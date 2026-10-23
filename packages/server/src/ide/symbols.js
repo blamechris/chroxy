@@ -30,6 +30,7 @@
 import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 import { isPathWithin } from '../utils/path-containment.js'
+import { makeConfigDirFilter } from '../ws-file-ops/common.js'
 
 // Directories never worth walking — build output, vendored deps, VCS metadata,
 // language caches. Keeps the scan bounded and the symbol table signal-rich.
@@ -233,6 +234,10 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
     target = realTarget
   }
 
+  // The config root is resolved once per walk; every path this walk yields is real
+  // (a real root, descended only through real directories, symlinks never followed).
+  const isDaemonState = await makeConfigDirFilter()
+
   const symbols = []
   let filesRead = 0
   let truncated = false
@@ -250,6 +255,9 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
     if (!st.isFile()) return
     if (st.size > maxFileSize) return
     if (!(extname(absPath).toLowerCase() in EXT_LANG)) return
+    // Daemon-managed state (the config directory and files directly in it) is not
+    // part of the symbol table, same as the file viewer; see ide/search.js.
+    if (isDaemonState(absPath)) return
     filesRead++
     let content
     try {

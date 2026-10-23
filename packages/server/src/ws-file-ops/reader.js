@@ -4,7 +4,7 @@ import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { GET_DIFF_BASE_MAX_LENGTH } from '@chroxy/protocol'
-import { parseDiff } from '../diff-parser.js'
+import { parseDiff, diffFileHeaderPaths } from '../diff-parser.js'
 import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
@@ -29,6 +29,28 @@ const WRITE_UNRESOLVABLE_REASONS = {
   ENOTDIR: 'Not a directory',
 }
 const log = createLogger('ws')
+
+// getDiff reads paths out of `git diff` output (parseDiff, diffFileHeaderPaths), and
+// the config-directory rule is applied to those paths. A user's or repo's git config
+// can change how a changed file is printed, so every `git diff` call pins what it
+// reads. Settings not named here are not pinned.
+//   --src-prefix=a/ --dst-prefix=b/   the `a/` / `b/` header form; beats diff.noprefix,
+//                                      diff.mnemonicPrefix, diff.srcPrefix, diff.dstPrefix
+//   -c diff.relative=false             paths from the repository root, not the cwd
+//   --no-ext-diff                      an external diff driver (diff.external, or a
+//                                      `diff=` attribute with diff.<name>.command) prints
+//                                      no `diff --git` header, so its output would land in
+//                                      the previous entry
+//   --no-color                         colour escapes start every header line
+// Checked on git 2.55.0: each prefix key alone and all four together still print
+// `a/` / `b/`; diff.relative=true from a subdirectory prints cwd-relative paths and
+// drops files outside it, and `-c diff.relative=false` restores repo-root paths.
+// Relative output is pinned with `-c` rather than `--no-relative` because the repo
+// states no minimum git version and `--no-relative` needs git 2.28; a `-c` setting
+// is accepted by every git (an unknown key is ignored). `-c` must come BEFORE the
+// subcommand, so it is a separate piece of argv from the options after it.
+const DIFF_PIN_CONFIG = ['-c', 'diff.relative=false']
+const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
 
 /**
  * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
@@ -212,6 +234,24 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             })
             return
           }
+          // Files directly in the config directory are daemon-managed state, so
+          // reads follow the same rule as writes: a missing name there answers
+          // the refusal an existing one does, never "File not found". Only
+          // reached once the path is known to be inside the project, where the
+          // deepest-ancestor walk has already resolved this same path; a check
+          // that cannot be answered denies, as it does for writes.
+          if (await isConfigDirOrDirectChild(absPath)) {
+            send({
+              type: 'file_content',
+              path: absPath,
+              content: null,
+              language: null,
+              size: null,
+              truncated: false,
+              error: CONFIG_DIR_REFUSAL,
+            })
+            return
+          }
           send({
             type: 'file_content',
             path: absPath,
@@ -255,6 +295,24 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           size: null,
           truncated: false,
           error: 'Access denied: file reading is restricted to the project directory',
+        })
+        return
+      }
+
+      // The config directory itself and any file directly in it are
+      // daemon-managed state, so the file viewer treats reads the same way as
+      // writes. Checked on the resolved path (a symlink into the config directory
+      // is judged by where it lands) and BEFORE `stat`, so no size or type of a
+      // refused file is revealed.
+      if (await isConfigDirOrDirectChild(resolvedAbsPath)) {
+        send({
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: null,
+          truncated: false,
+          error: CONFIG_DIR_REFUSAL,
         })
         return
       }
@@ -886,7 +944,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execImpl(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
+        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : [])], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -911,7 +969,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -924,7 +982,34 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         }
       }
 
-      const files = diffOutput.trim() ? parseDiff(diffOutput) : []
+      let files = diffOutput.trim() ? parseDiff(diffOutput) : []
+
+      // Files directly in the config directory are daemon-managed state, so the
+      // diff view treats them the way the file viewer and generic writes do: a
+      // changed one is left out of the reply, hunks and all, rather than listed by
+      // name. `git diff` names files from the repository root (not the session
+      // cwd), and an entry can touch more than one path (the source of a rename).
+      // An entry with no placeable path is left out too: "could not check" must
+      // never read as "not in the config directory".
+      if (files.length > 0) {
+        const { stdout: topOut } = await execImpl(GIT, ['rev-parse', '--show-toplevel'], {
+          cwd: cwdReal,
+          timeout: 5000,
+        })
+        const repoRoot = topOut.trim()
+        if (!repoRoot) throw new Error('git rev-parse --show-toplevel printed nothing')
+        const headerPaths = diffFileHeaderPaths(diffOutput)
+        const shown = []
+        for (let i = 0; i < files.length; i++) {
+          const touched = headerPaths[i] ?? []
+          let inConfigDir = touched.length === 0
+          for (const p of touched) {
+            if (await isConfigDirOrDirectChild(resolve(repoRoot, p))) { inConfigDir = true; break }
+          }
+          if (!inConfigDir) shown.push(files[i])
+        }
+        files = shown
+      }
 
       // Deduplicate files that appear in both unstaged and staged diffs
       const seen = new Map()
@@ -946,10 +1031,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
         )
         if (untrackedOutput.trim()) {
-          const untrackedPaths = untrackedOutput.trim().split('\n')
-            .filter(p => p && !seen.has(p))
-            .sort()
-            .slice(0, 10)
+          // Files directly in the config directory are daemon-managed state and are left
+          // out (as in the tracked-file filter above, and as a file outside the project
+          // is left out in the loop below). They are dropped BEFORE the cap of ten, so a
+          // config root that holds ten or more of them cannot fill the slots and hide
+          // every ordinary file after them. `isConfigDirOrDirectChild` resolves symlinks,
+          // so a link to such a file is dropped too.
+          const untrackedPaths = []
+          for (const p of untrackedOutput.trim().split('\n').filter(p => p && !seen.has(p)).sort()) {
+            if (untrackedPaths.length >= 10) break
+            if (await isConfigDirOrDirectChild(resolve(cwdReal, p))) continue
+            untrackedPaths.push(p)
+          }
 
           const MAX_UNTRACKED_SIZE = 50 * 1024
           for (const filePath of untrackedPaths) {

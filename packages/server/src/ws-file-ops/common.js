@@ -317,23 +317,72 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
 }
 
 /**
- * The refusal text for a generic file mutation aimed at the daemon's config
- * directory (#8331). Shared so every mutation path says the same thing.
+ * The refusal text for a generic file read or mutation aimed at the daemon's
+ * config directory (#8331). Shared so every read and write path says the same
+ * thing.
  */
 export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is managed by the daemon'
 
 const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
 
 /**
+ * The daemon's config directory as a real path (a missing one by its deepest
+ * existing ancestor), read per call — never cached, so a relocated
+ * `CHROXY_CONFIG_DIR` applies at once. Throws when it cannot be resolved (EACCES on
+ * an ancestor, a link cycle); callers fail closed on that.
+ * @returns {Promise<string>}
+ */
+export function resolveConfigRoot() {
+  return realpathOfDeepestAncestor(configDir())
+}
+
+/**
+ * Is an ALREADY-RESOLVED path the config root itself or a path directly in it?
+ * Pure: no filesystem access. `isConfigDirOrDirectChild` is this plus the
+ * resolution of both sides; a caller that holds many resolved paths and one root
+ * (the IDE walks) calls it per path instead of resolving the root again each time.
+ * @param {string} resolvedTarget - Real path of the file or directory in question
+ * @param {string} resolvedRoot - Real path from {@link resolveConfigRoot}
+ * @returns {boolean}
+ */
+export function isConfigRootOrDirectChild(resolvedTarget, resolvedRoot) {
+  return sameDir(resolvedTarget, resolvedRoot) || sameDir(dirname(resolvedTarget), resolvedRoot)
+}
+
+/**
+ * For a walk over a directory tree that already yields real paths (it descends only
+ * through real directories and never follows a symlink): resolve the config root ONCE
+ * and return a `(realFilePath) => boolean` that says whether a file is the config
+ * directory or directly in it. Resolving the root per file costs two path
+ * resolutions per file, which doubled a 2000-file walk (measured); this costs none.
+ * FAILS CLOSED like {@link isConfigDirOrDirectChild}: a root that cannot be resolved
+ * yields a filter that reports every file as protected.
+ * @returns {Promise<(realFilePath: string) => boolean>}
+ */
+export async function makeConfigDirFilter() {
+  let root
+  try {
+    root = await resolveConfigRoot()
+  } catch {
+    return () => true
+  }
+  return (realFilePath) => isConfigRootOrDirectChild(realFilePath, root)
+}
+
+/**
  * Is `absPath` the daemon's config directory itself, a FILE DIRECTLY IN it, or a
- * write that would create (or pass through) a NEW direct child of it?
+ * path that would create (or pass through) a NEW direct child of it?
  *
- * Generic file writes refuse exactly that, so the deploy control files
- * (`deploy-request.json`, `deploy-postpone.json`) and the rest of the daemon's
- * top-level state can only be written through the daemon's own paths
- * (`daemon_update_action` applies the primary-token gate and the busy-session
- * confirmation). Subtrees stay writable on purpose: chroxy's own session worktrees
- * live at `<configDir>/worktrees/<id>` and orchestration worktrees at
+ * Generic file writes and the read surfaces that return file contents from a
+ * session cwd (`read_file`, `get_diff`, `memory_read`; the IDE walks use the
+ * once-per-walk form, {@link makeConfigDirFilter}) refuse exactly that: files
+ * directly in the config directory are daemon-managed state, so a read is treated
+ * the same way as a write. The deploy control files (`deploy-request.json`,
+ * `deploy-postpone.json`) and the rest of the daemon's top-level state can only be
+ * written through the daemon's own paths (`daemon_update_action` applies the
+ * primary-token gate and the busy-session confirmation). Subtrees stay writable and
+ * readable on purpose: chroxy's own session worktrees live at
+ * `<configDir>/worktrees/<id>` and orchestration worktrees at
  * `<configDir>/orchestration/worktrees`, and ordinary editing inside them must work.
  *
  * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
@@ -346,21 +395,24 @@ const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
  * FAILS CLOSED: a path that cannot be resolved (EACCES on an ancestor, a link
  * cycle) is reported as protected, never as outside.
  *
- * @param {string} absPath - Absolute path of the mutation target
+ * @param {string} absPath - Absolute path of the read or mutation target
  * @returns {Promise<boolean>}
  */
 export async function isConfigDirOrDirectChild(absPath) {
   try {
     const [target, root] = await Promise.all([
       realpathOfDeepestAncestor(absPath),
-      realpathOfDeepestAncestor(configDir()),
+      resolveConfigRoot(),
     ])
-    if (sameDir(target, root) || sameDir(dirname(target), root)) return true
-    // A write that would CREATE, or pass through, a direct child of the root is
-    // refused too: `mkdir -p` would otherwise make a DIRECTORY at a control-file name
-    // (`deploy-request.json/x`) and wedge every later write of that file. The first
-    // segment must already be a directory (`worktrees`, `orchestration`, ...), which is
-    // what lets chroxy's own worktrees keep working; no list of names is involved.
+    if (isConfigRootOrDirectChild(target, root)) return true
+    // A path that would CREATE, or pass through, a direct child of the root is
+    // protected too. For a write that matters because `mkdir -p` would otherwise make
+    // a DIRECTORY at a control-file name (`deploy-request.json/x`) and wedge every
+    // later write of that file; for a read it means a missing name under a new
+    // top-level name answers the same refusal as an existing one, so there is no
+    // existence difference for new top-level names. The first segment must already be
+    // a directory (`worktrees`, `orchestration`, ...), which is what lets chroxy's own
+    // worktrees keep working; no list of names is involved.
     if (isPathWithin(target, root)) {
       const segments = target.slice(root.length).split(/[\\/]+/).filter(Boolean)
       if (segments.length > 1) {

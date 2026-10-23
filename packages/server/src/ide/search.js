@@ -17,6 +17,7 @@
 import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 import { isPathWithin } from '../utils/path-containment.js'
+import { makeConfigDirFilter } from '../ws-file-ops/common.js'
 
 // Directories never worth walking (mirrors symbols.js IGNORED_DIRS).
 const IGNORED_DIRS = new Set([
@@ -110,6 +111,10 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
     target = realTarget
   }
 
+  // The config root is resolved once per walk; every path this walk yields is real
+  // (a real root, descended only through real directories, symlinks never followed).
+  const isDaemonState = await makeConfigDirFilter()
+
   const results = []
   let filesRead = 0
   let truncated = false
@@ -132,6 +137,13 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
     } catch { return }
     if (!st.isFile()) return
     if (st.size > maxFileSize) return
+    // Files directly in the daemon's config directory are daemon-managed state, so
+    // search treats them the way the file viewer does: they contribute nothing. This
+    // matters when the session cwd is the config directory or an ancestor of a
+    // relocated, non-hidden one (the walk skips hidden directories). Checked after
+    // the cheap filters above and before the read, so a skipped file costs no read
+    // and does not count against the file cap.
+    if (isDaemonState(absPath)) return
     filesRead++
     let content
     try {
