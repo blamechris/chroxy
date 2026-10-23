@@ -93,7 +93,9 @@ describe('generic file reads refuse the config directory and its direct children
     }
   })
 
-  it('a worktree reaching the config root through ../.. never returns the file (the cwd check denies it first)', async () => {
+  // The pre-existing cwd containment check refuses this one before the config-dir rule
+  // is reached, so it passes without that rule: a control, not a test of it.
+  it('CONTROL: a worktree reaching the config root through ../.. never returns the file (the pre-existing cwd check refuses it)', async () => {
     const wt = join(cfg, 'worktrees', 'sess-up')
     await mkdir(wt, { recursive: true })
     const reply = await read('../../state.json', wt)
