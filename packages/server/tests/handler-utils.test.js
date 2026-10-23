@@ -9,7 +9,7 @@ import { describe, it, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs, {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  symlinkSync, realpathSync, existsSync, statSync
+  symlinkSync, realpathSync, existsSync, statSync, chmodSync
 } from 'node:fs'
 import { join, sep, dirname } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -703,8 +703,11 @@ describe('validateCwdWithinHome', () => {
     // guard, which is the very spelling this PR removed everywhere else. On
     // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
     // so the guard is doing real work here, not just guarding a POSIX literal.
-    const realTmp = realpathSync(tmpdir())
-    const home = realpathSync(homedir())
+    // The policy's own resolver (native): the JS realpathSync keeps 8.3 short
+    // names (C:\WINDOWS\SERVIC~1\NETWOR~1\...), so it would judge a temp dir
+    // outside a home that the policy resolves it to be inside.
+    const realTmp = realpathSync.native(tmpdir())
+    const home = realpathSync.native(homedir())
     if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
     const err = validateCwdWithinHome(realTmp)
     assert.ok(err)
@@ -1098,7 +1101,8 @@ function probeFirmlinkedDataVolume() {
   let dir = null
   try {
     if (!existsSync(dataVolume)) return false
-    dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-firmlink-probe-')))
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-firmlink-probe-'))
+    dir = realpathSync.native(dir)   // assigned in two steps so a failure here still cleans up the temp dir
     const direct = statSync(dir, { bigint: true })
     const viaData = statSync(dataVolume + dir, { bigint: true })
     return direct.ino !== 0n && direct.dev === viaData.dev && direct.ino === viaData.ino
@@ -1111,6 +1115,30 @@ function probeFirmlinkedDataVolume() {
   }
 }
 const FIRMLINKED_DATA_VOLUME = probeFirmlinkedDataVolume()
+
+// Does the volume fold U+017F (LATIN SMALL LETTER LONG S) onto `s` in a name
+// lookup (macOS APFS does)? Then `~/.ssh` resolves an entry whose on-disk name is
+// `.\u017Fsh`, a name no case-insensitive match of the listing would ever find.
+function probeLongSFolding() {
+  let dir = null
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-fold-probe-'))
+    mkdirSync(join(dir, '.\u017Fsh'))
+    try {
+      statSync(join(dir, '.ssh'))
+      return true
+    } catch {
+      return false
+    }
+  } catch {
+    return false
+  } finally {
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
+  }
+}
+const FOLDS_LONG_S = probeLongSFolding()
 
 describe('validateCwdAllowed — letter case and symlinked credential directories', () => {
   // On a case-insensitive volume `<base>/users/CHRIS/.ssh` and
@@ -1385,8 +1413,8 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
   })
 
   describe('a protected directory is recognised by the filesystem object, not only by its spelling', () => {
-    const CANNOT_CHECK_HOME = 'Directory is not allowed: cannot check the home directory (EACCES)'
-    const CANNOT_CHECK_PARENTS = 'Directory is not allowed: cannot check the parent directories of the working directory (EACCES)'
+    const CANNOT_CHECK_HOME = 'Directory is not allowed: cannot check the home directory (EACCES); fix or remove it'
+    const CANNOT_CHECK_PARENTS = 'Directory is not allowed: cannot check the parent directories of the working directory (EACCES); fix or remove it'
 
     // The simulated cases stand in for a second mount path of one directory
     // (an APFS firmlink, a Linux bind mount, a Windows volume mount point): the
@@ -1476,7 +1504,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(join(home, 'proj'), { homeOverride: home })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.aws (EACCES)')
+      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.aws (EACCES); fix or remove it')
       assert.ok(hits.length > 0, 'the entry must actually have been looked up')
       assert.ok(!err.includes(home), 'the message must not carry an absolute path')
     })
@@ -1489,7 +1517,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(join(home, 'dotfiles', 'aws'), { homeOverride: home })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.aws (EACCES)')
+      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.aws (EACCES); fix or remove it')
     })
 
     it('refuses when a protected entry is a symlink loop (real ELOOP)', { skip: SKIP_NO_SYMLINK }, () => {
@@ -1499,7 +1527,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(join(home, 'proj'), { homeOverride: home })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.docker (ELOOP)')
+      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.docker (ELOOP); fix or remove it')
     })
 
     it('refuses when the config/state directory cannot be checked (simulated EACCES)', (t) => {
@@ -1512,7 +1540,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(join(home, 'proj'), { homeOverride: home })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the chroxy config/state directory (EACCES)')
+      assert.equal(err, 'Directory is not allowed: cannot check the chroxy config/state directory (EACCES); fix or remove it')
     })
 
     it('refuses when the config/state directory is a symlink loop (real ELOOP)', { skip: SKIP_NO_SYMLINK }, () => {
@@ -1525,7 +1553,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(join(home, 'proj'), { homeOverride: home })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the chroxy config/state directory (ELOOP)')
+      assert.equal(err, 'Directory is not allowed: cannot check the chroxy config/state directory (ELOOP); fix or remove it')
     })
 
     it('refuses when a parent directory of the cwd cannot be checked', (t) => {
@@ -1536,9 +1564,18 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
       assert.equal(validateCwdAllowed(join(home, 'proj', 'sub'), { homeOverride: home }), CANNOT_CHECK_PARENTS)
     })
 
-    it('refuses when the home directory cannot be listed', (t) => {
-      const home = makeHome()
-      mkdirs(join(home, 'proj'))
+    // An unlistable $HOME loses only the listing half of the candidate set: the
+    // literal protected names are looked up one by one, with their own skip and
+    // refuse rules, so an unreadable listing neither locks everyone out nor lets
+    // a protected entry slip through.
+    it('an unlistable $HOME still protects ~/.ssh and still accepts ordinary projects (simulated EACCES)', (t) => {
+      const root = newRoot()
+      const home = join(root, 'home')
+      const ssh = join(home, '.ssh')
+      const alias = join(root, 'mounts', 'ssh-alias')
+      const project = join(root, 'elsewhere', 'proj')
+      mkdirs(ssh, alias, project, join(home, 'proj'))
+      mockStat(t, { reportsAs: new Map([[alias, ssh]]) })
       const original = fs.readdirSync
       let listed = 0
       t.mock.method(fs, 'readdirSync', (p, ...rest) => {
@@ -1548,9 +1585,96 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
         }
         return original(p, ...rest)
       })
+      const config = { homeOverride: home, workspaceRoots: [root] }
 
-      assert.equal(validateCwdAllowed(join(home, 'proj'), { homeOverride: home }), CANNOT_CHECK_HOME)
+      assert.equal(validateCwdAllowed(project, config), null, 'a project under an outside workspace root')
+      assert.equal(validateCwdAllowed(join(home, 'proj'), config), null, 'an ordinary project under $HOME')
+      assert.equal(validateCwdAllowed(ssh, config), CRED_DENY, 'the real ~/.ssh')
+      assert.equal(validateCwdAllowed(alias, config), CRED_DENY, 'a second path to ~/.ssh')
       assert.ok(listed > 0, 'the home directory must actually have been listed')
+    })
+
+    it('POSIX live: an unlistable $HOME (mode 0311) still protects ~/.ssh and still accepts ordinary projects',
+      { skip: process.platform === 'win32' ? 'POSIX permission bits only' : (process.getuid?.() === 0 ? 'root can list any directory' : false) },
+      (t) => {
+        const root = newRoot()
+        const home = join(root, 'home')
+        const ssh = join(home, '.ssh')
+        const alias = join(root, 'mounts', 'ssh-alias')
+        mkdirs(ssh, alias, join(root, 'elsewhere', 'proj'), join(home, 'proj'))
+        mockStat(t, { reportsAs: new Map([[alias, ssh]]) })
+        const config = { homeOverride: home, workspaceRoots: [root] }
+        chmodSync(home, 0o311)
+        try {
+          assert.throws(() => fs.readdirSync(home), { code: 'EACCES' }, 'precondition: $HOME cannot be listed')
+          assert.equal(validateCwdAllowed(join(root, 'elsewhere', 'proj'), config), null, 'a project under an outside workspace root')
+          assert.equal(validateCwdAllowed(join(home, 'proj'), config), null, 'an ordinary project under $HOME')
+          assert.equal(validateCwdAllowed(ssh, config), CRED_DENY, 'the real ~/.ssh')
+          assert.equal(validateCwdAllowed(alias, config), CRED_DENY, 'a second path to ~/.ssh')
+        } finally {
+          chmodSync(home, 0o755)
+        }
+      })
+
+    it('finds a protected entry the $HOME listing omits, because the literal names are looked up directly', (t) => {
+      const root = newRoot()
+      const home = join(root, 'home')
+      const ssh = join(home, '.ssh')
+      const alias = join(root, 'mounts', 'ssh-alias')
+      mkdirs(ssh, alias)
+      mockStat(t, { reportsAs: new Map([[alias, ssh]]) })
+      const original = fs.readdirSync
+      let listed = 0
+      t.mock.method(fs, 'readdirSync', (p, ...rest) => {
+        const names = original(p, ...rest)
+        if (p !== home) return names
+        listed++
+        return names.filter((name) => name !== '.ssh')
+      })
+
+      assert.equal(validateCwdAllowed(alias, { homeOverride: home, workspaceRoots: [root] }), CRED_DENY)
+      assert.ok(listed > 0, 'the listing must actually have been replaced')
+    })
+
+    it('live volume that folds U+017F onto s: an entry spelled with a long s is found by the literal name',
+      { skip: SKIP_NO_SYMLINK || (FOLDS_LONG_S ? false : 'needs a volume that folds U+017F onto s (macOS APFS); the omitted-from-listing case covers CI') },
+      () => {
+        // `~/.\u017Fsh` is what the listing shows, and no case-insensitive match
+        // against '.ssh' finds it; the lookup of '.ssh' itself does.
+        const home = makeHome()
+        mkdirs(join(home, 'dotfiles', 'ssh', 'sub'))
+        symlinkSync(join(home, 'dotfiles', 'ssh'), join(home, '.\u017Fsh'))
+        assert.ok(statSync(join(home, '.ssh')).isDirectory(), 'precondition: ~/.ssh resolves the long-s entry')
+
+        assert.equal(validateCwdAllowed(join(home, 'dotfiles', 'ssh', 'sub'), { homeOverride: home }), CRED_DENY)
+      })
+
+    it('a case variant of a protected entry that is a symlink stays protected (~/.SSH -> ~/dotfiles/ssh)', { skip: SKIP_NO_SYMLINK }, (t) => {
+      const home = makeHome()
+      mkdirs(join(home, 'dotfiles', 'ssh', 'sub'))
+      symlinkSync(join(home, 'dotfiles', 'ssh'), join(home, '.SSH'))
+      // The lowercase name is made absent on every volume (on a case-insensitive
+      // one it would resolve to this very entry), so only the $HOME listing,
+      // matched case-insensitively, can find `.SSH`.
+      const hits = mockStat(t, { fails: new Map([[join(home, '.ssh'), 'ENOENT']]) })
+
+      assert.equal(validateCwdAllowed(join(home, 'dotfiles', 'ssh', 'sub'), { homeOverride: home }), CRED_DENY)
+      assert.ok(hits.includes(join(home, '.ssh')), 'the lowercase name must have been looked up and found absent')
+    })
+
+    // When the config root IS a credential entry (the default `~/.chroxy`), one
+    // object is protected twice; the credential message is the one reported.
+    it('a config root that is also a credential entry reports the credential message through a second path', (t) => {
+      const root = newRoot()
+      const home = join(root, 'home')
+      const chroxy = join(home, '.chroxy')
+      const alias = join(root, 'mounts', 'chroxy-alias')
+      mkdirs(chroxy, alias)
+      process.env.CHROXY_CONFIG_DIR = chroxy
+      const hits = mockStat(t, { reportsAs: new Map([[alias, chroxy]]) })
+
+      assert.equal(validateCwdAllowed(alias, { homeOverride: home, workspaceRoots: [root] }), CRED_DENY)
+      assert.ok(hits.includes(alias), 'the second path must have been answered with the shared identity')
     })
 
     it('a home directory that does not exist has no entries to protect, and an absent config root is skipped', () => {
@@ -1648,7 +1772,7 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
 
       const err = validateCwdAllowed(alias, { homeOverride: home, workspaceRoots: [root] })
 
-      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.ssh (EACCES)')
+      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.ssh (EACCES); fix or remove it')
       assert.ok(failures > 0, 'the entry must actually have been resolved')
     })
 

@@ -472,16 +472,25 @@ function filesystemIdentity(p) {
  * (`/System/Volumes/Data/Users/me/.ssh`), a Linux bind mount or a Windows volume
  * mount point all give one directory several paths, and `realpath` keeps each
  * spelling. So the protected directories are identified by `device:inode` and
- * `realCwd` and each of its ancestors is checked against them.
+ * `realCwd` and each of its ancestors is checked against them. A second path is
+ * therefore recognised when it passes THROUGH the protected directory itself; a
+ * second path to a SUBDIRECTORY of one (a bind mount of `~/.config/gcloud`
+ * elsewhere, say) never passes through it and is not covered.
  *
- * Protected: each directory `$HOME/<FORBIDDEN_HOME_SUBDIRS entry>` that exists
- * (found by listing `$HOME` once and matching names case-insensitively, as the
- * name test does; `stat` follows symlinks, so a symlinked entry counts as the
- * directory it leads to), and the daemon config root. Per candidate:
+ * Protected: each directory `$HOME/<FORBIDDEN_HOME_SUBDIRS entry>` that exists,
+ * and the daemon config root. `stat` follows symlinks, so a symlinked entry
+ * counts as the directory it leads to. The entries come from two sources, merged:
+ * every literal protected name, looked up individually (the filesystem's own name
+ * resolution applies: on APFS `~/.ssh` also resolves an entry stored as
+ * `.\u017Fsh`), and the `$HOME` listing matched case-insensitively (which finds a
+ * case variant such as `~/.SSH` on a case-sensitive volume). An unreadable
+ * listing therefore costs only the second source; the literal names still apply.
+ * Per candidate:
  *   - ENOENT / ENOTDIR: nothing is there (absent, or a dangling link). Skipped,
  *     so a stale entry cannot lock anyone out.
- *   - any other error: it exists but cannot be checked, so the call refuses with
- *     a message naming it (`~/`-relative, never an absolute path).
+ *   - any other error: it exists but cannot be checked, so EVERY session start
+ *     refuses, whatever its cwd, with a message naming it (`~/`-relative, never
+ *     an absolute path), until it is fixed or removed.
  *   - not a directory (`.netrc`, `.npmrc`, ...): a directory cwd cannot be
  *     inside it, so it is skipped.
  *   - inode 0: no identity, so it is never matched by id; it falls back to path
@@ -493,21 +502,29 @@ function filesystemIdentity(p) {
  *     config root is never exempted, so if it holds `$HOME` everything under it
  *     is refused, as the spelling check already does.
  * A stat error on `$HOME` or one of its ancestors, or on an ancestor of
- * `realCwd`, also refuses. One loop serves both kinds of protected directory.
+ * `realCwd`, also refuses every session start the same way. One loop serves both
+ * kinds of protected directory.
  */
 function protectedDirectoryDenial(realCwd, home) {
-  const cannotCheck = (what, err) => `Directory is not allowed: cannot check ${what} (${err?.code ?? 'unknown error'})`
+  const cannotCheck = (what, err) => `Directory is not allowed: cannot check ${what} (${err?.code ?? 'unknown error'}); fix or remove it`
 
-  let homeNames
+  // Names to look up: every literal protected name, plus the case variants the
+  // listing of $HOME shows. If the listing fails for any reason only the second
+  // source is lost; the literal names are stat'd individually below and keep
+  // their own skip/refuse rules. (`fs.readdirSync` is called through `fs`, like
+  // `fs.statSync`, so tests can replace it.)
+  let listed = []
   try {
-    homeNames = fs.readdirSync(home)
-  } catch (err) {
-    if (!isAbsentError(err)) return cannotCheck('the home directory', err)
-    homeNames = [] // no home directory, so no entries under it to protect
+    listed = fs.readdirSync(home)
+  } catch {
+    listed = []
+  }
+  const names = new Set(FORBIDDEN_HOME_SUBDIRS)
+  for (const name of listed) {
+    if (FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) names.add(name)
   }
   const candidates = []
-  for (const name of homeNames) {
-    if (!FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) continue
+  for (const name of names) {
     candidates.push({
       path: join(home, name),
       what: `the protected home entry ~/${name}`,
@@ -529,7 +546,11 @@ function protectedDirectoryDenial(realCwd, home) {
     }
     if (!found.isDirectory) continue
     if (found.id === null) byPath.push(candidate)
-    else byIdentity.set(found.id, [...(byIdentity.get(found.id) ?? []), candidate])
+    else {
+      // One object reached under several names is one holder per kind.
+      const holders = byIdentity.get(found.id) ?? []
+      if (!holders.some((holder) => holder.denial === candidate.denial)) byIdentity.set(found.id, [...holders, candidate])
+    }
   }
   if (byIdentity.size === 0 && byPath.length === 0) return null
 
@@ -561,6 +582,8 @@ function protectedDirectoryDenial(realCwd, home) {
       if (isAbsentError(err)) continue
       return cannotCheck(candidate.what, err)
     }
+    // For the config root this condition changes nothing: an inode-0 config root
+    // is compared by canonical path exactly as `pathTouchesConfigDir` already did.
     if (candidate.exemptWhenHoldingHome && isPathWithin(home, real)) continue
     if (isPathWithin(realCwd, real)) return candidate.denial
   }
@@ -635,8 +658,11 @@ function pathTouchesConfigDir(absPath) {
  *    $HOME. Closes the 2026-04-11 audit Adversary A1 attack where an
  *    authenticated client could set cwd to ~/.ssh to read credentials.
  *    The entries (and the config root) are also recognised by filesystem
- *    object, so a symlink or a second mount path of one is denied too, and one
- *    that exists but cannot be checked refuses (protectedDirectoryDenial).
+ *    object, so a symlink or a second mount path of one is denied too. An entry
+ *    or config root that exists but cannot be checked (or a parent directory of
+ *    the cwd or of $HOME that cannot be stat'd) refuses EVERY session start,
+ *    whatever its cwd, with a `cannot check ...; fix or remove it` message
+ *    naming it (protectedDirectoryDenial).
  *
  * 3. Workspace allowlist (opt-in) — if `config.workspaceRoots` is a
  *    non-empty array, the cwd must be inside at least one of the
@@ -650,7 +676,7 @@ function pathTouchesConfigDir(absPath) {
  *
  * @param {string} cwd - Directory path to validate
  * @param {object} [config] - Optional runtime config. `config.workspaceRoots` is an array of absolute paths that form the allowlist. `config.homeOverride` is a test-only override for `os.homedir()`; setting it lets tests run hermetically against a throwaway directory without touching the real user home. Never use homeOverride in production code.
- * @returns {string|null} Error message or null if valid
+ * @returns {string|null} Error message (including the `cannot check ...` refusals) or null if valid
  */
 export function validateCwdAllowed(cwd, config = null) {
   // Layer 1: path hygiene
