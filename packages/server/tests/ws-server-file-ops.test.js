@@ -1935,8 +1935,13 @@ describe('get_diff handler', () => {
     )
     // A real repo with a commit resolves headOid, so this is `git diff <oid>`
     // (never the bare `['diff']` form, which only fires in an empty repo).
-    assert.ok(calls.some(c => c.args[0] === 'diff' && c.args.length === 2 && c.args[1] !== '--cached'), '`git diff <oid>` must route through the seam')
-    assert.ok(calls.some(c => c.args[0] === 'diff' && c.args[1] === '--cached'), 'staged `git diff --cached` must route through the seam')
+    // The exact argv, header-prefix pinning included (see DIFF_HEADER_ARGS in reader.js).
+    const headOid = execFileSync(GIT, ['rev-parse', 'HEAD'], { cwd: tempDir, encoding: 'utf-8' }).trim()
+    const diffArgv = calls.filter(c => c.args[0] === 'diff').map(c => c.args)
+    assert.deepEqual(diffArgv, [
+      ['diff', '--src-prefix=a/', '--dst-prefix=b/', headOid],
+      ['diff', '--src-prefix=a/', '--dst-prefix=b/', '--cached', 'HEAD'],
+    ], 'both `git diff` calls route through the seam with exactly this argv')
     assert.ok(calls.some(c => c.args[0] === 'ls-files'), 'the untracked-files scan must route through the seam')
   })
 

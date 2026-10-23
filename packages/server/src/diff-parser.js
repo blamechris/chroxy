@@ -155,3 +155,85 @@ export function parseDiff(diffOutput) {
 
   return files
 }
+
+// git C-quotes a path that holds a special byte (non-ASCII under the default
+// core.quotePath, a tab, a quote, a backslash): `"a/caf\303\251.json"`.
+const GIT_QUOTE_ESCAPES = { a: 0x07, b: 0x08, f: 0x0c, n: 0x0a, r: 0x0d, t: 0x09, v: 0x0b, '\\': 0x5c, '"': 0x22 }
+
+/** Decode the body of a git C-quoted path (the text between the quotes). */
+function unquoteGitPath(body) {
+  const bytes = []
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch !== '\\') {
+      for (const b of Buffer.from(ch, 'utf8')) bytes.push(b)
+      continue
+    }
+    const next = body[i + 1]
+    if (next >= '0' && next <= '7') {
+      let oct = ''
+      let j = i + 1
+      while (j < body.length && oct.length < 3 && body[j] >= '0' && body[j] <= '7') oct += body[j++]
+      bytes.push(parseInt(oct, 8) & 0xff)
+      i = j - 1
+    } else if (next in GIT_QUOTE_ESCAPES) {
+      bytes.push(GIT_QUOTE_ESCAPES[next])
+      i++
+    } else {
+      bytes.push(0x5c)
+    }
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
+/**
+ * The path(s) each `diff --git` header names, one array per header, in the order
+ * {@link parseDiff} returns its files (it starts a file at exactly those lines), so
+ * `diffFileHeaderPaths(text)[i]` belongs to `parseDiff(text)[i]`.
+ *
+ * parseDiff keeps only the `b/` side and cannot read a C-quoted name, so a caller
+ * that must know EVERY path a file entry touches (the source of a rename, a name
+ * git quoted) reads it here. Paths are relative to the repository root, as git
+ * prints them. A plain name may itself contain spaces, which makes a header with
+ * two different plain names ambiguous; every split is returned rather than a guess,
+ * so a caller asking "does any of these match" cannot be fooled by the ambiguity.
+ *
+ * A header with no recognisable `a/` / `b/` path yields `[]` (for example
+ * `diff.mnemonicPrefix` or `diff.noprefix` output) and the caller decides what an
+ * unplaceable entry means.
+ *
+ * @param {string} diffOutput - Raw output from `git diff`
+ * @returns {string[][]}
+ */
+export function diffFileHeaderPaths(diffOutput) {
+  if (!diffOutput || typeof diffOutput !== 'string') return []
+  const headers = []
+  for (const line of diffOutput.split('\n')) {
+    if (!line.startsWith('diff --git ')) continue
+    const found = new Set()
+    const add = (p) => { if (p) found.add(p) }
+    // Quoted names are unambiguous: lift them out first.
+    const plain = line.slice('diff --git '.length)
+      .replace(/"((?:[^"\\]|\\.)*)"/g, (_m, body) => {
+        const decoded = unquoteGitPath(body)
+        if (decoded.startsWith('a/') || decoded.startsWith('b/')) add(decoded.slice(2))
+        return '\0'
+      })
+      .replace(/\0/g, '')
+      .trim()
+    // What is left is `a/<path> b/<path>` (or one side of it).
+    if (plain.startsWith('a/') || plain.startsWith('b/')) {
+      let from = 0
+      let split = plain.indexOf(' b/', from)
+      if (split === -1) add(plain.slice(2))
+      while (split !== -1) {
+        add(plain.slice(2, split))
+        add(plain.slice(split + 3))
+        from = split + 1
+        split = plain.indexOf(' b/', from)
+      }
+    }
+    headers.push([...found])
+  }
+  return headers
+}

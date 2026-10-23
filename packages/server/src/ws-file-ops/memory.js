@@ -2,7 +2,7 @@ import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
-import { realpathOfDeepestAncestor } from './common.js'
+import { realpathOfDeepestAncestor, isConfigDirOrDirectChild } from './common.js'
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
@@ -178,6 +178,15 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
     // Outside every allowed root — reject WITHOUT stat'ing (no existence oracle).
     // Echo the LEXICAL request path (base.path), NOT the realpath-resolved path,
     // so a skipped entry can't be used as a symlink-target oracle. (#6971)
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
+  }
+
+  // The config directory itself and any file directly in it are daemon-managed
+  // state, so the memory panel shows nothing the file viewer refuses (the same
+  // invariant as the #8021 carve-out above). It only bites when the config
+  // directory sits INSIDE an allowed root, i.e. a project cwd at or above it. Same
+  // skip shape as every other refusal here: no oracle.
+  if (await isConfigDirOrDirectChild(resolvedPath)) {
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 

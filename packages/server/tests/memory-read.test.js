@@ -540,6 +540,69 @@ describe('memory_read (readMemory) handler', () => {
     }
   })
 
+  // Files directly in the daemon's config directory are daemon-managed state, so the
+  // memory panel follows the same invariant as above: it shows nothing the file viewer
+  // refuses. The config dir only matters when it sits INSIDE the project (cwd = home or
+  // above), so this runs with cwd = fakeHome. Targets are markdown so no other gate
+  // (the outside-the-project markdown rule) is what refuses them.
+  it('a project CLAUDE.md symlinked to a file directly in the config dir is skipped exactly when read_file refuses it', { skip: SKIP_NO_SYMLINK }, async () => {
+    const cfg = join(fakeHome, '.chroxy')
+    await mkdir(cfg, { recursive: true })
+    await mkdir(join(fakeHome, 'notes'), { recursive: true })
+    const rows = [
+      { target: join(cfg, 'state.md'), marker: 'CFG-ROW-MD-7f3a', protectedByRule: true },
+      { target: join(cfg, 'state.json'), marker: 'CFG-ROW-JSON-7f3a', protectedByRule: true },
+      { target: join(fakeHome, 'notes', 'plain.md'), marker: 'ORDINARY-ROW-7f3a', protectedByRule: false },
+    ]
+    for (const { target, marker, protectedByRule } of rows) {
+      await writeFile(target, marker, 'utf-8')
+      await symlink(target, join(fakeHome, 'CLAUDE.md'), 'file')
+      try {
+        responses.length = 0
+        await fileOps.readMemory(mockWs, fakeHome)
+        const project = responses[0].entries.find((e) => e.scope === 'project')
+        assert.ok(project, `${target}: the project entry is still reported`)
+        const memoryExposes = JSON.stringify(responses[0]).includes(marker)
+        responses.length = 0
+        await fileOps.readFile(mockWs, target, fakeHome)
+        const readFileExposes = JSON.stringify(responses[0]).includes(marker)
+        assert.equal(memoryExposes, readFileExposes, `${target}: memory panel and read_file disagree`)
+        // Positive control: the rows really differ, or equality above holds trivially.
+        assert.equal(readFileExposes, !protectedByRule, `${target}: fixture expectation`)
+        if (protectedByRule) {
+          assert.equal(project.skipped, true)
+          assert.equal(project.error, 'Outside allowed memory roots — read skipped')
+          assert.equal(project.content, null)
+        } else {
+          assert.equal(project.skipped, false)
+          assert.equal(project.content, marker)
+        }
+      } finally {
+        await rm(join(fakeHome, 'CLAUDE.md'), { force: true })
+      }
+    }
+  })
+
+  it('an @import of a markdown file directly in the config dir is skipped, while an ordinary one beside it still reads', async () => {
+    const cfg = join(fakeHome, '.chroxy')
+    await mkdir(cfg, { recursive: true })
+    await writeFile(join(cfg, 'state.md'), 'CFG-IMPORT-7f3a', 'utf-8')
+    await writeFile(join(fakeHome, 'ordinary.md'), 'ordinary import body', 'utf-8')
+    await writeFile(join(fakeHome, 'CLAUDE.md'), 'See @.chroxy/state.md and @ordinary.md here.', 'utf-8')
+
+    await fileOps.readMemory(mockWs, fakeHome)
+
+    const imports = responses[0].entries.filter((e) => e.scope === 'import')
+    assert.equal(imports.length, 2, 'both imports are reported')
+    const ordinary = imports.find((e) => e.content === 'ordinary import body')
+    assert.ok(ordinary, 'CONTROL: the ordinary import is read')
+    const skipped = imports.find((e) => e !== ordinary)
+    assert.equal(skipped.skipped, true)
+    assert.equal(skipped.error, 'Outside allowed memory roots — read skipped')
+    assert.equal(skipped.content, null)
+    assert.equal(JSON.stringify(responses[0]).includes('CFG-IMPORT-7f3a'), false)
+  })
+
   it('CONTRAST: a project CLAUDE.md symlinked to an extensionless rules file IN the project still reads (#8021)', { skip: SKIP_NO_SYMLINK }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-root-rules-'))
     await writeFile(join(dir, '.cursorrules'), 'shared rules for every agent', 'utf-8')

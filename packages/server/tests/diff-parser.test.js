@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseDiff } from '../src/diff-parser.js'
+import { parseDiff, diffFileHeaderPaths } from '../src/diff-parser.js'
 
 describe('parseDiff', () => {
   it('returns empty array for null/undefined/empty input', () => {
@@ -180,5 +180,29 @@ describe('parseDiff', () => {
     assert.deepEqual(parseDiff(123), [])
     assert.deepEqual(parseDiff({}), [])
     assert.deepEqual(parseDiff(false), [])
+  })
+})
+
+describe('diffFileHeaderPaths names the same files parseDiff returns, in the same order', () => {
+  it('plain, renamed, C-quoted and unparseable headers, aligned one entry per file', () => {
+    const text = [
+      'diff --git a/plain.txt b/plain.txt', 'index 1..2 100644', '--- a/plain.txt', '+++ b/plain.txt', '@@ -1 +1 @@', '-a', '+b',
+      'diff --git a/old name.txt b/new name.txt', 'similarity index 90%', 'rename from old name.txt', 'rename to new name.txt',
+      'diff --git "a/caf\\303\\251.json" "b/caf\\303\\251.json"', 'index 1..2 100644', '--- "a/caf\\303\\251.json"', '+++ "b/caf\\303\\251.json"', '@@ -1 +1 @@', '-a', '+b',
+      'diff --git a/plain2.txt "b/tab\\there.txt"', 'index 1..2 100644',
+      'diff --git i/odd.txt w/odd.txt', 'index 1..2 100644',
+    ].join('\n') + '\n'
+    const headers = diffFileHeaderPaths(text)
+    assert.equal(headers.length, parseDiff(text).length, 'one entry per parsed file')
+    assert.ok(headers[0].includes('plain.txt'))
+    assert.ok(headers[1].includes('old name.txt') && headers[1].includes('new name.txt'), `rename: ${headers[1]}`)
+    assert.ok(headers[2].includes('café.json'), `quoted: ${headers[2]}`)
+    assert.ok(headers[3].includes('tab\there.txt') && headers[3].includes('plain2.txt'), `mixed: ${headers[3]}`)
+    assert.deepEqual(headers[4], [], 'a header without the a/ b/ form yields no path')
+  })
+
+  it('returns [] for empty or non-string input', () => {
+    assert.deepEqual(diffFileHeaderPaths(''), [])
+    assert.deepEqual(diffFileHeaderPaths(null), [])
   })
 })

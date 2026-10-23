@@ -4,7 +4,7 @@ import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { GET_DIFF_BASE_MAX_LENGTH } from '@chroxy/protocol'
-import { parseDiff } from '../diff-parser.js'
+import { parseDiff, diffFileHeaderPaths } from '../diff-parser.js'
 import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
@@ -29,6 +29,17 @@ const WRITE_UNRESOLVABLE_REASONS = {
   ENOTDIR: 'Not a directory',
 }
 const log = createLogger('ws')
+
+// getDiff feeds `git diff` output to parseDiff and diffFileHeaderPaths, which read
+// the default `a/` / `b/` header form. A user's or repo's git config can change
+// that form (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`,
+// `diff.dstPrefix`), and then no file can be placed (paths read 'unknown'), which
+// also means no file can be checked against the config-directory rule. These two
+// options pin the form. Checked on git 2.55.0: each of the four keys alone, and all
+// four set at once, still print `a/` / `b/` with these options (the `-c` overrides
+// give the same result; the options are used because they sit on the diff command
+// itself, so the argv alone says what is pinned).
+const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/']
 
 /**
  * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
@@ -922,7 +933,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execImpl(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
+        const { stdout } = await execImpl(GIT, baseOid ? ['diff', ...DIFF_HEADER_ARGS, baseOid] : ['diff', ...DIFF_HEADER_ARGS], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -947,7 +958,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -960,7 +971,34 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         }
       }
 
-      const files = diffOutput.trim() ? parseDiff(diffOutput) : []
+      let files = diffOutput.trim() ? parseDiff(diffOutput) : []
+
+      // Files directly in the config directory are daemon-managed state, so the
+      // diff view treats them the way the file viewer and generic writes do: a
+      // changed one is left out of the reply, hunks and all, rather than listed by
+      // name. `git diff` names files from the repository root (not the session
+      // cwd), and an entry can touch more than one path (the source of a rename).
+      // An entry with no placeable path is left out too: "could not check" must
+      // never read as "not in the config directory".
+      if (files.length > 0) {
+        const { stdout: topOut } = await execImpl(GIT, ['rev-parse', '--show-toplevel'], {
+          cwd: cwdReal,
+          timeout: 5000,
+        })
+        const repoRoot = topOut.trim()
+        if (!repoRoot) throw new Error('git rev-parse --show-toplevel printed nothing')
+        const headerPaths = diffFileHeaderPaths(diffOutput)
+        const shown = []
+        for (let i = 0; i < files.length; i++) {
+          const touched = headerPaths[i] ?? []
+          let inConfigDir = touched.length === 0
+          for (const p of touched) {
+            if (await isConfigDirOrDirectChild(resolve(repoRoot, p))) { inConfigDir = true; break }
+          }
+          if (!inConfigDir) shown.push(files[i])
+        }
+        files = shown
+      }
 
       // Deduplicate files that appear in both unstaged and staged diffs
       const seen = new Map()
@@ -993,6 +1031,9 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
               const absPath = resolve(cwdReal, filePath)
               const validation = await validatePathWithinCwd(absPath, sessionCwd)
               if (!validation.valid) continue
+              // Daemon-managed state: left out, as above (and as a file outside the
+              // project is left out just above).
+              if (await isConfigDirOrDirectChild(validation.realPath)) continue
               const fileStat = await stat(validation.realPath)
               if (!fileStat.isFile()) continue
 

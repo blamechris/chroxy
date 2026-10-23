@@ -24,12 +24,18 @@ describe('generic file reads refuse the config directory and its direct children
 
   // One read, one reply. Collapse to the reply object so a failing assertion prints
   // a short message instead of a whole fixture.
-  async function read(requestedPath, cwd) {
+  async function read(requestedPath, cwd, requestId) {
     out.length = 0
-    await fileOps.readFile(ws, requestedPath, cwd)
+    await fileOps.readFile(ws, requestedPath, cwd, requestId)
     assert.equal(out.length, 1, 'exactly one file_content reply')
     assert.equal(out[0].type, 'file_content')
     return out[0]
+  }
+
+  // Assigning `undefined` to a process.env key stores the string "undefined".
+  function restoreConfigDir(prev) {
+    if (prev === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = prev
   }
 
   function assertRefused(reply, label) {
@@ -82,6 +88,19 @@ describe('generic file reads refuse the config directory and its direct children
     assertRefused(await read('.chroxy', home), 'config dir itself')
   })
 
+  it('a directory directly in the config dir is refused, rather than reported as a directory (as a write to it is)', async () => {
+    await mkdir(join(cfg, 'plain-dir'), { recursive: true })
+    assertRefused(await read('.chroxy/plain-dir', home), 'direct-child directory')
+  })
+
+  it('a refusal echoes the request nonce, for an existing name and a missing one', async () => {
+    for (const name of ['state.json', 'absent.json']) {
+      const reply = await read(`.chroxy/${name}`, home, `nonce-${name}`)
+      assertRefused(reply, name)
+      assert.equal(reply.requestId, `nonce-${name}`)
+    }
+  })
+
   it('a refusal comes before any size or type check: a large file and an image directly in the config dir reveal neither', async () => {
     await writeFile(join(cfg, 'big.log'), Buffer.alloc(600 * 1024, 0x61))
     await writeFile(join(cfg, 'pic.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]))
@@ -105,21 +124,30 @@ describe('generic file reads refuse the config directory and its direct children
   })
 
   it('a symlink inside the cwd that points at a file directly in the config dir is refused', { skip: SKIP_NO_SYMLINK }, async () => {
-    await symlink(join(cfg, 'state.json'), join(home, 'alias-state.json'))
-    assertRefused(await read('alias-state.json', home), 'file symlink')
+    const link = join(home, 'alias-state.json')
+    await symlink(join(cfg, 'state.json'), link)
+    try {
+      assertRefused(await read('alias-state.json', home), 'file symlink')
+    } finally { await rm(link, { force: true }) }
   })
 
   it('a symlinked parent that leads into the config dir is refused', { skip: SKIP_NO_SYMLINK }, async () => {
-    await symlink(cfg, join(home, 'alias-dir'))
-    assertRefused(await read('alias-dir/state.json', home), 'dir symlink, existing name')
-    assertRefused(await read('alias-dir/absent.json', home), 'dir symlink, missing name')
+    const link = join(home, 'alias-dir')
+    await symlink(cfg, link)
+    try {
+      assertRefused(await read('alias-dir/state.json', home), 'dir symlink, existing name')
+      assertRefused(await read('alias-dir/absent.json', home), 'dir symlink, missing name')
+    } finally { await rm(link, { force: true }) }
   })
 
   it('a dangling symlink inside the cwd that points at a missing name in the config dir is refused, not "File not found"', { skip: SKIP_NO_SYMLINK }, async () => {
-    await symlink(join(cfg, 'absent.json'), join(home, 'dangling-state.json'))
-    const reply = await read('dangling-state.json', home)
-    assertRefused(reply, 'dangling symlink')
-    assert.notEqual(reply.error, 'File not found')
+    const link = join(home, 'dangling-state.json')
+    await symlink(join(cfg, 'absent.json'), link)
+    try {
+      const reply = await read('dangling-state.json', home)
+      assertRefused(reply, 'dangling symlink')
+      assert.notEqual(reply.error, 'File not found')
+    } finally { await rm(link, { force: true }) }
   })
 
   it('follows a RELOCATED config root (CHROXY_CONFIG_DIR=<cwd>/state/chroxy): its top-level file is refused, a sibling under state/ is not', async () => {
@@ -136,7 +164,7 @@ describe('generic file reads refuse the config directory and its direct children
       const sibling = await read('state/sibling.txt', relocatedCwd)
       assert.equal(sibling.error, null)
       assert.equal(sibling.content, 'sibling\n')
-    } finally { process.env.CHROXY_CONFIG_DIR = prev }
+    } finally { restoreConfigDir(prev) }
   })
 
   it('FAILS CLOSED when the config root cannot be resolved: a symlink loop for the config dir refuses an in-cwd read instead of serving it', { skip: SKIP_NO_SYMLINK }, async () => {
@@ -148,7 +176,7 @@ describe('generic file reads refuse the config directory and its direct children
     process.env.CHROXY_CONFIG_DIR = join(loopCwd, 'cfg-loop')
     try {
       assertRefused(await read('plain.txt', loopCwd), 'unresolvable config root')
-    } finally { process.env.CHROXY_CONFIG_DIR = prev }
+    } finally { restoreConfigDir(prev) }
   })
 
   // ── POSITIVE CONTROLS: the rule must not widen into ordinary reads ───────────
@@ -176,10 +204,13 @@ describe('generic file reads refuse the config directory and its direct children
     const wt = join(cfg, 'worktrees', 'w2')
     await mkdir(wt, { recursive: true })
     await writeFile(join(wt, 'b.txt'), 'bee\n')
-    await symlink(wt, join(home, 'wt-link'))
-    const reply = await read('wt-link/b.txt', home)
-    assert.equal(reply.error, null)
-    assert.equal(reply.content, 'bee\n')
+    const link = join(home, 'wt-link')
+    await symlink(wt, link)
+    try {
+      const reply = await read('wt-link/b.txt', home)
+      assert.equal(reply.error, null)
+      assert.equal(reply.content, 'bee\n')
+    } finally { await rm(link, { force: true }) }
   })
 
   it('CONTROL: a missing ordinary file still answers "File not found"; so does a missing file in an existing worktree subtree', async () => {
