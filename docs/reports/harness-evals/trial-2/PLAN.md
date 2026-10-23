@@ -197,7 +197,10 @@ Exposing Codex tokens in Chroxy's badge (REPORT rec 7) is a product follow-up.
   `tiebreaks.json` on top. A merged PR with no verdict stops `measures.py` rather
   than counting as not delivered.
 - Red CI on the base is counted from each merge's own `ci.yml` push run, matched by
-  the merge commit; a merge with no finished push run makes the count `n/a`, not 0.
+  the merge commit (a cancelled or skipped run counts only when a later finished
+  push run covers it), plus any other `ci.yml` push run on the base in the window;
+  anything unfinished or uncovered leaves the count unknown (`null`, printed as
+  not observable), never 0.
 
 ## 9. Step list (replaces README steps 1–13)
 

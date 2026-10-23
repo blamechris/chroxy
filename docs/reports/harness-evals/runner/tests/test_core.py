@@ -41,7 +41,8 @@ class Trial2Roster(unittest.TestCase):
         # A rendered mission on main would sit in every clone and leave `cut` nothing to commit.
         def ignored(rel):
             return subprocess.run(['git', '-C', helpers.REPO_ROOT, 'check-ignore', '-q', '--no-index', rel]).returncode
-        self.assertEqual(ignored(f'{helpers.TRIAL_REL}/missions/A-cd-r1.md'), 0)
+        for run in self.trial.runs:
+            self.assertEqual(ignored(self.trial.mission_relpath(run)), 0, run.id)
         self.assertEqual(ignored(f'{helpers.TRIAL_REL}/missions/TEMPLATE.md'), 1)
 
     def test_bases_are_trial2_namespaced_and_unique(self):

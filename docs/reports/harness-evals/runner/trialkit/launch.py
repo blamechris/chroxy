@@ -299,9 +299,6 @@ def _cut_one(trial, run, env, repo, t0, want, push):
         command = f'git -C {repo} push origin {sha}:refs/heads/{run.base}'
         if not push:
             return checks.passed(name, f'built {sha}, not pushed (re-run with --push, or: {command})')
-        url = _git(env, repo, 'remote', 'get-url', 'origin')
-        if not url.ok or not _origin_is_trial_repo(trial, env, url.stdout.strip()):
-            return checks.failed(name, f'origin is {url.stdout.strip() or "unreadable"}, not {trial.repo}; nothing pushed')
         r = _git(env, work, 'push', 'origin', f'HEAD:refs/heads/{run.base}')
         if not r.ok:
             return checks.failed(name, f'git push failed: {_tail(r)}')
@@ -333,6 +330,14 @@ def cut(trial, runs, env, t0, push, repo_dir):
     if not SHA.match(t0):
         env.print(f'cut: refusing: T0 must be a full 40-character commit SHA, got {t0!r}')
         return 2
+    if push:
+        # The push URL, not the fetch URL: `remote.origin.pushurl` or `pushInsteadOf` can send a push
+        # somewhere `get-url` does not show. Checked before anything is fetched or T0 is recorded.
+        url = _git(env, repo, 'remote', 'get-url', '--push', 'origin')
+        pushes_to = url.stdout.strip() if url.ok else ''
+        if not pushes_to or not _origin_is_trial_repo(trial, env, pushes_to):
+            env.print(f'cut: refusing: origin pushes to {pushes_to or "an unreadable URL"}, not {trial.repo}; nothing fetched, recorded or pushed')
+            return 2
     fetched = _git(env, repo, 'fetch', 'origin')
     if not fetched.ok:
         env.print(f'cut: refusing: git fetch origin failed in {repo}: {_tail(fetched)}')
@@ -1141,6 +1146,8 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
         settings = _path(trial, env, 'claude_settings')
         now_hash = _sha256(settings) if settings else None
         started = st.get('start') or {}
+        while 'claude_settings_sha256' in (started.get('replaces') or {}):
+            started = started['replaces']  # the first send's baseline: a re-recorded start must not reset it
         pre = _latest_pre(st)
         if 'claude_settings_sha256' in started:
             known, before = True, started['claude_settings_sha256']
@@ -1149,6 +1156,8 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
         else:
             known, before = False, None
         record['settings_sha256'] = now_hash
+        if known and before is None and now_hash is None:
+            known = False  # unreadable at both ends: no evidence either way, not "unchanged"
         if not known:
             record['settings_changed'] = None
             env.print('note: no settings hash was recorded at the start or by a preflight, so a change to ~/.claude/settings.json cannot be ruled out')

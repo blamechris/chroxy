@@ -444,9 +444,20 @@ class Cut(unittest.TestCase):
         helpers.git(self.rig.box.tmp, 'clone', '--bare', '-q', self.rig.origin, other)
         helpers.git(self.rig.seed, 'remote', 'set-url', 'origin', other)
         code, out = self.cut('A-cd-r1', push=True)
-        self.assertEqual(code, 1, out)
-        self.assertIn(f'not {self.rig.trial.repo}; nothing pushed', out)
+        self.assertEqual(code, 2, out)
+        self.assertIn(f'not {self.rig.trial.repo}; nothing fetched, recorded or pushed', out)
         self.assertEqual(helpers.git(other, 'for-each-ref', 'refs/heads/trial'), '')
+        self.assertIsNone(self.rig.box.trial().t0, 'a refused push records no T0')
+
+    def test_push_reads_the_push_url_not_the_fetch_url(self):
+        # remote.origin.pushurl sends the push elsewhere while `git remote get-url origin` still shows the trial repo.
+        other = os.path.join(self.rig.box.tmp, 'other.git')
+        helpers.git(self.rig.box.tmp, 'clone', '--bare', '-q', self.rig.origin, other)
+        helpers.git(self.rig.seed, 'config', 'remote.origin.pushurl', other)
+        code, out = self.cut('A-cd-r1', push=True)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(helpers.git(other, 'for-each-ref', 'refs/heads/trial'), '')
+        self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
 
     def test_the_trial_repository_is_recognised_in_its_github_spellings(self):
         env = self.rig.env()
@@ -2013,6 +2024,24 @@ class Finish(LaunchCase):
         self.rig.save_state(rid, start={'sent_at': 'x'}, preflight=[{'phase': 'pre', 'at': 'y', 'checks': [],
                                                                        'facts': {'claude_settings_sha256': digest}}])
         return path
+
+    def test_a_settings_file_unreadable_at_both_ends_is_unknown_not_unchanged(self):
+        self.rig.save_state('A-cd-r1', start={'sent_at': 'x', 'claude_settings_sha256': None})
+        code, out = self.go()
+        self.assertEqual(code, 0, out)
+        self.assertIsNone(self.rig.state('A-cd-r1')['finish']['settings_changed'])
+        self.assertIn('cannot be ruled out', out)
+
+    def test_the_first_send_s_baseline_survives_a_re_recorded_start(self):
+        path = self.rig.write_home('.claude/settings.json', '{"a": 1}')
+        first = launch._sha256(path)
+        with open(path, 'w') as fh:
+            fh.write('{"a": 2}')  # changed between the first start and a re-recorded one
+        second = launch._sha256(path)
+        self.rig.save_state('A-cd-r1', start={'sent_at': 'y', 'claude_settings_sha256': second,
+                                              'replaces': {'sent_at': 'x', 'claude_settings_sha256': first}})
+        code, out = self.go()
+        self.assertTrue(self.rig.state('A-cd-r1')['finish']['settings_changed'], out)
 
     def test_records_the_end_and_a_run_stops_being_live(self):
         self.settled_run()

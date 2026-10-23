@@ -572,19 +572,21 @@ class RedCi(Scenario):
     PUSHES = [push.__func__(31, 'm101', '2026-11-02T10:35:30Z', 'failure'),
               push.__func__(32, 'm103', '2026-11-02T10:55:30Z'),
               push.__func__(33, 'm103', '2026-11-02T10:55:31Z', 'failure', path='.github/workflows/other.yml'),
-              push.__func__(34, 'zzz', '2026-11-02T10:40:00Z', 'failure'),   # not a merge of this run
+              push.__func__(34, 'zzz', '2026-11-02T10:40:00Z', 'failure'),   # a direct push, no merge's
               push.__func__(35, 'm104', '2026-11-02T11:31:00Z')]             # after the window
 
     def test_observable_counts_failures_per_merge_by_commit(self):
         ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.PUSHES))
         self.assertIs(ev['ci_push_observable'], True)
-        self.assertEqual(ev['red_ci_on_base'], 1)
+        # 31 failed after PR 101's merge; 34, a failing push that is no merge's, is red CI on the base too.
+        self.assertEqual(ev['red_ci_on_base'], 2)
         self.assertEqual([(r['id'], r['pr']) for r in ev['base_push_ci']], [(31, 101), (32, 103), (35, 104)])
+        self.assertEqual([r['id'] for r in ev['red_ci_unattributed']], [34])
         self.assertNotIn('red_ci_incomplete', ev)
-        self.assertIn('red CI on the base: 1 of 3 merges', self.output)
+        self.assertIn('red CI on the base: 2 red (3 merges, 1 other push run(s))', self.output)
 
     def test_a_rerun_of_a_merge_push_counts_its_latest_attempt(self):
-        rerun = self.PUSHES + [self.push(36, 'm101', '2026-11-02T10:45:00Z')]
+        rerun = [p for p in self.PUSHES if p['id'] != 34] + [self.push(36, 'm101', '2026-11-02T10:45:00Z')]
         ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=rerun))
         self.assertEqual(ev['red_ci_on_base'], 0)
 
@@ -605,7 +607,31 @@ class RedCi(Scenario):
         running = self.PUSHES[:4] + [dict(self.PUSHES[4], conclusion=None, status='in_progress')]
         ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=running))
         self.assertIsNone(ev['red_ci_on_base'])
-        self.assertIn('PR(s) [104] had not finished', ev['red_ci_incomplete'])
+        self.assertIn('the push run for PR 104 had not finished', ev['red_ci_incomplete'])
+
+    def ok(self, last_conclusion='success', extra=()):
+        return [self.push(41, 'm101', '2026-11-02T10:36:00Z'), self.push(42, 'm103', '2026-11-02T10:56:00Z'),
+                self.push(43, 'm104', '2026-11-02T11:31:00Z', last_conclusion), *extra]
+
+    def test_a_cancelled_or_skipped_last_run_with_nothing_after_it_is_no_count(self):
+        for conclusion in ('cancelled', 'skipped', 'neutral', 'action_required'):
+            with self.subTest(conclusion):
+                ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.ok(conclusion)))
+                self.assertIsNone(ev['red_ci_on_base'])
+                self.assertIn(f'PR 104 ended {conclusion} and no later push run covers it', ev['red_ci_incomplete'])
+
+    def test_a_cancelled_run_covered_by_a_later_finished_run_counts(self):
+        superseded = [self.push(41, 'm101', '2026-11-02T10:36:00Z', 'cancelled'),
+                      self.push(42, 'm103', '2026-11-02T10:56:00Z'), self.push(43, 'm104', '2026-11-02T11:31:00Z')]
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=superseded))
+        self.assertEqual(ev['red_ci_on_base'], 0)
+        self.assertNotIn('red_ci_incomplete', ev)
+
+    def test_an_unfinished_push_that_is_no_merge_s_is_no_count(self):
+        stray = self.push(44, 'direct', '2026-11-02T11:00:00Z', None)
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.ok(extra=[stray])))
+        self.assertIsNone(ev['red_ci_on_base'])
+        self.assertIn('push run 44 (not a merge) had not finished', ev['red_ci_incomplete'])
 
     def test_not_observable_when_ci_does_not_run_on_push_to_the_base(self):
         ev = self.collect(self.github(ci_text=CI_PUSH_MAIN, push_runs=self.PUSHES))
@@ -641,6 +667,24 @@ class RedCi(Scenario):
         self.assertEqual(read_json(os.path.join(box.tmp, 'd', 'runs.json'))['T0'], 'b' * 40)
 
 
+class FixtureTrim(unittest.TestCase):
+    CI = ('name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n\n'
+          'jobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps: []\n')
+
+    def test_a_recorded_ci_yml_keeps_the_trigger_and_drops_the_jobs(self):
+        response = {'content': base64.b64encode(self.CI.encode()).decode(), 'encoding': 'base64', 'sha': 'x'}
+        trimmed = collect.trim_fixture('repos/o/r/contents/.github/workflows/ci.yml?ref=abc', response)
+        text = base64.b64decode(trimmed['content']).decode()
+        self.assertEqual(text, self.CI[:self.CI.index('jobs:')])
+        self.assertNotIn('runs-on', text)
+        from trialkit.workflow import push_branches
+        self.assertEqual(push_branches(text), push_branches(self.CI))
+
+    def test_other_contents_are_kept_whole(self):
+        response = {'content': base64.b64encode(b'jobs: x\n').decode(), 'encoding': 'base64'}
+        self.assertEqual(collect.trim_fixture('repos/o/r/contents/README.md?ref=abc', response), response)
+
+
 class Recollect(Scenario):
     def test_a_second_collect_keeps_the_verdicts_already_applied(self):
         self.collect()
@@ -654,6 +698,23 @@ class Recollect(Scenario):
         self.assertIn(f'kept {len(merged)} grader verdict(s)', self.output)
         kept = {p['pr']: (p['correct_vs_key'], p.get('verdict_source')) for p in again['prs'] if p['state'] == 'merged'}
         self.assertEqual(kept, {p['pr']: ('yes', 'G-codex') for p in merged})
+
+    def test_a_verdict_for_a_pr_no_longer_collected_is_reported(self):
+        self.collect()
+        path = os.path.join(self.data, 'evidence', 'A-cd-r1.json')
+        evidence = read_json(path)
+        evidence['runs']['A-cd-r1']['prs'].append({'pr': 999, 'state': 'merged', 'correct_vs_key': 'yes'})
+        write_json(path, evidence)
+        self.collect()
+        self.assertIn('PR(s) [999] had a verdict and are not in this collection', self.output)
+
+    def test_a_previous_evidence_file_of_the_wrong_shape_stops(self):
+        path = os.path.join(self.box.tmp, 'data', 'evidence', 'A-cd-r1.json')
+        write_json(path, {'runs': {'A-cd-r1': {'prs': ['not a PR record']}}})
+        env = self.box.env(github=self.github())
+        trial = self.box.trial()
+        self.assertEqual(collect.collect(trial, trial.run('A-cd-r1'), env, data_dir=os.path.join(self.box.tmp, 'data')), 2)
+        self.assertEqual(read_json(path), {'runs': {'A-cd-r1': {'prs': ['not a PR record']}}})
 
     def test_an_unreadable_previous_evidence_file_stops_rather_than_overwrites(self):
         path = os.path.join(self.box.tmp, 'data', 'evidence', 'A-cd-r1.json')

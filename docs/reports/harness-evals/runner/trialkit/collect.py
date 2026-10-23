@@ -407,26 +407,42 @@ def _gather(trial, run, client, st, start, env):
     # Push CI is attributed to merges by commit, not by time: the last merge (the report PR's) ends
     # the window, so the run it triggers always starts after it.
     merge_shas = {p['merge_sha']: p['pr'] for p in records if p.get('state') == 'merged' and p.get('merge_sha')}
+    ci_push = sorted((r for r in push_runs if r.get('path') == CI_PATH), key=_stamp_key)
     latest = {}
-    for r in sorted(push_runs, key=_stamp_key):
-        if r.get('path') == CI_PATH and r.get('head_sha') in merge_shas:
+    for r in ci_push:
+        if r.get('head_sha') in merge_shas:
             latest[r['head_sha']] = r
-    push_ci = [dict(_run_entry(r, ('id', 'head_sha', 'created_at', 'conclusion')), pr=merge_shas[sha])
+    entry_keys = ('id', 'head_sha', 'created_at', 'conclusion')
+    push_ci = [dict(_run_entry(r, entry_keys), pr=merge_shas[sha])
                for sha, r in sorted(latest.items(), key=lambda kv: _stamp_key(kv[1]))]
+    # A ci.yml push run on the base that is no merge's (a direct push, a revert) is red CI on the base too.
+    unattributed = [_run_entry(r, entry_keys) for r in ci_push
+                    if r.get('head_sha') not in merge_shas and window.contains(r.get('created_at'))]
     observable = _push_observable(client, t0, run.base)
     red, red_gap = None, None
     if observable:
-        # A count is only a measurement when every merge into the base has a finished push run of its own;
-        # a missing or unfinished one would read as "not red" while nothing was seen. A cancelled run
-        # (superseded by the next merge's, per ci.yml's concurrency group) is covered by that later run.
+        # A count is only a measurement when every merge into the base has a finished verdict: its own
+        # push run passed or failed, or, when that run was cancelled or skipped (ci.yml's concurrency
+        # group cancels a pending run when the next merge queues one), a later finished push run on the
+        # base covers it. Anything else would read as "not red" while nothing was seen.
+        finished = ('success',) + RED
+        gaps = []
         missing = sorted(pr for sha, pr in merge_shas.items() if sha not in latest)
-        unfinished = [r['pr'] for r in push_ci if r.get('conclusion') is None]
         if missing:
-            red_gap = f'no ci.yml push run on the base for the merge of PR(s) {missing}'
-        elif unfinished:
-            red_gap = f'the push run(s) for PR(s) {unfinished} had not finished'
+            gaps.append(f'no ci.yml push run on the base for the merge of PR(s) {missing}')
+        for r in push_ci:
+            if r.get('conclusion') is None:
+                gaps.append(f'the push run for PR {r["pr"]} had not finished')
+            elif r['conclusion'] not in finished and not any(
+                    x.get('conclusion') in finished and _stamp_key(x) > _stamp_key(r) for x in ci_push):
+                gaps.append(f'the push run for PR {r["pr"]} ended {r["conclusion"]} and no later push run covers it')
+        for r in unattributed:
+            if r.get('conclusion') is None:
+                gaps.append(f'push run {r["id"]} (not a merge) had not finished')
+        if gaps:
+            red_gap = '; '.join(gaps)
         else:
-            red = sum(1 for r in push_ci if r['conclusion'] in RED)
+            red = sum(1 for r in push_ci + unattributed if r['conclusion'] in RED)
     wall = timeutil.minutes(start_text, end_text)
     wall_commit = (timeutil.minutes(start_text, report_commit['committer_date'])
                    if report_commit and report_commit.get('committer_date') else None)
@@ -455,6 +471,8 @@ def _gather(trial, run, client, st, start, env):
     out['ci_push_observable'] = observable
     if red_gap:
         out['red_ci_incomplete'] = red_gap
+    if unattributed:
+        out['red_ci_unattributed'] = unattributed
     return out, report_pr, notes
 
 
@@ -462,24 +480,25 @@ def _gather(trial, run, client, st, start, env):
 
 def _carry_verdicts(path, run_id, ev):
     """Copy `correct_vs_key` / `verdict_source` from an existing evidence file onto the same PRs, so a
-    re-collect after `apply-verdicts` does not erase the grading; returns how many were kept."""
+    re-collect after `apply-verdicts` does not erase the grading; returns (kept, dropped), dropped being
+    the PRs that held a verdict and are no longer in the evidence."""
     if not os.path.exists(path):
-        return 0
+        return 0, []
     try:
         with open(path, encoding='utf-8') as fh:
             old = json.load(fh)['runs'][run_id]['prs']
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        verdicts = {p['pr']: p for p in old if p.get('correct_vs_key') is not None}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise ValueError(f'{path} exists but cannot be read ({exc}); move it aside before collecting again') from exc
-    verdicts = {p.get('pr'): p for p in old if p.get('correct_vs_key') is not None}
     kept = 0
     for pr in ev['prs']:
-        prior = verdicts.get(pr['pr'])
+        prior = verdicts.pop(pr['pr'], None)
         if prior:
             pr['correct_vs_key'] = prior['correct_vs_key']
             if 'verdict_source' in prior:
                 pr['verdict_source'] = prior['verdict_source']
             kept += 1
-    return kept
+    return kept, sorted(verdicts)
 
 
 def _write_json(path, value):
@@ -596,7 +615,9 @@ def _summary(env, trial, run, ev, report_pr, notes):
     if ev['ci_push_observable'] and ev['red_ci_on_base'] is None:
         env.print(f'  red CI on the base: no count ({ev.get("red_ci_incomplete")})')
     elif ev['ci_push_observable']:
-        env.print(f'  red CI on the base: {ev["red_ci_on_base"]} of {len(ev["base_push_ci"])} merges')
+        others = len(ev.get('red_ci_unattributed') or [])
+        env.print(f'  red CI on the base: {ev["red_ci_on_base"]} red ({len(ev["base_push_ci"])} merges'
+                  + (f', {others} other push run(s))' if others else ')'))
     else:
         why = 'cannot be read' if ev['ci_push_observable'] is None else 'does not run on push to the base'
         env.print(f'  red CI on the base: not observable (ci.yml at T0 {why})')
@@ -649,12 +670,14 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
                 'methods': METHODS, 'runs': {run.id: ev}}
     path = os.path.join(data, 'evidence', f'{run.id}.json')
     try:
-        kept = _carry_verdicts(path, run.id, ev)
+        kept, dropped = _carry_verdicts(path, run.id, ev)
     except ValueError as exc:
         env.print(f'collect {run.id}: {exc}')
         return 2
     if kept:
         env.print(f'  kept {kept} grader verdict(s) already applied to {os.path.relpath(path, trial.root)}')
+    if dropped:
+        env.print(f'  WARNING: PR(s) {dropped} had a verdict and are not in this collection; their verdicts are gone')
     _write_json(path, evidence)
     try:
         update_runs_json(trial, run, data, st, start, ev['T0'])
