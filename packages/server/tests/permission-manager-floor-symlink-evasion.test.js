@@ -32,7 +32,10 @@ const silentLog = { info() {}, warn() {} }
 /** Make a fresh temp root and return its REAL path (macOS tmpdir is itself
  *  under a `/var → /private/var` firmlink; realpath gives a stable base). */
 function mkRoot() {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-sym-')))
+  // `.native` also returns long names: a Windows runner can report tmpdir() in
+  // 8.3 form (`C:\Users\RUNNER~1\…`), and a target that leaves the root is
+  // scanned as that absolute path, where a short-name segment floors.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-floor-sym-')))
 }
 
 describe('protected-path floor resolves symlinks (#6851)', () => {

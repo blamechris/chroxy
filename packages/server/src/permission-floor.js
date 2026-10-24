@@ -146,23 +146,29 @@ const CLAUDE_SETTINGS_DIR = CLAUDE_DIR
 const CLAUDE_SETTINGS_PREFIX = 'settings'
 const CLAUDE_SETTINGS_SUFFIX = '.json'
 
-// The form a path segment is compared in. Anything from a `:` on and any
-// trailing dots or spaces are dropped, and the name is folded wider than
-// `toLowerCase()`: compatibility forms decomposed, combining marks removed, and
-// each character upper- then lower-cased. An ASCII name only loses the
-// dropped parts and is lowercased. The fold only ever adds matches.
-function canonicalSegment(seg) {
+// The name a path segment carries: anything from a `:` on, and any trailing
+// dots or spaces, are dropped.
+function segmentName(seg) {
   const colon = seg.indexOf(':')
-  const name = (colon === -1 ? seg : seg.slice(0, colon)).replace(/[. ]+$/, '')
+  return (colon === -1 ? seg : seg.slice(0, colon)).replace(/[. ]+$/, '')
+}
+
+// The form a segment's name is compared in: folded wider than `toLowerCase()`.
+// Compatibility forms are decomposed and combining marks removed, then each
+// character is lower-, upper- and lower-cased again (so a capital or small
+// sharp s becomes `ss`). An ASCII name is only lowercased. The fold only ever
+// adds matches.
+function canonicalSegment(seg) {
+  const name = segmentName(seg)
   if (/^[\x00-\x7f]*$/.test(name)) return name.toLowerCase()
   return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
-    .map((ch) => ch.toUpperCase().toLowerCase())
+    .map((ch) => ch.toLowerCase().toUpperCase().toLowerCase())
     .join('')
 }
 
-// A segment in the 8.3 short-name form (`CLAUDE~1`, `SETTIN~1.JSO`): up to six
-// characters, `~`, digits, and an extension of up to three. It floors without
-// a name comparison, under both floors.
+// A segment whose name (see segmentName) is in the 8.3 short-name form
+// (`CLAUDE~1`, `SETTIN~1.JSO`): up to six characters, `~`, digits, and an
+// extension of up to three. It floors without a name comparison, under both floors.
 const SHORT_NAME_SEGMENT = /^[^~.]{1,6}~\d+(\.[^.]{1,3})?$/
 
 // #8741 — Claude Code's own worktrees live INSIDE the protected `.claude/` dir:
@@ -370,7 +376,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   const start = carved ? 2 : 0
   for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
-    if (SHORT_NAME_SEGMENT.test(pieces[i])) return true
+    if (SHORT_NAME_SEGMENT.test(segmentName(pieces[i]))) return true
     // Secret files, and credential-dense config files, are floored under BOTH
     // the read and the write floor (PR #6873 review — the read floor must not
     // silently auto-read .git/config, git credentials, or .claude/settings*.json).

@@ -41,6 +41,14 @@ describe('floor: segments compared in canonical form', () => {
     ['Write', 'GIT~1/config'],
     ['Read', 'SETTIN~1.JSO'],
     ['Write', 'CLAUDE~1/settings.json'],
+    ['Read', '.pgpa\u1E9E'],
+    ['Write', '.pgpa\u00DF'],
+    ['Read', '.claude/SETTIN~1.JSO::$DATA'],
+    ['Write', 'CLAUDE~1::$INDEX_ALLOCATION/settings.json'],
+    ['Write', 'GIT~1::$INDEX_ALLOCATION/config'],
+    ['Write', 'GIT~1./config'],
+    ['Write', 'CLAUDE~1 /settings.json'],
+    ['Read', 'SETTIN~1.JSO.'],
   ]) {
     it(`${tool} ${JSON.stringify(path)} \u2192 floored`, () => {
       assert.equal(floored(tool, path), true)
