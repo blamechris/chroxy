@@ -132,6 +132,26 @@ describe('floor: one call\'s targets share a budget', () => {
     assert.equal(floored('Read', at), false)
   })
 
+  it('the name bound counts UTF-16 code units, for non-ASCII names too', () => {
+    // A 2-byte character, and an astral one (two code units each).
+    for (const [ch, units] of [['\u00E9', 1], ['\u{1F600}', 2]]) {
+      const over = `src/${ch.repeat(Math.floor(FLOOR_MAX_NAME_LENGTH / units) + 1)}`
+      const at = `src/${ch.repeat(Math.floor(FLOOR_MAX_NAME_LENGTH / units))}`
+      assert.equal(floored('Write', over), true)
+      assert.equal(floored('Read', over), true)
+      assert.equal(floored('Write', at), false)
+      assert.equal(floored('Read', at), false)
+    }
+  })
+
+  it('the canonical budget counts UTF-16 code units', () => {
+    // 128-unit names: three digits, 62 astral characters, one letter.
+    const names = Array.from({ length: FLOOR_MAX_CALL_CANONICAL / 128 }, (_, i) => String(i).padStart(3, '0') + '\u{1F600}'.repeat(62) + 'a')
+    assert.ok(names.every((name) => name.length === 128), 'premise: 128 code units each')
+    assert.equal(isFlooredTarget('apply_patch', patch(names), CWD), false, 'exactly the budget')
+    assert.equal(isFlooredTarget('apply_patch', patch([...names, '\u00E9']), CWD), true)
+  })
+
   it(`more than FLOOR_MAX_CALL_CANONICAL (${FLOOR_MAX_CALL_CANONICAL}) characters of distinct non-ASCII names floors`, () => {
     // 128-character names of a 2-byte character, distinct, filling the budget exactly.
     const names = Array.from({ length: FLOOR_MAX_CALL_CANONICAL / 128 }, (_, i) => String(i).padStart(3, '0') + '\u00E9'.repeat(125))
