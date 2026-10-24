@@ -7,14 +7,23 @@ from trialkit.workflow import WorkflowParseError, branch_covered, push_branches
 
 
 class PushTrigger(unittest.TestCase):
-    def test_the_real_ci_yml_parses_and_runs_on_push_to_main(self):
-        # Only what holds before and after the trial's push-trigger change (PLAN.md P3); coverage of
-        # trial bases is exercised on synthetic workflows below.
+    def test_the_real_ci_yml_runs_on_push_to_main_and_every_trial_base(self):
+        # PLAN.md P3 (#8758): a merge into a trial base must run CI, or "red CI on the base" is not
+        # observable; the graders' eval branches must not. The bases come from trial-2's roster, not a
+        # hand-written list, so a run added to trial.json is covered or this goes red.
+        from trialkit import config
         with open(os.path.join(helpers.REPO_ROOT, '.github', 'workflows', 'ci.yml'), encoding='utf-8') as fh:
             patterns = push_branches(fh.read())
         self.assertIsInstance(patterns, list)
-        self.assertIn('main', patterns)
         self.assertTrue(branch_covered('main', patterns))
+        trial = config.load(helpers.TRIAL2, root=helpers.REPO_ROOT)
+        self.assertGreaterEqual(len(trial.runs), 8)
+        uncovered = [r.base for r in trial.runs if not branch_covered(r.base, patterns)]
+        self.assertEqual(uncovered, [])
+        for branch in (f'trial/{trial.id}-eval', f'trial/{trial.id}-eval-claude', f'trial/{trial.id}-eval-codex',
+                       'trial/eval', 'trial/eval-claude'):
+            self.assertFalse(branch_covered(branch, patterns), branch)
+        self.assertFalse(branch_covered('feature/x', patterns))
 
     def test_trial_trigger_with_eval_branches_excluded(self):
         text = "name: CI\non:\n  push:\n    branches: [main, 'trial/**', '!trial/*eval*']\n  pull_request:\n"

@@ -107,6 +107,11 @@ class Trial:
                 raise ConfigError(f'run id {run.id!r} must be letters, digits and hyphens')
             if not BASE.match(run.base):
                 raise ConfigError(f'run {run.id}: base {run.base!r} must be a lower-case trial/ branch')
+            if 'eval' in run.base[len('trial/'):]:
+                # ci.yml's push trigger excludes the graders' `trial/*eval*` branches; a base named so
+                # would get no CI on its merges, and "red CI on the base" would be unobservable.
+                raise ConfigError(f'run {run.id}: base {run.base!r} contains "eval"; ci.yml excludes `trial/*eval*` '
+                                  'from push CI, and no base may come near that pattern')
             if run.id in seen_ids or run.base in seen_bases:
                 raise ConfigError(f'run {run.id}: duplicate run id or base branch')
             seen_ids.add(run.id)

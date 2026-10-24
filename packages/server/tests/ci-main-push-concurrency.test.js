@@ -30,9 +30,9 @@ import { readWorkflows, assertReaderSane } from './helpers/workflow-reader.js'
  * THE FIX, AND WHY IT IS SAFE (GitHub's documented semantics)
  * -------------------------------------------------------------
  * `group: ci-${{ github.head_ref || github.ref }}` — for a `push`, `github.ref`
- * is "the branch or tag ref that was pushed" (`refs/heads/main` here, since
- * `on.push.branches` names only `main`), the SAME value on every push to that
- * branch. `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`
+ * is "the branch or tag ref that was pushed" (`refs/heads/main` for a push to
+ * `main`, `refs/heads/trial/<run>` for a push to a harness-trial base), the SAME
+ * value on every push to that branch and a different group per branch. `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`
  * scopes the "cancel a running job" behaviour to PR pushes only; on `main` it
  * resolves false. Per GitHub's concurrency docs: with `cancel-in-progress`
  * false, "any existing pending job or workflow in the same concurrency group

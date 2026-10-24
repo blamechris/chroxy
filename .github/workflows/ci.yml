@@ -2,7 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `trial/**`: the controlled harness trial's run bases
+    # (docs/reports/harness-evals/trial-2/PLAN.md). A trial merges each PR into
+    # its own `trial/<run>` base, and without a push run there "red CI on the
+    # base after a merge" is not observable (October trial REPORT §8). The
+    # graders' `trial/*eval*` branches (the unsealed key, gradings, rulings) are
+    # excluded, and `trialctl` refuses a run base whose name contains "eval".
+    # Each base gets its own concurrency group (`github.ref`, below), so a trial
+    # push never supersedes a `main` run or the reverse. `trialctl gate` checks
+    # that this list covers a run's base before the run starts.
+    branches: [main, 'trial/**', '!trial/*eval*']
   pull_request:
 
 # Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
@@ -26,16 +35,18 @@ on:
 #
 # THE FIX, per GitHub's documented concurrency semantics (Using jobs > Using
 # concurrency): with `cancel-in-progress` false (its default, and what every
-# NON-`pull_request` event — i.e. a `push` to `main` — now resolves to; a
+# NON-`pull_request` event — i.e. a `push` to `main` or a trial base — now resolves to; a
 # `pull_request` event still resolves it to `true`, unchanged from before),
 # "any existing pending job or workflow in the same concurrency group will be
 # canceled and the new queued job or workflow will take its place," and by
 # default "at most one job or
 # workflow run can be pending" per group — a run already IN PROGRESS is left to
 # finish. `github.ref` for a `push` is "the branch or tag ref that was pushed"
-# (`refs/heads/main` here, since `on.push.branches` names only `main`) — the
-# SAME value across every push to that branch, unlike `run_id`. So a burst of
-# `main` pushes now settles to at most one running plus one pending run (the
+# (`refs/heads/main` for a push to `main`, `refs/heads/trial/<run>` for a push
+# to a trial base) — the SAME value across every push to that branch, unlike
+# `run_id`, and a different group per branch, so a burst on one branch never
+# supersedes another branch's run. So a burst of `main` (or trial-base) pushes
+# now settles to at most one running plus one pending run (the
 # latest), and every commit still gets covered by either the run validating it
 # directly or a later run on top of it — see "WHAT A SKIPPED INTERMEDIATE
 # COMMIT LOSES" below. `pull_request` behaviour is unchanged: `head_ref` (the
@@ -52,7 +63,11 @@ on:
 # `workflow_run` consumer anywhere in `.github/workflows/` (grepped at fix
 # time), no coverage badge, and no deploy gated on push-to-main CI (`release.yml`
 # triggers only on a version TAG push or manual dispatch, both untouched by this
-# group). The one thing that DOES need `main`-push CI to run periodically — the
+# group). A trial base is the one consumer of per-merge push CI: the harness
+# trial's collector counts red CI per merge and treats a merge whose pending run
+# was superseded as covered by the later run, so a red intermediate merge fixed
+# by the next merge in the same burst goes unobserved, an accepted limit of that
+# measure. The one thing that DOES need `main`-push CI to run periodically — the
 # `dashboard-smoke` job's hosted npm-cache producer role, see its own comment —
 # still gets it: the run already IN PROGRESS when a burst starts, and the
 # newest PENDING one once it finishes, both execute in full. Only jobs strictly
@@ -2101,7 +2116,7 @@ jobs:
       # saving the entry.
       #
       # This job already satisfied both conditions: hosted, x86_64 (pinned for
-      # Playwright), unconditional, on `push: branches: [main]`, running a root
+      # Playwright), unconditional, on push to `main` (and to trial bases), running a root
       # `npm ci`. It just had no `cache:`, so it cold-installed the monorepo every
       # run AND saved nothing.
       #

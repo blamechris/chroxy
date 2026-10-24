@@ -588,6 +588,38 @@ def _login_check(trial, env, facts):
     return checks.failed(name, f'gh is logged in as {login}, the trial expects {trial.github_login}')
 
 
+def _ci_quiet_check(trial, env, facts):
+    """No ci.yml run queued or in progress in the repository. Trial PRs and merges run CI on the same
+    self-hosted runners the subject machine hosts (the macOS runner, the Docker Linux members), so a run
+    sent while other CI is queued starts on a loaded fleet; a freshly cut base's own push run is one.
+    The workflow and status are filtered by GitHub and read through `total_count`, so the answer covers
+    every matching run, not only the first page."""
+    name = 'CI fleet quiet'
+    busy = []
+    for status in ('queued', 'in_progress'):
+        r = _run(env, ['gh', 'api', '-X', 'GET', f'repos/{trial.repo}/actions/workflows/ci.yml/runs',
+                       '-f', f'status={status}', '-f', 'per_page=20'])
+        try:
+            reply = json.loads(r.stdout) if r.ok else None
+        except ValueError:
+            reply = None
+        count = reply.get('total_count') if isinstance(reply, dict) else None
+        if not isinstance(count, int) or isinstance(count, bool):
+            why = f'cannot list {status} CI runs: {_tail(r) or "unreadable reply"}'
+            # Runs already seen are a known FAIL; only an empty picture is "cannot tell".
+            return checks.failed(name, f'{", ".join(busy)}; and {why}') if busy else checks.unverified(name, why)
+        if count:
+            shown = [f'{x.get("id")} {x.get("head_branch")} ({status})' for x in reply.get('workflow_runs') or []
+                     if isinstance(x, dict)]
+            busy += shown or [f'{count} run(s) ({status})']
+            if count > len(shown):
+                busy.append(f'… {count - len(shown)} more {status}')
+    facts['ci_busy'] = busy
+    if busy:
+        return checks.failed(name, f'ci.yml run(s) queued or running: {", ".join(busy[:6])}; wait for them before the send')
+    return checks.passed(name, 'no ci.yml run queued or in progress')
+
+
 def _effort_setting(trial, run, env, facts):
     name = 'effort setting'
     path = _path(trial, env, 'claude_settings')
@@ -823,6 +855,7 @@ def preflight(trial, run, env, phase, session, state_file):
     results = _clone_checks(trial, run, env, st, clone_dir, facts)
     results.append(_node_check(trial, env, facts))
     results.append(_login_check(trial, env, facts))
+    results.append(_ci_quiet_check(trial, env, facts))
     results.append(_live_check(trial, run, env))
     if run.harness.family == 'claude':
         results.append(_effort_setting(trial, run, env, facts))

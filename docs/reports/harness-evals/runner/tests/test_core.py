@@ -83,6 +83,11 @@ class ConfigValidation(unittest.TestCase):
             d['runs'][0]['base'] = 'main'
         self.check_rejects(edit, 'trial/ branch')
 
+    def test_a_base_ci_yml_excludes_from_push_ci_is_refused(self):
+        def edit(d):
+            d['runs'][0]['base'] = 'trial/t2-retrieval-r1'
+        self.check_rejects(edit, 'from push CI')
+
     def test_unknown_cell(self):
         def edit(d):
             d['runs'][0]['cell'] = 'C-native'
