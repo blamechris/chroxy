@@ -392,6 +392,24 @@ describe('SdkSession effort (#8700) — mid-turn changes and stale reports', () 
     assert.deepEqual(await midTurn('claude-opus-5-5', 'max', { heard: false }), ['setMaxThinkingTokens(128000)'])
   })
 
+  it('High on a model nothing has described sets both live, as its next turn will', async () => {
+    assert.deepEqual(await midTurn('claude-opus-5-5', 'high', { heard: false }), ['applyFlagSettings({"effortLevel":"high"})', 'setMaxThinkingTokens(32000)'])
+  })
+
+  it('a refused effort does not stop the budget, and a failed report does not stop either', async () => {
+    const s = createSession({ model: 'claude-opus-5-5' })
+    const calls = []
+    s._query = {
+      applyFlagSettings: async () => { calls.push('applyFlagSettings'); throw new Error('refused') },
+      setMaxThinkingTokens: async (n) => { calls.push(`setMaxThinkingTokens(${n})`) },
+      getSettings: async () => { throw new Error('no answer') },
+    }
+    await s.setThinkingLevel('high')
+    s._query = null
+    s.destroy()
+    assert.deepEqual(calls, ['applyFlagSettings', 'setMaxThinkingTokens(32000)'])
+  })
+
   it('a budget model gets its budget live, and no effort', async () => {
     assert.deepEqual(await midTurn('claude-haiku-4-5', 'high'), ['setMaxThinkingTokens(32000)'])
   })

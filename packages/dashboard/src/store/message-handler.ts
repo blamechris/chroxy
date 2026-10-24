@@ -524,6 +524,12 @@ export function clearPendingThinkingLevelReverts(): void {
 }
 
 /** @internal test seam. */
+/** #8700 test hook: a copy of the revert entry registered for `requestId`, or null. */
+export function _testPendingThinkingLevelRevert(requestId: string): PendingThinkingLevelRevert | null {
+  const entry = _pendingThinkingLevelReverts.get(requestId);
+  return entry ? { ...entry } : null;
+}
+
 export function _testThinkingLevelRevertPendingSize(): number {
   return _pendingThinkingLevelReverts.size;
 }

@@ -3109,22 +3109,36 @@ export class SdkSession extends BaseSession {
     }
 
     // The same choice `_thinkingOptions` makes for the next turn, made live:
-    // an effort to set (or, at Auto, to clear), a budget to set (or, at Auto or
-    // on an effort-only answer, to clear). An unknown model gets both, as its
-    // next turn will.
+    // the effort is set when the next turn would send one, and cleared at
+    // Auto; the budget is set when the next turn would send one, and cleared
+    // at Auto or where the model reads no effort (a level with no budget then
+    // means none). An unknown model gets both, as its next turn will. Each
+    // setter fails on its own, so one the CLI refuses cannot keep the other
+    // from landing, and the report is asked for last.
     const opts = this._thinkingOptions()
     const setsEffort = opts.effort !== undefined || !this._thinkingLevel
     const setsBudget = opts.effort === undefined || opts.maxThinkingTokens !== undefined
-    try {
-      if (setsEffort && this._thinkingLevel !== 'max' && typeof query.applyFlagSettings === 'function') {
+    const asksEffort = setsEffort && this._thinkingLevel !== 'max' && typeof query.applyFlagSettings === 'function'
+    if (asksEffort) {
+      try {
         await query.applyFlagSettings({ effortLevel: this._thinkingLevel })
-        await this._readEffectiveEffort('after a mid-turn change')
+      } catch (err) {
+        ;(this._log || log).warn(`Failed to apply effort ${level} to the running turn: ${err?.message || err}`)
       }
-      if (setsBudget && typeof query.setMaxThinkingTokens === 'function') {
+    }
+    if (setsBudget && typeof query.setMaxThinkingTokens === 'function') {
+      try {
         await query.setMaxThinkingTokens(opts.maxThinkingTokens ?? null)
+      } catch (err) {
+        ;(this._log || log).warn(`Failed to apply the thinking budget for ${level} to the running turn: ${err?.message || err}`)
       }
-    } catch (err) {
-      ;(this._log || log).warn(`Failed to apply thinking level ${level} to the running turn: ${err.message}`)
+    }
+    if (asksEffort) {
+      try {
+        await this._readEffectiveEffort('after a mid-turn change')
+      } catch (err) {
+        ;(this._log || log).warn(`Effort report failed: ${err?.message || err}`)
+      }
     }
   }
 
@@ -3312,7 +3326,7 @@ export class SdkSession extends BaseSession {
         this.emit('models_updated', { models: converted })
       }
     } catch (err) {
-      ;(this._log || log).warn(`Failed to fetch supported models: ${err.message}`)
+      ;(this._log || log).warn(`Failed to fetch supported models: ${err?.message || err}`)
     }
   }
 
