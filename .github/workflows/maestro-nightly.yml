@@ -2,14 +2,9 @@
 #
 # The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
 # was deferred from per-PR because it needs a booted iOS simulator + a built dev
-# client + Metro, which only the self-hosted macOS runner can host and is too
-# costly to run on every PR. This runs it once a night instead.
-#
-# NOTE (#6355): the build + Metro orchestration below could not be validated
-# from a dev machine — verify it via the `workflow_dispatch` trigger on the
-# self-hosted runner before relying on the nightly. The runner must have the iOS
-# toolchain (Xcode + an "iPhone 16 Pro" simulator) available; the suite is
-# documented as tested only on that device (see CLAUDE.md). `run-all-sequential.sh`
+# client + Metro. Run once a night on a hosted macOS 15 image with Xcode 16.4:
+# Expo SDK 54 needs Simulator.app, which Xcode 27 removed (#7113).
+# `run-all-sequential.sh`
 # runs each flow in its own maestro process and retries a failure once — the
 # resilient runner required over `run-all.yaml` on a single simulator (#6091).
 name: Maestro App E2E (nightly)
@@ -34,14 +29,12 @@ permissions:
 env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
+  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
 
 jobs:
   maestro:
     name: Maestro App E2E
-    # No fork-PR guard (unlike ci.yml's self-hosted jobs) is needed: this workflow
-    # is schedule + workflow_dispatch only, neither of which is reachable from a
-    # fork PR — so untrusted code can never land on the self-hosted runner here.
-    runs-on: [self-hosted, macOS, ARM64, chroxy-mac]
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,18 +42,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          # No `cache:` — #7383. This job is pinned to the self-hosted macOS
-          # runner and, as the comment above says, is unreachable from a fork, so
-          # there is no hosted branch to route for: it is ALWAYS on a box whose
-          # ~/.npm is already warm (4.8 GB on the current runner). `cache: npm`
-          # only restored a 1.86 GB actions/cache entry over a superset of
-          # itself. ci.yml's 13 consumers took the routed form instead because
-          # they DO have a fork-PR branch that still needs the restore.
-          #
-          # It also carried `cache-dependency-path: package-lock.json` — the bare
-          # root lockfile that ci-cache-key.test.js forbids, in a repo with three
-          # lockfiles, so a change under packages/ never busted the key. Both are
-          # gone with the cache.
+
+      # Check the exact prerequisites Expo and the suite need before an expensive
+      # npm install or native build. Selects an iPhone 16 Pro with iOS 18.5 and
+      # exports DEVICE for the build and flow steps.
+      - name: Preflight Xcode and boot simulator
+        run: bash scripts/maestro-hosted-preflight.sh
 
       - name: Install dependencies
         run: npm ci
@@ -69,18 +56,6 @@ jobs:
         run: |
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
-
-      - name: Boot the iPhone 16 Pro simulator
-        run: |
-          DEVICE=$(xcrun simctl list devices available \
-            | grep -m1 'iPhone 16 Pro (' | grep -oE '[0-9A-F-]{36}')
-          if [ -z "$DEVICE" ]; then
-            echo "::error::no available 'iPhone 16 Pro' simulator on this runner"
-            exit 1
-          fi
-          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
-          xcrun simctl boot "$DEVICE" || true
-          xcrun simctl bootstatus "$DEVICE" -b || true
 
       # Builds + installs the chroxy dev client (com.blamechris.chroxy) into the
       # simulator WITHOUT starting Metro (started separately below so it can run
