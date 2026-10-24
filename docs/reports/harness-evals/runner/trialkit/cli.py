@@ -115,6 +115,15 @@ def build_parser():
     s.add_argument('--record', metavar='DIR', help='also write the GitHub responses to DIR as fixtures')
     s.add_argument('--fixtures', metavar='DIR', help='read GitHub responses from DIR instead of the network')
 
+    s = sub.add_parser('evidence', help="copy a finished run's native transcripts into the vault and write data/native/<RUN>.json")
+    s.add_argument('run')
+    s.add_argument('--state')
+    s.add_argument('--data')
+
+    s = sub.add_parser('queue-candidates', help="apply PLAN section 4's mechanical filters to the open backlog")
+    s.add_argument('--json', action='store_true', help='print the full result as JSON')
+    s.add_argument('--limit', type=int, metavar='N', help='show at most N candidates (the scan is always complete)')
+
     s = sub.add_parser('apply-verdicts', help="fold a grader's verdicts.json into the evidence")
     s.add_argument('verdicts')
     s.add_argument('--data')
@@ -185,6 +194,12 @@ def dispatch(trial, args, env):
         from . import collect
         return collect.collect(trial, trial.run(args.run), env, state_file=args.state, data_dir=args.data,
                                record_dir=args.record, fixtures_dir=args.fixtures)
+    if c == 'evidence':
+        from . import evidence
+        return evidence.evidence(trial, trial.run(args.run), env, state_file=args.state, data_dir=args.data)
+    if c == 'queue-candidates':
+        from . import candidates
+        return candidates.queue_candidates(trial, env, as_json=args.json, limit=args.limit)
     from . import verdicts
     if c == 'apply-verdicts':
         return verdicts.apply_verdicts(trial, env, args.verdicts, data_dir=args.data)

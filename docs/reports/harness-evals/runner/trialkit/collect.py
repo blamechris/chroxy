@@ -40,6 +40,8 @@ SMOKE_LEAD = re.compile(r'^[\W_]*(?:\w+[\W_]+){0,3}smoke\b', re.I)
 TIMELINE_EVENTS = ('cross-referenced', 'mentioned', 'referenced', 'connected')
 RED = ('failure', 'timed_out', 'startup_failure')
 MANUAL_FIELDS = ('workers', 'approvals', 'compactions', 'waves', 'incidents')
+# the manual fields `trialctl evidence` can derive; it fills one only while it is absent or the placeholder
+NATIVE_FIELDS = ('approvals', 'compactions', 'workers')
 
 METHODS = (
     'GitHub REST reads only. PRs: pulls?state=all&base=<run base>; per PR the reviews, issue comments, '
@@ -574,8 +576,28 @@ def run_metadata(trial, run, st, start_text):
     }
 
 
-def update_runs_json(trial, run, data, st, start_text, t0):
-    """Create or refresh `data/runs.json`; derived fields are rewritten, manual ones only if absent."""
+def native_row(data, run_id):
+    """(row, problem): the runs.json fields in `<data>/native/<run>.json`, written by `trialctl evidence`.
+
+    (None, None) when the run has no extract; a problem string when it has one that cannot be used."""
+    path = os.path.join(data, 'native', f'{run_id}.json')
+    if not os.path.exists(path):
+        return None, None
+    try:
+        doc = _read_json(path, None)
+    except (OSError, ValueError) as exc:
+        return None, f'cannot read {path}: {exc}'
+    row = doc.get('runs_row') if isinstance(doc, dict) else None
+    if not isinstance(row, dict) or doc.get('run') != run_id:
+        return None, f'{path} is not the native extract of {run_id}; its fields were not used'
+    return row, None
+
+
+def update_runs_json(trial, run, data, st, start_text, t0, notes=None):
+    """Create or refresh `data/runs.json`; derived fields are rewritten, manual ones only if absent.
+
+    A manual field the native extract can fill (NATIVE_FIELDS) is filled from it while it is absent or the
+    placeholder, and never once anyone has written a value."""
     path = os.path.join(data, 'runs.json')
     doc = _read_json(path, {})
     doc['queue'] = [s.issue for s in trial.slots]
@@ -593,6 +615,14 @@ def update_runs_json(trial, run, data, st, start_text, t0):
     stop_state = (st.get('finish') or {}).get('stop')
     for field in MANUAL_FIELDS:
         entry[field] = old[field] if field in old else NOT_RECORDED
+    row, problem = native_row(data, run.id)
+    if problem and notes is not None:
+        notes.append(problem)
+    for field in NATIVE_FIELDS:
+        if row and field in row and entry[field] == NOT_RECORDED:
+            entry[field] = row[field]
+            if notes is not None:
+                notes.append(f'{field} filled from the native extract: {row[field]}')
     entry['stop'] = stop_old if stop_old and stop_old != NOT_RECORDED else (stop_state or NOT_RECORDED)
     for key, value in old.items():
         entry.setdefault(key, value)
@@ -680,7 +710,7 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
         env.print(f'  WARNING: PR(s) {dropped} had a verdict and are not in this collection; their verdicts are gone')
     _write_json(path, evidence)
     try:
-        update_runs_json(trial, run, data, st, start, ev['T0'])
+        update_runs_json(trial, run, data, st, start, ev['T0'], notes=notes)
     except (OSError, ValueError) as exc:
         env.print(f'collect {run.id}: cannot update runs.json: {exc}')
         return 2

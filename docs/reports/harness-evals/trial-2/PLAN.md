@@ -91,7 +91,11 @@ Stop rules are PROTOCOL §3's: queue exhausted, 12 h from the first command, or 
 ## 4. Queue
 
 The October queue is spent: all ten issues are solved on `trial/*` branches and
-Copilot's review bodies link several of them to those PRs. Trial 2 draws ten new
+Copilot's review bodies link several of them to those PRs. The mechanical exclusions
+below do not catch all ten (checked against the live backlog on 2026-10-24: six by the
+changed-files rule, two by a cross-reference from a `trial/*` PR, and #8364 and #8277 by
+neither), so the runner also lists the ten by number (`queue_rules.exclude_issues`) and
+reports, for each, whether a rule would have caught it or only the list does. Trial 2 draws ten new
 issues with PROTOCOL §5's criteria and the same stratification (bugs, features,
 one or two cross-package items, one test or tooling item, spread across packages),
 plus three exclusions:
@@ -104,7 +108,8 @@ plus three exclusions:
 `trialctl queue-candidates` (package P2) applies the mechanical filters (open,
 owner-filed, no open or closing PR, excluded labels, the three exclusions above,
 no `.claude/` / `.github/workflows` / `docs/reports/harness-evals/` scope) to the
-open backlog and prints a table; a read-only exploration session reads the
+open backlog and prints a table; a rule it cannot apply (GitHub does not answer, or lists
+no PR into a `trial/*` branch at all) leaves the issue `unverified`, never a candidate; a read-only exploration session reads the
 survivors' bodies for concrete acceptance criteria, as in October; the owner picks
 ten. Each issue gets an opaque slot id (`Q01`…`Q10`, assigned in a random order
 that `trial.json` records), used in PR bodies (§6).
@@ -157,15 +162,19 @@ evidence <run>` (package P2), run on the Mac after the run ends:
 
 - copies the run's native transcripts (Claude: the clone's folder under
   `~/.claude/projects/`, subagents included; Codex: every rollout whose
-  `session_meta.cwd` is the clone or below it) and the daemon log lines for the
-  run's session into the vault (`~/Obsidian/no-it-all/reviews/harness-trial-2/evidence/<run>/`)
-  with a SHA-256 manifest;
-- writes a derived extract to `data/native/<run>.json`: model and effort per turn,
-  permission requests and their outcome (approved by a human, by the pipeline, by a
-  rule; denied; timed out; floored), human messages after the first, compactions,
-  token totals by model, and isolation-pattern hits (other `trial/*` refs, the key
-  folder, `NEXT-*.md`, native stores), with paths outside the clone reduced to a
-  pattern name and a hash;
+  `session_meta.cwd` is the clone or below it) and, for a Chroxy run, the daemon log
+  lines of the run's window into the vault
+  (`~/Obsidian/no-it-all/reviews/harness-trial-2/evidence/<run>/`) with a SHA-256
+  manifest, refusing any destination inside the repository, the clone or a git work
+  tree other than the declared private vault;
+- writes a derived extract to `data/native/<run>.json`: models and efforts per turn
+  (coordinator and workers apart), permission requests and their outcome as the daemon
+  log records it (answered through a notification action, which a person taps; decided
+  by a rule, a timeout or the pending cap; resolved by a client or an automatic
+  responder the log does not name; floored), human messages after the first,
+  interrupts, compactions, token totals by model, and isolation-pattern hits (other
+  `trial/*` refs, the key folder, `NEXT-*.md`, native stores), with paths outside the
+  clone reduced to a pattern name and a hash;
 - commits the manifest's digest beside the extract, so the vault copy can be
   verified later.
 
@@ -230,7 +239,7 @@ operator can run steps 7–12 during a Claude run without drawing on the Claude 
 | Package | Contents | State |
 |---|---|---|
 | P1 | `trial.json` schema; `trialctl render`, `gate`, `cut`, `clone`, `preflight`, `prepare`, `start`, `verify-start`, `finish`, `status`, `collect`, `apply-verdicts`, `disputes`, `verify-key`, `key-template`; `measures.py --data` with October pinned; mission and grader templates v2; tests in CI | this plan's first PR |
-| P2 | `trialctl evidence` (vault copy, manifest, derived extract, token totals), `queue-candidates` | next |
+| P2 | `trialctl evidence` (vault copy, manifest, derived extract, token totals), `queue-candidates` | delivered by the PR for blamechris/chroxy#8757 |
 | P3 | `ci.yml` push trigger for `trial/**` | before T0 |
 | Owner | ruleset, Copilot setting, key, launches, usage readings, unseal | before and during the trial |
 

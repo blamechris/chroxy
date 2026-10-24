@@ -884,6 +884,72 @@ class RunsJson(Scenario):
                                             {'arm': 'B', 'native': 'B-native', 'chroxy': 'B-chroxy'}])
         self.assertEqual(doc['queue'], [9001, 9002])
 
+    # -- the native extract (trialctl evidence) -----------------------------------------
+
+    def native(self, row, run='A-cd-r1', data=None):
+        data = data or os.path.join(self.box.tmp, 'data')
+        write_json(os.path.join(data, 'native', f'{run}.json'), {'run': run, 'runs_row': row})
+        return data
+
+    ROW = {'approvals': '4 prompted: 1 human, 3 unattributed, 0 automatic (daemon log)', 'compactions': 2,
+           'workers': '3 subagent transcript(s): claude-sonnet-5-5 x14'}
+
+    def test_the_native_extract_fills_the_placeholders(self):
+        data = self.native(self.ROW)
+        self.collect(data=data)
+        meta = self.runs_json()['runs']['A-cd-r1']
+        self.assertEqual((meta['approvals'], meta['compactions'], meta['workers']),
+                         (self.ROW['approvals'], 2, self.ROW['workers']))
+        self.assertEqual((meta['waves'], meta['incidents'], meta['stop']), ('not recorded',) * 3)
+        self.assertTrue('approvals filled from the native extract' in self.output)
+
+    def test_a_value_anyone_wrote_is_never_overwritten_not_even_a_zero(self):
+        data = self.native(self.ROW)
+        self.collect(data=os.path.join(self.box.tmp, 'other'))      # a first run with no extract: placeholders
+        doc = self.runs_json()
+        doc['runs']['A-cd-r1'].update({'approvals': 0, 'compactions': 'by hand', 'workers': ''})
+        write_json(os.path.join(data, 'runs.json'), doc)
+        self.collect(data=data)
+        meta = self.runs_json()['runs']['A-cd-r1']
+        self.assertEqual((meta['approvals'], meta['compactions'], meta['workers']), (0, 'by hand', ''))
+        self.assertFalse('filled from the native extract' in self.output)
+
+    def test_a_later_collect_fills_a_placeholder_and_then_leaves_it(self):
+        self.collect()
+        self.assertEqual(self.runs_json()['runs']['A-cd-r1']['approvals'], 'not recorded')
+        self.native(self.ROW, data=self.data)
+        self.collect(data=self.data)
+        self.assertEqual(self.runs_json()['runs']['A-cd-r1']['compactions'], 2)
+        self.native(dict(self.ROW, compactions=9), data=self.data)
+        self.collect(data=self.data)
+        self.assertEqual(self.runs_json()['runs']['A-cd-r1']['compactions'], 2)
+
+    def test_only_the_three_fields_are_taken(self):
+        data = self.native(dict(self.ROW, stop='quota', cost='$1', waves=7, incidents='x'))
+        self.collect(data=data)
+        meta = self.runs_json()['runs']['A-cd-r1']
+        self.assertEqual((meta['stop'], meta['cost'], meta['waves'], meta['incidents']), ('not recorded', 'n/a', 'not recorded', 'not recorded'))
+
+    def test_a_field_the_extract_does_not_know_stays_a_placeholder(self):
+        data = self.native({'compactions': 0, 'workers': 'none'})                    # a native run: no daemon log, no approvals
+        self.collect(data=data)
+        meta = self.runs_json()['runs']['A-cd-r1']
+        self.assertEqual((meta['approvals'], meta['compactions'], meta['workers']), ('not recorded', 0, 'none'))
+
+    def test_an_extract_that_cannot_be_used_is_reported_and_changes_nothing(self):
+        for body in ('{"truncated', json.dumps({'run': 'B-cy-r1', 'runs_row': self.ROW}), json.dumps({'run': 'A-cd-r1'}),
+                     json.dumps(['A-cd-r1']), json.dumps({'run': 'A-cd-r1', 'runs_row': 'oops'})):
+            data = os.path.join(self.box.tmp, 'bad')
+            os.makedirs(os.path.join(data, 'native'), exist_ok=True)
+            with open(os.path.join(data, 'native', 'A-cd-r1.json'), 'w', encoding='utf-8') as fh:
+                fh.write(body)
+            self.collect(data=data)
+            self.assertEqual(self.code, 0, self.output)
+            meta = self.runs_json()['runs']['A-cd-r1']
+            self.assertEqual((meta['approvals'], meta['compactions'], meta['workers']), ('not recorded',) * 3, body)
+            self.assertTrue('native extract' in self.output or 'cannot read' in self.output, (body, self.output))
+            os.remove(os.path.join(data, 'runs.json'))
+
     def test_an_existing_tiebreaks_file_is_left_alone(self):
         data = os.path.join(self.box.tmp, 'data')
         write_json(os.path.join(data, 'tiebreaks.json'), {'source': 'mine', 'overrides': [{'id': 'T1'}]})

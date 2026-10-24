@@ -49,23 +49,71 @@ def slug_candidates(path):
     return out
 
 
-def _lines(path):
+# A transcript copied while it is written can end mid-line, so a line or two is tolerated; more than this many
+# lines, or more than this share of them, and a count read from the file is a lower bound of unknown size.
+MAX_MALFORMED = 5
+MAX_MALFORMED_SHARE = 0.01
+
+
+# The key a record of a known type must carry as an object. A line that parses but lacks it (the format changed, or a
+# line is not what it claims) is as unreadable as a truncated one, and is counted with them.
+REQUIRED_OBJECT = {'assistant': 'message', 'user': 'message', 'session_meta': 'payload', 'turn_context': 'payload',
+                   'event_msg': 'payload', 'response_item': 'payload'}
+
+
+class Tally:
+    """What reading one JSONL file saw: its non-blank lines, the ones that were not a usable record (not a JSON
+    object, or a known type without the object it must carry), and whether it could be opened at all."""
+
+    def __init__(self):
+        self.lines = 0
+        self.malformed = 0
+        self.unreadable = False
+
+    def unreliable(self):
+        """True when too much of the file was skipped, or none of it could be read, to trust a count from it. A file
+        with no usable record at all (empty, or every line skipped) is unreliable however few lines it has."""
+        return (self.unreadable or self.lines - self.malformed <= 0 or self.malformed > MAX_MALFORMED
+                or self.malformed > self.lines * MAX_MALFORMED_SHARE)
+
+
+def _lines(path, tally=None):
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 raw = raw.strip()
                 if raw:
+                    if tally is not None:
+                        tally.lines += 1
                     yield raw
     except OSError:
-        return
+        if tally is not None:
+            tally.unreadable = True
 
 
 def _loads(raw):
     try:
         value = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # a pathologically nested line is a malformed one
         return None
     return value if isinstance(value, dict) else None
+
+
+def _shaped(entry):
+    key = REQUIRED_OBJECT.get(entry.get('type'))
+    return key is None or isinstance(entry.get(key), dict)
+
+
+def entries(path, tally=None):
+    """The usable records of a JSONL file (JSON objects whose known type carries its object); every other line is
+    skipped and, with a `tally`, counted."""
+    for raw in _lines(path, tally):
+        entry = _loads(raw)
+        if entry is None or not _shaped(entry):
+            if tally is not None:
+                tally.malformed += 1
+            continue
+        yield entry
 
 
 def _add(items, value):
@@ -298,19 +346,27 @@ def codex_summary(path):
 
 # -- the daemon log ----------------------------------------------------------
 
-def log_entries(text):
-    """(timestamp, message) for each log line, in either the text or the JSON format."""
-    for line in text.splitlines():
-        line = line.strip()
+def log_records(text):
+    """(line, timestamp, message) for each non-blank log line, in either the text or the JSON format.
+
+    A line that is neither (a stack trace's continuation) has no timestamp and is its own message."""
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line:
             continue
         if line.startswith('{'):
             obj = _loads(line)
             if obj is not None and isinstance(obj.get('msg'), str):
-                yield obj.get('ts'), obj['msg']
+                yield raw, obj.get('ts'), obj['msg']
                 continue
         match = LOG_LINE.match(line)
-        yield (match.group(1), match.group(4)) if match else (None, line)
+        yield (raw, match.group(1), match.group(4)) if match else (raw, None, line)
+
+
+def log_entries(text):
+    """(timestamp, message) for each log line, in either the text or the JSON format."""
+    for _raw, stamp, message in log_records(text):
+        yield stamp, message
 
 
 def session_findings(text, session_id):
