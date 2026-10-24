@@ -9,10 +9,19 @@ model names and hashes `extract.py` derives, plus the manifest's digest so the
 vault copy can be verified later.
 
 It refuses, writing nothing, when the destination is inside the trial
-repository, the run's clone or any git work tree (the owner's private vault may
-be declared in `paths.evidence_vault`: the one work tree evidence may live in).
-The copy is staged beside its destination and moved into place last, and the
-extract is written after it, so a failure leaves neither behind.
+repository, the run's clone or any git work tree. The owner's private vault may
+be declared in `paths.evidence_vault`: it is then the one work tree evidence may
+live in and the only place it may go. The copy is staged beside its destination
+and moved into place last, and the extract is written after it; a failure on any
+path (an I/O error or any other exception) removes the stage, and the copy too if
+the extract was not written, so a failure leaves neither behind.
+
+Threat model: an accidental misconfiguration on the owner's own machine (a wrong
+path, a link into the repository, a clone that moved), not an adversary with
+write access to the home directory. So `evidence_dir` is resolved once and
+everything is written under the resolved directory; the destination is checked
+before anything is read, again just before staging and again just before the
+move; and a link at the target or the stage is refused rather than followed.
 """
 import hashlib
 import os
@@ -24,6 +33,8 @@ from .collect import _write_json
 from .launch import START_GRACE, _clone_dir, _inside, _work_tree_above
 
 END_GRACE = timedelta(minutes=10)
+DOING = {'destination': 'checking the destination', 'copy': 'reading the staged copy', 'move': 'moving the copy into place',
+         'extract': 'writing the extract'}
 CLAUDE_DIR, CODEX_DIR, LOG_NAME, MANIFEST = 'claude-projects', 'codex-sessions', 'daemon.log', 'MANIFEST.sha256'
 
 
@@ -53,16 +64,26 @@ def _window(st):
         return None, None, f'cannot read the window ({start_text!r}, {first_text!r}, {end_text!r})'
 
 
-def destination_problems(trial, env, target, clone_dir):
-    """Why `target` may not hold raw transcripts, as a list of sentences (empty when it may)."""
+def resolve_base(path):
+    """The directory evidence goes under, every link resolved: it is validated, and written to, as this."""
+    return os.path.realpath(os.path.abspath(path))
+
+
+def stage_path(base, run_id):
+    return os.path.join(base, f'.{run_id}.partial')
+
+
+def _location_problems(trial, env, real, clone_dir):
+    """Why a resolved path may not hold raw transcripts."""
     problems = []
-    real = os.path.realpath(target)
     if _inside(real, os.path.realpath(trial.root)):
         problems.append(f'it is inside the trial repository {trial.root}')
     if clone_dir and _inside(real, os.path.realpath(clone_dir)):
         problems.append(f'it is inside the run\'s clone {clone_dir}')
     vault = _path(trial, env, 'evidence_vault')
     private = os.path.realpath(vault) if vault else None
+    if private and not _inside(real, private):
+        problems.append(f'it is outside the declared vault {vault}')
     here = real
     while True:
         tree = _work_tree_above(here)
@@ -73,9 +94,44 @@ def destination_problems(trial, env, target, clone_dir):
         if os.path.dirname(tree) == tree:
             break
         here = os.path.dirname(tree)
-    if os.path.lexists(target) and (not os.path.isdir(target) or os.listdir(target)):
+    return problems
+
+
+def destination_problems(trial, env, base, run_id, clone_dir):
+    """Why `<base>/<run_id>` and the stage beside it may not hold raw transcripts, as sentences (empty when they may).
+
+    `base` is `resolve_base(evidence_dir)`: the base itself, the target and the stage are all checked, so a link
+    that points somewhere else cannot move the stage into the repository while the final target looks fine. A
+    `base` that no longer resolves to itself has changed since it was resolved, which is a problem too."""
+    target, stage = os.path.join(base, run_id), stage_path(base, run_id)
+    real = os.path.realpath(base)
+    problems = [] if real == base else [f'{base} now resolves to {real}: a link or a parent directory changed']
+    for path in (real, os.path.realpath(target), os.path.realpath(stage)):
+        problems += [p for p in _location_problems(trial, env, path, clone_dir) if p not in problems]
+    for path in (target, stage):
+        if os.path.islink(path):
+            problems.append(f'{path} is a symbolic link; evidence is never written through one')
+    if os.path.lexists(target) and not os.path.islink(target) and (not os.path.isdir(target) or os.listdir(target)):
         problems.append(f'{target} already exists; evidence is written once, so move it aside to write it again')
     return problems
+
+
+def _make_private_dirs(path):
+    """Create `path` and any missing parent with mode 0700 (`os.makedirs(mode=)` leaves the parents at the umask)."""
+    missing = []
+    here = path
+    while not os.path.isdir(here):
+        missing.append(here)
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    for part in reversed(missing):
+        try:
+            os.mkdir(part, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(part):
+                raise
 
 
 # -- what to copy -----------------------------------------------------------------------
@@ -148,18 +204,21 @@ def _log_paths(path):
 
 
 def _daemon_slice(trial, env, start, end):
-    """(lines, text, check): the daemon log lines inside the window. `lines` is None when it cannot be read."""
+    """(lines, text, check, why): the daemon log lines inside the window, and whether they can be taken as data.
+
+    `lines` is None when the log cannot be read. `why` is None on a pass and otherwise a short reason that holds no
+    path, for the public extract: a log that is not a pass yields no permission counts at all."""
     name = 'daemon log'
     path = _path(trial, env, 'daemon_log')
     if not path:
-        return None, None, checks.unverified(name, 'paths.daemon_log is not set in trial.json')
+        return None, None, checks.unverified(name, 'paths.daemon_log is not set in trial.json'), 'the daemon log path is not set'
     text = ''
     try:
         for part in _log_paths(path):
             with open(part, encoding='utf-8', errors='replace') as fh:
                 text += fh.read()
     except OSError as exc:
-        return None, None, checks.unverified(name, f'cannot read {path}: {exc}')
+        return None, None, checks.unverified(name, f'cannot read {path}: {exc}'), 'the daemon log could not be read'
     lines = extract.slice_log(text, start, end)
     stamps = [s for s, _m in native.log_entries(text) if s]
     try:
@@ -167,14 +226,15 @@ def _daemon_slice(trial, env, start, end):
     except ValueError:
         oldest = None
     if oldest is None:
-        return lines, '\n'.join(lines), checks.unverified(name, f'{path} has no timestamped line')
+        return lines, '\n'.join(lines), checks.unverified(name, f'{path} has no timestamped line'), \
+            'the daemon log has no line with a readable timestamp'
     if oldest > start:
         return lines, '\n'.join(lines), checks.unverified(
             name, f'the oldest retained line is {timeutil.iso(oldest)}, after the window start {timeutil.iso(start)}: '
-                  f'rotation has dropped the beginning of the run')
+                  f'rotation has dropped the beginning of the run'), 'the daemon log was rotated past the window start'
     if not lines:
-        return lines, '', checks.unverified(name, f'no line of {path} falls in the window')
-    return lines, '\n'.join(lines), checks.passed(name, f'{len(lines)} line(s) in the window')
+        return lines, '', checks.unverified(name, f'no line of {path} falls in the window'), 'no daemon log line falls in the window'
+    return lines, '\n'.join(lines), checks.passed(name, f'{len(lines)} line(s) in the window'), None
 
 
 def _session(st):
@@ -188,10 +248,11 @@ def _session(st):
 
 
 def _daemon_facts(session, text):
+    """What the log says of the session; the names are the extract's plain identifiers or `<other>`."""
     found = native.session_findings(text, session) if session else None
-    return {'session': session,
-            'model': found['model'][0] if found and found['model'] else None,
-            'permission_mode': found['mode'][0] if found and found['mode'] else None,
+    return {'session': extract.safe_name(session) if session else None,
+            'model': extract.safe_name(found['model'][0]) if found and found['model'] else None,
+            'permission_mode': extract.safe_name(found['mode'][0]) if found and found['mode'] else None,
             'interrupts': len(found['interrupts']) if found else None}
 
 
@@ -231,9 +292,10 @@ def _stage(stage, entries, log_text):
 
 # -- the command ------------------------------------------------------------------------------
 
-def _derive(trial, run, env, stage, rows, clone_dir, log_text):
+def _derive(trial, run, env, stage, rows, clone_dir, permission_text):
     """(summary, permissions, isolation report, label) read from the staged copies, so the extract describes
-    exactly what the manifest holds."""
+    exactly what the manifest holds. `permission_text` is the daemon-log slice, or None when it cannot be taken
+    as data (then there are no permission counts, not zero ones)."""
     scanner = extract.Isolation(run.base, _path(trial, env, 'key_folder'), native.slug_candidates(clone_dir))
     if run.harness.family == 'claude':
         files = []
@@ -247,8 +309,24 @@ def _derive(trial, run, env, stage, rows, clone_dir, log_text):
         paths = [os.path.join(stage, *rel.split('/')) for _sha, rel in rows
                  if rel.startswith(CODEX_DIR + '/') and rel.endswith('.jsonl')]
         summary, label = extract.codex_summary(paths, scanner), 'subagent rollout(s)'
-    permission = extract.permissions(log_text) if log_text is not None else None
+    permission = extract.permissions(permission_text) if permission_text is not None else None
     return summary, permission, scanner.report(), label
+
+
+def _discard(*paths):
+    """Remove each path that exists; returns a sentence for each that could not be removed (never silent)."""
+    left = []
+    for path in paths:
+        if not os.path.lexists(path):
+            continue
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError as exc:
+            left.append(f'{path}: {exc}')
+    return left
 
 
 def _refuse(env, results, title, check):
@@ -264,14 +342,14 @@ def evidence(trial, run, env, state_file=None, data_dir=None):
     if problem:
         env.print(f'evidence {run.id}: {problem}')
         return 1
-    base = _path(trial, env, 'evidence_dir')
-    if not base:
+    configured = _path(trial, env, 'evidence_dir')
+    if not configured:
         env.print('evidence: paths.evidence_dir is not set in trial.json')
         return 2
-    base = os.path.abspath(base)
+    base = resolve_base(configured)   # validated and written to as this, never through the configured spelling
     clone_dir = _clone_dir(trial, run, env, st)
-    target = os.path.join(base, run.id)
-    problems = destination_problems(trial, env, target, clone_dir)
+    target, stage = os.path.join(base, run.id), stage_path(base, run.id)
+    problems = destination_problems(trial, env, base, run.id, clone_dir)
     if problems:
         env.print(checks.render([checks.failed('destination', '; '.join(problems))],
                                 f'evidence {run.id}: refused, nothing written (a raw transcript must stay out of the repository)'))
@@ -291,62 +369,132 @@ def evidence(trial, run, env, state_file=None, data_dir=None):
         results.append(checks.unverified('files after the window', f'{len(late)} file(s) modified after {timeutil.iso(ceil)} '
                                                                    f'were not copied: the session may have been continued'))
     log_lines = log_text = None
+    log_trusted, log_why = False, 'not a Chroxy run: there is no daemon log'
     session = _session(st)
     if run.harness.chroxy:
-        log_lines, log_text, check = _daemon_slice(trial, env, start, end)
+        log_lines, log_text, check, log_why = _daemon_slice(trial, env, start, end)
         results.append(check)
+        log_trusted = check.status == checks.PASS
         if session is None:
             results.append(checks.unverified('session id', 'no session-phase preflight recorded one, so the daemon facts have no session'))
     top = CLAUDE_DIR if family == 'claude' else CODEX_DIR
-    stage = os.path.join(base, f'.{run.id}.partial')
-    os.makedirs(base, mode=0o700, exist_ok=True)
+    path = os.path.join(data_dir or trial.repo_path('data'), 'native', f'{run.id}.json')
+    failure = None
+    phase, staged, moved, written = 'destination', False, False, False
     try:
-        rows, digest = _stage(stage, [(src, f'{top}/{rel}') for src, rel in found], log_text)
-        summary, permission, isolation, workers_label = _derive(trial, run, env, stage, rows, clone_dir, log_text)
+        # the destination is looked at again here, and again before the move: reading the transcripts took time
+        problems = destination_problems(trial, env, base, run.id, clone_dir)
+        if problems:
+            failure = checks.failed('destination', '; '.join(problems))
+        else:
+            phase = 'copy'
+            _make_private_dirs(base)
+            staged = True
+            rows, digest = _stage(stage, [(src, f'{top}/{rel}') for src, rel in found], log_text)
+            summary, permission, isolation, workers_label = _derive(
+                trial, run, env, stage, rows, clone_dir, log_text if log_trusted else None)
+            doc = _build(trial, run, env, results, summary, permission, isolation, workers_label,
+                         dict(window=(start, end), digest=digest, files=len(rows), session=session, log_lines=log_lines,
+                              log_text=log_text, log_trusted=log_trusted, log_why=log_why))
+            phase = 'destination'
+            problems = destination_problems(trial, env, base, run.id, clone_dir)
+            if problems:
+                failure = checks.failed('destination', '; '.join(problems))
+            else:
+                phase = 'move'
+                os.replace(stage, target)
+                moved = True
+                phase = 'extract'
+                _write_json(path, doc)
+                written = True
     except OSError as exc:
-        shutil.rmtree(stage, ignore_errors=True)
-        return _refuse(env, results, title, checks.failed('copy', str(exc)))
-    by_model = summary['tokens']['by_model']
+        failure = checks.failed('extract' if phase == 'extract' else 'copy',
+                                {'move': f'cannot move the staged copy to {target}: {exc}',
+                                 'extract': f'cannot write {path}: {exc}'}.get(phase, str(exc)))
+    except Exception as exc:  # noqa: BLE001 -- anything at all: the stage holds raw transcripts and must go
+        # the class only: the message of a parse error can quote the line that caused it
+        failure = checks.failed('extract' if phase == 'extract' else 'derive', f'{type(exc).__name__} while {DOING[phase]}')
+    finally:
+        left = _discard(*([stage] if staged and not moved else []), *([target] if moved and not written else []),
+                        *([path + '.tmp'] if phase == 'extract' and not written else []))
+    if left:
+        results.append(checks.failed('cleanup', 'could not remove ' + '; '.join(left) + ': remove it by hand'))
+    if failure or left:
+        if failure:
+            results.append(failure)
+        env.print(checks.render(results, title))
+        return checks.exit_code(results)
+    results.append(checks.passed('manifest', f'{doc["evidence"]["files"]} file(s) listed, sha256 {doc["evidence"]["manifest_sha256"][:12]}'))
+    env.print(checks.render(results, f'evidence {run.id}'))
+    env.print(f'  evidence: {target}')
+    env.print(f'  manifest sha256: {doc["evidence"]["manifest_sha256"]}')
+    env.print(f'  extract: {path}')
+    cost, cost_note = doc['cost'], doc['cost_note']
+    env.print('  cost: ' + (f'${cost["usd"]:.2f} (prices as of {cost["as_of"]})' if cost != 'n/a' else f'n/a ({cost_note})'))
+    for hit in doc['isolation']['hits']:
+        env.print(f'  isolation: {hit["pattern"]} x{hit["count"]} ({hit["distinct"]} distinct)')
+    return checks.exit_code(results)
+
+
+def _build(trial, run, env, results, summary, permission, isolation, workers_label, facts):
+    """Judge what was read, append the checks, and return the extract document. A figure whose check is not a pass
+    is left out of the document (null), never carried as if it were data."""
+    start, end = facts['window']
+    reads, tok = summary['lines'], summary['tokens']
+    trusted = not reads['unreliable_files'] and reads['read'] > 0
+    if trusted:
+        results.append(checks.passed('transcript lines', f'{reads["read"]} line(s) in {reads["files"]} file(s), {reads["malformed"]} skipped'))
+    else:
+        results.append(checks.unverified(
+            'transcript lines', f'{reads["unreliable_files"]} of {reads["files"]} file(s) had more than {native.MAX_MALFORMED} '
+                                f'or {native.MAX_MALFORMED_SHARE:.0%} of their lines unreadable ({reads["malformed"]} of {reads["read"]} '
+                                f'skipped overall, {reads["unreadable_files"]} file(s) not openable): the counts may be short'
+            if reads['read'] else 'no line could be read from the copied transcripts'))
+    by_model = tok['by_model']
     tokens = sum(sum(row.values()) for row in by_model.values())
-    results.append(checks.passed('token totals', f'{tokens} token(s) over {len(by_model)} model(s)') if tokens
-                   else checks.unverified('token totals', 'no usage record in the transcripts: the format may have changed'))
-    missing = summary['tokens'].get('rollouts_without_usage', 0)
+    if tok.get('unverified'):
+        results.append(checks.unverified('token totals', tok['unverified']))
+    else:
+        results.append(checks.passed('token totals', f'{tokens} token(s) over {len(by_model)} model(s)') if tokens
+                       else checks.unverified('token totals', 'no usage record in the transcripts: the format may have changed'))
+    missing = tok.get('rollouts_without_usage', 0)
     if missing:
         results.append(checks.unverified('rollout tokens', f'{missing} rollout(s) had no token record or no model, so their usage is '
                                                            f'not in the totals'))
     results.append(checks.passed('isolation scan', f'{isolation["tool_inputs_scanned"]} tool input(s) scanned')
                    if isolation['tool_inputs_scanned']
                    else checks.unverified('isolation scan', 'no tool input found in the transcripts, so nothing was scanned'))
-    cost, cost_note = extract.cost(by_model, trial.prices)
+    if tok.get('unverified'):
+        cost, cost_note = 'n/a', 'token totals are not verified'
+    else:
+        cost, cost_note = extract.cost(by_model, trial.prices)
     if cost_note and trial.prices is not None:
         results.append(checks.unverified('cost', cost_note))
     people = {k: summary[k] for k in ('human_messages_total', 'human_messages_after_first', 'interrupts', 'compactions')}
-    daemon = dict(_daemon_facts(session, log_text), lines_in_window=len(log_lines)) if log_lines is not None else None
-    doc = {'schema': extract.SCHEMA, 'trial': trial.id, 'run': run.id, 'harness': run.harness.key, 'family': family,
+    if not summary['human_messages_total']:
+        # every run opens with its invocation, so none found means the reader failed, not that nobody spoke
+        results.append(checks.unverified('human messages', 'none found in the coordinator transcript(s) although the invocation is '
+                                                           'one: the people counts are not recorded'))
+        people.update(human_messages_total=None, human_messages_after_first=None, interrupts=None)
+    else:
+        results.append(checks.passed('human messages', f'{summary["human_messages_total"]} found'))
+    notes = []
+    if tok.get('stale_final_rollouts'):
+        notes.append(f'{tok["stale_final_rollouts"]} rollout(s) ended on a token record below an earlier one; '
+                     f'the largest record of each was used')
+    daemon = None
+    if facts['log_trusted']:
+        daemon = dict(_daemon_facts(facts['session'], facts['log_text']), lines_in_window=len(facts['log_lines']))
+    doc = {'schema': extract.SCHEMA, 'trial': trial.id, 'run': run.id, 'harness': run.harness.key, 'family': run.harness.family,
            'chroxy': run.harness.chroxy, 'generated_at': timeutil.iso(env.now()),
            'window': {'start': timeutil.iso(start), 'end': timeutil.iso(end)},
            'turn_unit': summary['turn_unit'], 'coordinator': summary['coordinator'], 'workers': summary['workers'],
-           'tokens': summary['tokens'], 'cost': cost, 'cost_note': cost_note, 'people': people,
-           'permissions': permission, 'daemon': daemon, 'isolation': isolation,
-           'evidence': {'manifest_sha256': digest, 'files': len(rows)},
-           'runs_row': extract.runs_row(summary, permission, workers_label)}
-    path = os.path.join(data_dir or trial.repo_path('data'), 'native', f'{run.id}.json')
-    try:
-        os.replace(stage, target)
-    except OSError as exc:
-        shutil.rmtree(stage, ignore_errors=True)
-        return _refuse(env, results, title, checks.failed('copy', f'cannot move the staged copy to {target}: {exc}'))
-    try:
-        _write_json(path, doc)
-    except OSError as exc:
-        shutil.rmtree(target, ignore_errors=True)
-        return _refuse(env, results, title, checks.failed('extract', f'cannot write {path}: {exc}'))
-    results.append(checks.passed('manifest', f'{len(rows)} file(s) listed, sha256 {digest[:12]}'))
-    env.print(checks.render(results, f'evidence {run.id}'))
-    env.print(f'  evidence: {target}')
-    env.print(f'  manifest sha256: {digest}')
-    env.print(f'  extract: {path}')
-    env.print('  cost: ' + (f'${cost["usd"]:.2f} (prices as of {cost["as_of"]})' if cost != 'n/a' else f'n/a ({cost_note})'))
-    for hit in isolation['hits']:
-        env.print(f'  isolation: {hit["pattern"]} x{hit["count"]} ({hit["distinct"]} distinct)')
-    return checks.exit_code(results)
+           'tokens': tok, 'cost': cost, 'cost_note': cost_note, 'people': people, 'transcript_lines': reads,
+           'permissions': permission, 'daemon': daemon, 'isolation': isolation, 'notes': notes,
+           'evidence': {'manifest_sha256': facts['digest'], 'files': facts['files']},
+           'runs_row': extract.runs_row(summary, permission, workers_label) if trusted else {}}
+    if permission is None:
+        doc['permissions_unavailable'] = facts['log_why']
+    # name and status only: the detail text of a check can hold a path
+    doc['checks'] = [{'name': c.name, 'status': c.status} for c in results]
+    return doc

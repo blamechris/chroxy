@@ -36,9 +36,12 @@ class Backlog:
         self.issues = list(issues)
         self.timelines = {}   # issue number -> events, or an exception
         self.pulls = {}       # pr number -> (base ref, head ref)
-        self.trial_branches = []
-        self.base_prs = {}    # branch -> [pr numbers]
-        self.files = {}       # pr number -> [file names]
+        # the PR list: PRs into trial/* branches (one that changed nothing of interest, by default: a list with
+        # none is not an answer), and PRs into other branches
+        self.base_prs = {'trial/a1-cd': [900]}   # branch -> [pr numbers]
+        self.other_prs = {}                      # pr number -> base ref
+        self.pull_list = None                    # replaces the generated PR list
+        self.files = {900: ['unrelated/default.js']}   # pr number -> [file names], or [{'filename', 'previous_filename'}]
         self.failures = {}    # request path suffix -> exception
         self.requests = []
 
@@ -63,13 +66,14 @@ class Backlog:
         if match and int(match.group(1)) in self.pulls:
             base, head = self.pulls[int(match.group(1))]
             return {'number': int(match.group(1)), 'base': {'ref': base}, 'head': {'ref': head}}
-        if short == 'git/matching-refs/heads/trial/':
-            return [{'ref': f'refs/heads/{b}'} for b in self.trial_branches]
         if short == 'pulls':
-            return [{'number': n} for n in self.base_prs.get((params or {}).get('base'), [])]
+            if self.pull_list is not None:
+                return self.pull_list
+            return ([{'number': n, 'base': {'ref': branch}} for branch, numbers in self.base_prs.items() for n in numbers]
+                    + [{'number': n, 'base': {'ref': base}} for n, base in self.other_prs.items()])
         match = re.fullmatch(r'pulls/(\d+)/files', short)
         if match:
-            return [{'filename': f} for f in self.files.get(int(match.group(1)), [])]
+            return [f if isinstance(f, dict) else {'filename': f} for f in self.files.get(int(match.group(1)), [])]
         raise GitHubError(f'unscripted request {short}', 404)
 
     def get(self, path, params=None):
@@ -238,9 +242,45 @@ class TimelineRules(Queue):
         self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
 
 
+class UnreadableBranches(Queue):
+    """A PR whose base or head GitHub did not report is not a PR into a branch that is not trial/*."""
+
+    def verdict_with(self, pulls, sources=(5,)):
+        b = Backlog(issue(9001))
+        b.timelines[9001] = [xref(n, 'closed') for n in sources]
+        b.pulls.update(pulls)
+        return self.verdict(b, 9001)
+
+    def test_a_source_pr_with_no_base_or_head_is_unverified(self):
+        for pulls in ({5: ('', 'fix/x')}, {5: (None, 'fix/x')}, {5: ('main', '')}, {5: ('main', None)}):
+            rule, detail = self.verdict_with(pulls)
+            self.assertEqual(rule, 'unverified', pulls)
+            self.assertTrue('#5' in detail and 'readable' in detail, detail)
+
+    def test_a_source_pr_with_no_branch_objects_at_all_is_unverified(self):
+        b = Backlog(issue(9001))
+        b.timelines[9001] = [xref(5, 'closed')]
+        original = b._answer
+
+        def answer(path, params):
+            if path.endswith('pulls/5'):
+                b.requests.append((path, {}))
+                return {'number': 5}
+            return original(path, params)
+        b._answer = answer
+        self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
+
+    def test_a_readable_trial_pr_still_settles_it_when_another_source_is_unreadable(self):
+        rule, detail = self.verdict_with({5: ('', ''), 6: ('trial/a1-cd', 'fix/y')}, sources=(5, 6))
+        self.assertEqual(rule, 'trial-xref')
+        self.assertTrue('#6' in detail)
+
+    def test_an_unreadable_source_is_unverified_unless_another_settles_it_the_other_way(self):
+        self.assertEqual(self.verdict_with({5: ('', ''), 6: ('main', 'fix/y')}, sources=(5, 6))[0], 'unverified')
+
+
 class TrialFileRules(Queue):
-    def setup_trial(self, b, changed=None, branches=('trial/a1-cd',)):
-        b.trial_branches = list(branches)
+    def setup_trial(self, b, changed=None):
         b.base_prs = {'trial/a1-cd': [41, 42]}
         b.files = changed or {41: ['packages/server/src/bind-host.js', 'docs/x.md'], 42: ['packages/store-core/src/model-display.ts']}
 
@@ -275,37 +315,38 @@ class TrialFileRules(Queue):
 
     def test_only_prs_into_trial_branches_count(self):
         b = Backlog(issue(9001, body='see bind-host.js'))
-        b.trial_branches = []                      # none: a PR into main changing the file is the normal case
-        b.files = {1: ['packages/server/src/bind-host.js']}
+        b.other_prs = {1: 'main', 2: 'release/0.11'}       # a PR into main changing the file is the normal case
+        b.files[1] = b.files[2] = ['packages/server/src/bind-host.js']
         self.assertEqual(self.verdict(b, 9001)[0], 'candidate')
+        self.assertEqual(b.asked(r'pulls/[12]/files'), [])
 
     def test_prs_of_every_trial_branch_are_read_once_and_a_pr_listed_twice_is_fetched_once(self):
         b = Backlog(issue(9001, body='see zz.js'), issue(9002, body='see yy.js'))
-        self.setup_trial(b, branches=('trial/a1-cd', 'trial/a2-cy'))
-        b.base_prs = {'trial/a1-cd': [41, 42], 'trial/a2-cy': [42, 43]}
+        self.setup_trial(b)
+        b.base_prs = {'trial/a1-cd': [41, 42], 'trial/a2-cy': [42, 43]}      # 42 listed under two branches
         b.files = {41: ['a.js'], 42: ['b.js'], 43: ['c.js']}
         self.scan(b)
         self.assertEqual(len(b.asked(r'pulls/41/files')), 1)
         self.assertEqual(len(b.asked(r'pulls/42/files')), 1)
         self.assertEqual(len(b.asked(r'pulls/43/files')), 1)
-        self.assertEqual(len(b.asked(r'git/matching-refs')), 1)
+        self.assertEqual(len(b.asked(r'/pulls$')), 1)
 
     def test_a_file_changed_only_on_the_second_branch_is_found(self):
         b = Backlog(issue(9001, body='see c.js'))
-        self.setup_trial(b, branches=('trial/a1-cd', 'trial/a2-cy'))
+        self.setup_trial(b)
         b.base_prs = {'trial/a1-cd': [41], 'trial/a2-cy': [43]}
         b.files = {41: ['a.js'], 43: ['pkg/c.js']}
         rule, detail = self.verdict(b, 9001)
         self.assertEqual(rule, 'trial-files')
         self.assertTrue('trial/a2-cy' in detail)
 
-    def test_when_the_trial_prs_cannot_be_read_the_issues_that_name_a_file_are_unverified(self):
+    def test_when_the_trial_prs_cannot_be_read_no_issue_is_cleared_by_the_rules_that_need_them(self):
         b = Backlog(issue(9001, body='see bind-host.js'), issue(9002, body='no file named here'))
-        b.failures['git/matching-refs/heads/trial/'] = GitHubError('HTTP 502', 502)
+        b.failures['pulls'] = GitHubError('HTTP 502', 502)
         result = self.scan(b)
-        self.assertEqual([(r['number'], r['rule']) for r in result['unverified']], [(9001, 'unverified')])
-        self.assertEqual([c['number'] for c in result['candidates']], [9002])
-        self.assertTrue('trial/* branches' in result['unverified'][0]['detail'])
+        self.assertEqual([(r['number'], r['rule']) for r in result['unverified']], [(9002, 'unverified'), (9001, 'unverified')])
+        self.assertEqual(result['candidates'], [])
+        self.assertTrue('PRs into trial/* branches' in result['unverified'][0]['detail'])
 
     def test_a_failure_reading_one_prs_files_is_not_read_as_no_files(self):
         b = Backlog(issue(9001, body='see zz.js'))
@@ -314,22 +355,168 @@ class TrialFileRules(Queue):
         self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
 
 
+class TrialPrList(Queue):
+    """Where the trial PRs come from, and what an empty or unreadable answer means."""
+
+    def test_the_trial_prs_are_read_from_the_pr_list_not_from_the_branch_refs(self):
+        # the base branch of PR 41 is gone: no ref lists it, the PR still names it
+        b = Backlog(issue(9001, body='see bind-host.js'))
+        b.base_prs = {'trial/deleted-long-ago': [41]}
+        b.files = {41: ['packages/server/src/bind-host.js']}
+        rule, detail = self.verdict(b, 9001)
+        self.assertEqual(rule, 'trial-files')
+        self.assertTrue('trial/deleted-long-ago' in detail, detail)
+        self.assertEqual(b.asked(r'git/matching-refs'), [])
+        self.assertEqual([p for path, p in b.requests if path.endswith('/pulls')], [{'state': 'all'}])
+
+    def test_no_pr_into_a_trial_branch_leaves_nothing_cleared(self):
+        for setup in (lambda b: setattr(b, 'base_prs', {}),
+                      lambda b: (setattr(b, 'base_prs', {}), setattr(b, 'other_prs', {1: 'main', 2: 'release/1'}))):
+            b = Backlog(issue(9001, body='see bind-host.js'), issue(9002, body='no file named'))
+            setup(b)
+            result = self.scan(b)
+            self.assertEqual(result['candidates'], [], 'an empty list of trial PRs must not pass everything')
+            self.assertEqual(sorted(r['number'] for r in result['unverified']), [9001, 9002])
+            self.assertTrue(all('no PR into a trial/* branch' in r['detail'] for r in result['unverified']))
+            self.assertEqual(result['trial_branches']['listed'], False)
+            self.assertTrue('no PR into a trial/*' in result['trial_branches']['problem'])
+
+    def test_a_pr_with_no_readable_base_in_the_list_leaves_nothing_cleared(self):
+        for entry in ({'number': 8}, {'number': 8, 'base': {}}, {'number': 8, 'base': {'ref': ''}}, {'number': 8, 'base': None}):
+            b = Backlog(issue(9001, body='no file named'))
+            b.pull_list = [{'number': 41, 'base': {'ref': 'trial/a1-cd'}}, entry]
+            result = self.scan(b)
+            self.assertEqual((result['candidates'], [r['number'] for r in result['unverified']]), ([], [9001]), entry)
+            self.assertTrue('no readable base' in result['unverified'][0]['detail'])
+
+    def test_a_certain_rejection_stands_when_the_trial_prs_are_unknown(self):
+        b = Backlog(issue(9001), issue(9002))
+        b.base_prs = {}
+        b.timelines[9001] = [xref(5, 'open')]
+        result = self.scan(b)
+        self.assertEqual([(r['number'], r['rule']) for r in result['rejected']], [(9001, 'open-pr')])
+        self.assertEqual([r['number'] for r in result['unverified']], [9002])
+
+    def test_the_command_exits_2_and_says_the_trial_prs_were_not_read(self):
+        b = Backlog(issue(9001))
+        b.base_prs = {}
+        env = self.box.env(github=b)
+        code = cli.main(['--trial', self.box.trial_dir, 'queue-candidates'], env=env)
+        self.assertEqual(code, 2)
+        self.assertTrue('trial/* PRs NOT read' in env.out.getvalue())
+
+    def test_a_renamed_file_counts_under_its_old_name_too(self):
+        b = Backlog(issue(9001, body='see old/bind-host.js'), issue(9002, body='see packages/new/renamed.js'),
+                    issue(9003, body='see unrelated.js'))
+        b.files = {900: [{'filename': 'packages/new/renamed.js', 'previous_filename': 'packages/old/bind-host.js'}]}
+        self.assertEqual([self.verdict(b, n)[0] for n in (9001, 9002, 9003)], ['trial-files', 'trial-files', 'candidate'])
+
+    def test_a_file_entry_with_no_filename_is_not_read_as_no_files(self):
+        b = Backlog(issue(9001, body='see bind-host.js'))
+        b.files = {900: [{'sha': 'abc'}]}
+        self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
+
+
+class ListedCrossCheck(Queue):
+    """An issue on the list is rejected whatever else is true; the output says what else would have rejected it."""
+
+    def cross(self, b, number=7001):
+        result = self.scan(b)
+        return result, next(r for r in result['rejected'] if r['number'] == number)
+
+    def test_a_listed_issue_the_trial_files_rule_would_also_reject(self):
+        b = Backlog(issue(7001, body='see bind-host.js'))
+        b.base_prs = {'trial/a1-cd': [41]}
+        b.files = {41: ['packages/server/src/bind-host.js']}
+        result, row = self.cross(b)
+        self.assertEqual((row['rule'], row['cross_check'], row['also']), ('listed', 'also-rejected', 'trial-files'))
+        self.assertTrue('PR #41' in row['also_detail'])
+        self.assertEqual(result['listed_cross_check'], {'also_rejected': [7001], 'only_the_list': [], 'unverified': []})
+
+    def test_a_listed_issue_a_cheap_rule_would_also_reject(self):
+        for body, rule in (('edit .claude/x', 'scope'), ('depends on #8710', 'mentions-blocked')):
+            result, row = self.cross(Backlog(issue(7001, body=body)))
+            self.assertEqual((row['cross_check'], row['also']), ('also-rejected', rule), body)
+        result, row = self.cross(Backlog(issue(7001, labels=['epic'])))
+        self.assertEqual(row['also'], 'label')
+
+    def test_a_listed_issue_a_timeline_rule_would_also_reject(self):
+        b = Backlog(issue(7001))
+        b.timelines[7001] = [xref(5, 'closed')]
+        b.pulls[5] = ('trial/a2-cy', 'fix/x')
+        self.assertEqual(self.cross(b)[1]['also'], 'trial-xref')
+
+    def test_a_listed_issue_nothing_else_rejects_is_only_the_list(self):
+        result, row = self.cross(Backlog(issue(7001, body='plain'), issue(7002, body='plain too')))
+        self.assertEqual((row['cross_check'], row['also'], row['also_detail']), ('only-the-list', None, None))
+        self.assertEqual(result['listed_cross_check']['only_the_list'], [7001])
+
+    def test_a_listed_issue_that_could_not_be_cross_checked_is_not_called_only_the_list(self):
+        b = Backlog(issue(7001))
+        b.timelines[7001] = GitHubError('HTTP 502', 502)
+        result, row = self.cross(b)
+        self.assertEqual((row['cross_check'], row['also']), ('unverified', None))
+        self.assertTrue('502' in row['also_detail'])
+        self.assertEqual(result['listed_cross_check']['unverified'], [7001])
+        self.assertEqual(result['unverified'], [], 'it is rejected either way: it is not an undecided issue')
+
+    def test_a_listed_issue_is_not_called_only_the_list_while_the_trial_prs_are_unknown(self):
+        b = Backlog(issue(7001))
+        b.base_prs = {}
+        self.assertEqual(self.cross(b)[1]['cross_check'], 'unverified')
+
+    def test_an_issue_that_is_not_listed_has_no_cross_check_fields(self):
+        result = self.scan(Backlog(issue(8609)))
+        self.assertTrue('cross_check' not in result['rejected'][0])
+        self.assertEqual(result['listed_cross_check'], {'also_rejected': [], 'only_the_list': [], 'unverified': []})
+
+    def test_the_command_prints_and_exports_the_cross_check(self):
+        b = Backlog(issue(7001, body='plain'), issue(7002, body='edit .claude/x'), issue(9001))
+        data = json.loads(json.dumps(self.trial.data))
+        data['queue_rules']['exclude_issues'] = [7001, 7002]
+        self.box.write_trial(data)
+        env = self.box.env(github=b)
+        code = cli.main(['--trial', self.box.trial_dir, 'queue-candidates'], env=env)
+        text = env.out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertTrue('1 also rejected by a rule, 1 only by the list' in text, text)
+        self.assertTrue(re.search(r'#7001 .*listed:.*\n\s+only the list rejects it', text), text)
+        self.assertTrue(re.search(r'#7002 .*listed:.*\n\s+also scope: body mentions \.claude/', text), text)
+        env = self.box.env(github=b)
+        cli.main(['--trial', self.box.trial_dir, 'queue-candidates', '--json'], env=env)
+        rows = {r['number']: r for r in json.loads(env.out.getvalue())['rejected']}
+        self.assertEqual((rows[7001]['cross_check'], rows[7002]['also']), ('only-the-list', 'scope'))
+
+    def test_a_cross_check_that_could_not_be_made_makes_the_exit_code_2(self):
+        b = Backlog(issue(7001), issue(9001))
+        b.timelines[7001] = GitHubError('HTTP 502', 502)
+        env = self.box.env(github=b)
+        code = cli.main(['--trial', self.box.trial_dir, 'queue-candidates'], env=env)
+        self.assertEqual(code, 2)
+        self.assertTrue('NOT cross-checked' in env.out.getvalue())
+
+
 class RequestOrder(Queue):
     """Cheap rules first: GitHub is not asked about an issue a listing field already rules out."""
 
     def test_no_timeline_is_read_for_an_issue_a_cheap_rule_drops(self):
         b = Backlog(issue(9001, labels=['epic']), issue(9002, user='bot'), issue(7001), issue(9003, body='.claude/x'), issue(9004))
         self.scan(b)
-        self.assertEqual(b.asked(r'timeline'), ['repos/blamechris/chroxy/issues/9004/timeline'])
+        # 7001 is on the list: it is rejected without GitHub, then asked about only to say what else rejects it
+        self.assertEqual(sorted(b.asked(r'timeline')), ['repos/blamechris/chroxy/issues/7001/timeline',
+                                                        'repos/blamechris/chroxy/issues/9004/timeline'])
 
     def test_trial_prs_are_not_listed_when_no_surviving_issue_names_a_file(self):
         b = Backlog(issue(9001, body='no files here'), issue(9002, labels=['epic'], body='see bind-host.js'))
         self.scan(b)
-        self.assertEqual(b.asked(r'matching-refs|/pulls'), [])
+        self.assertEqual(b.asked(r'/files'), [])      # the PR list is read to know there are trial PRs; their files are not
+        self.assertEqual(len(b.asked(r'/pulls$')), 1)
+        b = Backlog(issue(9002, labels=['epic'], body='see bind-host.js'))
+        self.scan(b)
+        self.assertEqual(b.asked(r'/pulls'), [])      # nothing survives the cheap rules: nothing is asked
 
     def test_trial_files_rule_runs_before_any_timeline_call(self):
         b = Backlog(issue(9001, body='see bind-host.js'))
-        b.trial_branches = ['trial/a1-cd']
         b.base_prs = {'trial/a1-cd': [41]}
         b.files = {41: ['packages/server/src/bind-host.js']}
         self.scan(b)

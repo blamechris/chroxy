@@ -32,6 +32,10 @@ MACHINE_PROSE = ('<task-notification>', '<system-reminder>', '<local-command-std
                  '<local-command-stderr>', '<local-command-caveat>')
 MAX_TOOLS = 40
 MAX_HASHES = 50
+# A name that reaches the public extract or the terminal (model, effort, mode, tool, decision) must be a short plain
+# identifier; anything else is recorded as OTHER. `fullmatch`, because `$` also matches before a trailing newline.
+SAFE_NAME = re.compile(r'[\w.:/-]{1,64}', re.ASCII)
+OTHER = '<other>'
 
 
 # -- small helpers ---------------------------------------------------------------
@@ -48,6 +52,11 @@ def _add_tokens(table, model, usage):
     row = table.setdefault(model, _empty_tokens())
     for field in TOKEN_FIELDS:
         row[field] += usage[field]
+
+
+def safe_name(value):
+    """`value` when it is a short plain identifier, else OTHER (also for a value that is not a string)."""
+    return value if isinstance(value, str) and SAFE_NAME.fullmatch(value) else OTHER
 
 
 def _sorted_counts(counter):
@@ -84,7 +93,8 @@ def _stamp_of(path, limit=40):
 
 
 def sha256_text(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+    # `surrogatepass`: a lone surrogate in a tool input (a JSON `\ud800`) is hashed, not an exception
+    return hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()
 
 
 # -- isolation patterns -------------------------------------------------------------
@@ -132,8 +142,18 @@ class Isolation:
                 return True
         return False
 
-    def scan(self, text):
-        self.scanned += 1
+    def scan_input(self, value):
+        """Scan one tool input (a string, or JSON holding strings). It counts once, however many strings it holds,
+        and only if it holds one: a field that was renamed reads as no input, not as an input with nothing in it."""
+        found = False
+        for text in _strings(value):
+            found = True
+            self._scan_text(text)
+        self.scanned += found
+
+    scan = scan_input
+
+    def _scan_text(self, text):
         for match in BRANCH.finditer(text):
             branch = match.group(1).rstrip('.')
             if branch == self.own_base or FILE_EXT.search(branch) or branch.split('/')[1] in TRIAL_DIRS:
@@ -209,11 +229,10 @@ def claude_summary(files, scanner):
     people = {'total': 0, 'interrupts': 0, 'compactions': {'coordinator': 0, 'workers': 0}}
     ordered = sorted((f for f in files if f[1] == 'coordinator'), key=lambda f: (_stamp_of(f[0]), f[0]))
     ordered += sorted((f for f in files if f[1] != 'coordinator'), key=lambda f: f[0])
+    reads = []
     for path, file_role in ordered:
-        for raw in native._lines(path):
-            entry = native._loads(raw)
-            if entry is None:
-                continue
+        reads.append(native.Tally())
+        for entry in native.entries(path, reads[-1]):
             role = 'workers' if file_role == 'worker' or entry.get('isSidechain') else 'coordinator'
             kind = entry.get('type')
             if kind == 'assistant':
@@ -223,8 +242,8 @@ def claude_summary(files, scanner):
                     people['compactions'][role] += 1
             elif role == 'coordinator' and kind == 'user':
                 mode = entry.get('permissionMode')
-                if isinstance(mode, str) and mode not in modes:
-                    modes.append(mode)
+                if isinstance(mode, str) and safe_name(mode) not in modes:
+                    modes.append(safe_name(mode))
                 prose, _results = native._user_parts(entry)
                 if any(text.lstrip().startswith(native.INTERRUPT_MARK) for text in prose):
                     if _first_time(entry, seen_uuid):
@@ -247,7 +266,16 @@ def claude_summary(files, scanner):
         'human_messages_after_first': max(people['total'] - 1, 0),
         'interrupts': people['interrupts'],
         'compactions': people['compactions'],
+        'lines': line_report(reads),
     }
+
+
+def line_report(reads):
+    """What reading the files saw, from their `native.Tally` objects: counts only. A file with too many skipped
+    lines (or none readable) is `unreliable`: a count taken from it may be far short."""
+    return {'files': len(reads), 'read': sum(t.lines for t in reads), 'malformed': sum(t.malformed for t in reads),
+            'unreadable_files': sum(1 for t in reads if t.unreadable),
+            'unreliable_files': sum(1 for t in reads if t.unreliable())}
 
 
 def _first_time(entry, seen):
@@ -269,17 +297,17 @@ def _claude_assistant(entry, role, turns, efforts, messages, anonymous, seen_tur
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict) and block.get('type') == 'tool_use':
-                for text in _strings(block.get('input')):
-                    scanner.scan(text)
+                scanner.scan_input(block.get('input'))
     if not isinstance(model, str) or model == '<synthetic>':
         return
+    model = safe_name(model)
     mid = message.get('id') if isinstance(message.get('id'), str) else None
     if mid is None or mid not in seen_turn:
         if mid is not None:
             seen_turn.add(mid)
         turns[role][model] += 1
         if role == 'coordinator' and isinstance(entry.get('effort'), str):
-            efforts[entry['effort']] += 1
+            efforts[safe_name(entry['effort'])] += 1
     usage = message.get('usage')
     if not isinstance(usage, dict):
         return
@@ -337,43 +365,62 @@ def _codex_calls(entry, scanner):
     payload = entry.get('payload') if isinstance(entry.get('payload'), dict) else {}
     if entry.get('type') != 'response_item' or payload.get('type') not in CODEX_CALLS:
         return
+    values = []
     for field in ('arguments', 'input', 'action'):
         value = payload.get(field)
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except ValueError:
+            except (ValueError, RecursionError):
                 pass
-        for text in _strings(value):
-            scanner.scan(text)
+        values.append(value)
+    scanner.scan_input(values)   # one call is one input, whichever of its fields carry the text
+
+
+# `session_meta` keys that say a rollout continues, or was copied from, another thread. A rollout like that can
+# open with the parent's cumulative usage records replayed, which a sum over rollouts would then count twice.
+FORK_KEYS = ('forked_from', 'forked_from_id', 'resumed_from')
+
+
+def _forked(meta):
+    """True when a `session_meta` payload names the thread it was forked or resumed from (at the top, or in `source`)."""
+    for holder in (meta, meta.get('source')):
+        if isinstance(holder, dict) and any(holder.get(key) for key in FORK_KEYS):
+            return True
+    return False
 
 
 def _codex_rollout(path, scanner):
-    """One rollout's contribution: turns, settings, the cumulative-usage maximum and the people-events."""
+    """One rollout's contribution: turns, settings, the cumulative-usage maximum and the people-events.
+
+    `records` is the set of cumulative usage records it holds: the same record in two rollouts is a replay."""
     r = {'turns': Counter(), 'efforts': Counter(), 'policies': [], 'sandboxes': [], 'models': [],
          'best': None, 'last': None, 'source': None, 'messages': 0, 'interrupts': 0,
-         'compacted': 0, 'compaction_items': 0, 'context_compacted': 0}
-    for raw in native._lines(path):
-        entry = native._loads(raw)
-        if entry is None:
-            continue
+         'compacted': 0, 'compaction_items': 0, 'context_compacted': 0,
+         'forked': False, 'records': set(), 'tally': native.Tally()}
+    met = False
+    for entry in native.entries(path, r['tally']):
         _codex_calls(entry, scanner)
         payload = entry.get('payload') if isinstance(entry.get('payload'), dict) else {}
         kind = entry.get('type')
-        if kind == 'turn_context':
+        if kind == 'session_meta' and not met:
+            met = True
+            r['forked'] = _forked(payload)
+        elif kind == 'turn_context':
             model = payload.get('model')
             if isinstance(model, str):
+                model = safe_name(model)
                 r['turns'][model] += 1
                 if model not in r['models']:
                     r['models'].append(model)
             if isinstance(payload.get('effort'), str):
-                r['efforts'][payload['effort']] += 1
-            if isinstance(payload.get('approval_policy'), str) and payload['approval_policy'] not in r['policies']:
-                r['policies'].append(payload['approval_policy'])
+                r['efforts'][safe_name(payload['effort'])] += 1
+            if isinstance(payload.get('approval_policy'), str) and safe_name(payload['approval_policy']) not in r['policies']:
+                r['policies'].append(safe_name(payload['approval_policy']))
             sandbox = payload.get('sandbox_policy')
             sandbox = sandbox.get('type') if isinstance(sandbox, dict) else sandbox
-            if isinstance(sandbox, str) and sandbox not in r['sandboxes']:
-                r['sandboxes'].append(sandbox)
+            if isinstance(sandbox, str) and safe_name(sandbox) not in r['sandboxes']:
+                r['sandboxes'].append(safe_name(sandbox))
         elif kind == 'compacted':
             r['compacted'] += 1
         elif kind == 'response_item' and payload.get('type') == 'compaction':
@@ -389,6 +436,8 @@ def _codex_rollout(path, scanner):
         snap = _codex_snapshots(entry)
         if snap:
             source, (usage, total) = snap
+            if total or any(usage.values()):
+                r['records'].add((tuple(usage[f] for f in TOKEN_FIELDS), total))
             r['last'] = total
             if r['best'] is None or total >= r['best'][1]:
                 r['best'], r['source'] = (usage, total), source
@@ -412,11 +461,15 @@ def codex_summary(paths, scanner):
     tokens = {'coordinator': {}, 'workers': {}}
     totals = {'messages': 0, 'interrupts': 0}
     compactions = {'coordinator': 0, 'workers': 0}
-    stale = mixed = without_usage = 0
-    sources = Counter()
+    stale = mixed = without_usage = forked = replayed = 0
+    sources, owners, reads = Counter(), {}, []
     for role, listed in roles.items():
         for path in listed:
             r = _codex_rollout(path, scanner)
+            reads.append(r['tally'])
+            forked += r['forked']
+            # a record already seen in another rollout was replayed into this one (or the other way round)
+            replayed += any([owners.setdefault(rec, path) != path for rec in r['records']])
             turns[role].update(r['turns'])
             compactions[role] += max(r['compacted'], r['compaction_items'], r['context_compacted'])
             if role == 'coordinator':
@@ -434,7 +487,14 @@ def codex_summary(paths, scanner):
             _add_tokens(tokens[role], r['models'][-1], r['best'][0])
     report = _token_report(tokens)
     report.update({'rollouts_without_usage': without_usage, 'stale_final_rollouts': stale,
-                   'mixed_model_rollouts': mixed, 'sources': _sorted_counts(sources)})
+                   'mixed_model_rollouts': mixed, 'sources': _sorted_counts(sources),
+                   'forked_rollouts': forked, 'replayed_rollouts': replayed})
+    if forked or replayed:
+        # a sum over rollouts that replay one another's records counts them twice, and the part that does is not
+        # known: no total is better than a wrong one (the vault copy holds the records to work it out by hand)
+        report.update({'by_model': {}, 'by_role': {'coordinator': {}, 'workers': {}},
+                       'unverified': f'{forked} forked or resumed rollout(s), {replayed} sharing usage records '
+                                     f'with another rollout: totals withheld'})
     return {
         'turn_unit': 'turn_context entry (one per turn)',
         'coordinator': {'transcripts': len(roles['coordinator']), 'turns': _sorted_counts(turns['coordinator']),
@@ -445,6 +505,7 @@ def codex_summary(paths, scanner):
         'human_messages_after_first': max(totals['messages'] - 1, 0),
         'interrupts': totals['interrupts'],
         'compactions': compactions,
+        'lines': line_report(reads),
     }
 
 
@@ -480,10 +541,13 @@ CAP = re.compile(r'^Pending-permission cap \((\d+)\) reached — auto-denying (\
 #   permission-manager.js:1415 this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)
 AUTO_SWITCH = re.compile(r'^Auto-allowed (\d+) pending permission\(s\)')
 
-LOG_NOTE = ('Counts cover requests that reached a prompt. An Auto-mode allow that short-circuits '
-            '(permission-manager.js, `permissionMode === \'auto\'`) writes no log line, and the in-process pipeline '
-            'does not log a floored prompt. The log carries no session id on these lines, so the slice is every '
-            'session the daemon ran in the window.')
+LOG_NOTE = ('Counts cover requests that reached a prompt, one outcome per request id. An Auto-mode allow that '
+            'short-circuits (permission-manager.js, `permissionMode === \'auto\'`) writes no log line, and the in-process '
+            'pipeline does not log a floored prompt. A request answered over HTTP logs a plain `resolved:` line and then a '
+            '`resolved via HTTP:` line; the second decides who answered. The log carries no session id on these lines, so '
+            'the slice is every session the daemon ran in the window. A rule match or a pending-permission cap logs no '
+            '`Permission request`, so those are counted apart (`without_prompt`); an auto-mode switch allows requests that '
+            'were logged, without naming them, so its count is taken from the requests that have no other outcome.')
 
 
 def slice_log(text, start, end):
@@ -505,37 +569,36 @@ def slice_log(text, start, end):
 
 
 def permissions(text):
-    """Permission outcomes in a daemon-log slice (see LOG_NOTE for what the log cannot show)."""
+    """Permission outcomes in a daemon-log slice (see LOG_NOTE for what the log cannot show).
+
+    Each request id has exactly one outcome: answered over HTTP (a person), else resolved by a line that does not
+    say who (`unattributed`), else timed out, else its connection closed, else none (`unresolved_requests`).
+    `requests == human + unattributed + timed_out + connection_closed + auto_mode_switch_allowed + unresolved`."""
     requests, tools = {}, Counter()
-    decided = set()
-    resolved, by_human = Counter(), Counter()
+    http, plain, ended, late = {}, {}, {}, set()
     out = Counter()
     for _stamp, message in native.log_entries(text):
         m = REQUEST.match(message)
         if m:
             if m.group(1) not in requests:
-                requests[m.group(1)] = m.group(2)
-                tools[m.group(2)] += 1
+                requests[m.group(1)] = safe_name(m.group(2))
+                tools[requests[m.group(1)]] += 1
             continue
         m = RESOLVED_HTTP.match(message)
         if m:
-            by_human[m.group(2)] += 1
-            decided.add(m.group(1))
+            http.setdefault(m.group(1), safe_name(m.group(2)))
             continue
         m = RESOLVED.match(message)
         if m:
-            resolved[m.group(2)] += 1
-            decided.add(m.group(1))
+            plain.setdefault(m.group(1), safe_name(m.group(2)))
             continue
         m = TIMED_OUT.match(message)
         if m:
-            out['timed_out'] += 1
-            decided.add(m.group(1))
+            ended.setdefault(m.group(1), 'timed_out')
             continue
         m = CLOSED.match(message)
         if m:
-            out['connection_closed'] += 1
-            decided.add(m.group(1))
+            ended.setdefault(m.group(1), 'connection_closed')
             continue
         m = CAP.match(message)
         if m:
@@ -547,26 +610,44 @@ def permissions(text):
             continue
         m = AUTO_SWITCH.match(message)
         if m:
-            out['auto_mode_switch_allowed'] += int(m.group(1))
+            out['auto_mode_switch'] += int(m.group(1))
             continue
         if FLOOR.match(message):
             out['floor_forced'] += 1
-        elif LATE.match(message):
-            out['late_responses'] += 1
-    automatic = sum(out[k] for k in ('timed_out', 'cap_denied', 'rule_allow', 'rule_deny', 'auto_mode_switch_allowed'))
+            continue
+        m = LATE.match(message)
+        if m:
+            late.add(m.group(1))
+    resolved, by_human, undecided = Counter(), Counter(), 0
+    for rid in requests:
+        if rid in http:
+            by_human[http[rid]] += 1
+        elif rid in plain:
+            resolved[plain[rid]] += 1
+        elif rid in ended:
+            out[ended[rid]] += 1
+        else:
+            undecided += 1
+    answered = set(http) | set(plain) | set(ended)
+    # the switch allowed requests that were logged and never named: they come out of the ones with no other outcome
+    switched = min(out['auto_mode_switch'], undecided)
+    undecided -= switched
     return {
         'requests': len(requests),
         'requests_by_tool': {t: tools[t] for t in sorted(tools)[:MAX_TOOLS]},
-        'unresolved_requests': sum(1 for rid in requests if rid not in decided),
+        'unresolved_requests': undecided,
         'floor_forced': out['floor_forced'],
         'resolved': _sorted_counts(resolved),
         'resolved_by_http': _sorted_counts(by_human),
         'timed_out': out['timed_out'],
         'connection_closed': out['connection_closed'],
-        'late_responses': out['late_responses'],
-        'automatic': {'rule_allow': out['rule_allow'], 'rule_deny': out['rule_deny'], 'cap_denied': out['cap_denied'],
-                      'auto_mode_switch_allowed': out['auto_mode_switch_allowed']},
-        'decided_by': {'human': sum(by_human.values()), 'automatic': automatic,
+        'auto_mode_switch_allowed': switched,
+        'late_responses': len(late),
+        'without_prompt': {'rule_allow': out['rule_allow'], 'rule_deny': out['rule_deny'],
+                           'cap_denied': out['cap_denied'],
+                           'auto_mode_switch_unmatched': out['auto_mode_switch'] - switched,
+                           'outcomes_without_request': len(answered - set(requests))},
+        'decided_by': {'human': sum(by_human.values()), 'automatic': out['timed_out'] + switched,
                        'unattributed': sum(resolved.values())},
         'note': LOG_NOTE,
     }
@@ -612,6 +693,8 @@ def cost(by_model, prices):
         return 'n/a', problem
     if table is None:
         return 'n/a', 'trial.json has no price table'
+    if not by_model:
+        return 'n/a', 'no token totals to price'   # an empty sum is not a $0.00 bill
     usd, rows, unpriced = 0.0, {}, []
     for model, tokens in by_model.items():
         rates = table['per_mtok'].get(model)
@@ -628,7 +711,8 @@ def cost(by_model, prices):
 # -- the row collect folds into runs.json -------------------------------------------
 
 def runs_row(summary, permission, workers_label):
-    """The three runs.json fields the extract can fill; a field it cannot know is left out."""
+    """The three runs.json fields the extract can fill; a field it cannot know is left out (`permission` is None
+    when the daemon log could not be verified, so `approvals` is then absent and `collect` leaves it alone)."""
     row = {}
     compactions = summary['compactions']
     row['compactions'] = compactions['coordinator'] if not compactions['workers'] else (
@@ -642,6 +726,8 @@ def runs_row(summary, permission, workers_label):
     if permission is not None:
         by = permission['decided_by']
         prompted = f'{permission["requests"]} prompted'
-        row['approvals'] = (f'{prompted}: {by["human"]} human, {by["unattributed"]} unattributed, '
-                            f'{by["automatic"]} automatic (daemon log)') if any(by.values()) else f'{prompted} (daemon log)'
+        text = (f'{prompted}: {by["human"]} human, {by["unattributed"]} unattributed, '
+                f'{by["automatic"]} automatic') if any(by.values()) else prompted
+        apart = sum(permission['without_prompt'][k] for k in ('rule_allow', 'rule_deny', 'cap_denied', 'auto_mode_switch_unmatched'))
+        row['approvals'] = text + (f'; {apart} decided with no prompt' if apart else '') + ' (daemon log)'
     return row

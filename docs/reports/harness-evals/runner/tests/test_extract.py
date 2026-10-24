@@ -234,6 +234,100 @@ class ClaudeIsolationScan(TempFiles):
         self.assertEqual(self.scan(user('hi'))['tool_inputs_scanned'], 0)
 
 
+class ClaudeNamesAndReads(TempFiles):
+    def summary(self, *entries, **kwargs):
+        return extract.claude_summary([(self.write(*entries), 'coordinator')], self.scanner())
+
+    def test_a_model_effort_or_mode_that_is_not_a_plain_name_is_recorded_as_other(self):
+        odd = f'claude-opus-5-5 {SECRET} /Users/x/p'
+        s = self.summary(assistant('m1', model=odd, effort=f'high {SECRET}', use=usage(o=3)),
+                         assistant('m2', model='claude-opus-5-5\n', use=usage(o=1)),
+                         assistant('m3', model='claude-opus-5-5', effort='high', use=usage(o=2)),
+                         user('hi', permissionMode=f'auto {SECRET}'), user('again', permissionMode='plan'))
+        self.assertEqual(s['coordinator']['turns'], {'<other>': 2, 'claude-opus-5-5': 1})
+        self.assertEqual(s['coordinator']['efforts'], {'<other>': 1, 'high': 1})
+        self.assertEqual(s['coordinator']['permission_modes'], ['<other>', 'plan'])
+        self.assertEqual(sorted(s['tokens']['by_model']), ['<other>', 'claude-opus-5-5'])
+        self.assertFalse(SECRET in json.dumps(s))
+
+    def test_a_worker_model_that_is_not_a_plain_name_is_recorded_as_other(self):
+        files = [(self.write(assistant('m1', use=usage(o=1))), 'coordinator'),
+                 (self.write(assistant('w1', model='x' * 65, use=usage(o=1))), 'worker')]
+        s = extract.claude_summary(files, self.scanner())
+        self.assertEqual(s['workers']['turns'], {'<other>': 1})
+
+    def test_the_synthetic_marker_is_still_not_a_turn(self):
+        self.assertEqual(self.summary(assistant('m1', model='<synthetic>', use=usage(o=9)))['coordinator']['turns'], {})
+
+    def test_plain_names_with_the_usual_punctuation_are_kept(self):
+        for name in ('claude-opus-5-5', 'gpt-6-astra', 'anthropic.claude-opus-5:0', 'us.anthropic/claude-sonnet-5-5', 'm' * 64):
+            self.assertEqual(extract.safe_name(name), name)
+        for name in ('', 'm' * 65, 'a b', 'a\nb', 'a\n', 'caf\u00e9', '<synthetic>', 'a;b', None, 7, ['x']):
+            self.assertEqual(extract.safe_name(name), '<other>', repr(name))
+
+    def test_lines_read_and_skipped_are_counted_per_file_and_in_total(self):
+        good = self.write(assistant('m1', use=usage(o=1)), user('hi'))
+        bad = os.path.join(self.tmp, 'bad.jsonl')
+        with open(bad, 'w') as fh:
+            fh.write(jl(user('a'), '{"type": "assist', '[1, 2]', 'null'))
+        s = extract.claude_summary([(good, 'coordinator'), (bad, 'coordinator')], self.scanner())
+        self.assertEqual(s['lines'], {'files': 2, 'read': 6, 'malformed': 3, 'unreadable_files': 0, 'unreliable_files': 1})
+
+    def test_one_malformed_line_in_a_long_transcript_is_a_mid_write_tail_not_a_failure(self):
+        path = os.path.join(self.tmp, 'long.jsonl')
+        with open(path, 'w') as fh:
+            fh.write(jl(*[user(f'm{i}') for i in range(200)]) + '{"type": "user", "message": {"con')
+        s = extract.claude_summary([(path, 'coordinator')], self.scanner())
+        self.assertEqual((s['lines']['malformed'], s['lines']['unreliable_files']), (1, 0))
+
+    def test_a_valid_record_beside_a_truncated_remainder_is_not_a_clean_read(self):
+        path = os.path.join(self.tmp, 'mixed.jsonl')
+        with open(path, 'w') as fh:
+            fh.write(jl(assistant('m1', use=usage(o=5), tools=[{'command': 'ls'}]), '{"type": "assist', '{"ty', '{', '[[['))
+        s = extract.claude_summary([(path, 'coordinator')], self.scanner())
+        self.assertEqual(s['tokens']['by_model']['claude-opus-5-5']['output'], 5)     # the valid record counted
+        self.assertEqual(s['lines']['unreliable_files'], 1)                           # and the remainder is not hidden by it
+
+    def test_the_threshold_is_more_than_five_lines_or_more_than_one_percent(self):
+        def tally(lines, bad):
+            t = native.Tally()
+            t.lines, t.malformed = lines, bad
+            return t.unreliable()
+        self.assertEqual([tally(1000, 5), tally(1000, 6), tally(400, 4), tally(400, 5), tally(100, 1), tally(100, 2), tally(1, 1), tally(0, 0)],
+                         [False, True, False, True, False, True, True, False])
+        missing = native.Tally()
+        list(native.entries(os.path.join(self.tmp, 'absent.jsonl'), missing))
+        self.assertTrue(missing.unreadable and missing.unreliable())
+
+    def test_a_pathologically_nested_line_is_a_malformed_line_not_a_crash(self):
+        path = os.path.join(self.tmp, 'deep.jsonl')
+        with open(path, 'w') as fh:
+            fh.write(jl(user('hi'), '[' * 200000 + ']' * 200000, '{"a":' * 200000))
+        s = extract.claude_summary([(path, 'coordinator')], self.scanner())
+        self.assertEqual((s['lines']['read'], s['lines']['malformed']), (3, 2))
+
+    def test_a_tool_input_with_a_lone_surrogate_is_hashed_not_a_crash(self):
+        scanner = self.scanner()
+        extract.claude_summary([(self.write(assistant('m1', use=usage(o=1), tools=[{'command': 'ls ~/.claude/projects/other\ud800'}])),
+                                 'coordinator')], scanner)
+        hit = scanner.report()['hits'][0]
+        self.assertEqual((hit['pattern'], hit['count']), ('claude_projects_other', 1))
+        json.dumps(scanner.report())
+
+    def test_inputs_are_counted_once_each_and_only_if_they_hold_text(self):
+        s = self.scanner()
+        for value in ({'edits': [{'old': 'a', 'new': 'b'}], 'path': 'p'}, 'plain string', {'n': 3, 'flag': True}, None, {}, []):
+            s.scan_input(value)
+        self.assertEqual(s.report()['tool_inputs_scanned'], 2)      # not 4 strings, and the three without text not at all
+
+    def test_a_renamed_input_field_reads_as_nothing_scanned_not_as_clean(self):
+        entry = assistant('m1', use=usage(o=1))
+        entry['message']['content'] = [{'type': 'tool_use', 'name': 'Bash', 'arguments': {'command': 'git log trial/a1-cd'}}]
+        scanner = self.scanner()
+        extract.claude_summary([(self.write(entry), 'coordinator')], scanner)
+        self.assertEqual(scanner.report()['tool_inputs_scanned'], 0)
+
+
 class IsolationPatterns(unittest.TestCase):
     def setUp(self):
         self.s = self.fresh()
@@ -409,6 +503,62 @@ class CodexSummary(TempFiles):
         hits = {h['pattern']: h['count'] for h in self.scan.report()['hits']}
         self.assertEqual(hits, {'other_trial_branch': 1, 'key_file': 1, 'codex_sessions': 1})
 
+    def test_model_effort_policy_and_sandbox_that_are_not_plain_names_are_recorded_as_other(self):
+        s = self.summary([meta(), turn(model=f'gpt {SECRET}', effort='x y', approval='on request', sandbox=f'/tmp/{SECRET} x'),
+                          turn(), counted(10, output=10)])
+        self.assertEqual(s['coordinator']['turns'], {'<other>': 1, 'gpt-6-astra': 1})
+        self.assertEqual((s['coordinator']['efforts'], s['coordinator']['approval_policies'], s['coordinator']['sandboxes']),
+                         ({'<other>': 1, 'xhigh': 1}, ['<other>', 'on-request'], ['<other>', 'workspace-write']))
+        self.assertFalse(SECRET in json.dumps(s))
+
+    def test_a_rollout_that_names_the_thread_it_was_forked_or_resumed_from_withholds_the_totals(self):
+        for key in extract.FORK_KEYS:
+            s = self.summary([meta(), turn(), counted(900, output=900)],
+                             [dict(meta(), payload=dict(meta()['payload'], **{key: 'thread-1'})), turn(), counted(1500, output=600)])
+            self.assertEqual((s['tokens']['by_model'], s['tokens']['forked_rollouts']), ({}, 1), key)
+            self.assertTrue('withheld' in s['tokens']['unverified'], key)
+
+    def test_the_fork_marker_may_sit_in_the_source(self):
+        s = self.summary([meta(), turn(), counted(900, output=900)], [meta(source={'sub': {'forked_from_id': 'p'}}), turn(), counted(5, output=5)])
+        self.assertEqual(s['tokens']['forked_rollouts'], 0)       # only the top level and `source` itself are read
+        s = self.summary([meta(), turn(), counted(900, output=900)], [dict(meta(), payload=dict(meta()['payload'], source={'forked_from_id': 'p'})),
+                                                                     turn(), counted(5, output=5)])
+        self.assertEqual(s['tokens']['forked_rollouts'], 1)
+
+    def test_an_empty_marker_is_not_a_fork(self):
+        s = self.summary([meta(), turn(), counted(900, output=900)],
+                         [dict(meta(), payload=dict(meta()['payload'], forked_from_id=None, resumed_from='')), turn(), counted(5, output=5)])
+        self.assertEqual((s['tokens']['forked_rollouts'], sorted(s['tokens']['by_model'])), (0, ['gpt-6-astra']))
+        self.assertFalse('unverified' in s['tokens'])
+
+    def test_a_subagent_rollout_alone_is_not_a_fork_but_one_that_replays_its_parent_is(self):
+        child = [meta(parent='p'), turn(model='gpt-6-lite')]
+        s = self.summary([meta(), turn(), counted(900, input_tokens=600, output=300)], child + [counted(50, output=50)])
+        self.assertFalse('unverified' in s['tokens'])
+        self.assertEqual(s['tokens']['by_model']['gpt-6-lite']['output'], 50)
+        # the child opens with the parent's cumulative record replayed, then carries on
+        s = self.summary([meta(), turn(), counted(900, input_tokens=600, output=300)],
+                         child + [counted(900, input_tokens=600, output=300), counted(1000, input_tokens=650, output=350)])
+        self.assertEqual((s['tokens']['by_model'], s['tokens']['replayed_rollouts']), ({}, 1))
+        self.assertTrue('totals withheld' in s['tokens']['unverified'])
+
+    def test_the_same_record_twice_in_one_rollout_is_not_a_replay(self):
+        record = {'type': 'token_usage_record', 'payload': {'thread_token_usage': {
+            'input_tokens': 600, 'cached_input_tokens': 0, 'output_tokens': 300, 'total_tokens': 900}}}
+        s = self.summary([meta(), turn(), counted(900, input_tokens=600, output=300), record])
+        self.assertEqual((s['tokens']['replayed_rollouts'], 'unverified' in s['tokens']), (0, False))
+
+    def test_a_stale_final_record_is_reported_beside_the_totals(self):
+        s = self.summary([meta(), turn(), counted(2000, output=500), counted(1000, output=300)])
+        self.assertEqual(s['tokens']['stale_final_rollouts'], 1)
+
+    def test_codex_lines_are_tallied_per_rollout(self):
+        path = os.path.join(self.tmp, 'bad-rollout.jsonl')
+        with open(path, 'w') as fh:
+            fh.write(jl(meta(), turn(), counted(10, output=10), '{"type": "event_msg', 'not json'))
+        s = extract.codex_summary([path], self.scanner())
+        self.assertEqual(s['lines'], {'files': 1, 'read': 5, 'malformed': 2, 'unreadable_files': 0, 'unreliable_files': 1})
+
     def test_a_missing_rollout_set_is_an_empty_summary_not_a_crash(self):
         s = extract.codex_summary([], self.scanner())
         self.assertEqual((s['coordinator']['transcripts'], s['tokens']['by_model']), (0, {}))
@@ -484,6 +634,14 @@ def at(second, level, component, msg, as_json=False):
     return f'{stamp} [{level}] [{component}] {msg}'
 
 
+def http_pair(second, rid, decision, via='sdk'):
+    """The two lines the server writes for ONE request answered over HTTP: the plain `resolved:` line (from the
+    pending-permission callback, ws-permissions.js:481, or permission-manager.js:1115) and then the HTTP one
+    (ws-permissions.js:790)."""
+    return [at(second, 'INFO', 'ws', f'Permission {rid} resolved: {decision}'),
+            at(second, 'INFO', 'ws', f'Permission {rid} resolved via HTTP: {decision} ({via})')]
+
+
 class Permissions(unittest.TestCase):
     def count(self, *lines):
         return extract.permissions('\n'.join(lines) + '\n')
@@ -493,7 +651,7 @@ class Permissions(unittest.TestCase):
             at(1, 'INFO', 'ws', 'Permission request perm-a: Bash'),
             at(2, 'INFO', 'ws', 'Permission perm-a resolved: allow'),
             at(3, 'INFO', 'sdk-session', 'Permission request perm-b-1-1: Write', as_json=True),
-            at(4, 'INFO', 'sdk-session', 'Permission perm-b-1-1 resolved via HTTP: deny (sdk)', as_json=True),
+            *http_pair(4, 'perm-b-1-1', 'deny'),
             at(5, 'INFO', 'ws', 'Permission request perm-c: Bash'),
             at(6, 'INFO', 'ws', 'Permission perm-c timed out, auto-denying'),
             at(7, 'INFO', 'ws', 'Permission request perm-d: Read'),
@@ -508,12 +666,61 @@ class Permissions(unittest.TestCase):
             at(16, 'DEBUG', 'ws', 'Permission floor clear for Bash'))
         self.assertEqual(p['requests'], 5)
         self.assertEqual(p['requests_by_tool'], {'Bash': 2, 'Edit': 1, 'Read': 1, 'Write': 1})
-        self.assertEqual(p['unresolved_requests'], 1)          # perm-e
+        self.assertEqual(p['unresolved_requests'], 0)           # perm-e: the switch allowed it
+        self.assertEqual(p['auto_mode_switch_allowed'], 1)
         self.assertEqual(p['resolved'], {'allow': 1})
         self.assertEqual(p['resolved_by_http'], {'deny': 1})
         self.assertEqual((p['timed_out'], p['connection_closed'], p['late_responses'], p['floor_forced']), (1, 1, 1, 1))
-        self.assertEqual(p['automatic'], {'rule_allow': 1, 'rule_deny': 1, 'cap_denied': 1, 'auto_mode_switch_allowed': 3})
-        self.assertEqual(p['decided_by'], {'human': 1, 'automatic': 7, 'unattributed': 1})
+        self.assertEqual(p['without_prompt'], {'rule_allow': 1, 'rule_deny': 1, 'cap_denied': 1,
+                                               'auto_mode_switch_unmatched': 2, 'outcomes_without_request': 0})
+        self.assertEqual(p['decided_by'], {'human': 1, 'automatic': 2, 'unattributed': 1})
+
+    def test_a_request_answered_over_http_is_one_outcome_a_human_one(self):
+        """The server logs `resolved: <decision>` and then `resolved via HTTP: <decision> (<via>)` for the same id."""
+        p = self.count(at(1, 'INFO', 'ws', 'Permission request perm-a: Bash'), *http_pair(2, 'perm-a', 'allow'))
+        self.assertEqual(p['decided_by'], {'human': 1, 'automatic': 0, 'unattributed': 0})
+        self.assertEqual((p['resolved'], p['resolved_by_http']), ({}, {'allow': 1}))
+        self.assertEqual(p['unresolved_requests'], 0)
+
+    def test_the_http_line_decides_who_answered_whichever_comes_first(self):
+        first = self.count(at(1, 'INFO', 'ws', 'Permission request p: Bash'), *http_pair(2, 'p', 'deny'))
+        second = self.count(at(1, 'INFO', 'ws', 'Permission request p: Bash'), *reversed(http_pair(2, 'p', 'deny')))
+        self.assertEqual(first['decided_by'], second['decided_by'])
+        self.assertEqual(first['decided_by'], {'human': 1, 'automatic': 0, 'unattributed': 0})
+
+    def test_every_request_has_exactly_one_outcome(self):
+        lines = []
+        for n in range(1, 13):
+            lines.append(at(n, 'INFO', 'ws', f'Permission request p{n}: Bash'))
+        lines += http_pair(20, 'p1', 'allow') + http_pair(21, 'p2', 'deny') + http_pair(22, 'p3', 'allowAlways')
+        lines += [at(23, 'INFO', 'ws', 'Permission p4 resolved: allow'), at(24, 'INFO', 'ws', 'Permission p5 resolved: deny'),
+                  at(25, 'INFO', 'ws', 'Permission p6 timed out, auto-denying'), at(26, 'INFO', 'ws', 'Permission p7 timed out, auto-denying'),
+                  at(27, 'INFO', 'ws', 'Permission p8 connection closed by client'),
+                  at(28, 'INFO', 'x', 'Auto-allowed 2 pending permission(s) on auto mode switch'),
+                  at(29, 'INFO', 'x', 'Permission rule matched for Bash: allow'),
+                  at(30, 'INFO', 'ws', 'Permission p4 resolved: allow'), at(31, 'INFO', 'ws', 'Permission p6 timed out, auto-denying')]
+        p = self.count(*lines)
+        by = p['decided_by']
+        self.assertEqual(p['requests'], 12)
+        self.assertEqual(by['human'] + by['unattributed'] + p['timed_out'] + p['connection_closed'] + p['auto_mode_switch_allowed']
+                         + p['unresolved_requests'], p['requests'])
+        self.assertEqual((by, p['unresolved_requests']), ({'human': 3, 'unattributed': 2, 'automatic': 4}, 2))
+
+    def test_decided_by_never_exceeds_the_prompted_requests(self):
+        p = self.count(at(1, 'INFO', 'ws', 'Permission request p1: Bash'),
+                       *[at(n, 'INFO', 'x', 'Permission rule matched for Bash: allow') for n in range(2, 8)],
+                       at(8, 'INFO', 'x', 'Pending-permission cap (2) reached — auto-denying perm-z'),
+                       at(9, 'INFO', 'x', 'Auto-allowed 5 pending permission(s) on auto mode switch'))
+        self.assertEqual(p['requests'], 1)
+        self.assertTrue(sum(p['decided_by'].values()) <= p['requests'], p['decided_by'])
+        self.assertEqual(p['decided_by'], {'human': 0, 'automatic': 1, 'unattributed': 0})
+        self.assertEqual(p['without_prompt'], {'rule_allow': 6, 'rule_deny': 0, 'cap_denied': 1,
+                                               'auto_mode_switch_unmatched': 4, 'outcomes_without_request': 0})
+
+    def test_an_outcome_with_no_request_line_is_counted_apart(self):
+        p = self.count(*http_pair(1, 'old', 'allow'), at(3, 'INFO', 'ws', 'Permission old2 timed out, auto-denying'))
+        self.assertEqual((p['requests'], p['decided_by']), (0, {'human': 0, 'automatic': 0, 'unattributed': 0}))
+        self.assertEqual(p['without_prompt']['outcomes_without_request'], 2)
 
     def test_a_request_logged_twice_is_one_request(self):
         p = self.count(at(1, 'INFO', 'ws', 'Permission request perm-a: Bash'), at(2, 'INFO', 'ws', 'Permission request perm-a: Bash'))
@@ -526,6 +733,15 @@ class Permissions(unittest.TestCase):
 
     def test_the_note_says_what_the_log_cannot_show(self):
         self.assertTrue('short-circuits' in extract.permissions('')['note'])
+
+    def test_a_tool_or_decision_that_is_not_a_plain_name_is_recorded_as_other(self):
+        odd = 'Bash /Users/x/secret-project --token=abc'
+        p = self.count(at(1, 'INFO', 'ws', f'Permission request p1: {odd}'), at(2, 'INFO', 'ws', 'Permission p1 resolved: all\u00f6w'),
+                       at(3, 'INFO', 'ws', 'Permission request p2: mcp__chroxy__list_files'),
+                       *http_pair(4, 'p2', 'allow!'))
+        self.assertEqual(p['requests_by_tool'], {'<other>': 1, 'mcp__chroxy__list_files': 1})
+        self.assertEqual((p['resolved'], p['resolved_by_http']), ({'<other>': 1}, {'<other>': 1}))
+        self.assertFalse('secret-project' in json.dumps(p))
 
 
 class SliceLog(unittest.TestCase):
@@ -565,6 +781,9 @@ class Cost(unittest.TestCase):
         self.assertEqual(value['by_model'], {'claude-opus-5-5': 66.25, 'gpt-6-astra': 2.2})
         self.assertEqual((value['usd'], value['as_of']), (68.45, '2026-11-01'))
 
+    def test_no_tokens_at_all_is_not_a_zero_dollar_bill(self):
+        self.assertEqual(extract.cost({}, TABLE), ('n/a', 'no token totals to price'))
+
     def test_one_unpriced_model_makes_the_whole_cost_n_a(self):
         value, note = extract.cost({'claude-opus-5-5': tokens(o=1), 'claude-haiku-5': tokens(o=1)}, TABLE)
         self.assertEqual((value, note), ('n/a', 'no price for claude-haiku-5'))
@@ -602,6 +821,13 @@ class RunsRow(unittest.TestCase):
     def test_no_workers_and_worker_compactions(self):
         row = extract.runs_row(self.summary(0, None, (0, 2)), None, 'x')
         self.assertEqual((row['workers'], row['compactions']), ('none', '0 (+2 in workers)'))
+
+    def test_approvals_name_what_was_decided_with_no_prompt_apart_from_the_prompted_ones(self):
+        permission = extract.permissions('\n'.join([
+            at(1, 'INFO', 'ws', 'Permission request p: Bash'), *http_pair(2, 'p', 'allow'),
+            at(3, 'INFO', 'x', 'Permission rule matched for Bash: allow'), at(4, 'INFO', 'x', 'Permission rule matched for Bash: allow')]) + '\n')
+        self.assertEqual(extract.runs_row(self.summary(), permission, 'x')['approvals'],
+                         '1 prompted: 1 human, 0 unattributed, 0 automatic; 2 decided with no prompt (daemon log)')
 
     def test_approvals_only_when_there_was_a_daemon_log(self):
         permission = extract.permissions(at(1, 'INFO', 'ws', 'Permission request p: Bash') + '\n'

@@ -91,7 +91,11 @@ Stop rules are PROTOCOL §3's: queue exhausted, 12 h from the first command, or 
 ## 4. Queue
 
 The October queue is spent: all ten issues are solved on `trial/*` branches and
-Copilot's review bodies link several of them to those PRs. Trial 2 draws ten new
+Copilot's review bodies link several of them to those PRs. The mechanical exclusions
+below do not catch all ten (checked against the live backlog on 2026-10-24: six by the
+changed-files rule, two by a cross-reference from a `trial/*` PR, and #8364 and #8277 by
+neither), so the runner also lists the ten by number (`queue_rules.exclude_issues`) and
+reports, for each, whether a rule would have caught it or only the list does. Trial 2 draws ten new
 issues with PROTOCOL §5's criteria and the same stratification (bugs, features,
 one or two cross-package items, one test or tooling item, spread across packages),
 plus three exclusions:
@@ -104,7 +108,8 @@ plus three exclusions:
 `trialctl queue-candidates` (package P2) applies the mechanical filters (open,
 owner-filed, no open or closing PR, excluded labels, the three exclusions above,
 no `.claude/` / `.github/workflows` / `docs/reports/harness-evals/` scope) to the
-open backlog and prints a table; a read-only exploration session reads the
+open backlog and prints a table; a rule it cannot apply (GitHub does not answer, or lists
+no PR into a `trial/*` branch at all) leaves the issue `unverified`, never a candidate; a read-only exploration session reads the
 survivors' bodies for concrete acceptance criteria, as in October; the owner picks
 ten. Each issue gets an opaque slot id (`Q01`…`Q10`, assigned in a random order
 that `trial.json` records), used in PR bodies (§6).

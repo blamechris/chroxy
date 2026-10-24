@@ -49,23 +49,58 @@ def slug_candidates(path):
     return out
 
 
-def _lines(path):
+# A transcript copied while it is written can end mid-line, so a line or two is tolerated; more than this many
+# lines, or more than this share of them, and a count read from the file is a lower bound of unknown size.
+MAX_MALFORMED = 5
+MAX_MALFORMED_SHARE = 0.01
+
+
+class Tally:
+    """What reading one JSONL file saw: its non-blank lines, the ones that were not a JSON object, and whether
+    it could be opened at all."""
+
+    def __init__(self):
+        self.lines = 0
+        self.malformed = 0
+        self.unreadable = False
+
+    def unreliable(self):
+        """True when too much of the file was skipped (or none of it could be read) to trust a count from it."""
+        return (self.unreadable or self.malformed > MAX_MALFORMED
+                or self.malformed > self.lines * MAX_MALFORMED_SHARE)
+
+
+def _lines(path, tally=None):
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 raw = raw.strip()
                 if raw:
+                    if tally is not None:
+                        tally.lines += 1
                     yield raw
     except OSError:
-        return
+        if tally is not None:
+            tally.unreadable = True
 
 
 def _loads(raw):
     try:
         value = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # a pathologically nested line is a malformed one
         return None
     return value if isinstance(value, dict) else None
+
+
+def entries(path, tally=None):
+    """The JSON-object lines of a JSONL file; every other line is skipped and, with a `tally`, counted."""
+    for raw in _lines(path, tally):
+        entry = _loads(raw)
+        if entry is None:
+            if tally is not None:
+                tally.malformed += 1
+            continue
+        yield entry
 
 
 def _add(items, value):
