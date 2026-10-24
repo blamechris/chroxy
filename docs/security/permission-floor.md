@@ -27,11 +27,37 @@ providers in #7004.
 | Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
 | Ordinary project files | not floored | not floored |
 
-Matching is case-insensitive, per path segment, on the target **resolved against the
-session cwd** — with a second, symlink-following pass that walks the target
-component-by-component the way `open(2)` does, so a symlinked parent or a `..` after
-a symlink cannot escape the floor (#6851/#6921/#6928). Any resolution error
-(`EACCES`, `ELOOP`, a pathological depth) is treated as **floored**.
+Matching is per path segment, on the target **resolved against the session cwd** —
+with a second, symlink-following pass that walks the target component-by-component
+the way `open(2)` does, so a symlinked parent or a `..` after a symlink cannot escape
+the floor (#6851/#6921/#6928). Any resolution error (`EACCES`, `ELOOP`, a
+pathological depth) is treated as **floored**.
+
+Each segment is checked twice, and a match in either floors: as written
+(lowercased), and in a canonical form (`segmentName`, then `canonicalName`). The
+canonical form drops anything from a `:` on and any trailing dots or spaces, then
+folds the name wider than lowercase: compatibility forms decomposed and combining
+marks removed, then each character lower-, upper- and lower-cased again (a capital
+or small sharp s becomes `ss`). A few shapes floor without a name comparison:
+
+- on both floors, a segment whose name, after the same `:` and trailing drop, is in
+  the 8.3 short-name form: up to six characters, `~`, digits and an optional
+  extension of up to three (`GIT~1`, `SETTIN~1.JSO`, `GIT~1./config`).
+  `chunk~87fd721f7.js`, `vendors~main.js`, `abcdefg~1` and `a~1.json` are not in
+  that form;
+- on both floors and on POSIX, a target holding `\`, or a symlink met while
+  resolving it whose target holds one. The walk refuses such a link, which every
+  caller of the shared resolver treats as a failure;
+- under the full floor, an existing target with more than one hard link.
+
+Measured on 643,198 path segments (a checkout with its `node_modules`, a home
+directory's documents and application data), none of the name shapes above occurred,
+and no name folded onto a protected name it did not already match. Hard links are
+rarer still in a checkout, though not absent: in this repository's `node_modules`, two
+installed binaries have more than one link, so a write to either prompts. One known cost is on Windows: a target outside the cwd is
+scanned as its absolute path, so an absolute path that itself holds a short name (a
+temp directory reported as `C:\Users\RUNNER~1\…`) floors. A target under the cwd
+is scanned relative to it, so a cwd spelled with short names costs nothing.
 
 **Claude Code's own worktrees are workspaces, not agent config (#8741).**
 `EnterWorktree` and `claude --worktree <name>` check a worktree out at
@@ -74,11 +100,12 @@ purpose, and each condition that fails falls back to the full scan:
   scan: a link inside the worktree (into `.claude`, into another worktree, or to
   an ordinary place outside `.claude`), or a link in the cwd itself
   (`wt -> .claude/worktrees/a2c`). So does a target spelled with `..`.
-- **A single hard link.** An existing file on the path with more than one hard link
-  keeps the full scan.
+- **Hard links.** An existing target with more than one hard link floors under the
+  full floor, as anywhere else (see above).
 
 `tests/permission-floor-claude-worktree.test.js` builds these topologies on disk,
-and the parity matrix runs the worktree rows through both pipelines.
+`tests/permission-floor-claude-worktree-resolved.test.js` pins the same-path
+condition, and the parity matrix runs the worktree rows through both pipelines.
 
 A tool's targets are read from `PROTECTED_PATH_INPUT_FIELDS` (`file_path`, `path`,
 `notebook_path`) plus each `changes[].path` member (codex `apply_patch`, #6805/#6828).

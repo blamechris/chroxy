@@ -32,7 +32,10 @@ const silentLog = { info() {}, warn() {} }
 /** Make a fresh temp root and return its REAL path (macOS tmpdir is itself
  *  under a `/var → /private/var` firmlink; realpath gives a stable base). */
 function mkRoot() {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-sym-')))
+  // `.native` also returns long names: a Windows runner can report tmpdir() in
+  // 8.3 form (`C:\Users\RUNNER~1\…`), and a target that leaves the root is
+  // scanned as that absolute path, where a short-name segment floors.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-floor-sym-')))
 }
 
 describe('protected-path floor resolves symlinks (#6851)', () => {
@@ -423,9 +426,9 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
     assert.equal(isSecretReadTarget({ file_path: abs }, cwd), true)
   })
 
-  it('#6928: does NOT over-flag a benign relative BACKSLASH path', () => {
-    // The fix must split separators, not flag anything containing a `\`: a benign
-    // in-workspace backslash path resolves to a plain file and stays unfloored.
-    assert.equal(isProtectedPathTarget({ file_path: 'src\\lib\\util.js' }, root), false)
+  it('#6928: a benign relative BACKSLASH path is not floored where `\\` is a separator', () => {
+    // On win32 the separator split resolves it to a plain file, unfloored. On
+    // POSIX a target holding `\\` floors (see permission-floor-segment-forms).
+    assert.equal(isProtectedPathTarget({ file_path: 'src\\lib\\util.js' }, root), process.platform !== 'win32')
   })
 })

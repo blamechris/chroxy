@@ -17,7 +17,7 @@ import * as realResolver from '../src/utils/componentwise-resolver.js'
  */
 
 let answer = null
-mock.module(new URL('../src/utils/componentwise-resolver.js', import.meta.url).href, {
+const resolverMock = mock.module(new URL('../src/utils/componentwise-resolver.js', import.meta.url).href, {
   namedExports: {
     ...realResolver,
     resolveTargetComponentwiseSync: (base, target) => (answer ? answer(base) : realResolver.resolveTargetComponentwiseSync(base, target)),
@@ -38,6 +38,7 @@ describe('#8741 — the carve-out needs the resolved path to be the written one'
 
   after(() => {
     answer = null
+    resolverMock.restore()
     if (root) rmSync(root, { recursive: true, force: true })
   })
 

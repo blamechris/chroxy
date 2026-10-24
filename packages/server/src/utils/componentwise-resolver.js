@@ -1,6 +1,6 @@
 import { lstatSync, readlinkSync } from 'node:fs'
 import { lstat, readlink } from 'node:fs/promises'
-import { dirname, isAbsolute, join, parse } from 'node:path'
+import { dirname, isAbsolute, join, parse, sep } from 'node:path'
 
 /**
  * open(2)-faithful, component-by-component path resolver — the SINGLE SOURCE for
@@ -113,6 +113,11 @@ function resolveComponentLexically(resolved, comp, tailOnly) {
  * @returns {string}
  */
 function spliceSymlink(pending, i, resolved, link) {
+  // On POSIX `\` is a name character, which the split below would read as a
+  // separator; a link whose target holds one is not walked (callers fail closed).
+  if (sep === '/' && link.includes('\\')) {
+    throw Object.assign(new Error('componentwise resolver: link target holds a backslash'), { code: 'EINVAL' })
+  }
   const linkRoot = isAbsolute(link) ? parse(link).root : ''
   pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
   return linkRoot || resolved
