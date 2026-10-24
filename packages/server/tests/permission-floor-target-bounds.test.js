@@ -129,6 +129,13 @@ describe('floor: one call\'s targets share a budget', () => {
     assert.ok(ms < 200, `took ${ms} ms`)
   })
 
+  it('positive control: a thousand-file patch of absolute paths is not floored', () => {
+    // About 170 bytes each, 170 KB in all: a checkout under a home directory.
+    const cwd = '/Users/developer/work/some-organisation/some-project-checkout'
+    const paths = Array.from({ length: 1000 }, (_, i) => `${cwd}/packages/dashboard/src/components/settings/provider-configuration/provider-configuration-panel-${i}.test.tsx`)
+    assert.equal(isFlooredTarget('apply_patch', { file_path: cwd, changes: paths.map((path) => ({ path, kind: 'update' })) }, cwd), false)
+  })
+
   it('positive control: a large but ordinary patch is not floored', () => {
     const paths = Array.from({ length: 300 }, (_, i) => `packages/server/src/module-${i}/index.js`)
     assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), false)
@@ -136,6 +143,9 @@ describe('floor: one call\'s targets share a budget', () => {
 })
 
 describe('floor: one call\'s filesystem work is bounded', () => {
+  // These two time the name comparison over a thousand walks; on Windows the
+  // walks' filesystem calls alone take longer than the bound.
+  const SKIP_WIN32_TIMING = process.platform === 'win32' && 'filesystem calls dominate this timing on Windows; it runs on POSIX CI'
   let root
 
   before(() => {
@@ -152,6 +162,52 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
     assert.equal(value, false)
     assert.ok(ms < 1000, `took ${ms} ms`)
+  })
+
+  it('one component walked past FLOOR_MAX_CALL_WALK floors', () => {
+    // A trailing `/` is one more walked component, though not a counted one.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    const paths = Array.from({ length: FLOOR_MAX_CALL_WALK / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}` + (i === 0 ? '/' : ''))
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), true)
+    paths[0] = paths[0].slice(0, -1)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), false, 'exactly the walk budget')
+  })
+
+  it('a call over the component budget is floored before any target is walked', () => {
+    // Every component is a real directory, so walking the targets would cost a
+    // stat each; over the budget, none is walked.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    mkdirSync(join(root, ...Array.from({ length: each - 1 }, () => 'd')), { recursive: true })
+    const count = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each) + 1
+    const changes = Array.from({ length: count }, (_, i) => ({ path: 'd/'.repeat(each - 1) + `f${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { changes }, root))
+    assert.equal(value, true)
+    assert.ok(ms < 20, `took ${ms} ms`)
+  })
+
+  it('many targets resolving through one long real directory are decided quickly', { skip: SKIP_NO_SYMLINK || SKIP_WIN32_TIMING }, () => {
+    const dir = join(root, ...Array.from({ length: 3 }, (_, k) => `${k}` + '\uFDFA'.repeat(80)))
+    mkdirSync(dir, { recursive: true })
+    symlinkSync(dir, join(root, 'L'))
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('Read', { path: 'L', changes }, root))
+    assert.equal(value, false)
+    assert.ok(ms < 250, `took ${ms} ms`)
+  })
+
+  it('many targets above a long cwd are decided quickly', { skip: SKIP_WIN32_TIMING }, () => {
+    const cwd = join(root, ...Array.from({ length: 4 }, (_, k) => `${k}` + '\uFDFA'.repeat(70)))
+    mkdirSync(cwd, { recursive: true })
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `../x${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
+    assert.equal(value, false)
+    assert.ok(ms < 200, `took ${ms} ms`)
+  })
+
+  it('a name repeated across one call\'s targets is compared in canonical form each time', () => {
+    const git = '.\uFF47\uFF49\uFF54'
+    assert.equal(isFlooredTarget('Read', { path: `a/${git}` }, CWD), false)
+    assert.equal(isFlooredTarget('Read', { path: `a/${git}`, changes: [{ path: `b/${git}/config` }] }, CWD), true)
   })
 
   it(`targets whose links together walk more than FLOOR_MAX_CALL_WALK (${FLOOR_MAX_CALL_WALK}) components floor`, { skip: SKIP_NO_SYMLINK }, () => {

@@ -141,6 +141,17 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     await assertBothThrow(root, './'.repeat(COMPONENTWISE_MAX_COMPONENTS + 50) + 'a/y', 'ENAMETOOLONG')
   })
 
+  it('a shared budget is spent across walks, by both drivers', async () => {
+    const sync = { left: 5 }
+    resolveTargetComponentwiseSync(root, 'a/b/c', sync)
+    assert.equal(sync.left, 2)
+    assert.throws(() => resolveTargetComponentwiseSync(root, 'd/e/f', sync), (e) => e.code === 'ENAMETOOLONG')
+    const async = { left: 5 }
+    await resolveTargetComponentwiseAsync(root, 'a/b/c', async)
+    assert.equal(async.left, 2)
+    await assert.rejects(resolveTargetComponentwiseAsync(root, 'd/e/f', async), (e) => e.code === 'ENAMETOOLONG')
+  })
+
   it('a final component that takes the resolved path past the bound → both throw ENAMETOOLONG', async () => {
     // The first component is missing, so the rest is appended without a stat;
     // only the last one crosses the bound.

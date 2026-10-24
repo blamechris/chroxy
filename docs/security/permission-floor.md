@@ -42,7 +42,7 @@ member.
 One call is bounded as a whole too. It floors when it carries more than 1024 path
 targets (path fields and `changes[]` members together, whatever the members hold;
 `FLOOR_MAX_CALL_TARGETS`), more than 16384 components across them
-(`FLOOR_MAX_CALL_COMPONENTS`), more than 131072 UTF-8 bytes across them
+(`FLOOR_MAX_CALL_COMPONENTS`), more than 262144 UTF-8 bytes across them
 (`FLOOR_MAX_CALL_BYTES`), or when its targets' symlink-resolving walks together walk
 more than 16384 components (`FLOOR_MAX_CALL_WALK`, those a symlink adds included).
 

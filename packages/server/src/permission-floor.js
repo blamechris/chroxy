@@ -169,6 +169,17 @@ function canonicalName(name) {
     .join('')
 }
 
+// canonicalName, computed once per name within one call (`memo`): every target
+// of a call that resolves through the same directories shares its names.
+function _canonicalNameIn(name, memo) {
+  let canonical = memo.get(name)
+  if (canonical === undefined) {
+    canonical = canonicalName(name)
+    memo.set(name, canonical)
+  }
+  return canonical
+}
+
 // A segment whose name (see segmentName) is in the 8.3 short-name form
 // (`CLAUDE~1`, `SETTIN~1.JSO`): up to six characters, `~`, digits, and an
 // extension of up to three. It floors without a name comparison, under both floors.
@@ -281,8 +292,8 @@ export const FLOOR_MAX_CALL_COMPONENTS = 16384
 // adds included), the call floors.
 export const FLOOR_MAX_CALL_WALK = 16384
 // And more than FLOOR_MAX_CALL_BYTES UTF-8 bytes across one call's targets
-// floors the call. A thousand-file patch of 100-byte paths is about 100 KB.
-export const FLOOR_MAX_CALL_BYTES = 131072
+// floors the call. A thousand-file patch of 250-byte absolute paths is about 250 KB.
+export const FLOOR_MAX_CALL_BYTES = 262144
 
 /**
  * How many `/`- or `\`-separated components `target` has, counting no further
@@ -411,9 +422,10 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
  * @param {boolean} carved  `resolved` is inside a worktree the carve-out admits
+ * @param {Map<string, string>} memo  canonical names already computed in this call
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
+function _scanResolvedTarget(base, resolved, secretsOnly, carved, memo) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -438,7 +450,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   // Each segment is checked as written (lowercased) and in canonical form; a
   // match in either floors.
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
-    _matchesProtectedSegments(names.map(canonicalName), start, secretsOnly)
+    _matchesProtectedSegments(names.map((name) => _canonicalNameIn(name, memo)), start, secretsOnly)
 }
 
 /**
@@ -518,10 +530,13 @@ function _matchesProtectedSegments(segments, start, secretsOnly) {
  * the full (write) floor passes `secretsOnly = false`.
  * @param {string} target  a path value from a tool input
  * @param {string} base    the resolution base (session cwd)
- * @param {boolean} [secretsOnly]  match only secret / credential files
+ * @param {boolean} secretsOnly  match only secret / credential files
+ * @param {{ realBase: string|undefined, walk: { left: number }, names: Map<string, string> }} call
+ *   state shared by one call's targets: the session cwd's real path once
+ *   resolved, the walk budget left, and the canonical names computed so far
  * @returns {boolean}
  */
-function isProtectedPathValue(target, base, secretsOnly = false, call = { realBase: undefined, walk: undefined }) {
+function isProtectedPathValue(target, base, secretsOnly, call) {
   // The work spent on one target is bounded before anything else runs.
   if (_exceedsTargetBounds(target)) return true
   // On POSIX `\` is a name character that both passes read as a separator, so
@@ -533,7 +548,7 @@ function isProtectedPathValue(target, base, secretsOnly = false, call = { realBa
   // escaping relative path begins with `..` or is absolute, never `.claude`.
   const lexicalRel = relative(base, resolvedLexical)
   const carved = _insideClaudeWorktree(base, lexicalRel, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved)) return true
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved, call.names)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -563,7 +578,7 @@ function isProtectedPathValue(target, base, secretsOnly = false, call = { realBa
     // resolved target gets the full scan rather than an offset meant for another
     // path.
     const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
-    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)) return true
+    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved, call.names)) return true
     // Under the full floor, an existing target with more than one hard link floors.
     return !secretsOnly && _hasOtherHardLinks(realTarget)
   } catch {
@@ -678,7 +693,7 @@ function _matchesFloor(input, cwd, secretsOnly) {
     bytes += Buffer.byteLength(target, 'utf8')
     if (bytes > FLOOR_MAX_CALL_BYTES) return true
   }
-  const call = { realBase: undefined, walk: { left: FLOOR_MAX_CALL_WALK } }
+  const call = { realBase: undefined, walk: { left: FLOOR_MAX_CALL_WALK }, names: new Map() }
   for (const target of targets) {
     if (isProtectedPathValue(target, base, secretsOnly, call)) return true
   }
