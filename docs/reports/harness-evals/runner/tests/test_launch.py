@@ -191,10 +191,23 @@ class Rig:
             self.write_home(f'.codex/prompts/{name}', text)
 
 
+QUIET = '{"total_count": 0, "workflow_runs": []}\n'
+
+
+def ci_runs_argv(rig, status):
+    return ['gh', 'api', '-X', 'GET', f'repos/{rig.trial.repo}/actions/workflows/ci.yml/runs',
+            '-f', f'status={status}', '-f', 'per_page=20']
+
+
+def ci_reply(*runs, total=None):
+    return json.dumps({'total_count': len(runs) if total is None else total,
+                       'workflow_runs': [{'id': i, 'head_branch': b} for i, b in runs]}) + '\n'
+
+
 def toolbox(rig, node='v22.11.0\n', login='blamechris\n', claude='2.1.308 (Claude Code)\n',
             launchctl='PID\tStatus\tLabel\n-\t0\tcom.apple.example\n', daemon=SHA_D + '\n',
             codex='codex-cli 0.163.0\n', codex_app='codex-cli 0.163.0\n', prompts=PROMPTS, compile_rc=0,
-            ci_runs='[]\n'):
+            ci_queued=QUIET, ci_running=QUIET):
     """A runner answering every external tool a preflight asks. A value of None leaves that tool unscripted (127)."""
     r = Runner()
     node_bin = rig.trial.local_path('node_bin', rig.box.home)
@@ -208,7 +221,10 @@ def toolbox(rig, node='v22.11.0\n', login='blamechris\n', claude='2.1.308 (Claud
         (daemon, lambda a: a[:3] == ['git', '-C', daemon_dir]),
         (codex, argv_starts('codex', '--version')),
         (codex_app, lambda a: a[0] == app and a[1:] == ['--version']),
-        (ci_runs, argv_starts('gh', 'api', '-X', 'GET', f'repos/{rig.trial.repo}/actions/runs')),
+        # Only the exact request is answered: a wrong workflow path, status or page size goes unscripted
+        # (127, UNVERIFIED), so the quiet-fleet tests fail on the request, not just on the reply.
+        (ci_queued, lambda a: a == ci_runs_argv(rig, 'queued')),
+        (ci_running, lambda a: a == ci_runs_argv(rig, 'in_progress')),
     ]
     for value, predicate in scripted:
         if value is not None:
@@ -866,21 +882,40 @@ class PreflightClaudeNative(LaunchCase):
         self.assertEqual((entry['phase'], entry['at'], entry['facts']['claude_version']), ('pre', '2026-11-02T12:00:00Z', '2.1.308'))
         self.assertEqual(entry['facts']['clone_dir'], '~/trial/t2/A-cd-r1')
 
-    def test_queued_or_running_ci_fails_the_quiet_fleet_check(self):
+    def test_running_ci_fails_the_quiet_fleet_check(self):
         # A freshly cut base's own push run, or another PR's, loads the runners the subject machine hosts.
-        busy = toolbox(self.rig, ci_runs='["40120273200 trial/t2-a-cd-r1"]\n')
+        busy = toolbox(self.rig, ci_running=ci_reply((40120273200, 'trial/t2-a-cd-r1')))
         code, out, st = self.pre('A-cd-r1', runner=busy)
         self.assertEqual(code, 1, out)
         self.assertStatus(statuses(st), 'CI fleet quiet', 'FAIL')
-        self.assertIn('40120273200 trial/t2-a-cd-r1', details(st)['CI fleet quiet'])
-        self.assertEqual(len(st['preflight'][-1]['facts']['ci_busy']), 2)  # queued and in_progress both answered
+        self.assertIn('40120273200 trial/t2-a-cd-r1 (in_progress)', details(st)['CI fleet quiet'])
+        self.assertEqual(st['preflight'][-1]['facts']['ci_busy'], ['40120273200 trial/t2-a-cd-r1 (in_progress)'])
+
+    def test_queued_ci_fails_the_quiet_fleet_check(self):
+        busy = toolbox(self.rig, ci_queued=ci_reply((41, 'feat/x')))
+        code, out, st = self.pre('A-cd-r1', runner=busy)
+        self.assertEqual(code, 1, out)
+        self.assertIn('41 feat/x (queued)', details(st)['CI fleet quiet'])
+
+    def test_more_runs_than_one_page_are_counted_from_total_count(self):
+        busy = toolbox(self.rig, ci_running=ci_reply((1, 'a'), total=57))
+        code, out, st = self.pre('A-cd-r1', runner=busy)
+        self.assertEqual(code, 1, out)
+        self.assertIn('… 56 more in_progress', details(st)['CI fleet quiet'])
 
     def test_an_unreadable_runs_listing_leaves_the_quiet_fleet_check_unverified(self):
-        for reply in (None, 'not json\n', '{"a": 1}\n'):
+        for reply in (None, 'not json\n', '{"a": 1}\n', '{"total_count": "3"}\n', '[]\n'):
             with self.subTest(reply):
-                code, out, st = self.pre('A-cd-r1', runner=toolbox(self.rig, ci_runs=reply))
+                code, out, st = self.pre('A-cd-r1', runner=toolbox(self.rig, ci_queued=reply))
                 self.assertEqual(code, 2, out)
                 self.assertStatus(statuses(st), 'CI fleet quiet', 'UNVERIFIED')
+
+    def test_queued_runs_seen_before_an_unreadable_second_listing_are_a_fail(self):
+        runner = toolbox(self.rig, ci_queued=ci_reply((41, 'feat/x')), ci_running=None)
+        code, out, st = self.pre('A-cd-r1', runner=runner)
+        self.assertEqual(code, 1, out)
+        self.assertIn('41 feat/x (queued)', details(st)['CI fleet quiet'])
+        self.assertIn('cannot list in_progress', details(st)['CI fleet quiet'])
 
     def test_each_run_adds_a_preflight_entry(self):
         self.pre('A-cd-r1')
