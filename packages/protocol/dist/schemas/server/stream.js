@@ -595,9 +595,19 @@ export const ServerPermissionModeChangedSchema = z.object({
 // `sessionId` is optional for the same reason as ServerPermissionRequestSchema:
 // the multi-session broadcaster stamps it (`_broadcastToSession`), and
 // single-session mode has none.
+//
+// #8700: `effective` is the level the provider REPORTS it applied, as opposed
+// to `level`, which is the level the operator asked for (`default` = let the
+// provider decide). Present only from a provider that declares the
+// `thinkingLevelEffective` capability (claude-sdk: Claude Code's
+// `get_settings` → `applied.effort`); `null` there means "not reported yet" —
+// before the first turn starts, after a model change, or on a CLI that cannot
+// answer. Absent means the provider has no such report, which is not the same
+// thing as unknown. Open string for the same reason as `level`.
 export const ServerThinkingLevelChangedSchema = z.object({
     type: z.literal('thinking_level_changed'),
     level: z.string(),
+    effective: z.string().nullable().optional(),
     sessionId: z.string().optional(),
 });
 export const ServerPermissionRequestSchema = z.object({

@@ -118,6 +118,36 @@ Pick by billing surface and required features:
 - **`claude-tui`** — drives the interactive `claude` TUI under a PTY and bills against the subscription's interactive allowance. It was the default from #5819 until #8266, as a hedge against the credit pool that never shipped. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 - **`claude-cli`** — same plan-mode support as the SDK (#8153) and the same billing, but without in-process permissions (HTTP hook instead), no thinking-level control, and a live model switch that requires a process restart — see the feature table above. A `claude -p` subprocess per session instead of in-process. Pick this if the SDK itself is unavailable.
 
+### Effort on `claude-sdk` (#8700)
+
+The header's thinking level on a `claude-sdk` session is Claude Code's **effort**
+(`/effort`). The picker offers what the model offers: the levels come from the
+Agent SDK's `supportedModels()` answer (`supportedEffortLevels`, already narrowed
+per model by Claude Code, so Max is absent where the model has no `max`), with
+**Auto** first. Auto sends no effort, so Claude Code applies the user's own
+setting for that model (`modelSettings.<model>.effortLevel` in
+`~/.claude/settings.json`, else the model's default). Any other level is sent on
+every turn as the SDK's `effort` option (`--effort <level>`). A model that
+predates effort (one whose row the SDK reports without effort support) still
+gets the old `maxThinkingTokens` budget for High and Max instead.
+
+What Claude Code actually applied is read back at the start of every turn
+(`get_settings` → `applied.effort`) and shown beside the picker as
+**Effective: …**, or **unknown** before the first turn starts, right after a
+model or level change, or on a CLI that cannot answer. A level the newly chosen
+model does not offer goes back to Auto when the model changes. The daemon logs
+each change in one format, under the Chroxy session id:
+
+```
+Thinking level change from <client> on session <id>: default → high (model=claude-opus-5-5 requested=high effective=unknown)
+Thinking level on session <id>: model=claude-opus-5-5 requested=high effective=high — reported by Claude Code when the turn started
+```
+
+The first line is written when a client sets the level; the second when the
+session changes or learns it (a model change, or the report at turn start).
+Before the first send only the requested level can be known: set an explicit
+level in the header if the run must not depend on the user's saved one.
+
 ### Reasoning on `claude-tui` and `claude-cli` (#7393)
 
 Both providers show the model's reasoning as a collapsed "Thinking…" /

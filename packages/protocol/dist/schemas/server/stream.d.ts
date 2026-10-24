@@ -316,6 +316,7 @@ export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
 export declare const ServerThinkingLevelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"thinking_level_changed">;
     level: z.ZodString;
+    effective: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerPermissionRequestSchema: z.ZodObject<{

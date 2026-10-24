@@ -67,6 +67,10 @@ export interface AppHeaderProps {
   // #7730: forwarded straight through — the levels the ACTIVE MODEL offers.
   thinkingLevels: ComponentProps<typeof ChatSettingsDropdown>['thinkingLevels']
   onThinkingLevelChange: (level: string) => void
+  // #8700: the provider's applied-level report (capability + the session's
+  // last reported value), forwarded to the read-only readout beside the picker.
+  thinkingLevelEffective?: ComponentProps<typeof ChatSettingsDropdown>['thinkingLevelEffective']
+  effectiveThinkingLevel?: ComponentProps<typeof ChatSettingsDropdown>['effectiveThinkingLevel']
   // NotificationsWidget
   sessionNotifications: ComponentProps<typeof NotificationsWidget>['notifications']
   onSwitchSession: ComponentProps<typeof NotificationsWidget>['onSwitchSession']
@@ -252,6 +256,8 @@ export function AppHeader(props: AppHeaderProps) {
           // <select> can emit any offered level, and asserting otherwise
           // type-checked while being false for every codex session.
           onThinkingLevelChange={level => props.onThinkingLevelChange(level)}
+          thinkingLevelEffective={props.thinkingLevelEffective}
+          effectiveThinkingLevel={props.effectiveThinkingLevel}
         />
       </div>
       <div className="header-right">

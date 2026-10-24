@@ -6,7 +6,7 @@ import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } f
 import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 // #6901: single-source the Codex sandbox label/description for the read-only
 // active-sandbox badge (same list the create-time selector uses).
-import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode } from '@chroxy/protocol';
+import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode, LEGACY_DEFAULT_THINKING_LEVEL, formatThinkingLevelLabel, isThinkingLevelMismatch } from '@chroxy/protocol';
 import type { ModelInfo, ContextOccupancy, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -134,9 +134,78 @@ export interface SettingsBarProps {
   // once at thread start, so changing it needs a new session. `null`/`undefined`
   // (every non-codex session) renders nothing.
   codexSandbox?: CodexSandboxMode | null;
+  // #8700 — read-only "Effort" readout. The app has no thinking-level control;
+  // for a provider that REPORTS the level it applied (capabilities
+  // `thinkingLevel` AND `thinkingLevelEffective` — the claude-sdk family) the
+  // expanded bar shows what Claude Code actually ran at, so an effort the
+  // operator picked on another client that Claude Code did not apply is
+  // visible instead of silent. Default `false` (the opposite of the gating
+  // flags above): an older daemon omits the capability, and the readout must
+  // then stay hidden rather than claim an "unknown" nothing will resolve.
+  thinkingLevelEffectiveSupported?: boolean;
+  // The level the operator ASKED for (`default` = Auto, no particular level).
+  thinkingLevel?: string | null;
+  // The level the provider REPORTS it applied. `null` / `undefined` = not
+  // reported yet (before the first turn starts, right after a model change, or
+  // the CLI could not answer) and reads as "unknown".
+  effectiveThinkingLevel?: string | null;
 }
 
 // -- Helpers --
+
+/**
+ * #8700 — does this provider earn the "Effort" readout? Strictly `=== true` on
+ * BOTH capabilities (not the `!== false` convention the switch flags use): only
+ * a provider that REPORTS the level it applied can say what it applied, and an
+ * older daemon omits the capability — it must then render nothing rather than an
+ * "unknown" that will never resolve. `thinkingLevel` is required too, because the
+ * readout is the effective value of that setting and means nothing without it.
+ */
+export function providerReportsEffort(
+  caps: { thinkingLevel?: boolean; thinkingLevelEffective?: boolean } | null | undefined,
+): boolean {
+  return caps?.thinkingLevel === true && caps?.thinkingLevelEffective === true;
+}
+
+/**
+ * #8700 — what the "Effort" readout says. Exported for unit-testing.
+ *
+ * Three states, none of them silent:
+ *   - applied level known, and the operator asked for Auto or for that level
+ *     → `Effort: Medium`
+ *   - not reported (`null` / `undefined`) → `Effort: unknown`, with a hint
+ *     saying when the report arrives (a phone has no hover tooltip, so the
+ *     explanation is rendered, not titled)
+ *   - applied level known but different from an EXPLICIT request →
+ *     `Effort: Medium (requested High)`, flagged `mismatch` for the warning
+ *     style. Colour is never the only signal: the words carry it too.
+ *
+ * `default` (Auto) names no particular level, so any applied level satisfies
+ * it and is not a mismatch.
+ */
+export function describeEffort(
+  requested: string | null | undefined,
+  effective: string | null | undefined,
+): { text: string; hint: string | null; mismatch: boolean } {
+  if (typeof effective !== 'string' || effective.length === 0) {
+    return {
+      text: 'Effort: unknown',
+      hint: 'Claude Code reports the applied effort once a turn starts.',
+      mismatch: false,
+    };
+  }
+  const asked = requested && requested.length > 0 ? requested : LEGACY_DEFAULT_THINKING_LEVEL;
+  const applied = formatThinkingLevelLabel(effective);
+  if (isThinkingLevelMismatch(requested, effective)) {
+    const wanted = formatThinkingLevelLabel(asked);
+    return {
+      text: `Effort: ${applied} (requested ${wanted})`,
+      hint: `Requested ${wanted}; Claude Code applied ${applied}.`,
+      mismatch: true,
+    };
+  }
+  return { text: `Effort: ${applied}`, hint: null, mismatch: false };
+}
 
 /**
  * #4764 — humanise an intervention's discriminator into a one-line
@@ -253,6 +322,9 @@ export function SettingsBar({
   modelSwitchSupported = true,
   permissionModeSwitchSupported = true,
   codexSandbox = null,
+  thinkingLevelEffectiveSupported = false,
+  thinkingLevel,
+  effectiveThinkingLevel,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -628,6 +700,32 @@ export function SettingsBar({
                   >
                     {hint}
                   </Text>
+                );
+              })()}
+              {/* #8700: read-only effort readout — what the provider REPORTS it
+                  applied, beside nothing to change (the app has no thinking-level
+                  control). Gated on the capability, so a provider that makes no
+                  such report never shows an "unknown" it could not resolve. */}
+              {thinkingLevelEffectiveSupported && (() => {
+                const effort = describeEffort(thinkingLevel, effectiveThinkingLevel);
+                return (
+                  <>
+                    <View style={styles.chipRow}>
+                      <View
+                        style={[styles.chip, styles.chipReadOnly, effort.mismatch && styles.chipWarning]}
+                        accessibilityRole="text"
+                        accessibilityLabel={effort.hint ? `${effort.text}. ${effort.hint}` : effort.text}
+                        testID="settings-effective-effort"
+                      >
+                        <Text style={[styles.chipReadOnlyText, effort.mismatch && styles.chipWarningText]}>{effort.text}</Text>
+                      </View>
+                    </View>
+                    {effort.hint && !effort.mismatch && (
+                      <Text style={styles.permissionModeHint} testID="settings-effective-effort-hint">
+                        {effort.hint}
+                      </Text>
+                    )}
+                  </>
                 );
               })()}
               {/* #6901: read-only Codex sandbox badge. session_list carries
@@ -1122,6 +1220,18 @@ const styles = StyleSheet.create({
     color: COLORS.textDim,
     fontSize: 11,
     fontWeight: '500',
+  },
+  // #8700: the effort readout when the applied level differs from an explicit
+  // request. Warning tokens, and full opacity (the read-only chip dims to 0.7,
+  // which would mute the very state this flags). The text carries the same
+  // information, so colour is never the only signal.
+  chipWarning: {
+    backgroundColor: COLORS.accentOrangeSubtle,
+    borderColor: COLORS.accentOrangeBorder,
+    opacity: 1,
+  },
+  chipWarningText: {
+    color: COLORS.accentOrange,
   },
   contextRow: {
     flexDirection: 'row',

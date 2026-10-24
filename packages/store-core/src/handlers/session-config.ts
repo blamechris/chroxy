@@ -186,9 +186,16 @@ export type ThinkingLevel = string
  * a different thing from "the server named a level this client has not heard
  * of" — the latter is now kept verbatim.
  */
-export function handleThinkingLevelChanged(msg: Record<string, unknown>): { level: ThinkingLevel } {
+export function handleThinkingLevelChanged(msg: Record<string, unknown>): { level: ThinkingLevel; effective?: ThinkingLevel | null } {
   const raw = parseStringField(msg, 'level')
-  return { level: isWellFormedThinkingLevel(raw) ? raw : LEGACY_DEFAULT_THINKING_LEVEL }
+  const level = isWellFormedThinkingLevel(raw) ? raw : LEGACY_DEFAULT_THINKING_LEVEL
+  // #8700 — `effective` is what the provider reports it applied. ABSENT means
+  // the provider makes no such report, so the key stays absent and the client
+  // shows nothing; PRESENT but unusable (null, malformed) is "not reported yet",
+  // which a client shows as unknown. Same syntactic bound as `level`.
+  if (!Object.prototype.hasOwnProperty.call(msg, 'effective')) return { level }
+  const effective = parseStringField(msg, 'effective')
+  return { level, effective: isWellFormedThinkingLevel(effective) ? effective : null }
 }
 
 /**
@@ -207,8 +214,11 @@ export function handleThinkingLevelChangedPatch(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): SessionPatch {
+  const { level, effective } = handleThinkingLevelChanged(msg)
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
-    patch: { thinkingLevel: handleThinkingLevelChanged(msg).level },
+    // #8700: `effectiveThinkingLevel` only when the message carries the field,
+    // so a provider without the report never overwrites what another frame set.
+    patch: effective === undefined ? { thinkingLevel: level } : { thinkingLevel: level, effectiveThinkingLevel: effective },
   }
 }

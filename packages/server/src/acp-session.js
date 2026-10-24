@@ -238,6 +238,7 @@ export function createAcpSessionClass(rawEntry) {
         // #7725: the spawned ACP agent chooses its own reasoning behaviour and
         // Chroxy never scans the prompt for the Claude magic keywords.
         thinkingKeywords: false,
+        thinkingLevelEffective: false, // #8700: no report of the applied level
         streaming: true,
         // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
         // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,

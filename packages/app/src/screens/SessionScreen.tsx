@@ -38,7 +38,7 @@ import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
 import type { SelectOptionValue } from '../components/chat/MessageBubble';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
-import { SettingsBar } from '../components/SettingsBar';
+import { SettingsBar, providerReportsEffort } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
 import { InputBar, type InputBarHandle } from '../components/InputBar';
 import { ActivityIndicator } from '../components/ActivityIndicator';
@@ -321,6 +321,18 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id ? s.sessions.find((sess) => sess.sessionId === id)?.codexSandbox ?? null : null;
   });
+  // #8700 — the operator's requested thinking level and the level the provider
+  // REPORTS it applied, for the SettingsBar effort readout. `effective` is
+  // `null` (not reported yet) or absent (this provider makes no report) → the
+  // readout says "unknown" only when the capability gate below lets it render.
+  const activeThinkingLevel = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].thinkingLevel : null;
+  });
+  const activeEffectiveThinkingLevel = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].effectiveThinkingLevel ?? null : null;
+  });
   // #5731 — gate the SettingsBar model/permission chips on the active provider's
   // capabilities, mirroring the dashboard's dropdownFlags. Default to supported
   // (true) unless the provider explicitly reports the capability as false, so a
@@ -332,6 +344,9 @@ export function SessionScreen() {
     return {
       modelSwitchSupported: caps?.modelSwitch !== false,
       permissionModeSwitchSupported: caps?.permissionModeSwitch !== false,
+      // #8700 — strict, unlike the `!== false` flags above: only a provider that
+      // REPORTS the level it applied earns the effort readout.
+      thinkingLevelEffectiveSupported: providerReportsEffort(caps),
     };
   }, [availableProviders, activeSessionProvider]);
   // #5795 — provider capability lives in @chroxy/store-core (single source of
@@ -1588,6 +1603,9 @@ export function SessionScreen() {
           modelSwitchSupported={providerCaps.modelSwitchSupported}
           permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
           codexSandbox={activeSessionCodexSandbox}
+          thinkingLevelEffectiveSupported={providerCaps.thinkingLevelEffectiveSupported}
+          thinkingLevel={activeThinkingLevel}
+          effectiveThinkingLevel={activeEffectiveThinkingLevel}
         />
       )}
 

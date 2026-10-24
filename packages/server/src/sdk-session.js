@@ -6,7 +6,8 @@ import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-bi
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-sdk-version.js'
 import { CLAUDE_SDK_CUSTOMIZATION } from './provider-customization.js'
-import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
+import { updateModels, saveModelsCache, updateContextWindow, getModels, getRosterModelRow, ALLOWED_MODEL_IDS } from './models.js'
+import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
@@ -283,6 +284,12 @@ export class SdkSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: true,
+      // #8700: true where `thinking_level_changed` carries `effective`, the
+      // level the provider REPORTS it applied. SdkSession reads it from Claude
+      // Code (`get_settings` → `applied.effort`) at the start of every turn; a
+      // client shows it beside the picker, or "unknown" while it is null.
+      // Every other provider declares false: no report, so no readout.
+      thinkingLevelEffective: true,
       // #7725: true ONLY where the SERVER escalates on the magic keywords
       // ("think" / "think hard" / "ultrathink" …). SdkSession is the sole
       // importer of detect-thinking-keyword.js — it maps a detected keyword to
@@ -562,7 +569,12 @@ export class SdkSession extends BaseSession {
     return claudeModelMetadata(modelId)
   }
 
-  /** Token budgets for thinking levels. null = adaptive (SDK default). */
+  /**
+   * Token budgets for the legacy levels, for the models that predate Claude
+   * Code's effort setting and read only `maxThinkingTokens` (#8700: adaptive
+   * models ignore a budget, so a level goes to them as `effort` instead — see
+   * `_thinkingOptions`). null = adaptive (SDK default).
+   */
   static THINKING_BUDGETS = { default: null, high: 32000, max: 128000 }
 
   /** Error patterns mapped to user-friendly messages. */
@@ -618,6 +630,26 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
+  /**
+   * #8700 — the effort Claude Code reported it applied (`get_settings` →
+   * `applied.effort`), read at the start of each turn. null until it reports,
+   * and reset to null by a model or level change the running turn has not
+   * reported on yet. Put on the wire by `buildThinkingLevelChanged`.
+   */
+  get effectiveThinkingLevel() { return this._effectiveEffort }
+
+  /**
+   * #8700 — the one-line `model= requested= effective=` summary an operator
+   * reads in the daemon log before a send. Both log sites (the
+   * `set_thinking_level` handler and session-manager, for a change the session
+   * made itself) print this, so the line has one format.
+   */
+  describeThinkingLevel() {
+    const model = this._effectiveModel || this.model || this.bootedModel || 'default'
+    const requested = this._thinkingLevel || LEGACY_DEFAULT_THINKING_LEVEL
+    return `model=${model} requested=${requested} effective=${this._effectiveEffort || 'unknown'}`
+  }
+
   constructor(opts = {}) {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-sdk' }))
     // SdkSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
@@ -648,6 +680,20 @@ export class SdkSession extends BaseSession {
     this._log = null
     this._query = null
     this._thinkingLevel = null
+    // #8700: what Claude Code last reported it applied (see
+    // `effectiveThinkingLevel`), the model it reported with it, the last
+    // report announced (so an unchanged report each turn stays quiet), and an
+    // epoch `_forgetEffortReport` bumps so a report still in flight across a
+    // model or level change is dropped.
+    this._effectiveEffort = null
+    this._effectiveModel = null
+    this._lastEffortReport = null
+    this._effortEpoch = 0
+    // #8700: the SDK's own per-model effort answer from `supportedModels()`,
+    // keyed by the row's `value` and its `resolvedModel`: the levels the model
+    // offers, or an empty array for a model with no effort support (one that
+    // still reads `maxThinkingTokens`). Absent = this session has not heard.
+    this._modelEffortLevels = new Map()
 
     // #6766: last SDK transcript message UUID seen this session. Captured from
     // each full `assistant` message in the query loop and used as the fork
@@ -1053,11 +1099,9 @@ export class SdkSession extends BaseSession {
       options.model = this.model
     }
 
-    // Apply thinking level if set
-    if (this._thinkingLevel) {
-      const budget = SdkSession.THINKING_BUDGETS[this._thinkingLevel]
-      if (budget != null) options.maxThinkingTokens = budget
-    }
+    // Apply thinking level if set — as Claude Code's effort, or as the legacy
+    // budget for a model that predates effort (#8700, `_thinkingOptions`).
+    Object.assign(options, this._thinkingOptions())
 
     // #4306 — magic thinking-keyword escalation. The native Claude Code CLI's
     // interactive REPL scans the user's prompt for keywords (`think`,
@@ -1711,6 +1755,8 @@ export class SdkSession extends BaseSession {
               }
               // Fetch dynamic model list from SDK (non-blocking)
               this._fetchSupportedModels()
+              // #8700: and the effort this turn actually runs at (non-blocking)
+              this._readEffectiveEffort()
             } else if (msg.subtype === 'task_started') {
               // #5269: a Task subagent started. The SDK message carries BOTH
               // the subagent's `task_id` (needed by query.stopTask) and the
@@ -2942,6 +2988,22 @@ export class SdkSession extends BaseSession {
   _onModelChanged() {
     // #4828: session-scoped when init has fired.
     ;(this._log || log).info(`Model changed to ${this.model || 'default'}`)
+    // #8700: the level was chosen against the PREVIOUS model's roster. One the
+    // new model does not offer would reach `--effort` anyway and be silently
+    // downgraded (or, for a budget level, ignored), so it goes back to the
+    // model default, announced rather than kept on a header it no longer
+    // describes. Whatever was reported belonged to the old model too: with no
+    // level of our own, Claude Code applies the effort saved for the NEW model
+    // (`modelSettings.<model>.effortLevel`), so it is unknown until the next
+    // turn reports it.
+    let reason = 'the model changed; the effort is reported when the next turn starts'
+    const dropped = this._thinkingLevel
+    if (dropped && !this._offeredThinkingLevels().includes(dropped)) {
+      this._thinkingLevel = null
+      reason = `the model changed and ${this.model || 'the default model'} does not offer ${dropped}, so the session is back on the model default`
+    }
+    this._forgetEffortReport()
+    this.emit('thinking_level_changed', { reason })
   }
 
   _onPermissionModeChanged(mode) {
@@ -3010,29 +3072,179 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * Set thinking level by adjusting max thinking tokens.
-   * A key of `SdkSession.THINKING_BUDGETS` — the Claude budget table. An
-   * unknown key resolves to a null budget (adaptive), so this method never
-   * rejects: the per-model membership decision belongs to the
-   * `set_thinking_level` handler, which knows the session's model (#7730).
+   * Set the session's thinking level: Claude Code's effort for a model that
+   * has one, the legacy `maxThinkingTokens` budget for one that predates it
+   * (#8700, `_thinkingOptions`). Never rejects: the per-model membership
+   * decision belongs to the `set_thinking_level` handler, which knows the
+   * session's model (#7730).
+   *
+   * Between turns the level simply rides on the next turn's `query()`
+   * options, and the last report is dropped: it described a turn that ran at
+   * the old level. Mid-turn the running process is asked to switch (the flag
+   * settings layer for an effort, `setMaxThinkingTokens` for a budget) and then
+   * asked what it now applies, so the reported level is the CLI's answer, not
+   * this method's hope — `max` cannot be set that way (Claude Code's settings
+   * do not take it) and reaches the CLI at the next turn.
    * @param {string} level
    */
   async setThinkingLevel(level) {
-    const budget = SdkSession.THINKING_BUDGETS[level] ?? null
-    this._thinkingLevel = level === 'default' ? null : level
-
-    if (this._query && typeof this._query.setMaxThinkingTokens === 'function') {
-      try {
-        await this._query.setMaxThinkingTokens(budget)
-        // #4828: session-scoped (setThinkingLevel only takes effect with
-        // an active query — strictly post-init).
-        ;(this._log || log).info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
-      } catch (err) {
-        ;(this._log || log).warn(`Failed to set thinking level: ${err.message}`)
-      }
+    this._thinkingLevel = level === LEGACY_DEFAULT_THINKING_LEVEL ? null : level
+    // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
+    const query = this._query
+    if (!query) {
+      this._forgetEffortReport()
+      return
     }
 
-    // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
+    const opts = this._thinkingOptions()
+    try {
+      if (opts.effort !== undefined || !this._thinkingLevel) {
+        if (this._thinkingLevel !== 'max' && typeof query.applyFlagSettings === 'function') {
+          await query.applyFlagSettings({ effortLevel: this._thinkingLevel })
+          await this._readEffectiveEffort('after a mid-turn change')
+        }
+      }
+      if (opts.effort === undefined && typeof query.setMaxThinkingTokens === 'function') {
+        await query.setMaxThinkingTokens(opts.maxThinkingTokens ?? null)
+      }
+    } catch (err) {
+      ;(this._log || log).warn(`Failed to apply thinking level ${level} to the running turn: ${err.message}`)
+    }
+  }
+
+  /**
+   * #8700 — the levels the session's current model offers, by the SAME
+   * resolution the `set_thinking_level` gate and the dashboard picker use (the
+   * model's roster row, else the legacy triple: SdkSession is Claude-family),
+   * so a model switch keeps exactly the levels the gate would accept.
+   * @returns {string[]}
+   */
+  _offeredThinkingLevels() {
+    const modelId = this.model || this.bootedModel
+    let row = null
+    try {
+      row = modelId ? getRosterModelRow(this._provider, modelId) : null
+    } catch (err) {
+      ;(this._log || log).warn(`Thinking-level roster lookup failed for model '${modelId}': ${err?.message || err}`)
+    }
+    return resolveThinkingLevels(row, { legacyFallback: true }).levels
+  }
+
+  /**
+   * #8700 — does `modelId` take Claude Code's effort, a token budget, or is
+   * that not known yet? The SDK's own `supportedModels()` answer for this
+   * session comes first; failing that, a roster row that advertises levels
+   * (stamped from that same answer by any session, and kept across restarts
+   * in the models cache) means effort.
+   * @returns {'effort'|'budget'|'unknown'}
+   */
+  _effortSupportFor(modelId) {
+    const levels = this._modelEffortLevels.get(modelId || LEGACY_DEFAULT_THINKING_LEVEL)
+    if (levels) return levels.length > 0 ? 'effort' : 'budget'
+    let row = null
+    try {
+      row = modelId ? getRosterModelRow(this._provider, modelId) : null
+    } catch {
+      row = null
+    }
+    return Array.isArray(row?.reasoningLevels) && row.reasoningLevels.length > 0 ? 'effort' : 'unknown'
+  }
+
+  /**
+   * #8700 — the per-turn `query()` options for the session's level.
+   *
+   * An adaptive model (every current one) ignores `maxThinkingTokens`, which
+   * is all a level used to set, so High and Max did nothing and a session ran
+   * at Claude Code's default effort whatever the header said. A level now goes
+   * to such a model as `effort` (the CLI's `--effort`). A model that predates
+   * effort still reads the budget, and gets it alone. When neither is known
+   * yet (no model list heard and no roster row that says), the level is sent
+   * as an effort — the CLI drops `--effort` on a model without it — and a
+   * legacy level's budget rides along exactly as it did before #8700, for the
+   * pre-adaptive model that reads only that. No level (`default`) sends
+   * neither, so Claude Code applies the user's own setting for the model.
+   * @returns {{effort?: string, maxThinkingTokens?: number}}
+   */
+  _thinkingOptions() {
+    const level = this._thinkingLevel
+    if (!level) return {}
+    const budget = SdkSession.THINKING_BUDGETS[level] ?? null
+    const support = this._effortSupportFor(this.model || this.bootedModel)
+    if (support === 'budget') return budget != null ? { maxThinkingTokens: budget } : {}
+    if (support === 'effort' || budget == null) return { effort: level }
+    return { effort: level, maxThinkingTokens: budget }
+  }
+
+  /** #8700: drop the last effort report — it described a model or level the session has left. */
+  _forgetEffortReport() {
+    this._effortEpoch += 1
+    this._effectiveEffort = null
+    this._effectiveModel = null
+    this._lastEffortReport = null
+  }
+
+  /**
+   * #8700 — ask the running turn's Claude Code what it applies
+   * (`get_settings` → `applied: { model, effort }`) and announce it when it
+   * changed. `query.getSettings()` is in the Agent SDK's runtime, not its
+   * typings; a CLI or SDK without it, or a failed request, leaves the level
+   * unknown and says so once. `applied.effort: null` (a model without effort,
+   * or an environment override that turns it off) is shown as unknown and is
+   * NOT read as "this model takes a budget": which parameter a model reads is
+   * the `supportedModels()` answer's call alone (`_effortSupportFor`).
+   * @param {string} [when] - for the log line
+   */
+  async _readEffectiveEffort(when = 'when the turn started') {
+    const query = this._query
+    const turnSeq = this._turnSeq
+    const epoch = this._effortEpoch
+    let applied = null
+    let reason
+    if (!query || typeof query.getSettings !== 'function') {
+      reason = 'this Claude Code cannot report the effort it applies'
+    } else {
+      try {
+        applied = (await query.getSettings())?.applied ?? null
+        reason = applied ? `reported by Claude Code ${when}` : 'Claude Code did not report the effort it applies'
+      } catch (err) {
+        reason = `Claude Code could not report the effort it applies (${err?.message || err})`
+      }
+    }
+    // A report that lands after the session went away, after a newer turn
+    // started (which makes its own), or after a model or level change
+    // (`_forgetEffortReport`) is not this session's current answer. One that
+    // lands after its own turn ended, with nothing changed since, still is.
+    if (this._destroying || this._turnSeq !== turnSeq || this._effortEpoch !== epoch) return
+    const effort = isWellFormedThinkingLevel(applied?.effort) ? applied.effort : null
+    const model = typeof applied?.model === 'string' && applied.model.length > 0 ? applied.model : null
+    if (applied && applied.effort === null) {
+      reason = `Claude Code reports no effort level for ${model || 'this model'}`
+    }
+    this._effectiveEffort = effort
+    this._effectiveModel = model
+    const report = `${model}|${effort}|${applied ? 'reported' : reason}`
+    if (report === this._lastEffortReport) return
+    this._lastEffortReport = report
+    this.emit('thinking_level_changed', { reason })
+  }
+
+  /**
+   * #8700 — the SDK's per-model effort answer (`supportsEffort` +
+   * `supportedEffortLevels`, which the CLI already narrows per model) as the
+   * registry's `reasoningLevels` roster, the same translation
+   * codex-model-catalog.js does for `supportedReasoningEfforts`. The model
+   * default leads the list so the picker's first option is "Auto" — no effort
+   * of our own, the user's saved one applies. null for a model without effort,
+   * which keeps the legacy roster.
+   * @param {object} modelInfo - one `supportedModels()` row
+   * @returns {{reasoningLevels: string[], defaultReasoningLevel: string} | null}
+   */
+  static effortRoster(modelInfo) {
+    if (modelInfo?.supportsEffort !== true || !Array.isArray(modelInfo.supportedEffortLevels)) return null
+    const levels = [...new Set(modelInfo.supportedEffortLevels.filter(isWellFormedThinkingLevel))]
+      .filter((l) => l !== LEGACY_DEFAULT_THINKING_LEVEL)
+    if (levels.length === 0) return null
+    return { reasoningLevels: [LEGACY_DEFAULT_THINKING_LEVEL, ...levels], defaultReasoningLevel: LEGACY_DEFAULT_THINKING_LEVEL }
   }
 
   /**
@@ -3055,7 +3267,25 @@ export class SdkSession extends BaseSession {
 
     try {
       const sdkModels = await this._query.supportedModels()
-      const converted = updateModels(sdkModels)
+      // #8700: each row's effort roster rides into the registry as its
+      // `reasoningLevels`, which the picker and the `set_thinking_level` gate
+      // both read, and this session remembers the answer per model for
+      // `_thinkingOptions`. A row without effort means "no effort" only from a
+      // CLI that reports effort for some model; one that reports it for none
+      // predates the field, and its silence says nothing.
+      const reportsEffort = Array.isArray(sdkModels) && sdkModels.some((m) => m?.supportsEffort === true)
+      const withEffort = Array.isArray(sdkModels)
+        ? sdkModels.map((m) => {
+          const roster = SdkSession.effortRoster(m)
+          if (roster || reportsEffort) {
+            for (const key of [m?.value, m?.resolvedModel]) {
+              if (typeof key === 'string' && key.length > 0) this._modelEffortLevels.set(key, roster ? roster.reasoningLevels.slice(1) : [])
+            }
+          }
+          return roster ? { ...m, ...roster } : m
+        })
+        : sdkModels
+      const converted = updateModels(withEffort)
       if (converted && converted.length > 0) {
         // #4828: session-scoped (called from init handler so _log is set).
         ;(this._log || log).info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)

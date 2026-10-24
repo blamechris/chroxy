@@ -192,6 +192,14 @@ export interface ProviderCapabilities {
   // which providers have a fallback would be the provider-name list #7730
   // removed.
   thinkingLevelLegacyFallback?: boolean;
+  // #8700: true only when the provider REPORTS the level it actually applied
+  // (claude-sdk family: Claude Code's `applied.effort`), delivered as
+  // `effective` on `thinking_level_changed`. The header uses it to show an
+  // "Effective: <level>" readout beside the picker, so a level the operator
+  // asked for that Claude Code did not apply is visible rather than silent.
+  // Absent / false means the provider makes no such report and the readout
+  // stays hidden — an old daemon is never shown an "unknown" it cannot resolve.
+  thinkingLevelEffective?: boolean;
   // True if the provider supports session-scoped permission rules
   // (i.e. the "Allow for Session" affordance). Derived server-side from
   // method existence — only providers whose session class implements
@@ -757,6 +765,13 @@ export interface SessionState extends BaseSessionState {
   // Files tab: selected file path (persists across tab switches)
   selectedFilePath: string | null;
   thinkingLevel: ThinkingLevel;
+  // #8700: the level the provider REPORTS it applied, as opposed to
+  // `thinkingLevel` above (what the operator asked for). Written by the shared
+  // `handleThinkingLevelChangedPatch` only when `thinking_level_changed`
+  // carries `effective`. `null` = not reported yet (before the first turn,
+  // right after a model change, or the CLI could not answer) and renders as
+  // "unknown"; `undefined` = this provider makes no such report.
+  effectiveThinkingLevel?: ThinkingLevel | null;
   // Per-session auto-approval rules (mirrors server-side sessionRules, updated
   // via permission_rules_updated). Used by the "Allow for Session" flow to
   // append new rules without losing existing ones. Optional: undefined until

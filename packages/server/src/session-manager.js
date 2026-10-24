@@ -4697,7 +4697,7 @@ export class SessionManager extends EventEmitter {
     // store-core follow-up (#5937). Until then a client that reconnects
     // mid-queue won't see the pre-existing queued items — acceptable for the
     // foundation slice, tracked in #5937.
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared']
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed']
     const declaredCustomEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     // #8574: a name that is already PROXIED has its listener (above); a second
     // transient one would forward every frame to the client twice. Every
@@ -4715,6 +4715,16 @@ export class SessionManager extends EventEmitter {
         // #8348: journal the prompt's lifecycle BEFORE it is announced, so a
         // client that sees it end can always find the durable record. The
         // frames themselves stay transient; only the outcome is kept.
+        // #8700: a level the SESSION changed or learned (a model switch, the
+        // effort Claude Code reported at turn start) is logged here, under the
+        // Chroxy session id an operator greps for, in the same summary format
+        // the `set_thinking_level` handler prints.
+        if (event === 'thinking_level_changed') {
+          const described = typeof session.describeThinkingLevel === 'function'
+            ? session.describeThinkingLevel()
+            : `requested=${session.thinkingLevel || 'default'}`
+          sessionLog.info(`Thinking level on session ${sessionId}: ${described}${data?.reason ? ` — ${data.reason}` : ''}`)
+        }
         if (event === 'permission_request') {
           this.notePermissionRequest(sessionId, data)
         } else if (event === 'permission_resolved' || event === 'permission_expired') {

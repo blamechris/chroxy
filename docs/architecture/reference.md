@@ -211,7 +211,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `set_permission_rules` | Set session-scoped auto-allow/deny rules for eligible tools |
-| `set_thinking_level` | Change thinking level (default, high, max) |
+| `set_thinking_level` | Change thinking level: one of the levels the active model's roster row offers, else the Claude fallback `default`/`high`/`max` (claude-sdk: Claude Code's effort, #8700) |
 | `subscribe_sessions` | Subscribe to updates for non-active sessions |
 | `switch_session` | Switch to different active session |
 | `teleport_web_task` | Pull cloud task result into local session |

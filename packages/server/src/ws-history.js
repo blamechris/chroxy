@@ -6,6 +6,7 @@
  */
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
+import { buildThinkingLevelChanged } from './thinking-level-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
@@ -1437,13 +1438,9 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     sessionId,
   })
   // Always sync thinking level on reconnect so stale dashboard state is overwritten
-  const thinkingLevel = session.thinkingLevel
-  if (thinkingLevel !== undefined) {
-    send(ws, {
-      type: 'thinking_level_changed',
-      level: thinkingLevel || 'default',
-      sessionId,
-    })
+  const thinkingLevelMsg = buildThinkingLevelChanged(session)
+  if (thinkingLevelMsg) {
+    send(ws, { ...thinkingLevelMsg, sessionId })
   }
   // Replay permission rules so reconnecting clients have current whitelist.
   // #6771 — also replay durable per-project rules (persistentRules) so the

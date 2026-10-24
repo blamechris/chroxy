@@ -259,6 +259,9 @@ export class CodexAppServerSession extends BaseSession {
       // keyword highlight reads THIS flag, so flipping the one above lights the
       // dropdown and nothing else.
       thinkingKeywords: false,
+      // #8700: the level codex reports is already `thinkingLevel` itself (the
+      // booted effort when no override is set), so there is no separate report.
+      thinkingLevelEffective: false,
       streaming: true,
       // #6888: despite inProcessPermissions:true (this session's
       // respondToPermission delegates to the shared PermissionManager, which DOES

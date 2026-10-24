@@ -150,3 +150,12 @@ export declare function formatThinkingLevelLabel(level: string): string;
  * roster row through both and compares the sets in both directions (#7784).
  */
 export declare function thinkingLevelOptions(row?: ThinkingLevelSource | null, opts?: ThinkingLevelResolveOptions | null): ThinkingLevelOption[];
+/**
+ * #8700 — does the level a provider REPORTS it applied contradict the one the
+ * operator asked for? Only an EXPLICIT request can be contradicted: `default`
+ * (Auto) names no level, so whatever the provider applied satisfies it. An
+ * unreported (missing or malformed) effective level is not a mismatch either —
+ * it is unknown, which clients show as such. One rule for the dashboard header
+ * and the mobile SettingsBar, so the two cannot disagree about what to flag.
+ */
+export declare function isThinkingLevelMismatch(requested: string | null | undefined, effective: string | null | undefined): boolean;

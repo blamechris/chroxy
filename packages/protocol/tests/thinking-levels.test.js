@@ -199,3 +199,40 @@ describe('SetThinkingLevelSchema — a BOUNDED string, not an enum (#7730)', () 
     assert.equal(SetThinkingLevelSchema.safeParse({ type: 'set_thinking_level' }).success, false)
   })
 })
+
+// #8700 — `thinking_level_changed.effective`: what the provider reports it
+// applied, beside what the operator asked for. Optional (absent = this provider
+// makes no such report), nullable (null = not reported yet), open string.
+describe('@chroxy/protocol thinking_level_changed effective level (#8700)', () => {
+  it('accepts a reported level, an explicit unknown, and an absent field', async () => {
+    const { ServerThinkingLevelChangedSchema } = await import('../src/schemas/server/stream.ts')
+    for (const effective of ['medium', 'xhigh', null, undefined]) {
+      const msg = { type: 'thinking_level_changed', level: 'default', sessionId: 's1' }
+      if (effective !== undefined) msg.effective = effective
+      const parsed = ServerThinkingLevelChangedSchema.safeParse(msg)
+      assert.ok(parsed.success, `effective=${String(effective)} must parse`)
+      assert.equal(Object.hasOwn(parsed.data, 'effective'), effective !== undefined,
+        'absent and null are different answers and must survive the parse as such')
+    }
+  })
+
+  it('rejects a non-string effective level', async () => {
+    const { ServerThinkingLevelChangedSchema } = await import('../src/schemas/server/stream.ts')
+    for (const effective of [3, true, { level: 'high' }, ['high']]) {
+      assert.equal(ServerThinkingLevelChangedSchema.safeParse({ type: 'thinking_level_changed', level: 'high', effective }).success, false,
+        `effective=${JSON.stringify(effective)} must not parse`)
+    }
+  })
+})
+
+describe('@chroxy/protocol isThinkingLevelMismatch (#8700)', () => {
+  it('flags only an explicit request the reported level contradicts', async () => {
+    const { isThinkingLevelMismatch } = await import('../src/thinking-levels.ts')
+    assert.equal(isThinkingLevelMismatch('high', 'medium'), true, 'asked High, ran Medium')
+    assert.equal(isThinkingLevelMismatch('high', 'high'), false)
+    assert.equal(isThinkingLevelMismatch('default', 'medium'), false, 'Auto names no level, so any applied one satisfies it')
+    assert.equal(isThinkingLevelMismatch(null, 'medium'), false)
+    assert.equal(isThinkingLevelMismatch('high', null), false, 'unreported is unknown, not a contradiction')
+    assert.equal(isThinkingLevelMismatch('high', '../etc'), false)
+  })
+})
