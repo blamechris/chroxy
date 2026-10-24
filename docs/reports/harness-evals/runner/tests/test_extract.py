@@ -274,6 +274,16 @@ class ClaudeNamesAndReads(TempFiles):
                      'xapp-1-a0123', 'deepsea', 'cloud-opus', 'a' * 40):
             self.assertEqual(extract.safe_model(name), '<other>', name)
 
+    def test_a_host_or_file_name_that_starts_with_a_family_name_is_other(self):
+        for name in ('claude.ai', 'gpt.example.com', 'gemini.google.com', 'claude.env', 'codex.auth.json',
+                     'claude-secrets.txt', 'mistral.ngrok.io', 'opus.trycloudflare.com', 'gpt-5.prod.db.internal',
+                     'claude-5.', 'gpt-5..1', 'claude.5'):
+            self.assertEqual(extract.safe_model(name), '<other>', name)
+
+    def test_a_dot_between_two_digits_is_part_of_a_model_name(self):
+        for name in ('gpt-5.1-codex', 'gpt-6.1-sol', 'gemini-2.5-pro', 'llama3.1-70b', 'qwen2.5-coder', 'claude-3.5-sonnet'):
+            self.assertEqual(extract.safe_model(name), name)
+
     def test_a_character_that_is_not_in_a_models_alphabet_is_refused_in_the_middle_of_a_family_name(self):
         for name in ('claude-Opus-5', 'gpt-5-Codex', 'claude/opus', 'claude:opus', 'claude_opus', 'claude\\opus', 'claude;opus', 'claude opus', 'gpt@5', 'gpt(5)', 'gpt-5\t'):
             self.assertEqual(extract.safe_model(name), '<other>', repr(name))

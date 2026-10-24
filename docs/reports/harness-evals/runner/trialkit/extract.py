@@ -45,10 +45,11 @@ APPROVAL_POLICIES = frozenset(('never', 'on-request', 'on-failure', 'untrusted')
 SANDBOXES = frozenset(('read-only', 'workspace-write', 'danger-full-access'))
 # packages/server/src/ws-permissions.js, `validDecisions`
 DECISIONS = frozenset(('allow', 'deny', 'allowAlways'))
-# a model is a known family's name, then lower-case letters, digits, `.` and `-` (2 to 48 characters in all): a
-# hostname or a file name is not one, however plain
+# a model is a known family's name, then lower-case letters, digits and `-`, with a `.` only between two digits
+# (`gpt-5.1-codex`, `gemini-2.5-pro`), 2 to 48 characters in all: a hostname or a file name is not one, even one
+# that starts with a family's name (`claude.ai`, `codex.auth.json`)
 MODEL_NAME = re.compile(r'(?=[a-z0-9.-]{2,48}\Z)(?:claude|gpt|codex|gemini|opus|sonnet|haiku|deepseek|llama|qwen|mistral|o[1-9])'
-                        r'[a-z0-9.-]*')
+                        r'(?:[a-z0-9-]|(?<=[0-9])\.(?=[0-9]))*')
 TOOL_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,47}')
 SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}')
 # what a credential starts with, compared lower-cased: GitHub, OpenAI/Anthropic/Stripe, Slack, AWS, Google, npm, Hugging

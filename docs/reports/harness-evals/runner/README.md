@@ -148,8 +148,9 @@ when it fails, in the extract and on the terminal alike: effort, Claude permissi
 Codex approval policy and sandbox, permission decision and the daemon's mode take only
 their known values (`extract.py`, the last two pinned to the server source); a model
 is a known family's name (`claude`, `gpt`, `o1`-`o9`, `codex`, `gemini`, `opus`, `sonnet`,
-`haiku`, `deepseek`, `llama`, `qwen`, `mistral`) then `[a-z0-9.-]`, 2 to 48 characters in
-all, so a path, URL, host or file name is `<other>`; a tool is `[A-Za-z][A-Za-z0-9_]{0,47}`;
+`haiku`, `deepseek`, `llama`, `qwen`, `mistral`) then `[a-z0-9-]` with a `.` only between
+two digits (`gpt-5.1-codex`), 2 to 48 characters in all, so a path, URL, host or file name,
+even one starting with a family's name (`claude.ai`), is `<other>`; a tool is `[A-Za-z][A-Za-z0-9_]{0,47}`;
 a session id `[A-Za-z0-9][A-Za-z0-9-]{0,63}`. Nothing that starts like a credential
 (GitHub `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`, `sk-`/`sk_`, Slack `xox`/`xapp-`,
 AWS `AKIA`/`ASIA`, Google `AIza`, npm, Hugging Face, GitLab, a JWT `eyJ`; any case) passes
