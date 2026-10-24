@@ -2,6 +2,7 @@
 import { appendFileSync, readFileSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isEntryPoint } from './lib/is-entry-point.mjs'
 
 const packages = new Map([
   ['server', 'Server'],
@@ -41,6 +42,75 @@ function validateMetric(value, label, allowZero = false) {
   }
 }
 
+// Istanbul's JSON summary records absolute paths from the runner checkout,
+// while LCOV records package-relative `src/` paths. Compare their normalized
+// package-relative identities so downloaded artifacts remain verifiable after
+// the checkout is relocated.
+function sourceIdentity(source, packageName, reporter) {
+  const path = source.replaceAll('\\', '/')
+  let relative
+  if (reporter === 'JSON') {
+    const marker = `/packages/${packageName}/src/`
+    const markerAt = path.lastIndexOf(marker)
+    if ((!path.startsWith('/') && !/^[A-Za-z]:\//.test(path)) || markerAt < 0) {
+      fail(`unexpected source for ${packageName} in JSON summary: ${source}`)
+    }
+    relative = `src/${path.slice(markerAt + marker.length)}`
+  } else {
+    relative = path
+  }
+  if (!relative.startsWith('src/') ||
+      relative.split('/').some((part, index) => index > 0 && (part === '' || part === '.' || part === '..'))) {
+    fail(`unexpected source for ${packageName} in ${reporter}: ${source}`)
+  }
+  return relative
+}
+
+function verifyLcov(lcov, packageName, jsonSources, lcovPath) {
+  if (!lcov.trimEnd().endsWith('end_of_record')) fail(`malformed or empty LCOV report ${lcovPath}`)
+  const records = lcov.split('end_of_record')
+  if (records.pop().trim()) fail(`malformed or empty LCOV report ${lcovPath}`)
+  const seen = new Set()
+  for (const record of records) {
+    const sourceLines = [...record.matchAll(/^SF:(.+)$/gm)]
+    const linesFound = record.match(/^LF:(\d+)$/m)
+    const linesHit = record.match(/^LH:(\d+)$/m)
+    if (sourceLines.length !== 1 || !linesFound || !linesHit) fail(`malformed or empty LCOV report ${lcovPath}`)
+    const source = sourceIdentity(sourceLines[0][1].trim(), packageName, 'LCOV')
+    if (seen.has(source) || !jsonSources.has(source)) fail(`LCOV source mismatch for ${source} in ${lcovPath}`)
+    seen.add(source)
+    const total = Number(linesFound[1])
+    const covered = Number(linesHit[1])
+    if (!Number.isSafeInteger(total) || !Number.isSafeInteger(covered) || covered > total ||
+        (total > 0 && !/^DA:\d+,\d+/m.test(record))) {
+      fail(`malformed or empty LCOV report ${lcovPath}`)
+    }
+    const jsonLines = jsonSources.get(source).lines
+    if (total !== jsonLines.total || covered !== jsonLines.covered) {
+      fail(`LCOV line counts mismatch for ${source} in ${lcovPath}`)
+    }
+  }
+  if (seen.size === 0 || seen.size !== jsonSources.size) fail(`LCOV source mismatch in ${lcovPath}`)
+}
+
+function verifyHtml(html, htmlPath) {
+  // All four configured reporters use Istanbul's index layout. Check its
+  // complete document and coverage table, not merely a nonempty index file.
+  const content = html.toLowerCase()
+  const markers = [
+    '<!doctype html>', '<html', '<head',
+    '<title>code coverage report for all files</title>', '</head>',
+    '<body', '<table class="coverage-summary">', '</table>', '</body>', '</html>',
+  ]
+  let cursor = 0
+  for (const marker of markers) {
+    const position = content.indexOf(marker, cursor)
+    if (position < 0) fail(`malformed HTML report ${htmlPath}: missing ${marker}`)
+    cursor = position + marker.length
+  }
+  if (!content.trimEnd().endsWith('</html>')) fail(`malformed HTML report ${htmlPath}: truncated document`)
+}
+
 export function summarizeCoverage(packageName, repoRoot) {
   if (!packages.has(packageName)) fail(`unknown package ${packageName}`)
   const directory = resolve(repoRoot, 'packages', packageName, 'coverage')
@@ -57,10 +127,11 @@ export function summarizeCoverage(packageName, repoRoot) {
   }
   const sourceFiles = Object.keys(summary).filter((key) => key !== 'total')
   if (sourceFiles.length === 0) fail(`zero instrumented source files in ${summaryPath}`)
+  const jsonSources = new Map()
   for (const file of sourceFiles) {
-    if (!file.replaceAll('\\', '/').includes('/src/')) {
-      fail(`unexpected non-source entry ${file} in ${summaryPath}`)
-    }
+    const source = sourceIdentity(file, packageName, 'JSON')
+    if (jsonSources.has(source)) fail(`duplicate source ${source} in ${summaryPath}`)
+    jsonSources.set(source, summary[file])
   }
   for (const metric of metrics) {
     const value = summary.total?.[metric]
@@ -77,19 +148,20 @@ export function summarizeCoverage(packageName, repoRoot) {
   }
   const lcovPath = resolve(directory, 'lcov.info')
   const lcov = readRequired(lcovPath)
-  if (!lcov.split('end_of_record').slice(0, -1).some((record) =>
-    /^SF:.+$/m.test(record) && /^DA:\d+,\d+/m.test(record))) {
-    fail(`malformed or empty LCOV report ${lcovPath}`)
-  }
+  verifyLcov(lcov, packageName, jsonSources, lcovPath)
   const htmlPath = resolve(directory, 'index.html')
-  readRequired(htmlPath)
+  const html = readRequired(htmlPath)
   if (!statSync(htmlPath).isFile()) fail(`HTML report is not a file ${htmlPath}`)
+  verifyHtml(html, htmlPath)
   const row = `| ${packages.get(packageName)} | ${sourceFiles.length} | ${metrics.map((metric) => `${summary.total[metric].pct.toFixed(2)}%`).join(' | ')} |`
   return row
 }
 
 function main() {
-  const [packageName, rootFlag, rootValue] = process.argv.slice(2)
+  const args = process.argv.slice(2)
+  const packageName = args[0]
+  const rootFlag = args[1]
+  const rootValue = args[2]
   if (!packageName || (rootFlag && rootFlag !== '--root') || (rootFlag && !rootValue)) {
     fail('usage: node scripts/report-coverage.mjs <server|app|dashboard|store-core> [--root <repo-root>]')
   }
@@ -100,7 +172,7 @@ function main() {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${packages.get(packageName)} coverage\n\n${markdown}`)
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta.url)) {
   try {
     main()
   } catch (error) {

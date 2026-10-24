@@ -16,8 +16,14 @@ missing, malformed, or has no instrumented source.
 The reports count each package's own instrumented source. Percentages are not
 averaged across packages. `coverage-summary.json` carries the line, branch,
 function and statement numerators and denominators for each package. Coverage
-means code executed, not assertions checked. The initial rollout only reports
-percentages; it does not add a global percentage threshold. The first measured
+validation maps the JSON summary's absolute runner paths and LCOV's `src/`
+paths to the selected package's source identities, then checks that both
+reporters name the same files with the same line counts. The mapping uses the
+`/packages/<package>/src/` portion, so an artifact can be checked after moving
+it to another checkout without assuming the runner's absolute directory.
+The HTML index must contain the complete Istanbul coverage table and document.
+Coverage means code executed, not assertions checked. The initial rollout only
+reports percentages; it does not add a global percentage threshold. The first measured
 baseline at main `8f3d5497` was 96.25% server lines / 87.14% branches and
 61.21% mobile lines / 55.06% branches. Dashboard and store core had no reports
 at that baseline, so their previous values are unmeasured rather than zero.
