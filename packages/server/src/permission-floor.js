@@ -25,7 +25,7 @@
  * Everything here is PURE except the deliberate symlink resolution (realpath /
  * lstat), which FAILS CLOSED — see {@link isProtectedPathValue}.
  */
-import { realpathSync } from 'node:fs'
+import { realpathSync, lstatSync } from 'node:fs'
 import { resolve, relative, sep, isAbsolute, dirname, basename, join } from 'node:path'
 import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
 
@@ -145,6 +145,80 @@ const CLAUDE_SETTINGS_DIR = '.claude'
 const CLAUDE_SETTINGS_PREFIX = 'settings'
 const CLAUDE_SETTINGS_SUFFIX = '.json'
 
+// #8741 — Claude Code's own worktrees live INSIDE the protected `.claude/` dir:
+// `EnterWorktree` / `claude --worktree <name>` check one out at
+// `<repo>/.claude/worktrees/<name>/`. Flooring `.claude` at any depth forced a
+// prompt on every edit inside one; under Auto nobody answers and each cost the
+// 300 s timeout. A worktree is a workspace like the cwd itself, so a target
+// strictly inside `<cwd>/.claude/worktrees/<name>/` is scanned from `<name>` down:
+// its own `.claude/settings*.json`, `.git`, `.env`, keys and config dirs still floor.
+const CLAUDE_DIR = '.claude'
+const CLAUDE_WORKTREES_DIR = 'worktrees'
+// Claude Code accepts `[A-Za-z0-9._-]+` per `/`-separated name segment, refuses
+// `.`, `..` and `.git`, and names the directory with each `/` written as `+`
+// (`feature/auth` -> `feature+auth`). The floor also refuses a leading dot or
+// `+`: a name starts with a letter, digit, `_` or `-`, so one that is itself a
+// dotfile or a protected dir (`.claude`, `.git`, `.vscode`, `.env`) is never a root.
+const CLAUDE_WORKTREE_NAME = /^[a-z0-9_-][a-z0-9._+-]*$/i
+// The carve-out covers PLAIN names only: ASCII letters, digits, space and
+// `._-@+()[]$`, not ending in a dot or a space. A path with any other component
+// keeps the full scan, which costs a prompt, never access.
+const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
+
+/**
+ * #8741 — is `rel` (`relative(base, resolve(base, target))`, the path as
+ * written) strictly inside one of Claude Code's worktrees,
+ * `<base>/.claude/worktrees/<name>/`, by a path the scan reads as it is?
+ * `target` is the raw tool-input value. Decided ONCE, on the path as written,
+ * by {@link isProtectedPathValue}; the resolved pass keeps the carve-out only
+ * when its resolved path is that same path.
+ *
+ * Refused (the full scan applies) unless ALL of these hold:
+ *   - the raw `target` has no `..` component;
+ *   - split on the PLATFORM separator, every component of `rel` is a
+ *     {@link PLAIN_COMPONENT}, the first two are exactly `.claude/worktrees`
+ *     (as Claude Code spells them) and the third is a
+ *     {@link CLAUDE_WORKTREE_NAME};
+ *   - there is at least one component below `<name>` — the root itself, and
+ *     anything directly in `worktrees/`, stays floored;
+ *   - walking down from `.claude` with `lstat`, `.claude`, `.claude/worktrees`
+ *     and `<name>` are real directories (`lstat` reports a symlink as not a
+ *     directory), and no component below them that exists is a symlink. The
+ *     first part is Claude Code's own condition for creating a worktree (a
+ *     symlink at any of the three could redirect it); together they keep a path
+ *     that only LOOKS like a worktree, or leaves one through a link, floored;
+ *   - an existing file on the path has a single hard link.
+ * `ENOENT` below `<name>` ends the walk, since nothing further exists yet; any
+ * other error refuses (fail closed). That refusal is also covered by the
+ * resolved pass, whose walk fails closed on the same error.
+ * @param {string} base
+ * @param {string} rel
+ * @param {string} target
+ * @returns {boolean}
+ */
+function _insideClaudeWorktree(base, rel, target) {
+  if (target.split(/[/\\]+/).includes('..')) return false
+  const parts = rel.split(sep)
+  if (parts.length < 4 || !parts.every((part) => PLAIN_COMPONENT.test(part))) return false
+  if (parts[0] !== CLAUDE_DIR || parts[1] !== CLAUDE_WORKTREES_DIR) return false
+  if (!CLAUDE_WORKTREE_NAME.test(parts[2])) return false
+  let path = base
+  for (let k = 0; k < parts.length; k++) {
+    path = join(path, parts[k])
+    let stat
+    try {
+      stat = lstatSync(path)
+    } catch (err) {
+      return err.code === 'ENOENT' && k >= 3
+    }
+    // A root component must be a directory (a symlink is not one to `lstat`);
+    // below the root, no existing component may be a symlink.
+    if (k < 3 ? !stat.isDirectory() : stat.isSymbolicLink()) return false
+    if (stat.isFile() && stat.nlink > 1) return false
+  }
+  return true
+}
+
 // #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
 // paths never legitimately nest this deep; the cap only guards a pathological /
 // malicious tail (a to-be-created path with hundreds of nonexistent components
@@ -217,8 +291,13 @@ function realpathDeepestAncestorSync(absPath) {
  * #6851 — the pure segment scan, factored out of {@link isProtectedPathValue} so
  * the lexical pass and the symlink-resolved pass share ONE matcher. Given a
  * resolution `base` and an already-resolved absolute `resolved` target, applies
- * the #6806 relative-vs-absolute framing (below) and tests each segment. No fs
- * access — string ops only.
+ * the #6806 relative-vs-absolute framing (below) and tests each segment. String
+ * ops only.
+ *
+ * #8741 — when `carved` (see {@link isProtectedPathValue}), the target is
+ * strictly inside `<base>/.claude/worktrees/<name>/` and is scanned from
+ * `<name>` down, so the `.claude` and `worktrees` above the worktree are not
+ * counted while everything inside it is.
  *
  * #6806 — the discriminator is whether the resolved target stays INSIDE base's
  * own subtree:
@@ -233,9 +312,10 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} base
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
+ * @param {boolean} carved  `resolved` is inside a worktree the carve-out admits
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly) {
+function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -250,7 +330,12 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
   const segments = scanned.split(/[/\\]+/)
     .filter((s) => s.length > 0 && s !== '..')
     .map((s) => s.toLowerCase())
-  for (let i = 0; i < segments.length; i++) {
+  // #8741 — start the scan at `<name>`. `carved` means `rel` is a path
+  // `_insideClaudeWorktree` admitted: every native component is a
+  // PLAIN_COMPONENT (no separator of either kind, never empty or `..`), so its
+  // first three native components are also `segments[0..2]`.
+  const start = carved ? 2 : 0
+  for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
     // Secret files, and credential-dense config files, are floored under BOTH
     // the read and the write floor (PR #6873 review — the read floor must not
@@ -273,8 +358,10 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
  * TWO passes, ORed — a hit on EITHER floors the target:
  *   (1) LEXICAL (the pre-#6851 floor, unchanged). `resolve()` absorbs absolute
  *       paths, a leading `./`, and `..` traversal; the resolved path is scanned
- *       segment-by-segment ({@link _scanResolvedTarget}). Pure string ops, no fs
- *       access — fast, and every input the old floor flagged still flags.
+ *       segment-by-segment ({@link _scanResolvedTarget}). String ops, plus the
+ *       #8741 worktree-root lstats for a `.claude/worktrees/<name>/…` target —
+ *       fast, and every input the old floor flagged still flags, except an
+ *       ordinary file inside one of Claude Code's own worktrees.
  *   (2) #6851/#6921 SYMLINK. The lexical pass is symlink-BLIND: because
  *       `resolve()` collapses `..` textually, a symlink in cwd's PREFIX (the
  *       chroxy agent worktree can live under a *symlink* to a real `.claude/`),
@@ -322,7 +409,11 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
 function isProtectedPathValue(target, base, secretsOnly = false) {
   // (1) LEXICAL floor — pre-#6851 behavior, authoritative on a hit (no fs cost).
   const resolvedLexical = resolve(base, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly)) return true
+  // #8741 — the worktree carve-out is decided once, on the path as written. An
+  // escaping relative path begins with `..` or is absolute, never `.claude`.
+  const lexicalRel = relative(base, resolvedLexical)
+  const carved = _insideClaudeWorktree(base, lexicalRel, target)
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -344,7 +435,13 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
     const realTarget = resolveTargetComponentwiseSync(realBase, target)
-    return _scanResolvedTarget(realBase, realTarget, secretsOnly)
+    // The carve-out survives only when the resolved path IS the written one. The
+    // written path held no symlink when `_insideClaudeWorktree` walked it, so
+    // this differs only if the path changed between the two walks; then the
+    // resolved target gets the full scan rather than an offset meant for another
+    // path.
+    const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
+    return _scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)
   } catch {
     return true
   }
@@ -377,7 +474,10 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
  * prefix excluded). But a `..`-traversal back UP into that same `.claude`
  * (`../../settings.local.json` → the real agent config) IS floored, because an
  * above-cwd target is scanned as its resolved ABSOLUTE path (#6806). See
- * {@link isProtectedPathValue} for the full reconciliation.
+ * {@link isProtectedPathValue} for the full reconciliation. A Claude Code
+ * worktree BELOW cwd (`.claude/worktrees/<name>/…`) is a workspace too: its
+ * ordinary files are not floored, its own config and secrets are (#8741,
+ * {@link _insideClaudeWorktree}).
  *
  * Segment rules (a match on ANY segment floors the write; see
  * {@link isProtectedPathValue} for the lowercase rationale):
