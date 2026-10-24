@@ -13,5 +13,12 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     maxWorkers: '50%',
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.d.ts', 'src/contract-fixtures/**'],
+      reporter: ['text-summary', 'html', 'lcov', 'json-summary'],
+      reportsDirectory: './coverage',
+    },
   },
 })

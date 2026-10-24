@@ -39,6 +39,13 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['src/test-setup.ts'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.d.ts', 'src/test-setup.ts', 'src/theme/tokens.ts'],
+      reporter: ['text-summary', 'html', 'lcov', 'json-summary'],
+      reportsDirectory: './coverage',
+    },
     // #7300. Every failure that issue catalogues is `Test timed out in 5000ms`
     // and never an assertion, on a different random subset each run — so the
     // premise that is wrong is the clock, not any test's behaviour. The

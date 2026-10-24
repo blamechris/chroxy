@@ -346,12 +346,18 @@ jobs:
           # sessionId→clients reverse index immediately.
           CHROXY_WS_INDEX_ASSERT: '1'
 
+      - name: Validate and summarize server coverage
+        if: always()
+        run: node ../../scripts/report-coverage.mjs server
+
       - name: Upload server coverage
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-coverage
-          path: packages/server/coverage/
+          path: |
+            packages/server/coverage/**
+            !packages/server/coverage/tmp/**
           retention-days: 14
 
   changes:
@@ -960,7 +966,19 @@ jobs:
           }
 
       - name: Run dashboard tests
-        run: npm test
+        run: npm run test:coverage
+
+      - name: Validate and summarize dashboard coverage
+        if: always()
+        run: node ../../scripts/report-coverage.mjs dashboard
+
+      - name: Upload dashboard coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dashboard-coverage
+          path: packages/dashboard/coverage/
+          retention-days: 14
 
   dashboard-typecheck:
     name: Dashboard Type Check
@@ -1075,7 +1093,19 @@ jobs:
         working-directory: .
 
       - name: Run tests
-        run: npm test
+        run: npm run test:coverage
+
+      - name: Validate and summarize store-core coverage
+        if: always()
+        run: node ../../scripts/report-coverage.mjs store-core
+
+      - name: Upload store-core coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: store-core-coverage
+          path: packages/store-core/coverage/
+          retention-days: 14
 
       - name: Check committed dist/crypto.js is in sync with build:crypto
         # #6488: the build:crypto import-shim rewrite is committed to dist/. Rebuild
@@ -1237,6 +1267,10 @@ jobs:
         # Tests jobs on the pool's two replicas can't jointly OOM the shared
         # 16GB Docker VM. Local `npm test` is untouched — the cap is CI-only.
         run: npm test -- --maxWorkers=2
+
+      - name: Validate and summarize app coverage
+        if: always()
+        run: node ../../scripts/report-coverage.mjs app
 
       - name: Upload app coverage
         if: always()
@@ -1840,6 +1874,9 @@ jobs:
         # packages/server) that server, design-tokens and claude-hooks all
         # front their test commands with — including its fail-closed --min.
         run: node scripts/__tests__/assert-test-count.test.mjs
+
+      - name: Run coverage report guard tests
+        run: node scripts/__tests__/report-coverage.test.mjs
 
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of

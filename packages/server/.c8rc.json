@@ -8,6 +8,6 @@
     "scripts/**",
     "node_modules/**"
   ],
-  "reporter": ["text-summary", "html"],
+  "reporter": ["text-summary", "html", "lcov", "json-summary"],
   "report-dir": "coverage"
 }
