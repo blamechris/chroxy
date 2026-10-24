@@ -8,9 +8,8 @@ This directory contains two kinds of integration tests:
 - **Infrastructure-dependent / opt-in** (e.g. `docker-sdk-roundtrip.test.js`,
   `k8s-sidecar-roundtrip.test.js`) — boot real Docker containers or Kubernetes
   clusters. They are gated on an environment variable and/or a tool-availability
-  check. If the gate is not satisfied the file prints a skip message and exits
-  cleanly (zero tests registered, zero failures), so they are safe to leave in the
-  default test glob.
+  check. They skip cleanly in the default test glob when not opted in. An
+  explicitly requested integration run fails when its prerequisites are missing.
 
 The remainder of this document covers the opt-in suites and how to run them locally.
 
@@ -40,7 +39,11 @@ End-to-end test for the `K8sBackend` + `chroxy-pod-agent` sidecar bridge.
 | Docker daemon | Running locally — `docker info` must succeed |
 | Node 22 | `PATH="/opt/homebrew/opt/node@22/bin:$PATH"` |
 
-kind writes a kubeconfig entry to `~/.kube/config`; no extra setup is needed.
+The test exports the kubeconfig from its newly created named kind cluster to a
+private temporary file. It validates the context, HTTPS endpoint and CA before
+passing that file to `K8sBackend`, then deletes it during cleanup. This avoids
+the Kubernetes client's silent `http://localhost:8080` fallback when its default
+kubeconfig is absent.
 
 ### Running locally
 
@@ -73,15 +76,20 @@ RUN_K8S_INTEGRATION=1 \
 |----------|----------|-------------|
 | `RUN_K8S_INTEGRATION` | **yes** (must be `1`) | Gates the entire test file |
 
-`kind` must also be on `PATH`. If either condition is unmet the file prints:
+`kind` must also be on `PATH`. The file skips when not opted in:
 
 ```
-[k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 and install kind to run
+[k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 to run
 ```
+
+The dedicated `test:integration:k8s` script opts in and enforces a floor of four
+reported cases. It fails if `kind` is unavailable or the suite reports fewer
+than four cases.
 
 ### Cleanup guarantees
 
 A kind cluster named `chroxy-test-<pid>` is created at `before` and deleted at `after`.
+The private temporary kubeconfig is also deleted at `after`.
 Cleanup runs unconditionally — even if an assertion fails mid-suite — via a `try/finally`
 pattern inside `after`. A `SIGINT` handler (`Ctrl-C`) also triggers cleanup so an
 interrupted test run does not leave a stale cluster behind.
