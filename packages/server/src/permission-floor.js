@@ -153,52 +153,63 @@ const CLAUDE_SETTINGS_SUFFIX = '.json'
 // strictly inside `<cwd>/.claude/worktrees/<name>/` is scanned from `<name>` down:
 // its own `.claude/settings*.json`, `.git`, `.env`, keys and config dirs still floor.
 const CLAUDE_WORKTREES_DIR = 'worktrees'
-// Claude Code accepts `[A-Za-z0-9._-]+` per name segment and refuses `.`, `..`
-// and `.git`. The floor also refuses a LEADING dot, so a name that is itself a
-// dotfile or a protected dir (`.claude`, `.git`, `.vscode`, `.env`) is never a root.
-const CLAUDE_WORKTREE_NAME = /^[a-z0-9][a-z0-9._-]*$/i
+// Claude Code accepts `[A-Za-z0-9._-]+` per `/`-separated name segment, refuses
+// `.`, `..` and `.git`, and names the directory with each `/` written as `+`
+// (`feature/auth` -> `feature+auth`). The floor also refuses a LEADING dot, so a
+// name that is itself a dotfile or a protected dir (`.claude`, `.git`, `.vscode`,
+// `.env`) is never a root.
+const CLAUDE_WORKTREE_NAME = /^[a-z0-9_-][a-z0-9._+-]*$/i
 // The carve-out covers PLAIN names only: ASCII letters, digits, space and
 // `._-@+()[]$`, not ending in a dot or a space. A path with any other component
 // keeps the full scan, which costs a prompt, never access.
 const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
 
 /**
- * #8741 — is `rel` (`relative(base, target)`) strictly inside one of Claude
- * Code's worktrees, `<base>/.claude/worktrees/<name>/`?
+ * #8741 — is `rel` (`relative(base, resolved)`) strictly inside one of Claude
+ * Code's worktrees, `<base>/.claude/worktrees/<name>/`, by a path the scan reads
+ * as it is? `target` is the raw tool-input value `rel` was resolved from.
  *
  * Refused (the full scan applies) unless ALL of these hold:
- *   - split on the PLATFORM separator, every component is a
- *     {@link PLAIN_COMPONENT}, the first two are `.claude/worktrees`
- *     (case-insensitively, as the scan matches) and the third is a
+ *   - the raw `target` has no `..` component;
+ *   - split on the PLATFORM separator, every component of `rel` is a
+ *     {@link PLAIN_COMPONENT}, the first two are exactly `.claude/worktrees`
+ *     (as Claude Code spells them) and the third is a
  *     {@link CLAUDE_WORKTREE_NAME};
  *   - there is at least one component below `<name>` — the root itself, and
  *     anything directly in `worktrees/`, stays floored;
- *   - `.claude`, `.claude/worktrees` and `.claude/worktrees/<name>` are each a
- *     real directory NOW: `lstat` reports a symlink, a file or nothing at all as
- *     not a directory, and any error refuses (fail closed). That is Claude Code's
- *     own condition for creating a worktree (a committed symlink there could
- *     redirect it), and it is what keeps a path that only LOOKS like a worktree
- *     floored: the symlink-resolving pass matches names, so it cannot tell that
- *     a `.claude` linked to `.claude-real/` is agent config.
- * Only the lexical pass can meet a symlink here; on the resolved pass every
- * component that exists is already real.
+ *   - walking down from `.claude` with `lstat`, nothing is a symlink:
+ *     `.claude`, `.claude/worktrees` and `<name>` are real directories, and each
+ *     component below them that exists is a real directory or file. This holds
+ *     Claude Code's own condition for creating a worktree (a symlink at any of
+ *     the first three could redirect it), and it keeps a path that only LOOKS
+ *     like a worktree floored;
+ *   - an existing file on the path has a single hard link.
+ * `ENOENT` below `<name>` ends the walk, since nothing further exists yet; any
+ * other error refuses (fail closed). On the resolved pass every component that
+ * exists is already real, so only the lexical pass can meet a symlink here.
  * @param {string} base
  * @param {string} rel
+ * @param {string} target
  * @returns {boolean}
  */
-function _insideClaudeWorktree(base, rel) {
+function _insideClaudeWorktree(base, rel, target) {
+  if (target.split(/[/\\]+/).includes('..')) return false
   const parts = rel.split(sep)
   if (parts.length < 4 || !parts.every((part) => PLAIN_COMPONENT.test(part))) return false
-  if (parts[0].toLowerCase() !== CLAUDE_SETTINGS_DIR || parts[1].toLowerCase() !== CLAUDE_WORKTREES_DIR) return false
+  if (parts[0] !== CLAUDE_SETTINGS_DIR || parts[1] !== CLAUDE_WORKTREES_DIR) return false
   if (!CLAUDE_WORKTREE_NAME.test(parts[2])) return false
-  try {
-    let dir = base
-    for (let k = 0; k < 3; k++) {
-      dir = join(dir, parts[k])
-      if (!lstatSync(dir).isDirectory()) return false
+  let path = base
+  for (let k = 0; k < parts.length; k++) {
+    path = join(path, parts[k])
+    let stat
+    try {
+      stat = lstatSync(path)
+    } catch (err) {
+      return err.code === 'ENOENT' && k >= 3
     }
-  } catch {
-    return false
+    if (stat.isSymbolicLink()) return false
+    if (k < 3 && !stat.isDirectory()) return false
+    if (stat.isFile() && stat.nlink > 1) return false
   }
   return true
 }
@@ -277,7 +288,7 @@ function realpathDeepestAncestorSync(absPath) {
  * resolution `base` and an already-resolved absolute `resolved` target, applies
  * the #6806 relative-vs-absolute framing (below) and tests each segment. String
  * ops only, except the #8741 worktree-root check ({@link _insideClaudeWorktree}:
- * up to three lstats, and only for a target spelled `.claude/worktrees/<name>/…`).
+ * one lstat per component, and only for a target spelled `.claude/worktrees/<name>/…`).
  *
  * #8741 — a target under base and strictly inside `<base>/.claude/worktrees/<name>/`
  * is scanned from `<name>` down, so the `.claude` and `worktrees` above the
@@ -298,9 +309,10 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} base
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
+ * @param {string} target  the raw tool-input value `resolved` came from
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly) {
+function _scanResolvedTarget(base, resolved, secretsOnly, target) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -316,10 +328,11 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
     .filter((s) => s.length > 0 && s !== '..')
     .map((s) => s.toLowerCase())
   // #8741 — start the scan at `<name>`. Only a target under base can match: an
-  // escaping `rel` begins with `..` or is absolute, never with `.claude`. The
-  // first three native components hold no separator of either kind and are
-  // neither empty nor `..`, so they are also `segments[0..2]`.
-  const start = _insideClaudeWorktree(base, rel) ? 2 : 0
+  // escaping `rel` begins with `..` or is absolute, never with `.claude`. On a
+  // match `_insideClaudeWorktree` has checked that every native component is a
+  // PLAIN_COMPONENT: no separator of either kind, never empty or `..`. So the
+  // first three native components are also `segments[0..2]`.
+  const start = _insideClaudeWorktree(base, rel, target) ? 2 : 0
   for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
     // Secret files, and credential-dense config files, are floored under BOTH
@@ -394,7 +407,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
 function isProtectedPathValue(target, base, secretsOnly = false) {
   // (1) LEXICAL floor — pre-#6851 behavior, authoritative on a hit (no fs cost).
   const resolvedLexical = resolve(base, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly)) return true
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, target)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -416,7 +429,7 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
     const realTarget = resolveTargetComponentwiseSync(realBase, target)
-    return _scanResolvedTarget(realBase, realTarget, secretsOnly)
+    return _scanResolvedTarget(realBase, realTarget, secretsOnly, target)
   } catch {
     return true
   }

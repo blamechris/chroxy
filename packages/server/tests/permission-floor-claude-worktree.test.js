@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync, linkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isFlooredTarget } from '../src/permission-floor.js'
@@ -47,9 +47,17 @@ before(() => {
   touch('.claude/worktrees/a2c/.git') // a worktree's .git is a gitlink FILE
   touch('.claude/worktrees/a2c/packages/server/tests/models.test.js')
   mkdir('.claude/worktrees/a2c/.claude/commands')
-  // A second worktree, and one whose name has a `/` (Claude Code allows it).
+  // A second worktree; one named `feature/auth`, whose directory Claude Code
+  // writes as `feature+auth`; and one whose name starts with `_`.
   mkdir('.claude/worktrees/b2/src')
-  mkdir('.claude/worktrees/feature/auth/src')
+  mkdir('.claude/worktrees/feature+auth/src')
+  mkdir('.claude/worktrees/_wip/src')
+  // `<dir>/worktrees/<x>/` shapes that are not Claude Code worktrees: the anchor
+  // is `.claude/worktrees`, both parts of it.
+  mkdir('.claude/skills/foo')
+  mkdir('.claude/agents/team')
+  mkdir('.git/worktrees/x')
+  mkdir('.vscode/worktrees/x')
   // Directories under worktrees/ that are NOT worktree roots by name.
   mkdir('.claude/worktrees/.hidden/src')
   mkdir('.claude/worktrees/.claude')
@@ -61,6 +69,9 @@ before(() => {
   if (process.platform !== 'win32') mkdir('.claude/worktrees/a2c\\b/src')
   // A nested repo's .claude/worktrees: the carve-out is at the cwd root only.
   mkdir('sub/.claude/worktrees/a2c/src')
+  // One file reachable under two names.
+  touch('.claude/worktrees/a2c/src/orig.js')
+  linkSync(join(repo, '.claude/worktrees/a2c/src/orig.js'), join(repo, '.claude/worktrees/a2c/src/twin.js'))
 })
 
 after(() => {
@@ -97,9 +108,12 @@ describe('#8741 — ordinary files inside a Claude Code worktree are not floored
     }
   })
 
-  it('a second worktree, and a worktree whose name contains a `/`', () => {
+  it('other worktrees: a second one, `feature/auth` as Claude Code names it, and a leading `_`', () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/b2/src/a.js' }), false)
-    assert.equal(floored('Write', { file_path: '.claude/worktrees/feature/auth/src/a.js' }), false)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/src/a.js' }), false)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/_wip/src/a.js' }), false)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.claude/settings.json' }), true)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.env' }), true)
   })
 
   it('end-to-end: auto and acceptEdits approve a worktree edit with no prompt', async () => {
@@ -129,6 +143,15 @@ describe('#8741 — the real .claude/ stays floored', () => {
     '.claude/worktrees/CLAUDE.md',
     '.claude/worktrees/a2c', // the root itself
     '.claude/worktrees',
+    // `<dir>/<x>/<real dir>/<file>` under the real config and repo-control dirs:
+    // only `.claude/worktrees` anchors the carve-out.
+    '.claude/skills/foo/SKILL.md',
+    '.claude/agents/team/r.md',
+    '.git/worktrees/x/config.worktree',
+    '.vscode/worktrees/x/tasks.json',
+    // The anchor is matched exactly as Claude Code spells it.
+    '.CLAUDE/worktrees/a2c/src/a.js',
+    '.claude/WORKTREES/a2c/src/a.js',
   ]) {
     it(`Write ${file_path} → floored`, () => {
       assert.equal(floored('Write', { file_path }), true)
@@ -236,6 +259,17 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/x\\y/a.js' }), true)
   })
 
+  it('a `..` anywhere in the target keeps the full scan', () => {
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/packages/../src/a.js' }), true)
+    // An absolute spelling too (`join` would collapse the `..` before the floor saw it).
+    assert.equal(floored('Write', { file_path: `${repo}/.claude/worktrees/a2c/src/../src/a.js` }), true)
+  })
+
+  it('a file with more than one hard link keeps the full scan', () => {
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/twin.js' }), true)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/orig.js' }), true)
+  })
+
   it('case variants of the real config stay floored', () => {
     assert.equal(floored('Write', { file_path: '.CLAUDE/settings.json' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/A2C/.Claude/Settings.json' }), true)
@@ -255,9 +289,10 @@ describe('#8741 — symlinks: a worktree root is a real directory, as Claude Cod
     // <repo>/.claude/worktrees/out -> a benign dir outside the repo
     mkdirSync(join(root, 'elsewhere'), { recursive: true })
     symlinkSync(join(root, 'elsewhere'), join(repo, '.claude/worktrees/out'))
-    // Below a real root: one link into the real config, one into a sibling worktree.
+    // Below a real root: links into the real config, into a sibling worktree, and to a file.
     symlinkSync(join(repo, '.claude'), join(repo, '.claude/worktrees/a2c/cfg'))
     symlinkSync(join(repo, '.claude/worktrees/b2/src'), join(repo, '.claude/worktrees/a2c/peer'))
+    symlinkSync(join(repo, '.claude/worktrees/a2c/src/orig.js'), join(repo, '.claude/worktrees/a2c/alias.js'))
     // A cwd-level link INTO a worktree.
     symlinkSync(join(repo, '.claude/worktrees/a2c'), join(repo, 'wt'))
 
@@ -301,8 +336,9 @@ describe('#8741 — symlinks: a worktree root is a real directory, as Claude Cod
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/cfg/commands/x.md' }), true)
   })
 
-  it('positive control: a link below a real root into another worktree is not floored', () => {
-    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/peer/a.js' }), false)
+  it('any symlink below a real root keeps the full scan, even one into another worktree', () => {
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/peer/a.js' }), true)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/alias.js' }), true)
   })
 
   it('positive control: a cwd-level link whose real path is inside a worktree is not floored', () => {

@@ -50,24 +50,28 @@ purpose, and each condition that fails falls back to the full scan:
 - **At the cwd's own root, one level deep.** `sub/.claude/worktrees/…` and a
   worktree nested inside a worktree keep their `.claude`. A target that escapes the
   cwd is scanned as an absolute path, as before.
-- **`<name>` is one path component** of `[A-Za-z0-9._-]` with no leading dot, so
-  `.`, `..`, `.claude`, `.git` and `.env` are never a root. `<name>` itself is
-  still scanned, so a secret-shaped name floors.
+- **Under `.claude/worktrees` exactly, as Claude Code spells it.** Other
+  `<dir>/worktrees/` or `.claude/<dir>/` shapes (`.git/worktrees/`,
+  `.claude/skills/<s>/`) keep the full scan.
+- **`<name>` is one path component** of `[A-Za-z0-9._+-]` that does not start
+  with a dot, so `.`, `..`, `.claude`, `.git` and `.env` are never a root. Claude
+  Code writes a `/` in a worktree name as `+`, so `feature/auth` is the directory
+  `feature+auth`. `<name>` itself is still scanned, so a secret-shaped name floors.
 - **Plain names only.** Split on the platform separator, every component of the
   path is ASCII letters, digits, space or `._-@+()[]$`, and none ends in a dot or
   a space. A path with any other component keeps the full scan; it costs a
   prompt, not access.
 - **Strictly below `<name>`.** The root itself, and anything directly in
   `worktrees/`, stay floored.
-- **`.claude`, `.claude/worktrees` and `.claude/worktrees/<name>` are each a real
-  directory** at check time: `lstat`, not a symlink, not missing, not a file; any
-  error floors. This is Claude Code's own precondition for creating a worktree, and
-  a name-based floor needs it. The symlink-resolving pass matches *names*: with
-  `.claude` linked to `.claude-real/`, it cannot see that
-  `.claude/worktrees/x/settings.json`, where `x` links back to `.claude-real`,
-  writes agent config. So any worktree path through a symlinked root keeps its
-  lexical floor. A symlink *below* a real root is resolved by the second pass as
-  before: into the real `.claude` floors, into another worktree does not.
+- **No `..` in the target, and no symlink on the path.** Walking down from
+  `.claude` with `lstat`, `.claude`, `.claude/worktrees` and `<name>` must be real
+  directories, and each component below them that exists must be a real directory
+  or file; any error floors. This includes Claude Code's own precondition for
+  creating a worktree (no symlink at any of the first three). A path through any
+  symlink, even one into another worktree, keeps the full scan, as does a target
+  spelled with `..`.
+- **A single hard link.** An existing file on the path with more than one hard link
+  keeps the full scan.
 
 `tests/permission-floor-claude-worktree.test.js` builds these topologies on disk,
 and the parity matrix runs the worktree rows through both pipelines.
@@ -467,9 +471,8 @@ an approve with edits can do, and it lives in `edited-input.js` and
   read/write (e.g. via an un-floored `Bash` step), so a benign realpath here does not
   *guarantee* a benign open later. Chroxy does not own the downstream `open` for the
   SDK/TUI/codex providers, so an atomic guard is not achievable at this layer. The
-  floor is defence-in-depth and prompt-only. The #8741 worktree-root check (an
-  `lstat` of `.claude`, `.claude/worktrees` and `.claude/worktrees/<name>`) has the
-  same limit.
+  floor is defence-in-depth and prompt-only. The #8741 worktree check (an `lstat`
+  walk down from `.claude`) has the same limit.
 - **A floored target whose payload exceeds 64 KB is denied, not prompted.** The probe
   accepts up to 1 MiB, but `POST /permission` caps bodies at 64 KB (it *holds* the
   payload for five minutes and broadcasts it to clients), so a `Write` of a >64 KB

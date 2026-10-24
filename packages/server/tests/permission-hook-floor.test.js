@@ -1112,7 +1112,10 @@ const MATRIX = [
 // run under a REAL cwd instead of the synthetic one above.
 const WT_ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-hook-floor-wt-')))
 const WT_CWD = join(WT_ROOT, 'repo')
-for (const dir of ['.claude/commands', '.claude/worktrees/a2c/.claude', '.claude/worktrees/a2c/packages/server/tests']) {
+for (const dir of [
+  '.claude/commands', '.claude/worktrees/a2c/.claude', '.claude/worktrees/a2c/packages/server/tests',
+  '.claude/worktrees/feature+auth/src', '.claude/skills/foo', '.git/worktrees/x', '.vscode/worktrees/x',
+]) {
   mkdirSync(join(WT_CWD, dir), { recursive: true })
 }
 // Looks like a worktree, is the agent config dir.
@@ -1125,10 +1128,15 @@ const WORKTREE_MATRIX = [
   ['Write', { file_path: '.claude/worktrees/a2c/src/new.js' }, false],
   ['NotebookEdit', { notebook_path: '.claude/worktrees/a2c/nb.ipynb' }, false],
   ['Read', { file_path: '.claude/worktrees/a2c/src/new.js' }, false],
+  ['Edit', { file_path: '.claude/worktrees/feature+auth/src/a.js' }, false],
   // the real agent config beside it
   ['Write', { file_path: '.claude/settings.json' }, true],
   ['Write', { file_path: '.claude/commands/x.md' }, true],
   ['Write', { file_path: '.claude/worktrees/CLAUDE.md' }, true],
+  // `<dir>/<x>/<real dir>/<file>` shapes the `.claude/worktrees` anchor must not match
+  ['Write', { file_path: '.claude/skills/foo/SKILL.md' }, true],
+  ['Write', { file_path: '.git/worktrees/x/config.worktree' }, true],
+  ['Write', { file_path: '.vscode/worktrees/x/tasks.json' }, true],
   // protected names inside the worktree
   ['Write', { file_path: '.claude/worktrees/a2c/.claude/settings.json' }, true],
   ['Write', { file_path: '.claude/worktrees/a2c/.git/config' }, true],
