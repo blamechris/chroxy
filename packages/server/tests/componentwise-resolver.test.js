@@ -142,6 +142,9 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
   })
 
   it('a shared budget is spent across walks, by both drivers', async () => {
+    const exact = { left: 3 }
+    resolveTargetComponentwiseSync(root, 'a/b/c', exact)
+    assert.equal(exact.left, 0, 'exactly the budget')
     const sync = { left: 5 }
     resolveTargetComponentwiseSync(root, 'a/b/c', sync)
     assert.equal(sync.left, 2)

@@ -45,6 +45,12 @@ targets (path fields and `changes[]` members together, whatever the members hold
 (`FLOOR_MAX_CALL_COMPONENTS`), more than 262144 UTF-8 bytes across them
 (`FLOOR_MAX_CALL_BYTES`), or when its targets' symlink-resolving walks together walk
 more than 16384 components (`FLOOR_MAX_CALL_WALK`, those a symlink adds included).
+A path name longer than 255 characters floors (`FLOOR_MAX_NAME_LENGTH`), and so does a
+call whose targets, and the paths they resolve to, hold more than 65536 characters of
+distinct non-ASCII names (`FLOOR_MAX_CALL_CANONICAL`; characters are UTF-16 code units): those are the names compared in
+canonical form, and a resolved path's directory names and symlink text are not part of
+the call's byte count. Of these budgets, the walk budget is the one a very large patch
+reaches first: about a thousand absolute paths of 17 components each.
 
 Measured on 573,681 real paths (a checkout with its `node_modules`, `~/work`, and a
 home directory's documents, notes and application data), the deepest had 21

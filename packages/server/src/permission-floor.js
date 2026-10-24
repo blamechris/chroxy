@@ -162,21 +162,30 @@ function segmentName(seg) {
 // removed, then each character is lower-, upper- and lower-cased again (so a
 // capital or small sharp s becomes `ss`). An ASCII name is only lowercased.
 // Each segment is also checked as written, so this form only adds matches.
+const ASCII_NAME = /^[\x00-\x7f]*$/
 function canonicalName(name) {
-  if (/^[\x00-\x7f]*$/.test(name)) return name.toLowerCase()
+  if (ASCII_NAME.test(name)) return name.toLowerCase()
   return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
     .map((ch) => ch.toLowerCase().toUpperCase().toLowerCase())
     .join('')
 }
 
-// canonicalName, computed once per name within one call (`memo`): every target
-// of a call that resolves through the same directories shares its names.
-function _canonicalNameIn(name, memo) {
-  let canonical = memo.get(name)
-  if (canonical === undefined) {
-    canonical = canonicalName(name)
-    memo.set(name, canonical)
+// canonicalName, computed once per name within one call: every target of a
+// call that resolves through the same directories shares its names. Returns
+// null, and the caller floors, for a name longer than FLOOR_MAX_NAME_LENGTH or
+// once the call's distinct non-ASCII names pass FLOOR_MAX_CALL_CANONICAL
+// characters. A resolved path's names include directory names and symlink
+// text, which the call's byte budget does not count.
+function _canonicalNameIn(name, call) {
+  let canonical = call.names.get(name)
+  if (canonical !== undefined) return canonical
+  if (name.length > FLOOR_MAX_NAME_LENGTH) return null
+  if (!ASCII_NAME.test(name)) {
+    call.canonical.left -= name.length
+    if (call.canonical.left < 0) return null
   }
+  canonical = canonicalName(name)
+  call.names.set(name, canonical)
   return canonical
 }
 
@@ -294,6 +303,12 @@ export const FLOOR_MAX_CALL_WALK = 16384
 // And more than FLOOR_MAX_CALL_BYTES UTF-8 bytes across one call's targets
 // floors the call. A thousand-file patch of 250-byte absolute paths is about 250 KB.
 export const FLOOR_MAX_CALL_BYTES = 262144
+// A path name longer than FLOOR_MAX_NAME_LENGTH characters floors: no
+// filesystem here accepts one. And more than FLOOR_MAX_CALL_CANONICAL characters
+// of distinct non-ASCII names, from the targets and from what they resolve to,
+// floors the call. Characters here are UTF-16 code units, as `length` counts them.
+export const FLOOR_MAX_NAME_LENGTH = 255
+export const FLOOR_MAX_CALL_CANONICAL = 65536
 
 /**
  * How many `/`- or `\`-separated components `target` has, counting no further
@@ -422,10 +437,11 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
  * @param {boolean} carved  `resolved` is inside a worktree the carve-out admits
- * @param {Map<string, string>} memo  canonical names already computed in this call
+ * @param {{ names: Map<string, string>, canonical: { left: number } }} call
+ *   the canonical names computed in this call, and the characters left to compute
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly, carved, memo) {
+function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -448,9 +464,15 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved, memo) {
     if (SHORT_NAME_SEGMENT.test(names[i])) return true
   }
   // Each segment is checked as written (lowercased) and in canonical form; a
-  // match in either floors.
+  // match in either floors, and so does a name with no canonical form computed.
+  const canonical = []
+  for (const name of names) {
+    const form = _canonicalNameIn(name, call)
+    if (form === null) return true
+    canonical.push(form)
+  }
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
-    _matchesProtectedSegments(names.map((name) => _canonicalNameIn(name, memo)), start, secretsOnly)
+    _matchesProtectedSegments(canonical, start, secretsOnly)
 }
 
 /**
@@ -531,9 +553,10 @@ function _matchesProtectedSegments(segments, start, secretsOnly) {
  * @param {string} target  a path value from a tool input
  * @param {string} base    the resolution base (session cwd)
  * @param {boolean} secretsOnly  match only secret / credential files
- * @param {{ realBase: string|undefined, walk: { left: number }, names: Map<string, string> }} call
+ * @param {{ realBase: string|undefined, walk: { left: number }, names: Map<string, string>, canonical: { left: number } }} call
  *   state shared by one call's targets: the session cwd's real path once
- *   resolved, the walk budget left, and the canonical names computed so far
+ *   resolved, the walk budget left, the canonical names computed so far, and
+ *   the characters of non-ASCII names left to compute
  * @returns {boolean}
  */
 function isProtectedPathValue(target, base, secretsOnly, call) {
@@ -548,7 +571,7 @@ function isProtectedPathValue(target, base, secretsOnly, call) {
   // escaping relative path begins with `..` or is absolute, never `.claude`.
   const lexicalRel = relative(base, resolvedLexical)
   const carved = _insideClaudeWorktree(base, lexicalRel, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved, call.names)) return true
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved, call)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -578,7 +601,7 @@ function isProtectedPathValue(target, base, secretsOnly, call) {
     // resolved target gets the full scan rather than an offset meant for another
     // path.
     const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
-    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved, call.names)) return true
+    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved, call)) return true
     // Under the full floor, an existing target with more than one hard link floors.
     return !secretsOnly && _hasOtherHardLinks(realTarget)
   } catch {
@@ -660,7 +683,9 @@ export function isSecretReadTarget(input, cwd) {
  * (config dirs + secret files). ANY protected field/member floors the input.
  * The call as a whole is bounded too: more than FLOOR_MAX_CALL_TARGETS targets,
  * FLOOR_MAX_CALL_COMPONENTS components or FLOOR_MAX_CALL_BYTES bytes across them,
- * or more than FLOOR_MAX_CALL_WALK components walked, floors it.
+ * more than FLOOR_MAX_CALL_WALK components walked, or more than
+ * FLOOR_MAX_CALL_CANONICAL characters of distinct non-ASCII names compared,
+ * floors it.
  * @param {object} input
  * @param {string} [cwd]
  * @param {boolean} secretsOnly
@@ -693,7 +718,12 @@ function _matchesFloor(input, cwd, secretsOnly) {
     bytes += Buffer.byteLength(target, 'utf8')
     if (bytes > FLOOR_MAX_CALL_BYTES) return true
   }
-  const call = { realBase: undefined, walk: { left: FLOOR_MAX_CALL_WALK }, names: new Map() }
+  const call = {
+    realBase: undefined,
+    walk: { left: FLOOR_MAX_CALL_WALK },
+    names: new Map(),
+    canonical: { left: FLOOR_MAX_CALL_CANONICAL },
+  }
   for (const target of targets) {
     if (isProtectedPathValue(target, base, secretsOnly, call)) return true
   }

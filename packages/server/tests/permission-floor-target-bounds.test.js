@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
+  FLOOR_MAX_NAME_LENGTH, FLOOR_MAX_CALL_CANONICAL,
   FLOOR_MAX_CALL_WALK, FLOOR_MAX_CALL_BYTES,
 } from '../src/permission-floor.js'
 
@@ -122,6 +123,31 @@ describe('floor: one call\'s targets share a budget', () => {
     assert.equal(isFlooredTarget('Read', { changes: big.map((path) => ({ path })) }, CWD), false)
   })
 
+  it(`a name longer than FLOOR_MAX_NAME_LENGTH (${FLOOR_MAX_NAME_LENGTH}) characters floors, on both floors`, () => {
+    const over = `src/${'n'.repeat(FLOOR_MAX_NAME_LENGTH + 1)}`
+    assert.equal(floored('Write', over), true)
+    assert.equal(floored('Read', over), true)
+    const at = `src/${'n'.repeat(FLOOR_MAX_NAME_LENGTH)}`
+    assert.equal(floored('Write', at), false)
+    assert.equal(floored('Read', at), false)
+  })
+
+  it(`more than FLOOR_MAX_CALL_CANONICAL (${FLOOR_MAX_CALL_CANONICAL}) characters of distinct non-ASCII names floors`, () => {
+    // 128-character names of a 2-byte character, distinct, filling the budget exactly.
+    const names = Array.from({ length: FLOOR_MAX_CALL_CANONICAL / 128 }, (_, i) => String(i).padStart(3, '0') + '\u00E9'.repeat(125))
+    const call = (paths) => isFlooredTarget('apply_patch', patch(paths), CWD)
+    assert.equal(call(names), false, 'exactly the budget')
+    // The second call repeats the first call's names: each call counts its own.
+    assert.equal(call([...names, '\u00E9']), true)
+    assert.equal(isFlooredTarget('Read', { changes: [...names, '\u00E9'].map((path) => ({ path })) }, CWD), true)
+  })
+
+  it('ASCII names do not count toward FLOOR_MAX_CALL_CANONICAL', () => {
+    const names = Array.from({ length: 1000 }, (_, i) => String(i).padStart(4, '0') + 'a'.repeat(100))
+    assert.ok(names.join('').length > FLOOR_MAX_CALL_CANONICAL, 'premise: more characters than the budget')
+    assert.equal(isFlooredTarget('apply_patch', patch(names), CWD), false)
+  })
+
   it('a very large changes[] is decided quickly', () => {
     const paths = Array.from({ length: 40_000 }, (_, i) => `src/f${i}.js`)
     const { value, ms } = time(() => isFlooredTarget('apply_patch', patch(paths), CWD))
@@ -192,7 +218,7 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
     const { value, ms } = time(() => isFlooredTarget('Read', { path: 'L', changes }, root))
     assert.equal(value, false)
-    assert.ok(ms < 250, `took ${ms} ms`)
+    assert.ok(ms < 150, `took ${ms} ms`)
   })
 
   it('many targets above a long cwd are decided quickly', { skip: SKIP_WIN32_TIMING }, () => {
@@ -202,6 +228,24 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
     assert.equal(value, false)
     assert.ok(ms < 200, `took ${ms} ms`)
+  })
+
+  it('a long name a target resolves to floors', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync('m/' + 'x'.repeat(FLOOR_MAX_NAME_LENGTH + 1), join(root, 'long-over'))
+    symlinkSync('m/' + 'x'.repeat(FLOOR_MAX_NAME_LENGTH), join(root, 'long-at'))
+    assert.equal(isFlooredTarget('Read', { path: 'long-over/f' }, root), true)
+    assert.equal(isFlooredTarget('Read', { path: 'long-at/f' }, root), false)
+  })
+
+  it('the names targets resolve to count toward FLOOR_MAX_CALL_CANONICAL', { skip: SKIP_NO_SYMLINK }, () => {
+    // Each link adds a distinct 253-character non-ASCII name the targets' text does not hold.
+    const per = 253
+    const count = Math.floor(FLOOR_MAX_CALL_CANONICAL / per) + 1
+    mkdirSync(join(root, 'links'))
+    for (let i = 0; i < count; i++) symlinkSync('m/' + String(i).padStart(3, '0') + '\u00E9'.repeat(per - 3), join(root, 'links', `s${i}`))
+    const read = (n) => isFlooredTarget('Read', { changes: Array.from({ length: n }, (_, i) => ({ path: `links/s${i}/f` })) }, root)
+    assert.equal(read(count - 1), false, 'within the budget')
+    assert.equal(read(count), true)
   })
 
   it('a name repeated across one call\'s targets is compared in canonical form each time', () => {
@@ -237,7 +281,8 @@ describe('floor: targets within the size bounds are judged as before', () => {
   })
 
   it('exactly the byte bound is not floored', () => {
-    const head = 'zz/'
+    // Of names a filesystem accepts.
+    const head = 'zz/' + ('n'.repeat(FLOOR_MAX_NAME_LENGTH) + '/').repeat(15)
     const target = head + 'n'.repeat(FLOOR_MAX_TARGET_BYTES - head.length)
     assert.equal(Buffer.byteLength(target), FLOOR_MAX_TARGET_BYTES)
     assert.equal(floored('Read', target), false)
