@@ -494,6 +494,10 @@ export function _testPermissionModeRevertPendingSize(): number {
 interface PendingThinkingLevelRevert {
   sessionId: string | null;
   previousLevel: string | null;
+  // #8700: the reported effective level the optimistic update cleared, restored
+  // with the level on a rejection. Undefined when the session had no report to
+  // clear (a provider that makes none), so the revert leaves the key alone.
+  previousEffective?: string | null;
 }
 
 const _pendingThinkingLevelReverts = new Map<string, PendingThinkingLevelRevert>();
@@ -520,6 +524,12 @@ export function clearPendingThinkingLevelReverts(): void {
 }
 
 /** @internal test seam. */
+/** #8700 test hook: a copy of the revert entry registered for `requestId`, or null. */
+export function _testPendingThinkingLevelRevert(requestId: string): PendingThinkingLevelRevert | null {
+  const entry = _pendingThinkingLevelReverts.get(requestId);
+  return entry ? { ...entry } : null;
+}
+
 export function _testThinkingLevelRevertPendingSize(): number {
   return _pendingThinkingLevelReverts.size;
 }
@@ -7351,7 +7361,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       if (errCode === 'THINKING_LEVEL_NOT_APPLIED' && errReqId) {
         const revert = consumePendingThinkingLevelRevert(errReqId);
         if (revert?.sessionId && get().sessionStates[revert.sessionId]) {
-          updateSession(revert.sessionId, () => ({ thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'] }));
+          updateSession(revert.sessionId, () => ({
+            thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'],
+            ...(revert.previousEffective !== undefined ? { effectiveThinkingLevel: revert.previousEffective } : {}),
+          }));
         }
       }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured

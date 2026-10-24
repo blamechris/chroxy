@@ -89,6 +89,10 @@ export const NOT_PROVIDER_ACTIVITY_EVENTS = Object.freeze([
   // configuration, environment and daemon housekeeping
   'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
   'inactivity_warning', 'stdin_dropped_totals', 'setup_log', 'respawn_exhausted',
+  // #8700: a session's thinking level changed or was reported — a model switch,
+  // a setting, or Claude Code's report at the start of a turn the turn's own
+  // stream already stamps
+  'thinking_level_changed',
 ])
 
 // #5936 (epic #5935): explicit overflow cap for the shared outgoing-message

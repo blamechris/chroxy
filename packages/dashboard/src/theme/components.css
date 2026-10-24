@@ -407,6 +407,32 @@
   max-width: none;
 }
 
+/* #8700: the read-only "Effective: <level>" readout beside the thinking picker
+   (what the provider says it applied, vs what the picker asked for). Not a
+   control, so no hover/focus affordance and no tap-target floor. It sizes to
+   its own text, stays shrinkable (ellipsis; the full sentence is in `title`)
+   so under pressure it gives way before an interactive select does, and it is
+   quiet by default. A mismatch between an explicit request and the applied
+   level takes the warning tokens — the title and aria-label say the same in
+   words, so colour is never the only signal. */
+.chat-settings-effective {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+  cursor: default;
+}
+.chat-settings-effective--mismatch {
+  color: var(--warning-fg, #fbbf24);
+  border: 1px solid var(--accent-orange-border);
+  background: var(--accent-orange-light);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
 /* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
    header dropdown into SettingsPanel which uses .settings-field-checkbox
    for inline-checkbox layout.) */

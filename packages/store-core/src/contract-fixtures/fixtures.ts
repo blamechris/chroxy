@@ -558,6 +558,38 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     message: { type: 'thinking_level_changed', sessionId: 's1', level: '../../etc' },
     expect: { sessions: { s1: { thinkingLevel: 'default' } } },
   },
+  {
+    // #8700 — the level the provider REPORTS it applied rides beside the
+    // requested one: Auto asked, Claude Code ran `medium`.
+    name: 'thinking_level_changed records the reported effective level',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'default' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'default', effective: 'medium' },
+    expect: { sessions: { s1: { thinkingLevel: 'default', effectiveThinkingLevel: 'medium' } } },
+  },
+  {
+    name: 'thinking_level_changed with effective null clears a stale report to unknown',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'high', effectiveThinkingLevel: 'high' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'high', effective: null },
+    expect: { sessions: { s1: { thinkingLevel: 'high', effectiveThinkingLevel: null } } },
+  },
+  {
+    name: 'thinking_level_changed treats a malformed effective level as unknown, not as a level',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'default', effectiveThinkingLevel: 'high' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'default', effective: '../../etc' },
+    expect: { sessions: { s1: { thinkingLevel: 'default', effectiveThinkingLevel: null } } },
+  },
+  {
+    // A provider with no report (codex, or an older server) sends no field: the
+    // last report a frame carried is left alone rather than reset to unknown.
+    name: 'thinking_level_changed without an effective field leaves the recorded one alone',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'default', effectiveThinkingLevel: 'medium' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'high' },
+    expect: { sessions: { s1: { thinkingLevel: 'high', effectiveThinkingLevel: 'medium' } } },
+  },
 
   // 4. budget_resumed — append system message (target session OR flat addMessage)
   {

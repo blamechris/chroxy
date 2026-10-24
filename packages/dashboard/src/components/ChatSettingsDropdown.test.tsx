@@ -471,6 +471,82 @@ describe('ChatSettingsDropdown', () => {
       expect(screen.queryByTestId('codex-sandbox-badge')).toBeNull()
     })
   })
+
+  // #8700 — the picker says what the operator ASKED for; for a provider that
+  // reports what it applied, a read-only readout beside it says what Claude
+  // Code did. It is never a control, and never shown where the provider makes
+  // no such report.
+  describe('effective thinking level readout (#8700)', () => {
+    const LEVELS = [
+      { id: 'default', label: 'Auto' },
+      { id: 'low', label: 'Low' },
+      { id: 'medium', label: 'Medium' },
+      { id: 'high', label: 'High' },
+    ]
+    const readout = () => screen.getByTestId('effective-thinking-level')
+    const renderWithReport = (overrides: Partial<ChatSettingsDropdownProps> = {}) =>
+      renderDropdown({
+        showThinkingLevel: true,
+        thinkingLevels: LEVELS,
+        thinkingLevelEffective: true,
+        ...overrides,
+      })
+
+    it('shows the level the provider reports it applied', () => {
+      renderWithReport({ thinkingLevel: 'medium', effectiveThinkingLevel: 'medium' })
+      expect(readout().textContent).toBe('Effective: Medium')
+      expect(readout().getAttribute('data-mismatch')).toBe('false')
+    })
+
+    it('is not a mismatch when the operator left the picker on Auto', () => {
+      renderWithReport({ thinkingLevel: 'default', effectiveThinkingLevel: 'high' })
+      expect(readout().textContent).toBe('Effective: High')
+      expect(readout().getAttribute('data-mismatch')).toBe('false')
+    })
+
+    it.each([[null], [undefined]])('says unknown, with when it resolves, while the report is %s', (effective) => {
+      renderWithReport({ thinkingLevel: 'high', effectiveThinkingLevel: effective })
+      expect(readout().textContent).toBe('Effective: unknown')
+      expect(readout().getAttribute('title')).toMatch(/once a turn starts/)
+      // Unknown is not a disagreement: there is nothing to disagree with yet.
+      expect(readout().getAttribute('data-mismatch')).toBe('false')
+    })
+
+    it('flags a mismatch between an explicit request and the applied level, in words as well as colour', () => {
+      renderWithReport({ thinkingLevel: 'high', effectiveThinkingLevel: 'medium' })
+      expect(readout().textContent).toBe('Effective: Medium')
+      expect(readout().getAttribute('data-mismatch')).toBe('true')
+      expect(readout().className).toContain('chat-settings-effective--mismatch')
+      expect(readout().getAttribute('title')).toBe('Requested High; Claude Code applied Medium.')
+      expect(readout().getAttribute('aria-label')).toContain('Requested High; Claude Code applied Medium.')
+    })
+
+    it('renders no readout when the provider does not declare the capability', () => {
+      renderWithReport({ thinkingLevel: 'high', effectiveThinkingLevel: 'medium', thinkingLevelEffective: false })
+      expect(screen.queryByTestId('effective-thinking-level')).toBeNull()
+    })
+
+    it('renders no readout when the capability is absent (an older daemon)', () => {
+      renderDropdown({ showThinkingLevel: true, thinkingLevel: 'high', effectiveThinkingLevel: 'medium' })
+      expect(screen.queryByTestId('effective-thinking-level')).toBeNull()
+    })
+
+    it('renders no readout when the picker itself is hidden', () => {
+      renderWithReport({ showThinkingLevel: false, thinkingLevel: 'high', effectiveThinkingLevel: 'medium' })
+      expect(screen.queryByTestId('effective-thinking-level')).toBeNull()
+    })
+
+    it('leaves the picker exactly as it was, and the readout is not interactive', () => {
+      const onThinkingLevelChange = vi.fn()
+      renderWithReport({ thinkingLevel: 'high', effectiveThinkingLevel: 'medium', onThinkingLevelChange })
+      const select = screen.getByLabelText('Thinking level') as HTMLSelectElement
+      expect(select.value).toBe('high')
+      expect(Array.from(select.options).map(o => o.textContent)).toEqual(['Auto', 'Low', 'Medium', 'High'])
+      fireEvent.click(readout())
+      expect(onThinkingLevelChange).not.toHaveBeenCalled()
+      expect(readout().tagName.toLowerCase()).not.toMatch(/^(select|button|a|input)$/)
+    })
+  })
 })
 
 describe('model presentation (#8260)', () => {

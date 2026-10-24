@@ -720,6 +720,19 @@ describe('#8086 — setThinkingLevel does not leave a phantom level or dangling 
     expect(store.getState().sessionStates['sess-1']!.thinkingLevel).toBe('high')
     expect(_testThinkingLevelRevertPendingSize()).toBe(1)
   })
+
+  // #8700 — the optimistic write clears the reported effective level; the
+  // revert it arms must carry that level so a rejection can put it back.
+  it('arms the revert with the effective level the optimistic write cleared', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    store.setState((st: any) => ({ sessionStates: { 'sess-1': { ...st.sessionStates['sess-1'], effectiveThinkingLevel: 'medium' } } }))
+    const { _testPendingThinkingLevelRevert } = await import('./message-handler')
+    store.getState().setThinkingLevel('high')
+    expect(store.getState().sessionStates['sess-1']!.effectiveThinkingLevel).toBe(null)
+    expect(_testPendingThinkingLevelRevert(String(sent[0]!.requestId))).toEqual({ sessionId: 'sess-1', previousLevel: 'default', previousEffective: 'medium' })
+  })
 })
 
 describe('#8086 — grantCommunitySkillTrust never renders a row in-flight for a send that never went out', () => {

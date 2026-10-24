@@ -380,6 +380,9 @@ export function App() {
     activeAgents,
     isPlanPending,
     thinkingLevel,
+    // #8700: what the provider reports it applied (vs `thinkingLevel`, what the
+    // operator asked for). Undefined until a provider that reports it says so.
+    effectiveThinkingLevel,
     skills: activeSkills,
     mismatchedSkillNames: activeMismatched,
     pendingCommunitySkills: activePendingCommunitySkills,
@@ -598,6 +601,11 @@ export function App() {
       // the bug this issue is about. Same shape as #7728 dropping the MODEL
       // picker on an empty roster.
       showThinkingLevel: !!caps?.thinkingLevel && activeModelThinkingLevels.length > 0,
+      // #8700: the provider REPORTS the level it applied (claude-sdk family).
+      // Strict `=== true`, not the `!== false` convention above: an older
+      // daemon omits the capability, and the readout must then stay hidden
+      // rather than claim an "unknown" nothing will ever resolve.
+      thinkingLevelEffective: caps?.thinkingLevelEffective === true,
       // #7725: the composer's magic-keyword highlight is a SEPARATE question
       // from "does this provider take a thinking budget". It reads the
       // capability the server sets only where it actually scans the prompt
@@ -2899,6 +2907,8 @@ export function App() {
         showThinkingLevel={dropdownFlags.showThinkingLevel}
         thinkingLevel={thinkingLevel}
         thinkingLevels={activeModelThinkingLevels}
+        thinkingLevelEffective={dropdownFlags.thinkingLevelEffective}
+        effectiveThinkingLevel={effectiveThinkingLevel}
         // #7730: no cast. `setThinkingLevel` takes the open string the
         // model's own roster offers; the `as`-to-a-three-level-union that
         // stood here compiled and was false for every codex session.

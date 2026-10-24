@@ -1414,6 +1414,53 @@ describe('App', () => {
     })
   })
 
+  // #8700 — the header's "Effective: <level>" readout, pinned at the wiring
+  // level: the provider's `thinkingLevelEffective` capability gates it, and the
+  // session's `effectiveThinkingLevel` (written by the shared dispatch from
+  // `thinking_level_changed.effective`) feeds it. The component's own states are
+  // pinned in ChatSettingsDropdown.test.tsx.
+  describe('effective thinking level readout wiring (#8700)', () => {
+    const claudeSession = {
+      sessionId: 's1', name: 'Claude', cwd: '/tmp', type: 'cli' as const, hasTerminal: true,
+      model: null, permissionMode: null, isBusy: false, createdAt: Date.now(),
+      conversationId: null, provider: 'claude-sdk',
+    }
+    function claudeStateWith(capabilities: Record<string, boolean>, session: Record<string, unknown>) {
+      return {
+        connectionPhase: 'connected',
+        sessions: [claudeSession],
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-sdk', capabilities: { thinkingLevel: true, thinkingKeywords: true, thinkingLevelLegacyFallback: true, ...capabilities } }],
+        getActiveSessionState: () => ({
+          messages: [], streamingMessageId: null, activeModel: null, permissionMode: null,
+          contextUsage: null, sessionCost: null, isIdle: true, activeAgents: [],
+          isPlanPending: false, thinkingLevel: 'default', ...session,
+        }),
+      }
+    }
+
+    it('shows the applied level, flagged when it differs from the explicit request', () => {
+      stateOverrides = claudeStateWith({ thinkingLevelEffective: true }, { thinkingLevel: 'high', effectiveThinkingLevel: 'medium' })
+      render(<App />)
+      const readout = screen.getByTestId('effective-thinking-level')
+      expect(readout.textContent).toBe('Effective: Medium')
+      expect(readout.getAttribute('data-mismatch')).toBe('true')
+    })
+
+    it('says unknown while the daemon has not reported an applied level', () => {
+      stateOverrides = claudeStateWith({ thinkingLevelEffective: true }, { effectiveThinkingLevel: null })
+      render(<App />)
+      expect(screen.getByTestId('effective-thinking-level').textContent).toBe('Effective: unknown')
+    })
+
+    it('renders nothing for a provider that does not declare the capability', () => {
+      stateOverrides = claudeStateWith({ thinkingLevelEffective: false }, { effectiveThinkingLevel: 'medium' })
+      render(<App />)
+      expect(screen.getByLabelText('Thinking level')).toBeInTheDocument()
+      expect(screen.queryByTestId('effective-thinking-level')).not.toBeInTheDocument()
+    })
+  })
+
   // #6861 / PR #6878 (Copilot review thread) — the `#`-prefix quick-append must
   // be SKIPPED for PTY-backed sessions (claude-tui / user-shell): the composer
   // routes to the terminal there, where a leading `#` is a shell comment, not a

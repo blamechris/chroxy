@@ -79,6 +79,7 @@ export class ClaudeChannelSession extends BaseSession {
       // #7725: the channel transport hands the prompt straight to the upstream
       // `claude` process; the daemon runs no keyword scan on this path.
       thinkingKeywords: false,
+      thinkingLevelEffective: false, // #8700: no report of the applied level
       // Channel notifications stream as they arrive — the headline win
       // over claude-tui's deliver-on-complete model.
       streaming: true,

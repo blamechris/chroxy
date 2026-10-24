@@ -143,3 +143,17 @@ export function formatThinkingLevelLabel(level) {
 export function thinkingLevelOptions(row, opts) {
     return resolveThinkingLevels(row, opts).levels.map((id) => ({ id, label: formatThinkingLevelLabel(id) }));
 }
+/**
+ * #8700 — does the level a provider REPORTS it applied contradict the one the
+ * operator asked for? Only an EXPLICIT request can be contradicted: `default`
+ * (Auto) names no level, so whatever the provider applied satisfies it. An
+ * unreported (missing or malformed) effective level is not a mismatch either —
+ * it is unknown, which clients show as such. One rule for the dashboard header
+ * and the mobile SettingsBar, so the two cannot disagree about what to flag.
+ */
+export function isThinkingLevelMismatch(requested, effective) {
+    if (!isWellFormedThinkingLevel(effective))
+        return false;
+    const asked = isWellFormedThinkingLevel(requested) ? requested : LEGACY_DEFAULT_THINKING_LEVEL;
+    return asked !== LEGACY_DEFAULT_THINKING_LEVEL && asked !== effective;
+}

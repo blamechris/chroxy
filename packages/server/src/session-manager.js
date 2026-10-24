@@ -67,7 +67,7 @@ export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 's
  * Exported so the #8743 provider-activity classification can be checked against
  * this list instead of a copy of it.
  */
-export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared'])
+export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed'])
 
 const log = createLogger('session-manager')
 /**
@@ -4720,6 +4720,16 @@ export class SessionManager extends EventEmitter {
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
       session.on(event, (data) => {
+        // #8700: a level the SESSION changed or learned (a model switch, the
+        // effort Claude Code reported at turn start) is logged here, under the
+        // Chroxy session id an operator greps for, in the same summary format
+        // the `set_thinking_level` handler prints.
+        if (event === 'thinking_level_changed') {
+          const described = typeof session.describeThinkingLevel === 'function'
+            ? session.describeThinkingLevel()
+            : `requested=${session.thinkingLevel || 'default'}`
+          sessionLog.info(`Thinking level on session ${sessionId}: ${described}${data?.reason ? ` — ${data.reason}` : ''}`)
+        }
         // #8348: journal the prompt's lifecycle BEFORE it is announced, so a
         // client that sees it end can always find the durable record. The
         // frames themselves stay transient; only the outcome is kept.

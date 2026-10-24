@@ -936,6 +936,7 @@ export interface DispatchMessageMap {
     type: 'thinking_level_changed'
     sessionId?: string
     level?: string
+    effective?: string | null
   }
   session_cost_threshold_crossed: {
     type: 'session_cost_threshold_crossed'

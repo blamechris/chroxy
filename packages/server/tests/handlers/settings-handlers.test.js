@@ -3064,6 +3064,29 @@ describe('settings-handlers', () => {
       assert.equal(ctx._sent.filter((m) => m.type === 'error').length, 0)
     })
 
+    // #8700 — a real SdkSession, so the broadcast and the operator's log line
+    // are what the provider says, not what the mock was told.
+    it('logs the change with the session\'s model/requested/effective summary and broadcasts effective', async () => {
+      const { SdkSession } = await import('../../src/sdk-session.js')
+      const session = new SdkSession({ cwd: '/tmp', model: 'claude-opus-5-5' })
+      const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' }]])
+      const ctx = makeCtx(sessions)
+      const lines = []
+      const listener = (entry) => lines.push(entry.message)
+      addLogListener(listener)
+      try {
+        await settingsHandlers.set_thinking_level(makeWs(), makeClient({ activeSessionId: 's1' }), { level: 'high', requestId: 'r-8700' }, ctx)
+      } finally {
+        removeLogListener(listener)
+        session.destroy()
+      }
+      assert.ok(
+        lines.includes('Thinking level change from client-1 on session s1: default → high (model=claude-opus-5-5 requested=high effective=unknown)'),
+        `operator line missing; got: ${lines.filter((l) => l.startsWith('Thinking level')).join(' | ') || '(none)'}`,
+      )
+      assert.deepEqual(ctx._sessionBroadcasts.map((b) => b.msg), [{ type: 'thinking_level_changed', level: 'high', effective: null }])
+    })
+
     it('rejects an invalid level with THINKING_LEVEL_NOT_APPLIED echoing the requestId', async () => {
       const sessions = new Map()
       sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp', provider: 'claude-sdk' })

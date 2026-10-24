@@ -300,6 +300,7 @@ export class ClaudeTuiSession extends BaseSession {
       // daemon, and Chroxy does not run detect-thinking-keyword.js on this
       // path, so it must not advertise the escalation.
       thinkingKeywords: false,
+      thinkingLevelEffective: false, // #8700: no report of the applied level
       streaming: false,
       tools: true,
       // #5791 — advertise whether the server will actually honor a single

@@ -194,6 +194,7 @@ export class GeminiSession extends JsonlSubprocessSession {
       // #7725: Gemini never sees detect-thinking-keyword.js — the magic words
       // are plain prose on this path.
       thinkingKeywords: false,
+      thinkingLevelEffective: false, // #8700: no report of the applied level
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,

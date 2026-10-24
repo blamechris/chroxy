@@ -6,6 +6,7 @@ import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/pro
 import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 import { permissionScope } from './permission-scope.js'
+import { buildThinkingLevelChanged } from './thinking-level-wire.js'
 
 const log = createLogger('event-normalizer')
 
@@ -121,22 +122,26 @@ Object.assign(EVENT_MAP, {
       // so it can only ever replay whatever was already known (`default` for
       // a fresh codex session). This `ready` push is the only moment that
       // can carry the booted effort to the client that created the session.
-      // Same `undefined`-means-unsupported / falsy-means-unknown contract as
-      // ws-history.js:1162-1166, so the two paths can never disagree: a
-      // provider whose `thinkingLevel` getter is `undefined` (the BaseSession
-      // default) sends nothing here either, rather than a bogus 'default'
-      // that would stomp a client that already has the right value.
-      const thinkingLevel = entry.session.thinkingLevel
-      if (thinkingLevel !== undefined) {
-        messages.push({
-          msg: {
-            type: 'thinking_level_changed',
-            level: thinkingLevel || 'default',
-          },
-        })
-      }
+      // Built by the same `buildThinkingLevelChanged` as ws-history's replay
+      // (#8700), so the two paths can never disagree: a provider whose
+      // `thinkingLevel` getter is `undefined` (the BaseSession default) sends
+      // nothing here either, rather than a bogus 'default' that would stomp a
+      // client that already has the right value.
+      const thinkingLevelMsg = buildThinkingLevelChanged(entry.session)
+      if (thinkingLevelMsg) messages.push({ msg: thinkingLevelMsg })
     }
     return { messages }
+  },
+
+  // #8700: the SESSION changed or learned its level — a model switch dropped a
+  // level the new model does not offer, or Claude Code reported the effort it
+  // applied at the start of a turn. The frame is rebuilt from the session's
+  // current state rather than from `data`, so it says exactly what the next
+  // reconnect replay will say; `data` carries only the log fields
+  // session-manager prints.
+  thinking_level_changed: (_data, ctx) => {
+    const msg = buildThinkingLevelChanged(ctx.getSessionEntry?.()?.session)
+    return msg ? { messages: [{ msg }] } : null
   },
 
   // #5431: claude-tui's idle transcript re-scan saw the outstanding-work set

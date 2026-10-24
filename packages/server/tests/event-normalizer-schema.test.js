@@ -146,6 +146,19 @@ function makeCtx(overrides = {}) {
   }
 }
 
+// #8700 — a session whose class declares `thinkingLevelEffective`, so the
+// builder emits `effective` (the level Claude Code reported, or null).
+function effortReportingSession(effective) {
+  class EffortReportingSession {
+    static get capabilities() { return { thinkingLevelEffective: true } }
+    get model() { return 'claude-opus-5-5' }
+    get permissionMode() { return 'auto' }
+    get thinkingLevel() { return null }
+    get effectiveThinkingLevel() { return effective }
+  }
+  return new EffortReportingSession()
+}
+
 // A realistic background-task snapshot entry (BackgroundTaskSchema).
 const backgroundTask = { toolUseId: 'toolu_ci', kind: 'bash', description: 'Wait for CI', startedAt: 1781068000000 }
 // A realistic activity-tree entry (ActivityEntrySchema); `running` → no endedAt.
@@ -177,6 +190,27 @@ const FIXTURES = [
       }),
     }),
     'ready (provider with a thinkingLevel)',
+  ],
+  // #8700 — a provider that reports the level it applied puts `effective` on
+  // the frame (a string, or null while unreported). A plain-object session has
+  // no `capabilities`, so without these rows the `effective` key never reaches
+  // `validateMessage` and a schema that dropped or mistyped it would stay green.
+  [
+    'ready',
+    {},
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test' }) }),
+    'ready (provider reporting its effective level)',
+  ],
+  [
+    'thinking_level_changed',
+    { reason: 'reported by Claude Code when the turn started' },
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test' }) }),
+  ],
+  [
+    'thinking_level_changed',
+    { reason: 'the model changed' },
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession(null), name: 'SDK Session', cwd: '/tmp/test' }) }),
+    'thinking_level_changed (effective not reported yet)',
   ],
   ['background_tasks_changed', { backgroundTasks: [backgroundTask], scheduledWakeup: { at: 1781068600000, reason: 'watching CI' } }, makeCtx()],
   ['conversation_id', { conversationId: 'conv-1' }, makeCtx()],

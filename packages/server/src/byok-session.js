@@ -235,6 +235,7 @@ export class ClaudeByokSession extends BaseSession {
       // Inherited by the anthropic-compatible / openai-compatible factories,
       // DeepSeek, Ollama and docker-byok, which all extend this class.
       thinkingKeywords: false,
+      thinkingLevelEffective: false, // #8700: no report of the applied level
       streaming: true,
       // We rebuild the system prompt on every turn from
       // _buildSystemPrompt(), so an activate/deactivate of a skill

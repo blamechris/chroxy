@@ -4,7 +4,8 @@
  * Handles: set_model, set_permission_mode, permission_response,
  *          query_permission_audit, list_providers, set_permission_rules
  */
-import { isWellFormedThinkingLevel, resolveThinkingLevels } from '@chroxy/protocol'
+import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
+import { buildThinkingLevelChanged } from '../thinking-level-wire.js'
 import {
   ALLOWED_MODEL_IDS,
   toShortModelId,
@@ -886,9 +887,14 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
     return
   }
 
+  const previousLevel = entry.session.thinkingLevel || LEGACY_DEFAULT_THINKING_LEVEL
   try {
     await entry.session.setThinkingLevel(level)
-    ctx.transport.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+    // #8700: the line an operator checks before a send. A provider that can say
+    // what it will run (SdkSession) appends its model/requested/effective summary.
+    const described = typeof entry.session.describeThinkingLevel === 'function' ? entry.session.describeThinkingLevel() : null
+    ;sessionLogger(sessionId).info(`Thinking level change from ${client.id} on session ${sessionId}: ${previousLevel} → ${level}${described ? ` (${described})` : ''}`)
+    ctx.transport.broadcastToSession(sessionId, buildThinkingLevelChanged(entry.session) ?? { type: 'thinking_level_changed', level })
   } catch (err) {
     sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to set thinking level: ${err.message}`, undefined, ctx)
   }

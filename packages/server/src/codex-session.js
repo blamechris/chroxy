@@ -608,6 +608,7 @@ export class CodexSession extends JsonlSubprocessSession {
       // Kept SEPARATE from `thinkingLevel` precisely so #7730 can flip that one
       // on without the client also promising keyword escalation.
       thinkingKeywords: false,
+      thinkingLevelEffective: false, // #8700: no report of the applied level
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,

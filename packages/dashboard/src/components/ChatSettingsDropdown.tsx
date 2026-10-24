@@ -20,6 +20,8 @@ import {
   type CodexSandboxMode,
   thinkingLevelOptions,
   formatThinkingLevelLabel,
+  LEGACY_DEFAULT_THINKING_LEVEL,
+  isThinkingLevelMismatch,
   type ThinkingLevelOption,
 } from '@chroxy/protocol'
 import { ModelPickerModal } from './ModelPickerModal'
@@ -108,6 +110,19 @@ export interface ChatSettingsDropdownProps {
   // new call site must do the same rather than relying on the fallback below.
   thinkingLevels?: ThinkingLevelOption[]
   onThinkingLevelChange: (level: string) => void
+  // #8700: the active provider's `thinkingLevelEffective` capability — it
+  // REPORTS the level it actually applied (claude-sdk family). Only then does
+  // the picker get a read-only "Effective: <level>" readout beside it: the
+  // picker says what was asked for, the readout says what Claude Code did with
+  // it, because an adaptive model can run at an effort the picker never named.
+  // Anything but `true` (older daemon, a provider with no such report) renders
+  // no readout — "unknown" is only honest where the provider could have known.
+  thinkingLevelEffective?: boolean
+  // #8700: the level the provider last reported applying, from the session's
+  // `effectiveThinkingLevel`. `null` / `undefined` read as "unknown": not
+  // reported yet (before the first turn starts, right after a model change, or
+  // the CLI could not answer).
+  effectiveThinkingLevel?: string | null
   // promptEvaluator was originally rendered here as a per-session
   // checkbox alongside the model + permission selects. Moved to the
   // SettingsPanel ("Active session" section) — the inline toggle was
@@ -131,6 +146,8 @@ export function ChatSettingsDropdown({
   thinkingLevel,
   thinkingLevels,
   onThinkingLevelChange,
+  thinkingLevelEffective = false,
+  effectiveThinkingLevel,
   readOnlyModel = null,
   providerLabel = null,
 }: ChatSettingsDropdownProps) {
@@ -312,7 +329,53 @@ export function ChatSettingsDropdown({
           </select>
         </SelectFit>
       )}
+
+      {/* #8700: what the provider REPORTS it applied, beside what was asked for.
+          Gated on the capability as well as the picker, so a provider that
+          makes no such report never shows an "unknown" it could not resolve. */}
+      {showThinkingLevel && thinkingLevelEffective === true && (
+        <EffectiveThinkingLevel requested={thinkingLevel} effective={effectiveThinkingLevel} />
+      )}
     </>
+  )
+}
+
+/**
+ * #8700: read-only readout of the thinking level the provider applied.
+ *
+ * Three states, none of them silent:
+ *   - known and matching (or the operator left it on Auto) → "Effective: Medium"
+ *   - not reported (`null` / `undefined`) → "Effective: unknown", with a title
+ *     saying when the report arrives
+ *   - known but different from an EXPLICIT request → the same text in the
+ *     warning colour (`data-mismatch`), with a title naming both sides
+ *
+ * `default` (Auto) asks for no particular level, so any applied level satisfies
+ * it and is not a mismatch. Colour alone is not the signal: the title and
+ * aria-label carry the same words, and `data-mismatch` is the test hook.
+ */
+function EffectiveThinkingLevel({ requested, effective }: { requested: string | null; effective: string | null | undefined }) {
+  const known = typeof effective === 'string' && effective.length > 0
+  const asked = requested && requested.length > 0 ? requested : LEGACY_DEFAULT_THINKING_LEVEL
+  const mismatch = isThinkingLevelMismatch(requested, effective)
+  const text = known ? `Effective: ${formatThinkingLevelLabel(effective)}` : 'Effective: unknown'
+  const title = !known
+    ? 'Effective level unknown: Claude Code reports the applied effort once a turn starts.'
+    : mismatch
+      ? `Requested ${formatThinkingLevelLabel(asked)}; Claude Code applied ${formatThinkingLevelLabel(effective)}.`
+      : `Claude Code applied ${formatThinkingLevelLabel(effective)}.`
+  return (
+    <span
+      data-testid="effective-thinking-level"
+      data-kind="thinking-effective"
+      data-mismatch={mismatch ? 'true' : 'false'}
+      className={`chat-settings-effective${mismatch ? ' chat-settings-effective--mismatch' : ''}`}
+      title={title}
+      aria-label={`${text}. ${title}`}
+      role="status"
+    >
+      {text}
+    </span>
   )
 }
 

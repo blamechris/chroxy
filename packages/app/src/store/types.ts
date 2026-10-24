@@ -223,6 +223,12 @@ export interface ProviderCapabilities {
   // three levels the gate refused. Absent (an older daemon) means the fallback
   // applies, i.e. the pre-#7784 behaviour.
   thinkingLevelLegacyFallback?: boolean;
+  // #8700: true only when the provider REPORTS the level it actually applied
+  // (claude-sdk family: Claude Code's `applied.effort`), delivered as
+  // `effective` on `thinking_level_changed`. Together with `thinkingLevel` it
+  // gates the read-only "Effort" readout in SettingsBar. Absent / false means
+  // the provider makes no such report and the readout stays hidden.
+  thinkingLevelEffective?: boolean;
   // #5026: true when the provider runs sessions inside an isolated Docker
   // container (docker-cli, docker-sdk, docker-byok). Surfaced as a badge +
   // container settings knobs in the New Session flow.
@@ -288,10 +294,16 @@ export interface SessionState extends BaseSessionState {
   persistentRules?: PermissionRule[];
   // #7807: current session's reasoning/thinking level, written by the shared
   // `handleThinkingLevelChangedPatch` dispatch-table entry (thinking_level_changed).
-  // Mirrors the dashboard's `SessionState['thinkingLevel']`. No app UI reads
-  // this yet — the app has no thinking-level control — so this only makes the
-  // store reflect server state; wiring a control is a tracked follow-up.
+  // Mirrors the dashboard's `SessionState['thinkingLevel']`. The app has no
+  // thinking-level CONTROL; the value is the operator's REQUEST, read only by
+  // the SettingsBar "Effort" readout (#8700) to flag a mismatch with
+  // `effectiveThinkingLevel`.
   thinkingLevel: ThinkingLevel;
+  // #8700: the level the provider REPORTS it applied (the shared dispatch
+  // writes it only when `thinking_level_changed` carries `effective`). `null`
+  // = not reported yet (renders as "unknown"); `undefined` = this provider
+  // makes no such report.
+  effectiveThinkingLevel?: ThinkingLevel | null;
 }
 
 export interface SessionNotification {

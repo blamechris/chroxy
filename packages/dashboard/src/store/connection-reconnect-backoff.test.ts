@@ -487,6 +487,10 @@ const ALL_SESSION_STATE_KEYS = {
   terminalSize: true,
   selectedFilePath: true,
   thinkingLevel: true,
+  // #8700: the provider-reported applied level. Like `thinkingLevel` it is
+  // session config, not transient connection state, so the onclose sweep must
+  // leave it alone.
+  effectiveThinkingLevel: true,
   sessionRules: true,
   persistentRules: true,
   skills: true,
