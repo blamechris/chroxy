@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-10-24
+
+### Changed
+
+- **The permission floor bounds the work it does per request (#8771).** A path-tool target longer than 4096 bytes or with more than 256 components, and a single request carrying more than 1024 targets or more than 16384 components across them, are prompted for without walking the path; the shared path walk also stops after 1024 components. Measured on over half a million real paths (the deepest 21 components, the longest 335 bytes), no ordinary path reaches these limits. A floor hit costs a prompt, never access.
+
 ## [0.11.6] - 2026-10-23
 
 ### Added
