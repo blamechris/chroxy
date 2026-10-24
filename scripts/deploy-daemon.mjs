@@ -257,6 +257,29 @@ export function defaultDeps() {
 
 const short = (sha) => (typeof sha === 'string' ? sha.slice(0, 12) : '?')
 const tail = (text, n = 12) => String(text || '').trim().split('\n').slice(-n).join('\n')
+
+// #8743: how long each session's provider had been silent, from the
+// /api/daemon/idle answer, for the line logged before every restart, so a
+// restart that cuts work off can be traced to the verdict that allowed it.
+// Bounded: there may be many sessions, and their names are user-chosen.
+const LOGGED_SESSIONS_MAX = 20
+function sessionActivityOf(sessions) {
+  if (!Array.isArray(sessions)) return { total: 0, rows: [] }
+  return {
+    total: sessions.length,
+    rows: sessions.slice(0, LOGGED_SESSIONS_MAX).map((s) => ({
+      name: String(s?.name || s?.sessionId || '?').slice(0, 60),
+      ageMs: Number.isSafeInteger(s?.providerActivityAgeMs) && s.providerActivityAgeMs >= 0 ? s.providerActivityAgeMs : null,
+    })),
+  }
+}
+const agoText = (ms) => (ms < 120_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`)
+function describeSessionActivity({ total, rows }) {
+  if (!total) return 'no sessions'
+  const each = rows.map((r) => `"${r.name}" ${r.ageMs === null ? 'no provider output' : `last provider output ${agoText(r.ageMs)} ago`}`)
+  if (total > rows.length) each.push(`+${total - rows.length} more`)
+  return `${total} session(s): ${each.join(', ')}`
+}
 // What a failed command says, for deploy.log: the first few lines that look like
 // an error (vite and npm end with stack frames, which say where, not what), else
 // the tail.
@@ -592,7 +615,7 @@ async function deployOnce(opts, d, meta) {
   // Only a REFUSED connection proves nothing is listening. A reset, a timeout or
   // any answer at all means something is there.
   const isRefused = (e) => /ECONNREFUSED/.test(`${e?.cause?.code || ''} ${e?.code || ''} ${e?.message || ''}`)
-  // -> { kind, reasons, commit, pid, noRoute }
+  // -> { kind, reasons, commit, pid, noRoute, activity }
   //   idle / busy  the daemon answered and said so
   //   down         NOTHING is listening: the daemon's port REFUSED a connection (also
   //                checked when connection.json is missing or stale). The only kind
@@ -603,7 +626,7 @@ async function deployOnce(opts, d, meta) {
   // `commit` is what the DAEMON says it started from (null when it cannot say).
   async function probe() {
     const conn = readConn()
-    const make = (kind, why, extra = {}) => ({ kind, reasons: [why], commit: null, pid: null, noRoute: false, ...extra })
+    const make = (kind, why, extra = {}) => ({ kind, reasons: [why], commit: null, pid: null, noRoute: false, activity: sessionActivityOf(null), ...extra })
     // `down` is PROOF that nothing is listening: the daemon's port refused a
     // connection. connection.json is NOT that proof. A second chroxy process
     // sharing the config dir deletes or overwrites it on exit, and a stale or
@@ -634,7 +657,7 @@ async function deployOnce(opts, d, meta) {
     const reasons = Array.isArray(r.body.reasons) ? r.body.reasons.map(String) : []
     const commit = typeof r.body.commit === 'string' && FULL_SHA.test(r.body.commit) ? r.body.commit.toLowerCase() : null
     const pid = Number.isInteger(r.body.pid) ? r.body.pid : null
-    return { kind: r.body.idle === true ? 'idle' : 'busy', reasons: r.body.idle === true ? reasons : (reasons.length ? reasons : ['busy']), commit, pid, noRoute: false }
+    return { kind: r.body.idle === true ? 'idle' : 'busy', reasons: r.body.idle === true ? reasons : (reasons.length ? reasons : ['busy']), commit, pid, noRoute: false, activity: sessionActivityOf(r.body.sessions) }
   }
   const describe = (pr) => `${pr.kind}${pr.reasons.length ? ` (${pr.reasons.join('; ')})` : ''}`
 
@@ -1107,6 +1130,8 @@ async function deployOnce(opts, d, meta) {
 
       // The build took time: the daemon may have turned busy.
       let prevPid = pre.pid ?? null
+      // #8743: the verdict the signal goes out on, logged just before it.
+      let verdict = 'idle checks skipped (--force)'
       // ALWAYS re-probe after the build. A daemon that was down when the tick
       // began may have been relaunched by launchd and be busy by now; only a
       // rollback that finds it STILL down may go ahead without an idle verdict.
@@ -1131,6 +1156,9 @@ async function deployOnce(opts, d, meta) {
           return { exitCode: 0, outcome: 'deferred-busy' }
         }
         prevPid = again.pid
+        verdict = stillDown
+          ? 'daemon down'
+          : `${busyButForced ? `busy, restart confirmed by the owner (${again.reasons.join('; ')})` : 'idle'}; ${describeSessionActivity(again.activity)}`
       }
 
       // The idle probe above was asynchronous too: look at the postpone one last
@@ -1141,6 +1169,7 @@ async function deployOnce(opts, d, meta) {
       // Owed BEFORE the signal: an interruption anywhere after it leaves a
       // rollback owed instead of a false "up to date".
       if (isForward) setRollbackTo(old)
+      event(`restarting: ${verdict}`, { range })
       const v = await restartAndVerify(want, prevPid, { tolerateSignalFailure: !isForward })
 
       if (v.ok) {

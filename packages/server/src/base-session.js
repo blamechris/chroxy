@@ -54,6 +54,26 @@ export const CHROXY_CONTEXT_HINT_TEXT =
 // turn token overhead predictable.
 export const SESSION_PREAMBLE_MAX_LENGTH = 4000
 
+// #8743: the events that mean the provider is doing something, stamped by the
+// emit() override below and read as `providerActivityAgeMs` by the idle-only
+// auto-deploy (daemon-idle-state.js). It is the conversation stream a working
+// turn produces, so it is independent of the turn bookkeeping that `isBusy`
+// reads: in trial run B2-cy-codex that bookkeeping said the turn was over while
+// codex kept emitting for 17 minutes, and the deploy restarted the daemon under
+// it. `ready` (a boot or respawn handshake) and `error` (often the daemon's own
+// failure, and repeatable in a crash/respawn loop) are deliberately absent: they
+// are not evidence of work, and one that recurs would hold every deploy off.
+// tests/daemon-idle.test.js checks every proxied session event is in this list
+// or named there as excluded.
+export const PROVIDER_ACTIVITY_EVENTS = Object.freeze([
+  'stream_start', 'stream_delta', 'stream_end', 'message',
+  'tool_start', 'tool_input_delta', 'tool_result', 'result', 'stopped',
+  'user_question', 'background_tasks_changed',
+  'agent_spawned', 'agent_event', 'agent_completed',
+  'plan_started', 'plan_ready',
+])
+const PROVIDER_ACTIVITY_EVENT_SET = new Set(PROVIDER_ACTIVITY_EVENTS)
+
 // #5936 (epic #5935): explicit overflow cap for the shared outgoing-message
 // queue (`_outgoingQueue`). Replaces the SDK's hard-coded mid-turn cap of 3
 // (#5711) with one bounded, surfaced limit shared by SDK + CLI. A send-while-
@@ -511,6 +531,9 @@ export class BaseSession extends EventEmitter {
 
     this._isBusy = false
     this._processReady = false
+    // #8743: when the provider last produced output, on the monotonic
+    // `_providerActivityClock()`. null until it first does. See noteProviderActivity.
+    this._providerActivityAtMs = null
     // #7382: outstanding hook-routed permission prompts, by requestId. Hoisted
     // from CliSession, where it was written for #2831 and stayed provider-local
     // through #7375/#7379 — so claude-tui, then DEFAULT_PROVIDER, which routes
@@ -2216,6 +2239,7 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean} whether the event had listeners (EventEmitter contract)
    */
   emit(event, ...args) {
+    if (PROVIDER_ACTIVITY_EVENT_SET.has(event)) this.noteProviderActivity()
     if (event === 'stopped') {
       // #8461: this Stop was already confirmed in place of the chip; not twice.
       if (this._stopAckedByResult) {
@@ -2300,6 +2324,38 @@ export class BaseSession extends EventEmitter {
   getPendingPermissionCount() {
     const inProcess = this._pendingPermissions instanceof Map ? this._pendingPermissions.size : 0
     return this._pendingPermissionIds.size + inProcess
+  }
+
+  /**
+   * #8743: record that the provider just produced output. The emit() override
+   * calls it for every PROVIDER_ACTIVITY_EVENTS event; a provider calls it
+   * directly for input that maps to no event (a Codex sub-agent's notifications,
+   * or a straggler from a turn codex already ended), which is exactly the
+   * activity the turn bookkeeping cannot see.
+   */
+  noteProviderActivity() {
+    this._providerActivityAtMs = this._providerActivityClock()
+  }
+
+  /**
+   * #8743: the clock `noteProviderActivity` stamps with. Monotonic, so a wall
+   * clock step cannot make recent activity look old. A test replaces it on the
+   * instance to move time.
+   * @returns {number}
+   */
+  _providerActivityClock() {
+    return Math.trunc(performance.now())
+  }
+
+  /**
+   * #8743: how long ago the provider last produced output, in ms, or null when
+   * it has not since this session object was created. The idle-only auto-deploy
+   * holds off a restart while this is recent (daemon-idle-state.js).
+   * @returns {number|null}
+   */
+  get providerActivityAgeMs() {
+    if (this._providerActivityAtMs === null) return null
+    return Math.max(0, this._providerActivityClock() - this._providerActivityAtMs)
   }
 
   /**

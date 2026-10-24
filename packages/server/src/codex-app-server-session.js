@@ -1226,6 +1226,12 @@ export class CodexAppServerSession extends BaseSession {
       this._onDeprecationNotice(params)
       return
     }
+    // #8743 — every other notification is codex doing something, so the
+    // idle-only auto-deploy must not restart the daemon under it. That includes
+    // the ones dropped below without an event: a sub-agent's thread, a straggler
+    // from a turn codex already ended, anything for a turn the daemon is not
+    // tracking. The emit() override only sees the ones that become events.
+    this.noteProviderActivity()
     if (this._isOtherThread(params)) {
       // #8710 — a sub-agent's thread. Its activity is evidence this turn's work
       // is still running (the parent is often blocked waiting on it), so it holds
