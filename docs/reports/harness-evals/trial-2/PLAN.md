@@ -1,10 +1,11 @@
 # Controlled harness trial 2 — plan
 
-**Status (2026-10-22): draft, not started.** Trial 2 repeats the October trial
+**Status (2026-10-24): draft, not started.** Trial 2 repeats the October trial
 ([`../trial/`](../trial/)) with two runs per cell, a fresh queue, and the hand-work
 of README steps 2–12 replaced by the runner in [`../runner/`](../runner/). Nothing
-here launches a run. The first run waits on the entry gate (§2), which today fails:
-every blocking defect below is open.
+here launches a run. The first run waits on the entry gate (§2): every blocking
+defect below is closed and the queue is set (`trial.json`, §4); the gate still fails
+until T0 is recorded, which follows the sealed key (§5).
 
 The October trial answered its question at n = 1 (REPORT §1): same delivery, Chroxy
 slower by 40 and 68 minutes, and Chroxy lost on reliability. It cost five days for

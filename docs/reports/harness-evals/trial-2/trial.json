@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "t2",
   "title": "Controlled harness trial 2",
-  "status": "draft: queue not selected; entry gate failing (PLAN.md section 2)",
+  "status": "draft: queue set; entry gate failing until T0 is recorded (PLAN.md section 2)",
   "repo": "blamechris/chroxy",
   "trial_dir": "docs/reports/harness-evals/trial-2",
   "t0": null,
@@ -39,8 +39,19 @@
     "cy-claude": [8741, 8700]
   },
   "queue": {
-    "status": "not selected (PLAN.md section 4)",
-    "slots": []
+    "status": "set 2026-10-24: ten issues approved by the owner from the candidate read; slot ids assigned in a random order",
+    "slots": [
+      {"slot": "Q01", "issue": 8341, "title": "app: a duplicate permission_request adds a second activity-history row for a background session", "type": "bug, app"},
+      {"slot": "Q02", "issue": 8457, "title": "containerLostPatch treats a live container-lost error inside a replay window as replayed", "type": "bug, store-core"},
+      {"slot": "Q03", "issue": 8554, "title": "orchestration: a stopped or errored turn's usage never reaches the run ledger or budget", "type": "bug, server"},
+      {"slot": "Q04", "issue": 6976, "title": "MCP: multi-argument structured prompt parsing", "type": "feature, server"},
+      {"slot": "Q05", "issue": 8594, "title": "dashboard: header tooltip resolves a colliding model alias twice", "type": "bug, dashboard"},
+      {"slot": "Q06", "issue": 8548, "title": "test(server): gate the nested provider rosters against their docs", "type": "test, server tests"},
+      {"slot": "Q07", "issue": 7612, "title": "killProcessTree: build the POSIX process table from /proc on Linux, fall back to ps", "type": "bug, server"},
+      {"slot": "Q08", "issue": 8187, "title": "git panel: flag status entries outside the session cwd and exclude them from Stage All / Unstage All", "type": "cross, store-core + dashboard + app"},
+      {"slot": "Q09", "issue": 8571, "title": "scheduler: a daemon restart forgets which session belongs to a scheduled task", "type": "bug, server"},
+      {"slot": "Q10", "issue": 8188, "title": "app: honor the server-advertised defaultProvider", "type": "feature, app"}
+    ]
   },
   "queue_rules": {
     "exclude_labels": ["epic", "subtask", "roadmap", "blocked:developer-program", "needs-dogfood", "backlog-deferred",
