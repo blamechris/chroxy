@@ -70,6 +70,7 @@ before(() => {
   mkdir('.claude/worktrees/feature+auth/src')
   mkdir('.claude/worktrees/_wip/src')
   mkdir('.claude/worktrees/Feature-X/src')
+  mkdir('.claude/worktrees/-wip/src')
   // `<dir>/worktrees/<x>/` shapes that are not Claude Code worktrees: the anchor
   // is `.claude/worktrees`, both parts of it.
   mkdir('.claude/skills/foo')
@@ -131,6 +132,7 @@ describe('#8741 — ordinary files inside a Claude Code worktree are not floored
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/src/a.js' }), false)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/_wip/src/a.js' }), false)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/Feature-X/src/a.js' }), false, 'names are case-insensitive')
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/-wip/src/a.js' }), false, 'a name may start with `-`')
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.claude/settings.json' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.env' }), true)
   })
@@ -266,7 +268,7 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c\\b/src/x.js' }), true)
   })
 
-  for (const rel of ['notes~/a.js', 'café/a.js', 'a:b/c.js', 'dir./a.js', 'dir /a.js', 'a%b.js']) {
+  for (const rel of ['notes~/a.js', 'café/a.js', 'a:b/c.js', 'dir./a.js', 'dir /a.js', 'a%b.js', 'caféx/a.js', 'a~1/b.js']) {
     it(`a name outside the plain set keeps the full scan: ${JSON.stringify(rel)}`, () => {
       assert.equal(floored('Write', { file_path: `.claude/worktrees/a2c/${rel}` }), true)
     })
@@ -312,6 +314,8 @@ describe('#8741 — symlinks: a worktree root is a real directory, as Claude Cod
     symlinkSync(join(repo, '.claude'), join(repo, '.claude/worktrees/a2c/cfg'))
     symlinkSync(join(repo, '.claude/worktrees/b2/src'), join(repo, '.claude/worktrees/a2c/peer'))
     symlinkSync(join(repo, '.claude/worktrees/a2c/src/orig.js'), join(repo, '.claude/worktrees/a2c/alias.js'))
+    symlinkSync(join(root, 'elsewhere'), join(repo, '.claude/worktrees/a2c/away'))
+    symlinkSync(repo, join(repo, '.claude/worktrees/a2c/up'))
     // A cwd-level link INTO a worktree.
     symlinkSync(join(repo, '.claude/worktrees/a2c'), join(repo, 'wt'))
 
@@ -358,6 +362,9 @@ describe('#8741 — symlinks: a worktree root is a real directory, as Claude Cod
   it('any symlink below a real root keeps the full scan, even one into another worktree', () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/peer/a.js' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/alias.js' }), true)
+    // Also when it leads somewhere ordinary, outside .claude.
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/away/f.js' }), true)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/up/src.js' }), true)
   })
 
   it('a path that reaches a worktree only through a cwd-level link keeps the full scan', () => {

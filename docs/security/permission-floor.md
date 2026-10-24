@@ -59,20 +59,21 @@ purpose, and each condition that fails falls back to the full scan:
   Code writes a `/` in a worktree name as `+`, so `feature/auth` is the directory
   `feature+auth`. `<name>` itself is still scanned, so a secret-shaped name floors.
 - **Plain names only.** Split on the platform separator, every component of the
-  path is ASCII letters, digits, space or `._-@+()[]$`, and none ends in a dot or
-  a space. A path with any other component keeps the full scan; it costs a
+  target below the cwd is ASCII letters, digits, space or `._-@+()[]$`, and none
+  ends in a dot or a space. A path with any other component keeps the full scan; it costs a
   prompt, not access.
 - **Strictly below `<name>`.** The root itself, and anything directly in
   `worktrees/`, stay floored.
 - **No `..` in the target, and no symlink on the path.** `.claude`,
   `.claude/worktrees` and `<name>` must be real directories by `lstat` (not a
-  symlink, not missing, not a file; any error floors). That is Claude Code's own
-  precondition for creating a worktree. The carve-out is decided once, on the path
-  as written, and the symlink-resolving pass keeps it only when its resolved path
-  is that same path. So a path that reaches a worktree
-  through any symlink keeps the full scan: one inside the worktree, one into
-  another worktree, or a link in the cwd itself (`wt -> .claude/worktrees/a2c`). So
-  does a target spelled with `..`.
+  symlink, not missing, not a file; any error floors), which is Claude Code's own
+  precondition for creating a worktree, and no existing component below them may
+  be a symlink. The carve-out is decided once, on the path as written, and the
+  symlink-resolving pass keeps it only when its resolved path is that same path.
+  So a path that reaches or leaves a worktree through any symlink keeps the full
+  scan: a link inside the worktree (into `.claude`, into another worktree, or to
+  an ordinary place outside `.claude`), or a link in the cwd itself
+  (`wt -> .claude/worktrees/a2c`). So does a target spelled with `..`.
 - **A single hard link.** An existing file on the path with more than one hard link
   keeps the full scan.
 

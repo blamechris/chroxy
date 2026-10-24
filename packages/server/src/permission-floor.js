@@ -152,12 +152,13 @@ const CLAUDE_SETTINGS_SUFFIX = '.json'
 // 300 s timeout. A worktree is a workspace like the cwd itself, so a target
 // strictly inside `<cwd>/.claude/worktrees/<name>/` is scanned from `<name>` down:
 // its own `.claude/settings*.json`, `.git`, `.env`, keys and config dirs still floor.
+const CLAUDE_DIR = '.claude'
 const CLAUDE_WORKTREES_DIR = 'worktrees'
 // Claude Code accepts `[A-Za-z0-9._-]+` per `/`-separated name segment, refuses
 // `.`, `..` and `.git`, and names the directory with each `/` written as `+`
-// (`feature/auth` -> `feature+auth`). The floor also refuses a LEADING dot, so a
-// name that is itself a dotfile or a protected dir (`.claude`, `.git`, `.vscode`,
-// `.env`) is never a root.
+// (`feature/auth` -> `feature+auth`). The floor also refuses a leading dot or
+// `+`: a name starts with a letter, digit, `_` or `-`, so one that is itself a
+// dotfile or a protected dir (`.claude`, `.git`, `.vscode`, `.env`) is never a root.
 const CLAUDE_WORKTREE_NAME = /^[a-z0-9_-][a-z0-9._+-]*$/i
 // The carve-out covers PLAIN names only: ASCII letters, digits, space and
 // `._-@+()[]$`, not ending in a dot or a space. A path with any other component
@@ -182,11 +183,10 @@ const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
  *     anything directly in `worktrees/`, stays floored;
  *   - walking down from `.claude` with `lstat`, `.claude`, `.claude/worktrees`
  *     and `<name>` are real directories (`lstat` reports a symlink as not a
- *     directory). That is Claude Code's own condition for creating a worktree
- *     (a symlink at any of the three could redirect it), and it keeps a path
- *     that only LOOKS like a worktree floored. A symlink further down is caught
- *     by the resolved pass, which keeps the carve-out only when it resolves to
- *     the written path;
+ *     directory), and no component below them that exists is a symlink. The
+ *     first part is Claude Code's own condition for creating a worktree (a
+ *     symlink at any of the three could redirect it); together they keep a path
+ *     that only LOOKS like a worktree, or leaves one through a link, floored;
  *   - an existing file on the path has a single hard link.
  * `ENOENT` below `<name>` ends the walk, since nothing further exists yet; any
  * other error refuses (fail closed). That refusal is also covered by the
@@ -200,7 +200,7 @@ function _insideClaudeWorktree(base, rel, target) {
   if (target.split(/[/\\]+/).includes('..')) return false
   const parts = rel.split(sep)
   if (parts.length < 4 || !parts.every((part) => PLAIN_COMPONENT.test(part))) return false
-  if (parts[0] !== CLAUDE_SETTINGS_DIR || parts[1] !== CLAUDE_WORKTREES_DIR) return false
+  if (parts[0] !== CLAUDE_DIR || parts[1] !== CLAUDE_WORKTREES_DIR) return false
   if (!CLAUDE_WORKTREE_NAME.test(parts[2])) return false
   let path = base
   for (let k = 0; k < parts.length; k++) {
@@ -211,7 +211,9 @@ function _insideClaudeWorktree(base, rel, target) {
     } catch (err) {
       return err.code === 'ENOENT' && k >= 3
     }
-    if (k < 3 && !stat.isDirectory()) return false
+    // A root component must be a directory (a symlink is not one to `lstat`);
+    // below the root, no existing component may be a symlink.
+    if (k < 3 ? !stat.isDirectory() : stat.isSymbolicLink()) return false
     if (stat.isFile() && stat.nlink > 1) return false
   }
   return true
@@ -433,8 +435,11 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
     const realTarget = resolveTargetComponentwiseSync(realBase, target)
-    // The carve-out survives only when the resolved path IS the written one: a
-    // path through a symlink below the worktree root gets the full scan here.
+    // The carve-out survives only when the resolved path IS the written one. The
+    // written path held no symlink when `_insideClaudeWorktree` walked it, so
+    // this differs only if the path changed between the two walks; then the
+    // resolved target gets the full scan rather than an offset meant for another
+    // path.
     const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
     return _scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)
   } catch {
