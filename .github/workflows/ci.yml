@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `trial/**`: the controlled harness trial's run bases
+    # (docs/reports/harness-evals/trial-2/PLAN.md). A trial merges each PR into
+    # its own `trial/<run>` base, and without a push run there "red CI on the
+    # base after a merge" is not observable (October trial REPORT §8). The
+    # graders' `trial/*eval*` branches hold only grading notes and are excluded.
+    # Each base gets its own concurrency group (`github.ref`, below), so a trial
+    # push never supersedes a `main` run or the reverse. `trialctl gate` checks
+    # that this list covers a run's base before the run starts.
+    branches: [main, 'trial/**', '!trial/*eval*']
   pull_request:
 
 # Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
@@ -33,8 +41,10 @@ on:
 # default "at most one job or
 # workflow run can be pending" per group — a run already IN PROGRESS is left to
 # finish. `github.ref` for a `push` is "the branch or tag ref that was pushed"
-# (`refs/heads/main` here, since `on.push.branches` names only `main`) — the
-# SAME value across every push to that branch, unlike `run_id`. So a burst of
+# (`refs/heads/main` for a push to `main`, `refs/heads/trial/<run>` for a push
+# to a trial base) — the SAME value across every push to that branch, unlike
+# `run_id`, and a different group per branch, so a burst on one branch never
+# supersedes another branch's run. So a burst of
 # `main` pushes now settles to at most one running plus one pending run (the
 # latest), and every commit still gets covered by either the run validating it
 # directly or a later run on top of it — see "WHAT A SKIPPED INTERMEDIATE
