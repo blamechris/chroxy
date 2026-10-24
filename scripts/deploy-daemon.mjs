@@ -262,21 +262,29 @@ const tail = (text, n = 12) => String(text || '').trim().split('\n').slice(-n).j
 // /api/daemon/idle answer, for the line logged before every restart, so a
 // restart that cuts work off can be traced to the verdict that allowed it.
 // Bounded: there may be many sessions, and their names are user-chosen.
+// `ageMs` is a duration, null (the daemon says no output yet), or undefined: the
+// daemon did not report one (it predates the field), which must never read as
+// silence it measured.
 const LOGGED_SESSIONS_MAX = 20
 function sessionActivityOf(sessions) {
   if (!Array.isArray(sessions)) return { total: 0, rows: [] }
   return {
     total: sessions.length,
-    rows: sessions.slice(0, LOGGED_SESSIONS_MAX).map((s) => ({
-      name: String(s?.name || s?.sessionId || '?').slice(0, 60),
-      ageMs: Number.isSafeInteger(s?.providerActivityAgeMs) && s.providerActivityAgeMs >= 0 ? s.providerActivityAgeMs : null,
-    })),
+    rows: sessions.slice(0, LOGGED_SESSIONS_MAX).map((s) => {
+      const age = s?.providerActivityAgeMs
+      return {
+        name: String(s?.name || s?.sessionId || '?').slice(0, 60),
+        ageMs: age === null || (Number.isSafeInteger(age) && age >= 0) ? age : undefined,
+      }
+    }),
   }
 }
 const agoText = (ms) => (ms < 120_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`)
+const activityText = (ageMs) => (ageMs === undefined ? 'provider activity not reported'
+  : ageMs === null ? 'no provider output' : `last provider output ${agoText(ageMs)} ago`)
 function describeSessionActivity({ total, rows }) {
   if (!total) return 'no sessions'
-  const each = rows.map((r) => `"${r.name}" ${r.ageMs === null ? 'no provider output' : `last provider output ${agoText(r.ageMs)} ago`}`)
+  const each = rows.map((r) => `${JSON.stringify(r.name)} ${activityText(r.ageMs)}`)
   if (total > rows.length) each.push(`+${total - rows.length} more`)
   return `${total} session(s): ${each.join(', ')}`
 }

@@ -29,9 +29,11 @@
 
 /**
  * How long every session's provider must have been silent before the daemon
- * may be restarted (#8743). Longer than the gaps a working turn leaves between
- * events, and shorter than the deploy tick, so a quiet daemon still deploys on
- * the next tick or the one after.
+ * may be restarted (#8743). A working provider emits every few seconds, so the
+ * window holds a restart off across ordinary pauses; only a single silent
+ * stretch longer than the window (one long command that reports nothing) gets
+ * through, and then only when `isBusy` is wrong too. Shorter than the deploy
+ * tick, so a quiet daemon still deploys on the next tick or the one after.
  */
 export const PROVIDER_QUIET_WINDOW_MS = 5 * 60 * 1000
 

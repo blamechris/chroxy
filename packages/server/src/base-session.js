@@ -60,19 +60,36 @@ export const SESSION_PREAMBLE_MAX_LENGTH = 4000
 // turn produces, so it is independent of the turn bookkeeping that `isBusy`
 // reads: in trial run B2-cy-codex that bookkeeping said the turn was over while
 // codex kept emitting for 17 minutes, and the deploy restarted the daemon under
-// it. `ready` (a boot or respawn handshake) and `error` (often the daemon's own
-// failure, and repeatable in a crash/respawn loop) are deliberately absent: they
-// are not evidence of work, and one that recurs would hold every deploy off.
-// tests/daemon-idle.test.js checks every proxied session event is in this list
-// or named there as excluded.
+// it. Events that are not evidence of work are in NOT_PROVIDER_ACTIVITY_EVENTS
+// below, because one that recurs would hold every deploy off.
+// tests/daemon-idle.test.js and tests/provider-custom-events-overlap.test.js put
+// every forwarded session event (proxied, built-in transient, and each
+// provider's `customEvents`) in exactly one of the two lists, and check that
+// every name here is emitted somewhere.
 export const PROVIDER_ACTIVITY_EVENTS = Object.freeze([
   'stream_start', 'stream_delta', 'stream_end', 'message',
   'tool_start', 'tool_input_delta', 'tool_result', 'result', 'stopped',
-  'user_question', 'background_tasks_changed',
+  'user_question', 'multi_question_intervention', 'background_tasks_changed',
   'agent_spawned', 'agent_event', 'agent_completed',
   'plan_started', 'plan_ready',
 ])
 const PROVIDER_ACTIVITY_EVENT_SET = new Set(PROVIDER_ACTIVITY_EVENTS)
+
+// #8743: forwarded session events that do NOT stamp provider activity.
+export const NOT_PROVIDER_ACTIVITY_EVENTS = Object.freeze([
+  // a boot or respawn handshake, and often the daemon's own failure, repeatable
+  // in a crash/respawn loop
+  'ready', 'error',
+  // a prompt waiting on a human: the idle verdict counts it as pending already
+  'permission_request', 'permission_resolved', 'permission_expired',
+  // the user's input queue, not the provider (queued input is a restart blocker)
+  'message_queued', 'message_dequeued',
+  // derived from the tool and shell events, and recomputed on sweeps
+  'activity_delta', 'activity_snapshot', 'background_work_changed', 'busy_cleared',
+  // configuration, environment and daemon housekeeping
+  'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
+  'inactivity_warning', 'stdin_dropped_totals', 'setup_log', 'respawn_exhausted',
+])
 
 // #5936 (epic #5935): explicit overflow cap for the shared outgoing-message
 // queue (`_outgoingQueue`). Replaces the SDK's hard-coded mid-turn cap of 3

@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs, POSTPONE_MAX_MS, REQUEST_SKEW_MS } from
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 134
+const MIN_CASES = 135
 
 let pass = 0
 let fail = 0
@@ -2157,11 +2157,12 @@ await test('a restart logs, before the signal, the idle verdict and how long eac
     { sessionId: 's1', name: 'main', providerActivityAgeMs: 12 * 60_000 },
     { sessionId: 's2', name: 'scratch', providerActivityAgeMs: null },
     { sessionId: 's3', providerActivityAgeMs: 45_000 },
+    { sessionId: 's4', name: 'say "hi"' }, // a daemon that predates the field
   ] } })
   let logAtKill = null
   env.onRun = (cmd, args) => { if ([cmd, ...args].join(' ') === KILL) logAtKill = env.readLog() }
   eq((await env.run()).outcome, 'deployed')
-  const want = `${A.slice(0, 12)}..${B.slice(0, 12)} restarting: idle; 3 session(s): "main" last provider output 12m ago, "scratch" no provider output, "s3" last provider output 45s ago`
+  const want = `${A.slice(0, 12)}..${B.slice(0, 12)} restarting: idle; 4 session(s): "main" last provider output 12m ago, "scratch" no provider output, "s3" last provider output 45s ago, "say \\"hi\\"" provider activity not reported`
   assert(logAtKill !== null && logAtKill.trim().split('\n').at(-1).endsWith(want), `on disk at the SIGTERM: ${logAtKill}`)
   const lines = env.readLog().trim().split('\n')
   eq(lines.length, 2, 'the verdict line, then the outcome')
@@ -2181,6 +2182,17 @@ await test('the verdict line is bounded however many sessions there are, and say
   const forced = makeEnv()
   eq((await forced.run({ force: true })).outcome, 'deployed')
   assert(forced.readLog().includes('restarting: idle checks skipped (--force)'), forced.readLog())
+})
+
+await test('an owed rollback onto a DOWN daemon logs that it went out on "daemon down"', async () => {
+  const env = makeEnv()
+  writeFileSync(env.path('deploy-state.json'), JSON.stringify({ rollbackTo: A }))
+  env.git.head = B
+  env.daemon.commit = B
+  env.daemon.dead = true
+  env.daemon.livePid = null
+  eq((await env.run()).outcome, 'rollback-completed')
+  assert(env.readLog().includes('restarting: daemon down'), env.readLog())
 })
 
 await test('a restart the owner confirmed on a busy daemon logs it as busy and confirmed, with the busy reasons', async () => {

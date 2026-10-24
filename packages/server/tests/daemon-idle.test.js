@@ -6,14 +6,15 @@ import { computeDaemonIdleState, PROVIDER_QUIET_WINDOW_MS } from '../src/daemon-
 import { createHttpHandler } from '../src/http-routes.js'
 import { WsServer } from '../src/ws-server.js'
 import { PairingManager } from '../src/pairing.js'
-import { BaseSession, PROVIDER_ACTIVITY_EVENTS } from '../src/base-session.js'
+import { BaseSession, PROVIDER_ACTIVITY_EVENTS, NOT_PROVIDER_ACTIVITY_EVENTS } from '../src/base-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
-import { PROXIED_SESSION_EVENTS } from '../src/session-manager.js'
+import { PROXIED_SESSION_EVENTS, BUILTIN_TRANSIENT_SESSION_EVENTS } from '../src/session-manager.js'
+import { fileURLToPath } from 'node:url'
 import { CliSession } from '../src/cli-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { busyStateOf } from '../src/session-busy-state.js'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DAEMON_COMMIT, isSameDirectory, resolveRepoCommit } from '../src/daemon-commit.js'
 import { tmpdir } from 'node:os'
@@ -722,16 +723,31 @@ describe('provider activity holds a restart off (#8743)', () => {
     assert.ok(out.reasons.some((r) => r.includes('age-broke')), out.reasons.join('|'))
   })
 
-  // `ready` is a boot or respawn handshake and `error` is often the daemon's own
-  // failure, repeatable in a crash/respawn loop: neither is evidence of work.
-  const EXCLUDED = ['ready', 'error']
+  const EXCLUDED = NOT_PROVIDER_ACTIVITY_EVENTS
 
-  it('every proxied session event is either provider activity or named here as excluded', () => {
-    for (const ev of PROXIED_SESSION_EVENTS) {
+  // Both directions. Every event the session manager forwards is classified,
+  // so a new one cannot silently fall outside the window (provider
+  // `customEvents` are classified in provider-custom-events-overlap.test.js,
+  // which discovers every provider class). And every activity name is one that
+  // something under src/ actually emits, so a typo or a dead entry cannot pass
+  // for coverage.
+  it('every proxied and built-in transient session event is in exactly one of the two lists', () => {
+    for (const ev of [...PROXIED_SESSION_EVENTS, ...BUILTIN_TRANSIENT_SESSION_EVENTS]) {
       const inRoster = PROVIDER_ACTIVITY_EVENTS.includes(ev)
       const excluded = EXCLUDED.includes(ev)
-      assert.ok(inRoster !== excluded, `${ev}: add it to PROVIDER_ACTIVITY_EVENTS or to EXCLUDED, exactly one`)
+      assert.ok(inRoster !== excluded, `${ev}: add it to PROVIDER_ACTIVITY_EVENTS or to NOT_PROVIDER_ACTIVITY_EVENTS (base-session.js), exactly one`)
     }
+    assert.deepEqual(PROVIDER_ACTIVITY_EVENTS.filter((ev) => EXCLUDED.includes(ev)), [], 'the lists are disjoint')
+  })
+
+  it('every provider-activity event is emitted by something under src/', () => {
+    const src = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src')
+    const text = readdirSync(src, { recursive: true })
+      .filter((f) => typeof f === 'string' && f.endsWith('.js'))
+      .map((f) => readFileSync(join(src, f), 'utf8'))
+      .join('\n')
+    const unemitted = PROVIDER_ACTIVITY_EVENTS.filter((ev) => !new RegExp(`emit\\(\\s*['"]${ev}['"]`).test(text))
+    assert.deepEqual(unemitted, [], 'a name nothing emits is a typo or a dead entry')
   })
 
   it('a real BaseSession stamps on every activity event and on no excluded one', () => {
@@ -835,10 +851,14 @@ describe('provider activity holds a restart off (#8743)', () => {
       assert.equal(probe(s).idle, true, 'once codex has been silent for the whole window, the daemon is idle again')
     })
 
-    it('a deprecation notice is not activity', () => {
+    it('a deprecation notice, or a notification that names no thread or turn, is not activity', () => {
       s._onNotification({ method: 'deprecationNotice', params: { summary: 'x', details: null } })
+      s._onNotification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 12 } } } })
+      s._onNotification({ method: 'mcpServer/startupStatus/updated', params: { name: 'docs', status: 'ready' } })
       assert.equal(s.providerActivityAgeMs, null)
       assert.equal(probe(s).idle, true)
+      s._onNotification({ method: 'thread/status/changed', params: { threadId: CHILD, status: { type: 'active' } } })
+      assert.equal(s.providerActivityAgeMs, 0, 'one that names a thread is')
     })
   })
 })
