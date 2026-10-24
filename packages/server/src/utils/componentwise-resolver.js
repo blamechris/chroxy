@@ -39,6 +39,16 @@ import { dirname, isAbsolute, join, parse, sep } from 'node:path'
 // `catch` treats as protected / rejected (fail closed).
 export const COMPONENTWISE_MAX_SYMLINKS = 40
 
+// The most work one walk does: COMPONENTWISE_MAX_COMPONENTS components walked,
+// those a symlink adds included, and a resolved path no longer than
+// COMPONENTWISE_MAX_PATH_LENGTH characters. Past either, the walk THROWS
+// `ENAMETOOLONG`, which every caller treats as a failure (fail closed). Each step
+// builds and stats the full path so far, so these bound the walk's total cost.
+// A real path is far below both: Linux's PATH_MAX is 4096 bytes, and even 40
+// symlinks of a few dozen components each stay under the component bound.
+export const COMPONENTWISE_MAX_COMPONENTS = 1024
+export const COMPONENTWISE_MAX_PATH_LENGTH = 16384
+
 /**
  * #6928 — split a raw path into the components BELOW its parsed root, separating on
  * BOTH `/` and `\` regardless of platform. Node accepts forward slashes on Windows,
@@ -123,6 +133,15 @@ function spliceSymlink(pending, i, resolved, link) {
   return linkRoot || resolved
 }
 
+function checkWalkBounds(walked, resolved, fnName) {
+  if (walked > COMPONENTWISE_MAX_COMPONENTS || resolved.length > COMPONENTWISE_MAX_PATH_LENGTH) {
+    throw Object.assign(
+      new Error(`${fnName}: walk exceeds ${COMPONENTWISE_MAX_COMPONENTS} components or ${COMPONENTWISE_MAX_PATH_LENGTH} characters`),
+      { code: 'ENAMETOOLONG' },
+    )
+  }
+}
+
 function symlinkBudgetError(fnName) {
   return Object.assign(
     new Error(`${fnName}: symlink depth exceeds ${COMPONENTWISE_MAX_SYMLINKS}`),
@@ -150,6 +169,7 @@ export function resolveTargetComponentwiseSync(realBase, target) {
   while (i < pending.length) {
     const comp = pending[i]
     i++
+    checkWalkBounds(i, resolved, 'resolveTargetComponentwiseSync')
     const step = resolveComponentLexically(resolved, comp, tailOnly)
     resolved = step.resolved
     if (step.stat === null) continue
@@ -189,6 +209,7 @@ export async function resolveTargetComponentwiseAsync(realBase, target) {
   while (i < pending.length) {
     const comp = pending[i]
     i++
+    checkWalkBounds(i, resolved, 'resolveTargetComponentwiseAsync')
     const step = resolveComponentLexically(resolved, comp, tailOnly)
     resolved = step.resolved
     if (step.stat === null) continue

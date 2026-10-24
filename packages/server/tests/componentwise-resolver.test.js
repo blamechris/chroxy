@@ -8,7 +8,10 @@ import {
   resolveTargetComponentwiseAsync,
   splitPathBelowRoot,
   COMPONENTWISE_MAX_SYMLINKS,
+  COMPONENTWISE_MAX_COMPONENTS,
+  COMPONENTWISE_MAX_PATH_LENGTH,
 } from '../src/utils/componentwise-resolver.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * #6923/#6928 — the SYNC (protected-path floor) and ASYNC (BYOK confinement)
@@ -117,6 +120,31 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     symlinkSync('x\\y', join(root, 'plain'))
     await assertBothThrow(root, 'plain', 'EINVAL')
     await assertBothThrow(root, 'plain/z', 'EINVAL')
+  })
+
+  it(`walking more than COMPONENTWISE_MAX_COMPONENTS (${COMPONENTWISE_MAX_COMPONENTS}) components → both throw ENAMETOOLONG`, async () => {
+    // `a/..` keeps the resolved path short, so only the count is over.
+    await assertBothThrow(root, 'a/../'.repeat(COMPONENTWISE_MAX_COMPONENTS / 2 + 1) + 'x', 'ENAMETOOLONG')
+    await assertParity(root, 'a/../'.repeat(COMPONENTWISE_MAX_COMPONENTS / 4) + 'x', join(root, 'x'))
+  })
+
+  it(`a resolved path longer than COMPONENTWISE_MAX_PATH_LENGTH (${COMPONENTWISE_MAX_PATH_LENGTH}) → both throw ENAMETOOLONG`, async () => {
+    const names = Math.ceil(COMPONENTWISE_MAX_PATH_LENGTH / 251) + 1
+    await assertBothThrow(root, 'zz/' + ('n'.repeat(250) + '/').repeat(names) + 'f', 'ENAMETOOLONG')
+  })
+
+  it('components a symlink adds count toward the bound → both throw ENAMETOOLONG', { skip: SKIP_NO_SYMLINK }, async () => {
+    // Each link's text is short enough for any platform's PATH_MAX; the chain
+    // as a whole walks more than the bound.
+    mkdirSync(join(root, 'end'))
+    let prev = 'end'
+    const perLink = 180 // `q/../` pairs: 360 components, 900 bytes
+    const links = Math.ceil(COMPONENTWISE_MAX_COMPONENTS / (2 * perLink)) + 1
+    for (let i = 0; i < links; i++) {
+      symlinkSync(prev + '/' + 'q/../'.repeat(perLink) + 'z', join(root, 'l' + i))
+      prev = 'l' + i
+    }
+    await assertBothThrow(root, prev + '/x', 'ENAMETOOLONG')
   })
 
   it('symlink cycle → both throw ELOOP', async () => {
