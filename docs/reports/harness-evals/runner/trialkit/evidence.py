@@ -250,9 +250,9 @@ def _session(st):
 def _daemon_facts(session, text):
     """What the log says of the session; the names are the extract's plain identifiers or `<other>`."""
     found = native.session_findings(text, session) if session else None
-    return {'session': extract.safe_name(session) if session else None,
-            'model': extract.safe_name(found['model'][0]) if found and found['model'] else None,
-            'permission_mode': extract.safe_name(found['mode'][0]) if found and found['mode'] else None,
+    return {'session': extract.safe_session(session) if session else None,
+            'model': extract.safe_model(found['model'][0]) if found and found['model'] else None,
+            'permission_mode': extract.safe_enum(found['mode'][0], extract.DAEMON_MODES) if found and found['mode'] else None,
             'interrupts': len(found['interrupts']) if found else None}
 
 
@@ -436,20 +436,35 @@ def evidence(trial, run, env, state_file=None, data_dir=None):
     return checks.exit_code(results)
 
 
+# The checks each runs.json field of the extract depends on: it is written only while every one of them is a pass
+RUNS_ROW_NEEDS = {'workers': ('coordinator transcripts', 'transcript lines'),
+                  'compactions': ('coordinator transcripts', 'transcript lines', 'human messages')}
+
+
 def _build(trial, run, env, results, summary, permission, isolation, workers_label, facts):
     """Judge what was read, append the checks, and return the extract document. A figure whose check is not a pass
     is left out of the document (null), never carried as if it were data."""
     start, end = facts['window']
     reads, tok = summary['lines'], summary['tokens']
-    trusted = not reads['unreliable_files'] and reads['read'] > 0
-    if trusted:
+    why_not = {}     # figure -> why it is not carried
+    if summary['coordinator']['transcripts']:
+        results.append(checks.passed('coordinator transcripts', f'{summary["coordinator"]["transcripts"]} read'))
+    else:
+        results.append(checks.unverified('coordinator transcripts', 'none was read, so nothing says what the coordinator did'))
+    lines_ok = not reads['unreliable_files'] and reads['read'] > 0
+    if lines_ok:
         results.append(checks.passed('transcript lines', f'{reads["read"]} line(s) in {reads["files"]} file(s), {reads["malformed"]} skipped'))
     else:
         results.append(checks.unverified(
-            'transcript lines', f'{reads["unreliable_files"]} of {reads["files"]} file(s) had more than {native.MAX_MALFORMED} '
-                                f'or {native.MAX_MALFORMED_SHARE:.0%} of their lines unreadable ({reads["malformed"]} of {reads["read"]} '
-                                f'skipped overall, {reads["unreadable_files"]} file(s) not openable): the counts may be short'
+            'transcript lines', f'{reads["unreliable_files"]} of {reads["files"]} file(s) had no usable record, or more than '
+                                f'{native.MAX_MALFORMED} or {native.MAX_MALFORMED_SHARE:.0%} of their lines unusable '
+                                f'({reads["malformed"]} of {reads["read"]} skipped overall, {reads["unreadable_files"]} file(s) not '
+                                f'openable): the counts may be short'
             if reads['read'] else 'no line could be read from the copied transcripts'))
+        # what was counted is a lower bound of unknown size: not carried, as for a forked rollout
+        tok = dict(tok, by_model={}, by_role={'coordinator': {}, 'workers': {}},
+                   unverified='transcript lines were not read whole: totals withheld')
+        why_not['people'] = 'transcript lines were not read whole'
     by_model = tok['by_model']
     tokens = sum(sum(row.values()) for row in by_model.values())
     if tok.get('unverified'):
@@ -461,9 +476,13 @@ def _build(trial, run, env, results, summary, permission, isolation, workers_lab
     if missing:
         results.append(checks.unverified('rollout tokens', f'{missing} rollout(s) had no token record or no model, so their usage is '
                                                            f'not in the totals'))
-    results.append(checks.passed('isolation scan', f'{isolation["tool_inputs_scanned"]} tool input(s) scanned')
-                   if isolation['tool_inputs_scanned']
-                   else checks.unverified('isolation scan', 'no tool input found in the transcripts, so nothing was scanned'))
+    if not isolation['tool_inputs_scanned']:
+        results.append(checks.unverified('isolation scan', 'no tool input found in the transcripts, so nothing was scanned'))
+    elif not lines_ok:
+        results.append(checks.unverified('isolation scan', f'{isolation["tool_inputs_scanned"]} tool input(s) scanned, but not every '
+                                                           f'transcript line was read: no hit proves less than it says'))
+    else:
+        results.append(checks.passed('isolation scan', f'{isolation["tool_inputs_scanned"]} tool input(s) scanned'))
     if tok.get('unverified'):
         cost, cost_note = 'n/a', 'token totals are not verified'
     else:
@@ -476,8 +495,22 @@ def _build(trial, run, env, results, summary, permission, isolation, workers_lab
         results.append(checks.unverified('human messages', 'none found in the coordinator transcript(s) although the invocation is '
                                                            'one: the people counts are not recorded'))
         people.update(human_messages_total=None, human_messages_after_first=None, interrupts=None)
+        why_not.setdefault('people', 'no human message was found, although the invocation is one')
     else:
         results.append(checks.passed('human messages', f'{summary["human_messages_total"]} found'))
+    if 'people' in why_not:
+        if not lines_ok:
+            people = dict.fromkeys(people)
+        people['unverified'] = why_not['people']
+    if permission is not None:
+        if permission['unrecognized_lines']:
+            # the daemon says something about permissions this reader does not know: its counts may be short
+            results.append(checks.unverified('permission lines', f'{permission["unrecognized_lines"]} line(s) open like a permission '
+                                                                 f'message but match none this reader knows'))
+            permission = None
+            facts = dict(facts, log_why='permission log lines were not recognised')
+        else:
+            results.append(checks.passed('permission lines', f'{permission["requests"]} request(s), every permission line recognised'))
     notes = []
     if tok.get('stale_final_rollouts'):
         notes.append(f'{tok["stale_final_rollouts"]} rollout(s) ended on a token record below an earlier one; '
@@ -485,14 +518,17 @@ def _build(trial, run, env, results, summary, permission, isolation, workers_lab
     daemon = None
     if facts['log_trusted']:
         daemon = dict(_daemon_facts(facts['session'], facts['log_text']), lines_in_window=len(facts['log_lines']))
+    statuses = {c.name: c.status for c in results}
+    row = extract.runs_row(summary, permission, workers_label)
+    runs_row = {k: v for k, v in row.items()
+                if k == 'approvals' or all(statuses.get(n) == checks.PASS for n in RUNS_ROW_NEEDS[k])}
     doc = {'schema': extract.SCHEMA, 'trial': trial.id, 'run': run.id, 'harness': run.harness.key, 'family': run.harness.family,
            'chroxy': run.harness.chroxy, 'generated_at': timeutil.iso(env.now()),
            'window': {'start': timeutil.iso(start), 'end': timeutil.iso(end)},
            'turn_unit': summary['turn_unit'], 'coordinator': summary['coordinator'], 'workers': summary['workers'],
            'tokens': tok, 'cost': cost, 'cost_note': cost_note, 'people': people, 'transcript_lines': reads,
            'permissions': permission, 'daemon': daemon, 'isolation': isolation, 'notes': notes,
-           'evidence': {'manifest_sha256': facts['digest'], 'files': facts['files']},
-           'runs_row': extract.runs_row(summary, permission, workers_label) if trusted else {}}
+           'evidence': {'manifest_sha256': facts['digest'], 'files': facts['files']}, 'runs_row': runs_row}
     if permission is None:
         doc['permissions_unavailable'] = facts['log_why']
     # name and status only: the detail text of a check can hold a path

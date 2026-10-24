@@ -32,10 +32,23 @@ MACHINE_PROSE = ('<task-notification>', '<system-reminder>', '<local-command-std
                  '<local-command-stderr>', '<local-command-caveat>')
 MAX_TOOLS = 40
 MAX_HASHES = 50
-# A name that reaches the public extract or the terminal (model, effort, mode, tool, decision) must be a short plain
-# identifier; anything else is recorded as OTHER. `fullmatch`, because `$` also matches before a trailing newline.
-SAFE_NAME = re.compile(r'[\w.:/-]{1,64}', re.ASCII)
+# A name that reaches the public extract or the terminal is checked by the rule of its own field, and is recorded
+# as OTHER when it fails it. A field with a known set of values takes only those; a model or tool name takes only a
+# plain identifier (no path, URL or `:` can pass); and nothing that starts like a credential passes any rule.
+# `fullmatch`, because `$` also matches before a trailing newline.
 OTHER = '<other>'
+EFFORTS = frozenset(('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none'))
+CLAUDE_MODES = frozenset(('default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto', 'dontAsk'))
+# the daemon's own mode ids (packages/server/src/handler-utils.js, MODE_IDS), which its log names
+DAEMON_MODES = frozenset(('approve', 'acceptEdits', 'auto', 'plan'))
+APPROVAL_POLICIES = frozenset(('never', 'on-request', 'on-failure', 'untrusted'))
+SANDBOXES = frozenset(('read-only', 'workspace-write', 'danger-full-access'))
+# packages/server/src/ws-permissions.js, `validDecisions`
+DECISIONS = frozenset(('allow', 'deny', 'allowAlways'))
+MODEL_NAME = re.compile(r'[a-z][a-z0-9.-]{1,47}')
+TOOL_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,47}')
+SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}')
+SECRET_PREFIXES = ('ghp_', 'gho_', 'ghs_', 'github_pat_', 'sk-', 'xox', 'akia')   # compared lower-cased
 
 
 # -- small helpers ---------------------------------------------------------------
@@ -54,9 +67,28 @@ def _add_tokens(table, model, usage):
         row[field] += usage[field]
 
 
-def safe_name(value):
-    """`value` when it is a short plain identifier, else OTHER (also for a value that is not a string)."""
-    return value if isinstance(value, str) and SAFE_NAME.fullmatch(value) else OTHER
+def _plain(value, pattern):
+    """`value` if it is a string that fully matches `pattern` and does not start like a credential, else OTHER."""
+    if isinstance(value, str) and pattern.fullmatch(value) and not value.lower().startswith(SECRET_PREFIXES):
+        return value
+    return OTHER
+
+
+def safe_enum(value, allowed):
+    """`value` if it is one of the `allowed` values of its field, else OTHER."""
+    return value if isinstance(value, str) and value in allowed else OTHER
+
+
+def safe_model(value):
+    return _plain(value, MODEL_NAME)
+
+
+def safe_tool(value):
+    return _plain(value, TOOL_NAME)
+
+
+def safe_session(value):
+    return _plain(value, SESSION_ID)
 
 
 def _sorted_counts(counter):
@@ -242,8 +274,8 @@ def claude_summary(files, scanner):
                     people['compactions'][role] += 1
             elif role == 'coordinator' and kind == 'user':
                 mode = entry.get('permissionMode')
-                if isinstance(mode, str) and safe_name(mode) not in modes:
-                    modes.append(safe_name(mode))
+                if isinstance(mode, str) and safe_enum(mode, CLAUDE_MODES) not in modes:
+                    modes.append(safe_enum(mode, CLAUDE_MODES))
                 prose, _results = native._user_parts(entry)
                 if any(text.lstrip().startswith(native.INTERRUPT_MARK) for text in prose):
                     if _first_time(entry, seen_uuid):
@@ -300,14 +332,14 @@ def _claude_assistant(entry, role, turns, efforts, messages, anonymous, seen_tur
                 scanner.scan_input(block.get('input'))
     if not isinstance(model, str) or model == '<synthetic>':
         return
-    model = safe_name(model)
+    model = safe_model(model)
     mid = message.get('id') if isinstance(message.get('id'), str) else None
     if mid is None or mid not in seen_turn:
         if mid is not None:
             seen_turn.add(mid)
         turns[role][model] += 1
         if role == 'coordinator' and isinstance(entry.get('effort'), str):
-            efforts[safe_name(entry['effort'])] += 1
+            efforts[safe_enum(entry['effort'], EFFORTS)] += 1
     usage = message.get('usage')
     if not isinstance(usage, dict):
         return
@@ -409,18 +441,18 @@ def _codex_rollout(path, scanner):
         elif kind == 'turn_context':
             model = payload.get('model')
             if isinstance(model, str):
-                model = safe_name(model)
+                model = safe_model(model)
                 r['turns'][model] += 1
                 if model not in r['models']:
                     r['models'].append(model)
             if isinstance(payload.get('effort'), str):
-                r['efforts'][safe_name(payload['effort'])] += 1
-            if isinstance(payload.get('approval_policy'), str) and safe_name(payload['approval_policy']) not in r['policies']:
-                r['policies'].append(safe_name(payload['approval_policy']))
+                r['efforts'][safe_enum(payload['effort'], EFFORTS)] += 1
+            if isinstance(payload.get('approval_policy'), str) and safe_enum(payload['approval_policy'], APPROVAL_POLICIES) not in r['policies']:
+                r['policies'].append(safe_enum(payload['approval_policy'], APPROVAL_POLICIES))
             sandbox = payload.get('sandbox_policy')
             sandbox = sandbox.get('type') if isinstance(sandbox, dict) else sandbox
-            if isinstance(sandbox, str) and safe_name(sandbox) not in r['sandboxes']:
-                r['sandboxes'].append(safe_name(sandbox))
+            if isinstance(sandbox, str) and safe_enum(sandbox, SANDBOXES) not in r['sandboxes']:
+                r['sandboxes'].append(safe_enum(sandbox, SANDBOXES))
         elif kind == 'compacted':
             r['compacted'] += 1
         elif kind == 'response_item' and payload.get('type') == 'compaction':
@@ -541,6 +573,18 @@ CAP = re.compile(r'^Pending-permission cap \((\d+)\) reached — auto-denying (\
 #   permission-manager.js:1415 this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)
 AUTO_SWITCH = re.compile(r'^Auto-allowed (\d+) pending permission\(s\)')
 
+# Lines that open like the permission outcomes above but are not one. Any other line that opens that way is a
+# permission message this reader does not know (the daemon's wording changed, or the line is damaged), and the counts
+# are then not to be trusted: `permissions` reports how many there were.
+#   ws-permissions.js:622       log.debug(`Permission floor clear for ${hookData.tool_name}`)
+#   ws-permissions.js:1044      log.debug(`Permission ${requestId} released, but the deny response write failed ...`)
+#   cli-session.js:2259         log.info(`Permission mode changed to ${mode}, restarting process`)  (and sdk, claude-tui)
+#   settings-handlers.js:406    _pmLog.info(`Permission mode change from ${client.id} on session ...`)
+#   settings-handlers.js:1137   info(`Permission rules updated by ${client.id} on session ...`)
+#   permission-manager.js:719   this._logWarn(`Permission audit sink threw: ${err?.message || err}`)
+NOT_OUTCOME = re.compile(r'^Permission (?:floor clear for |mode changed? |rules updated by |audit sink threw: |\S+ released, but )')
+PERMISSION_LINE = re.compile(r'^(?:[Pp]ermission |Pending-permission)')
+
 LOG_NOTE = ('Counts cover requests that reached a prompt, one outcome per request id. An Auto-mode allow that '
             'short-circuits (permission-manager.js, `permissionMode === \'auto\'`) writes no log line, and the in-process '
             'pipeline does not log a floored prompt. A request answered over HTTP logs a plain `resolved:` line and then a '
@@ -577,20 +621,21 @@ def permissions(text):
     requests, tools = {}, Counter()
     http, plain, ended, late = {}, {}, {}, set()
     out = Counter()
+    unrecognized = 0
     for _stamp, message in native.log_entries(text):
         m = REQUEST.match(message)
         if m:
             if m.group(1) not in requests:
-                requests[m.group(1)] = safe_name(m.group(2))
+                requests[m.group(1)] = safe_tool(m.group(2))
                 tools[requests[m.group(1)]] += 1
             continue
         m = RESOLVED_HTTP.match(message)
         if m:
-            http.setdefault(m.group(1), safe_name(m.group(2)))
+            http.setdefault(m.group(1), safe_enum(m.group(2), DECISIONS))
             continue
         m = RESOLVED.match(message)
         if m:
-            plain.setdefault(m.group(1), safe_name(m.group(2)))
+            plain.setdefault(m.group(1), safe_enum(m.group(2), DECISIONS))
             continue
         m = TIMED_OUT.match(message)
         if m:
@@ -618,6 +663,8 @@ def permissions(text):
         m = LATE.match(message)
         if m:
             late.add(m.group(1))
+        elif PERMISSION_LINE.match(message) and not NOT_OUTCOME.match(message):
+            unrecognized += 1
     resolved, by_human, undecided = Counter(), Counter(), 0
     for rid in requests:
         if rid in http:
@@ -643,6 +690,7 @@ def permissions(text):
         'connection_closed': out['connection_closed'],
         'auto_mode_switch_allowed': switched,
         'late_responses': len(late),
+        'unrecognized_lines': unrecognized,
         'without_prompt': {'rule_allow': out['rule_allow'], 'rule_deny': out['rule_deny'],
                            'cap_denied': out['cap_denied'],
                            'auto_mode_switch_unmatched': out['auto_mode_switch'] - switched,

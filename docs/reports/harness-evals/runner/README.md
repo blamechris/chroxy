@@ -143,10 +143,13 @@ and compactions; for a Chroxy run the permission counts from the daemon log (bel
 isolation-pattern hits; the `transcript_lines` read and skipped; a `checks` list (each
 check's name and status, no detail text), `notes` and the manifest's SHA-256 and file count. It never holds
 message text, tool output, a command line or file content. A name taken from a
-transcript or the log (model, effort, permission mode, approval policy, sandbox, tool,
-decision, daemon-log model and mode) is kept only if it is a short plain identifier
-(`[A-Za-z0-9_.:/-]`, 1 to 64 characters) and is recorded as `<other>` otherwise, in the
-extract and on the terminal alike. An isolation hit
+transcript or the log is checked by the rule of its field and recorded as `<other>`
+when it fails, in the extract and on the terminal alike: effort, Claude permission mode,
+Codex approval policy and sandbox, permission decision and the daemon's mode take only
+their known values (`extract.py`, the last two pinned to the server source); a model
+takes `[a-z][a-z0-9.-]{1,47}` (no path, URL or `:`); a tool `[A-Za-z][A-Za-z0-9_]{0,47}`;
+a session id `[A-Za-z0-9][A-Za-z0-9-]{0,63}`; and nothing that starts like a credential
+(`ghp_`, `gho_`, `ghs_`, `github_pat_`, `sk-`, `xox`, `AKIA`, any case) passes any of them. An isolation hit
 (another run's `trial/*` branch, the key folder, `KEY.md`/`KEY.md.enc`, a `NEXT-*.md`
 seed, another project's folder under `~/.claude/projects/`, `~/.codex/sessions/`) is
 a pattern name, a count and a SHA-256 of each distinct matched string; the patterns
@@ -163,12 +166,28 @@ reason is a fixed phrase with no path:
   past the window start, nothing in the window): `permissions` and `daemon` are null,
   `permissions_unavailable` says why, and `runs_row` has no `approvals`, so `collect`
   leaves it `not recorded`;
+- the daemon log is read but holds a line that opens like a permission message
+  (`Permission ...`, `Pending-permission ...`) and matches none this reader knows, other
+  than the daemon's own non-outcome messages (mode changes, rule updates, floor-clear
+  debug lines, ...): `UNVERIFIED permission lines`, and the permission figures are
+  withheld as for an unverified log, because a changed or damaged message would
+  otherwise read as a count of zero;
 - no human message is found in the coordinator transcripts (every run opens with its
-  invocation, so none means the reader failed): the three people counts are null;
+  invocation, so none means the reader failed): the three people counts are null and
+  `people.unverified` says why;
 - a transcript or rollout has more than 5 lines, or more than 1% of its lines, that are
-  not JSON objects (or cannot be opened): `UNVERIFIED transcript lines`, and `runs_row`
-  is empty. A valid record beside a truncated remainder is not a clean read. One
+  unusable (not a JSON object, or a known type without the object it carries: an
+  `assistant`/`user` record without a `message` object, a Codex `session_meta`,
+  `turn_context`, `event_msg` or `response_item` without a `payload` object), has no
+  usable record at all (an empty file), or cannot be opened: `UNVERIFIED transcript
+  lines`. Token totals, cost and every people count are then withheld too (null, with the
+  reason), and the isolation scan is `UNVERIFIED`: what was counted is a lower bound of
+  unknown size. A valid record beside a truncated remainder is not a clean read. One
   unreadable line in a long transcript is a mid-write tail and is tolerated;
+- `runs_row` is written field by field: `workers` only while `coordinator transcripts`
+  and `transcript lines` are both a pass, `compactions` only while `human messages` is a
+  pass as well, `approvals` only from a verified permission summary. With no coordinator
+  transcript read it is empty;
 - a Codex rollout whose `session_meta` names the thread it was forked or resumed from
   (`forked_from`, `forked_from_id`, `resumed_from`, at the top or in `source`), or that
   holds a cumulative usage record another rollout also holds (a replay): token totals are
@@ -222,7 +241,8 @@ read only when nothing in the listing rules it out): `not-owner`, `listed`
 epic's parent or child), `scope` (the body mentions `.claude/`, `.github/workflows` or
 `docs/reports/harness-evals/`), `mentions-blocked` (the body mentions a blocker or a
 reserved issue), `trial-files` (the body names a file that a PR into a `trial/*`
-branch changed, a renamed file under both names; those PRs are read once from the
+branch changed, a renamed file under both names; a changed file whose name GitHub does
+not report makes the issues that name a file `unverified`; those PRs are read once from the
 repository's PR list, `pulls?state=all`, every page, keeping those whose base starts with
 `trial/`, so a PR whose base branch was deleted still counts),
 `open-pr` (an open PR cross-references it), `connected-pr`, `trial-xref` (a PR into or

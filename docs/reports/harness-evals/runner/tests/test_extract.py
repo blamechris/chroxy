@@ -259,11 +259,60 @@ class ClaudeNamesAndReads(TempFiles):
     def test_the_synthetic_marker_is_still_not_a_turn(self):
         self.assertEqual(self.summary(assistant('m1', model='<synthetic>', use=usage(o=9)))['coordinator']['turns'], {})
 
-    def test_plain_names_with_the_usual_punctuation_are_kept(self):
-        for name in ('claude-opus-5-5', 'gpt-6-astra', 'anthropic.claude-opus-5:0', 'us.anthropic/claude-sonnet-5-5', 'm' * 64):
-            self.assertEqual(extract.safe_name(name), name)
-        for name in ('', 'm' * 65, 'a b', 'a\nb', 'a\n', 'caf\u00e9', '<synthetic>', 'a;b', None, 7, ['x']):
-            self.assertEqual(extract.safe_name(name), '<other>', repr(name))
+    def test_a_model_is_a_lower_case_identifier_with_no_path_url_or_colon(self):
+        for name in ('claude-opus-5-5', 'gpt-6-astra', 'claude-sonnet-4-5-20250929', 'gpt-5.1-codex', 'o3', 'm' * 48):
+            self.assertEqual(extract.safe_model(name), name)
+        for name in ('/private/probe/value', 'https://example.com/x', 'anthropic:claude-opus', 'us.anthropic/claude-sonnet',
+                     'Claude-Opus', 'claude opus', 'claude-opus\n', 'm' * 49, 'x', '', '-opus', 'caf\u00e9', '<synthetic>', None, 7, ['x']):
+            self.assertEqual(extract.safe_model(name), '<other>', repr(name))
+
+    def test_a_tool_is_a_letter_then_word_characters(self):
+        for name in ('Bash', 'Edit', 'mcp__chroxy__list_files', 'NotebookEdit', 'T' * 48):
+            self.assertEqual(extract.safe_tool(name), name)
+        for name in ('unknown tool', 'mcp__my-server__tool', '/bin/sh', 'Bash(rm -rf /)', 'Bash\n', '1Bash', 'T' * 49, '', None):
+            self.assertEqual(extract.safe_tool(name), '<other>', repr(name))
+
+    def test_a_session_id_is_alphanumeric_with_hyphens(self):
+        for name in ('s-1', '0a1b2c3d4e5f60718293a4b5c6d7e8f9', 'abandoned', '3f2a9c1e-77aa-4b5e-9d11-0c9a1b2c3d4e'):
+            self.assertEqual(extract.safe_session(name), name)
+        for name in ('/Users/x/s', 's 1', 's_1', 's-1\n', '-s', '', 'x' * 65, None):
+            self.assertEqual(extract.safe_session(name), '<other>', repr(name))
+
+    def test_nothing_that_starts_like_a_credential_passes_a_rule_it_would_otherwise_match(self):
+        for name in ('sk-proj-abc123def456', 'SK-PROJ-ABC', 'sk-ant-api03-xyz'):
+            self.assertTrue(extract.MODEL_NAME.fullmatch(name.lower()), name)       # the pattern alone would let it through
+            self.assertEqual(extract.safe_model(name.lower()), '<other>', name)
+            self.assertEqual(extract.safe_session(name), '<other>', name)
+        for name in ('ghp_ABCdef123456', 'gho_x1', 'ghs_x1', 'github_pat_11ABC', 'xoxb', 'xoxp123', 'AKIAABCDEFGHIJKLMNOP', 'akiaabcdef'):
+            self.assertTrue(extract.TOOL_NAME.fullmatch(name), name)
+            self.assertEqual(extract.safe_tool(name), '<other>', name)
+        self.assertEqual(extract.safe_tool('Skill'), 'Skill')       # `sk` alone is not the prefix `sk-`
+
+    def test_a_field_with_known_values_takes_only_those(self):
+        for value in ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none'):
+            self.assertEqual(extract.safe_enum(value, extract.EFFORTS), value)
+        for value in ('HIGH', 'ultra', 'high ', '', None, 3, 'xhigh\n'):
+            self.assertEqual(extract.safe_enum(value, extract.EFFORTS), '<other>', repr(value))
+        self.assertEqual(sorted(extract.CLAUDE_MODES), ['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan'])
+        self.assertEqual(sorted(extract.APPROVAL_POLICIES), ['never', 'on-failure', 'on-request', 'untrusted'])
+        self.assertEqual(sorted(extract.SANDBOXES), ['danger-full-access', 'read-only', 'workspace-write'])
+
+    def test_a_value_in_the_wrong_field_is_other(self):
+        self.assertEqual((extract.safe_enum('workspace-write', extract.EFFORTS), extract.safe_enum('high', extract.SANDBOXES),
+                          extract.safe_enum('allow', extract.CLAUDE_MODES)), ('<other>',) * 3)
+
+    def test_the_decision_and_daemon_mode_sets_are_the_servers(self):
+        source = read_source
+        self.assertTrue("const validDecisions = ['allow', 'deny', 'allowAlways']" in source('ws-permissions.js'))
+        self.assertEqual(sorted(extract.DECISIONS), ['allow', 'allowAlways', 'deny'])
+        self.assertTrue("const MODE_IDS = ['approve', 'acceptEdits', 'auto', 'plan']" in source('handler-utils.js'))
+        self.assertEqual(sorted(extract.DAEMON_MODES), ['acceptEdits', 'approve', 'auto', 'plan'])
+
+    def test_a_path_shaped_model_reaches_neither_the_turns_nor_the_token_table(self):
+        s = self.summary(assistant('m1', model='/private/probe/value', use=usage(o=3)), assistant('m2', model='sk-proj-abc123', use=usage(o=1)))
+        self.assertEqual(s['coordinator']['turns'], {'<other>': 2})
+        self.assertEqual(list(s['tokens']['by_model']), ['<other>'])
+        self.assertFalse('probe' in json.dumps(s) or 'proj' in json.dumps(s))
 
     def test_lines_read_and_skipped_are_counted_per_file_and_in_total(self):
         good = self.write(assistant('m1', use=usage(o=1)), user('hi'))
@@ -293,8 +342,10 @@ class ClaudeNamesAndReads(TempFiles):
             t = native.Tally()
             t.lines, t.malformed = lines, bad
             return t.unreliable()
-        self.assertEqual([tally(1000, 5), tally(1000, 6), tally(400, 4), tally(400, 5), tally(100, 1), tally(100, 2), tally(1, 1), tally(0, 0)],
-                         [False, True, False, True, False, True, True, False])
+        self.assertEqual([tally(1000, 5), tally(1000, 6), tally(400, 4), tally(400, 5), tally(100, 1), tally(100, 2)],
+                         [False, True, False, True, False, True])
+        self.assertEqual([tally(1, 1), tally(0, 0), tally(3, 3)], [True, True, True],
+                         'a file with no usable record at all is not a file that was read, however few lines it has')
         missing = native.Tally()
         list(native.entries(os.path.join(self.tmp, 'absent.jsonl'), missing))
         self.assertTrue(missing.unreadable and missing.unreliable())
@@ -305,6 +356,48 @@ class ClaudeNamesAndReads(TempFiles):
             fh.write(jl(user('hi'), '[' * 200000 + ']' * 200000, '{"a":' * 200000))
         s = extract.claude_summary([(path, 'coordinator')], self.scanner())
         self.assertEqual((s['lines']['read'], s['lines']['malformed']), (3, 2))
+
+    def test_records_that_parse_but_lack_the_object_their_type_carries_are_unusable(self):
+        wrong = [{'type': 'assistant', 'message': None}] * 100
+        s = self.summary(assistant('m1', use=usage(o=2), tools=[{'command': 'ls'}]), user('hi'), *wrong)
+        self.assertEqual((s['lines']['read'], s['lines']['malformed'], s['lines']['unreliable_files']), (102, 100, 1))
+        self.assertEqual(s['tokens']['by_model']['claude-opus-5-5']['output'], 2)       # the valid ones still counted
+
+    def test_each_known_type_needs_its_object_and_other_types_need_nothing(self):
+        cases = {'assistant': 'message', 'user': 'message', 'session_meta': 'payload', 'turn_context': 'payload',
+                 'event_msg': 'payload', 'response_item': 'payload'}
+        for kind, key in cases.items():
+            for bad in (None, 'text', ['x'], 7, True):
+                tally = native.Tally()
+                path = self.write({'type': kind, key: bad}, {'type': kind, key: {}})
+                self.assertEqual(len(list(native.entries(path, tally))), 1, (kind, bad))
+                self.assertEqual((tally.lines, tally.malformed), (2, 1), (kind, bad))
+            tally = native.Tally()
+            self.assertEqual(len(list(native.entries(self.write({'type': kind}), tally))), 0, kind)
+        tally = native.Tally()
+        free = [{'type': t} for t in ('system', 'summary', 'compacted', 'token_usage_record', 'queue-operation', 'something-new')]
+        self.assertEqual(len(list(native.entries(self.write(*free), tally))), 6)
+        self.assertEqual(tally.malformed, 0)
+
+    def test_wrong_shaped_codex_records_beside_valid_ones_are_not_a_clean_read(self):
+        path = self.write(meta(), turn(), counted(10, output=10), *[{'type': 'event_msg', 'payload': None}] * 50)
+        s = extract.codex_summary([path], self.scanner())
+        self.assertEqual((s['lines']['malformed'], s['lines']['unreliable_files']), (50, 1))
+        self.assertEqual(s['tokens']['by_model']['gpt-6-astra']['output'], 10)
+
+    def test_a_file_with_no_usable_record_is_unreliable_beside_a_valid_coordinator(self):
+        good = self.write(user('hi'), assistant('m1', use=usage(o=1)))
+        empty = os.path.join(self.tmp, 'agent-empty.jsonl')
+        open(empty, 'w').close()
+        blank = os.path.join(self.tmp, 'agent-blank.jsonl')
+        with open(blank, 'w') as fh:
+            fh.write('\n\n   \n')
+        junk = os.path.join(self.tmp, 'agent-junk.jsonl')
+        with open(junk, 'w') as fh:
+            fh.write('{"x\n')
+        for worker in (empty, blank, junk):
+            s = extract.claude_summary([(good, 'coordinator'), (worker, 'worker')], self.scanner())
+            self.assertEqual(s['lines']['unreliable_files'], 1, worker)
 
     def test_a_tool_input_with_a_lone_surrogate_is_hashed_not_a_crash(self):
         scanner = self.scanner()
@@ -474,9 +567,9 @@ class CodexSummary(TempFiles):
         self.assertEqual(s['tokens']['by_role']['workers'], {'gpt-6-lite': {'input': 0, 'output': 50, 'cache_read': 0, 'cache_write': 0}})
 
     def test_a_rollout_without_usage_is_reported_and_one_with_two_models_is_priced_at_the_last(self):
-        s = self.summary([meta(), turn()], [meta(), turn(model='a'), turn(model='b'), counted(10, output=10)])
+        s = self.summary([meta(), turn()], [meta(), turn(model='gpt-a'), turn(model='gpt-b'), counted(10, output=10)])
         self.assertEqual((s['tokens']['rollouts_without_usage'], s['tokens']['mixed_model_rollouts']), (1, 1))
-        self.assertEqual(list(s['tokens']['by_model']), ['b'])
+        self.assertEqual(list(s['tokens']['by_model']), ['gpt-b'])
 
     def test_people_events_come_from_coordinator_rollouts(self):
         s = self.summary([meta(), turn(), event('user_message', message=SECRET), event('user_message', message='again'),
@@ -558,6 +651,14 @@ class CodexSummary(TempFiles):
             fh.write(jl(meta(), turn(), counted(10, output=10), '{"type": "event_msg', 'not json'))
         s = extract.codex_summary([path], self.scanner())
         self.assertEqual(s['lines'], {'files': 1, 'read': 5, 'malformed': 2, 'unreadable_files': 0, 'unreliable_files': 1})
+
+    def test_a_call_whose_arguments_string_is_nested_too_deep_to_parse_is_scanned_as_text(self):
+        deep = '[' * 200000 + 'trial/other-run' + ']' * 200000
+        s = self.summary([meta(), turn(), call(arguments=deep), counted(10, output=10)])
+        self.assertEqual(s['tokens']['by_model']['gpt-6-astra']['output'], 10)
+        report = self.scan.report()
+        self.assertEqual(report['tool_inputs_scanned'], 1)
+        self.assertEqual([h['pattern'] for h in report['hits']], ['other_trial_branch'])
 
     def test_a_missing_rollout_set_is_an_empty_summary_not_a_crash(self):
         s = extract.codex_summary([], self.scanner())
@@ -730,6 +831,37 @@ class Permissions(unittest.TestCase):
         p = self.count('garbage', '{"not": "a log', at(1, 'INFO', 'ws', 'Permission mode change from c1 on session s: default → auto at x'),
                        at(2, 'INFO', 'ws', 'MCP trust request perm-m: server'), at(3, 'INFO', 'ws', 'Question q timed out, auto-denying'))
         self.assertEqual((p['requests'], p['decided_by']), (0, {'human': 0, 'automatic': 0, 'unattributed': 0}))
+
+    def test_permission_lines_this_reader_does_not_know_are_counted(self):
+        p = self.count(at(1, 'INFO', 'ws', 'Permission request perm-a: Bash'), at(2, 'INFO', 'ws', 'Permission request'),
+                       at(3, 'INFO', 'ws', 'Permission perm-a resolved maybe'), at(4, 'INFO', 'ws', 'permission request perm-b: Edit'),
+                       at(5, 'INFO', 'ws', 'Permission perm-c got an answer: allow'), at(6, 'INFO', 'ws', 'Pending-permission count 7'),
+                       at(7, 'INFO', 'ws', 'Permission rule matched for Bash: ask'))
+        self.assertEqual(p['unrecognized_lines'], 6)
+
+    def test_lines_that_open_like_a_permission_message_but_are_not_an_outcome_are_not_unknown(self):
+        p = self.count(at(1, 'INFO', 'ws', 'Permission request perm-a: Bash'), at(2, 'DEBUG', 'ws', 'Permission floor clear for Bash'),
+                       at(3, 'INFO', 'ws', 'Permission mode change from c1 on session s: approve → auto at x'),
+                       at(4, 'INFO', 'ws', 'Permission mode changed to auto'), at(5, 'INFO', 'ws', 'Permission mode changed to plan, restarting process'),
+                       at(6, 'INFO', 'ws', 'Permission rules updated by c1 on session s: 2 session rule(s)'),
+                       at(7, 'WARN', 'ws', 'Permission audit sink threw: boom'),
+                       at(8, 'DEBUG', 'ws', 'Permission perm-a released, but the deny response write failed (socket likely gone): EPIPE'),
+                       at(9, 'WARN', 'ws', 'Rate limited POST /permission from 1.2.3.4'), at(10, 'INFO', 'ws', 'Loaded 3 persistent permission rule(s) across 1 project(s)'),
+                       at(11, 'WARN', 'ws', 'permission-mode sidecar cleanup failed: EACCES'),
+                       at(12, 'INFO', 'ws', 'Re-sending pending permission perm-a to reconnected client (4s remaining)'),
+                       at(13, 'INFO', 'x', 'Auto-allowed 1 pending permission(s) on auto mode switch'))
+        self.assertEqual(p['unrecognized_lines'], 0)
+
+    def test_every_not_an_outcome_line_is_one_the_server_writes(self):
+        for name, line in (('ws-permissions.js', "log.debug(`Permission floor clear for ${hookData.tool_name}`)"),
+                           ('ws-permissions.js', "released, but the deny response write failed"),
+                           ('cli-session.js', "info(`Permission mode changed to ${mode}, restarting process`)"),
+                           ('sdk-session.js', "info(`Permission mode changed to ${mode}`)"),
+                           ('claude-tui-session.js', "log.info(`Permission mode changed to ${mode} (sidecar updated, no PTY restart)`)"),
+                           ('handlers/settings-handlers.js', "_pmLog.info(`Permission mode change from ${client.id} on session"),
+                           ('handlers/settings-handlers.js', "info(`Permission rules updated by ${client.id} on session"),
+                           ('permission-manager.js', "this._logWarn(`Permission audit sink threw: ${err?.message || err}`)")):
+            self.assertTrue(line in read_source(name), f'{name} no longer holds {line!r}')
 
     def test_the_note_says_what_the_log_cannot_show(self):
         self.assertTrue('short-circuits' in extract.permissions('')['note'])

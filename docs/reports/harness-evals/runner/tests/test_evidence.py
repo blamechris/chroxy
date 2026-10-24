@@ -441,8 +441,60 @@ class Checks(Evidence):
         doc = self.extract()
         self.assertEqual(doc['transcript_lines']['unreliable_files'], 1)
         self.assertEqual(doc['runs_row'], {}, 'a count from a transcript that was not read whole fills nothing in runs.json')
-        self.assertEqual({c['name']: c['status'] for c in doc['checks']}['transcript lines'], 'UNVERIFIED')
-        self.assertTrue(self.extract()['tokens']['by_model'], 'the figures that were read are still shown, flagged by the check')
+        status = {c['name']: c['status'] for c in doc['checks']}
+        self.assertEqual((status['transcript lines'], status['token totals'], status['isolation scan']), ('UNVERIFIED',) * 3)
+        self.assert_withheld(doc)
+
+    def assert_withheld(self, doc):
+        """What was counted from transcripts that were not read whole is not carried: tokens, cost and the people counts."""
+        self.assertEqual((doc['tokens']['by_model'], doc['tokens']['by_role']), ({}, {'coordinator': {}, 'workers': {}}))
+        self.assertTrue('withheld' in doc['tokens']['unverified'])
+        self.assertEqual((doc['cost'], doc['cost_note']), ('n/a', 'token totals are not verified'))
+        people = doc['people']
+        self.assertEqual({k: v for k, v in people.items() if k != 'unverified'},
+                         dict.fromkeys(('human_messages_total', 'human_messages_after_first', 'interrupts', 'compactions')))
+        self.assertTrue('not read whole' in people['unverified'], people)
+
+    def test_records_of_the_wrong_shape_beside_valid_ones_are_not_a_clean_read(self):
+        self.claude('s1.jsonl', user('Trial run A-cd-r1: go'), assistant('m1', tools=[{'command': 'ls'}]),
+                    *[{'type': 'assistant', 'message': None}] * 100, *[{'type': 'user', 'message': 'text'}] * 5)
+        self.assertEqual(self.run_evidence(), 2, self.out)
+        self.assertTrue(re.search(r'UNVERIFIED\s+transcript lines', self.out), self.out)
+        self.assertEqual(self.extract()['transcript_lines']['malformed'], 105)
+        self.assert_withheld(self.extract())
+
+    def test_an_empty_worker_transcript_beside_a_valid_coordinator_is_not_a_clean_read(self):
+        self.claude('s1.jsonl', user('Trial run A-cd-r1: go'), assistant('m1', tools=[{'command': 'ls'}]))
+        self.put('.claude', 'projects', native.slug(self.clone), 's1', 'subagents', 'agent-a.jsonl', text='')
+        self.assertEqual(self.run_evidence(), 2, self.out)
+        self.assertTrue(re.search(r'UNVERIFIED\s+transcript lines', self.out), self.out)
+        self.assertEqual(self.extract()['transcript_lines']['unreliable_files'], 1)
+        self.assertEqual(self.extract()['runs_row'], {})
+
+    def test_no_transcript_among_the_copied_files_is_not_a_clean_read_and_fills_nothing(self):
+        self.put('.claude', 'projects', native.slug(self.clone), 's1', 'tool-results', 'out.txt', text='tool output\n')
+        self.assertEqual(self.run_evidence(), 2, self.out)
+        status = {c['name']: c['status'] for c in self.extract()['checks']}
+        self.assertEqual((status['transcript lines'], status['coordinator transcripts']), ('UNVERIFIED', 'UNVERIFIED'))
+        self.assertEqual(self.extract()['runs_row'], {})
+
+    def test_worker_transcripts_alone_fill_neither_workers_nor_compactions(self):
+        self.claude('s1/subagents/agent-a.jsonl', user('a spawn prompt'), assistant('w1', model='claude-sonnet-5-5', out=7, tools=[{'command': 'ls'}]))
+        self.run_evidence()
+        status = {c['name']: c['status'] for c in self.extract()['checks']}
+        self.assertEqual((status['coordinator transcripts'], status['transcript lines']), ('UNVERIFIED', 'PASS'))
+        self.assertEqual(self.extract()['runs_row'], {})
+
+    def test_without_a_human_message_workers_are_filled_and_compactions_are_not(self):
+        self.claude('s1.jsonl', assistant('m1', tools=[{'command': 'ls'}]), assistant('m2', out=30))
+        self.claude('s1/subagents/agent-a.jsonl', assistant('w1', model='claude-sonnet-5-5', out=7))
+        self.run_evidence()
+        self.assertEqual(self.extract()['runs_row'], {'workers': '1 subagent transcript(s): claude-sonnet-5-5 x1'})
+
+    def test_a_verified_run_fills_every_field(self):
+        self.basic_claude()
+        self.run_evidence()
+        self.assertEqual(sorted(self.extract()['runs_row']), ['compactions', 'workers'])
 
     def test_a_mid_write_tail_in_a_long_transcript_is_tolerated(self):
         entries = [user('Trial run A-cd-r1: go')] + [assistant(f'm{i}', out=1, tools=[{'command': 'ls'}]) for i in range(150)]
@@ -742,6 +794,15 @@ class Priced(Evidence):
         self.assertEqual(cost['usd'], 62.0)
         self.assertTrue('cost: $62.00' in self.out)
 
+    def test_a_path_or_token_shaped_model_reaches_neither_the_extract_nor_the_terminal(self):
+        for odd in ('/private/probe/value', 'sk-proj-abc123def456', 'https://example.com/m'):
+            self.claude('s1.jsonl', user('Trial run A-cd-r1: go'), assistant('m1', model=odd, tools=[{'command': 'ls'}]))
+            self.run_evidence()
+            self.assertTrue('no price for <other>' in self.out, self.out)
+            self.assertFalse('probe' in self.out or 'sk-proj' in self.out or 'example.com' in self.out, self.out)
+            self.assertFalse('probe' in json.dumps(self.extract()) or 'sk-proj' in json.dumps(self.extract()))
+            shutil_rmtree(os.path.join(self.evidence_dir, self.RUN))
+
     def test_a_model_name_that_is_not_a_plain_name_reaches_neither_the_extract_nor_the_terminal(self):
         odd = f'claude-opus-5-5 {SECRET} /Users/x/project'
         self.claude('s1.jsonl', user('Trial run A-cd-r1: go'), assistant('m1', model=odd, effort=f'high {SECRET}', tools=[{'command': 'ls'}]))
@@ -935,6 +996,43 @@ class DaemonLog:
         self.put_log('not-a-time [INFO] [ws] Permission request perm-x: Bash\nnot-a-time [INFO] [ws] Permission perm-x resolved: allow\n')
         self.assertEqual(self.run_evidence(), 2, self.out)
         self.assert_no_permission_data('readable timestamp')
+
+    def test_one_timestamped_line_beside_permission_lines_nobody_can_read_gives_no_permission_data(self):
+        self.put_log(log_text([LOG[0], LOG[1], ('10:10:00', 'INFO', 'ws', 'Permission request'),
+                               ('10:10:30', 'INFO', 'ws', 'Permission perm-a got an answer: allow'),
+                               ('10:20:00', 'INFO', 'ws', 'permission request perm-b Write')]))
+        self.assertEqual(self.run_evidence(), 2, self.out)
+        self.assertTrue(re.search(r'UNVERIFIED\s+permission lines\s+3 line', self.out), self.out)
+        doc = self.extract()
+        self.assertEqual(doc['permissions'], None)
+        self.assertTrue('not recognised' in doc['permissions_unavailable'])
+        self.assertFalse('approvals' in doc['runs_row'])
+        self.assertEqual({c['name']: c['status'] for c in doc['checks']}['daemon log'], 'PASS')
+
+    def test_the_daemons_other_permission_messages_do_not_unverify_a_log(self):
+        self.put_log(log_text(LOG + [('10:40:00', 'INFO', 'ws', 'Permission mode changed to auto'),
+                                     ('10:41:00', 'WARN', 'ws', 'Rate limited POST /permission from 1.2.3.4'),
+                                     ('10:42:00', 'INFO', 'ws', 'Loaded 3 persistent permission rule(s) across 1 project(s)')]))
+        self.assertEqual(self.run_evidence(), 0, self.out)
+        self.assertEqual({c['name']: c['status'] for c in self.extract()['checks']}['permission lines'], 'PASS')
+
+    def test_collect_leaves_approvals_alone_when_the_permission_lines_were_not_recognised(self):
+        from trialkit import collect
+        self.put_log(log_text([LOG[0], LOG[1], ('10:10:00', 'INFO', 'ws', 'Permission request')]))
+        self.run_evidence()
+        st = state.load(self.trial, self.RUN, home=self.home)
+        collect.update_runs_json(self.trial, self.run, self.data, st, SENT, '2026-11-02T09:00:00Z')
+        with open(os.path.join(self.data, 'runs.json'), encoding='utf-8') as fh:
+            self.assertEqual(json.load(fh)['runs'][self.RUN]['approvals'], 'not recorded')
+
+    def test_a_session_id_that_is_not_a_plain_one_is_recorded_as_other(self):
+        for odd in (f'sk-{SECRET}', '/Users/x/private-session', 'ghp_abcdef123456'):
+            self.write_state(preflight=[{'phase': 'session', 'facts': {'session': odd}}])
+            self.put_log()
+            self.run_evidence()
+            self.assertEqual(self.extract()['daemon']['session'], '<other>', odd)
+            self.assertFalse(SECRET in json.dumps(self.extract()))
+            shutil_rmtree(os.path.join(self.evidence_dir, self.RUN))
 
     def test_collect_leaves_approvals_alone_when_the_log_was_not_verified(self):
         from trialkit import collect

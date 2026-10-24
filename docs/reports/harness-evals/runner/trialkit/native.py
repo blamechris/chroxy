@@ -55,9 +55,15 @@ MAX_MALFORMED = 5
 MAX_MALFORMED_SHARE = 0.01
 
 
+# The key a record of a known type must carry as an object. A line that parses but lacks it (the format changed, or a
+# line is not what it claims) is as unreadable as a truncated one, and is counted with them.
+REQUIRED_OBJECT = {'assistant': 'message', 'user': 'message', 'session_meta': 'payload', 'turn_context': 'payload',
+                   'event_msg': 'payload', 'response_item': 'payload'}
+
+
 class Tally:
-    """What reading one JSONL file saw: its non-blank lines, the ones that were not a JSON object, and whether
-    it could be opened at all."""
+    """What reading one JSONL file saw: its non-blank lines, the ones that were not a usable record (not a JSON
+    object, or a known type without the object it must carry), and whether it could be opened at all."""
 
     def __init__(self):
         self.lines = 0
@@ -65,8 +71,9 @@ class Tally:
         self.unreadable = False
 
     def unreliable(self):
-        """True when too much of the file was skipped (or none of it could be read) to trust a count from it."""
-        return (self.unreadable or self.malformed > MAX_MALFORMED
+        """True when too much of the file was skipped, or none of it could be read, to trust a count from it. A file
+        with no usable record at all (empty, or every line skipped) is unreliable however few lines it has."""
+        return (self.unreadable or self.lines - self.malformed <= 0 or self.malformed > MAX_MALFORMED
                 or self.malformed > self.lines * MAX_MALFORMED_SHARE)
 
 
@@ -92,11 +99,17 @@ def _loads(raw):
     return value if isinstance(value, dict) else None
 
 
+def _shaped(entry):
+    key = REQUIRED_OBJECT.get(entry.get('type'))
+    return key is None or isinstance(entry.get(key), dict)
+
+
 def entries(path, tally=None):
-    """The JSON-object lines of a JSONL file; every other line is skipped and, with a `tally`, counted."""
+    """The usable records of a JSONL file (JSON objects whose known type carries its object); every other line is
+    skipped and, with a `tally`, counted."""
     for raw in _lines(path, tally):
         entry = _loads(raw)
-        if entry is None:
+        if entry is None or not _shaped(entry):
             if tally is not None:
                 tally.malformed += 1
             continue

@@ -416,6 +416,26 @@ class TrialPrList(Queue):
         b.files = {900: [{'sha': 'abc'}]}
         self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
 
+    def test_unreadable_file_metadata_is_unverified_for_the_issues_that_name_a_file_only(self):
+        for entry in ({'filename': None}, {'filename': ''}, {'filename': 7}, {'filename': ['a.js']},
+                      {'filename': 'a.js', 'previous_filename': ''}, {'filename': 'a.js', 'previous_filename': 7}):
+            b = Backlog(issue(9001, body='see bind-host.js'), issue(9002, body='no file named'))
+            b.files = {900: [{'filename': 'unrelated/default.js'}, entry]}
+            result = self.scan(b)
+            self.assertEqual([(r['number'], r['rule']) for r in result['unverified']], [(9001, 'unverified')], entry)
+            self.assertTrue('no readable name' in result['unverified'][0]['detail'], result['unverified'][0]['detail'])
+            self.assertEqual([c['number'] for c in result['candidates']], [9002], entry)      # the PR list itself is known
+
+    def test_a_file_list_that_is_not_a_list_of_objects_is_unverified(self):
+        b = Backlog(issue(9001, body='see bind-host.js'))
+        b.files = {900: [None, 'a.js']}
+        self.assertEqual(self.verdict(b, 9001)[0], 'unverified')
+
+    def test_a_null_previous_filename_is_the_ordinary_case(self):
+        b = Backlog(issue(9001, body='see bind-host.js'))
+        b.files = {900: [{'filename': 'packages/server/src/bind-host.js', 'previous_filename': None}]}
+        self.assertEqual(self.verdict(b, 9001)[0], 'trial-files')
+
 
 class ListedCrossCheck(Queue):
     """An issue on the list is rejected whatever else is true; the output says what else would have rejected it."""

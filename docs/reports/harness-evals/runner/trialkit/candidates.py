@@ -93,7 +93,8 @@ class TrialChanges:
         self.gh = gh
         self.prs = None     # PR number -> base branch
         self.files = None   # file path -> [(pr number, base branch)]
-        self.error = None
+        self.error = None         # the PR list is not known: every rule that needs the trial PRs is unverified
+        self.files_error = None   # their files are not known: only an issue that names a file is unverified
 
     @property
     def branches(self):
@@ -122,19 +123,26 @@ class TrialChanges:
             raise GitHubError(self.error)
 
     def _load_files(self):
+        if self.files_error:
+            raise GitHubError(self.files_error)
         if self.files is None:
             try:
                 index = {}
                 for number, branch in self.prs.items():
                     for entry in self.gh.list(self.gh.repo_path(f'pulls/{number}/files')):
-                        # a renamed file is a changed file under both its names
-                        for name in (entry['filename'], entry.get('previous_filename')):
-                            if isinstance(name, str) and name:
-                                index.setdefault(name, []).append((number, branch))
+                        # a renamed file is a changed file under both its names; a name that is not there is not
+                        # "no file changed", it is metadata this cannot read
+                        names = [entry.get('filename')]
+                        if entry.get('previous_filename') is not None:
+                            names.append(entry['previous_filename'])
+                        if not all(isinstance(name, str) and name for name in names):
+                            raise GitHubError(f'PR #{number} lists a changed file with no readable name')
+                        for name in names:
+                            index.setdefault(name, []).append((number, branch))
                 self.files = index
-            except (GitHubError, KeyError, TypeError) as exc:
-                self.error = f'could not list the files changed on trial/* branches: {exc}'
-                raise GitHubError(self.error)
+            except (GitHubError, KeyError, TypeError, AttributeError) as exc:
+                self.files_error = f'could not list the files changed on trial/* branches: {exc}'
+                raise GitHubError(self.files_error)
 
     def find(self, token):
         """[(path, pr, branch)] for the changed files a body's `token` names. Raises GitHubError if unknown."""
@@ -335,7 +343,8 @@ def scan(trial, gh, items):
                 'only_the_list': sorted((r['number'] for r in cross if r['cross_check'] == 'only-the-list'), reverse=True),
                 'unverified': sorted((r['number'] for r in cross if r['cross_check'] == 'unverified'), reverse=True)},
             'trial_branches': {'branches': len(changes.branches), 'prs': len(changes.prs or {}),
-                               'listed': changes.prs is not None and not changes.error, 'problem': changes.error}}
+                               'listed': changes.prs is not None and not changes.error,
+                               'problem': changes.error or changes.files_error}}
 
 
 def render(result, limit):
@@ -348,7 +357,7 @@ def render(result, limit):
     tb = result['trial_branches']
     if tb['listed']:
         lines.append(f'trial/* base branches read: {tb["branches"]}, PRs into them: {tb["prs"]}')
-    elif tb['problem']:
+    if tb['problem']:
         lines.append(f'trial/* PRs NOT read: {tb["problem"]}')
     cross = result['listed_cross_check']
     if any(cross.values()):
