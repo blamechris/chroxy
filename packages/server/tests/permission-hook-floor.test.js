@@ -10,7 +10,7 @@ import { PassThrough } from 'node:stream'
 
 import { createPermissionHandler, evaluateHookFloorRequest } from '../src/ws-permissions.js'
 import { PermissionManager } from '../src/permission-manager.js'
-import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS, GLOB_SELECTOR_FLOOR_TOOLS } from '../src/permission-floor.js'
+import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS, GLOB_SELECTOR_FLOOR_TOOLS, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS } from '../src/permission-floor.js'
 import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
@@ -1298,6 +1298,45 @@ describe('floor PARITY: hook path vs in-process permission-manager (#7004)', () 
     assert.equal(await inProcessFloored('Read', { file_path: '.env' }, 'approve'), true)
     assert.equal(await inProcessFloored('Read', { file_path: 'src/a.js' }, 'approve'), false)
   })
+})
+
+// ---------------------------------------------------------------------------
+// 4b. Size bounds: a target over FLOOR_MAX_TARGET_COMPONENTS or
+// FLOOR_MAX_TARGET_BYTES floors on both pipelines and through the real shell.
+// Kept out of MATRIX so the test names stay short.
+// ---------------------------------------------------------------------------
+
+describe('floor size bounds: both pipelines and the real shell hook agree', () => {
+  const rows = [
+    ['Write', 'over the component bound', 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)],
+    ['Read', 'over the byte bound', 'zz/' + ('n'.repeat(250) + '/').repeat(Math.ceil(FLOOR_MAX_TARGET_BYTES / 251) + 1) + 'f'],
+    ['apply_patch', 'a changes[] member over the component bound', 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)],
+  ]
+  for (const [tool, label, target] of rows) {
+    const input = tool === 'apply_patch' ? { file_path: CWD, changes: [{ path: 'src/a.js', kind: 'update' }, { path: target, kind: 'update' }] } : { file_path: target }
+    it(`${tool}, ${label}: floored on both paths, and the hook raises a prompt`, async () => {
+      assert.equal(evaluateHookFloorRequest({ tool_name: tool, tool_input: input }, CWD).floor, true, 'hook-path verdict')
+      const pm = new PermissionManager({ log: silentLog, cwd: CWD })
+      try {
+        const seen = []
+        pm.on('permission_request', (d) => seen.push(d))
+        const promise = pm.handlePermission(tool, input, null, 'auto')
+        assert.equal(seen.length, 1, 'in-process auto raised a prompt')
+        pm.respondToPermission(seen[0].requestId, 'deny')
+        await promise
+      } finally {
+        pm.destroy()
+      }
+      const daemon = await startRealDaemon({ promptDecision: 'deny' })
+      try {
+        const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: input, cwd: CWD }, port: daemon.port, mode: 'auto' })
+        assert.equal(daemon.stats.permissionRequests, 1, 'the shell hook routed it to a prompt')
+        assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'the user answered deny')
+      } finally {
+        await daemon.close()
+      }
+    })
+  }
 })
 
 // ---------------------------------------------------------------------------

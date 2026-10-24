@@ -33,6 +33,42 @@ the way `open(2)` does, so a symlinked parent or a `..` after a symlink cannot e
 the floor (#6851/#6921/#6928). Any resolution error (`EACCES`, `ELOOP`, a
 pathological depth) is treated as **floored**.
 
+**The work per target is bounded.** A path-tool target longer than 4096 UTF-8 bytes
+(`FLOOR_MAX_TARGET_BYTES`) or with more than 256 components
+(`FLOOR_MAX_TARGET_COMPONENTS`; `/`- or `\`-separated, `.` and `..` included) floors
+before it is resolved, on both floors and for every path field and `changes[].path`
+member.
+
+One call is bounded as a whole too. It floors when it carries more than 1024 path
+targets (path fields and `changes[]` members together, whatever the members hold;
+`FLOOR_MAX_CALL_TARGETS`), more than 16384 components across them
+(`FLOOR_MAX_CALL_COMPONENTS`), more than 262144 UTF-8 bytes across them
+(`FLOOR_MAX_CALL_BYTES`), or when its targets' symlink-resolving walks together walk
+more than 16384 components (`FLOOR_MAX_CALL_WALK`, those a symlink adds included).
+A path name longer than 255 characters floors (`FLOOR_MAX_NAME_LENGTH`), and so does a
+call whose targets, and the paths they resolve to, hold more than 65536 characters of
+distinct non-ASCII names (`FLOOR_MAX_CALL_CANONICAL`); characters here are UTF-16 code
+units. Every name is compared in canonical form, and a non-ASCII name is the costly
+one to fold; a resolved path's directory names and symlink text count toward this
+budget, though not toward the call's byte count. A thousand files with 60-character
+non-ASCII names stay under it. Of the call's budgets, the component budget (checked
+before any walk) is the one a very large patch reaches first: about 960 absolute paths
+of 17 components each.
+
+Measured on 573,681 real paths (a checkout with its `node_modules`, `~/work`, and a
+home directory's documents, notes and application data), the deepest had 21
+components and the longest was 335 bytes, so no real path reached any bound. A valid
+but extreme path still can: 257 components however short, or a Windows long path over
+4096 bytes, floors.
+
+The shared component-wise walk is bounded too, for every caller: it stops with
+`ENAMETOOLONG` once it has walked 1024 components (`COMPONENTWISE_MAX_COMPONENTS`,
+those a symlink adds included) or its resolved path passes 16384 characters
+(`COMPONENTWISE_MAX_PATH_LENGTH`). The floor counts that as floored, and BYOK file
+operations and the instruction-file policy refuse it, so 1025 components however
+short, or a Windows long path over 16384 characters, is refused there. The Grep
+`glob` analysis keeps its own bounds (below).
+
 Each segment is checked twice, and a match in either floors: as written
 (lowercased), and in a canonical form (`segmentName`, then `canonicalName`). The
 canonical form drops anything from a `:` on and any trailing dots or spaces, then

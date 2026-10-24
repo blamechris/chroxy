@@ -162,11 +162,31 @@ function segmentName(seg) {
 // removed, then each character is lower-, upper- and lower-cased again (so a
 // capital or small sharp s becomes `ss`). An ASCII name is only lowercased.
 // Each segment is also checked as written, so this form only adds matches.
+const ASCII_NAME = /^[\x00-\x7f]*$/
 function canonicalName(name) {
-  if (/^[\x00-\x7f]*$/.test(name)) return name.toLowerCase()
+  if (ASCII_NAME.test(name)) return name.toLowerCase()
   return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
     .map((ch) => ch.toLowerCase().toUpperCase().toLowerCase())
     .join('')
+}
+
+// canonicalName, computed once per name within one call: every target of a
+// call that resolves through the same directories shares its names. Returns
+// null, and the caller floors, for a name longer than FLOOR_MAX_NAME_LENGTH or
+// once the call's distinct non-ASCII names pass FLOOR_MAX_CALL_CANONICAL
+// characters. A resolved path's names include directory names and symlink
+// text, which the call's byte budget does not count.
+function _canonicalNameIn(name, call) {
+  let canonical = call.names.get(name)
+  if (canonical !== undefined) return canonical
+  if (name.length > FLOOR_MAX_NAME_LENGTH) return null
+  if (!ASCII_NAME.test(name)) {
+    call.canonical.left -= name.length
+    if (call.canonical.left < 0) return null
+  }
+  canonical = canonicalName(name)
+  call.names.set(name, canonical)
+  return canonical
 }
 
 // A segment whose name (see segmentName) is in the 8.3 short-name form
@@ -260,6 +280,67 @@ function _hasOtherHardLinks(path) {
   } catch (err) {
     return err.code !== 'ENOENT'
   }
+}
+
+// The most a single path-tool target may be before the floor decides it
+// without resolving it: longer than FLOOR_MAX_TARGET_BYTES (UTF-8), or with more
+// than FLOOR_MAX_TARGET_COMPONENTS components (`/`- or `\`-separated, `.` and
+// `..` included), it floors. Measured on 573,681 real paths, the deepest had 21
+// components and the longest was 335 bytes; Linux's PATH_MAX is 4096 bytes.
+// Exported so tests derive their inputs from the same numbers.
+export const FLOOR_MAX_TARGET_BYTES = 4096
+export const FLOOR_MAX_TARGET_COMPONENTS = 256
+// And the most one tool call may carry: more than FLOOR_MAX_CALL_TARGETS path
+// targets (path fields and `changes[]` members together), or more than
+// FLOOR_MAX_CALL_COMPONENTS components across them, floors the call before any
+// target is resolved. A patch touching hundreds of files is far below both.
+export const FLOOR_MAX_CALL_TARGETS = 1024
+export const FLOOR_MAX_CALL_COMPONENTS = 16384
+// The call's symlink-resolving walks share one budget too: past
+// FLOOR_MAX_CALL_WALK components walked across all its targets (those a symlink
+// adds included), the call floors.
+export const FLOOR_MAX_CALL_WALK = 16384
+// And more than FLOOR_MAX_CALL_BYTES UTF-8 bytes across one call's targets
+// floors the call. A thousand-file patch of 250-byte absolute paths is about 250 KB.
+export const FLOOR_MAX_CALL_BYTES = 262144
+// A path name longer than FLOOR_MAX_NAME_LENGTH characters floors: no
+// filesystem here accepts one. And more than FLOOR_MAX_CALL_CANONICAL characters
+// of distinct non-ASCII names, from the targets and from what they resolve to,
+// floors the call. Characters here are UTF-16 code units, as `length` counts them.
+export const FLOOR_MAX_NAME_LENGTH = 255
+export const FLOOR_MAX_CALL_CANONICAL = 65536
+
+/**
+ * How many `/`- or `\`-separated components `target` has, counting no further
+ * than `limit` (so a huge target costs only as much as the bound it is checked
+ * against).
+ * @param {string} target
+ * @param {number} limit
+ * @returns {number}
+ */
+function _componentCount(target, limit) {
+  let components = 0
+  let inName = false
+  for (let i = 0; i < target.length && components <= limit; i++) {
+    const code = target.charCodeAt(i)
+    if (code === 0x2f || code === 0x5c) {
+      inName = false
+    } else if (!inName) {
+      inName = true
+      components++
+    }
+  }
+  return components
+}
+
+/**
+ * Is `target` over either size bound? Linear in its length.
+ * @param {string} target
+ * @returns {boolean}
+ */
+function _exceedsTargetBounds(target) {
+  if (Buffer.byteLength(target, 'utf8') > FLOOR_MAX_TARGET_BYTES) return true
+  return _componentCount(target, FLOOR_MAX_TARGET_COMPONENTS) > FLOOR_MAX_TARGET_COMPONENTS
 }
 
 // #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
@@ -356,9 +437,11 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
  * @param {boolean} carved  `resolved` is inside a worktree the carve-out admits
+ * @param {{ names: Map<string, string>, canonical: { left: number } }} call
+ *   the canonical names computed in this call, and the characters left to compute
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
+function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -381,9 +464,15 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
     if (SHORT_NAME_SEGMENT.test(names[i])) return true
   }
   // Each segment is checked as written (lowercased) and in canonical form; a
-  // match in either floors.
+  // match in either floors, and so does a name with no canonical form computed.
+  const canonical = []
+  for (const name of names) {
+    const form = _canonicalNameIn(name, call)
+    if (form === null) return true
+    canonical.push(form)
+  }
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
-    _matchesProtectedSegments(names.map(canonicalName), start, secretsOnly)
+    _matchesProtectedSegments(canonical, start, secretsOnly)
 }
 
 /**
@@ -463,10 +552,16 @@ function _matchesProtectedSegments(segments, start, secretsOnly) {
  * the full (write) floor passes `secretsOnly = false`.
  * @param {string} target  a path value from a tool input
  * @param {string} base    the resolution base (session cwd)
- * @param {boolean} [secretsOnly]  match only secret / credential files
+ * @param {boolean} secretsOnly  match only secret / credential files
+ * @param {{ realBase: string|undefined, walk: { left: number }, names: Map<string, string>, canonical: { left: number } }} call
+ *   state shared by one call's targets: the session cwd's real path once
+ *   resolved, the walk budget left, the canonical names computed so far, and
+ *   the characters of non-ASCII names left to compute
  * @returns {boolean}
  */
-function isProtectedPathValue(target, base, secretsOnly = false) {
+function isProtectedPathValue(target, base, secretsOnly, call) {
+  // The work spent on one target is bounded before anything else runs.
+  if (_exceedsTargetBounds(target)) return true
   // On POSIX `\` is a name character that both passes read as a separator, so
   // a target holding one floors.
   if (sep === '/' && target.includes('\\')) return true
@@ -476,7 +571,7 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
   // escaping relative path begins with `..` or is absolute, never `.claude`.
   const lexicalRel = relative(base, resolvedLexical)
   const carved = _insideClaudeWorktree(base, lexicalRel, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved)) return true
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved, call)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -493,18 +588,20 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // (caught below → return true → force the prompt) instead of resolving
     // against process.cwd(). Wrapping in resolve() would defeat BOTH the guard
     // and the wrong-root framing it protects against.
-    const realBase = realpathDeepestAncestorSync(base)
+    // Once per call: every target of one call shares the session cwd.
+    if (call.realBase === undefined) call.realBase = realpathDeepestAncestorSync(base)
+    const realBase = call.realBase
     // Pass the RAW `target` (its `..` intact) to the component walker, so a `..`
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
-    const realTarget = resolveTargetComponentwiseSync(realBase, target)
+    const realTarget = resolveTargetComponentwiseSync(realBase, target, call.walk)
     // The carve-out survives only when the resolved path IS the written one. The
     // written path held no symlink when `_insideClaudeWorktree` walked it, so
     // this differs only if the path changed between the two walks; then the
     // resolved target gets the full scan rather than an offset meant for another
     // path.
     const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
-    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)) return true
+    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved, call)) return true
     // Under the full floor, an existing target with more than one hard link floors.
     return !secretsOnly && _hasOtherHardLinks(realTarget)
   } catch {
@@ -584,6 +681,11 @@ export function isSecretReadTarget(input, cwd) {
  * resolving each against the session cwd, and tests it with {@link isProtectedPathValue}.
  * `secretsOnly` selects the read floor (secret files) vs the full write floor
  * (config dirs + secret files). ANY protected field/member floors the input.
+ * The call as a whole is bounded too: more than FLOOR_MAX_CALL_TARGETS targets,
+ * FLOOR_MAX_CALL_COMPONENTS components or FLOOR_MAX_CALL_BYTES bytes across them,
+ * more than FLOOR_MAX_CALL_WALK components walked, or more than
+ * FLOOR_MAX_CALL_CANONICAL characters of distinct non-ASCII names compared,
+ * floors it.
  * @param {object} input
  * @param {string} [cwd]
  * @param {boolean} secretsOnly
@@ -592,16 +694,38 @@ export function isSecretReadTarget(input, cwd) {
 function _matchesFloor(input, cwd, secretsOnly) {
   if (!input || typeof input !== 'object') return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
+  const targets = []
   for (const field of PROTECTED_PATH_INPUT_FIELDS) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
-    if (isProtectedPathValue(input[field], base, secretsOnly)) return true
+    targets.push(input[field])
   }
-  // #6805/#6828 — walk the array-shaped per-file targets (codex apply_patch).
+  // #6805/#6828 — the array-shaped per-file targets (codex apply_patch). Every
+  // member counts toward the call's target budget, whatever it holds, so the
+  // array is never enumerated past the budget.
   if (Array.isArray(input.changes)) {
+    if (targets.length + input.changes.length > FLOOR_MAX_CALL_TARGETS) return true
     for (const change of input.changes) {
       if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      if (isProtectedPathValue(change.path, base, secretsOnly)) return true
+      targets.push(change.path)
     }
+  }
+  // The call's component and byte budgets, checked before any target is resolved.
+  let components = 0
+  let bytes = 0
+  for (const target of targets) {
+    components += _componentCount(target, FLOOR_MAX_CALL_COMPONENTS - components)
+    if (components > FLOOR_MAX_CALL_COMPONENTS) return true
+    bytes += Buffer.byteLength(target, 'utf8')
+    if (bytes > FLOOR_MAX_CALL_BYTES) return true
+  }
+  const call = {
+    realBase: undefined,
+    walk: { left: FLOOR_MAX_CALL_WALK },
+    names: new Map(),
+    canonical: { left: FLOOR_MAX_CALL_CANONICAL },
+  }
+  for (const target of targets) {
+    if (isProtectedPathValue(target, base, secretsOnly, call)) return true
   }
   return false
 }

@@ -1,0 +1,310 @@
+import { describe, it, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import {
+  isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
+  FLOOR_MAX_NAME_LENGTH, FLOOR_MAX_CALL_CANONICAL,
+  FLOOR_MAX_CALL_WALK, FLOOR_MAX_CALL_BYTES,
+} from '../src/permission-floor.js'
+
+/**
+ * The permission floor bounds the work it does per target: a path-tool target
+ * longer than FLOOR_MAX_TARGET_BYTES (UTF-8) or with more than
+ * FLOOR_MAX_TARGET_COMPONENTS components floors (a prompt, never a deny)
+ * before any resolution or walk. Real paths sit far below both (see
+ * docs/security/permission-floor.md §1), so these are positive controls too.
+ */
+
+const CWD = '/work/project'
+const floored = (tool, file_path) => isFlooredTarget(tool, { file_path }, CWD)
+const time = (fn) => { const t0 = Date.now(); const value = fn(); return { value, ms: Date.now() - t0 } }
+
+// Under the component bound but over the byte bound: 250-byte names.
+const longNames = (count) => 'zz/' + ('n'.repeat(250) + '/').repeat(count) + 'f'
+
+describe('floor: a target over the size bounds floors', () => {
+  it('more components than the bound floors, on both floors', () => {
+    const target = 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)
+    assert.equal(floored('Write', target), true)
+    assert.equal(floored('Read', target), true)
+  })
+
+  it('`\\`-separated components count too', () => {
+    // On win32 `\\` is the separator, so the component bound is what floors this;
+    // on POSIX a target holding `\\` floors anyway.
+    assert.equal(floored('Write', 'a\\'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)), true)
+  })
+
+  it('more bytes than the bound floors, with few components', () => {
+    const target = longNames(Math.ceil(FLOOR_MAX_TARGET_BYTES / 251) + 1)
+    assert.ok(Buffer.byteLength(target) > FLOOR_MAX_TARGET_BYTES, 'premise: over the byte bound')
+    assert.ok(target.split('/').length < FLOOR_MAX_TARGET_COMPONENTS, 'premise: under the component bound')
+    assert.equal(floored('Read', target), true)
+  })
+
+  it('the byte bound counts UTF-8 bytes, not characters', () => {
+    const target = 'zz/' + ('\u00E9'.repeat(100) + '/').repeat(21) + 'f'
+    assert.ok(target.length <= FLOOR_MAX_TARGET_BYTES, 'premise: within the bound in characters')
+    assert.ok(Buffer.byteLength(target) > FLOOR_MAX_TARGET_BYTES, 'premise: over it in UTF-8 bytes')
+    assert.equal(floored('Read', target), true)
+  })
+
+  it('every path field and changes[] member is bounded', () => {
+    const big = 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)
+    assert.equal(isFlooredTarget('Grep', { path: big, pattern: 'x' }, CWD), true)
+    assert.equal(isFlooredTarget('NotebookEdit', { notebook_path: big }, CWD), true)
+    assert.equal(isFlooredTarget('apply_patch', { file_path: CWD, changes: [{ path: 'src/a.js', kind: 'update' }, { path: big, kind: 'update' }] }, CWD), true)
+  })
+
+  it('a large over-bound target is decided quickly', () => {
+    for (const target of ['a/'.repeat(32_000), 'a/../'.repeat(16_000) + 'x', longNames(4_000)]) {
+      const { value, ms } = time(() => floored('Write', target))
+      assert.equal(value, true)
+      assert.ok(ms < 500, `took ${ms} ms for a ${target.length}-character target`)
+    }
+  })
+})
+
+describe('floor: one call\'s targets share a budget', () => {
+  const patch = (paths) => ({ file_path: CWD, changes: paths.map((path) => ({ path, kind: 'update' })) })
+
+  it('more targets than FLOOR_MAX_CALL_TARGETS floors', () => {
+    const paths = Array.from({ length: FLOOR_MAX_CALL_TARGETS + 1 }, (_, i) => `src/f${i}.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), true)
+  })
+
+  it('more components in total than FLOOR_MAX_CALL_COMPONENTS floors', () => {
+    const each = FLOOR_MAX_TARGET_COMPONENTS - 6
+    const count = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each) + 1
+    assert.ok(count <= FLOOR_MAX_CALL_TARGETS, 'premise: under the target-count budget')
+    const paths = Array.from({ length: count }, (_, i) => 'd/'.repeat(each - 1) + `f${i}.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), true)
+  })
+
+  it('changes[] members count toward the target budget whatever they hold', () => {
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS + 1 }, () => null)
+    assert.equal(isFlooredTarget('apply_patch', { file_path: CWD, changes }, CWD), true)
+  })
+
+  it('the flat path fields count toward the component budget too', () => {
+    const each = FLOOR_MAX_TARGET_COMPONENTS - 6
+    const inChanges = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each)
+    const paths = Array.from({ length: inChanges }, (_, i) => 'd/'.repeat(each - 1) + `f${i}.js`)
+    const flat = 'e/'.repeat(each - 1) + 'g.js'
+    assert.ok(inChanges * each <= FLOOR_MAX_CALL_COMPONENTS, 'premise: changes[] alone is within the budget')
+    assert.equal(isFlooredTarget('apply_patch', { file_path: flat, changes: paths.map((path) => ({ path, kind: 'update' })) }, CWD), true)
+  })
+
+  it('more UTF-8 bytes in total than FLOOR_MAX_CALL_BYTES floors', () => {
+    // Each target is within its own bounds; 249-byte names of a 3-byte character.
+    const name = '\uFDFA'.repeat(83)
+    const each = 'zz/' + Array.from({ length: 15 }, () => name).join('/') + '/f'
+    const count = Math.floor(FLOOR_MAX_CALL_BYTES / Buffer.byteLength(each)) + 1
+    assert.ok(Buffer.byteLength(each) <= FLOOR_MAX_TARGET_BYTES, 'premise: each target is within the byte bound')
+    assert.equal(isFlooredTarget('Read', { path: 'src', changes: Array.from({ length: count }, () => ({ path: each })) }, CWD), true)
+  })
+
+  it('exactly the call budgets are not floored', () => {
+    // FLOOR_MAX_CALL_TARGETS targets, a path field among them.
+    const targets = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `src/f${i}.js` }))
+    assert.equal(isFlooredTarget('apply_patch', { file_path: 'src', changes: targets }, CWD), false)
+    // FLOOR_MAX_CALL_COMPONENTS components across the call.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    const paths = Array.from({ length: FLOOR_MAX_CALL_COMPONENTS / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}`)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, CWD), false)
+    // FLOOR_MAX_CALL_BYTES bytes across the call.
+    // 4096-byte targets of 255-byte names (a name the filesystem accepts).
+    const names = ('b'.repeat(255) + '/').repeat(16)
+    const big = Array.from({ length: FLOOR_MAX_CALL_BYTES / 4096 }, (_, i) => names.slice(0, 4096 - 5) + `/f${String(i).padStart(3, '0')}`)
+    assert.equal(big.reduce((sum, p) => sum + Buffer.byteLength(p), 0), FLOOR_MAX_CALL_BYTES)
+    assert.equal(isFlooredTarget('Read', { changes: big.map((path) => ({ path })) }, CWD), false)
+  })
+
+  it(`a name longer than FLOOR_MAX_NAME_LENGTH (${FLOOR_MAX_NAME_LENGTH}) characters floors, on both floors`, () => {
+    const over = `src/${'n'.repeat(FLOOR_MAX_NAME_LENGTH + 1)}`
+    assert.equal(floored('Write', over), true)
+    assert.equal(floored('Read', over), true)
+    const at = `src/${'n'.repeat(FLOOR_MAX_NAME_LENGTH)}`
+    assert.equal(floored('Write', at), false)
+    assert.equal(floored('Read', at), false)
+  })
+
+  it('the name bound counts UTF-16 code units, for non-ASCII names too', () => {
+    // A 2-byte character, and an astral one (two code units each).
+    for (const [ch, units] of [['\u00E9', 1], ['\u{1F600}', 2]]) {
+      const over = `src/${ch.repeat(Math.floor(FLOOR_MAX_NAME_LENGTH / units) + 1)}`
+      const at = `src/${ch.repeat(Math.floor(FLOOR_MAX_NAME_LENGTH / units))}`
+      assert.equal(floored('Write', over), true)
+      assert.equal(floored('Read', over), true)
+      assert.equal(floored('Write', at), false)
+      assert.equal(floored('Read', at), false)
+    }
+  })
+
+  it('the canonical budget counts UTF-16 code units', () => {
+    // 128-unit names: three digits, 62 astral characters, one letter.
+    const names = Array.from({ length: FLOOR_MAX_CALL_CANONICAL / 128 }, (_, i) => String(i).padStart(3, '0') + '\u{1F600}'.repeat(62) + 'a')
+    assert.ok(names.every((name) => name.length === 128), 'premise: 128 code units each')
+    assert.equal(isFlooredTarget('apply_patch', patch(names), CWD), false, 'exactly the budget')
+    assert.equal(isFlooredTarget('apply_patch', patch([...names, '\u00E9']), CWD), true)
+  })
+
+  it(`more than FLOOR_MAX_CALL_CANONICAL (${FLOOR_MAX_CALL_CANONICAL}) characters of distinct non-ASCII names floors`, () => {
+    // 128-character names of a 2-byte character, distinct, filling the budget exactly.
+    const names = Array.from({ length: FLOOR_MAX_CALL_CANONICAL / 128 }, (_, i) => String(i).padStart(3, '0') + '\u00E9'.repeat(125))
+    const call = (paths) => isFlooredTarget('apply_patch', patch(paths), CWD)
+    assert.equal(call(names), false, 'exactly the budget')
+    // The second call repeats the first call's names: each call counts its own.
+    assert.equal(call([...names, '\u00E9']), true)
+    assert.equal(isFlooredTarget('Read', { changes: [...names, '\u00E9'].map((path) => ({ path })) }, CWD), true)
+  })
+
+  it('ASCII names do not count toward FLOOR_MAX_CALL_CANONICAL', () => {
+    const names = Array.from({ length: 1000 }, (_, i) => String(i).padStart(4, '0') + 'a'.repeat(100))
+    assert.ok(names.join('').length > FLOOR_MAX_CALL_CANONICAL, 'premise: more characters than the budget')
+    assert.equal(isFlooredTarget('apply_patch', patch(names), CWD), false)
+  })
+
+  it('a very large changes[] is decided quickly', () => {
+    const paths = Array.from({ length: 40_000 }, (_, i) => `src/f${i}.js`)
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', patch(paths), CWD))
+    assert.equal(value, true)
+    assert.ok(ms < 200, `took ${ms} ms`)
+  })
+
+  it('positive control: a thousand-file patch of absolute paths is not floored', () => {
+    // About 170 bytes each, 170 KB in all: a checkout under a home directory.
+    const cwd = '/Users/developer/work/some-organisation/some-project-checkout'
+    const paths = Array.from({ length: 1000 }, (_, i) => `${cwd}/packages/dashboard/src/components/settings/provider-configuration/provider-configuration-panel-${i}.test.tsx`)
+    assert.equal(isFlooredTarget('apply_patch', { file_path: cwd, changes: paths.map((path) => ({ path, kind: 'update' })) }, cwd), false)
+  })
+
+  it('positive control: a large but ordinary patch is not floored', () => {
+    const paths = Array.from({ length: 300 }, (_, i) => `packages/server/src/module-${i}/index.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), false)
+  })
+})
+
+describe('floor: one call\'s filesystem work is bounded', () => {
+  // These two time the name comparison over a thousand walks; on Windows the
+  // walks' filesystem calls alone take longer than the bound.
+  const SKIP_WIN32_TIMING = process.platform === 'win32' && 'filesystem calls dominate this timing on Windows; it runs on POSIX CI'
+  let root
+
+  before(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
+  })
+
+  after(() => {
+    if (root) rmSync(root, { recursive: true, force: true })
+  })
+
+  it('many targets under a deep, missing cwd are decided quickly', () => {
+    const cwd = join(root, ...Array.from({ length: 255 }, () => 'm'))
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `f${i}.js`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
+    assert.equal(value, false)
+    assert.ok(ms < 1000, `took ${ms} ms`)
+  })
+
+  it('one component walked past FLOOR_MAX_CALL_WALK floors', () => {
+    // A trailing `/` is one more walked component, though not a counted one.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    const paths = Array.from({ length: FLOOR_MAX_CALL_WALK / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}` + (i === 0 ? '/' : ''))
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), true)
+    paths[0] = paths[0].slice(0, -1)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), false, 'exactly the walk budget')
+  })
+
+  it('a call over the component budget is floored before any target is walked', () => {
+    // Every component is a real directory, so walking the targets would cost a
+    // stat each; over the budget, none is walked.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    mkdirSync(join(root, ...Array.from({ length: each - 1 }, () => 'd')), { recursive: true })
+    const count = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each) + 1
+    const changes = Array.from({ length: count }, (_, i) => ({ path: 'd/'.repeat(each - 1) + `f${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { changes }, root))
+    assert.equal(value, true)
+    assert.ok(ms < 20, `took ${ms} ms`)
+  })
+
+  it('many targets resolving through one long real directory are decided quickly', { skip: SKIP_NO_SYMLINK || SKIP_WIN32_TIMING }, () => {
+    const dir = join(root, ...Array.from({ length: 3 }, (_, k) => `${k}` + '\uFDFA'.repeat(80)))
+    mkdirSync(dir, { recursive: true })
+    symlinkSync(dir, join(root, 'L'))
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('Read', { path: 'L', changes }, root))
+    assert.equal(value, false)
+    assert.ok(ms < 150, `took ${ms} ms`)
+  })
+
+  it('many targets above a long cwd are decided quickly', { skip: SKIP_WIN32_TIMING }, () => {
+    const cwd = join(root, ...Array.from({ length: 4 }, (_, k) => `${k}` + '\uFDFA'.repeat(70)))
+    mkdirSync(cwd, { recursive: true })
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `../x${i}`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
+    assert.equal(value, false)
+    assert.ok(ms < 200, `took ${ms} ms`)
+  })
+
+  it('a long name a target resolves to floors', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync('m/' + 'x'.repeat(FLOOR_MAX_NAME_LENGTH + 1), join(root, 'long-over'))
+    symlinkSync('m/' + 'x'.repeat(FLOOR_MAX_NAME_LENGTH), join(root, 'long-at'))
+    assert.equal(isFlooredTarget('Read', { path: 'long-over/f' }, root), true)
+    assert.equal(isFlooredTarget('Read', { path: 'long-at/f' }, root), false)
+  })
+
+  it('the names targets resolve to count toward FLOOR_MAX_CALL_CANONICAL', { skip: SKIP_NO_SYMLINK }, () => {
+    // Each link adds a distinct 253-character non-ASCII name the targets' text does not hold.
+    const per = 253
+    const count = Math.floor(FLOOR_MAX_CALL_CANONICAL / per) + 1
+    mkdirSync(join(root, 'links'))
+    for (let i = 0; i < count; i++) symlinkSync('m/' + String(i).padStart(3, '0') + '\u00E9'.repeat(per - 3), join(root, 'links', `s${i}`))
+    const read = (n) => isFlooredTarget('Read', { changes: Array.from({ length: n }, (_, i) => ({ path: `links/s${i}/f` })) }, root)
+    assert.equal(read(count - 1), false, 'within the budget')
+    assert.equal(read(count), true)
+  })
+
+  it('a name repeated across one call\'s targets is compared in canonical form each time', () => {
+    const git = '.\uFF47\uFF49\uFF54'
+    assert.equal(isFlooredTarget('Read', { path: `a/${git}` }, CWD), false)
+    assert.equal(isFlooredTarget('Read', { path: `a/${git}`, changes: [{ path: `b/${git}/config` }] }, CWD), true)
+  })
+
+  it(`targets whose links together walk more than FLOOR_MAX_CALL_WALK (${FLOOR_MAX_CALL_WALK}) components floor`, { skip: SKIP_NO_SYMLINK }, () => {
+    // Each link adds 360 components; every target stays within its own walk bound.
+    mkdirSync(join(root, 'end'), { recursive: true })
+    symlinkSync('end/' + 'q/../'.repeat(180) + 'z', join(root, 'hop'))
+    const count = Math.ceil(FLOOR_MAX_CALL_WALK / 360) + 1
+    const changes = Array.from({ length: count }, (_, i) => ({ path: `hop/f${i}.js`, kind: 'update' }))
+    assert.equal(isFlooredTarget('apply_patch', { file_path: root, changes: changes.slice(0, 2) }, root), false, 'premise: two targets are fine')
+    assert.equal(isFlooredTarget('apply_patch', { file_path: root, changes }, root), true)
+  })
+})
+
+describe('floor: targets within the size bounds are judged as before', () => {
+  it('a realistic deep dependency path is not floored', () => {
+    const target = 'node_modules/.pnpm/@babel+plugin-transform-modules-commonjs@7.24.1_@babel+core@7.24.4/node_modules/' +
+      '@babel/plugin-transform-modules-commonjs/lib/src/main/kotlin/com/example/very/deep/package/name/' +
+      'with/many/levels/of/nesting/that/real/projects/use/index.js'
+    assert.equal(floored('Write', target), false)
+    assert.equal(floored('Read', target), false)
+  })
+
+  it('exactly the component bound is not floored', () => {
+    const target = 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS - 1) + 'b'
+    assert.equal(target.split('/').length, FLOOR_MAX_TARGET_COMPONENTS)
+    assert.equal(floored('Read', target), false)
+  })
+
+  it('exactly the byte bound is not floored', () => {
+    // Of names a filesystem accepts.
+    const head = 'zz/' + ('n'.repeat(FLOOR_MAX_NAME_LENGTH) + '/').repeat(15)
+    const target = head + 'n'.repeat(FLOOR_MAX_TARGET_BYTES - head.length)
+    assert.equal(Buffer.byteLength(target), FLOOR_MAX_TARGET_BYTES)
+    assert.equal(floored('Read', target), false)
+  })
+})
