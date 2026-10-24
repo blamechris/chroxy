@@ -61,6 +61,17 @@ class Trial2Roster(unittest.TestCase):
         self.assertEqual(self.trial.blockers_for(self.trial.run('A-cy-r2')), [8700, 8741])
         self.assertEqual(self.trial.blockers_for(self.trial.run('A-cd-r1')), [])
 
+    def test_evidence_lives_beside_the_sealed_key_in_the_declared_vault(self):
+        paths = self.trial.paths
+        self.assertTrue(paths['evidence_dir'].startswith(paths['key_folder'] + '/'))
+        self.assertTrue(paths['key_folder'].startswith(paths['evidence_vault'] + '/'))
+        for name in ('evidence_dir', 'key_folder', 'evidence_vault'):
+            self.assertTrue(paths[name].startswith('~/'), name)
+
+    def test_the_committed_price_table_is_absent_or_valid(self):
+        from trialkit import extract
+        self.assertIsNone(extract.parse_prices(self.trial.prices)[1])
+
     def test_unknown_run_names_the_roster(self):
         with self.assertRaises(config.ConfigError) as ctx:
             self.trial.run('A1-cd')

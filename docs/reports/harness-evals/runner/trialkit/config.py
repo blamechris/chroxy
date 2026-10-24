@@ -15,6 +15,7 @@ FAMILIES = ('claude', 'codex')
 RUN_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]*$')
 BASE = re.compile(r'^trial/[a-z0-9][a-z0-9./-]*$')
 SLOT = re.compile(r'^Q\d{2}$')
+QUEUE_RULE_KEYS = {'exclude_labels': str, 'reserved': int, 'exclude_issues': int}
 
 
 class ConfigError(Exception):
@@ -73,6 +74,8 @@ class Trial:
         self.versions = data.get('versions', {})
         self.allowance = data.get('allowance', {})
         self.blockers = {k: list(v) for k, v in data.get('blockers', {}).items()}
+        self.prices = data.get('prices')
+        self.queue_rules = _queue_rules(data.get('queue_rules'))
         self.harnesses = {k: _harness(k, v) for k, v in data['harnesses'].items()}
         self.cells = {c['id']: c for c in data['cells']}
         self.arms = data['arms']
@@ -187,6 +190,24 @@ class Trial:
     def clone_source(self, home=None):
         """Where clones come from: `paths.clone_source` (tests point it at a local repo), else GitHub."""
         return self.local_path('clone_source', home) or self.repo_url()
+
+
+def _queue_rules(rules):
+    """`queue_rules` from trial.json: lists of excluded labels, reserved issues and spent issues.
+
+    An unknown key is refused rather than ignored: a misspelt list would filter
+    nothing and `queue-candidates` would look as if it had applied it."""
+    if rules is None:
+        return {}
+    if not isinstance(rules, dict):
+        raise ConfigError('queue_rules must be an object')
+    for key, value in rules.items():
+        kind = QUEUE_RULE_KEYS.get(key)
+        if kind is None:
+            raise ConfigError(f'queue_rules: unknown key {key!r} (known: {", ".join(sorted(QUEUE_RULE_KEYS))})')
+        if not isinstance(value, list) or not all(type(v) is kind for v in value):
+            raise ConfigError(f'queue_rules.{key} must be a list of {"strings" if kind is str else "issue numbers"}')
+    return {key: list(value) for key, value in rules.items()}
 
 
 def _harness(key, h):
