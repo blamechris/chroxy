@@ -2,16 +2,19 @@ import { describe, it, afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { computeDaemonIdleState } from '../src/daemon-idle-state.js'
+import { computeDaemonIdleState, PROVIDER_QUIET_WINDOW_MS } from '../src/daemon-idle-state.js'
 import { createHttpHandler } from '../src/http-routes.js'
 import { WsServer } from '../src/ws-server.js'
 import { PairingManager } from '../src/pairing.js'
-import { BaseSession } from '../src/base-session.js'
+import { BaseSession, PROVIDER_ACTIVITY_EVENTS, NOT_PROVIDER_ACTIVITY_EVENTS } from '../src/base-session.js'
+import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { PROXIED_SESSION_EVENTS, BUILTIN_TRANSIENT_SESSION_EVENTS } from '../src/session-manager.js'
+import { fileURLToPath } from 'node:url'
 import { CliSession } from '../src/cli-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { busyStateOf } from '../src/session-busy-state.js'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DAEMON_COMMIT, isSameDirectory, resolveRepoCommit } from '../src/daemon-commit.js'
 import { tmpdir } from 'node:os'
@@ -40,6 +43,7 @@ function fakeManager(rows, sessionById = {}) {
         getPendingPermissionCount: () => 0,
         getPendingQuestions: () => [],
         getRestartBlockers: () => [],
+        providerActivityAgeMs: null,
         ...(sessionById[r.sessionId] || {}),
       },
     })
@@ -67,7 +71,7 @@ describe('computeDaemonIdleState (#8324)', () => {
     assert.equal(out.idle, true)
     assert.equal(out.sessions.length, 2)
     assert.deepEqual(Object.keys(out.sessions[0]).sort(), [
-      'backgroundShellCount', 'busyReason', 'isBusy', 'name', 'pendingPermissions', 'pendingQuestions', 'restartBlockers', 'sessionId',
+      'backgroundShellCount', 'busyReason', 'isBusy', 'name', 'pendingPermissions', 'pendingQuestions', 'providerActivityAgeMs', 'restartBlockers', 'sessionId',
     ])
   })
 
@@ -176,8 +180,13 @@ const probe = (session) => computeDaemonIdleState({ sessionManager: realManager(
 describe('restart blockers: real session lifecycles (#8324)', () => {
   it('a background agent that outlives a cleanly ended turn blocks the restart while isBusy reads idle', () => {
     const s = new BaseSession()
+    let clock = 0
+    s._providerActivityClock = () => clock
     assert.equal(probe(s).idle, true, 'a fresh session is idle')
     s._trackAgent({ toolUseId: 'agent-1', description: 'research', background: true, authoritative: true })
+    // #8743: the spawn is provider activity; step past its quiet window so the
+    // agent is the only thing that can block.
+    clock += PROVIDER_QUIET_WINDOW_MS
     s._clearMessageState({ turnEndedCleanly: true })
     assert.equal(s.isRunning, false, 'premise: the turn is over and isBusy is false')
     assert.equal(s._activeAgents.size, 1, 'premise: the agent survived the turn end')
@@ -453,7 +462,7 @@ describe('restart blockers fail closed (#8324)', () => {
     sessionManager: { listSessions: () => [row()], getSession: () => ({ session }) },
     getHookPendingPermissionCount: () => 0,
   })
-  const base = { getPendingPermissionCount: () => 0, getPendingQuestions: () => [] }
+  const base = { getPendingPermissionCount: () => 0, getPendingQuestions: () => [], providerActivityAgeMs: null }
 
   it('a missing accessor is not idle', () => {
     assert.equal(withSession({ ...base }).idle, false)
@@ -538,6 +547,7 @@ describe('GET /api/daemon/idle route (#8324)', () => {
     assert.equal(body.idle, true)
     assert.deepEqual(body.reasons, [])
     assert.equal(body.sessions.length, 1)
+    assert.equal(body.sessions[0].providerActivityAgeMs, null, 'each session says how long its provider has been silent (#8743)')
     assert.equal(body.hookPendingPermissions, 0)
     assert.equal(typeof body.version, 'string')
     assert.equal(body.pid, process.pid)
@@ -667,5 +677,188 @@ describe('GET /api/daemon/idle route (#8324)', () => {
     const port = await start(makeServer({ authRequired: false }))
     assert.equal((await get(port)).status, 200)
     assert.equal((await get(port, { 'cf-connecting-ip': '1.2.3.4' })).status, 403)
+  })
+})
+
+// #8743 — trial run B2-cy-codex: the daemon took a Codex app-server turn as
+// over while codex kept emitting every few seconds for 17 minutes, the deploy
+// tick read `idle: true`, and the SIGTERM cut the run off. `isBusy` is the
+// daemon's own turn bookkeeping; the provider-activity window reads what the
+// provider SAID, so a wrong turn state can no longer make a working session idle.
+describe('provider activity holds a restart off (#8743)', () => {
+  const W = PROVIDER_QUIET_WINDOW_MS
+  const withAge = (age) => computeDaemonIdleState({
+    sessionManager: fakeManager([row()], { s1: { providerActivityAgeMs: age } }),
+    getHookPendingPermissionCount: () => 0,
+  })
+
+  it('activity inside the quiet window is not idle and says how long ago; at the window it is idle', () => {
+    const out = withAge(42_000)
+    assert.equal(out.idle, false)
+    assert.ok(out.reasons.includes(`session "main" provider active 42s ago (quiet window ${W / 60000}m)`), out.reasons.join('|'))
+    assert.equal(out.sessions[0].providerActivityAgeMs, 42_000)
+    assert.equal(withAge(0).idle, false, 'this instant')
+    assert.equal(withAge(W - 1).idle, false, 'one ms inside the window')
+    assert.equal(withAge(W).idle, true, 'quiet for the whole window')
+    assert.equal(withAge(null).idle, true, 'a provider that has produced nothing')
+  })
+
+  it('FAIL SAFE: an age that is missing, throws or is not a duration is not idle', () => {
+    for (const [name, session] of Object.entries({
+      missing: { providerActivityAgeMs: undefined },
+      NaN: { providerActivityAgeMs: NaN },
+      negative: { providerActivityAgeMs: -1 },
+      fractional: { providerActivityAgeMs: 1.5 },
+      string: { providerActivityAgeMs: '600000' },
+      Infinity: { providerActivityAgeMs: Infinity },
+    })) {
+      const out = computeDaemonIdleState({ sessionManager: fakeManager([row()], { s1: session }), getHookPendingPermissionCount: () => 0 })
+      assert.equal(out.idle, false, name)
+      assert.ok(out.reasons.some((r) => r.includes('provider activity')), `${name}: ${out.reasons.join('|')}`)
+    }
+    const mgr = fakeManager([row()])
+    Object.defineProperty(mgr.getSession('s1').session, 'providerActivityAgeMs', { get() { throw new Error('age-broke') } })
+    const out = computeDaemonIdleState({ sessionManager: mgr, getHookPendingPermissionCount: () => 0 })
+    assert.equal(out.idle, false)
+    assert.ok(out.reasons.some((r) => r.includes('age-broke')), out.reasons.join('|'))
+  })
+
+  const EXCLUDED = NOT_PROVIDER_ACTIVITY_EVENTS
+
+  // Both directions. Every event the session manager forwards is classified,
+  // so a new one cannot silently fall outside the window (provider
+  // `customEvents` are classified in provider-custom-events-overlap.test.js,
+  // which discovers every provider class). And every activity name is one that
+  // something under src/ actually emits, so a typo or a dead entry cannot pass
+  // for coverage.
+  it('every proxied and built-in transient session event is in exactly one of the two lists', () => {
+    for (const ev of [...PROXIED_SESSION_EVENTS, ...BUILTIN_TRANSIENT_SESSION_EVENTS]) {
+      const inRoster = PROVIDER_ACTIVITY_EVENTS.includes(ev)
+      const excluded = EXCLUDED.includes(ev)
+      assert.ok(inRoster !== excluded, `${ev}: add it to PROVIDER_ACTIVITY_EVENTS or to NOT_PROVIDER_ACTIVITY_EVENTS (base-session.js), exactly one`)
+    }
+    assert.deepEqual(PROVIDER_ACTIVITY_EVENTS.filter((ev) => EXCLUDED.includes(ev)), [], 'the lists are disjoint')
+  })
+
+  it('every provider-activity event is emitted by something under src/', () => {
+    const src = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src')
+    const text = readdirSync(src, { recursive: true })
+      .filter((f) => typeof f === 'string' && f.endsWith('.js'))
+      .map((f) => readFileSync(join(src, f), 'utf8'))
+      .join('\n')
+    const unemitted = PROVIDER_ACTIVITY_EVENTS.filter((ev) => !new RegExp(`emit\\(\\s*['"]${ev}['"]`).test(text))
+    assert.deepEqual(unemitted, [], 'a name nothing emits is a typo or a dead entry')
+  })
+
+  it('a real BaseSession stamps on every activity event and on no excluded one', () => {
+    for (const ev of [...PROVIDER_ACTIVITY_EVENTS, ...EXCLUDED]) {
+      const s = new BaseSession()
+      s.on('error', () => {})
+      let clock = 50_000
+      s._providerActivityClock = () => clock
+      assert.equal(s.providerActivityAgeMs, null, `${ev}: premise, nothing yet`)
+      s.emit(ev, {})
+      clock += 1500
+      assert.equal(s.providerActivityAgeMs, PROVIDER_ACTIVITY_EVENTS.includes(ev) ? 1500 : null, ev)
+    }
+  })
+
+  it('a stream that keeps going holds the window open, and the window closes after it stops', () => {
+    const s = new BaseSession()
+    let clock = 0
+    s._providerActivityClock = () => clock
+    s.emit('stream_delta', { messageId: 'm', delta: 'a' })
+    for (let i = 0; i < 20; i++) {
+      clock += 60_000
+      assert.equal(probe(s).idle, false, `minute ${i + 1}: still inside the window of the last delta`)
+      s.emit('stream_delta', { messageId: 'm', delta: 'b' })
+    }
+    clock += W - 1
+    assert.equal(probe(s).idle, false)
+    clock += 1
+    assert.equal(probe(s).idle, true)
+  })
+
+  describe('a real CodexAppServerSession', () => {
+    // codex-cli 0.163.0 notification shapes, as in the #8710 tests in
+    // codex-app-server-session.test.js: a sub-agent's thread is relayed on the
+    // parent's connection and names its own `threadId`.
+    const PARENT = 'th-parent'
+    const PARENT_TURN = 'turn-parent'
+    const CHILD = 'th-worker'
+    const CHILD_TURN = 'turn-worker'
+    const turnStarted = (threadId, id) => ({ method: 'turn/started', params: { threadId, turn: { id, items: [], status: 'inProgress' } } })
+    const turnCompleted = (threadId, id) => ({ method: 'turn/completed', params: { threadId, turn: { id, items: [], status: 'completed', error: null, durationMs: 1 } } })
+    const delta = (threadId, turnId, text) => ({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'msg', delta: text } })
+    const itemStarted = (threadId, turnId, item) => ({ method: 'item/started', params: { threadId, turnId, item, startedAtMs: 0 } })
+    const itemCompleted = (threadId, turnId, item) => ({ method: 'item/completed', params: { threadId, turnId, item, completedAtMs: 0 } })
+
+    let s
+    let skills
+    let clock
+    beforeEach(() => {
+      skills = mkdtempSync(join(tmpdir(), 'chroxy-idle-codex-'))
+      s = new CodexAppServerSession({ cwd: '/tmp', skillsDir: skills, repoSkillsDir: null })
+      s.on('error', () => {})
+      clock = 1_000_000
+      s._providerActivityClock = () => clock
+      s._processReady = true
+      s._threadId = PARENT
+      s._client = { request: async () => ({ turn: { id: PARENT_TURN } }) }
+    })
+    afterEach(() => {
+      try { s.destroy() } catch { /* ignore */ }
+      rmSync(skills, { recursive: true, force: true })
+    })
+
+    it('mid-turn it is not idle', async () => {
+      await s.sendMessage('run the trial')
+      s._onNotification(turnStarted(PARENT, PARENT_TURN))
+      s._onNotification(delta(PARENT, PARENT_TURN, 'working'))
+      const out = probe(s)
+      assert.equal(out.idle, false)
+      assert.ok(out.reasons.includes('session "real" busy: turn'), out.reasons.join('|'))
+    })
+
+    it('B2-cy-codex: codex keeps working after the daemon took the turn as over, and the daemon does not read idle', async () => {
+      await s.sendMessage('run the trial')
+      s._onNotification(turnStarted(PARENT, PARENT_TURN))
+      s._onNotification(delta(PARENT, PARENT_TURN, 'spawning a worker'))
+      s._onNotification(turnCompleted(PARENT, PARENT_TURN))
+      assert.equal(s.isRunning, false, 'premise: the daemon holds no turn open')
+      clock += W
+      assert.equal(probe(s).idle, true, 'premise: past the window, a silent session is idle')
+
+      // The worker the turn spawned is still running on the same connection.
+      // None of this maps to an event, and none of it opens a turn on the parent.
+      s._onNotification(turnStarted(CHILD, CHILD_TURN))
+      s._onNotification(itemStarted(CHILD, CHILD_TURN, { type: 'commandExecution', id: 'worker-cmd', command: 'npm test', cwd: '/trial' }))
+      assert.equal(s.isRunning, false, 'premise: isBusy still reads idle')
+      clock += 30_000
+      let out = probe(s)
+      assert.equal(out.idle, false, 'a sub-agent emitting 30s ago holds the restart off')
+      assert.ok(out.reasons.includes(`session "real" provider active 30s ago (quiet window ${W / 60000}m)`), out.reasons.join('|'))
+
+      // Minutes later a background exec from the ended parent turn reports: a
+      // straggler, dropped without an event, and still codex at work.
+      clock += W - 1000
+      s._onNotification(itemCompleted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'bg-suite', aggregatedOutput: '', status: 'completed' }))
+      assert.equal(s.isRunning, false, 'premise: the straggler does not reopen the turn')
+      out = probe(s)
+      assert.equal(out.idle, false, 'a straggler is activity too')
+
+      clock += W
+      assert.equal(probe(s).idle, true, 'once codex has been silent for the whole window, the daemon is idle again')
+    })
+
+    it('a deprecation notice, or a notification that names no thread or turn, is not activity', () => {
+      s._onNotification({ method: 'deprecationNotice', params: { summary: 'x', details: null } })
+      s._onNotification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 12 } } } })
+      s._onNotification({ method: 'mcpServer/startupStatus/updated', params: { name: 'docs', status: 'ready' } })
+      assert.equal(s.providerActivityAgeMs, null)
+      assert.equal(probe(s).idle, true)
+      s._onNotification({ method: 'thread/status/changed', params: { threadId: CHILD, status: { type: 'active' } } })
+      assert.equal(s.providerActivityAgeMs, 0, 'one that names a thread is')
+    })
   })
 })

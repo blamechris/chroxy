@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
-import { BaseSession } from '../src/base-session.js'
-import { PROXIED_SESSION_EVENTS } from '../src/session-manager.js'
+import { BaseSession, PROVIDER_ACTIVITY_EVENTS, NOT_PROVIDER_ACTIVITY_EVENTS } from '../src/base-session.js'
+import { PROXIED_SESSION_EVENTS, BUILTIN_TRANSIENT_SESSION_EVENTS } from '../src/session-manager.js'
 import { getProvider, getRegisteredProviderNames } from '../src/providers.js'
 
 // #8574: a name in PROXIED_SESSION_EVENTS already has a forwarding listener
@@ -126,5 +126,49 @@ describe('#8574 — no provider lists a proxied event in customEvents', () => {
       static get customEvents() { return ['tool_start', 'x'] }
     }
     assert.deepEqual(overlapOf(Bad), ['tool_start'])
+  })
+})
+
+// #8743: the idle-only auto-deploy holds a restart off while a session's
+// provider is producing output, stamped from the events in
+// PROVIDER_ACTIVITY_EVENTS. A provider's own `customEvents` are forwarded too, so
+// each one must be classified like the proxied and built-in transient events
+// (tests/daemon-idle.test.js covers those two lists), over the same derived
+// roster of classes.
+describe('#8743 — every forwarded session event is classified for the provider-activity window', () => {
+  const unclassified = (Cls) => (Array.isArray(Cls.customEvents) ? Cls.customEvents : [])
+    .filter((e) => PROVIDER_ACTIVITY_EVENTS.includes(e) === NOT_PROVIDER_ACTIVITY_EVENTS.includes(e))
+
+  it('every customEvents name of every discovered, registered and factory-built class is in exactly one list', async () => {
+    const classes = new Map(await discoverSessionClasses())
+    for (const n of getRegisteredProviderNames()) classes.set(`registry:${n}`, getProvider(n))
+    for (const [n, Cls] of (await discoverFactoryClasses()).built) classes.set(n, Cls)
+    const offenders = []
+    let declared = 0
+    for (const [name, Cls] of classes) {
+      declared += Array.isArray(Cls.customEvents) ? Cls.customEvents.length : 0
+      const bad = unclassified(Cls)
+      if (bad.length) offenders.push(`${name}: ${bad.join(', ')}`)
+    }
+    assert.ok(declared > 0, 'premise: some provider declares customEvents, or this checks nothing')
+    assert.deepEqual(offenders, [], 'add each to PROVIDER_ACTIVITY_EVENTS or NOT_PROVIDER_ACTIVITY_EVENTS (base-session.js)')
+  })
+
+  it('every NOT_PROVIDER_ACTIVITY_EVENTS name is an event that is actually forwarded (no dead exclusions)', async () => {
+    const forwarded = new Set([...PROXIED_SESSION_EVENTS, ...BUILTIN_TRANSIENT_SESSION_EVENTS])
+    for (const Cls of (await discoverSessionClasses()).values()) {
+      for (const e of Array.isArray(Cls.customEvents) ? Cls.customEvents : []) forwarded.add(e)
+    }
+    for (const Cls of (await discoverFactoryClasses()).built.values()) {
+      for (const e of Array.isArray(Cls.customEvents) ? Cls.customEvents : []) forwarded.add(e)
+    }
+    assert.deepEqual(NOT_PROVIDER_ACTIVITY_EVENTS.filter((e) => !forwarded.has(e)), [])
+  })
+
+  it('the check itself detects an unclassified event (control)', () => {
+    class Bad extends BaseSession {
+      static get customEvents() { return ['brand_new_event', 'setup_log'] }
+    }
+    assert.deepEqual(unclassified(Bad), ['brand_new_event'])
   })
 })

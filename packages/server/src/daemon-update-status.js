@@ -36,6 +36,7 @@ import { mkdirSync, unlinkSync, watch as fsWatch } from 'node:fs'
 import { join } from 'node:path'
 import { configDir } from './config-dir.js'
 import { DAEMON_COMMIT } from './daemon-commit.js'
+import { PROVIDER_QUIET_WINDOW_MS } from './daemon-idle-state.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('daemon-update')
@@ -140,7 +141,9 @@ const writeJsonAtomic = (file, value) => writeFileAtomic(file, JSON.stringify(va
 function busySummary(idle) {
   const reasons = (Array.isArray(idle?.reasons) ? idle.reasons : []).slice(0, 50).map((r) => clip(r, 300))
   const sessions = (Array.isArray(idle?.sessions) ? idle.sessions : [])
-    .filter((s) => s && (s.isBusy === true || s.pendingPermissions > 0 || s.pendingQuestions > 0 || (Array.isArray(s.restartBlockers) && s.restartBlockers.length > 0)))
+    .filter((s) => s && (s.isBusy === true || s.pendingPermissions > 0 || s.pendingQuestions > 0 || (Array.isArray(s.restartBlockers) && s.restartBlockers.length > 0)
+      // #8743: a provider still producing output holds the restart off on its own
+      || (Number.isSafeInteger(s.providerActivityAgeMs) && s.providerActivityAgeMs >= 0 && s.providerActivityAgeMs < PROVIDER_QUIET_WINDOW_MS)))
     .slice(0, 50)
     .map((s) => ({
       sessionId: clip(s.sessionId ?? '', 128),

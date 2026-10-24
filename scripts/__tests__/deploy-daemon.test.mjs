@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs, POSTPONE_MAX_MS, REQUEST_SKEW_MS } from
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 131
+const MIN_CASES = 135
 
 let pass = 0
 let fail = 0
@@ -2144,6 +2144,63 @@ await test('a stale applying marker is logged as cleared', async () => {
   writePending(env, { reason: 'applying', applyingSince: isoAt(env.t - 31 * 60e3) })
   await env.run()
   assert(env.readLog().includes('cleared a stale "applying" marker'), 'logged')
+})
+
+// -- the verdict a restart goes out on (#8743) --------------------------------
+// Trial run B2-cy-codex: a restart cut off a Codex run the daemon had wrongly
+// called idle, and nothing in deploy.log said what the verdict had been. The
+// line is written BEFORE the signal, so a tick that dies in the restart leaves it.
+
+await test('a restart logs, before the signal, the idle verdict and how long each session\'s provider had been silent', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => ({ status: 200, body: { idle: true, reasons: [], sessions: [
+    { sessionId: 's1', name: 'main', providerActivityAgeMs: 12 * 60_000 },
+    { sessionId: 's2', name: 'scratch', providerActivityAgeMs: null },
+    { sessionId: 's3', providerActivityAgeMs: 45_000 },
+    { sessionId: 's4', name: 'say "hi"' }, // a daemon that predates the field
+  ] } })
+  let logAtKill = null
+  env.onRun = (cmd, args) => { if ([cmd, ...args].join(' ') === KILL) logAtKill = env.readLog() }
+  eq((await env.run()).outcome, 'deployed')
+  const want = `${A.slice(0, 12)}..${B.slice(0, 12)} restarting: idle; 4 session(s): "main" last provider output 12m ago, "scratch" no provider output, "s3" last provider output 45s ago, "say \\"hi\\"" provider activity not reported`
+  assert(logAtKill !== null && logAtKill.trim().split('\n').at(-1).endsWith(want), `on disk at the SIGTERM: ${logAtKill}`)
+  const lines = env.readLog().trim().split('\n')
+  eq(lines.length, 2, 'the verdict line, then the outcome')
+  assert(lines[1].endsWith(' ok'), lines[1])
+})
+
+await test('the verdict line is bounded however many sessions there are, and says so; --force says the idle checks were skipped', async () => {
+  const env = makeEnv()
+  const many = Array.from({ length: 25 }, (_, i) => ({ sessionId: `s${i}`, name: `${'n'.repeat(100)}${i}`, providerActivityAgeMs: 600_000 }))
+  env.daemon.idleFn = () => ({ status: 200, body: { idle: true, reasons: [], sessions: many } })
+  eq((await env.run()).outcome, 'deployed')
+  const line = env.readLog().split('\n').find((l) => l.includes('restarting: '))
+  assert(line.includes('25 session(s): ') && line.endsWith(', +5 more'), line)
+  eq(line.split('last provider output 10m ago').length - 1, 20, 'twenty sessions named')
+  assert(!line.includes('n'.repeat(61)), 'names are cut to 60 characters')
+
+  const forced = makeEnv()
+  eq((await forced.run({ force: true })).outcome, 'deployed')
+  assert(forced.readLog().includes('restarting: idle checks skipped (--force)'), forced.readLog())
+})
+
+await test('an owed rollback onto a DOWN daemon logs that it went out on "daemon down"', async () => {
+  const env = makeEnv()
+  writeFileSync(env.path('deploy-state.json'), JSON.stringify({ rollbackTo: A }))
+  env.git.head = B
+  env.daemon.commit = B
+  env.daemon.dead = true
+  env.daemon.livePid = null
+  eq((await env.run()).outcome, 'rollback-completed')
+  assert(env.readLog().includes('restarting: daemon down'), env.readLog())
+})
+
+await test('a restart the owner confirmed on a busy daemon logs it as busy and confirmed, with the busy reasons', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env)
+  eq((await env.run()).outcome, 'deployed')
+  assert(env.readLog().includes('restarting: busy, restart confirmed by the owner (session "a" busy: turn); no sessions'), env.readLog())
 })
 
 // ---------------------------------------------------------------------------

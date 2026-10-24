@@ -61,6 +61,14 @@ import { busyStateOf } from './session-busy-state.js'
  */
 export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question', 'background_tasks_changed'])
 
+/**
+ * Session events `_wireSessionEvents` forwards to clients as transient frames
+ * (not recorded, not replayed), beside each provider's own `customEvents`.
+ * Exported so the #8743 provider-activity classification can be checked against
+ * this list instead of a copy of it.
+ */
+export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed'])
+
 const log = createLogger('session-manager')
 /**
  * The state file a SessionManager falls back to when no `stateFilePath` is
@@ -4697,7 +4705,7 @@ export class SessionManager extends EventEmitter {
     // store-core follow-up (#5937). Until then a client that reconnects
     // mid-queue won't see the pre-existing queued items — acceptable for the
     // foundation slice, tracked in #5937.
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed']
+    const builtinTransient = BUILTIN_TRANSIENT_SESSION_EVENTS
     const declaredCustomEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     // #8574: a name that is already PROXIED has its listener (above); a second
     // transient one would forward every frame to the client twice. Every
