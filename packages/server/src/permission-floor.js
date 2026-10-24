@@ -165,9 +165,12 @@ const CLAUDE_WORKTREE_NAME = /^[a-z0-9_-][a-z0-9._+-]*$/i
 const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
 
 /**
- * #8741 — is `rel` (`relative(base, resolved)`) strictly inside one of Claude
- * Code's worktrees, `<base>/.claude/worktrees/<name>/`, by a path the scan reads
- * as it is? `target` is the raw tool-input value `rel` was resolved from.
+ * #8741 — is `rel` (`relative(base, resolve(base, target))`, the path as
+ * written) strictly inside one of Claude Code's worktrees,
+ * `<base>/.claude/worktrees/<name>/`, by a path the scan reads as it is?
+ * `target` is the raw tool-input value. Decided ONCE, on the path as written,
+ * by {@link isProtectedPathValue}; the resolved pass keeps the carve-out only
+ * when its resolved path is that same path.
  *
  * Refused (the full scan applies) unless ALL of these hold:
  *   - the raw `target` has no `..` component;
@@ -177,16 +180,17 @@ const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
  *     {@link CLAUDE_WORKTREE_NAME};
  *   - there is at least one component below `<name>` — the root itself, and
  *     anything directly in `worktrees/`, stays floored;
- *   - walking down from `.claude` with `lstat`, nothing is a symlink:
- *     `.claude`, `.claude/worktrees` and `<name>` are real directories, and each
- *     component below them that exists is a real directory or file. This holds
- *     Claude Code's own condition for creating a worktree (a symlink at any of
- *     the first three could redirect it), and it keeps a path that only LOOKS
- *     like a worktree floored;
+ *   - walking down from `.claude` with `lstat`, `.claude`, `.claude/worktrees`
+ *     and `<name>` are real directories (`lstat` reports a symlink as not a
+ *     directory). That is Claude Code's own condition for creating a worktree
+ *     (a symlink at any of the three could redirect it), and it keeps a path
+ *     that only LOOKS like a worktree floored. A symlink further down is caught
+ *     by the resolved pass, which keeps the carve-out only when it resolves to
+ *     the written path;
  *   - an existing file on the path has a single hard link.
  * `ENOENT` below `<name>` ends the walk, since nothing further exists yet; any
- * other error refuses (fail closed). On the resolved pass every component that
- * exists is already real, so only the lexical pass can meet a symlink here.
+ * other error refuses (fail closed). That refusal is also covered by the
+ * resolved pass, whose walk fails closed on the same error.
  * @param {string} base
  * @param {string} rel
  * @param {string} target
@@ -207,7 +211,6 @@ function _insideClaudeWorktree(base, rel, target) {
     } catch (err) {
       return err.code === 'ENOENT' && k >= 3
     }
-    if (stat.isSymbolicLink()) return false
     if (k < 3 && !stat.isDirectory()) return false
     if (stat.isFile() && stat.nlink > 1) return false
   }
@@ -287,14 +290,12 @@ function realpathDeepestAncestorSync(absPath) {
  * the lexical pass and the symlink-resolved pass share ONE matcher. Given a
  * resolution `base` and an already-resolved absolute `resolved` target, applies
  * the #6806 relative-vs-absolute framing (below) and tests each segment. String
- * ops only, except the #8741 worktree-root check ({@link _insideClaudeWorktree}:
- * one lstat per component, and only for a target spelled `.claude/worktrees/<name>/…`).
+ * ops only.
  *
- * #8741 — a target under base and strictly inside `<base>/.claude/worktrees/<name>/`
- * is scanned from `<name>` down, so the `.claude` and `worktrees` above the
- * worktree are not counted while everything inside it is. The carve-out applies
- * at base's own root only, one level deep (a worktree nested in a worktree keeps
- * its outer `.claude`), and never to a target that escapes base.
+ * #8741 — when `carved` (see {@link isProtectedPathValue}), the target is
+ * strictly inside `<base>/.claude/worktrees/<name>/` and is scanned from
+ * `<name>` down, so the `.claude` and `worktrees` above the worktree are not
+ * counted while everything inside it is.
  *
  * #6806 — the discriminator is whether the resolved target stays INSIDE base's
  * own subtree:
@@ -309,10 +310,10 @@ function realpathDeepestAncestorSync(absPath) {
  * @param {string} base
  * @param {string} resolved  an absolute path already resolved against base
  * @param {boolean} secretsOnly
- * @param {string} target  the raw tool-input value `resolved` came from
+ * @param {boolean} carved  `resolved` is inside a worktree the carve-out admits
  * @returns {boolean}
  */
-function _scanResolvedTarget(base, resolved, secretsOnly, target) {
+function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   const rel = relative(base, resolved)
   // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
@@ -327,12 +328,11 @@ function _scanResolvedTarget(base, resolved, secretsOnly, target) {
   const segments = scanned.split(/[/\\]+/)
     .filter((s) => s.length > 0 && s !== '..')
     .map((s) => s.toLowerCase())
-  // #8741 — start the scan at `<name>`. Only a target under base can match: an
-  // escaping `rel` begins with `..` or is absolute, never with `.claude`. On a
-  // match `_insideClaudeWorktree` has checked that every native component is a
-  // PLAIN_COMPONENT: no separator of either kind, never empty or `..`. So the
+  // #8741 — start the scan at `<name>`. `carved` means `rel` is a path
+  // `_insideClaudeWorktree` admitted: every native component is a
+  // PLAIN_COMPONENT (no separator of either kind, never empty or `..`), so its
   // first three native components are also `segments[0..2]`.
-  const start = _insideClaudeWorktree(base, rel, target) ? 2 : 0
+  const start = carved ? 2 : 0
   for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
     // Secret files, and credential-dense config files, are floored under BOTH
@@ -407,7 +407,11 @@ function _scanResolvedTarget(base, resolved, secretsOnly, target) {
 function isProtectedPathValue(target, base, secretsOnly = false) {
   // (1) LEXICAL floor — pre-#6851 behavior, authoritative on a hit (no fs cost).
   const resolvedLexical = resolve(base, target)
-  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, target)) return true
+  // #8741 — the worktree carve-out is decided once, on the path as written. An
+  // escaping relative path begins with `..` or is absolute, never `.claude`.
+  const lexicalRel = relative(base, resolvedLexical)
+  const carved = _insideClaudeWorktree(base, lexicalRel, target)
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly, carved)) return true
   // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
   // target component-by-component (open(2) semantics) and re-scan. A resolution
   // error FAILS CLOSED (return true → force the prompt). Runs only on a
@@ -429,7 +433,10 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
     const realTarget = resolveTargetComponentwiseSync(realBase, target)
-    return _scanResolvedTarget(realBase, realTarget, secretsOnly, target)
+    // The carve-out survives only when the resolved path IS the written one: a
+    // path through a symlink below the worktree root gets the full scan here.
+    const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
+    return _scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)
   } catch {
     return true
   }

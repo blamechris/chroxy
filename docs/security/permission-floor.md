@@ -53,8 +53,9 @@ purpose, and each condition that fails falls back to the full scan:
 - **Under `.claude/worktrees` exactly, as Claude Code spells it.** Other
   `<dir>/worktrees/` or `.claude/<dir>/` shapes (`.git/worktrees/`,
   `.claude/skills/<s>/`) keep the full scan.
-- **`<name>` is one path component** of `[A-Za-z0-9._+-]` that does not start
-  with a dot, so `.`, `..`, `.claude`, `.git` and `.env` are never a root. Claude
+- **`<name>` is one path component** of `[A-Za-z0-9._+-]` that starts with a
+  letter, digit, `_` or `-`, so `.`, `..`, `.claude`, `.git` and `.env` are never a
+  root. Claude
   Code writes a `/` in a worktree name as `+`, so `feature/auth` is the directory
   `feature+auth`. `<name>` itself is still scanned, so a secret-shaped name floors.
 - **Plain names only.** Split on the platform separator, every component of the
@@ -63,13 +64,15 @@ purpose, and each condition that fails falls back to the full scan:
   prompt, not access.
 - **Strictly below `<name>`.** The root itself, and anything directly in
   `worktrees/`, stay floored.
-- **No `..` in the target, and no symlink on the path.** Walking down from
-  `.claude` with `lstat`, `.claude`, `.claude/worktrees` and `<name>` must be real
-  directories, and each component below them that exists must be a real directory
-  or file; any error floors. This includes Claude Code's own precondition for
-  creating a worktree (no symlink at any of the first three). A path through any
-  symlink, even one into another worktree, keeps the full scan, as does a target
-  spelled with `..`.
+- **No `..` in the target, and no symlink on the path.** `.claude`,
+  `.claude/worktrees` and `<name>` must be real directories by `lstat` (not a
+  symlink, not missing, not a file; any error floors). That is Claude Code's own
+  precondition for creating a worktree. The carve-out is decided once, on the path
+  as written, and the symlink-resolving pass keeps it only when its resolved path
+  is that same path. So a path that reaches a worktree
+  through any symlink keeps the full scan: one inside the worktree, one into
+  another worktree, or a link in the cwd itself (`wt -> .claude/worktrees/a2c`). So
+  does a target spelled with `..`.
 - **A single hard link.** An existing file on the path with more than one hard link
   keeps the full scan.
 

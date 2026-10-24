@@ -30,6 +30,23 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 const silentLog = { info() {}, warn() {}, debug() {}, error() {} }
 
+// Can this filesystem give one file two names? Probed once, so a host that
+// cannot reports the hard-link case as skipped instead of failing setup.
+function probeHardLinks() {
+  let dir = null
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-hardlink-probe-'))
+    writeFileSync(join(dir, 'a'), 'x')
+    linkSync(join(dir, 'a'), join(dir, 'b'))
+    return true
+  } catch {
+    return false
+  } finally {
+    if (dir) try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+}
+const SKIP_NO_HARDLINK = probeHardLinks() ? false : 'this filesystem cannot create a hard link'
+
 let root
 let repo
 
@@ -52,6 +69,7 @@ before(() => {
   mkdir('.claude/worktrees/b2/src')
   mkdir('.claude/worktrees/feature+auth/src')
   mkdir('.claude/worktrees/_wip/src')
+  mkdir('.claude/worktrees/Feature-X/src')
   // `<dir>/worktrees/<x>/` shapes that are not Claude Code worktrees: the anchor
   // is `.claude/worktrees`, both parts of it.
   mkdir('.claude/skills/foo')
@@ -71,7 +89,7 @@ before(() => {
   mkdir('sub/.claude/worktrees/a2c/src')
   // One file reachable under two names.
   touch('.claude/worktrees/a2c/src/orig.js')
-  linkSync(join(repo, '.claude/worktrees/a2c/src/orig.js'), join(repo, '.claude/worktrees/a2c/src/twin.js'))
+  if (!SKIP_NO_HARDLINK) linkSync(join(repo, '.claude/worktrees/a2c/src/orig.js'), join(repo, '.claude/worktrees/a2c/src/twin.js'))
 })
 
 after(() => {
@@ -112,6 +130,7 @@ describe('#8741 — ordinary files inside a Claude Code worktree are not floored
     assert.equal(floored('Write', { file_path: '.claude/worktrees/b2/src/a.js' }), false)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/src/a.js' }), false)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/_wip/src/a.js' }), false)
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/Feature-X/src/a.js' }), false, 'names are case-insensitive')
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.claude/settings.json' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature+auth/.env' }), true)
   })
@@ -265,7 +284,7 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     assert.equal(floored('Write', { file_path: `${repo}/.claude/worktrees/a2c/src/../src/a.js` }), true)
   })
 
-  it('a file with more than one hard link keeps the full scan', () => {
+  it('a file with more than one hard link keeps the full scan', { skip: SKIP_NO_HARDLINK }, () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/twin.js' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/orig.js' }), true)
   })
@@ -341,8 +360,10 @@ describe('#8741 — symlinks: a worktree root is a real directory, as Claude Cod
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/alias.js' }), true)
   })
 
-  it('positive control: a cwd-level link whose real path is inside a worktree is not floored', () => {
-    assert.equal(floored('Write', { file_path: 'wt/src/a.js' }), false)
-    assert.equal(floored('Write', { file_path: 'wt/.claude/settings.json' }), true, 'and its config is')
+  it('a path that reaches a worktree only through a cwd-level link keeps the full scan', () => {
+    // The carve-out is decided on the path as written; `wt/…` is not spelled as
+    // a worktree path, and its resolved path differs from it.
+    assert.equal(floored('Write', { file_path: 'wt/src/a.js' }), true)
+    assert.equal(floored('Write', { file_path: 'wt/.claude/settings.json' }), true)
   })
 })
