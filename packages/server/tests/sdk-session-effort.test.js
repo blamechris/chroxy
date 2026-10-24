@@ -136,7 +136,13 @@ describe('SdkSession effort (#8700) — the level reaches the query() options', 
 
   it('a CLI that reports effort for no model leaves effort support unknown rather than "none"', async () => {
     const { s, captured } = capturing({ model: 'claude-opus-5-5' })
-    await hearModels(s, SDK_MODELS.map(({ supportsEffort, supportedEffortLevels, ...rest }) => rest))
+    const silent = SDK_MODELS.map((m) => {
+      const row = { ...m }
+      delete row.supportsEffort
+      delete row.supportedEffortLevels
+      return row
+    })
+    await hearModels(s, silent)
     await s.setThinkingLevel('high')
     await s.sendMessage('go')
     s.destroy()
