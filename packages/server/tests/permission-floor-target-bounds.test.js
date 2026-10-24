@@ -1,7 +1,12 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
+  FLOOR_MAX_CALL_WALK, FLOOR_MAX_CALL_BYTES,
 } from '../src/permission-floor.js'
 
 /**
@@ -78,6 +83,45 @@ describe('floor: one call\'s targets share a budget', () => {
     assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), true)
   })
 
+  it('changes[] members count toward the target budget whatever they hold', () => {
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS + 1 }, () => null)
+    assert.equal(isFlooredTarget('apply_patch', { file_path: CWD, changes }, CWD), true)
+  })
+
+  it('the flat path fields count toward the component budget too', () => {
+    const each = FLOOR_MAX_TARGET_COMPONENTS - 6
+    const inChanges = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each)
+    const paths = Array.from({ length: inChanges }, (_, i) => 'd/'.repeat(each - 1) + `f${i}.js`)
+    const flat = 'e/'.repeat(each - 1) + 'g.js'
+    assert.ok(inChanges * each <= FLOOR_MAX_CALL_COMPONENTS, 'premise: changes[] alone is within the budget')
+    assert.equal(isFlooredTarget('apply_patch', { file_path: flat, changes: paths.map((path) => ({ path, kind: 'update' })) }, CWD), true)
+  })
+
+  it('more UTF-8 bytes in total than FLOOR_MAX_CALL_BYTES floors', () => {
+    // Each target is within its own bounds; 249-byte names of a 3-byte character.
+    const name = '\uFDFA'.repeat(83)
+    const each = 'zz/' + Array.from({ length: 15 }, () => name).join('/') + '/f'
+    const count = Math.floor(FLOOR_MAX_CALL_BYTES / Buffer.byteLength(each)) + 1
+    assert.ok(Buffer.byteLength(each) <= FLOOR_MAX_TARGET_BYTES, 'premise: each target is within the byte bound')
+    assert.equal(isFlooredTarget('Read', { path: 'src', changes: Array.from({ length: count }, () => ({ path: each })) }, CWD), true)
+  })
+
+  it('exactly the call budgets are not floored', () => {
+    // FLOOR_MAX_CALL_TARGETS targets, a path field among them.
+    const targets = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `src/f${i}.js` }))
+    assert.equal(isFlooredTarget('apply_patch', { file_path: 'src', changes: targets }, CWD), false)
+    // FLOOR_MAX_CALL_COMPONENTS components across the call.
+    const each = FLOOR_MAX_TARGET_COMPONENTS
+    const paths = Array.from({ length: FLOOR_MAX_CALL_COMPONENTS / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}`)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, CWD), false)
+    // FLOOR_MAX_CALL_BYTES bytes across the call.
+    // 4096-byte targets of 255-byte names (a name the filesystem accepts).
+    const names = ('b'.repeat(255) + '/').repeat(16)
+    const big = Array.from({ length: FLOOR_MAX_CALL_BYTES / 4096 }, (_, i) => names.slice(0, 4096 - 5) + `/f${String(i).padStart(3, '0')}`)
+    assert.equal(big.reduce((sum, p) => sum + Buffer.byteLength(p), 0), FLOOR_MAX_CALL_BYTES)
+    assert.equal(isFlooredTarget('Read', { changes: big.map((path) => ({ path })) }, CWD), false)
+  })
+
   it('a very large changes[] is decided quickly', () => {
     const paths = Array.from({ length: 40_000 }, (_, i) => `src/f${i}.js`)
     const { value, ms } = time(() => isFlooredTarget('apply_patch', patch(paths), CWD))
@@ -88,6 +132,36 @@ describe('floor: one call\'s targets share a budget', () => {
   it('positive control: a large but ordinary patch is not floored', () => {
     const paths = Array.from({ length: 300 }, (_, i) => `packages/server/src/module-${i}/index.js`)
     assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), false)
+  })
+})
+
+describe('floor: one call\'s filesystem work is bounded', () => {
+  let root
+
+  before(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
+  })
+
+  after(() => {
+    if (root) rmSync(root, { recursive: true, force: true })
+  })
+
+  it('many targets under a deep, missing cwd are decided quickly', () => {
+    const cwd = join(root, ...Array.from({ length: 255 }, () => 'm'))
+    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `f${i}.js`, kind: 'update' }))
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
+    assert.equal(value, false)
+    assert.ok(ms < 1000, `took ${ms} ms`)
+  })
+
+  it(`targets whose links together walk more than FLOOR_MAX_CALL_WALK (${FLOOR_MAX_CALL_WALK}) components floor`, { skip: SKIP_NO_SYMLINK }, () => {
+    // Each link adds 360 components; every target stays within its own walk bound.
+    mkdirSync(join(root, 'end'), { recursive: true })
+    symlinkSync('end/' + 'q/../'.repeat(180) + 'z', join(root, 'hop'))
+    const count = Math.ceil(FLOOR_MAX_CALL_WALK / 360) + 1
+    const changes = Array.from({ length: count }, (_, i) => ({ path: `hop/f${i}.js`, kind: 'update' }))
+    assert.equal(isFlooredTarget('apply_patch', { file_path: root, changes: changes.slice(0, 2) }, root), false, 'premise: two targets are fine')
+    assert.equal(isFlooredTarget('apply_patch', { file_path: root, changes }, root), true)
   })
 })
 

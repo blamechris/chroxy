@@ -133,6 +133,14 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     await assertBothThrow(root, 'zz/' + ('n'.repeat(250) + '/').repeat(names) + 'f', 'ENAMETOOLONG')
   })
 
+  it('the component bound stops the walk where it is crossed, not at the end', { skip: SKIP_NO_SYMLINK }, async () => {
+    // `.` costs nothing to walk, and the loop after it would end in ELOOP; the
+    // bound is crossed first.
+    symlinkSync(join(root, 'b'), join(root, 'a'))
+    symlinkSync(join(root, 'a'), join(root, 'b'))
+    await assertBothThrow(root, './'.repeat(COMPONENTWISE_MAX_COMPONENTS + 50) + 'a/y', 'ENAMETOOLONG')
+  })
+
   it('a final component that takes the resolved path past the bound → both throw ENAMETOOLONG', async () => {
     // The first component is missing, so the rest is appended without a stat;
     // only the last one crosses the bound.

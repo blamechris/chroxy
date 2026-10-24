@@ -133,12 +133,29 @@ function spliceSymlink(pending, i, resolved, link) {
   return linkRoot || resolved
 }
 
+/**
+ * Throw ENAMETOOLONG once a walk has consumed more than
+ * COMPONENTWISE_MAX_COMPONENTS components or its resolved path is longer than
+ * COMPONENTWISE_MAX_PATH_LENGTH characters. Called before each component and
+ * after the last.
+ * @param {number} walked    components consumed so far, the current one included
+ * @param {string} resolved  the path resolved so far
+ * @param {string} fnName    the driver, for the message
+ */
 function checkWalkBounds(walked, resolved, fnName) {
   if (walked > COMPONENTWISE_MAX_COMPONENTS || resolved.length > COMPONENTWISE_MAX_PATH_LENGTH) {
     throw Object.assign(
       new Error(`${fnName}: walk exceeds ${COMPONENTWISE_MAX_COMPONENTS} components or ${COMPONENTWISE_MAX_PATH_LENGTH} characters`),
       { code: 'ENAMETOOLONG' },
     )
+  }
+}
+
+// A caller may share one walk budget across several walks (`{ left: n }`); each
+// component walked spends one, and an exhausted budget fails like a long walk.
+function spendWalkBudget(budget, fnName) {
+  if (budget !== undefined && --budget.left < 0) {
+    throw Object.assign(new Error(`${fnName}: the shared walk budget is spent`), { code: 'ENAMETOOLONG' })
   }
 }
 
@@ -158,9 +175,10 @@ function symlinkBudgetError(fnName) {
  * REAL path by the same pop/append rules.
  * @param {string} realBase  the session cwd, already resolved to its real path
  * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path
+ * @param {{ left: number }} [budget]  a walk budget shared with other walks
  * @returns {string} the open(2)-faithful resolved absolute real path
  */
-export function resolveTargetComponentwiseSync(realBase, target) {
+export function resolveTargetComponentwiseSync(realBase, target, budget) {
   const { resolved: base, pending } = beginWalk(realBase, target)
   let resolved = base
   let symlinks = 0
@@ -170,6 +188,7 @@ export function resolveTargetComponentwiseSync(realBase, target) {
     const comp = pending[i]
     i++
     checkWalkBounds(i, resolved, 'resolveTargetComponentwiseSync')
+    spendWalkBudget(budget, 'resolveTargetComponentwiseSync')
     const step = resolveComponentLexically(resolved, comp, tailOnly)
     resolved = step.resolved
     if (step.stat === null) continue
@@ -199,9 +218,10 @@ export function resolveTargetComponentwiseSync(realBase, target) {
  * (including `..`) by pop/append.
  * @param {string} realBase  the session cwd, already resolved to its real path
  * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path
+ * @param {{ left: number }} [budget]  a walk budget shared with other walks
  * @returns {Promise<string>} the open(2)-faithful resolved absolute real path
  */
-export async function resolveTargetComponentwiseAsync(realBase, target) {
+export async function resolveTargetComponentwiseAsync(realBase, target, budget) {
   const { resolved: base, pending } = beginWalk(realBase, target)
   let resolved = base
   let symlinks = 0
@@ -211,6 +231,7 @@ export async function resolveTargetComponentwiseAsync(realBase, target) {
     const comp = pending[i]
     i++
     checkWalkBounds(i, resolved, 'resolveTargetComponentwiseAsync')
+    spendWalkBudget(budget, 'resolveTargetComponentwiseAsync')
     const step = resolveComponentLexically(resolved, comp, tailOnly)
     resolved = step.resolved
     if (step.stat === null) continue

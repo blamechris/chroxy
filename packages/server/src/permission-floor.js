@@ -276,6 +276,13 @@ export const FLOOR_MAX_TARGET_COMPONENTS = 256
 // target is resolved. A patch touching hundreds of files is far below both.
 export const FLOOR_MAX_CALL_TARGETS = 1024
 export const FLOOR_MAX_CALL_COMPONENTS = 16384
+// The call's symlink-resolving walks share one budget too: past
+// FLOOR_MAX_CALL_WALK components walked across all its targets (those a symlink
+// adds included), the call floors.
+export const FLOOR_MAX_CALL_WALK = 16384
+// And more than FLOOR_MAX_CALL_BYTES UTF-8 bytes across one call's targets
+// floors the call. A thousand-file patch of 100-byte paths is about 100 KB.
+export const FLOOR_MAX_CALL_BYTES = 131072
 
 /**
  * How many `/`- or `\`-separated components `target` has, counting no further
@@ -514,7 +521,7 @@ function _matchesProtectedSegments(segments, start, secretsOnly) {
  * @param {boolean} [secretsOnly]  match only secret / credential files
  * @returns {boolean}
  */
-function isProtectedPathValue(target, base, secretsOnly = false) {
+function isProtectedPathValue(target, base, secretsOnly = false, call = { realBase: undefined, walk: undefined }) {
   // The work spent on one target is bounded before anything else runs.
   if (_exceedsTargetBounds(target)) return true
   // On POSIX `\` is a name character that both passes read as a separator, so
@@ -543,11 +550,13 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // (caught below → return true → force the prompt) instead of resolving
     // against process.cwd(). Wrapping in resolve() would defeat BOTH the guard
     // and the wrong-root framing it protects against.
-    const realBase = realpathDeepestAncestorSync(base)
+    // Once per call: every target of one call shares the session cwd.
+    if (call.realBase === undefined) call.realBase = realpathDeepestAncestorSync(base)
+    const realBase = call.realBase
     // Pass the RAW `target` (its `..` intact) to the component walker, so a `..`
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
-    const realTarget = resolveTargetComponentwiseSync(realBase, target)
+    const realTarget = resolveTargetComponentwiseSync(realBase, target, call.walk)
     // The carve-out survives only when the resolved path IS the written one. The
     // written path held no symlink when `_insideClaudeWorktree` walked it, so
     // this differs only if the path changed between the two walks; then the
@@ -634,6 +643,9 @@ export function isSecretReadTarget(input, cwd) {
  * resolving each against the session cwd, and tests it with {@link isProtectedPathValue}.
  * `secretsOnly` selects the read floor (secret files) vs the full write floor
  * (config dirs + secret files). ANY protected field/member floors the input.
+ * The call as a whole is bounded too: more than FLOOR_MAX_CALL_TARGETS targets,
+ * FLOOR_MAX_CALL_COMPONENTS components or FLOOR_MAX_CALL_BYTES bytes across them,
+ * or more than FLOOR_MAX_CALL_WALK components walked, floors it.
  * @param {object} input
  * @param {string} [cwd]
  * @param {boolean} secretsOnly
@@ -647,23 +659,28 @@ function _matchesFloor(input, cwd, secretsOnly) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
     targets.push(input[field])
   }
-  // #6805/#6828 — the array-shaped per-file targets (codex apply_patch). The
-  // call's target budget is checked as they are collected, so a huge array costs
-  // no more than the budget.
+  // #6805/#6828 — the array-shaped per-file targets (codex apply_patch). Every
+  // member counts toward the call's target budget, whatever it holds, so the
+  // array is never enumerated past the budget.
   if (Array.isArray(input.changes)) {
+    if (targets.length + input.changes.length > FLOOR_MAX_CALL_TARGETS) return true
     for (const change of input.changes) {
       if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      if (targets.push(change.path) > FLOOR_MAX_CALL_TARGETS) return true
+      targets.push(change.path)
     }
   }
-  // The call's component budget, checked before any target is resolved.
+  // The call's component and byte budgets, checked before any target is resolved.
   let components = 0
+  let bytes = 0
   for (const target of targets) {
     components += _componentCount(target, FLOOR_MAX_CALL_COMPONENTS - components)
     if (components > FLOOR_MAX_CALL_COMPONENTS) return true
+    bytes += Buffer.byteLength(target, 'utf8')
+    if (bytes > FLOOR_MAX_CALL_BYTES) return true
   }
+  const call = { realBase: undefined, walk: { left: FLOOR_MAX_CALL_WALK } }
   for (const target of targets) {
-    if (isProtectedPathValue(target, base, secretsOnly)) return true
+    if (isProtectedPathValue(target, base, secretsOnly, call)) return true
   }
   return false
 }
