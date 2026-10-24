@@ -51,9 +51,10 @@ or small sharp s becomes `ss`). A few shapes floor without a name comparison:
 - under the full floor, an existing target with more than one hard link.
 
 Measured on 643,198 path segments (a checkout with its `node_modules`, a home
-directory's documents and application data), none of these shapes occurred, and no
-name folded onto a protected name it did not already match. So the expected cost is
-close to no extra prompts. One known cost is on Windows: a target outside the cwd is
+directory's documents and application data), none of the name shapes above occurred,
+and no name folded onto a protected name it did not already match. Hard links are
+rarer still in a checkout, though not absent: in this repository's `node_modules`, two
+installed binaries have more than one link, so a write to either prompts. One known cost is on Windows: a target outside the cwd is
 scanned as its absolute path, so an absolute path that itself holds a short name (a
 temp directory reported as `C:\Users\RUNNER~1\…`) floors. A target under the cwd
 is scanned relative to it, so a cwd spelled with short names costs nothing.

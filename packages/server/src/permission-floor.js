@@ -87,10 +87,10 @@ export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path'
 export const SECRET_READ_FLOOR_TOOLS = new Set(['Read', 'Glob', 'Grep'])
 
 /**
- * #6803 — is a single (lowercased or canonical, see canonicalName) path segment a known secret FILE?
+ * #6803 — is a single path segment (lowercased as written, or canonical — see canonicalName) a known secret FILE?
  * Env files, SSH/credential dotfiles, and PEM/key/keystore extensions. Pure
  * string ops (no regex) so it can't be mangled by a later edit.
- * @param {string} seg  a canonical path segment
+ * @param {string} seg  a lowercased or canonical path segment
  * @returns {boolean}
  */
 function isSecretFileSegment(seg) {
@@ -115,10 +115,10 @@ function isSecretFileSegment(seg) {
  * the config dirs (`.claude/skills/*.md`, a secret-free `.vscode/settings.json`)
  * stay un-floored for reads per #6803's intent.
  *
- * Matched as a 2-/3-segment sequence anchored at index `i` of the (canonical,
+ * Matched as a 2-/3-segment sequence anchored at index `i` of the (lowercased or canonical,
  * `..`-stripped) segment array, so any depth prefix (`sub/.git/config`) matches.
  * Pure string ops (no regex) — consistent with the rest of the floor.
- * @param {string[]} segments  canonical path segments
+ * @param {string[]} segments  lowercased or canonical path segments
  * @param {number} i           the current segment index
  * @returns {boolean}
  */
@@ -147,10 +147,14 @@ const CLAUDE_SETTINGS_PREFIX = 'settings'
 const CLAUDE_SETTINGS_SUFFIX = '.json'
 
 // The name a path segment carries: anything from a `:` on, and any trailing
-// dots or spaces, are dropped.
+// dots or spaces, are dropped. The trim is a scan from the end, not a regex,
+// so a long run of dots or spaces costs linear time.
 function segmentName(seg) {
   const colon = seg.indexOf(':')
-  return (colon === -1 ? seg : seg.slice(0, colon)).replace(/[. ]+$/, '')
+  const name = colon === -1 ? seg : seg.slice(0, colon)
+  let end = name.length
+  while (end > 0 && (name[end - 1] === '.' || name[end - 1] === ' ')) end--
+  return name.slice(0, end)
 }
 
 // The canonical form of a segment's name (see segmentName): folded wider than

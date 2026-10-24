@@ -77,6 +77,9 @@ describe('floor: segments compared in canonical form', () => {
     ['Write', 'notes.md'],
     ['Write', 'abcdefg~1'],
     ['Read', 'a~1.json'],
+    ['Write', 'notes~'],
+    ['Write', '~1'],
+    ['Write', 'a.b~1'],
   ]) {
     it(`${tool} ${JSON.stringify(path)} \u2192 not floored`, () => {
       assert.equal(floored(tool, path), false)
@@ -88,6 +91,15 @@ it('a `:` drops only what follows it: `a:b.txt` is not floored', {
   skip: process.platform === 'win32' ? '`:` names a stream on win32' : false,
 }, () => {
   assert.equal(floored('Read', 'a:b.txt'), false)
+})
+
+it('a long run of dots or spaces in one segment is handled in linear time', () => {
+  for (const filler of ['.', ' ']) {
+    // The verdict is the resolver's (a name this long fails closed); the time is the point.
+    const t0 = Date.now()
+    floored('Read', `${filler.repeat(200_000)}x`)
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`)
+  }
 })
 
 describe('floor: `\\` in a POSIX target', {
