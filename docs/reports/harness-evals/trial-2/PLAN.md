@@ -157,15 +157,19 @@ evidence <run>` (package P2), run on the Mac after the run ends:
 
 - copies the run's native transcripts (Claude: the clone's folder under
   `~/.claude/projects/`, subagents included; Codex: every rollout whose
-  `session_meta.cwd` is the clone or below it) and the daemon log lines for the
-  run's session into the vault (`~/Obsidian/no-it-all/reviews/harness-trial-2/evidence/<run>/`)
-  with a SHA-256 manifest;
-- writes a derived extract to `data/native/<run>.json`: model and effort per turn,
-  permission requests and their outcome (approved by a human, by the pipeline, by a
-  rule; denied; timed out; floored), human messages after the first, compactions,
-  token totals by model, and isolation-pattern hits (other `trial/*` refs, the key
-  folder, `NEXT-*.md`, native stores), with paths outside the clone reduced to a
-  pattern name and a hash;
+  `session_meta.cwd` is the clone or below it) and, for a Chroxy run, the daemon log
+  lines of the run's window into the vault
+  (`~/Obsidian/no-it-all/reviews/harness-trial-2/evidence/<run>/`) with a SHA-256
+  manifest, refusing any destination inside the repository, the clone or a git work
+  tree other than the declared private vault;
+- writes a derived extract to `data/native/<run>.json`: models and efforts per turn
+  (coordinator and workers apart), permission requests and their outcome as the daemon
+  log records it (answered through a notification action, which a person taps; decided
+  by a rule, a timeout or the pending cap; resolved by a client or an automatic
+  responder the log does not name; floored), human messages after the first,
+  interrupts, compactions, token totals by model, and isolation-pattern hits (other
+  `trial/*` refs, the key folder, `NEXT-*.md`, native stores), with paths outside the
+  clone reduced to a pattern name and a hash;
 - commits the manifest's digest beside the extract, so the vault copy can be
   verified later.
 
@@ -230,7 +234,7 @@ operator can run steps 7–12 during a Claude run without drawing on the Claude 
 | Package | Contents | State |
 |---|---|---|
 | P1 | `trial.json` schema; `trialctl render`, `gate`, `cut`, `clone`, `preflight`, `prepare`, `start`, `verify-start`, `finish`, `status`, `collect`, `apply-verdicts`, `disputes`, `verify-key`, `key-template`; `measures.py --data` with October pinned; mission and grader templates v2; tests in CI | this plan's first PR |
-| P2 | `trialctl evidence` (vault copy, manifest, derived extract, token totals), `queue-candidates` | next |
+| P2 | `trialctl evidence` (vault copy, manifest, derived extract, token totals), `queue-candidates` | delivered by the PR for blamechris/chroxy#8757 |
 | P3 | `ci.yml` push trigger for `trial/**` | before T0 |
 | Owner | ruleset, Copilot setting, key, launches, usage readings, unseal | before and during the trial |
 

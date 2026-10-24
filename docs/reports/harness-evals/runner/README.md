@@ -15,7 +15,9 @@ state file, `trial.json`'s `t0`, rendered missions and grader prompts (previews;
 `missions/*.md` other than the template is gitignored, because the real copy is
 committed on each base by `cut`), the trial's `data/`, and in the checkout `cut`
 runs from, a `git fetch`, a temporary worktree it removes again, and with
-`--push` the new `trial/*` base branches.
+`--push` the new `trial/*` base branches. `evidence` also writes, outside the
+repository, a run's raw transcripts (see "Evidence" below), and
+`queue-candidates` only reads from GitHub.
 
 ## Layout
 
@@ -27,6 +29,8 @@ runs from, a `git fetch`, a temporary worktree it removes again, and with
 | `<trial>/trial.json` | everything about one trial: roster, cells, arms, harnesses and their invocations, queue slots, blockers, local paths, allowance floors |
 | `<trial>/missions/TEMPLATE.md`, `<trial>/graders/GRADER-PROMPT.md` | the templates `render` fills |
 | `<paths.state_dir>/<RUN>.json` | the run's state on the Mac: clone, preflights, send, readings, applied settings, end |
+| `<paths.evidence_dir>/<RUN>/` | the run's raw transcripts and a SHA-256 manifest, on the owner's Mac, in the private vault, never in a work tree (`evidence`) |
+| `<trial>/data/native/<RUN>.json` | the public, derived extract of those transcripts: counts, models, tokens, hashes, no text (`evidence`) |
 
 A second trial is a second directory with its own `trial.json`; the scripts do
 not change.
@@ -51,7 +55,9 @@ GitHub error). "Could not check" is never reported as a pass.
 | `verify-start RUN` | owner, Mac | reads the applied model, effort, permission mode and the mission's `TRIAL-PROBE` line back from the native transcript (Claude Code) or rollout (Codex); prints `STOP:` on any mismatch |
 | `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, and whether `~/.claude/settings.json` changed during the run (#8704) |
 | `status RUN` | operator, anywhere with `gh` | read-only live view (October's `check-run.sh` for any trial): base tip, commits since T0, the base's PRs with mission-rule flags, the queue issues that must stay untouched, the main tip, whether the report has landed |
-| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge |
+| `evidence RUN [--state FILE] [--data DIR]` | owner, Mac, after `finish` | copies the run's native transcripts (and, for Chroxy, the daemon log lines of its window) into the vault with a SHA-256 manifest, and writes the derived extract `data/native/<RUN>.json`; refuses, writing nothing, when the vault path is inside the repository, the run's clone or a git work tree |
+| `queue-candidates [--json] [--limit N]` | supervisor | PLAN.md section 4's mechanical filters over the open backlog: a candidate table plus the rule that dropped each other issue; read-only |
+| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge. When `data/native/<RUN>.json` exists it also fills the run's `approvals`, `compactions` and `workers` in `runs.json`, only while each is absent or `not recorded` |
 | `apply-verdicts FILE` | supervisor | folds a grader's `verdicts.json` into the evidence; refuses while a merged PR has no verdict |
 | `disputes A B [--markdown]` | supervisor | the items where the two graders differ, for the owner's rulings |
 | `verify-key KEY.md` | grader, owner | digest and size against `<trial>/KEY-COMMITMENT.md` |
@@ -77,8 +83,106 @@ Per run, in order: `trialctl prepare <RUN>`; create the session as the launch
 card says (for a Chroxy run, then `trialctl preflight <RUN> --phase session
 --session <id>`); `trialctl start <RUN> --meter …`; send the invocation once;
 within ten minutes `trialctl verify-start <RUN>`; every three hours `trialctl status <RUN>`; when the run ends `trialctl
-finish <RUN> --meter …`, and hand the state file to the supervisor, who copies it
-to `<trial>/data/state/<RUN>.json` and runs `collect`.
+finish <RUN> --meter …`, then `trialctl evidence <RUN>`, and hand the state file and
+`data/native/<RUN>.json` to the supervisor, who copies them to `<trial>/data/state/<RUN>.json`
+and `<trial>/data/native/<RUN>.json` and runs `collect`.
+
+## Evidence
+
+The repository is public and a raw transcript holds everything a run read and
+said, so `trialctl evidence <RUN>` keeps raw material in the owner's private vault
+and commits only a derived extract.
+
+**Where.** `paths.evidence_dir` in `trial.json` (trial 2: `~/Obsidian/no-it-all/reviews/harness-trial-2/evidence`,
+inside the sealed key's folder on purpose: the mission already forbids subjects to
+read that folder). The run's copy is `<evidence_dir>/<RUN>/`:
+`claude-projects/<clone slug>/...` (every file under the clone's folder in
+`paths.claude_projects` modified in the run window, subagent transcripts and tool
+results included), or `codex-sessions/YYYY/MM/DD/rollout-*.jsonl` (every rollout
+whose `session_meta.cwd` is the clone or below it, coordinator and subagents), plus
+`daemon.log` (the daemon log lines of the window, rotated files read oldest first)
+for a Chroxy run, and `MANIFEST.sha256` (`<sha256>  <relative path>`, sorted).
+Files and folders are mode 0600/0700. The window is the earlier of `start.sent_at` and
+`verify_start.first_command_at`, to `finish.ended_at`; a file is copied if it was
+modified from five minutes before the start to ten minutes after the end, and a file
+modified later is reported (`UNVERIFIED`, exit 2) rather than silently left out. An
+existing non-empty `<RUN>/` is never overwritten: evidence is written once.
+
+**Never in the repository.** The command refuses, exit 1 and nothing written, when
+`<evidence_dir>/<RUN>` resolves (symlinks followed) inside the trial repository, the
+run's clone or any git work tree. The one exception is the work tree named by
+`paths.evidence_vault` (`~/Obsidian/no-it-all`, which is itself a private git
+repository): it is allowed only when it is the only work tree around the destination,
+so a repository nested in the vault, or a vault inside the trial repository, is still
+refused.
+Remove that key and every work tree is refused. The copy is staged next to its
+destination and moved into place last, and the extract is written after it; if
+either step fails the other is removed.
+
+**The extract** `data/native/<RUN>.json` holds only aggregates and short identifiers:
+per-model turn counts and the observed efforts (Claude), or `turn_context` models,
+efforts, approval policies and sandboxes (Codex); worker (subagent) turns per model;
+token totals by model (Claude: `message.usage` deduplicated by `message.id`, largest
+value per field; Codex: the largest cumulative token record of each rollout, with the
+cached part split out and `stale_final_rollouts` counting the rollouts whose last
+`token_count` was below an earlier one); human messages after the first, interrupts
+and compactions; for a Chroxy run the permission counts from the daemon log (below);
+isolation-pattern hits; and the manifest's SHA-256 and file count. It never holds
+message text, tool output, a command line or file content. An isolation hit
+(another run's `trial/*` branch, the key folder, `KEY.md`/`KEY.md.enc`, a `NEXT-*.md`
+seed, another project's folder under `~/.claude/projects/`, `~/.codex/sessions/`) is
+a pattern name, a count and a SHA-256 of each distinct matched string; the patterns
+read tool inputs only (Claude `tool_use.input`, Codex function-call arguments), and
+`tool_inputs_scanned` is recorded so an unreadable transcript shows as zero scanned
+rather than as clean.
+
+**Shapes.** The Claude Code and Codex record shapes the extract reads beyond those
+`trialkit/native.py` documents (`message.id` and `message.usage`, `isMeta`,
+`isCompactSummary`, `compact_boundary`, entry `uuid`; Codex `token_count`,
+`token_usage_record`, `user_message`, `compacted`, function-call arguments) are taken from
+the Claude Code and Codex versions named there and from the October review, not read
+from a live store while this was written. A shape that drifts shows as an `UNVERIFIED`
+check (no usage record, no tool input scanned) rather than as a zero; the dry runs
+(PLAN.md section 9, step 5) are where the readers first meet real files.
+
+**Permissions** come from the daemon log, whose messages the patterns in
+`trialkit/extract.py` quote and `tests/test_extract.py` pins to the server source.
+The log says who answered only for the notification action (`resolved via HTTP`), which
+a person taps; a plain `resolved:` line may be a client or an automatic responder, and
+is counted as `unattributed`. An Auto-mode allow that short-circuits writes no line, and
+the lines carry no session id, so the counts cover prompts, across every session the
+daemon ran in the window.
+
+**Cost.** `prices` in `trial.json` is `null` (cost is `n/a`) or a dated table:
+
+```json
+"prices": {"as_of": "2026-11-01", "source": "where the rates were read",
+           "per_mtok": {"claude-opus-5-5": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+                        "gpt-6-astra": {"input": 2, "output": 10, "cache_read": 0.2}}}
+```
+
+in dollars per million tokens. One model with tokens and no rate (or a cache rate
+missing where it has cached tokens) makes the whole cost `n/a`, with the reason in `cost_note`.
+
+## Queue candidates
+
+`trialctl queue-candidates [--json] [--limit N]` reads the open backlog and applies
+PLAN.md section 4's filters that need no judgement. Every issue it drops is listed with
+the first rule that applies, in this order (cheapest first, so an issue's timeline is
+read only when nothing in the listing rules it out): `not-owner`, `listed`
+(`queue_rules.exclude_issues`, the October queue), `reserved` (`queue_rules.reserved`),
+`blocker` (a trial blocker), `label` (`queue_rules.exclude_labels`), `structure` (an
+epic's parent or child), `scope` (the body mentions `.claude/`, `.github/workflows` or
+`docs/reports/harness-evals/`), `mentions-blocked` (the body mentions a blocker or a
+reserved issue), `trial-files` (the body names a file that a PR into a `trial/*`
+branch changed; those PRs are enumerated once, from `git/matching-refs/heads/trial/`),
+`open-pr` (an open PR cross-references it), `connected-pr`, `trial-xref` (a PR into or
+from a `trial/*` branch cross-references it). A request GitHub cannot answer makes the
+issue `unverified`: neither a candidate nor ruled out, listed apart, exit 2. Survivors
+show their labels, creation date, whether the body has an acceptance-criteria section,
+and a type and package guess from labels; `--limit` shortens that list, never the scan.
+`queue_rules` in `trial.json` rejects an unknown key, so a misspelt list cannot silently
+filter nothing.
 
 ## Owner commands (accounts)
 

@@ -298,19 +298,27 @@ def codex_summary(path):
 
 # -- the daemon log ----------------------------------------------------------
 
-def log_entries(text):
-    """(timestamp, message) for each log line, in either the text or the JSON format."""
-    for line in text.splitlines():
-        line = line.strip()
+def log_records(text):
+    """(line, timestamp, message) for each non-blank log line, in either the text or the JSON format.
+
+    A line that is neither (a stack trace's continuation) has no timestamp and is its own message."""
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line:
             continue
         if line.startswith('{'):
             obj = _loads(line)
             if obj is not None and isinstance(obj.get('msg'), str):
-                yield obj.get('ts'), obj['msg']
+                yield raw, obj.get('ts'), obj['msg']
                 continue
         match = LOG_LINE.match(line)
-        yield (match.group(1), match.group(4)) if match else (None, line)
+        yield (raw, match.group(1), match.group(4)) if match else (raw, None, line)
+
+
+def log_entries(text):
+    """(timestamp, message) for each log line, in either the text or the JSON format."""
+    for _raw, stamp, message in log_records(text):
+        yield stamp, message
 
 
 def session_findings(text, session_id):

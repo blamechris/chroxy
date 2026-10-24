@@ -12,7 +12,7 @@ import os
 import sys
 import unittest
 
-MIN_TESTS = 300
+MIN_TESTS = 540
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 

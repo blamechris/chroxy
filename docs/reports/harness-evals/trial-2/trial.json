@@ -20,7 +20,9 @@
     "codex_sessions": "~/.codex/sessions",
     "codex_app_cli": "/Applications/Codex.app/Contents/Resources/codex",
     "node_bin": "/opt/homebrew/opt/node@22/bin",
-    "key_folder": "~/Obsidian/no-it-all/reviews/harness-trial-2"
+    "key_folder": "~/Obsidian/no-it-all/reviews/harness-trial-2",
+    "evidence_dir": "~/Obsidian/no-it-all/reviews/harness-trial-2/evidence",
+    "evidence_vault": "~/Obsidian/no-it-all"
   },
   "versions": {
     "node_major": 22,
@@ -39,6 +41,12 @@
   "queue": {
     "status": "not selected (PLAN.md section 4)",
     "slots": []
+  },
+  "queue_rules": {
+    "exclude_labels": ["epic", "subtask", "roadmap", "blocked:developer-program", "needs-dogfood", "backlog-deferred",
+                       "security", "wontfix", "duplicate", "invalid", "question", "stale"],
+    "reserved": [8609, 8757, 8759],
+    "exclude_issues": [8233, 8215, 7771, 8595, 8364, 8282, 8277, 8567, 8303, 7815]
   },
   "arms": {
     "A": {"model": "claude-opus-5-5", "effort": "high"},
