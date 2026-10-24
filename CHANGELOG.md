@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-10-23
+
+### Added
+
+- **A scripted runner for harness evaluation trials (#8756).** `trialctl` takes a planned run from a fresh clone to a launch-ready state (entry gate, base cut, mission, preflight), records its start and finish, and collects its evidence so `measures.py --data` rebuilds the report tables. The plan for the next trial is in `docs/reports/harness-evals/trial-2/`.
+
+### Changed
+
+- **The Claude SDK thinking level now sets Claude Code's effort (#8700, #8762).** The header's level is sent as Claude Code's effort on every turn; each model offers the effort levels Claude Code reports for it; Auto leaves Claude Code's own saved level in place; and the daemon log and the header show the effort that was applied.
+- **The permission floor compares path names in a canonical form (#8767).** Each path segment is also matched after dropping a `:` suffix and trailing dots or spaces and after a wide case fold; 8.3 short names, a `\` in a target on macOS and Linux, and an existing target with more than one hard link are prompted for. A floor hit costs a prompt, never access.
+
+### Fixed
+
+- **A Codex session no longer looks finished while it is still working (#8710, #8751).** The daemon now ends a Codex app-server turn only on that thread's own completion, so a sub-agent finishing no longer ends the parent's turn, and the work and errors that follow are no longer dropped; a usage-limit stop now shows as an error.
+- **The idle-only auto-deploy no longer restarts a daemon whose provider is still working (#8743, #8760).** A session whose provider produced output in the last five minutes counts as busy, Codex sub-agents included, and the deploy log records the verdict each restart went out on.
+- **Edits inside Claude Code's own worktrees no longer stall on a prompt (#8741, #8761).** Files in `<project>/.claude/worktrees/<name>/` are checked like any other project file, while protected names inside a worktree are still prompted for.
+
 ## [0.11.5] - 2026-10-22
 
 ### Added
