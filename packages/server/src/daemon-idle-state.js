@@ -13,6 +13,12 @@
  *   - nothing `getRestartBlockers()` names: work `isBusy` does not report, such
  *     as a background agent that outlived its turn, input accepted but not yet
  *     dispatched, or a TUI whose terminal is still producing output
+ *   - no session's provider has produced output in the last
+ *     PROVIDER_QUIET_WINDOW_MS (#8743). `isBusy` is the daemon's own turn
+ *     bookkeeping, and when that is wrong the provider is still working while
+ *     the session reads idle: trial run B2-cy-codex lost a 17-minute Codex run to
+ *     a restart while codex emitted every few seconds. The window is read from
+ *     what the provider SAID (`providerActivityAgeMs`), not from the turn state.
  *
  * FAIL SAFE. Every uncertainty reads as NOT idle. "Could not check" must never
  * be the same observable outcome as "nothing to check" (docs/false-safety-guards.md):
@@ -20,6 +26,16 @@
  * reason and force `idle: false`. A deploy that is wrongly deferred costs a
  * ten-minute wait; a deploy that is wrongly allowed kills a running turn.
  */
+
+/**
+ * How long every session's provider must have been silent before the daemon
+ * may be restarted (#8743). A working provider emits every few seconds, so the
+ * window holds a restart off across ordinary pauses; only a single silent
+ * stretch longer than the window (one long command that reports nothing) gets
+ * through, and then only when `isBusy` is wrong too. Shorter than the deploy
+ * tick, so a quiet daemon still deploys on the next tick or the one after.
+ */
+export const PROVIDER_QUIET_WINDOW_MS = 5 * 60 * 1000
 
 /**
  * @param {object} input
@@ -54,6 +70,7 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
     let pendingPermissions = 0
     let pendingQuestions = 0
     let restartBlockers = []
+    let providerActivityAgeMs = null
     try {
       const entrySession = sessionManager.getSession?.(sessionId)?.session
       if (!entrySession) {
@@ -63,11 +80,13 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
       pendingPermissions = countPending(entrySession, 'pending permission count', () => entrySession.getPendingPermissionCount())
       pendingQuestions = countPending(entrySession, 'pending question count', () => entrySession.getPendingQuestions().length)
       restartBlockers = readBlockers(entrySession)
+      providerActivityAgeMs = readActivityAge(entrySession)
     } catch (err) {
       reasons.push(`idle state unavailable for session ${label}: ${err?.message || String(err)}`)
       pendingPermissions = 0
       pendingQuestions = 0
       restartBlockers = []
+      providerActivityAgeMs = null
     }
     const isBusy = row?.isBusy === true
     sessions.push({
@@ -79,11 +98,15 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
       pendingPermissions,
       pendingQuestions,
       restartBlockers,
+      providerActivityAgeMs,
     })
     if (isBusy) reasons.push(`session ${label} busy: ${row?.busyReason || 'turn'}`)
     if (pendingPermissions > 0) reasons.push(`session ${label} has ${pendingPermissions} pending permission(s)`)
     if (pendingQuestions > 0) reasons.push(`session ${label} has ${pendingQuestions} pending question(s)`)
     for (const b of restartBlockers) reasons.push(`session ${label} restart blocked: ${b}`)
+    if (providerActivityAgeMs !== null && providerActivityAgeMs < PROVIDER_QUIET_WINDOW_MS) {
+      reasons.push(`session ${label} provider active ${Math.round(providerActivityAgeMs / 1000)}s ago (quiet window ${PROVIDER_QUIET_WINDOW_MS / 60000}m)`)
+    }
   }
 
   try {
@@ -130,4 +153,19 @@ function readBlockers(session) {
   }
   if (!Array.isArray(out)) throw new Error('restart blockers is not an array')
   return out.map(String)
+}
+
+// `providerActivityAgeMs` is null for "never active", which is safe, so like the
+// blockers every other shape is "cannot say": a missing getter (undefined), a
+// throw, NaN, a negative or fractional number.
+function readActivityAge(session) {
+  let age
+  try {
+    age = session.providerActivityAgeMs
+  } catch (err) {
+    throw new Error(`provider activity unavailable (${err?.message || String(err)})`)
+  }
+  if (age === null) return null
+  if (!Number.isSafeInteger(age) || age < 0) throw new Error('provider activity age is not a duration')
+  return age
 }

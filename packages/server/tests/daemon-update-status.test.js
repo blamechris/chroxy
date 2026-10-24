@@ -15,6 +15,7 @@ import {
 } from '../../../scripts/deploy-daemon.mjs'
 import { ServerDaemonUpdateStatusSchema } from '@chroxy/protocol'
 import { readBoundedFile } from '../src/utils/small-file.js'
+import { PROVIDER_QUIET_WINDOW_MS } from '../src/daemon-idle-state.js'
 
 // #8331 — the server half of the update banner. Everything runs against a temp
 // config dir (never ~/.chroxy: the sandbox guard would throw).
@@ -175,6 +176,24 @@ describe('requestRestart', () => {
     assert.deepEqual(out.reasons, ['session "api" busy: turn'])
     assert.deepEqual(out.sessions, [{ sessionId: 's1', name: 'api', busyReason: 'turn' }])
     assert.equal(existsSync(join(dir, REQUEST_FILE)), false)
+  })
+
+  it('a session held off only by recent provider output is listed in the dialog, and a quiet one is not (#8743)', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    const quiet = { isBusy: false, busyReason: null, pendingPermissions: 0, pendingQuestions: 0, restartBlockers: [] }
+    const getIdleState = () => ({
+      idle: false,
+      reasons: ['session "codex" provider active 30s ago (quiet window 5m)'],
+      sessions: [
+        { sessionId: 's1', name: 'codex', ...quiet, providerActivityAgeMs: 30_000 },
+        { sessionId: 's2', name: 'old', ...quiet, providerActivityAgeMs: PROVIDER_QUIET_WINDOW_MS },
+        { sessionId: 's3', name: 'never', ...quiet, providerActivityAgeMs: null },
+      ],
+    })
+    const out = mk(dir, { getIdleState }).requestRestart({ target: B })
+    assert.equal(out.confirmRequired, true)
+    assert.deepEqual(out.sessions, [{ sessionId: 's1', name: 'codex', busyReason: null }])
   })
 
   it('busy WITH confirmation: writes force:true', () => {
