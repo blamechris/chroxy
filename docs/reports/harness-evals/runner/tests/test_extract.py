@@ -259,34 +259,72 @@ class ClaudeNamesAndReads(TempFiles):
     def test_the_synthetic_marker_is_still_not_a_turn(self):
         self.assertEqual(self.summary(assistant('m1', model='<synthetic>', use=usage(o=9)))['coordinator']['turns'], {})
 
-    def test_a_model_is_a_lower_case_identifier_with_no_path_url_or_colon(self):
-        for name in ('claude-opus-5-5', 'gpt-6-astra', 'claude-sonnet-4-5-20250929', 'gpt-5.1-codex', 'o3', 'm' * 48):
+    def test_a_model_is_a_known_familys_name_in_lower_case(self):
+        for name in ('claude-opus-5-5', 'gpt-6-astra', 'claude-sonnet-4-5-20250929', 'gpt-5.1-codex', 'o3', 'o4-mini', 'o1-preview', 'o9',
+                     'codex-mini-latest', 'gemini-2.5-pro', 'opus', 'sonnet', 'haiku', 'deepseek-chat', 'llama3.1-70b', 'qwen2.5-coder',
+                     'mistral-large', 'claude-' + 'x' * 41, 'gpt-' + 'f' * 31):
             self.assertEqual(extract.safe_model(name), name)
         for name in ('/private/probe/value', 'https://example.com/x', 'anthropic:claude-opus', 'us.anthropic/claude-sonnet',
-                     'Claude-Opus', 'claude opus', 'claude-opus\n', 'm' * 49, 'x', '', '-opus', 'caf\u00e9', '<synthetic>', None, 7, ['x']):
+                     'Claude-Opus', 'claude opus', 'claude-opus\n', 'claude-' + 'x' * 42, 'x', '', '-opus', 'caf\u00e9', '<synthetic>',
+                     'o0', 'o', 'gp', None, 7, ['x']):
+            self.assertEqual(extract.safe_model(name), '<other>', repr(name))
+
+    def test_a_model_that_is_a_host_a_file_or_not_a_family_is_other_however_plain(self):
+        for name in ('internal.corp.example.com', 'secrets.env', 'localhost', 'my-model', 'prod-db-password', 'glpat-abc123def456',
+                     'xapp-1-a0123', 'deepsea', 'cloud-opus', 'a' * 40):
+            self.assertEqual(extract.safe_model(name), '<other>', name)
+
+    def test_a_character_that_is_not_in_a_models_alphabet_is_refused_in_the_middle_of_a_family_name(self):
+        for name in ('claude-Opus-5', 'gpt-5-Codex', 'claude/opus', 'claude:opus', 'claude_opus', 'claude\\opus', 'claude;opus', 'claude opus', 'gpt@5', 'gpt(5)', 'gpt-5\t'):
             self.assertEqual(extract.safe_model(name), '<other>', repr(name))
 
     def test_a_tool_is_a_letter_then_word_characters(self):
-        for name in ('Bash', 'Edit', 'mcp__chroxy__list_files', 'NotebookEdit', 'T' * 48):
+        for name in ('Bash', 'Edit', 'mcp__chroxy__list_files', 'NotebookEdit', 'Skill', 'T' * 48, 'f' * 31):
             self.assertEqual(extract.safe_tool(name), name)
         for name in ('unknown tool', 'mcp__my-server__tool', '/bin/sh', 'Bash(rm -rf /)', 'Bash\n', '1Bash', 'T' * 49, '', None):
             self.assertEqual(extract.safe_tool(name), '<other>', repr(name))
 
+    def test_a_character_that_is_not_a_word_character_is_refused_inside_a_tool_name(self):
+        for name in ('Bash/x', 'a:b', 'a.b', 'a\\b', 'a-b', 'a b', 'a;b', 'a$b', 'a@b', 'a=b', 'a\tb'):
+            self.assertEqual(extract.safe_tool(name), '<other>', repr(name))
+
     def test_a_session_id_is_alphanumeric_with_hyphens(self):
-        for name in ('s-1', '0a1b2c3d4e5f60718293a4b5c6d7e8f9', 'abandoned', '3f2a9c1e-77aa-4b5e-9d11-0c9a1b2c3d4e'):
+        for name in ('s-1', '0a1b2c3d4e5f60718293a4b5c6d7e8f9', 'abandoned', '3f2a9c1e-77aa-4b5e-9d11-0c9a1b2c3d4e', 's' * 64):
             self.assertEqual(extract.safe_session(name), name)
         for name in ('/Users/x/s', 's 1', 's_1', 's-1\n', '-s', '', 'x' * 65, None):
             self.assertEqual(extract.safe_session(name), '<other>', repr(name))
 
+    def test_a_character_that_is_not_alphanumeric_or_a_hyphen_is_refused_inside_a_session_id(self):
+        for name in ('s/x', 's:1', 's.1', 's\\1', 's_1', 's 1', 's;1', 's@1', 's=1'):
+            self.assertEqual(extract.safe_session(name), '<other>', repr(name))
+
     def test_nothing_that_starts_like_a_credential_passes_a_rule_it_would_otherwise_match(self):
-        for name in ('sk-proj-abc123def456', 'SK-PROJ-ABC', 'sk-ant-api03-xyz'):
-            self.assertTrue(extract.MODEL_NAME.fullmatch(name.lower()), name)       # the pattern alone would let it through
-            self.assertEqual(extract.safe_model(name.lower()), '<other>', name)
-            self.assertEqual(extract.safe_session(name), '<other>', name)
-        for name in ('ghp_ABCdef123456', 'gho_x1', 'ghs_x1', 'github_pat_11ABC', 'xoxb', 'xoxp123', 'AKIAABCDEFGHIJKLMNOP', 'akiaabcdef'):
-            self.assertTrue(extract.TOOL_NAME.fullmatch(name), name)
+        tools = ('ghp_ABCdef123456', 'gho_x1', 'ghs_x1', 'ghu_x1', 'ghr_x1', 'github_pat_11ABC', 'sk_live_abc123', 'sk_test_abc123',
+                 'npm_abc123', 'hf_abc123', 'AIzaSyABC123', 'ASIAABCDEFGH', 'eyJhbGciOiJIUzI1NiJ9', 'xoxb', 'xoxp123',
+                 'AKIAABCDEFGHIJKLMNOP', 'akiaabcdef')
+        for name in tools:
+            self.assertTrue(extract.TOOL_NAME.fullmatch(name), name)                # the pattern alone would let it through
             self.assertEqual(extract.safe_tool(name), '<other>', name)
-        self.assertEqual(extract.safe_tool('Skill'), 'Skill')       # `sk` alone is not the prefix `sk-`
+        sessions = ('sk-proj-abc123def456', 'SK-PROJ-ABC', 'sk-ant-api03-xyz', 'glpat-abcdef123456', 'xapp-1-A0123', 'xoxb-123',
+                    'AKIAABCDEFGHIJKLMNOP', 'ASIAABCDEFGH', 'AIzaSyABC123', 'eyJhbGciOiJIUzI1NiJ9', 'Eyj-upper')
+        for name in sessions:
+            self.assertTrue(extract.SESSION_ID.fullmatch(name), name)
+            self.assertEqual(extract.safe_session(name), '<other>', name)
+        self.assertEqual(extract.safe_tool('Skill'), 'Skill')       # `sk` alone is not the prefix `sk-` or `sk_`
+
+    def test_a_run_of_hex_digits_as_long_as_a_token_is_refused_in_every_name_field(self):
+        token = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'              # 40 hex digits
+        self.assertEqual((extract.safe_tool(token), extract.safe_tool('f' * 32), extract.safe_tool('Bash' + 'f' * 32)), ('<other>',) * 3)
+        self.assertEqual((extract.safe_model('claude-' + token), extract.safe_model('gpt-' + 'f' * 32), extract.safe_model('gpt-' + 'f' * 31)),
+                         ('<other>', '<other>', 'gpt-' + 'f' * 31))
+        self.assertEqual((extract.safe_session(token), extract.safe_session('f' * 33), extract.safe_session('s-' + token)), ('<other>',) * 3)
+        self.assertEqual(extract.safe_tool('f' * 31), 'f' * 31)
+
+    def test_a_session_ids_own_shape_is_kept(self):
+        """The daemon makes them `randomBytes(16).toString('hex')`: 32 hex digits, which is why a session may hold 32."""
+        self.assertTrue("randomBytes(16).toString('hex')" in read_source('session-manager.js'))
+        for name in ('0123456789abcdef0123456789abcdef', 'f' * 32, 'A' * 8 + 'b1' * 12, '3f2a9c1e-77aa-4b5e-9d11-0c9a1b2c3d4e'):
+            self.assertEqual(extract.safe_session(name), name)
 
     def test_a_field_with_known_values_takes_only_those(self):
         for value in ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none'):

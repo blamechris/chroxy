@@ -494,7 +494,7 @@ def _build(trial, run, env, results, summary, permission, isolation, workers_lab
         # every run opens with its invocation, so none found means the reader failed, not that nobody spoke
         results.append(checks.unverified('human messages', 'none found in the coordinator transcript(s) although the invocation is '
                                                            'one: the people counts are not recorded'))
-        people.update(human_messages_total=None, human_messages_after_first=None, interrupts=None)
+        people.update(human_messages_total=None, human_messages_after_first=None, interrupts=None, compactions=None)
         why_not.setdefault('people', 'no human message was found, although the invocation is one')
     else:
         results.append(checks.passed('human messages', f'{summary["human_messages_total"]} found'))

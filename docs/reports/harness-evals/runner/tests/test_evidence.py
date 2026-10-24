@@ -418,8 +418,9 @@ class Checks(Evidence):
         self.assertEqual(self.run_evidence(), 2, self.out)
         self.assertTrue(re.search(r'UNVERIFIED\s+human messages', self.out), self.out)
         people = self.extract()['people']
-        self.assertEqual((people['human_messages_total'], people['human_messages_after_first'], people['interrupts']), (None, None, None))
-        self.assertEqual(people['compactions'], {'coordinator': 0, 'workers': 0})       # another detector: still reported
+        self.assertEqual((people['human_messages_total'], people['human_messages_after_first'], people['interrupts'],
+                          people['compactions']), (None, None, None, None))
+        self.assertTrue('no human message' in people['unverified'], people)
         self.assertEqual({c['name']: c['status'] for c in self.extract()['checks']}['human messages'], 'UNVERIFIED')
 
     def test_the_invocation_alone_is_one_message_and_a_pass(self):
@@ -1070,6 +1071,15 @@ class DaemonLog:
             ('10:02:05', 'INFO', 'ws', 'Permission mode change from c1 on session s-1: default → auto!x at 2026-11-02T10:02:05.000Z')]))
         self.assertEqual(self.run_evidence(), 0, self.out)
         self.assertEqual((self.extract()['daemon']['model'], self.extract()['daemon']['permission_mode']), ('<other>', '<other>'))
+
+    def test_a_daemon_mode_is_one_of_the_daemons_modes(self):
+        for mode, expected in (('approve', 'approve'), ('acceptEdits', 'acceptEdits'), ('auto', 'auto'), ('plan', 'plan'),
+                               ('superuser', '<other>'), ('opus-admin', '<other>'), ('bypassPermissions', '<other>'), ('default', '<other>')):
+            self.put_log(log_text([r for r in LOG if 'mode change' not in r[3]] + [
+                ('10:02:05', 'INFO', 'ws', f'Permission mode change from c1 on session s-1: approve → {mode} at 2026-11-02T10:02:05.000Z')]))
+            self.run_evidence()
+            self.assertEqual(self.extract()['daemon']['permission_mode'], expected, mode)
+            shutil_rmtree(os.path.join(self.evidence_dir, self.RUN))
 
     def test_the_last_session_phase_preflight_names_the_session(self):
         self.write_state(preflight=[{'phase': 'session', 'facts': {'session': 'abandoned'}}, {'phase': 'pre', 'facts': {}},

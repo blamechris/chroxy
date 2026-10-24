@@ -45,10 +45,20 @@ APPROVAL_POLICIES = frozenset(('never', 'on-request', 'on-failure', 'untrusted')
 SANDBOXES = frozenset(('read-only', 'workspace-write', 'danger-full-access'))
 # packages/server/src/ws-permissions.js, `validDecisions`
 DECISIONS = frozenset(('allow', 'deny', 'allowAlways'))
-MODEL_NAME = re.compile(r'[a-z][a-z0-9.-]{1,47}')
+# a model is a known family's name, then lower-case letters, digits, `.` and `-` (2 to 48 characters in all): a
+# hostname or a file name is not one, however plain
+MODEL_NAME = re.compile(r'(?=[a-z0-9.-]{2,48}\Z)(?:claude|gpt|codex|gemini|opus|sonnet|haiku|deepseek|llama|qwen|mistral|o[1-9])'
+                        r'[a-z0-9.-]*')
 TOOL_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,47}')
 SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}')
-SECRET_PREFIXES = ('ghp_', 'gho_', 'ghs_', 'github_pat_', 'sk-', 'xox', 'akia')   # compared lower-cased
+# what a credential starts with, compared lower-cased: GitHub, OpenAI/Anthropic/Stripe, Slack, AWS, Google, npm, Hugging
+# Face, GitLab, and the `eyJ` of a JWT
+SECRET_PREFIXES = ('ghp_', 'gho_', 'ghs_', 'ghu_', 'ghr_', 'github_pat_', 'sk-', 'sk_', 'xox', 'xapp-', 'akia', 'asia',
+                   'aiza', 'npm_', 'hf_', 'glpat-', 'eyj')
+# ...and a run of hex digits as long as a token's: 32 for a model or tool name; a session id IS 32 hex digits
+# (`randomBytes(16).toString('hex')`, session-manager.js), so only a longer run is a token there
+HEX_RUN = re.compile(r'[0-9a-fA-F]{32,}')
+SESSION_HEX_RUN = re.compile(r'[0-9a-fA-F]{33,}')
 
 
 # -- small helpers ---------------------------------------------------------------
@@ -67,9 +77,11 @@ def _add_tokens(table, model, usage):
         row[field] += usage[field]
 
 
-def _plain(value, pattern):
-    """`value` if it is a string that fully matches `pattern` and does not start like a credential, else OTHER."""
-    if isinstance(value, str) and pattern.fullmatch(value) and not value.lower().startswith(SECRET_PREFIXES):
+def _plain(value, pattern, hex_run=HEX_RUN):
+    """`value` if it is a string that fully matches `pattern`, does not start like a credential and holds no run of hex
+    digits long enough to be one, else OTHER."""
+    if (isinstance(value, str) and pattern.fullmatch(value) and not value.lower().startswith(SECRET_PREFIXES)
+            and not hex_run.search(value)):
         return value
     return OTHER
 
@@ -88,7 +100,7 @@ def safe_tool(value):
 
 
 def safe_session(value):
-    return _plain(value, SESSION_ID)
+    return _plain(value, SESSION_ID, SESSION_HEX_RUN)
 
 
 def _sorted_counts(counter):
@@ -582,6 +594,10 @@ AUTO_SWITCH = re.compile(r'^Auto-allowed (\d+) pending permission\(s\)')
 #   settings-handlers.js:406    _pmLog.info(`Permission mode change from ${client.id} on session ...`)
 #   settings-handlers.js:1137   info(`Permission rules updated by ${client.id} on session ...`)
 #   permission-manager.js:719   this._logWarn(`Permission audit sink threw: ${err?.message || err}`)
+# A line is taken for a permission message by its first word. One that only mentions permissions later (a rate limit,
+# the rule store, hook registration, ...) is not, which is a known limit and deliberate: nearly every real log would
+# otherwise be unverified. The guard against a reworded outcome is the tests that pin every message above to the server
+# source (`LogFormatsArePinnedToTheServer`, `test_every_not_an_outcome_line_is_one_the_server_writes`).
 NOT_OUTCOME = re.compile(r'^Permission (?:floor clear for |mode changed? |rules updated by |audit sink threw: |\S+ released, but )')
 PERMISSION_LINE = re.compile(r'^(?:[Pp]ermission |Pending-permission)')
 

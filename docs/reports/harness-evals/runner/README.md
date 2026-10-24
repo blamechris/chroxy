@@ -147,9 +147,14 @@ transcript or the log is checked by the rule of its field and recorded as `<othe
 when it fails, in the extract and on the terminal alike: effort, Claude permission mode,
 Codex approval policy and sandbox, permission decision and the daemon's mode take only
 their known values (`extract.py`, the last two pinned to the server source); a model
-takes `[a-z][a-z0-9.-]{1,47}` (no path, URL or `:`); a tool `[A-Za-z][A-Za-z0-9_]{0,47}`;
-a session id `[A-Za-z0-9][A-Za-z0-9-]{0,63}`; and nothing that starts like a credential
-(`ghp_`, `gho_`, `ghs_`, `github_pat_`, `sk-`, `xox`, `AKIA`, any case) passes any of them. An isolation hit
+is a known family's name (`claude`, `gpt`, `o1`-`o9`, `codex`, `gemini`, `opus`, `sonnet`,
+`haiku`, `deepseek`, `llama`, `qwen`, `mistral`) then `[a-z0-9.-]`, 2 to 48 characters in
+all, so a path, URL, host or file name is `<other>`; a tool is `[A-Za-z][A-Za-z0-9_]{0,47}`;
+a session id `[A-Za-z0-9][A-Za-z0-9-]{0,63}`. Nothing that starts like a credential
+(GitHub `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`, `sk-`/`sk_`, Slack `xox`/`xapp-`,
+AWS `AKIA`/`ASIA`, Google `AIza`, npm, Hugging Face, GitLab, a JWT `eyJ`; any case) passes
+any of them, nor does a value holding a run of 32 hex digits (33 for a session id, which
+the daemon makes from 32). An isolation hit
 (another run's `trial/*` branch, the key folder, `KEY.md`/`KEY.md.enc`, a `NEXT-*.md`
 seed, another project's folder under `~/.claude/projects/`, `~/.codex/sessions/`) is
 a pattern name, a count and a SHA-256 of each distinct matched string; the patterns
