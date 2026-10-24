@@ -5082,6 +5082,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const previousLevel = (activeSessionId && get().sessionStates[activeSessionId])
       ? (get().sessionStates[activeSessionId]!.thinkingLevel ?? 'default')
       : 'default';
+    // #8700: the provider's last report described the OLD level. Left in place
+    // beside the new request it reads as a mismatch for the round trip, so it is
+    // cleared to unknown with the optimistic write (the server's frame then says
+    // what is current) and restored if the change is rejected. Undefined = this
+    // session has no report, and nothing is cleared.
+    const previousEffective = (activeSessionId && get().sessionStates[activeSessionId])
+      ? get().sessionStates[activeSessionId]!.effectiveThinkingLevel
+      : undefined;
     const requestId = `set-thinking-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (socket && socket.readyState === WebSocket.OPEN) {
       const payload: Record<string, unknown> = { type: 'set_thinking_level', level, requestId };
@@ -5092,14 +5100,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // coming, so a THINKING_LEVEL_NOT_APPLIED rejection never arrives to revert.
       // Bail before arming anything so the dropdown doesn't show a phantom level.
       if (!wsSend(socket, payload)) return;
-      registerThinkingLevelChangeRequest(requestId, { sessionId: activeSessionId, previousLevel });
+      registerThinkingLevelChangeRequest(requestId, { sessionId: activeSessionId, previousLevel, previousEffective });
     }
     // Optimistically update the active session's thinking level so the controlled
     // `<select>` doesn't snap back to the prior value before the server's
     // `thinking_level_changed` broadcast lands. Idempotent — the broadcast
     // re-sets the same value when it arrives. thinkingLevel is per-session only.
     if (activeSessionId && get().sessionStates[activeSessionId]) {
-      updateActiveSession(() => ({ thinkingLevel: level as SessionState['thinkingLevel'] }));
+      updateActiveSession(() => ({
+        thinkingLevel: level as SessionState['thinkingLevel'],
+        ...(previousEffective !== undefined ? { effectiveThinkingLevel: null } : {}),
+      }));
     }
   },
 

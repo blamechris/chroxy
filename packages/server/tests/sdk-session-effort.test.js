@@ -359,6 +359,116 @@ describe('SdkSession effort (#8700) — the effective level Claude Code reports'
   })
 })
 
+describe('SdkSession effort (#8700) — mid-turn changes and stale reports', () => {
+  afterEach(() => resetModels())
+
+  // A running turn's query handle that records which live setter was used.
+  function liveQuery(applied = { model: 'claude-opus-5-5', effort: 'high' }) {
+    const calls = []
+    return {
+      calls,
+      applyFlagSettings: async (settings) => { calls.push(['applyFlagSettings', settings]) },
+      setMaxThinkingTokens: async (n) => { calls.push(['setMaxThinkingTokens', n]) },
+      getSettings: async () => ({ applied }),
+    }
+  }
+
+  async function midTurn(model, level, { heard = true } = {}) {
+    const s = createSession({ model })
+    if (heard) await hearModels(s)
+    const q = liveQuery()
+    s._query = q
+    await s.setThinkingLevel(level)
+    s._query = null
+    s.destroy()
+    return q.calls.map(([name, arg]) => `${name}(${JSON.stringify(arg)})`)
+  }
+
+  it('Max on an effort model is left for the next turn: Claude Code\'s settings do not take it', async () => {
+    assert.deepEqual(await midTurn('claude-opus-5-5', 'max'), [])
+  })
+
+  it('Max on a model nothing has described still sets the budget live, as before #8700', async () => {
+    assert.deepEqual(await midTurn('claude-opus-5-5', 'max', { heard: false }), ['setMaxThinkingTokens(128000)'])
+  })
+
+  it('a budget model gets its budget live, and no effort', async () => {
+    assert.deepEqual(await midTurn('claude-haiku-4-5', 'high'), ['setMaxThinkingTokens(32000)'])
+  })
+
+  it('Auto clears both the flag-layer effort and the budget', async () => {
+    assert.deepEqual(await midTurn('claude-opus-5-5', 'default'), ['applyFlagSettings({"effortLevel":null})', 'setMaxThinkingTokens(null)'])
+  })
+
+  it('an effort model gets its effort live, and no budget', async () => {
+    assert.deepEqual(await midTurn('claude-opus-5-5', 'xhigh'), ['applyFlagSettings({"effortLevel":"xhigh"})'])
+  })
+
+  it('a row that claims effort without naming its levels still gets effort, not the dead budget', async () => {
+    const { s, captured } = capturing({ model: 'claude-opus-5-5' })
+    await hearModels(s, SDK_MODELS.map((m) => (m.value === 'claude-opus-5-5' ? { ...m, supportedEffortLevels: undefined } : m)))
+    await s.setThinkingLevel('high')
+    await s.sendMessage('go')
+    s.destroy()
+    assert.equal(captured[0].options.effort, 'high')
+    assert.equal(captured[0].options.maxThinkingTokens, undefined)
+  })
+
+  it('drops a report that lands after a newer turn started', async () => {
+    const s = createSession({ model: 'claude-opus-5-5' })
+    let answer
+    s._query = { getSettings: () => new Promise((r) => { answer = r }) }
+    const pending = s._readEffectiveEffort()
+    s._turnSeq = (s._turnSeq || 0) + 1
+    answer({ applied: { model: 'claude-opus-5-5', effort: 'medium' } })
+    await pending
+    s._query = null
+    s.destroy()
+    assert.equal(s.effectiveThinkingLevel, null, 'the newer turn makes its own report')
+  })
+
+  it('drops a report that lands after the session was destroyed', async () => {
+    const s = createSession({ model: 'claude-opus-5-5' })
+    const events = []
+    s.on('thinking_level_changed', (d) => events.push(d))
+    let answer
+    s._query = { getSettings: () => new Promise((r) => { answer = r }), interrupt: async () => {} }
+    const pending = s._readEffectiveEffort()
+    s.destroy()
+    answer({ applied: { model: 'claude-opus-5-5', effort: 'medium' } })
+    await pending
+    assert.equal(s.effectiveThinkingLevel, null)
+    assert.equal(events.length, 0)
+  })
+
+  it('a listener that throws on the turn-start report does not become an unhandled rejection', async () => {
+    const s = createSession({ model: 'claude-opus-5-5' })
+    s._processReady = true
+    s.on('error', () => {})
+    s.on('thinking_level_changed', () => { throw new Error('listener blew up') })
+    s._callQuery = () => {
+      const gen = (async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-2', model: 'claude-opus-5-5', tools: [] }
+        await new Promise((r) => setTimeout(r, 20))
+        yield { type: 'result', session_id: 'sdk-2', total_cost_usd: 0, duration_ms: 0, usage: {} }
+      })()
+      gen.getSettings = async () => ({ applied: { model: 'claude-opus-5-5', effort: 'medium' } })
+      return gen
+    }
+    const unhandled = []
+    const onUnhandled = (reason) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await s.sendMessage('go')
+      await new Promise((r) => setTimeout(r, 20))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      s.destroy()
+    }
+    assert.deepEqual(unhandled.map((e) => e?.message), [], 'the readback is not awaited, so it must catch its own failures')
+  })
+})
+
 describe('SdkSession effort (#8700) — the operator\'s log line', () => {
   afterEach(() => resetModels())
 

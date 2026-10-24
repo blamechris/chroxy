@@ -133,12 +133,6 @@ Object.assign(EVENT_MAP, {
     return { messages }
   },
 
-  // #5431: claude-tui's idle transcript re-scan saw the outstanding-work set
-  // change (a task-notification landed / a wakeup fired while no turn was
-  // running). Re-emit `claude_ready` with the fresh snapshot — the session is
-  // idle by definition when this fires, so the ready state is accurate, and
-  // an explicit empty `backgroundTasks: []` is the client's signal to clear a
-  // stale indicator (absence means "no information", per the schema contract).
   // #8700: the SESSION changed or learned its level — a model switch dropped a
   // level the new model does not offer, or Claude Code reported the effort it
   // applied at the start of a turn. The frame is rebuilt from the session's
@@ -150,6 +144,12 @@ Object.assign(EVENT_MAP, {
     return msg ? { messages: [{ msg }] } : null
   },
 
+  // #5431: claude-tui's idle transcript re-scan saw the outstanding-work set
+  // change (a task-notification landed / a wakeup fired while no turn was
+  // running). Re-emit `claude_ready` with the fresh snapshot — the session is
+  // idle by definition when this fires, so the ready state is accurate, and
+  // an explicit empty `backgroundTasks: []` is the client's signal to clear a
+  // stale indicator (absence means "no information", per the schema contract).
   background_tasks_changed: (data) => {
     const tasks = Array.isArray(data?.backgroundTasks) ? data.backgroundTasks : []
     const msg = { type: 'claude_ready', backgroundTasks: tasks }

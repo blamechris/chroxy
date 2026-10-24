@@ -494,6 +494,10 @@ export function _testPermissionModeRevertPendingSize(): number {
 interface PendingThinkingLevelRevert {
   sessionId: string | null;
   previousLevel: string | null;
+  // #8700: the reported effective level the optimistic update cleared, restored
+  // with the level on a rejection. Undefined when the session had no report to
+  // clear (a provider that makes none), so the revert leaves the key alone.
+  previousEffective?: string | null;
 }
 
 const _pendingThinkingLevelReverts = new Map<string, PendingThinkingLevelRevert>();
@@ -7351,7 +7355,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       if (errCode === 'THINKING_LEVEL_NOT_APPLIED' && errReqId) {
         const revert = consumePendingThinkingLevelRevert(errReqId);
         if (revert?.sessionId && get().sessionStates[revert.sessionId]) {
-          updateSession(revert.sessionId, () => ({ thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'] }));
+          updateSession(revert.sessionId, () => ({
+            thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'],
+            ...(revert.previousEffective !== undefined ? { effectiveThinkingLevel: revert.previousEffective } : {}),
+          }));
         }
       }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured

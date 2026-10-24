@@ -133,4 +133,25 @@ describe('#3693 — optimistic permission/model update', () => {
     const after = useConnectionStore.getState().sessionStates[sessionId]!
     expect(after.thinkingLevel).toBe('high')
   })
+
+  // #8700 — the reported effective level described the OLD request; beside the
+  // new one it would read as a mismatch until the server's frame lands.
+  it('setThinkingLevel clears a reported effective level, and leaves an absent one absent', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const reported = createEmptySessionState()
+    reported.thinkingLevel = 'default'
+    reported.effectiveThinkingLevel = 'medium'
+    const unreported = createEmptySessionState()
+    useConnectionStore.setState({
+      activeSessionId: 'sess-5',
+      sessionStates: { 'sess-5': reported, 'sess-6': unreported },
+      socket: null,
+    })
+    useConnectionStore.getState().setThinkingLevel('high')
+    expect(useConnectionStore.getState().sessionStates['sess-5']!.effectiveThinkingLevel).toBe(null)
+
+    useConnectionStore.setState({ activeSessionId: 'sess-6' })
+    useConnectionStore.getState().setThinkingLevel('high')
+    expect('effectiveThinkingLevel' in useConnectionStore.getState().sessionStates['sess-6']!).toBe(false)
+  })
 })

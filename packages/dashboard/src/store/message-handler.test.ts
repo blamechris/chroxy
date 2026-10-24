@@ -1182,6 +1182,27 @@ describe('dashboard message-handler dispatch', () => {
         expect(_testThinkingLevelRevertPendingSize()).toBe(0) // consumed
       })
 
+      // #8700 — the optimistic write cleared the reported effective level; a
+      // rejected change must put it back, not leave "unknown" behind.
+      it('restores the effective level the optimistic update cleared', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), thinkingLevel: 'high', effectiveThinkingLevel: null } },
+          }),
+        )
+        setStore(store)
+        registerThinkingLevelChangeRequest('set-thinking-8700', { sessionId: 's1', previousLevel: 'default', previousEffective: 'medium' })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-thinking-8700', code: 'THINKING_LEVEL_NOT_APPLIED', message: 'x' },
+          ctx() as any,
+        )
+
+        expect((store.getState() as any).sessionStates.s1.thinkingLevel).toBe('default')
+        expect((store.getState() as any).sessionStates.s1.effectiveThinkingLevel).toBe('medium')
+      })
+
       it('does NOT revert when the error requestId does not match a pending change', () => {
         store = createMockStore(
           baseState({

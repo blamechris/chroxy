@@ -4712,9 +4712,6 @@ export class SessionManager extends EventEmitter {
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
       session.on(event, (data) => {
-        // #8348: journal the prompt's lifecycle BEFORE it is announced, so a
-        // client that sees it end can always find the durable record. The
-        // frames themselves stay transient; only the outcome is kept.
         // #8700: a level the SESSION changed or learned (a model switch, the
         // effort Claude Code reported at turn start) is logged here, under the
         // Chroxy session id an operator greps for, in the same summary format
@@ -4725,6 +4722,9 @@ export class SessionManager extends EventEmitter {
             : `requested=${session.thinkingLevel || 'default'}`
           sessionLog.info(`Thinking level on session ${sessionId}: ${described}${data?.reason ? ` — ${data.reason}` : ''}`)
         }
+        // #8348: journal the prompt's lifecycle BEFORE it is announced, so a
+        // client that sees it end can always find the durable record. The
+        // frames themselves stay transient; only the outcome is kept.
         if (event === 'permission_request') {
           this.notePermissionRequest(sessionId, data)
         } else if (event === 'permission_resolved' || event === 'permission_expired') {

@@ -33,6 +33,13 @@ import { turnOutcomeField, outcomeFromSdkResult } from './turn-outcome.js'
 
 const log = createLogger('sdk')
 
+/**
+ * #8700: the `value` the Agent SDK's `supportedModels()` gives the row for the
+ * CLI's own default model — what a session with no model of its own runs. A
+ * model alias, unrelated to the thinking level that happens to share the word.
+ */
+const SDK_DEFAULT_MODEL_ALIAS = 'default'
+
 // #8223: an authentication failure is surfaced with this code so the clients can
 // render a "sign in" card instead of a raw error line. Same wire code claude-tui
 // emits (claude-tui/pty-driver.js AUTH_REQUIRED_CODE) — kept as a local literal
@@ -690,10 +697,10 @@ export class SdkSession extends BaseSession {
     this._lastEffortReport = null
     this._effortEpoch = 0
     // #8700: the SDK's own per-model effort answer from `supportedModels()`,
-    // keyed by the row's `value` and its `resolvedModel`: the levels the model
-    // offers, or an empty array for a model with no effort support (one that
-    // still reads `maxThinkingTokens`). Absent = this session has not heard.
-    this._modelEffortLevels = new Map()
+    // keyed by the row's `value` and its `resolvedModel`: 'effort' for a model
+    // that takes Claude Code's effort, 'budget' for one that still reads only
+    // `maxThinkingTokens`. Absent = this session has not heard.
+    this._modelEffortSupport = new Map()
 
     // #6766: last SDK transcript message UUID seen this session. Captured from
     // each full `assistant` message in the query loop and used as the fork
@@ -1755,8 +1762,13 @@ export class SdkSession extends BaseSession {
               }
               // Fetch dynamic model list from SDK (non-blocking)
               this._fetchSupportedModels()
-              // #8700: and the effort this turn actually runs at (non-blocking)
-              this._readEffectiveEffort()
+              // #8700: and the effort this turn actually runs at (non-blocking).
+              // Caught here because nothing awaits it: a throwing listener on the
+              // `thinking_level_changed` it emits must not become an unhandled
+              // rejection, which ends the daemon (#5313).
+              this._readEffectiveEffort().catch((err) => {
+                ;(this._log || log).warn(`Effort report failed: ${err?.message || err}`)
+              })
             } else if (msg.subtype === 'task_started') {
               // #5269: a Task subagent started. The SDK message carries BOTH
               // the subagent's `task_id` (needed by query.stopTask) and the
@@ -3096,15 +3108,19 @@ export class SdkSession extends BaseSession {
       return
     }
 
+    // The same choice `_thinkingOptions` makes for the next turn, made live:
+    // an effort to set (or, at Auto, to clear), a budget to set (or, at Auto or
+    // on an effort-only answer, to clear). An unknown model gets both, as its
+    // next turn will.
     const opts = this._thinkingOptions()
+    const setsEffort = opts.effort !== undefined || !this._thinkingLevel
+    const setsBudget = opts.effort === undefined || opts.maxThinkingTokens !== undefined
     try {
-      if (opts.effort !== undefined || !this._thinkingLevel) {
-        if (this._thinkingLevel !== 'max' && typeof query.applyFlagSettings === 'function') {
-          await query.applyFlagSettings({ effortLevel: this._thinkingLevel })
-          await this._readEffectiveEffort('after a mid-turn change')
-        }
+      if (setsEffort && this._thinkingLevel !== 'max' && typeof query.applyFlagSettings === 'function') {
+        await query.applyFlagSettings({ effortLevel: this._thinkingLevel })
+        await this._readEffectiveEffort('after a mid-turn change')
       }
-      if (opts.effort === undefined && typeof query.setMaxThinkingTokens === 'function') {
+      if (setsBudget && typeof query.setMaxThinkingTokens === 'function') {
         await query.setMaxThinkingTokens(opts.maxThinkingTokens ?? null)
       }
     } catch (err) {
@@ -3139,8 +3155,8 @@ export class SdkSession extends BaseSession {
    * @returns {'effort'|'budget'|'unknown'}
    */
   _effortSupportFor(modelId) {
-    const levels = this._modelEffortLevels.get(modelId || LEGACY_DEFAULT_THINKING_LEVEL)
-    if (levels) return levels.length > 0 ? 'effort' : 'budget'
+    const heard = this._modelEffortSupport.get(modelId || SDK_DEFAULT_MODEL_ALIAS)
+    if (heard) return heard
     let row = null
     try {
       row = modelId ? getRosterModelRow(this._provider, modelId) : null
@@ -3270,18 +3286,21 @@ export class SdkSession extends BaseSession {
       // #8700: each row's effort roster rides into the registry as its
       // `reasoningLevels`, which the picker and the `set_thinking_level` gate
       // both read, and this session remembers the answer per model for
-      // `_thinkingOptions`. A row without effort means "no effort" only from a
-      // CLI that reports effort for some model; one that reports it for none
-      // predates the field, and its silence says nothing.
+      // `_thinkingOptions`. `supportsEffort` alone decides effort support, so a
+      // row that claims it without naming its levels still gets `effort` (with
+      // the legacy roster in the picker). A row without it means "no effort"
+      // only from a CLI that reports effort for some model; one that reports it
+      // for none predates the field, and its silence says nothing.
       const reportsEffort = Array.isArray(sdkModels) && sdkModels.some((m) => m?.supportsEffort === true)
       const withEffort = Array.isArray(sdkModels)
         ? sdkModels.map((m) => {
-          const roster = SdkSession.effortRoster(m)
-          if (roster || reportsEffort) {
+          const support = m?.supportsEffort === true ? 'effort' : (reportsEffort ? 'budget' : null)
+          if (support) {
             for (const key of [m?.value, m?.resolvedModel]) {
-              if (typeof key === 'string' && key.length > 0) this._modelEffortLevels.set(key, roster ? roster.reasoningLevels.slice(1) : [])
+              if (typeof key === 'string' && key.length > 0) this._modelEffortSupport.set(key, support)
             }
           }
+          const roster = SdkSession.effortRoster(m)
           return roster ? { ...m, ...roster } : m
         })
         : sdkModels
