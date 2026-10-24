@@ -588,6 +588,30 @@ def _login_check(trial, env, facts):
     return checks.failed(name, f'gh is logged in as {login}, the trial expects {trial.github_login}')
 
 
+def _ci_quiet_check(trial, env, facts):
+    """No ci.yml run queued or in progress in the repository. Trial PRs and merges run CI on the same
+    self-hosted runners the subject machine hosts (the macOS runner, the Docker Linux members), so a run
+    sent while other CI is queued starts on a loaded fleet; a freshly cut base's own push run is one."""
+    name = 'CI fleet quiet'
+    busy = []
+    for status in ('queued', 'in_progress'):
+        r = _run(env, ['gh', 'api', '-X', 'GET', f'repos/{trial.repo}/actions/runs', '-f', f'status={status}',
+                       '-f', 'per_page=100', '--jq',
+                       '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | "\\(.id) \\(.head_branch)"]'])
+        try:
+            listed = json.loads(r.stdout) if r.ok else None
+        except ValueError:
+            listed = None
+        if not isinstance(listed, list):
+            return checks.unverified(name, f'cannot list {status} CI runs: {_tail(r) or "unreadable reply"}')
+        busy += [f'{item} ({status})' for item in listed]
+    facts['ci_busy'] = busy
+    if busy:
+        return checks.failed(name, f'{len(busy)} ci.yml run(s) queued or running: {", ".join(busy[:5])}'
+                                   + (' …' if len(busy) > 5 else '') + '; wait for them before the send')
+    return checks.passed(name, 'no ci.yml run queued or in progress')
+
+
 def _effort_setting(trial, run, env, facts):
     name = 'effort setting'
     path = _path(trial, env, 'claude_settings')
@@ -823,6 +847,7 @@ def preflight(trial, run, env, phase, session, state_file):
     results = _clone_checks(trial, run, env, st, clone_dir, facts)
     results.append(_node_check(trial, env, facts))
     results.append(_login_check(trial, env, facts))
+    results.append(_ci_quiet_check(trial, env, facts))
     results.append(_live_check(trial, run, env))
     if run.harness.family == 'claude':
         results.append(_effort_setting(trial, run, env, facts))

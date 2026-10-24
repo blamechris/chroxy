@@ -193,7 +193,8 @@ class Rig:
 
 def toolbox(rig, node='v22.11.0\n', login='blamechris\n', claude='2.1.308 (Claude Code)\n',
             launchctl='PID\tStatus\tLabel\n-\t0\tcom.apple.example\n', daemon=SHA_D + '\n',
-            codex='codex-cli 0.163.0\n', codex_app='codex-cli 0.163.0\n', prompts=PROMPTS, compile_rc=0):
+            codex='codex-cli 0.163.0\n', codex_app='codex-cli 0.163.0\n', prompts=PROMPTS, compile_rc=0,
+            ci_runs='[]\n'):
     """A runner answering every external tool a preflight asks. A value of None leaves that tool unscripted (127)."""
     r = Runner()
     node_bin = rig.trial.local_path('node_bin', rig.box.home)
@@ -207,6 +208,7 @@ def toolbox(rig, node='v22.11.0\n', login='blamechris\n', claude='2.1.308 (Claud
         (daemon, lambda a: a[:3] == ['git', '-C', daemon_dir]),
         (codex, argv_starts('codex', '--version')),
         (codex_app, lambda a: a[0] == app and a[1:] == ['--version']),
+        (ci_runs, argv_starts('gh', 'api', '-X', 'GET', f'repos/{rig.trial.repo}/actions/runs')),
     ]
     for value, predicate in scripted:
         if value is not None:
@@ -854,8 +856,8 @@ class PreflightClaudeNative(LaunchCase):
         self.assertEqual(code, 0, out)
         self.assertTrue(all(s == 'PASS' for s in statuses(st).values()), statuses(st))
         self.assertEqual(set(statuses(st)), {'clone exists', 'clone clean', 'clone matches origin', 'base shape', 'mission file',
-                                             'clone identity', 'node version', 'gh login', 'no other run live',
-                                             'effort setting', 'claude version'})
+                                             'clone identity', 'node version', 'gh login', 'CI fleet quiet',
+                                             'no other run live', 'effort setting', 'claude version'})
         entry = st['preflight'][-1]
         settings = self.rig.home('.claude', 'settings.json')
         with open(settings, 'rb') as fh:
@@ -863,6 +865,22 @@ class PreflightClaudeNative(LaunchCase):
         self.assertEqual(entry['facts']['head'], self.rig.branch('trial/t2-a-cd-r1'))
         self.assertEqual((entry['phase'], entry['at'], entry['facts']['claude_version']), ('pre', '2026-11-02T12:00:00Z', '2.1.308'))
         self.assertEqual(entry['facts']['clone_dir'], '~/trial/t2/A-cd-r1')
+
+    def test_queued_or_running_ci_fails_the_quiet_fleet_check(self):
+        # A freshly cut base's own push run, or another PR's, loads the runners the subject machine hosts.
+        busy = toolbox(self.rig, ci_runs='["40120273200 trial/t2-a-cd-r1"]\n')
+        code, out, st = self.pre('A-cd-r1', runner=busy)
+        self.assertEqual(code, 1, out)
+        self.assertStatus(statuses(st), 'CI fleet quiet', 'FAIL')
+        self.assertIn('40120273200 trial/t2-a-cd-r1', details(st)['CI fleet quiet'])
+        self.assertEqual(len(st['preflight'][-1]['facts']['ci_busy']), 2)  # queued and in_progress both answered
+
+    def test_an_unreadable_runs_listing_leaves_the_quiet_fleet_check_unverified(self):
+        for reply in (None, 'not json\n', '{"a": 1}\n'):
+            with self.subTest(reply):
+                code, out, st = self.pre('A-cd-r1', runner=toolbox(self.rig, ci_runs=reply))
+                self.assertEqual(code, 2, out)
+                self.assertStatus(statuses(st), 'CI fleet quiet', 'UNVERIFIED')
 
     def test_each_run_adds_a_preflight_entry(self):
         self.pre('A-cd-r1')

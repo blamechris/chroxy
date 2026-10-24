@@ -211,8 +211,8 @@ Exposing Codex tokens in Chroxy's badge (REPORT rec 7) is a product follow-up.
 | 3 | Queue candidates, owner picks ten, slots assigned | supervisor, owner | `trialctl queue-candidates` | one exploration session |
 | 4 | Key written, dry-graded, sealed; digest committed | owner, graders | `trialctl key-template`, `verify-key` | two short grader sessions |
 | 5 | Dry runs (the October three, on the current daemon), each with `prepare`, `start` and `verify-start`, so the transcript readers meet real files before run 1 | owner | as October step 5 | three short runs |
-| 6 | Cut all bases at T0 | supervisor | `trialctl cut --all --t0 <sha>` | — |
-| 7 | Per run: gate, clone, preflight, launch card | owner on the Mac | `trialctl prepare <run>` | — |
+| 6 | Record T0; cut each base from it just before that run's step 7, not all at once: every cut fires one full CI push run on its new base, and eight at once would queue on the single macOS and Windows runners | supervisor | `trialctl cut --run <run> --t0 <sha> --push` | — |
+| 7 | Per run: gate, clone, preflight (including no CI queued or running, so the base's own cut run has finished), launch card | owner on the Mac | `trialctl prepare <run>` | — |
 | 8 | Per run: send the invocation, record the start | owner | `trialctl start <run>` | the run |
 | 9 | Per run: confirm the applied settings | owner | `trialctl verify-start <run>` | — |
 | 10 | Per run: watch (every 3 h, read-only) | operator | `trialctl status <run>` | — |
