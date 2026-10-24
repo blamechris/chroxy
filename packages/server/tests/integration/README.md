@@ -82,17 +82,18 @@ RUN_K8S_INTEGRATION=1 \
 [k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 to run
 ```
 
-The dedicated `test:integration:k8s` script opts in and enforces a floor of four
-reported cases. It fails if `kind` is unavailable or the suite reports fewer
-than four cases.
+The dedicated `test:integration:k8s` script opts in and requires four reported
+and four passed cases. It fails if `kind` is unavailable, a case is missing or
+a case is skipped.
 
 ### Cleanup guarantees
 
 A kind cluster named `chroxy-test-<pid>` is created at `before` and deleted at `after`.
-The private temporary kubeconfig is also deleted at `after`.
-Cleanup runs unconditionally — even if an assertion fails mid-suite — via a `try/finally`
-pattern inside `after`. A `SIGINT` handler (`Ctrl-C`) also triggers cleanup so an
-interrupted test run does not leave a stale cluster behind.
+The private temporary kubeconfig is deleted on normal completion, SIGINT or
+SIGTERM. Each cleanup command has a timeout.
+The `after` hook and both signal handlers use the same idempotent cleanup path.
+Cluster deletion, temporary file removal and host image removal are attempted
+independently, including when an assertion fails mid-suite.
 
 If a cluster is accidentally orphaned (process killed with `SIGKILL`, power loss, etc.),
 clean it up manually:

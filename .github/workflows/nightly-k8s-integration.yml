@@ -66,7 +66,7 @@ jobs:
         working-directory: packages/protocol
 
       # The dedicated script enables the opt-in test and requires all four
-      # roundtrip cases to report. A missing kind binary fails the opted-in run.
+      # roundtrip cases to pass. A missing kind binary fails the opted-in run.
       # The 14-minute timeout guard (just under the 15-minute job ceiling above,
       # so we exit with a diagnostic rather than take a hard runner kill) lives on
       # the `test:integration:k8s` script itself, because Node rejects

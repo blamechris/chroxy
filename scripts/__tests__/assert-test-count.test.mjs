@@ -31,7 +31,7 @@ const script = resolve(__dirname, '..', 'lib', 'assert-test-count.mjs')
 // literally, so the exact count is knowable here in a way it is not for a
 // runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
 // bound for exactly that reason).
-const EXPECTED_CASES = 17
+const EXPECTED_CASES = 24
 
 let pass = 0
 let fail = 0
@@ -63,6 +63,11 @@ const tapWith = (tests, failed, cancelled) =>
   [process.execPath, '-e',
     `console.log('# tests ${tests}'); console.log('# fail ${failed}'); console.log('# cancelled ${cancelled}')`]
 
+const tapWithPassed = (tests, passed, skipped) =>
+  [process.execPath, '-e',
+    `console.log('# tests ${tests}'); console.log('# pass ${passed}'); console.log('# fail 0'); ` +
+    `console.log('# cancelled 0'); console.log('# skipped ${skipped}')`]
+
 const test = async (name, fn) => {
   try {
     await fn()
@@ -81,6 +86,41 @@ await test('zero discovered tests fails the floor (#7447: the zero-test green)',
 })
 await test('an at-floor run passes', async () => {
   eq(await run(['--min', '5', ...tap(5, 0)]), 0, 'exit')
+})
+await test('four executed cases pass the optional passed floor', async () => {
+  eq(await run(['--min', '4', '--min-passed', '4', ...tapWithPassed(4, 4, 0)]), 0, 'exit')
+})
+await test('four skipped cases fail the passed floor despite clearing the total floor', async () => {
+  const { code, out } = await runCapture(['--min', '4', '--min-passed', '4', ...tapWithPassed(4, 0, 4)])
+  eq(code, 1, 'exit')
+  if (!out.includes('only 0 tests passed')) throw new Error('missing passed-floor verdict')
+})
+await test('one skipped case fails the passed floor despite three passes', async () => {
+  eq(await run(['--min', '4', '--min-passed', '4', ...tapWithPassed(4, 3, 1)]), 1, 'exit')
+})
+await test('zero reported cases fail the dedicated total and passed floors', async () => {
+  eq(await run(['--min', '4', '--min-passed', '4', ...tapWithPassed(0, 0, 0)]), 1, 'exit')
+})
+await test('missing pass summary fails when a passed floor is requested', async () => {
+  eq(await run(['--min', '4', '--min-passed', '4', ...tap(4, 0)]), 1, 'exit')
+})
+await test('an invalid --min-passed is a usage error', async () => {
+  eq(await run(['--min', '4', '--min-passed', 'zero', ...tapWithPassed(4, 4, 0)]), 2, 'exit')
+})
+await test('real skipped Node tests fail the passed floor', async () => {
+  const suite = join(tmpdir(), `assert-test-count-skipped-${process.pid}.mjs`)
+  writeFileSync(suite,
+    "import { it } from 'node:test'\n" +
+    "for (let i = 0; i < 4; i++) it.skip(`case ${i}`, () => {})\n")
+  try {
+    const { code, out } = await runCapture(['--min', '4', '--min-passed', '4', process.execPath, '--test', suite])
+    eq(code, 1, 'exit')
+    if (!/^# tests 4$/m.test(out) || !/^# pass 0$/m.test(out)) {
+      throw new Error(`unexpected Node skip summary: ${out.slice(-400)}`)
+    }
+  } finally {
+    rmSync(suite, { force: true })
+  }
 })
 await test('real test failures fail even above the floor', async () => {
   eq(await run(['--min', '2', ...tap(10, 2)]), 1, 'exit')

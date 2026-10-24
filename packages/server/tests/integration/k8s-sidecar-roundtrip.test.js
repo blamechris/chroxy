@@ -15,11 +15,11 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execSync, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve as pathResolve } from 'node:path'
-import { join } from 'node:path'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve as pathResolve } from 'node:path'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { loadNamedKindKubeconfig } from './k8s-kind-kubeconfig.js'
+import { registerKindCleanup } from './k8s-roundtrip-cleanup.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -60,6 +60,12 @@ if (!SHOULD_RUN) {
   const EXEC_TIMEOUT = 30_000
   const STREAM_TIMEOUT = 30_000
   const POD_READY_POLL_MS = 2_000
+  let kubeconfigDir
+  const cleanup = registerKindCleanup({
+    clusterName: CLUSTER_NAME,
+    sidecarImage: SIDECAR_IMAGE,
+    getKubeconfigDir: () => kubeconfigDir,
+  })
 
   // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -81,35 +87,6 @@ if (!SHOULD_RUN) {
     throw new Error(`Pod ${podName} did not become Running within ${timeoutMs}ms`)
   }
 
-  // ─── cluster lifecycle ─────────────────────────────────────────────────────
-
-  /**
-   * Unconditionally delete the kind cluster.  Called from `after` and the
-   * SIGINT handler so cleanup always runs even on test failure.
-   */
-  async function deleteCluster() {
-    try {
-      execFileSync('kind', ['delete', 'cluster', '--name', CLUSTER_NAME], {
-        stdio: 'pipe', timeout: 60_000,
-      })
-      console.log(`[k8s-integration] Deleted cluster ${CLUSTER_NAME}`)
-    } catch (err) {
-      // Log but never throw — cleanup must be best-effort
-      console.warn(`[k8s-integration] Warning: cluster delete failed (may already be gone): ${err.message}`)
-    }
-  }
-
-  // Register SIGINT handler so Ctrl-C during a long test still cleans up.
-  // Guard with a flag so we don't double-delete when after() also runs.
-  let _cleanedUp = false
-  process.on('SIGINT', async () => {
-    if (_cleanedUp) return
-    _cleanedUp = true
-    console.log('\n[k8s-integration] SIGINT — cleaning up cluster before exit')
-    await deleteCluster()
-    process.exit(130)
-  })
-
   // ─── test suite ────────────────────────────────────────────────────────────
 
   describe('K8s sidecar roundtrip (integration)', { timeout: CLUSTER_BOOT_TIMEOUT + 180_000 }, () => {
@@ -120,8 +97,6 @@ if (!SHOULD_RUN) {
     let podName
     /** envId used to derive pod name and secret name. */
     let envId
-    /** Private temporary kubeconfig for the named kind cluster. */
-    let kubeconfigDir
 
     // ── before: bootstrap cluster + image ──────────────────────────────────
 
@@ -172,29 +147,7 @@ if (!SHOULD_RUN) {
 
     // ── after: cleanup unconditionally ─────────────────────────────────────
 
-    after(async () => {
-      if (_cleanedUp) return
-      _cleanedUp = true
-
-      // Best-effort pod cleanup — the test may have already done it
-      if (backend && podName) {
-        try { await backend.destroyEnvironment(podName) } catch { /* ignore */ }
-      }
-
-      await deleteCluster()
-      if (kubeconfigDir) rmSync(kubeconfigDir, { recursive: true, force: true })
-
-      // Best-effort host image cleanup — kind loads the image into its own
-      // node container, so the host copy is no longer needed once the cluster
-      // is gone. Re-runs rebuild from cache anyway.
-      try {
-        execFileSync('docker', ['rmi', SIDECAR_IMAGE], {
-          stdio: 'pipe', timeout: 10_000,
-        })
-      } catch {
-        // Image may already be gone or in use — ignore
-      }
-    })
+    after(cleanup)
 
     // ── test 1: createEnvironment creates a Running Pod ────────────────────
 
