@@ -51,9 +51,12 @@ purpose, and each condition that fails falls back to the full scan:
   worktree nested inside a worktree keep their `.claude`. A target that escapes the
   cwd is scanned as an absolute path, as before.
 - **`<name>` is one path component** of `[A-Za-z0-9._-]` with no leading dot, so
-  `.`, `..`, `.claude`, `.git` and `.env` are never a root. It is decided on the
-  platform separator, so on POSIX a directory named `a2c\b` is not the worktree
-  `a2c`. `<name>` itself is still scanned, so a secret-shaped name floors.
+  `.`, `..`, `.claude`, `.git` and `.env` are never a root. `<name>` itself is
+  still scanned, so a secret-shaped name floors.
+- **Plain names only.** Split on the platform separator, every component of the
+  path is ASCII letters, digits, space or `._-@+()[]$`, and none ends in a dot or
+  a space. A path with any other component keeps the full scan; it costs a
+  prompt, not access.
 - **Strictly below `<name>`.** The root itself, and anything directly in
   `worktrees/`, stay floored.
 - **`.claude`, `.claude/worktrees` and `.claude/worktrees/<name>` are each a real

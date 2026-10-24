@@ -83,6 +83,20 @@ describe('#8741 — ordinary files inside a Claude Code worktree are not floored
     assert.equal(floored('apply_patch', { file_path: repo, changes: [{ path: abs, kind: 'add', diff: '' }] }), false)
   })
 
+  it('common source-tree names are plain names', () => {
+    for (const rel of [
+      'node_modules/@scope/pkg/index.js',
+      'app/[id]/page.tsx',
+      'app/(group)/layout.tsx',
+      'routes/+page.svelte',
+      'routes/$id.tsx',
+      'docs/My Notes.md',
+      'a-b_c.d.e.js',
+    ]) {
+      assert.equal(floored('Write', { file_path: `.claude/worktrees/a2c/${rel}` }), false, rel)
+    }
+  })
+
   it('a second worktree, and a worktree whose name contains a `/`', () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/b2/src/a.js' }), false)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/feature/auth/src/a.js' }), false)
@@ -208,6 +222,18 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     skip: process.platform === 'win32' ? '`\\` is a path separator on win32, so the path really is inside a2c there' : false,
   }, () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c\\b/src/x.js' }), true)
+  })
+
+  for (const rel of ['notes~/a.js', 'café/a.js', 'a:b/c.js', 'dir./a.js', 'dir /a.js', 'a%b.js']) {
+    it(`a name outside the plain set keeps the full scan: ${JSON.stringify(rel)}`, () => {
+      assert.equal(floored('Write', { file_path: `.claude/worktrees/a2c/${rel}` }), true)
+    })
+  }
+
+  it('a POSIX name holding `\\` below the root keeps the full scan', {
+    skip: process.platform === 'win32' ? '`\\` is a path separator on win32' : false,
+  }, () => {
+    assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/x\\y/a.js' }), true)
   })
 
   it('case variants of the real config stay floored', () => {

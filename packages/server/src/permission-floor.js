@@ -157,18 +157,20 @@ const CLAUDE_WORKTREES_DIR = 'worktrees'
 // and `.git`. The floor also refuses a LEADING dot, so a name that is itself a
 // dotfile or a protected dir (`.claude`, `.git`, `.vscode`, `.env`) is never a root.
 const CLAUDE_WORKTREE_NAME = /^[a-z0-9][a-z0-9._-]*$/i
+// The carve-out covers PLAIN names only: ASCII letters, digits, space and
+// `._-@+()[]$`, not ending in a dot or a space. A path with any other component
+// keeps the full scan, which costs a prompt, never access.
+const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
 
 /**
  * #8741 — is `rel` (`relative(base, target)`) strictly inside one of Claude
  * Code's worktrees, `<base>/.claude/worktrees/<name>/`?
  *
  * Refused (the full scan applies) unless ALL of these hold:
- *   - split on the PLATFORM separator, the first two components are
- *     `.claude/worktrees` (case-insensitively, as the scan matches) and the third
- *     is a {@link CLAUDE_WORKTREE_NAME}. The scan itself splits on both `/` and
- *     `\`; deciding on the native split means a POSIX name spelled `a2c\b` is
- *     one component, which the name pattern refuses, rather than the worktree
- *     `a2c` it would read as;
+ *   - split on the PLATFORM separator, every component is a
+ *     {@link PLAIN_COMPONENT}, the first two are `.claude/worktrees`
+ *     (case-insensitively, as the scan matches) and the third is a
+ *     {@link CLAUDE_WORKTREE_NAME};
  *   - there is at least one component below `<name>` — the root itself, and
  *     anything directly in `worktrees/`, stays floored;
  *   - `.claude`, `.claude/worktrees` and `.claude/worktrees/<name>` are each a
@@ -186,7 +188,7 @@ const CLAUDE_WORKTREE_NAME = /^[a-z0-9][a-z0-9._-]*$/i
  */
 function _insideClaudeWorktree(base, rel) {
   const parts = rel.split(sep)
-  if (parts.length < 4) return false
+  if (parts.length < 4 || !parts.every((part) => PLAIN_COMPONENT.test(part))) return false
   if (parts[0].toLowerCase() !== CLAUDE_SETTINGS_DIR || parts[1].toLowerCase() !== CLAUDE_WORKTREES_DIR) return false
   if (!CLAUDE_WORKTREE_NAME.test(parts[2])) return false
   try {
