@@ -10,6 +10,7 @@ const root = resolve(import.meta.dirname, '../../..')
 const workflow = yaml.load(readFileSync(join(root, '.github/workflows/maestro-nightly.yml'), 'utf8'))
 const preflight = join(root, 'scripts/maestro-hosted-preflight.sh')
 const device = '0AD31F77-82DF-4E28-99E6-CAE0A8BB5E54'
+const shellIt = process.platform === 'win32' ? it.skip : it
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-preflight-'))
@@ -18,7 +19,9 @@ function fixture() {
   mkdirSync(join(developerDir, 'Applications/Simulator.app'), { recursive: true })
   mkdirSync(bin)
   const command = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 })
-  command('xcodebuild', 'echo "Xcode 16.4"; echo "Build version 16F6"')
+  // The pause makes an early-closing `head -1` deterministic: xcodebuild writes
+  // more output only after head has exited. The real hosted run died this way.
+  command('xcodebuild', 'set -e; printf "Xcode 16.4\\n"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
   command('osascript', 'echo "${SIMULATOR_ID:-com.apple.iphonesimulator}"')
   command('xcrun', 'if [ "$*" = "simctl list devices available -j" ]; then cat "$FAKE_DEVICES"; else echo "$*" >> "$FAKE_TRACE"; fi')
   const devicesFile = join(dir, 'devices.json')
@@ -34,7 +37,7 @@ function fixture() {
   const run = (overrides = {}) => spawnSync('bash', [preflight], {
     env: { ...env, ...overrides }, encoding: 'utf8', timeout: 5000
   })
-  return { dir, developerDir, devicesFile, envFile, traceFile, run }
+  return { dir, developerDir, devicesFile, envFile, traceFile, env, run }
 }
 
 describe('Maestro nightly hosted runner (#7113)', () => {
@@ -53,7 +56,21 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(steps[index('Run Maestro suite')].run.includes('run-all-sequential.sh'))
   })
 
-  it('exports the exact iOS 18.5 simulator and boots it before a build', () => {
+  shellIt('captures all xcodebuild output before parsing its first line', () => {
+    const f = fixture()
+    try {
+      const oldPipeline = spawnSync('bash', ['-c', 'set -o pipefail; xcodebuild -version | head -1'], {
+        env: f.env, encoding: 'utf8', timeout: 5000
+      })
+      assert.notEqual(oldPipeline.status, 0, 'fixture must reproduce the early-close failure')
+      assert.equal(oldPipeline.stdout, 'Xcode 16.4\n')
+      const repaired = f.run()
+      assert.equal(repaired.status, 0, repaired.stderr)
+      assert.ok(repaired.stdout.includes('Using Xcode 16.4 and iPhone 16 Pro'))
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('exports the exact iOS 18.5 simulator and boots it before a build', () => {
     const f = fixture()
     try {
       const result = f.run()
@@ -63,7 +80,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
-  it('fails before boot when Simulator.app or Expo LaunchServices lookup is missing', () => {
+  shellIt('fails before boot when Simulator.app or Expo LaunchServices lookup is missing', () => {
     const f = fixture()
     try {
       rmSync(join(f.developerDir, 'Applications/Simulator.app'), { recursive: true })
@@ -77,7 +94,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
-  it('fails when the selected iOS runtime has no available iPhone 16 Pro', () => {
+  shellIt('fails when the selected iOS runtime has no available iPhone 16 Pro', () => {
     const f = fixture()
     try {
       writeFileSync(f.devicesFile, JSON.stringify({ devices: {

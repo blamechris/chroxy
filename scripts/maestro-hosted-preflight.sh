@@ -8,7 +8,13 @@ if [ -z "${DEVELOPER_DIR:-}" ] || [ ! -d "$DEVELOPER_DIR/Applications/Simulator.
   exit 1
 fi
 
-xcode_version="$(xcodebuild -version | head -1)"
+if ! xcode_version_output="$(xcodebuild -version 2>&1)"; then
+  echo "::error::xcodebuild -version failed: $xcode_version_output" >&2
+  exit 1
+fi
+# Capture all of xcodebuild's output before taking the first line. Piping it to
+# head closes stdout early and crashes xcodebuild under pipefail on macOS.
+xcode_version="${xcode_version_output%%$'\n'*}"
 if [ "$xcode_version" != 'Xcode 16.4' ]; then
   echo "::error::Expected Xcode 16.4, found $xcode_version (DEVELOPER_DIR=$DEVELOPER_DIR)" >&2
   exit 1
