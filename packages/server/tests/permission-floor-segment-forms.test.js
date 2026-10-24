@@ -35,7 +35,12 @@ describe('floor: segments compared in canonical form', () => {
     ['Write', '.git./config'],
     ['Write', '.git /config'],
     ['Read', 'id_rsa '],
-    ['Read', '.env.'],
+    ['Read', '.npmrc.'],
+    ['Write', '.git../config'],
+    ['Write', '.git. ./config'],
+    ['Read', 'id_rsa..'],
+    ['Write', '.gi\u0307t/config'],
+    ['Read', 'id_r\u015Ba'],
     ['Read', '.env:x'],
     ['Write', '.git:y/config'],
     ['Write', 'GIT~1/config'],
@@ -49,6 +54,14 @@ describe('floor: segments compared in canonical form', () => {
     ['Write', 'GIT~1./config'],
     ['Write', 'CLAUDE~1 /settings.json'],
     ['Read', 'SETTIN~1.JSO.'],
+    ['Write', 'abcdef~1'],
+    ['Read', 'a~1.abc'],
+    // A name as written is still checked: on POSIX `:` and a leading mark are
+    // ordinary name characters.
+    ['Read', 'host:2222.pem'],
+    ['Read', 'a:b.key'],
+    ['Read', '.claude/settings:local.json'],
+    ['Read', '\u0301.pem'],
   ]) {
     it(`${tool} ${JSON.stringify(path)} \u2192 floored`, () => {
       assert.equal(floored(tool, path), true)
@@ -62,6 +75,8 @@ describe('floor: segments compared in canonical form', () => {
     ['Read', 'dist/chunk~87fd721f7.js'],
     ['Write', 'src/vendors~main.js'],
     ['Write', 'notes.md'],
+    ['Write', 'abcdefg~1'],
+    ['Read', 'a~1.json'],
   ]) {
     it(`${tool} ${JSON.stringify(path)} \u2192 not floored`, () => {
       assert.equal(floored(tool, path), false)
@@ -110,6 +125,7 @@ describe('floor: what a target is on disk', () => {
     linkSync(join(root, 'src/one.js'), join(root, 'src/two.js'))
     assert.equal(floored('Write', 'src/two.js', root), true)
     assert.equal(floored('Edit', 'src/one.js', root), true)
+    assert.equal(floored('Read', 'src/two.js', root), false, 'the rule belongs to the full floor')
   })
 
   it('positive control: a single-link file, and a file not yet created, are not floored', () => {

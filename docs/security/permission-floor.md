@@ -33,19 +33,21 @@ the way `open(2)` does, so a symlinked parent or a `..` after a symlink cannot e
 the floor (#6851/#6921/#6928). Any resolution error (`EACCES`, `ELOOP`, a
 pathological depth) is treated as **floored**.
 
-Each segment is compared in a canonical form (`canonicalSegment`): anything from a
-`:` on and any trailing dots or spaces are dropped, and the name is folded wider than
-lowercase: compatibility forms decomposed and combining marks removed, then each
-character lower-, upper- and lower-cased again (a capital or small sharp s becomes
-`ss`). A few shapes floor without a name comparison, on both floors:
+Each segment is checked twice, and a match in either floors: as written
+(lowercased), and in a canonical form (`segmentName`, then `canonicalName`). The
+canonical form drops anything from a `:` on and any trailing dots or spaces, then
+folds the name wider than lowercase: compatibility forms decomposed and combining
+marks removed, then each character lower-, upper- and lower-cased again (a capital
+or small sharp s becomes `ss`). A few shapes floor without a name comparison:
 
-- a segment whose name, after the same `:` and trailing drop, is in the 8.3
-  short-name form: up to six characters, `~`, digits and an optional extension of
-  up to three (`GIT~1`, `SETTIN~1.JSO`, `GIT~1./config`). `chunk~87fd721f7.js`
-  and `vendors~main.js` are not in that form;
-- on POSIX, a target holding `\`, or a symlink met while resolving it whose target
-  holds one. The walk refuses such a link, which every caller of the shared resolver
-  treats as a failure;
+- on both floors, a segment whose name, after the same `:` and trailing drop, is in
+  the 8.3 short-name form: up to six characters, `~`, digits and an optional
+  extension of up to three (`GIT~1`, `SETTIN~1.JSO`, `GIT~1./config`).
+  `chunk~87fd721f7.js`, `vendors~main.js`, `abcdefg~1` and `a~1.json` are not in
+  that form;
+- on both floors and on POSIX, a target holding `\`, or a symlink met while
+  resolving it whose target holds one. The walk refuses such a link, which every
+  caller of the shared resolver treats as a failure;
 - under the full floor, an existing target with more than one hard link.
 
 Measured on 643,198 path segments (a checkout with its `node_modules`, a home
@@ -97,8 +99,8 @@ purpose, and each condition that fails falls back to the full scan:
   scan: a link inside the worktree (into `.claude`, into another worktree, or to
   an ordinary place outside `.claude`), or a link in the cwd itself
   (`wt -> .claude/worktrees/a2c`). So does a target spelled with `..`.
-- **A single hard link.** An existing file on the path with more than one hard link
-  keeps the full scan.
+- **Hard links.** An existing target with more than one hard link floors under the
+  full floor, as anywhere else (see above).
 
 `tests/permission-floor-claude-worktree.test.js` builds these topologies on disk,
 `tests/permission-floor-claude-worktree-resolved.test.js` pins the same-path

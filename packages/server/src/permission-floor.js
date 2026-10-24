@@ -51,7 +51,7 @@ const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
 // is a common benign operation and must not prompt, but auto-reading a private
 // key or an env file under a broad `allow Read` must not silently succeed.
 //
-// Matched (in canonical form, see canonicalSegment) at ANY path segment:
+// Matched (as written and in canonical form, see canonicalName) at ANY path segment:
 //   - `.env` or `.env.*`                 → env files (.env / .env.local / …)
 //   - one of SECRET_FILE_EXACT           → SSH keys, credential dotfiles
 //   - a segment ending in an extension in SECRET_FILE_EXTENSIONS → PEM / keys /
@@ -87,7 +87,7 @@ export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path'
 export const SECRET_READ_FLOOR_TOOLS = new Set(['Read', 'Glob', 'Grep'])
 
 /**
- * #6803 — is a single (canonical, see canonicalSegment) path segment a known secret FILE?
+ * #6803 — is a single (lowercased or canonical, see canonicalName) path segment a known secret FILE?
  * Env files, SSH/credential dotfiles, and PEM/key/keystore extensions. Pure
  * string ops (no regex) so it can't be mangled by a later edit.
  * @param {string} seg  a canonical path segment
@@ -153,13 +153,12 @@ function segmentName(seg) {
   return (colon === -1 ? seg : seg.slice(0, colon)).replace(/[. ]+$/, '')
 }
 
-// The form a segment's name is compared in: folded wider than `toLowerCase()`.
-// Compatibility forms are decomposed and combining marks removed, then each
-// character is lower-, upper- and lower-cased again (so a capital or small
-// sharp s becomes `ss`). An ASCII name is only lowercased. The fold only ever
-// adds matches.
-function canonicalSegment(seg) {
-  const name = segmentName(seg)
+// The canonical form of a segment's name (see segmentName): folded wider than
+// `toLowerCase()`. Compatibility forms are decomposed and combining marks
+// removed, then each character is lower-, upper- and lower-cased again (so a
+// capital or small sharp s becomes `ss`). An ASCII name is only lowercased.
+// Each segment is also checked as written, so this form only adds matches.
+function canonicalName(name) {
   if (/^[\x00-\x7f]*$/.test(name)) return name.toLowerCase()
   return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
     .map((ch) => ch.toLowerCase().toUpperCase().toLowerCase())
@@ -368,15 +367,32 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   // foreign `\`/`/` that survives (and can never wrongly merge two segments — a
   // filename cannot contain a separator on the platform that produced it).
   const pieces = scanned.split(/[/\\]+/).filter((s) => s.length > 0 && s !== '..')
-  const segments = pieces.map(canonicalSegment)
+  const names = pieces.map(segmentName)
   // #8741 — start the scan at `<name>`. `carved` means `rel` is a path
   // `_insideClaudeWorktree` admitted: every native component is a
   // PLAIN_COMPONENT (no separator of either kind, never empty or `..`), so its
-  // first three native components are also `segments[0..2]`.
+  // first three native components are also `pieces[0..2]`.
   const start = carved ? 2 : 0
+  for (let i = start; i < names.length; i++) {
+    if (SHORT_NAME_SEGMENT.test(names[i])) return true
+  }
+  // Each segment is checked as written (lowercased) and in canonical form; a
+  // match in either floors.
+  return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
+    _matchesProtectedSegments(names.map(canonicalName), start, secretsOnly)
+}
+
+/**
+ * Does any segment from `start` on match the floor's names? `segments` are
+ * already in the form to compare (lowercased, or canonical).
+ * @param {string[]} segments
+ * @param {number} start
+ * @param {boolean} secretsOnly
+ * @returns {boolean}
+ */
+function _matchesProtectedSegments(segments, start, secretsOnly) {
   for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
-    if (SHORT_NAME_SEGMENT.test(segmentName(pieces[i]))) return true
     // Secret files, and credential-dense config files, are floored under BOTH
     // the read and the write floor (PR #6873 review — the read floor must not
     // silently auto-read .git/config, git credentials, or .claude/settings*.json).
@@ -525,7 +541,7 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
  * {@link _insideClaudeWorktree}).
  *
  * Segment rules (a match on ANY segment floors the write; see
- * {@link canonicalSegment} for the form segments are compared in):
+ * {@link canonicalName} for the forms segments are compared in):
  *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)

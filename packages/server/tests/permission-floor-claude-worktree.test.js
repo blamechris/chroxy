@@ -272,7 +272,7 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     assert.equal(floored('Write', { file_path: `${repo}/.claude/worktrees/a2c/src/../src/a.js` }), true)
   })
 
-  it('a file with more than one hard link keeps the full scan', { skip: SKIP_NO_HARDLINK }, () => {
+  it('a file with more than one hard link floors under the full floor', { skip: SKIP_NO_HARDLINK }, () => {
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/twin.js' }), true)
     assert.equal(floored('Write', { file_path: '.claude/worktrees/a2c/src/orig.js' }), true)
   })
