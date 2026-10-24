@@ -187,6 +187,7 @@ export function resolveTargetComponentwiseSync(realBase, target) {
       resolved = step.stat
     }
   }
+  checkWalkBounds(i, resolved, 'resolveTargetComponentwiseSync')
   return resolved
 }
 
@@ -227,5 +228,6 @@ export async function resolveTargetComponentwiseAsync(realBase, target) {
       resolved = step.stat
     }
   }
+  checkWalkBounds(i, resolved, 'resolveTargetComponentwiseAsync')
   return resolved
 }

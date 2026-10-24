@@ -37,15 +37,20 @@ pathological depth) is treated as **floored**.
 (`FLOOR_MAX_TARGET_BYTES`) or with more than 256 components
 (`FLOOR_MAX_TARGET_COMPONENTS`; `/`- or `\`-separated, `.` and `..` included) floors
 before it is resolved, on both floors and for every path field and `changes[].path`
-member. Measured on 573,681 real paths (a checkout with its `node_modules`, `~/work`,
-and a home directory's documents, notes and application data), the deepest had 21
-components and the longest was 335 bytes, so no real path reached either bound. The
+member. One call is bounded as a whole too: more than 1024 path targets (path fields
+and `changes[]` members together, `FLOOR_MAX_CALL_TARGETS`) or more than 16384
+components across them (`FLOOR_MAX_CALL_COMPONENTS`) floors the call before any
+target is resolved. Measured on 573,681 real paths (a checkout with its
+`node_modules`, `~/work`, and a home directory's documents, notes and application
+data), the deepest had 21 components and the longest was 335 bytes, so no real path
+reached any bound. A valid but extreme path still can: 257 components however short,
+or a Windows long path over 4096 bytes, floors. The
 shared component-wise walk is bounded too, for every caller: it stops with
 `ENAMETOOLONG` once it has walked 1024 components (`COMPONENTWISE_MAX_COMPONENTS`,
 those a symlink adds included) or its resolved path passes 16384 characters
 (`COMPONENTWISE_MAX_PATH_LENGTH`). The floor counts that as floored, and BYOK file
-operations and the instruction-file policy refuse it, so a Windows long path over
-16384 characters is refused there. The Grep `glob` analysis keeps its own bounds
+operations and the instruction-file policy refuse it, so 1025 components however
+short, or a Windows long path over 16384 characters, is refused there. The Grep `glob` analysis keeps its own bounds
 (above).
 
 Each segment is checked twice, and a match in either floors: as written

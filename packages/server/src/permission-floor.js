@@ -270,27 +270,44 @@ function _hasOtherHardLinks(path) {
 // Exported so tests derive their inputs from the same numbers.
 export const FLOOR_MAX_TARGET_BYTES = 4096
 export const FLOOR_MAX_TARGET_COMPONENTS = 256
+// And the most one tool call may carry: more than FLOOR_MAX_CALL_TARGETS path
+// targets (path fields and `changes[]` members together), or more than
+// FLOOR_MAX_CALL_COMPONENTS components across them, floors the call before any
+// target is resolved. A patch touching hundreds of files is far below both.
+export const FLOOR_MAX_CALL_TARGETS = 1024
+export const FLOOR_MAX_CALL_COMPONENTS = 16384
 
 /**
- * Is `target` over either size bound? Linear in its length: the component count
- * stops at the first component past the bound.
+ * How many `/`- or `\`-separated components `target` has, counting no further
+ * than `limit` (so a huge target costs only as much as the bound it is checked
+ * against).
  * @param {string} target
- * @returns {boolean}
+ * @param {number} limit
+ * @returns {number}
  */
-function _exceedsTargetBounds(target) {
-  if (Buffer.byteLength(target, 'utf8') > FLOOR_MAX_TARGET_BYTES) return true
+function _componentCount(target, limit) {
   let components = 0
   let inName = false
-  for (let i = 0; i < target.length; i++) {
+  for (let i = 0; i < target.length && components <= limit; i++) {
     const code = target.charCodeAt(i)
     if (code === 0x2f || code === 0x5c) {
       inName = false
     } else if (!inName) {
       inName = true
-      if (++components > FLOOR_MAX_TARGET_COMPONENTS) return true
+      components++
     }
   }
-  return false
+  return components
+}
+
+/**
+ * Is `target` over either size bound? Linear in its length.
+ * @param {string} target
+ * @returns {boolean}
+ */
+function _exceedsTargetBounds(target) {
+  if (Buffer.byteLength(target, 'utf8') > FLOOR_MAX_TARGET_BYTES) return true
+  return _componentCount(target, FLOOR_MAX_TARGET_COMPONENTS) > FLOOR_MAX_TARGET_COMPONENTS
 }
 
 // #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
@@ -625,16 +642,28 @@ export function isSecretReadTarget(input, cwd) {
 function _matchesFloor(input, cwd, secretsOnly) {
   if (!input || typeof input !== 'object') return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
+  const targets = []
   for (const field of PROTECTED_PATH_INPUT_FIELDS) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
-    if (isProtectedPathValue(input[field], base, secretsOnly)) return true
+    targets.push(input[field])
   }
-  // #6805/#6828 — walk the array-shaped per-file targets (codex apply_patch).
+  // #6805/#6828 — the array-shaped per-file targets (codex apply_patch). The
+  // call's target budget is checked as they are collected, so a huge array costs
+  // no more than the budget.
   if (Array.isArray(input.changes)) {
     for (const change of input.changes) {
       if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      if (isProtectedPathValue(change.path, base, secretsOnly)) return true
+      if (targets.push(change.path) > FLOOR_MAX_CALL_TARGETS) return true
     }
+  }
+  // The call's component budget, checked before any target is resolved.
+  let components = 0
+  for (const target of targets) {
+    components += _componentCount(target, FLOOR_MAX_CALL_COMPONENTS - components)
+    if (components > FLOOR_MAX_CALL_COMPONENTS) return true
+  }
+  for (const target of targets) {
+    if (isProtectedPathValue(target, base, secretsOnly)) return true
   }
   return false
 }

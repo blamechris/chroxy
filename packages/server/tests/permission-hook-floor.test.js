@@ -1310,15 +1310,17 @@ describe('floor size bounds: both pipelines and the real shell hook agree', () =
   const rows = [
     ['Write', 'over the component bound', 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)],
     ['Read', 'over the byte bound', 'zz/' + ('n'.repeat(250) + '/').repeat(Math.ceil(FLOOR_MAX_TARGET_BYTES / 251) + 1) + 'f'],
+    ['apply_patch', 'a changes[] member over the component bound', 'a/'.repeat(FLOOR_MAX_TARGET_COMPONENTS + 10)],
   ]
-  for (const [tool, label, file_path] of rows) {
+  for (const [tool, label, target] of rows) {
+    const input = tool === 'apply_patch' ? { file_path: CWD, changes: [{ path: 'src/a.js', kind: 'update' }, { path: target, kind: 'update' }] } : { file_path: target }
     it(`${tool}, ${label}: floored on both paths, and the hook raises a prompt`, async () => {
-      assert.equal(evaluateHookFloorRequest({ tool_name: tool, tool_input: { file_path } }, CWD).floor, true, 'hook-path verdict')
+      assert.equal(evaluateHookFloorRequest({ tool_name: tool, tool_input: input }, CWD).floor, true, 'hook-path verdict')
       const pm = new PermissionManager({ log: silentLog, cwd: CWD })
       try {
         const seen = []
         pm.on('permission_request', (d) => seen.push(d))
-        const promise = pm.handlePermission(tool, { file_path }, null, 'auto')
+        const promise = pm.handlePermission(tool, input, null, 'auto')
         assert.equal(seen.length, 1, 'in-process auto raised a prompt')
         pm.respondToPermission(seen[0].requestId, 'deny')
         await promise
@@ -1327,7 +1329,7 @@ describe('floor size bounds: both pipelines and the real shell hook agree', () =
       }
       const daemon = await startRealDaemon({ promptDecision: 'deny' })
       try {
-        const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: { file_path }, cwd: CWD }, port: daemon.port, mode: 'auto' })
+        const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: input, cwd: CWD }, port: daemon.port, mode: 'auto' })
         assert.equal(daemon.stats.permissionRequests, 1, 'the shell hook routed it to a prompt')
         assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'the user answered deny')
       } finally {

@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS } from '../src/permission-floor.js'
+import {
+  isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
+} from '../src/permission-floor.js'
 
 /**
  * The permission floor bounds the work it does per target: a path-tool target
@@ -57,6 +59,35 @@ describe('floor: a target over the size bounds floors', () => {
       assert.equal(value, true)
       assert.ok(ms < 500, `took ${ms} ms for a ${target.length}-character target`)
     }
+  })
+})
+
+describe('floor: one call\'s targets share a budget', () => {
+  const patch = (paths) => ({ file_path: CWD, changes: paths.map((path) => ({ path, kind: 'update' })) })
+
+  it('more targets than FLOOR_MAX_CALL_TARGETS floors', () => {
+    const paths = Array.from({ length: FLOOR_MAX_CALL_TARGETS + 1 }, (_, i) => `src/f${i}.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), true)
+  })
+
+  it('more components in total than FLOOR_MAX_CALL_COMPONENTS floors', () => {
+    const each = FLOOR_MAX_TARGET_COMPONENTS - 6
+    const count = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each) + 1
+    assert.ok(count <= FLOOR_MAX_CALL_TARGETS, 'premise: under the target-count budget')
+    const paths = Array.from({ length: count }, (_, i) => 'd/'.repeat(each - 1) + `f${i}.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), true)
+  })
+
+  it('a very large changes[] is decided quickly', () => {
+    const paths = Array.from({ length: 40_000 }, (_, i) => `src/f${i}.js`)
+    const { value, ms } = time(() => isFlooredTarget('apply_patch', patch(paths), CWD))
+    assert.equal(value, true)
+    assert.ok(ms < 200, `took ${ms} ms`)
+  })
+
+  it('positive control: a large but ordinary patch is not floored', () => {
+    const paths = Array.from({ length: 300 }, (_, i) => `packages/server/src/module-${i}/index.js`)
+    assert.equal(isFlooredTarget('apply_patch', patch(paths), CWD), false)
   })
 })
 

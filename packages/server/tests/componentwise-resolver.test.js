@@ -133,6 +133,21 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     await assertBothThrow(root, 'zz/' + ('n'.repeat(250) + '/').repeat(names) + 'f', 'ENAMETOOLONG')
   })
 
+  it('a final component that takes the resolved path past the bound → both throw ENAMETOOLONG', async () => {
+    // The first component is missing, so the rest is appended without a stat;
+    // only the last one crosses the bound.
+    await assertBothThrow(root, 'zz/' + 'x'.repeat(COMPONENTWISE_MAX_PATH_LENGTH), 'ENAMETOOLONG')
+  })
+
+  it('positive control: exactly the bounds still resolve', async () => {
+    const atCount = 'a/../'.repeat(COMPONENTWISE_MAX_COMPONENTS / 2 - 1) + 'x/y'
+    assert.equal(atCount.split('/').length, COMPONENTWISE_MAX_COMPONENTS)
+    await assertParity(root, atCount, join(root, 'x', 'y'))
+    const tail = COMPONENTWISE_MAX_PATH_LENGTH - (root.length + '/zz/'.length)
+    const atLength = 'zz/' + 'x'.repeat(tail)
+    assert.equal((await assertParity(root, atLength)).length, COMPONENTWISE_MAX_PATH_LENGTH)
+  })
+
   it('components a symlink adds count toward the bound → both throw ENAMETOOLONG', { skip: SKIP_NO_SYMLINK }, async () => {
     // Each link's text is short enough for any platform's PATH_MAX; the chain
     // as a whole walks more than the bound.
