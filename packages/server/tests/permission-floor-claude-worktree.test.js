@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { isFlooredTarget } from '../src/permission-floor.js'
 import { PermissionManager } from '../src/permission-manager.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { SKIP_NO_HARDLINK } from './helpers/hardlink-support.js'
 
 /**
  * #8741 — Claude Code's own worktrees live INSIDE the protected `.claude/` dir.
@@ -29,23 +30,6 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
  */
 
 const silentLog = { info() {}, warn() {}, debug() {}, error() {} }
-
-// Can this filesystem give one file two names? Probed once, so a host that
-// cannot reports the hard-link case as skipped instead of failing setup.
-function probeHardLinks() {
-  let dir = null
-  try {
-    dir = mkdtempSync(join(tmpdir(), 'chroxy-hardlink-probe-'))
-    writeFileSync(join(dir, 'a'), 'x')
-    linkSync(join(dir, 'a'), join(dir, 'b'))
-    return true
-  } catch {
-    return false
-  } finally {
-    if (dir) try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
-  }
-}
-const SKIP_NO_HARDLINK = probeHardLinks() ? false : 'this filesystem cannot create a hard link'
 
 let root
 let repo
@@ -79,6 +63,7 @@ before(() => {
   mkdir('.vscode/worktrees/x')
   // Directories under worktrees/ that are NOT worktree roots by name.
   mkdir('.claude/worktrees/.hidden/src')
+  mkdir('.claude/worktrees/+wip/src')
   mkdir('.claude/worktrees/.claude')
   touch('.claude/worktrees/afile')
   // A root whose own name is secret-shaped: the scan still covers `<name>`.
@@ -236,6 +221,7 @@ describe('#8741 — a path that only looks like a worktree stays floored', () =>
     '.claude/worktrees/afile/x',
     // Names that are dotfiles, protected names or traversals.
     '.claude/worktrees/.hidden/src/a.js',
+    '.claude/worktrees/+wip/src/a.js',
     '.claude/worktrees/.claude/settings.json',
     '.claude/worktrees/.git/config',
     '.claude/worktrees/../settings.json',

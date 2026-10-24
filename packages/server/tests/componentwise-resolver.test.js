@@ -111,6 +111,14 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
   // ==========================================================================
   // Fail-closed parity — both variants must throw the SAME code, never a guess.
   // ==========================================================================
+  it('on POSIX, a link whose target holds `\\` → both throw EINVAL (fail closed)', {
+    skip: process.platform === 'win32' ? '`\\` is a path separator on win32' : false,
+  }, async () => {
+    symlinkSync('x\\y', join(root, 'plain'))
+    await assertBothThrow(root, 'plain', 'EINVAL')
+    await assertBothThrow(root, 'plain/z', 'EINVAL')
+  })
+
   it('symlink cycle → both throw ELOOP', async () => {
     symlinkSync(join(root, 'b'), join(root, 'a')) // a -> b
     symlinkSync(join(root, 'a'), join(root, 'b')) // b -> a

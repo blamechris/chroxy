@@ -1104,6 +1104,14 @@ const MATRIX = [
   // path-less tools carry nothing the floor can match
   ['Bash', { command: 'cat .env' }, false],
   ['WebFetch', { url: 'https://example.com/.env' }, false],
+  // segments are compared in canonical form (permission-floor-segment-forms.test.js)
+  ['Read', { file_path: 'id_r\u017Fa' }, true],
+  ['Write', { file_path: '.git./config' }, true],
+  ['Read', { file_path: '.env:x' }, true],
+  ['Write', { file_path: 'GIT~1/config' }, true],
+  ['Read', { file_path: 'caf\u00E9/notes.md' }, false],
+  ['Read', { file_path: 'dist/chunk~87fd721f7.js' }, false],
+  ['Read', { file_path: 'src\\lib\\util.js' }, process.platform !== 'win32'],
 ]
 
 // #8741 — the same contract inside one of Claude Code's own worktrees,

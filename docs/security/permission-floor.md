@@ -27,11 +27,30 @@ providers in #7004.
 | Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
 | Ordinary project files | not floored | not floored |
 
-Matching is case-insensitive, per path segment, on the target **resolved against the
-session cwd** — with a second, symlink-following pass that walks the target
-component-by-component the way `open(2)` does, so a symlinked parent or a `..` after
-a symlink cannot escape the floor (#6851/#6921/#6928). Any resolution error
-(`EACCES`, `ELOOP`, a pathological depth) is treated as **floored**.
+Matching is per path segment, on the target **resolved against the session cwd** —
+with a second, symlink-following pass that walks the target component-by-component
+the way `open(2)` does, so a symlinked parent or a `..` after a symlink cannot escape
+the floor (#6851/#6921/#6928). Any resolution error (`EACCES`, `ELOOP`, a
+pathological depth) is treated as **floored**.
+
+Each segment is compared in a canonical form (`canonicalSegment`): anything from a
+`:` on and any trailing dots or spaces are dropped, and the name is folded wider than
+lowercase, with compatibility forms decomposed, combining marks removed and each
+character upper- then lower-cased. A few shapes floor without a name comparison, on
+both floors:
+
+- a segment in the 8.3 short-name form, up to six characters, `~`, digits and an
+  optional extension of up to three (`GIT~1`, `SETTIN~1.JSO`). `chunk~87fd721f7.js`
+  and `vendors~main.js` are not in that form;
+- on POSIX, a target holding `\`, or a symlink met while resolving it whose target
+  holds one. The walk refuses such a link, which every caller of the shared resolver
+  treats as a failure;
+- under the full floor, an existing target with more than one hard link.
+
+Measured on 643,198 path segments (a checkout with its `node_modules`, a home
+directory's documents and application data), none of these shapes occurred, and no
+name folded onto a protected name it did not already match. So the expected cost is
+close to no extra prompts.
 
 **Claude Code's own worktrees are workspaces, not agent config (#8741).**
 `EnterWorktree` and `claude --worktree <name>` check a worktree out at
@@ -78,7 +97,8 @@ purpose, and each condition that fails falls back to the full scan:
   keeps the full scan.
 
 `tests/permission-floor-claude-worktree.test.js` builds these topologies on disk,
-and the parity matrix runs the worktree rows through both pipelines.
+`tests/permission-floor-claude-worktree-resolved.test.js` pins the same-path
+condition, and the parity matrix runs the worktree rows through both pipelines.
 
 A tool's targets are read from `PROTECTED_PATH_INPUT_FIELDS` (`file_path`, `path`,
 `notebook_path`) plus each `changes[].path` member (codex `apply_patch`, #6805/#6828).

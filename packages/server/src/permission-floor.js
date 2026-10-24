@@ -51,7 +51,7 @@ const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
 // is a common benign operation and must not prompt, but auto-reading a private
 // key or an env file under a broad `allow Read` must not silently succeed.
 //
-// Matched (case-insensitively, see isProtectedPathValue) at ANY path segment:
+// Matched (in canonical form, see canonicalSegment) at ANY path segment:
 //   - `.env` or `.env.*`                 → env files (.env / .env.local / …)
 //   - one of SECRET_FILE_EXACT           → SSH keys, credential dotfiles
 //   - a segment ending in an extension in SECRET_FILE_EXTENSIONS → PEM / keys /
@@ -87,10 +87,10 @@ export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path'
 export const SECRET_READ_FLOOR_TOOLS = new Set(['Read', 'Glob', 'Grep'])
 
 /**
- * #6803 — is a single (already-lowercased) path segment a known secret FILE?
+ * #6803 — is a single (canonical, see canonicalSegment) path segment a known secret FILE?
  * Env files, SSH/credential dotfiles, and PEM/key/keystore extensions. Pure
  * string ops (no regex) so it can't be mangled by a later edit.
- * @param {string} seg  a lowercased path segment
+ * @param {string} seg  a canonical path segment
  * @returns {boolean}
  */
 function isSecretFileSegment(seg) {
@@ -115,10 +115,10 @@ function isSecretFileSegment(seg) {
  * the config dirs (`.claude/skills/*.md`, a secret-free `.vscode/settings.json`)
  * stay un-floored for reads per #6803's intent.
  *
- * Matched as a 2-/3-segment sequence anchored at index `i` of the (lowercased,
+ * Matched as a 2-/3-segment sequence anchored at index `i` of the (canonical,
  * `..`-stripped) segment array, so any depth prefix (`sub/.git/config`) matches.
  * Pure string ops (no regex) — consistent with the rest of the floor.
- * @param {string[]} segments  lowercased path segments
+ * @param {string[]} segments  canonical path segments
  * @param {number} i           the current segment index
  * @returns {boolean}
  */
@@ -141,9 +141,29 @@ const CREDENTIAL_CONFIG_SEQUENCES = [
   ['.git', 'config'], ['.git', 'credentials'],
   ['.config', 'git', 'config'], ['.config', 'git', 'credentials'],
 ]
-const CLAUDE_SETTINGS_DIR = '.claude'
+const CLAUDE_DIR = '.claude'
+const CLAUDE_SETTINGS_DIR = CLAUDE_DIR
 const CLAUDE_SETTINGS_PREFIX = 'settings'
 const CLAUDE_SETTINGS_SUFFIX = '.json'
+
+// The form a path segment is compared in. Anything from a `:` on and any
+// trailing dots or spaces are dropped, and the name is folded wider than
+// `toLowerCase()`: compatibility forms decomposed, combining marks removed, and
+// each character upper- then lower-cased. An ASCII name only loses the
+// dropped parts and is lowercased. The fold only ever adds matches.
+function canonicalSegment(seg) {
+  const colon = seg.indexOf(':')
+  const name = (colon === -1 ? seg : seg.slice(0, colon)).replace(/[. ]+$/, '')
+  if (/^[\x00-\x7f]*$/.test(name)) return name.toLowerCase()
+  return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
+    .map((ch) => ch.toUpperCase().toLowerCase())
+    .join('')
+}
+
+// A segment in the 8.3 short-name form (`CLAUDE~1`, `SETTIN~1.JSO`): up to six
+// characters, `~`, digits, and an extension of up to three. It floors without
+// a name comparison, under both floors.
+const SHORT_NAME_SEGMENT = /^[^~.]{1,6}~\d+(\.[^.]{1,3})?$/
 
 // #8741 — Claude Code's own worktrees live INSIDE the protected `.claude/` dir:
 // `EnterWorktree` / `claude --worktree <name>` check one out at
@@ -152,7 +172,6 @@ const CLAUDE_SETTINGS_SUFFIX = '.json'
 // 300 s timeout. A worktree is a workspace like the cwd itself, so a target
 // strictly inside `<cwd>/.claude/worktrees/<name>/` is scanned from `<name>` down:
 // its own `.claude/settings*.json`, `.git`, `.env`, keys and config dirs still floor.
-const CLAUDE_DIR = '.claude'
 const CLAUDE_WORKTREES_DIR = 'worktrees'
 // Claude Code accepts `[A-Za-z0-9._-]+` per `/`-separated name segment, refuses
 // `.`, `..` and `.git`, and names the directory with each `/` written as `+`
@@ -186,8 +205,9 @@ const PLAIN_COMPONENT = /^[A-Za-z0-9._@+()[\]$ -]*[A-Za-z0-9_@+()[\]$-]$/
  *     directory), and no component below them that exists is a symlink. The
  *     first part is Claude Code's own condition for creating a worktree (a
  *     symlink at any of the three could redirect it); together they keep a path
- *     that only LOOKS like a worktree, or leaves one through a link, floored;
- *   - an existing file on the path has a single hard link.
+ *     that only LOOKS like a worktree, or leaves one through a link, floored.
+ *     On POSIX a non-directory among the first three also fails the next
+ *     `lstat` with `ENOTDIR`, so a test can separate only the symlink half.
  * `ENOENT` below `<name>` ends the walk, since nothing further exists yet; any
  * other error refuses (fail closed). That refusal is also covered by the
  * resolved pass, whose walk fails closed on the same error.
@@ -214,9 +234,23 @@ function _insideClaudeWorktree(base, rel, target) {
     // A root component must be a directory (a symlink is not one to `lstat`);
     // below the root, no existing component may be a symlink.
     if (k < 3 ? !stat.isDirectory() : stat.isSymbolicLink()) return false
-    if (stat.isFile() && stat.nlink > 1) return false
   }
   return true
+}
+
+/**
+ * Is `path` an existing file with more than one hard link? A missing target is
+ * not; any other `lstat` error answers yes (fail closed).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function _hasOtherHardLinks(path) {
+  try {
+    const stat = lstatSync(path)
+    return stat.isFile() && stat.nlink > 1
+  } catch (err) {
+    return err.code !== 'ENOENT'
+  }
 }
 
 // #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
@@ -327,9 +361,8 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   // here, but a separator-agnostic split keeps the segment scan robust to any
   // foreign `\`/`/` that survives (and can never wrongly merge two segments — a
   // filename cannot contain a separator on the platform that produced it).
-  const segments = scanned.split(/[/\\]+/)
-    .filter((s) => s.length > 0 && s !== '..')
-    .map((s) => s.toLowerCase())
+  const pieces = scanned.split(/[/\\]+/).filter((s) => s.length > 0 && s !== '..')
+  const segments = pieces.map(canonicalSegment)
   // #8741 — start the scan at `<name>`. `carved` means `rel` is a path
   // `_insideClaudeWorktree` admitted: every native component is a
   // PLAIN_COMPONENT (no separator of either kind, never empty or `..`), so its
@@ -337,6 +370,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
   const start = carved ? 2 : 0
   for (let i = start; i < segments.length; i++) {
     const seg = segments[i]
+    if (SHORT_NAME_SEGMENT.test(pieces[i])) return true
     // Secret files, and credential-dense config files, are floored under BOTH
     // the read and the write floor (PR #6873 review — the read floor must not
     // silently auto-read .git/config, git credentials, or .claude/settings*.json).
@@ -359,7 +393,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
  *   (1) LEXICAL (the pre-#6851 floor, unchanged). `resolve()` absorbs absolute
  *       paths, a leading `./`, and `..` traversal; the resolved path is scanned
  *       segment-by-segment ({@link _scanResolvedTarget}). String ops, plus the
- *       #8741 worktree-root lstats for a `.claude/worktrees/<name>/…` target —
+ *       #8741 worktree lstat walk for a `.claude/worktrees/<name>/…` target —
  *       fast, and every input the old floor flagged still flags, except an
  *       ordinary file inside one of Claude Code's own worktrees.
  *   (2) #6851/#6921 SYMLINK. The lexical pass is symlink-BLIND: because
@@ -407,6 +441,9 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved) {
  * @returns {boolean}
  */
 function isProtectedPathValue(target, base, secretsOnly = false) {
+  // On POSIX `\` is a name character that both passes read as a separator, so
+  // a target holding one floors.
+  if (sep === '/' && target.includes('\\')) return true
   // (1) LEXICAL floor — pre-#6851 behavior, authoritative on a hit (no fs cost).
   const resolvedLexical = resolve(base, target)
   // #8741 — the worktree carve-out is decided once, on the path as written. An
@@ -441,7 +478,9 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     // resolved target gets the full scan rather than an offset meant for another
     // path.
     const stillCarved = carved && relative(realBase, realTarget) === lexicalRel
-    return _scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)
+    if (_scanResolvedTarget(realBase, realTarget, secretsOnly, stillCarved)) return true
+    // Under the full floor, an existing target with more than one hard link floors.
+    return !secretsOnly && _hasOtherHardLinks(realTarget)
   } catch {
     return true
   }
@@ -480,7 +519,7 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
  * {@link _insideClaudeWorktree}).
  *
  * Segment rules (a match on ANY segment floors the write; see
- * {@link isProtectedPathValue} for the lowercase rationale):
+ * {@link canonicalSegment} for the form segments are compared in):
  *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
