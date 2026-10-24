@@ -24,6 +24,7 @@ providers in #7004.
 | `*.pem`, `*.key`, `*.p12`, `*.pfx` | floored | floored |
 | `.git/config`, `.git/credentials`, `.config/git/{config,credentials}`, `.claude/settings*.json` | floored (credential-dense) | floored |
 | Anything else inside `.git/`, `.claude/`, `.vscode/`, `.config/git/` | **not** floored — reading a config file is benign | floored |
+| Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
 | Ordinary project files | not floored | not floored |
 
 Matching is case-insensitive, per path segment, on the target **resolved against the
@@ -31,6 +32,42 @@ session cwd** — with a second, symlink-following pass that walks the target
 component-by-component the way `open(2)` does, so a symlinked parent or a `..` after
 a symlink cannot escape the floor (#6851/#6921/#6928). Any resolution error
 (`EACCES`, `ELOOP`, a pathological depth) is treated as **floored**.
+
+**Claude Code's own worktrees are workspaces, not agent config (#8741).**
+`EnterWorktree` and `claude --worktree <name>` check a worktree out at
+`<repo>/.claude/worktrees/<name>/`, inside the very `.claude/` the full floor
+protects. Matching `.claude` at any depth forced a prompt for every edit in such a
+worktree; under Auto nobody answers, so each one cost the 300 s timeout and the
+agent then made the same edit through `Bash`. The #6794/#6806 framing already
+covered a worktree used *as* the session cwd; this covers one *below* it.
+
+A target strictly inside `<cwd>/.claude/worktrees/<name>/` is scanned from `<name>`
+down. The `.claude` and `worktrees` above the worktree are not counted; everything
+inside it is: its own `.claude/settings*.json` and `.claude/commands/`, its `.git`
+gitlink and `.git/config`, `.env*`, keys, `.vscode/`. The carve-out is narrow on
+purpose, and each condition that fails falls back to the full scan:
+
+- **At the cwd's own root, one level deep.** `sub/.claude/worktrees/…` and a
+  worktree nested inside a worktree keep their `.claude`. A target that escapes the
+  cwd is scanned as an absolute path, as before.
+- **`<name>` is one path component** of `[A-Za-z0-9._-]` with no leading dot, so
+  `.`, `..`, `.claude`, `.git` and `.env` are never a root. It is decided on the
+  platform separator, so on POSIX a directory named `a2c\b` is not the worktree
+  `a2c`. `<name>` itself is still scanned, so a secret-shaped name floors.
+- **Strictly below `<name>`.** The root itself, and anything directly in
+  `worktrees/`, stay floored.
+- **`.claude`, `.claude/worktrees` and `.claude/worktrees/<name>` are each a real
+  directory** at check time: `lstat`, not a symlink, not missing, not a file; any
+  error floors. This is Claude Code's own precondition for creating a worktree, and
+  a name-based floor needs it. The symlink-resolving pass matches *names*: with
+  `.claude` linked to `.claude-real/`, it cannot see that
+  `.claude/worktrees/x/settings.json`, where `x` links back to `.claude-real`,
+  writes agent config. So any worktree path through a symlinked root keeps its
+  lexical floor. A symlink *below* a real root is resolved by the second pass as
+  before: into the real `.claude` floors, into another worktree does not.
+
+`tests/permission-floor-claude-worktree.test.js` builds these topologies on disk,
+and the parity matrix runs the worktree rows through both pipelines.
 
 A tool's targets are read from `PROTECTED_PATH_INPUT_FIELDS` (`file_path`, `path`,
 `notebook_path`) plus each `changes[].path` member (codex `apply_patch`, #6805/#6828).
@@ -371,7 +408,9 @@ those; `floored` only guarantees it never approves one the floor reserved for a 
      remote-reachable, but the byte-scan-vs-semantic-lookup divergence does survive
      there — also #7043.
 3. **Keep the parity matrix honest.** `tests/permission-hook-floor.test.js` runs a
-   `(tool, target)` matrix through both pipelines and asserts they agree.
+   `(tool, target)` matrix through both pipelines and asserts they agree. Its
+   `WORKTREE_MATRIX` (#8741) does the same under a real on-disk cwd, because
+   whether a directory is a worktree root is decided on the filesystem.
 
 ## 4a. An approved edit never changes where a write lands, or what it is made of (#8446)
 
@@ -425,7 +464,9 @@ an approve with edits can do, and it lives in `edited-input.js` and
   read/write (e.g. via an un-floored `Bash` step), so a benign realpath here does not
   *guarantee* a benign open later. Chroxy does not own the downstream `open` for the
   SDK/TUI/codex providers, so an atomic guard is not achievable at this layer. The
-  floor is defence-in-depth and prompt-only.
+  floor is defence-in-depth and prompt-only. The #8741 worktree-root check (an
+  `lstat` of `.claude`, `.claude/worktrees` and `.claude/worktrees/<name>`) has the
+  same limit.
 - **A floored target whose payload exceeds 64 KB is denied, not prompted.** The probe
   accepts up to 1 MiB, but `POST /permission` caps bodies at 64 KB (it *holds* the
   payload for five minutes and broadcasts it to clients), so a `Write` of a >64 KB

@@ -1,7 +1,8 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
@@ -10,6 +11,7 @@ import { PassThrough } from 'node:stream'
 import { createPermissionHandler, evaluateHookFloorRequest } from '../src/ws-permissions.js'
 import { PermissionManager } from '../src/permission-manager.js'
 import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS, GLOB_SELECTOR_FLOOR_TOOLS } from '../src/permission-floor.js'
+import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * #7004 — the protected-path / secret-read FLOOR on the HOOK permission path.
@@ -1104,6 +1106,48 @@ const MATRIX = [
   ['WebFetch', { url: 'https://example.com/.env' }, false],
 ]
 
+// #8741 — the same contract inside one of Claude Code's own worktrees,
+// `<cwd>/.claude/worktrees/<name>/`. Whether a directory is a worktree root is a
+// filesystem question (it must exist and must not be a symlink), so these rows
+// run under a REAL cwd instead of the synthetic one above.
+const WT_ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-hook-floor-wt-')))
+const WT_CWD = join(WT_ROOT, 'repo')
+for (const dir of ['.claude/commands', '.claude/worktrees/a2c/.claude', '.claude/worktrees/a2c/packages/server/tests']) {
+  mkdirSync(join(WT_CWD, dir), { recursive: true })
+}
+// Looks like a worktree, is the agent config dir.
+if (SYMLINK_SUPPORTED) symlinkSync(join(WT_CWD, '.claude'), join(WT_CWD, '.claude/worktrees/evil'))
+after(() => rmSync(WT_ROOT, { recursive: true, force: true }))
+
+const WORKTREE_MATRIX = [
+  // ordinary work inside the worktree — the A2c repro and its neighbours
+  ['Edit', { file_path: '.claude/worktrees/a2c/packages/server/tests/models.test.js' }, false],
+  ['Write', { file_path: '.claude/worktrees/a2c/src/new.js' }, false],
+  ['NotebookEdit', { notebook_path: '.claude/worktrees/a2c/nb.ipynb' }, false],
+  ['Read', { file_path: '.claude/worktrees/a2c/src/new.js' }, false],
+  // the real agent config beside it
+  ['Write', { file_path: '.claude/settings.json' }, true],
+  ['Write', { file_path: '.claude/commands/x.md' }, true],
+  ['Write', { file_path: '.claude/worktrees/CLAUDE.md' }, true],
+  // protected names inside the worktree
+  ['Write', { file_path: '.claude/worktrees/a2c/.claude/settings.json' }, true],
+  ['Write', { file_path: '.claude/worktrees/a2c/.git/config' }, true],
+  ['Edit', { file_path: '.claude/worktrees/a2c/.env' }, true],
+  ['Read', { file_path: '.claude/worktrees/a2c/.env' }, true],
+  ['Read', { file_path: '.claude/worktrees/a2c/.claude/settings.local.json' }, true],
+  // paths that only look like a worktree
+  ['Write', { file_path: '.claude/worktrees/missing/src/a.js' }, true],
+  ['Write', { file_path: '.claude/worktrees/../settings.json' }, true],
+  ['Write', { file_path: '.claude/worktrees/a2c/../../settings.local.json' }, true],
+  ['Write', { file_path: '.claude/worktrees/evil/src/a.js' }, true, { skip: SKIP_NO_SYMLINK }],
+]
+
+// Every parity row, with the cwd it runs under.
+const PARITY_ROWS = [
+  ...MATRIX.map(([tool, input, expected]) => ({ tool, input, expected, cwd: CWD, label: '', opts: {} })),
+  ...WORKTREE_MATRIX.map(([tool, input, expected, opts = {}]) => ({ tool, input, expected, cwd: WT_CWD, label: '#8741 worktree cwd: ', opts })),
+]
+
 
 // ---------------------------------------------------------------------------
 // 3c. #7019 — the parity matrix through the REAL shell hook
@@ -1134,17 +1178,19 @@ describe('permission-hook.sh: the whole parity matrix through the REAL shell (#7
   // routed to the phone in that mode whatever the floor says).
   const ACCEPT_EDITS_SHELL_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 
-  assert.ok(MATRIX.some(([, , e]) => e === true) && MATRIX.some(([, , e]) => e === false), 'fixture sanity: both verdicts present')
+  for (const matrix of [MATRIX, WORKTREE_MATRIX]) {
+    assert.ok(matrix.some(([, , e]) => e === true) && matrix.some(([, , e]) => e === false), 'fixture sanity: both verdicts present')
+  }
 
-  async function runRow(tool, input, mode) {
-    daemon = await startRealDaemon({ promptDecision: 'deny' })
-    const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: input, cwd: CWD }, port: daemon.port, mode })
+  async function runRow(tool, input, mode, cwd = CWD) {
+    daemon = await startRealDaemon({ promptDecision: 'deny', sessionCwd: cwd })
+    const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: input, cwd }, port: daemon.port, mode })
     return { stats: daemon.stats, out: decisionOf(stdout) }
   }
 
-  for (const [tool, input, expected] of MATRIX) {
-    it(`auto: ${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, async () => {
-      const { stats, out } = await runRow(tool, input, 'auto')
+  for (const { tool, input, expected, cwd, label, opts } of PARITY_ROWS) {
+    it(`auto: ${label}${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, opts, async () => {
+      const { stats, out } = await runRow(tool, input, 'auto', cwd)
       assert.equal(stats.floorRequests, PATHLESS.has(tool) ? 0 : 1, 'floor probe consulted exactly when the payload names a path')
       if (expected) {
         assert.equal(stats.permissionRequests, 1, 'a floored target must raise a real permission request')
@@ -1157,9 +1203,9 @@ describe('permission-hook.sh: the whole parity matrix through the REAL shell (#7
     })
   }
 
-  for (const [tool, input, expected] of MATRIX.filter(([tool]) => ACCEPT_EDITS_SHELL_TOOLS.has(tool))) {
-    it(`acceptEdits: ${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, async () => {
-      const { stats, out } = await runRow(tool, input, 'acceptEdits')
+  for (const { tool, input, expected, cwd, label, opts } of PARITY_ROWS.filter(({ tool }) => ACCEPT_EDITS_SHELL_TOOLS.has(tool))) {
+    it(`acceptEdits: ${label}${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, opts, async () => {
+      const { stats, out } = await runRow(tool, input, 'acceptEdits', cwd)
       assert.equal(stats.floorRequests, 1)
       if (expected) {
         assert.equal(stats.permissionRequests, 1)
@@ -1197,28 +1243,33 @@ describe('floor PARITY: hook path vs in-process permission-manager (#7004)', () 
   afterEach(() => { pm.destroy() })
 
   /** In-process: did handlePermission FALL THROUGH to a prompt (= floored)? */
-  async function inProcessFloored(tool, input, mode) {
+  async function inProcessFloored(tool, input, mode, manager = pm) {
     const seen = []
     const onReq = (d) => seen.push(d)
-    pm.on('permission_request', onReq)
-    const promise = pm.handlePermission(tool, input, null, mode)
-    if (seen.length > 0) pm.respondToPermission(seen[0].requestId, 'deny')
+    manager.on('permission_request', onReq)
+    const promise = manager.handlePermission(tool, input, null, mode)
+    if (seen.length > 0) manager.respondToPermission(seen[0].requestId, 'deny')
     await promise
-    pm.off('permission_request', onReq)
+    manager.off('permission_request', onReq)
     return seen.length > 0
   }
 
-  for (const [tool, input, expected] of MATRIX) {
-    it(`${tool} ${JSON.stringify(input)} → floor=${expected} on BOTH paths`, async () => {
-      // hook path (the server-side probe the shell consults)
-      const hookFloor = evaluateHookFloorRequest({ tool_name: tool, tool_input: input }, CWD).floor
-      assert.equal(hookFloor, expected, 'hook-path verdict')
-      // in-process path, under BOTH lenient modes the floor must beat
-      assert.equal(await inProcessFloored(tool, input, 'auto'), expected, 'in-process auto')
-      const acceptEditsFloored = await inProcessFloored(tool, input, 'acceptEdits')
-      // acceptEdits only short-circuits for its own tool set; a tool outside it
-      // prompts regardless of the floor, so only assert the floored direction.
-      if (expected) assert.equal(acceptEditsFloored, true, 'in-process acceptEdits')
+  for (const { tool, input, expected, cwd, label, opts } of PARITY_ROWS) {
+    it(`${label}${tool} ${JSON.stringify(input)} → floor=${expected} on BOTH paths`, opts, async () => {
+      const manager = cwd === CWD ? pm : new PermissionManager({ log: silentLog, cwd })
+      try {
+        // hook path (the server-side probe the shell consults)
+        const hookFloor = evaluateHookFloorRequest({ tool_name: tool, tool_input: input }, cwd).floor
+        assert.equal(hookFloor, expected, 'hook-path verdict')
+        // in-process path, under BOTH lenient modes the floor must beat
+        assert.equal(await inProcessFloored(tool, input, 'auto', manager), expected, 'in-process auto')
+        const acceptEditsFloored = await inProcessFloored(tool, input, 'acceptEdits', manager)
+        // acceptEdits only short-circuits for its own tool set; a tool outside it
+        // prompts regardless of the floor, so only assert the floored direction.
+        if (expected) assert.equal(acceptEditsFloored, true, 'in-process acceptEdits')
+      } finally {
+        if (manager !== pm) manager.destroy()
+      }
     })
   }
 
