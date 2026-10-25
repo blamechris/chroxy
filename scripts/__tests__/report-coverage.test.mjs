@@ -11,7 +11,7 @@ const script = resolve(fileURLToPath(import.meta.url), '../../report-coverage.mj
 const nativeFixture = resolve(fileURLToPath(import.meta.url), '../fixtures/coverage-report')
 const validSummary = JSON.parse(readFileSync(resolve(nativeFixture, 'coverage-summary.json'), 'utf8'))
 
-function fixture(packageName = 'server') {
+function fixture(packageName = 'server', sourceRoot = 'src') {
   const root = mkdtempSync(resolve(tmpdir(), 'chroxy-coverage-'))
   const directory = resolve(root, 'packages', packageName, 'coverage')
   mkdirSync(directory, { recursive: true })
@@ -20,15 +20,15 @@ function fixture(packageName = 'server') {
   }
   // Keep the native c8 metrics and HTML shape, while proving that a report
   // generated in a different checkout can be validated after relocation.
-  const extension = packageName === 'server' ? 'mjs' : 'ts'
-  const source = `/runner/packages/${packageName}/src/example.${extension}`
+  const extension = sourceRoot === 'sidecar' ? 'js' : packageName === 'server' ? 'mjs' : 'ts'
+  const source = `/runner/packages/${packageName}/${sourceRoot}/example.${extension}`
   const originalSource = Object.keys(validSummary).find((key) => key !== 'total')
   writeFileSync(resolve(directory, 'coverage-summary.json'), JSON.stringify({
     total: validSummary.total,
     [source]: validSummary[originalSource],
   }))
   writeFileSync(resolve(directory, 'lcov.info'),
-    readFileSync(resolve(directory, 'lcov.info'), 'utf8').replace('SF:src/example.mjs', `SF:src/example.${extension}`))
+    readFileSync(resolve(directory, 'lcov.info'), 'utf8').replace('SF:src/example.mjs', `SF:${sourceRoot}/example.${extension}`))
   return { root, directory }
 }
 
@@ -47,6 +47,19 @@ for (const [packageName, label] of [
       const result = run(root, packageName)
       assert.equal(result.status, 0, result.stderr)
       assert.ok(result.stdout.includes(`| ${label} | 1 | 100.00% | 66.66% | 100.00% | 100.00% |`))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+for (const sourceRoot of ['hooks', 'sidecar']) {
+  test(`server ${sourceRoot} production source is included in its report`, () => {
+    const { root } = fixture('server', sourceRoot)
+    try {
+      const result = run(root)
+      assert.equal(result.status, 0, result.stderr)
+      assert.ok(result.stdout.includes('| Server | 1 |'))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

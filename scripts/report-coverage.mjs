@@ -43,23 +43,23 @@ function validateMetric(value, label, allowZero = false) {
 }
 
 // Istanbul's JSON summary records absolute paths from the runner checkout,
-// while LCOV records package-relative `src/` paths. Compare their normalized
-// package-relative identities so downloaded artifacts remain verifiable after
-// the checkout is relocated.
+// while LCOV records package-relative paths. Compare their normalized source
+// identities so downloaded artifacts remain verifiable after relocation.
 function sourceIdentity(source, packageName, reporter) {
   const path = source.replaceAll('\\', '/')
   let relative
   if (reporter === 'JSON') {
-    const marker = `/packages/${packageName}/src/`
+    const marker = `/packages/${packageName}/`
     const markerAt = path.lastIndexOf(marker)
     if ((!path.startsWith('/') && !/^[A-Za-z]:\//.test(path)) || markerAt < 0) {
       fail(`unexpected source for ${packageName} in JSON summary: ${source}`)
     }
-    relative = `src/${path.slice(markerAt + marker.length)}`
+    relative = path.slice(markerAt + marker.length)
   } else {
     relative = path
   }
-  if (!relative.startsWith('src/') ||
+  const sourceRoots = packageName === 'server' ? ['src/', 'hooks/', 'sidecar/'] : ['src/']
+  if (!sourceRoots.some((root) => relative.startsWith(root)) ||
       relative.split('/').some((part, index) => index > 0 && (part === '' || part === '.' || part === '..'))) {
     fail(`unexpected source for ${packageName} in ${reporter}: ${source}`)
   }

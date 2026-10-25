@@ -8,7 +8,7 @@ missing, malformed, or has no instrumented source.
 
 | Package | Runner | Source denominator |
 | --- | --- | --- |
-| Server | Node test runner + c8 | `packages/server/src/`, including unexecuted files; excludes CLI entry point, test client, tests and scripts per `.c8rc.json` |
+| Server | Node test runner + c8 | `packages/server/{src,hooks,sidecar}/`, including unexecuted JavaScript files; excludes CLI entry point, test client, tests and scripts per `.c8rc.json` |
 | Mobile app | Jest | `packages/app/src/**/*.{ts,tsx}`; excludes declarations and the generated xterm bundle |
 | Dashboard | Vitest + V8 | `packages/dashboard/src/**/*.{ts,tsx}`; excludes tests, declarations, test setup and generated theme tokens |
 | Store core | Vitest + V8 | `packages/store-core/src/**/*.{ts,tsx}`; excludes tests, declarations and contract fixtures |
@@ -16,11 +16,12 @@ missing, malformed, or has no instrumented source.
 The reports count each package's own instrumented source. Percentages are not
 averaged across packages. `coverage-summary.json` carries the line, branch,
 function and statement numerators and denominators for each package. Coverage
-validation maps the JSON summary's absolute runner paths and LCOV's `src/`
+validation maps the JSON summary's absolute runner paths and LCOV's package-relative
 paths to the selected package's source identities, then checks that both
 reporters name the same files with the same line counts. The mapping uses the
-`/packages/<package>/src/` portion, so an artifact can be checked after moving
-it to another checkout without assuming the runner's absolute directory.
+`/packages/<package>/` portion and the package's source roots, so an artifact
+can be checked after moving it to another checkout without assuming the runner's
+absolute directory.
 The HTML index must contain the complete Istanbul coverage table and document.
 Coverage means code executed, not assertions checked. The initial rollout only
 reports percentages; it does not add a global percentage threshold. The first measured

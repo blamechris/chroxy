@@ -253,8 +253,12 @@ function assertVitestDiscovers(entry, configPath, candidates = exemptedSuites(en
     `${entry.tree} has no tracked suites under its exemption; remove the entry rather than pass an empty check`)
   const root = join(REPO_ROOT, entry.tree)
   const cli = join(REPO_ROOT, 'node_modules/vitest/vitest.mjs')
+  // The full Windows server suite runs these probes while hundreds of other
+  // tests contend for the host. Run 40146745239 measured one 30s timeout and
+  // another successful discovery at 28.5s; 90s gives 3x that measured start
+  // while bounding all seven probes well below this job's 20-minute ceiling.
   const result = spawnSync(process.execPath, [cli, 'list', '--filesOnly', '--config', configPath], {
-    cwd: root, encoding: 'utf8', timeout: 30_000,
+    cwd: root, encoding: 'utf8', timeout: 90_000,
   })
   assert.equal(result.signal, null, `Vitest discovery timed out or was killed: ${result.stderr}`)
   assert.equal(result.status, 0, `Vitest discovery failed: ${result.stderr || result.error?.message}`)
