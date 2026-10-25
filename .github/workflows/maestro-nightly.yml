@@ -13,7 +13,16 @@ on:
   schedule:
     # ~01:00 America/Los_Angeles (09:00 UTC). Adjust to a runner-idle window.
     - cron: '0 9 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      flow:
+        description: Run the full inventory or diagnose the first flow
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - connect-screen.yaml
 
 # Never overlap with a still-running prior night.
 concurrency:
@@ -81,8 +90,21 @@ jobs:
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro
       # process, retries a failing flow once, and exits non-zero on a real failure.
+      # A diagnostic dispatch runs only the first flow. Full runs stop after
+      # three failed flows so a broken shared setup cannot consume the whole job.
       - name: Run Maestro suite
-        run: bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE"
+        env:
+          MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
+        run: |
+          case "$MAESTRO_FLOW" in
+            all)
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --max-failures 3
+              ;;
+            connect-screen.yaml)
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow connect-screen.yaml --retries 0 --max-failures 1
+              ;;
+            *) echo "::error::Unexpected Maestro flow: $MAESTRO_FLOW" >&2; exit 2 ;;
+          esac
 
       - name: Stop Metro
         if: always()

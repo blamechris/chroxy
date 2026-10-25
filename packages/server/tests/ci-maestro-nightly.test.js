@@ -9,6 +9,7 @@ import yaml from 'js-yaml'
 const root = resolve(import.meta.dirname, '../../..')
 const workflow = yaml.load(readFileSync(join(root, '.github/workflows/maestro-nightly.yml'), 'utf8'))
 const preflight = join(root, 'scripts/maestro-hosted-preflight.sh')
+const sequentialRunner = join(root, 'packages/app/.maestro/scripts/run-all-sequential.sh')
 const device = '0AD31F77-82DF-4E28-99E6-CAE0A8BB5E54'
 const shellIt = process.platform === 'win32' ? it.skip : it
 
@@ -40,6 +41,22 @@ function fixture() {
   return { dir, developerDir, devicesFile, envFile, traceFile, env, run }
 }
 
+function runnerFixture() {
+  const f = fixture()
+  const javaHome = join(f.dir, 'jdk')
+  const trace = join(f.dir, 'maestro-trace')
+  mkdirSync(join(javaHome, 'bin'), { recursive: true })
+  writeFileSync(join(javaHome, 'bin/java'), '#!/bin/bash\nexit 0\n', { mode: 0o755 })
+  writeFileSync(join(f.dir, 'bin/maestro'),
+    '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_MAESTRO_TRACE"\nexit "${FAKE_MAESTRO_EXIT:-0}"\n',
+    { mode: 0o755 })
+  const env = { ...f.env, JAVA_HOME: javaHome, FAKE_MAESTRO_TRACE: trace }
+  const run = (args, overrides = {}) => spawnSync('bash', [sequentialRunner,
+    '--device', device, '--no-mock', '--no-reset', '--retries', '0', '--timeout', '5', ...args],
+  { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15000 })
+  return { ...f, trace, run }
+}
+
 describe('Maestro nightly hosted runner (#7113)', () => {
   it('wires the scheduled and dispatch suite to a pinned, preflighted hosted image', () => {
     assert.ok(workflow.on.schedule?.length > 0, 'nightly schedule must exist')
@@ -54,6 +71,51 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(index('Install dependencies') < index('Build + install the dev client'))
     assert.ok(index('Build + install the dev client') < index('Run Maestro suite'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('run-all-sequential.sh'))
+    const dispatch = workflow.on.workflow_dispatch.inputs.flow
+    assert.equal(dispatch.default, 'all', 'scheduled and ordinary dispatch runs must keep the full suite')
+    assert.deepEqual(dispatch.options, ['all', 'connect-screen.yaml'])
+    const inventory = yaml.loadAll(readFileSync(join(root, 'packages/app/.maestro/run-all.yaml'), 'utf8'))[1]
+      .map(command => command.runFlow)
+    assert.ok(inventory.includes('connect-screen.yaml'), 'diagnostic choice must name an inventoried flow')
+    assert.ok(steps[index('Run Maestro suite')].run.includes('--max-failures 3'))
+    assert.ok(steps[index('Run Maestro suite')].run.includes('--flow connect-screen.yaml'))
+  })
+
+  it('opens the same Metro dev-client link in connect and session setup', () => {
+    const flow = name => yaml.loadAll(readFileSync(join(root, `packages/app/.maestro/setup/${name}.yaml`), 'utf8'))[1]
+    const connect = flow('ensure-connect-screen')
+    const session = flow('ensure-session-screen')
+    assert.equal(connect[0], 'launchApp')
+    assert.equal(connect[1].openLink, session.find(step => step.openLink).openLink)
+    assert.equal(connect.at(-1).extendedWaitUntil.visible, 'Connect to Chroxy')
+  })
+
+  shellIt('runs only an inventoried diagnostic flow and rejects path aliases', () => {
+    const f = runnerFixture()
+    try {
+      const one = f.run(['--flow', 'connect-screen.yaml', '--max-failures', '1'])
+      assert.equal(one.status, 0, one.stderr)
+      const calls = readFileSync(f.trace, 'utf8').trim().split('\n')
+      assert.equal(calls.length, 1)
+      assert.ok(calls[0].endsWith('/connect-screen.yaml'))
+      rmSync(f.trace)
+      const invalid = f.run(['--flow', '../connect-screen.yaml'])
+      assert.equal(invalid.status, 2)
+      assert.ok(invalid.stderr.includes('--flow must name a flow in run-all.yaml'))
+      assert.equal(existsSync(f.trace), false, 'invalid flow must not start Maestro')
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('stops a failing inventory after three flows and reports the unrun remainder', () => {
+    const f = runnerFixture()
+    try {
+      const result = f.run(['--max-failures', '3'], { FAKE_MAESTRO_EXIT: '1' })
+      assert.equal(result.status, 1, result.stderr)
+      assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 3)
+      assert.ok(result.stdout.includes('Stopping after 3 failed flows; remaining inventory not run.'))
+      assert.ok(result.stdout.includes('3 attempted of'))
+      assert.ok(result.stdout.includes('not run)'))
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
   shellIt('captures all xcodebuild output before parsing its first line', () => {

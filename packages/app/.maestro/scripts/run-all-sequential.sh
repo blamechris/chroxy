@@ -30,12 +30,14 @@
 #
 # Usage:
 #   bash run-all-sequential.sh [--device <udid>] [--no-mock] \
-#       [--retries N] [--timeout SECS] [--no-reset]
+#       [--retries N] [--timeout SECS] [--no-reset] \
+#       [--flow <name-from-run-all.yaml>] [--max-failures N]
 #
 # Env overrides:
 #   MAESTRO_DEVICE   simulator UDID (default: first booted device)
 #   MAX_RETRIES      per-flow retry count on failure (default: 1)
 #   FLOW_TIMEOUT     per-flow timeout in seconds (default: 300)
+#   MAX_FAILURES     stop after N failed flows (default: 0, run every flow)
 #   MOCK_PORT        mock-server port (default: 9876)
 #   JAVA_HOME        validated; falls back to the Homebrew openjdk@21 symlink
 
@@ -49,6 +51,8 @@ DEVICE="${MAESTRO_DEVICE:-}"
 START_MOCK=1
 MAX_RETRIES="${MAX_RETRIES:-1}"
 FLOW_TIMEOUT="${FLOW_TIMEOUT:-300}"
+MAX_FAILURES="${MAX_FAILURES:-0}"
+ONLY_FLOW=""
 RESET_ON_FAIL=1
 
 need_val() { [ $# -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; exit 2; }; }
@@ -58,6 +62,8 @@ while [ $# -gt 0 ]; do
     --no-mock) START_MOCK=0; shift ;;
     --retries) need_val "$@"; MAX_RETRIES="$2"; shift 2 ;;
     --timeout) need_val "$@"; FLOW_TIMEOUT="$2"; shift 2 ;;
+    --flow) need_val "$@"; ONLY_FLOW="$2"; [ -n "$ONLY_FLOW" ] || { echo 'ERROR: --flow needs a nonempty name' >&2; exit 2; }; shift 2 ;;
+    --max-failures) need_val "$@"; MAX_FAILURES="$2"; shift 2 ;;
     --no-reset) RESET_ON_FAIL=0; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -66,6 +72,7 @@ done
 # Numeric guards so a bad --retries/--timeout fails fast, not mid-loop.
 case "$MAX_RETRIES" in (*[!0-9]*|'') echo "ERROR: --retries must be a non-negative integer" >&2; exit 2 ;; esac
 case "$FLOW_TIMEOUT" in (*[!0-9]*|'') echo "ERROR: --timeout must be a positive integer (seconds)" >&2; exit 2 ;; esac
+case "$MAX_FAILURES" in (*[!0-9]*|'') echo "ERROR: --max-failures must be a non-negative integer" >&2; exit 2 ;; esac
 
 # maestro needs Java. A JAVA_HOME inherited from the user's profile is often a
 # pinned Cellar version path (e.g. openjdk@21/21.0.9) that goes stale on the next
@@ -117,6 +124,17 @@ done < <(grep -oE 'runFlow:[[:space:]]*[^[:space:]]+\.yaml' "$RUN_ALL" | sed -E 
 if [ "${#FLOWS[@]}" -eq 0 ]; then
   echo "ERROR: no '- runFlow:' entries parsed from run-all.yaml" >&2
   exit 1
+fi
+if [ -n "$ONLY_FLOW" ]; then
+  found=0
+  for flow in "${FLOWS[@]}"; do
+    if [ "$flow" = "$ONLY_FLOW" ]; then found=1; break; fi
+  done
+  if [ "$found" -ne 1 ]; then
+    echo "ERROR: --flow must name a flow in run-all.yaml: $ONLY_FLOW" >&2
+    exit 2
+  fi
+  FLOWS=("$ONLY_FLOW")
 fi
 
 # Run a command with a wall-clock timeout, portably (macOS has no `timeout`).
@@ -181,6 +199,7 @@ echo " Device:   $DEVICE"
 echo " Flows:    ${#FLOWS[@]}  (from run-all.yaml)"
 echo " Retries:  $MAX_RETRIES per flow on failure"
 echo " Timeout:  ${FLOW_TIMEOUT}s per flow"
+echo " Stop:     $([ "$MAX_FAILURES" -eq 0 ] && echo 'no early stop' || echo "after $MAX_FAILURES failed flows")"
 echo " Reset:    $([ "$RESET_ON_FAIL" -eq 1 ] && echo 'shutdown+boot on failure' || echo 'disabled')"
 echo "================================================================"
 
@@ -219,6 +238,10 @@ for flow in "${FLOWS[@]}"; do
   if [ ! -f "$flow_path" ]; then
     echo "[runner] SKIP (missing file): $flow"
     FAILED+=("$flow (missing)")
+    if [ "$MAX_FAILURES" -gt 0 ] && [ "${#FAILED[@]}" -ge "$MAX_FAILURES" ]; then
+      echo "[runner] Stopping after ${#FAILED[@]} failed flows; remaining inventory not run."
+      break
+    fi
     continue
   fi
 
@@ -256,10 +279,19 @@ for flow in "${FLOWS[@]}"; do
     FAILED+=("$flow")
     echo "[runner] FAIL (after $((MAX_RETRIES + 1)) attempts): $flow"
   fi
+  if [ "$MAX_FAILURES" -gt 0 ] && [ "${#FAILED[@]}" -ge "$MAX_FAILURES" ]; then
+    echo "[runner] Stopping after ${#FAILED[@]} failed flows; remaining inventory not run."
+    break
+  fi
 done
 
 echo "================================================================"
-echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed (of ${#FLOWS[@]})"
+attempted=$((${#PASSED[@]} + ${#FAILED[@]}))
+if [ "$attempted" -eq "${#FLOWS[@]}" ]; then
+  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed (of ${#FLOWS[@]})"
+else
+  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed ($attempted attempted of ${#FLOWS[@]}; $((${#FLOWS[@]} - attempted)) not run)"
+fi
 echo "================================================================"
 if [ "${#FAILED[@]}" -gt 0 ]; then
   printf ' FAIL  %s\n' "${FAILED[@]}"
