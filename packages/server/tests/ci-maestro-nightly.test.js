@@ -12,6 +12,21 @@ const preflight = join(root, 'scripts/maestro-hosted-preflight.sh')
 const sequentialRunner = join(root, 'packages/app/.maestro/scripts/run-all-sequential.sh')
 const device = '0AD31F77-82DF-4E28-99E6-CAE0A8BB5E54'
 const shellIt = process.platform === 'win32' ? it.skip : it
+// Independent expectation for the canonical suite. An added, removed, or renamed
+// flow must be reviewed here; the runner derives its own inventory from YAML.
+const expectedInventory = [
+  'connect-screen.yaml', 'manual-connect.yaml', 'lan-scan.yaml',
+  'small-screen-layout.yaml', 'session-screen-connected.yaml',
+  'session-view-modes.yaml', 'session-file-browser.yaml', 'session-messages.yaml',
+  'chat-todolist.yaml', 'chat-websearch.yaml', 'chat-webfetch.yaml',
+  'chat-tool-partial-summary.yaml', 'stream-stall-chip.yaml', 'plan-approval.yaml',
+  'plan-approval-deny.yaml', 'terminal-view.yaml', 'reconnect.yaml',
+  'ask-user-question.yaml', 'ask-user-question-deny.yaml',
+  'ask-user-question-multi.yaml', 'ask-question-other-freeform.yaml',
+  'chat-multi-question.yaml', 'key-exchange.yaml',
+  'permission-disconnected-noop.yaml', 'diff-comment.yaml',
+  'compaction-marker.yaml'
+]
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-preflight-'))
@@ -55,8 +70,21 @@ function runnerFixture({ reset = false } = {}) {
     SIM_RESET_PHASE_TIMEOUT: '1', SIM_BOOTSTATUS_TIMEOUT: '1' }
   const run = (args, overrides = {}) => spawnSync('bash', [sequentialRunner,
     '--device', device, '--no-mock', ...(reset ? [] : ['--no-reset']), '--retries', '0', '--timeout', '2', ...args],
-  { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 })
+  { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000 })
   return { ...f, trace, run }
+}
+
+function tracedFlows(trace) {
+  return readFileSync(trace, 'utf8').trim().split('\n').map(line => line.match(/([^/ ]+\.yaml)$/)?.[1])
+}
+
+function assertCompletePartition(shards) {
+  const flattened = shards.flat()
+  const duplicates = flattened.filter((name, index) => flattened.indexOf(name) !== index)
+  const missing = expectedInventory.filter(name => !flattened.includes(name))
+  const unexpected = flattened.filter(name => !expectedInventory.includes(name))
+  assert.deepEqual({ missing, duplicates, unexpected },
+    { missing: [], duplicates: [], unexpected: [] }, 'shards must cover the independent inventory exactly once')
 }
 
 function flow(path) {
@@ -108,6 +136,10 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(workflow.on.schedule?.length > 0, 'nightly schedule must exist')
     assert.ok(workflow.on.workflow_dispatch !== undefined, 'manual proof run must remain available')
     assert.equal(workflow.jobs.maestro['runs-on'], 'macos-15')
+    assert.equal(workflow.jobs.maestro['timeout-minutes'], 90)
+    assert.equal(workflow.jobs.maestro.strategy['fail-fast'], false)
+    assert.equal(workflow.jobs.maestro.strategy.matrix.shard,
+      "${{ fromJSON((inputs.flow || 'all') == 'all' && '[0,1]' || '[0]') }}")
     assert.equal(workflow.env.DEVELOPER_DIR, '/Applications/Xcode_16.4.app/Contents/Developer')
     const steps = workflow.jobs.maestro.steps
     const index = name => steps.findIndex(step => step.name === name)
@@ -129,7 +161,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       .map(command => command.runFlow)
     assert.ok(inventory.includes('connect-screen.yaml'), 'diagnostic choice must name an inventoried flow')
     assert.ok(inventory.includes('permission-disconnected-noop.yaml'), 'disconnected diagnostic must name an inventoried flow')
-    assert.ok(steps[index('Run Maestro suite')].run.includes('--max-failures 3'))
+    assert.ok(steps[index('Run Maestro suite')].run.includes('--shard-index "${{ strategy.job-index }}" --shard-count "${{ strategy.job-total }}" --max-failures 1'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow connect-screen.yaml'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow permission-disconnected-noop.yaml'))
   })
@@ -140,7 +172,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     const upload = steps.find(step => step.name === 'Upload this run\'s Maestro diagnostics')
     assert.equal(run.env.MAESTRO_ARTIFACT_DIR, '${{ runner.temp }}/maestro-diagnostics')
     assert.equal(upload.if, 'failure() || cancelled()')
-    assert.equal(upload.with.name, 'maestro-diagnostics')
+    assert.equal(upload.with.name, 'maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}')
     assert.equal(upload.with.path.trim(), [
       '${{ runner.temp }}/maestro-diagnostics/',
       '${{ runner.temp }}/metro.log'
@@ -211,6 +243,71 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
+  shellIt('executes the canonical inventory exactly once across real runner shards', () => {
+    const inventoried = yaml.loadAll(readFileSync(join(root, 'packages/app/.maestro/run-all.yaml'), 'utf8'))[1]
+      .map(command => command.runFlow)
+    assert.deepEqual(inventoried, expectedInventory)
+    const f = runnerFixture()
+    try {
+      const local = f.run([])
+      assert.equal(local.status, 0, local.stderr || local.stdout)
+      assert.deepEqual(tracedFlows(f.trace), expectedInventory,
+        'the local default must still execute the complete canonical inventory')
+      rmSync(f.trace)
+      for (const count of [2, 3]) {
+        const shards = []
+        for (let index = 0; index < count; index++) {
+          const result = f.run(['--shard-index', String(index), '--shard-count', String(count), '--max-failures', '1'])
+          assert.equal(result.status, 0, result.stderr || result.stdout)
+          const selected = tracedFlows(f.trace)
+          assert.ok(result.stdout.includes(`Inventory: ${expectedInventory.length} flows`))
+          assert.ok(result.stdout.includes(`Selection: ${selected.length} flows; shard ${index}/${count}`))
+          assert.ok(result.stdout.includes(`All ${selected.length} selected flows passed (shard ${index}/${count} of ${expectedInventory.length} inventoried).`))
+          shards.push(selected)
+          rmSync(f.trace)
+        }
+        assertCompletePartition(shards)
+        for (let index = 0; index < count; index++) {
+          assert.deepEqual(shards[index], expectedInventory.filter((_, position) => position % count === index),
+            `shard ${index}/${count} must preserve canonical relative order`)
+        }
+      }
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('rejects invalid or empty shard selection before starting Maestro', () => {
+    const f = runnerFixture()
+    try {
+      for (const [args, diagnostic] of [
+        [['--shard-index', '0'], 'must be supplied together'],
+        [['--shard-count', '2'], 'must be supplied together'],
+        [['--shard-index', '0', '--shard-count', '0'], 'positive decimal integer'],
+        [['--shard-index', '-1', '--shard-count', '2'], 'non-negative decimal integer'],
+        [['--shard-index', '01', '--shard-count', '2'], 'non-negative decimal integer'],
+        [['--shard-index', '2', '--shard-count', '2'], 'less than --shard-count'],
+        [['--shard-index', '0', '--shard-count', '27'], 'empty shard'],
+        [['--flow', 'connect-screen.yaml', '--shard-index', '0', '--shard-count', '2'], 'cannot be combined']
+      ]) {
+        const result = f.run(args)
+        assert.equal(result.status, 2, `${args.join(' ')}: ${result.stderr}`)
+        assert.ok(result.stderr.includes(diagnostic), `${args.join(' ')}: ${result.stderr}`)
+        assert.equal(existsSync(f.trace), false, `${args.join(' ')} must not invoke Maestro`)
+      }
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('stops each failed shard after one failed flow and names the unrun remainder', () => {
+    const f = runnerFixture()
+    try {
+      const result = f.run(['--shard-index', '1', '--shard-count', '2', '--max-failures', '1'],
+        { FAKE_MAESTRO_EXIT: '1' })
+      assert.equal(result.status, 1, result.stderr)
+      assert.deepEqual(tracedFlows(f.trace), ['manual-connect.yaml'])
+      assert.ok(result.stdout.includes('Stopping after 1 failed flows; remaining inventory not run.'))
+      assert.ok(result.stdout.includes('1 attempted of 13 selected; 12 not run; 26 inventoried; shard 1/2'))
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
   shellIt('routes both Maestro output streams into a distinct current-run attempt', () => {
     const f = runnerFixture()
     try {
@@ -245,7 +342,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 3)
       assert.ok(result.stdout.includes('Stopping after 3 failed flows; remaining inventory not run.'))
       assert.ok(result.stdout.includes('3 attempted of'))
-      assert.ok(result.stdout.includes('not run)'))
+      assert.ok(result.stdout.includes('not run; 26 inventoried; shard 0/1)'))
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 

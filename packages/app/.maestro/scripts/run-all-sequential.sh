@@ -31,7 +31,8 @@
 # Usage:
 #   bash run-all-sequential.sh [--device <udid>] [--no-mock] \
 #       [--retries N] [--timeout SECS] [--no-reset] \
-#       [--flow <name-from-run-all.yaml>] [--max-failures N]
+#       [--flow <name-from-run-all.yaml>] [--max-failures N] \
+#       [--shard-index INDEX --shard-count COUNT]
 #
 # Env overrides:
 #   MAESTRO_DEVICE   simulator UDID (default: first booted device)
@@ -56,6 +57,10 @@ MAX_RETRIES="${MAX_RETRIES:-1}"
 FLOW_TIMEOUT="${FLOW_TIMEOUT:-300}"
 MAX_FAILURES="${MAX_FAILURES:-0}"
 ONLY_FLOW=""
+SHARD_INDEX=0
+SHARD_COUNT=1
+SHARD_INDEX_SET=0
+SHARD_COUNT_SET=0
 RESET_ON_FAIL=1
 MAESTRO_ARTIFACT_DIR="${MAESTRO_ARTIFACT_DIR:-}"
 SIM_RESET_PHASE_TIMEOUT="${SIM_RESET_PHASE_TIMEOUT:-60}"
@@ -69,6 +74,8 @@ while [ $# -gt 0 ]; do
     --retries) need_val "$@"; MAX_RETRIES="$2"; shift 2 ;;
     --timeout) need_val "$@"; FLOW_TIMEOUT="$2"; shift 2 ;;
     --flow) need_val "$@"; ONLY_FLOW="$2"; [ -n "$ONLY_FLOW" ] || { echo 'ERROR: --flow needs a nonempty name' >&2; exit 2; }; shift 2 ;;
+    --shard-index) need_val "$@"; SHARD_INDEX="$2"; SHARD_INDEX_SET=1; shift 2 ;;
+    --shard-count) need_val "$@"; SHARD_COUNT="$2"; SHARD_COUNT_SET=1; shift 2 ;;
     --max-failures) need_val "$@"; MAX_FAILURES="$2"; shift 2 ;;
     --no-reset) RESET_ON_FAIL=0; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -79,6 +86,29 @@ done
 case "$MAX_RETRIES" in (*[!0-9]*|'') echo "ERROR: --retries must be a non-negative integer" >&2; exit 2 ;; esac
 case "$FLOW_TIMEOUT" in (*[!0-9]*|'') echo "ERROR: --timeout must be a positive integer (seconds)" >&2; exit 2 ;; esac
 case "$MAX_FAILURES" in (*[!0-9]*|'') echo "ERROR: --max-failures must be a non-negative integer" >&2; exit 2 ;; esac
+if [ "$SHARD_INDEX_SET" -ne "$SHARD_COUNT_SET" ]; then
+  echo 'ERROR: --shard-index and --shard-count must be supplied together' >&2
+  exit 2
+fi
+if [ -n "$ONLY_FLOW" ] && [ "$SHARD_INDEX_SET" -eq 1 ]; then
+  echo 'ERROR: --flow cannot be combined with shard selection' >&2
+  exit 2
+fi
+# Canonical decimal spelling avoids Bash interpreting a leading zero as octal.
+# Bound digit length before integer comparison so hostile CLI input cannot
+# overflow Bash's signed integer parser.
+if [[ ! "$SHARD_INDEX" =~ ^(0|[1-9][0-9]*)$ ]] || [ "${#SHARD_INDEX}" -gt 9 ]; then
+  echo 'ERROR: --shard-index must be a non-negative decimal integer' >&2
+  exit 2
+fi
+if [[ ! "$SHARD_COUNT" =~ ^[1-9][0-9]*$ ]] || [ "${#SHARD_COUNT}" -gt 9 ]; then
+  echo 'ERROR: --shard-count must be a positive decimal integer' >&2
+  exit 2
+fi
+if [ "$SHARD_INDEX" -ge "$SHARD_COUNT" ]; then
+  echo 'ERROR: --shard-index must be less than --shard-count' >&2
+  exit 2
+fi
 for reset_timeout in "$SIM_RESET_PHASE_TIMEOUT" "$SIM_BOOTSTATUS_TIMEOUT"; do
   case "$reset_timeout" in (*[!0-9]*|'') echo "ERROR: simulator reset timeouts must be 1-300 seconds" >&2; exit 2 ;; esac
   if [ "$reset_timeout" -lt 1 ] || [ "$reset_timeout" -gt 300 ]; then
@@ -145,6 +175,7 @@ if [ "${#FLOWS[@]}" -eq 0 ]; then
   echo "ERROR: no '- runFlow:' entries parsed from run-all.yaml" >&2
   exit 1
 fi
+INVENTORY_COUNT=${#FLOWS[@]}
 if [ -n "$ONLY_FLOW" ]; then
   found=0
   for flow in "${FLOWS[@]}"; do
@@ -155,6 +186,22 @@ if [ -n "$ONLY_FLOW" ]; then
     exit 2
   fi
   FLOWS=("$ONLY_FLOW")
+elif [ "$SHARD_COUNT" -gt 1 ]; then
+  if [ "$SHARD_COUNT" -gt "$INVENTORY_COUNT" ]; then
+    echo "ERROR: --shard-count $SHARD_COUNT exceeds $INVENTORY_COUNT inventoried flows (empty shard)" >&2
+    exit 2
+  fi
+  SELECTED_FLOWS=()
+  for ((inventory_index = 0; inventory_index < INVENTORY_COUNT; inventory_index++)); do
+    if [ "$((inventory_index % SHARD_COUNT))" -eq "$SHARD_INDEX" ]; then
+      SELECTED_FLOWS+=("${FLOWS[inventory_index]}")
+    fi
+  done
+  FLOWS=("${SELECTED_FLOWS[@]}")
+fi
+if [ "${#FLOWS[@]}" -eq 0 ]; then
+  echo "ERROR: shard $SHARD_INDEX/$SHARD_COUNT selected no flows from $INVENTORY_COUNT inventoried flows" >&2
+  exit 2
 fi
 
 # Run a command with a wall-clock timeout, portably (macOS has no `timeout`).
@@ -236,7 +283,8 @@ reset_phase() {
 echo "================================================================"
 echo " Maestro per-flow runner (#6091)"
 echo " Device:   $DEVICE"
-echo " Flows:    ${#FLOWS[@]}  (from run-all.yaml)"
+echo " Inventory: $INVENTORY_COUNT flows from run-all.yaml"
+echo " Selection: ${#FLOWS[@]} flows; shard $SHARD_INDEX/$SHARD_COUNT"
 echo " Retries:  $MAX_RETRIES per flow on failure"
 echo " Timeout:  ${FLOW_TIMEOUT}s per flow"
 echo " Stop:     $([ "$MAX_FAILURES" -eq 0 ] && echo 'no early stop' || echo "after $MAX_FAILURES failed flows")"
@@ -344,14 +392,14 @@ done
 echo "================================================================"
 attempted=$((${#PASSED[@]} + ${#FAILED[@]}))
 if [ "$attempted" -eq "${#FLOWS[@]}" ]; then
-  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed (of ${#FLOWS[@]})"
+  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed (of ${#FLOWS[@]} selected; $INVENTORY_COUNT inventoried; shard $SHARD_INDEX/$SHARD_COUNT)"
 else
-  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed ($attempted attempted of ${#FLOWS[@]}; $((${#FLOWS[@]} - attempted)) not run)"
+  echo " Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed ($attempted attempted of ${#FLOWS[@]} selected; $((${#FLOWS[@]} - attempted)) not run; $INVENTORY_COUNT inventoried; shard $SHARD_INDEX/$SHARD_COUNT)"
 fi
 echo "================================================================"
 if [ "${#FAILED[@]}" -gt 0 ]; then
   printf ' FAIL  %s\n' "${FAILED[@]}"
   exit 1
 fi
-echo " All flows passed."
+echo " All ${#FLOWS[@]} selected flows passed (shard $SHARD_INDEX/$SHARD_COUNT of $INVENTORY_COUNT inventoried)."
 exit 0

@@ -2,7 +2,8 @@
 #
 # The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
 # was deferred from per-PR because it needs a booted iOS simulator + a built dev
-# client + Metro. Run once a night on a hosted macOS 15 image with Xcode 16.4:
+# client + Metro. Run once a night on two isolated hosted macOS 15 simulators
+# with Xcode 16.4, partitioning the canonical inventory across them:
 # Expo SDK 54 needs Simulator.app, which Xcode 27 removed (#7113).
 # `run-all-sequential.sh`
 # runs each flow in its own maestro process and retries a failure once — the
@@ -44,9 +45,14 @@ env:
 
 jobs:
   maestro:
-    name: Maestro App E2E
+    name: Maestro App E2E (shard ${{ matrix.shard }})
     runs-on: macos-15
     timeout-minutes: 90
+    strategy:
+      # Keep both halves running if one fails, so full-inventory proof is visible.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON((inputs.flow || 'all') == 'all' && '[0,1]' || '[0]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -99,8 +105,9 @@ jobs:
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro
       # process, retries a failing flow once, and exits non-zero on a real failure.
-      # A diagnostic dispatch runs one selected inventoried flow. Full runs stop after
-      # three failed flows so a broken shared setup cannot consume the whole job.
+      # A diagnostic dispatch runs one selected inventoried flow in one job. Full
+      # runs partition the canonical inventory by the actual matrix index/count;
+      # each shard stops after one failed flow, bounding a broken shared setup.
       - name: Run Maestro suite
         env:
           MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
@@ -108,7 +115,7 @@ jobs:
         run: |
           case "$MAESTRO_FLOW" in
             all)
-              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --max-failures 3
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --shard-index "${{ strategy.job-index }}" --shard-count "${{ strategy.job-total }}" --max-failures 1
               ;;
             connect-screen.yaml)
               bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow connect-screen.yaml --retries 0 --max-failures 1
@@ -127,7 +134,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maestro-diagnostics
+          name: maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}
           path: |
             ${{ runner.temp }}/maestro-diagnostics/
             ${{ runner.temp }}/metro.log
