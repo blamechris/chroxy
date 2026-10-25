@@ -36,7 +36,7 @@ LATE = ('a snapshot taken after a run began holds the text as it is then, which 
         'pass it')
 WRONG_STATE = "if a run state there is wrong, such as a dry run's start or a file that cannot be read, repair or move it first"
 # What `finish` appends to the sentence for acceptances it did not use, and the later-gate sentence (13:00 send, 14:00 gate) it appends to.
-NOT_COMPARED = ", and no slot is compared: the T0 snapshot cannot be used either (each slot's detail says why)"
+NOT_COMPARED = ", and no slot is compared (each slot's detail says why)"
 LATER_GATE = ('the recorded gate (2026-11-02T14:00:00Z) is later than the first send (2026-11-02T13:00:00Z), so the text it let through or '
               'accepted is not the text the run started on')
 STATES = 'by the run states in ~/trial/t2/state'
@@ -3723,6 +3723,23 @@ class FinishQueueText(LaunchCase):
         for slot, number in (('Q01', 9001), ('Q02', 9002)):
             self.assertEqual(self.seen(slot), {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
         self.assertEqual(gh.requests, [], 'no text was read without a baseline')
+
+    def test_a_late_gate_with_a_usable_snapshot_says_no_slot_is_compared_when_no_text_can_be_read(self):
+        # The snapshot loads, but a GitHub that answers no read compares nothing: the sentence follows what the slots recorded.
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        self.gated(at='2026-11-02T14:00:00Z')
+        down = GitHubError('boom', 502)
+        for how, gh, ending, unread in (
+                ('no slot read', FakeGitHub(bodies={9001: down, 9002: down}), NOT_COMPARED, ['Q01', 'Q02']),
+                ('one slot read', FakeGitHub(bodies={9001: down}), ' and the queue text is compared with T0 only', ['Q01'])):
+            with self.subTest(how):
+                self.rewrite(finish=None)   # each a first finish
+                code, out, _ = self.finish(gh)
+                self.assertEqual(code, 0, out)
+                sentence = f'{LATER_GATE}; its acceptances are not used{ending}'
+                self.assertEqual(self.recorded()['queue_text']['acceptances_ignored'], sentence)
+                self.assertIn(f'note: {sentence}', out.splitlines())
+                self.assertEqual(sorted(s for s in ('Q01', 'Q02') if self.seen(s)['since_t0'] == 'unverified'), unread)
 
     def test_a_gate_time_that_cannot_be_read_and_a_late_snapshot_say_that_no_slot_is_compared(self):
         # The repro of #8817: an unreadable gate time (so the acceptances are not used), a send at 13:00 and a snapshot read at 13:30.

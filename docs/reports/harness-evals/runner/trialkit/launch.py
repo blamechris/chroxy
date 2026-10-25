@@ -1295,8 +1295,9 @@ def _acceptances_ignored(st):
     """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
     when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
     ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. The
-    sentence says only that the acceptances are not used. What is compared instead is said once `finish` knows whether the T0
-    snapshot could be used (a send that cannot be read, or a snapshot read after one, leaves it unplaced, #8812) (#8817)."""
+    sentence says only that the acceptances are not used. What is compared instead is said once `finish` has read the slots: no
+    slot is, when the T0 snapshot cannot be used (a send that cannot be read, or a snapshot read after one, leaves it unplaced,
+    #8812) or no slot's text can be read (#8817)."""
     if not (st.get('start') and st.get('gate')):
         return None
     gate = st['gate'] if isinstance(st['gate'], dict) else {}
@@ -1361,11 +1362,12 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     accepted, ignored = gate_record.get('accepted_changed'), _acceptances_ignored(st)
     if ignored:
         accepted = None
-    results, slots, compared = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file),
-                                                        ignored)
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     if ignored:
-        ignored += (' and the queue text is compared with T0 only' if compared
-                    else ', and no slot is compared: the T0 snapshot cannot be used either (each slot\'s detail says why)')
+        # What stands in for the acceptances is what the slots recorded: no slot is compared when the T0 snapshot cannot be used,
+        # and none either when no slot's text could be read (#8817).
+        compared = any(seen['since_t0'] != queue_text.NOT_VERIFIED for seen in slots.values())
+        ignored += ' and the queue text is compared with T0 only' if compared else ', and no slot is compared (each slot\'s detail says why)'
         env.print(f'note: {ignored}')
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:

@@ -387,21 +387,20 @@ def _end_check(slot, entry, accepted, gh, taken, ignored):
 
 
 def finish_checks(trial, gh, accepted, starts, ignored=None):
-    """(checks, {slot: record}, compared) for the queue text as `finish` reads it, to be compared with T0 and with what the
-    run's gate let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not
-    judged here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read
-    after a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
-    `compared` is True when the T0 snapshot was usable as the baseline (each slot then compared, or unverified on its own
-    read) and False when it was not, or there are no slots: nothing was compared. `ignored`, when given, is the sentence saying
-    why `accepted` was not passed on, and changes what a changed slot's detail says."""
+    """(checks, {slot: record}) for the queue text as `finish` reads it, to be compared with T0 and with what the run's gate
+    let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not judged
+    here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read after
+    a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
+    `ignored`, when given, is the sentence saying why `accepted` was not passed on, and changes what a changed slot's detail
+    says."""
     if not trial.slots:
-        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}, False
+        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
     data, taken, problem = _baseline(trial, starts, after_run=True)
     if problem:
-        return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}, False
+        return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}
     accepted = accepted if isinstance(accepted, dict) else {}
     results, slots = [], {}
     for slot in trial.slots:
         check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken, ignored)
         results.append(check)
-    return results, slots, True
+    return results, slots

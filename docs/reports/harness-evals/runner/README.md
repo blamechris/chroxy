@@ -114,7 +114,7 @@ unless a run has started. Once T0 is recorded and any run's state in `paths.stat
 (finished or not), or a state there cannot be read or `paths.state_dir` is not set, `cut` refuses to take a
 missing snapshot (exit 2, nothing cut): text read after a run began may have moved since T0, and every later
 gate would pass it. Put the committed file back and cut again, after repairing or moving a state that is wrong,
-such as a dry run's start. The cut that records T0 is exempt: no run is meant to start before its base is cut
+such as a dry run's start, or setting `paths.state_dir` in `trial.json` if it is not set. The cut that records T0 is exempt: no run is meant to start before its base is cut
 from T0, so a start in the state folder then is a dry run's (PLAN step 5) and does not block it. A start
 recorded before the snapshot was read fails every later `gate` (below), so a dry run's state left in
 `paths.state_dir` must be moved before PLAN step 7. A later `cut` that does take a missing snapshot prints a
@@ -168,12 +168,12 @@ it), the two times compared as moments, not as strings: a gate half a second aft
 later. A gate recorded later, say one that accepted an edit made after the send, cannot say what the run
 started on. With no start or no gate recorded there is nothing to place and the acceptances count. If the
 gate's time or the first send's is missing or cannot be read, the gate cannot be placed before the send, which
-is as good as later. In either case its acceptances are not used. The slots are then compared with T0 only if the
-T0 snapshot can be used as the baseline. When it cannot (a first send that cannot be read, since the snapshot
-cannot be placed before it, see `gate` above; or a snapshot that is missing, unreadable, taken at another T0 or
-read after a recorded first send), no slot is compared and every one is `unverified`.
-`finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the send's, or the
-unreadable value quoted) and ends "the queue text is compared with T0 only" or "no slot is compared"; a `note:`
+is as good as later. In either case its acceptances are not used, and the slots are compared with T0 as far as
+they can be: not at all when the T0 snapshot cannot be used as the baseline (below; a first send that cannot be
+read is one such case, since the snapshot cannot be placed before it, see `gate` above), and not a slot whose
+text cannot be read. `finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the
+send's, or the unreadable value quoted) and ends "the queue text is compared with T0 only" when at least one slot
+was compared, or "no slot is compared" when every slot is `unverified`; a `note:`
 line prints the same, each changed slot's `detail` says its acceptances were not used (not that the gate passed
 the T0 text), and `collect` prints the sentence as its first note.
 `finish.queue_text` holds `{"at": …, "acceptances_ignored": … (only when they were not used), "slots": {"Q03":
