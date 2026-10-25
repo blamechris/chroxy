@@ -151,7 +151,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     const connect = flow('setup/ensure-connect-screen.yaml')
     const session = flow('setup/ensure-session-screen.yaml')
     const encrypted = flow('key-exchange.yaml')
-    assert.equal(connect[0], 'launchApp')
+    assert.equal(connect[0], 'stopApp')
     assert.equal(connect[1].openLink, session.find(step => step.openLink).openLink)
     assert.equal(connect[1].openLink, encrypted.find(step => step.openLink).openLink)
     assert.equal(session[0].launchApp.clearState, true)

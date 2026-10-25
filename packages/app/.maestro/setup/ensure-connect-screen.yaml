@@ -11,10 +11,11 @@ name: Ensure ConnectScreen
 # The app now requires a dev build (expo-speech-recognition + expo-secure-store
 # native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
 # rather than Expo Go. On a fresh hosted runner there is no remembered Metro
-# server, so launchApp alone leaves the development-build picker on screen.
-# Use the same Metro deep link as ensure-session-screen.yaml.
+# server. Stop the app without clearing saved connection state, then open the
+# Metro launcher URL once. launchApp restarts the dev client first, and a
+# following openLink can trigger a second bundle load after readiness passes.
 
-- launchApp
+- stopApp
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
 - runFlow: await-dev-client.yaml
 
