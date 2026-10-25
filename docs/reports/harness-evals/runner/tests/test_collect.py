@@ -822,8 +822,8 @@ class QueueTextNotes(Scenario):
         rows = {slot: dict(row, issue=9001) for slot, row in slots.items()}
         return dict(self.FINISH, queue_text={'at': '2026-11-02T11:40:00Z', 'slots': rows})
 
-    def row(self, since_gate, detail='the detail finish recorded'):
-        return {'since_t0': since_gate, 'since_gate': since_gate, 'detail': detail}
+    def row(self, since_gate, detail='the detail finish recorded', since_t0=None):
+        return {'since_t0': since_t0 or since_gate, 'since_gate': since_gate, 'detail': detail}
 
     def test_a_finish_that_did_not_read_the_text_again_is_a_note(self):
         self.write_state({'start': {'sent_at': START}, 'finish': self.FINISH})
@@ -914,6 +914,89 @@ class QueueTextNotes(Scenario):
                 self.write_state({'start': {'sent_at': START}, 'finish': finish})
                 self.collect()
                 self.assertNotIn('acceptances ignored', self.output)
+
+    def replaced(self, latest, *earlier):
+        """A finish re-run over `earlier` records (newest first), as `finish` keeps them under `finish.replaces`."""
+        record = latest
+        for older in earlier:
+            record['replaces'] = older
+            record = older
+        return latest
+
+    def test_a_slot_an_earlier_finish_found_changed_is_named_oldest_first_and_an_earlier_unverified_is_not(self):
+        oldest = dict(self.seen(Q01=self.row('changed', 'comments (1 -> 2)'), Q02=self.row('unverified', 'rate limited')))
+        oldest['queue_text']['at'] = '2026-11-02T11:40:00Z'
+        middle = dict(self.seen(Q01=self.row('unchanged'), Q02=self.row('changed', 'body')))
+        middle['queue_text']['at'] = '2026-11-02T11:50:00Z'
+        latest = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+        self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(latest, middle, oldest)})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        first = ("  note: queue text Q01: an earlier finish (queue text read at 2026-11-02T11:40:00Z) found it changed since this run's gate "
+                 "(comments (1 -> 2))")
+        second = "  note: queue text Q02: an earlier finish (queue text read at 2026-11-02T11:50:00Z) found it changed since this run's gate (body)"
+        self.assertIn(first, self.output)
+        self.assertIn(second, self.output)
+        self.assertLess(self.output.index(first), self.output.index(second), 'oldest first')
+        self.assertNotIn('rate limited', self.output)
+        self.assertNotIn('unverified', self.output)
+
+    def test_an_earlier_change_is_named_after_the_latest_finish_s_notes_and_even_when_the_latest_did_not_read(self):
+        earlier = self.seen(Q02=self.row('changed', 'body'), Q01=self.row('unchanged'))
+        latest = self.seen(Q01=self.row('unverified', 'boom'), Q02=self.row('changed', 'body'))
+        self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(latest, earlier)})
+        self.collect()
+        self.assertLess(self.output.index("queue text Q02: changed since this run's gate"), self.output.index('queue text Q02: an earlier finish'))
+        self.assertLess(self.output.index('queue text Q01: unverified'), self.output.index('queue text Q02: an earlier finish'))
+        self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(dict(self.FINISH), self.seen(Q02=self.row('changed', 'body')))})
+        self.collect()
+        self.assertIn('finish did not re-read the queue text', self.output)
+        self.assertIn('queue text Q02: an earlier finish', self.output)
+
+    def test_an_earlier_finish_s_accepted_change_is_not_named(self):
+        # `gate --accept-changed` then `finish`: changed since T0, unchanged since the text the gate accepted. Only `since_gate` counts.
+        accepted = dict(self.row('unchanged', 'changed since T0 (body), the text this run\'s gate accepted: a typo fix', since_t0='changed'),
+                        accepted='a typo fix')
+        earlier = self.seen(Q01=self.row('unchanged'), Q02=accepted)
+        latest = self.seen(Q01=self.row('unchanged'), Q02=dict(accepted))
+        self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(latest, earlier)})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertNotIn('queue text', self.output)
+
+    def test_a_malformed_record_in_the_chain_hides_no_other_before_or_after_it(self):
+        note = ("  note: queue text Q01: an earlier finish (queue text read at 2026-11-02T11:40:00Z) found it changed since this run's gate "
+                "(title)")
+        for older_is_malformed in (False, True):
+            with self.subTest(older_is_malformed=older_is_malformed):
+                valid = self.seen(Q01=self.row('changed', 'title'), Q02=self.row('unchanged'))
+                malformed = {'ended_at': 'x', 'queue_text': 'x'}
+                latest = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+                chain = (valid, malformed) if older_is_malformed else (malformed, valid)
+                self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(latest, *chain)})
+                self.collect()
+                self.assertIn(note, self.output)
+
+    def test_an_earlier_read_time_that_was_not_recorded_says_so(self):
+        for at in (None, '', 5):
+            with self.subTest(at=at):
+                earlier = self.seen(Q01=self.row('unchanged'), Q02=self.row('changed', 'body'))
+                earlier['queue_text']['at'] = at
+                latest = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+                self.write_state({'start': {'sent_at': START}, 'finish': self.replaced(latest, earlier)})
+                self.collect()
+                self.assertIn('queue text Q02: an earlier finish (queue text read at an unrecorded time) found it changed', self.output)
+
+    def test_an_earlier_record_that_is_not_one_names_nothing(self):
+        for earlier in ('x', [], {}, {'queue_text': 'x'}, {'queue_text': {'slots': []}}, {'queue_text': {'slots': {'Q01': 'changed'}}},
+                        {'queue_text': {'slots': {'Q09': self.row('changed')}}}):
+            with self.subTest(earlier=earlier):
+                latest = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+                latest['replaces'] = earlier
+                self.write_state({'start': {'sent_at': START}, 'finish': latest})
+                self.collect()
+                self.assertEqual(self.code, 0, self.output)
+                self.assertNotIn('queue text', self.output)
 
     def test_a_row_that_is_not_a_record_is_not_unchanged(self):
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})

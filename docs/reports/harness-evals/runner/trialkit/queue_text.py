@@ -184,13 +184,19 @@ def _slot_check(slot, entry, gh, taken, accept_changed, accepted):
                                f'Restore it, or accept it with --accept-changed {slot.slot}=REASON')
 
 
-def _baseline(trial):
+def _baseline(trial, after_run=False):
     """The T0 snapshot a comparison starts from: (data, taken, None), or (None, None, the Check saying why there is none).
-    `taken` is when the text was read. Used by `gate` (where a bad baseline is a failure) and `finish` (where it is not)."""
+    `taken` is when the text was read. Used by `gate` (where a bad baseline is a failure) and `finish` (where it is not).
+    `after_run` is set by `finish`: a missing file must then not be written again by `cut`, whose snapshot would be the
+    text as it is after the run, so the end text would be compared with itself."""
     name = 'queue text at T0'
     if not trial.t0:
         return None, None, checks.unverified(name, 'no T0 recorded, so the queue text at T0 cannot be compared')
     data, status = load(trial)
+    if status == 'missing' and after_run:
+        return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir}: put the committed file back and run `finish` again '
+                                               f'(runner README, "When `finish` recorded `unverified` slots"). Do not run `cut` to write it '
+                                               f'now: a snapshot taken after the run compares the end text with itself')
     if status == 'missing':
         return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir}: `cut` writes it with T0 and the supervisor commits it '
                                                f'with trial.json\'s t0. Pull that commit, or, if T0 was recorded without it, run `cut` again '
@@ -283,7 +289,7 @@ def finish_checks(trial, gh, accepted, ignored=None):
     sentence saying why `accepted` was not passed on, and changes what a changed slot's detail says."""
     if not trial.slots:
         return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
-    data, taken, problem = _baseline(trial)
+    data, taken, problem = _baseline(trial, after_run=True)
     if problem:
         return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}
     accepted = accepted if isinstance(accepted, dict) else {}

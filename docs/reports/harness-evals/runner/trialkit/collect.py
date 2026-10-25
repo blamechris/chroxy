@@ -637,14 +637,14 @@ def update_runs_json(trial, run, data, st, start_text, t0, notes=None):
 def _queue_text_notes(trial, st):
     """Notes on whether the queue's text moved during the run, from what `finish` recorded (`finish.queue_text`), for each slot of
     the trial in order. A finish that did not re-read it, acceptances it did not use, a slot it recorded nothing for, a slot it
-    recorded that `trial.json` no longer has, and a slot that is changed or could not be read since the run's gate are named;
-    none when every slot is unchanged, and none before a finish."""
+    recorded that `trial.json` no longer has, a slot that is changed or could not be read since the run's gate, and a slot an
+    earlier finish found changed are named; none when every slot is unchanged, and none before a finish."""
     finish = st.get('finish')
     if not isinstance(finish, dict):
         return []
     seen = finish.get('queue_text')
     if not (isinstance(seen, dict) and isinstance(seen.get('slots'), dict)):
-        return ['finish did not re-read the queue text, so an edit during the run cannot be ruled out']
+        return ['finish did not re-read the queue text, so an edit during the run cannot be ruled out'] + _earlier_changes(trial, finish)
     notes = []
     if isinstance(seen.get('acceptances_ignored'), str) and seen['acceptances_ignored']:
         notes.append(f'queue text: acceptances ignored at finish ({seen["acceptances_ignored"]})')
@@ -659,6 +659,29 @@ def _queue_text_notes(trial, st):
                          f'({row.get("detail", "no detail recorded")})')
     for slot in sorted(set(seen['slots']) - {slot.slot for slot in trial.slots}):
         notes.append(f'queue text {slot}: recorded at finish, but trial.json no longer has the slot')
+    return notes + _earlier_changes(trial, finish)
+
+
+def _earlier_changes(trial, finish):
+    """A note for each slot an earlier `finish` found changed since the run's gate, oldest first. A re-run of `finish` keeps the
+    record it replaces under `finish.replaces` (#8802), and the re-read may find the edit reverted: what the earlier one saw must
+    not drop out of the evidence. An earlier `unverified` is no evidence either way and is not named."""
+    earlier, record = [], finish.get('replaces')
+    while isinstance(record, dict):
+        earlier.append(record)
+        record = record.get('replaces')
+    notes = []
+    for record in reversed(earlier):
+        seen = record.get('queue_text')
+        rows = seen.get('slots') if isinstance(seen, dict) else None
+        if not isinstance(rows, dict):
+            continue
+        at = seen['at'] if isinstance(seen.get('at'), str) and seen['at'] else 'an unrecorded time'
+        for slot in trial.slots:
+            row = rows.get(slot.slot)
+            if isinstance(row, dict) and row.get('since_gate') == queue_text.CHANGED:
+                notes.append(f'queue text {slot.slot}: an earlier finish (queue text read at {at}) found it changed since this '
+                             f'run\'s gate ({row.get("detail", "no detail recorded")})')
     return notes
 
 
