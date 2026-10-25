@@ -16,50 +16,7 @@ name: Ensure ConnectScreen
 
 - launchApp
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Wait for the app (or the Expo dev-client menu) to appear. Could show any of:
-# - "Welcome to Chroxy" (first-run onboarding carousel)
-# - "Connect to Chroxy" (ConnectScreen, possibly behind the dev menu)
-# - "Session" (auto-connected from saved state)
-# - "Connecting" (auto-connect spinner)
-# - "Reload" (the Expo dev-client menu card)
-# - "Continue" (the dev-client intro sheet)
-- extendedWaitUntil:
-    visible:
-      text: ".*(Welcome to Chroxy|Session|Connect to Chroxy|Connecting|Reload|Continue).*"
-    timeout: 20000
-
-# Dismiss the dev-client intro sheet when it appears on the first launch.
-- runFlow:
-    when:
-      visible:
-        text: "^Continue$"
-    commands:
-      - tapOn:
-          text: "^Continue$"
-      - waitForAnimationToEnd
-
-# Dismiss the Expo dev-client menu ONLY if it actually appeared (its card shows
-# "Reload"). A blind point-tap when no menu is present lands on the app
-# underneath and can navigate into the QR scanner — so gate it on "Reload".
-- runFlow:
-    when:
-      visible:
-        text: "^Reload$"
-    commands:
-      - tapOn:
-          point: "93%,43%"
-      - waitForAnimationToEnd
-
-# Skip the first-run onboarding carousel if present (Welcome to Chroxy → Skip).
-- runFlow:
-    when:
-      visible:
-        text: "^Skip$"
-    commands:
-      - tapOn:
-          text: "^Skip$"
-      - waitForAnimationToEnd
+- runFlow: await-dev-client.yaml
 
 # If on SessionScreen (auto-connected from saved state — possibly wedged on
 # the reconnect banner, or live-connected to the mock server), tap the

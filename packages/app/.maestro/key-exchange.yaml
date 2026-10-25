@@ -72,26 +72,11 @@ name: E2E key exchange eager handshake (#6019)
 - launchApp:
     clearState: true
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip the onboarding carousel post-clearState.
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands — extended timeout
-# because Metro may need to bundle on first launch.
+- runFlow: setup/await-dev-client.yaml
 - extendedWaitUntil:
     visible:
       text: "Connect to Chroxy|Chat"
-    timeout: 30000
+    timeout: 15000
 
 # The app auto-connects to the previously-used server here: on iOS
 # `clearState: true` wipes the app data container but NOT SecureStore

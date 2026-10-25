@@ -24,7 +24,8 @@ function fixture() {
   // more output only after head has exited. The real hosted run died this way.
   command('xcodebuild', 'set -e; printf "Xcode %s\\n" "${XCODE_VERSION:-16.4}"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
   command('osascript', 'echo "${SIMULATOR_ID:-com.apple.iphonesimulator}"')
-  command('xcrun', 'if [ "$*" = "simctl list devices available -j" ]; then cat "$FAKE_DEVICES"; else echo "$*" >> "$FAKE_TRACE"; fi')
+  command('xcrun', 'if [ "$*" = "simctl list devices available -j" ]; then cat "$FAKE_DEVICES"; else echo "$*" >> "$FAKE_TRACE"; if [ "$1" = simctl ] && [ "$2" = shutdown ]; then sleep "${FAKE_SHUTDOWN_DELAY:-0}"; exit "${FAKE_SHUTDOWN_EXIT:-0}"; fi; if [ "$1" = simctl ] && [ "$2" = bootstatus ]; then sleep "${FAKE_BOOTSTATUS_DELAY:-0}"; exit "${FAKE_BOOTSTATUS_EXIT:-0}"; fi; fi')
+  command('pkill', 'exit 0') // Keep the reset fixture from touching host Maestro processes.
   const devicesFile = join(dir, 'devices.json')
   writeFileSync(devicesFile, JSON.stringify({
     devices: { 'com.apple.CoreSimulator.SimRuntime.iOS-18-5': [
@@ -41,20 +42,65 @@ function fixture() {
   return { dir, developerDir, devicesFile, envFile, traceFile, env, run }
 }
 
-function runnerFixture() {
+function runnerFixture({ reset = false } = {}) {
   const f = fixture()
   const javaHome = join(f.dir, 'jdk')
   const trace = join(f.dir, 'maestro-trace')
   mkdirSync(join(javaHome, 'bin'), { recursive: true })
   writeFileSync(join(javaHome, 'bin/java'), '#!/bin/bash\nexit 0\n', { mode: 0o755 })
   writeFileSync(join(f.dir, 'bin/maestro'),
-    '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_MAESTRO_TRACE"\nexit "${FAKE_MAESTRO_EXIT:-0}"\n',
+    '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_MAESTRO_TRACE"\nif [ "${FAKE_MAESTRO_FIRST_FAIL:-0}" = 1 ] && [ "$(wc -l < "$FAKE_MAESTRO_TRACE")" -eq 1 ]; then exit 1; fi\nexit "${FAKE_MAESTRO_EXIT:-0}"\n',
     { mode: 0o755 })
-  const env = { ...f.env, JAVA_HOME: javaHome, FAKE_MAESTRO_TRACE: trace }
+  const env = { ...f.env, JAVA_HOME: javaHome, FAKE_MAESTRO_TRACE: trace,
+    SIM_RESET_PHASE_TIMEOUT: '1', SIM_BOOTSTATUS_TIMEOUT: '1' }
   const run = (args, overrides = {}) => spawnSync('bash', [sequentialRunner,
-    '--device', device, '--no-mock', '--no-reset', '--retries', '0', '--timeout', '5', ...args],
-  { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15000 })
+    '--device', device, '--no-mock', ...(reset ? [] : ['--no-reset']), '--retries', '0', '--timeout', '2', ...args],
+  { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 })
   return { ...f, trace, run }
+}
+
+function flow(path) {
+  return yaml.loadAll(readFileSync(join(root, 'packages/app/.maestro', path), 'utf8'))[1]
+}
+
+// Exercise the actual shared command order against the native states captured
+// by the failed run: late Expo sheet, slow bundle download, and no readiness.
+function simulateDevClient(commands, events, destination) {
+  const labels = {
+    loading: ['Loading from Metro...'], downloading: ['Downloading 100%...'],
+    intro: ['Continue'], menu: ['Reload'], onboarding: ['Welcome to Chroxy', 'Skip'],
+    connect: ['Connect to Chroxy'], chat: ['Chat'], connecting: ['Connecting', 'Cancel']
+  }
+  let state = events[0].state
+  let time = events[0].at
+  let next = 1
+  const matches = selector => {
+    const text = typeof selector === 'string' ? selector : selector.text
+    return labels[state].some(label => new RegExp(text).test(label))
+  }
+  const execute = steps => {
+    for (const step of steps) {
+      if (step.extendedWaitUntil) {
+        const { visible, timeout } = step.extendedWaitUntil
+        const deadline = time + timeout
+        while (!matches(visible)) {
+          if (next >= events.length || events[next].at > deadline) throw new Error('readiness timed out')
+          time = events[next].at
+          state = events[next++].state
+        }
+      } else if (step.runFlow) {
+        if (!step.runFlow.when || matches(step.runFlow.when.visible)) execute(step.runFlow.commands)
+      } else if (step.tapOn) {
+        if (step.tapOn.text === '^Continue$' && state === 'intro') state = 'menu'
+        else if (step.tapOn.text === '^Skip$' && state === 'onboarding') state = destination
+        else if (step.tapOn.text === '^Cancel$' && state === 'connecting') state = 'connect'
+        else if (step.tapOn.point === '93%,43%' && state === 'menu') state = destination
+        else throw new Error(`tap would miss or hit the app: ${JSON.stringify(step.tapOn)}`)
+      }
+    }
+  }
+  execute(commands)
+  return state
 }
 
 describe('Maestro nightly hosted runner (#7113)', () => {
@@ -102,12 +148,40 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   })
 
   it('opens the same Metro dev-client link in connect and session setup', () => {
-    const flow = name => yaml.loadAll(readFileSync(join(root, `packages/app/.maestro/setup/${name}.yaml`), 'utf8'))[1]
-    const connect = flow('ensure-connect-screen')
-    const session = flow('ensure-session-screen')
+    const connect = flow('setup/ensure-connect-screen.yaml')
+    const session = flow('setup/ensure-session-screen.yaml')
+    const encrypted = flow('key-exchange.yaml')
     assert.equal(connect[0], 'launchApp')
     assert.equal(connect[1].openLink, session.find(step => step.openLink).openLink)
+    assert.equal(connect[1].openLink, encrypted.find(step => step.openLink).openLink)
+    assert.equal(session[0].launchApp.clearState, true)
+    assert.equal(encrypted[0].launchApp.clearState, true)
+    assert.equal(connect[2].runFlow, 'await-dev-client.yaml')
+    assert.equal(session[2].runFlow, 'await-dev-client.yaml')
+    assert.equal(encrypted[2].runFlow, 'setup/await-dev-client.yaml')
+    assert.equal(session[3].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
+    assert.equal(encrypted[3].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
     assert.equal(connect.at(-1).extendedWaitUntil.visible, 'Connect to Chroxy')
+  })
+
+  it('waits for late native readiness before dismissing the dev menu', () => {
+    const commands = flow('setup/await-dev-client.yaml')
+    const lateIntro = [{ at: 0, state: 'loading' }, { at: 40, state: 'intro' }]
+    const slowDownload = [{ at: 0, state: 'downloading' }, { at: 38, state: 'connect' }]
+    assert.equal(simulateDevClient(commands, lateIntro, 'chat'), 'chat')
+    assert.equal(simulateDevClient(commands, slowDownload, 'connect'), 'connect')
+    assert.equal(simulateDevClient(commands, [{ at: 0, state: 'onboarding' }], 'connect'), 'connect')
+    assert.equal(simulateDevClient([
+      ...commands, ...flow('setup/ensure-connect-screen.yaml').slice(3)
+    ], [{ at: 0, state: 'connecting' }], 'connect'), 'connect')
+    assert.throws(() => simulateDevClient(commands, [{ at: 0, state: 'loading' }], 'chat'), /readiness timed out/)
+    assert.throws(() => simulateDevClient(commands.slice(1), lateIntro, 'chat'), /readiness timed out/)
+    assert.throws(() => simulateDevClient([
+      { ...commands[0], extendedWaitUntil: { ...commands[0].extendedWaitUntil, timeout: 20 } },
+      ...commands.slice(1)
+    ], slowDownload, 'connect'), /readiness timed out/)
+    assert.throws(() => simulateDevClient(commands.filter(step =>
+      step.runFlow?.when?.visible?.text !== '^Continue$'), lateIntro, 'chat'), /readiness timed out/)
   })
 
   shellIt('runs only an inventoried diagnostic flow and rejects path aliases', () => {
@@ -161,6 +235,83 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       assert.ok(result.stdout.includes('Stopping after 3 failed flows; remaining inventory not run.'))
       assert.ok(result.stdout.includes('3 attempted of'))
       assert.ok(result.stdout.includes('not run)'))
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('resets only when another attempt or flow will run', () => {
+    const f = runnerFixture({ reset: true })
+    try {
+      const finalFailure = f.run(['--flow', 'connect-screen.yaml', '--max-failures', '1'], {
+        FAKE_MAESTRO_EXIT: '1'
+      })
+      assert.equal(finalFailure.status, 1, finalFailure.stderr)
+      assert.equal(existsSync(f.traceFile), false, 'final failure must not reset a simulator no flow will use')
+      rmSync(f.trace)
+
+      const recovered = f.run(['--flow', 'connect-screen.yaml', '--retries', '1'], {
+        FAKE_MAESTRO_FIRST_FAIL: '1'
+      })
+      assert.equal(recovered.status, 0, recovered.stderr)
+      assert.ok(recovered.stdout.includes('reset bootstatus finished'))
+      assert.equal(readFileSync(f.traceFile, 'utf8'), [
+        `simctl shutdown ${device}`, `simctl boot ${device}`, `simctl bootstatus ${device} -b`, ''
+      ].join('\n'))
+      assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 2)
+      rmSync(f.trace)
+      rmSync(f.traceFile)
+
+      const nextFlow = f.run(['--max-failures', '2'], { FAKE_MAESTRO_EXIT: '1' })
+      assert.equal(nextFlow.status, 1, nextFlow.stderr)
+      assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 2)
+      assert.equal(readFileSync(f.traceFile, 'utf8').trim().split('\n').length, 3,
+        'reset must run between failed flows, but not after the stop threshold')
+      rmSync(f.trace)
+      rmSync(f.traceFile)
+
+      const alreadyShutdown = f.run(['--flow', 'connect-screen.yaml', '--retries', '1'], {
+        FAKE_MAESTRO_FIRST_FAIL: '1', FAKE_SHUTDOWN_EXIT: '1'
+      })
+      assert.equal(alreadyShutdown.status, 0, alreadyShutdown.stderr)
+      assert.ok(alreadyShutdown.stderr.includes('boot and bootstatus will verify recovery'))
+      assert.equal(readFileSync(f.traceFile, 'utf8').trim().split('\n').length, 3)
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('reports a stalled or unhealthy simulator reset and stops before retry', () => {
+    const f = runnerFixture({ reset: true })
+    try {
+      const timedOut = f.run(['--flow', 'connect-screen.yaml', '--retries', '1'], {
+        FAKE_MAESTRO_FIRST_FAIL: '1', FAKE_BOOTSTATUS_DELAY: '3'
+      })
+      assert.equal(timedOut.status, 1, timedOut.stderr)
+      assert.ok(timedOut.stdout.includes('reset bootstatus started (limit 1s)'))
+      assert.ok(timedOut.stderr.includes('reset bootstatus failed (exit 124)'))
+      assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 1)
+      rmSync(f.trace)
+      rmSync(f.traceFile)
+
+      const shutdownTimeout = f.run(['--flow', 'connect-screen.yaml', '--retries', '1'], {
+        FAKE_MAESTRO_FIRST_FAIL: '1', FAKE_SHUTDOWN_DELAY: '3'
+      })
+      assert.equal(shutdownTimeout.status, 1, shutdownTimeout.stderr)
+      assert.ok(shutdownTimeout.stderr.includes('reset shutdown failed (exit 124)'))
+      assert.equal(readFileSync(f.traceFile, 'utf8').trim().split('\n').length, 1,
+        'a timed-out shutdown must not try to boot')
+      rmSync(f.trace)
+      rmSync(f.traceFile)
+
+      const unhealthy = f.run(['--flow', 'connect-screen.yaml', '--retries', '1'], {
+        FAKE_MAESTRO_FIRST_FAIL: '1', FAKE_BOOTSTATUS_EXIT: '5'
+      })
+      assert.equal(unhealthy.status, 1, unhealthy.stderr)
+      assert.ok(unhealthy.stderr.includes('reset bootstatus failed (exit 5)'))
+      assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 1)
+      rmSync(f.trace)
+
+      const unbounded = f.run(['--flow', 'connect-screen.yaml'], { SIM_BOOTSTATUS_TIMEOUT: '9999' })
+      assert.equal(unbounded.status, 2)
+      assert.ok(unbounded.stderr.includes('reset timeouts must be 1-300 seconds'))
+      assert.equal(existsSync(f.trace), false, 'bad reset ceiling must not start Maestro')
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 

@@ -1,0 +1,50 @@
+appId: com.blamechris.chroxy
+name: Wait for Chroxy dev client
+---
+
+# The native client can still be downloading its bundle after Metro's HTTP
+# warmup. Wait for an actual app or dev-menu element before trying to dismiss
+# anything; optional taps made while "Loading from Metro" is visible miss the
+# intro sheet that appears later.
+- extendedWaitUntil:
+    visible:
+      text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible:
+        text: "^Continue$"
+    commands:
+      - tapOn:
+          text: "^Continue$"
+      - waitForAnimationToEnd
+
+# The main dev menu can appear after the intro sheet. Its Reload action is a
+# reliable signal that the menu is open; the close point must not be tapped
+# over the app itself.
+- runFlow:
+    when:
+      visible:
+        text: "^Reload$"
+    commands:
+      - tapOn:
+          point: "93%,43%"
+      - waitForAnimationToEnd
+
+- runFlow:
+    when:
+      visible:
+        text: "^Skip$"
+    commands:
+      - tapOn:
+          text: "^Skip$"
+      - waitForAnimationToEnd
+
+# A visible app control proves the native sheet no longer masks the app.
+# Connecting/Cancel is a valid transient state for ensure-connect-screen's
+# recovery branch; callers that need a session still wait for Connect or Chat.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat|Connecting|Cancel"
+    timeout: 15000

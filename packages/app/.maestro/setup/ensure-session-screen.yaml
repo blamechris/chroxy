@@ -24,30 +24,11 @@ name: Ensure SessionScreen (connected to mock server)
 - launchApp:
     clearState: true
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet that shows on first launch of a dev build.
-# Two forms: (a) intro sheet with a "Continue" button, (b) main dev menu
-# (Reload/Go home/Toggle...) with an X close icon. Tapping the top of the
-# screen (outside the sheet) dismisses either by iOS convention.
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip the onboarding carousel (post-clearState the `onboarding_complete`
-# SecureStore flag is gone, so it always shows).
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands — extended timeout because
-# Metro may need to bundle on first launch.
+- runFlow: await-dev-client.yaml
 - extendedWaitUntil:
     visible:
       text: "Connect to Chroxy|Chat"
-    timeout: 30000
+    timeout: 15000
 
 # If we auto-connected to a stale saved server (SessionScreen with the
 # reconnect banner showing "Could not reach server"), bail out via the

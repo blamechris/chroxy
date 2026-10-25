@@ -38,6 +38,8 @@
 #   MAX_RETRIES      per-flow retry count on failure (default: 1)
 #   FLOW_TIMEOUT     per-flow timeout in seconds (default: 300)
 #   MAX_FAILURES     stop after N failed flows (default: 0, run every flow)
+#   SIM_RESET_PHASE_TIMEOUT  shutdown/boot phase ceiling in seconds (default: 60)
+#   SIM_BOOTSTATUS_TIMEOUT   bootstatus ceiling in seconds (default: 120)
 #   MAESTRO_ARTIFACT_DIR  optional current-run diagnostics under RUNNER_TEMP
 #   MOCK_PORT        mock-server port (default: 9876)
 #   JAVA_HOME        validated; falls back to the Homebrew openjdk@21 symlink
@@ -56,6 +58,8 @@ MAX_FAILURES="${MAX_FAILURES:-0}"
 ONLY_FLOW=""
 RESET_ON_FAIL=1
 MAESTRO_ARTIFACT_DIR="${MAESTRO_ARTIFACT_DIR:-}"
+SIM_RESET_PHASE_TIMEOUT="${SIM_RESET_PHASE_TIMEOUT:-60}"
+SIM_BOOTSTATUS_TIMEOUT="${SIM_BOOTSTATUS_TIMEOUT:-120}"
 
 need_val() { [ $# -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
@@ -75,6 +79,13 @@ done
 case "$MAX_RETRIES" in (*[!0-9]*|'') echo "ERROR: --retries must be a non-negative integer" >&2; exit 2 ;; esac
 case "$FLOW_TIMEOUT" in (*[!0-9]*|'') echo "ERROR: --timeout must be a positive integer (seconds)" >&2; exit 2 ;; esac
 case "$MAX_FAILURES" in (*[!0-9]*|'') echo "ERROR: --max-failures must be a non-negative integer" >&2; exit 2 ;; esac
+for reset_timeout in "$SIM_RESET_PHASE_TIMEOUT" "$SIM_BOOTSTATUS_TIMEOUT"; do
+  case "$reset_timeout" in (*[!0-9]*|'') echo "ERROR: simulator reset timeouts must be 1-300 seconds" >&2; exit 2 ;; esac
+  if [ "$reset_timeout" -lt 1 ] || [ "$reset_timeout" -gt 300 ]; then
+    echo "ERROR: simulator reset timeouts must be 1-300 seconds" >&2
+    exit 2
+  fi
+done
 if [ -n "$MAESTRO_ARTIFACT_DIR" ]; then
   if [ -z "${RUNNER_TEMP:-}" ] || [[ "$RUNNER_TEMP" != /* ]] || \
     [ "$MAESTRO_ARTIFACT_DIR" != "${RUNNER_TEMP%/}/maestro-diagnostics" ]; then
@@ -196,10 +207,30 @@ reset_simulator() {
   [ "$RESET_ON_FAIL" -eq 1 ] || return 0
   echo "[runner] resetting simulator $DEVICE (clearing wedged a11y state)..."
   kill_maestro_children
-  xcrun simctl shutdown "$DEVICE" 2>/dev/null || true
-  xcrun simctl boot "$DEVICE" 2>/dev/null || true
-  # bootstatus -b blocks until the device is fully booted (best-effort).
-  xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
+  local shutdown_rc=0
+  reset_phase 'shutdown' "$SIM_RESET_PHASE_TIMEOUT" xcrun simctl shutdown "$DEVICE" || shutdown_rc=$?
+  # A simulator already in Shutdown makes simctl shutdown return nonzero. The
+  # following boot + bootstatus still prove recovery; a timed-out shutdown does
+  # not, so stop on its deadline.
+  [ "$shutdown_rc" -ne 124 ] || return 1
+  reset_phase 'boot' "$SIM_RESET_PHASE_TIMEOUT" xcrun simctl boot "$DEVICE" || return 1
+  reset_phase 'bootstatus' "$SIM_BOOTSTATUS_TIMEOUT" xcrun simctl bootstatus "$DEVICE" -b || return 1
+}
+
+reset_phase() {
+  local name="$1" secs="$2"; shift 2
+  local started=$SECONDS rc=0
+  echo "[runner] reset $name started (limit ${secs}s)"
+  run_with_timeout "$secs" "$@" || rc=$?
+  echo "[runner] reset $name finished in $((SECONDS - started))s (exit $rc)"
+  if [ "$rc" -ne 0 ]; then
+    if [ "$name" = shutdown ] && [ "$rc" -ne 124 ]; then
+      echo "[runner] reset shutdown returned $rc; boot and bootstatus will verify recovery" >&2
+    else
+      echo "ERROR: simulator reset $name failed (exit $rc)" >&2
+    fi
+    return "$rc"
+  fi
 }
 
 echo "================================================================"
@@ -242,7 +273,9 @@ trap cleanup EXIT
 PASSED=()
 FAILED=()
 
+flow_index=0
 for flow in "${FLOWS[@]}"; do
+  flow_index=$((flow_index + 1))
   flow_path="$MAESTRO_DIR/$flow"
   if [ ! -f "$flow_path" ]; then
     echo "[runner] SKIP (missing file): $flow"
@@ -285,9 +318,14 @@ for flow in "${FLOWS[@]}"; do
       # Reap orphaned driver children now, in case reset is disabled.
       kill_maestro_children
     fi
-    # Failure (crash, timeout, or assertion): reset the sim before the next
-    # attempt / next flow so a wedged a11y state doesn't poison what follows.
-    reset_simulator
+    # Reset only if an attempt or later flow will actually run. A final failed
+    # flow (including the --max-failures boundary) needs no further simulator.
+    if [ "$attempt" -le "$MAX_RETRIES" ] || {
+      [ "$flow_index" -lt "${#FLOWS[@]}" ] &&
+      { [ "$MAX_FAILURES" -eq 0 ] || [ "$((${#FAILED[@]} + 1))" -lt "$MAX_FAILURES" ]; }
+    }; then
+      reset_simulator || exit 1
+    fi
   done
 
   if [ "$ok" -eq 1 ]; then
