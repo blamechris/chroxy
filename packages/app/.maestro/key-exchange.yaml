@@ -64,13 +64,15 @@ name: E2E key exchange eager handshake (#6019)
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
 
-# Use launchApp + openLink directly (not setup/ensure-session-screen.yaml)
+# Clear state and open the Metro link directly (not setup/ensure-session-screen.yaml)
 # because this flow must connect with a different token
 # (test-token-maestro-encrypted) than the standard fixture. We replicate
-# the same launch + connect sequence that ensure-session-screen.yaml uses,
+# the same reset + connect sequence that ensure-session-screen.yaml uses,
 # but with the encrypted token in the API-token field.
-- launchApp:
-    clearState: true
+- clearState
+- setPermissions:
+    permissions:
+      all: allow
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
 - runFlow: setup/await-dev-client.yaml
 - extendedWaitUntil:
@@ -79,7 +81,7 @@ name: E2E key exchange eager handshake (#6019)
     timeout: 15000
 
 # The app auto-connects to the previously-used server here: on iOS
-# `clearState: true` wipes the app data container but NOT SecureStore
+# `clearState` wipes the app data container but NOT SecureStore
 # (expo-secure-store → keychain, which survives a data-clear), so the cached
 # server URL + STANDARD token are restored and the app lands on Chat. We MUST
 # return to ConnectScreen to re-connect with the ENCRYPTED token — otherwise the

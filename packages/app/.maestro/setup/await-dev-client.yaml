@@ -9,7 +9,7 @@ name: Wait for Chroxy dev client
 - extendedWaitUntil:
     visible:
       text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
-    timeout: 60000
+    timeout: 90000
 
 - runFlow:
     when:

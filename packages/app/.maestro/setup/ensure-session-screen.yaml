@@ -17,12 +17,15 @@ name: Ensure SessionScreen (connected to mock server)
 
 # Launch via the dev client's deep link so we skip the "Development Build /
 # pick a dev server" screen and load the chroxy bundle directly.
-# `clearState: true` resets app data but NOT the SecureStore Keychain entry
-# that holds saved connections, so the app may auto-connect to a
-# previously-used server — the conditional below handles both fresh and
-# warm starts.
-- launchApp:
-    clearState: true
+# Clear app data without launching a first dev-client process before the Metro
+# link. The Keychain entry holding saved connections survives, so the app may
+# auto-connect to a previously-used server; the conditional below handles
+# fresh and warm starts. Standalone clearState unsets permissions, so restore
+# launchApp's default allow-all setting before the link opens the app.
+- clearState
+- setPermissions:
+    permissions:
+      all: allow
 - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
 - runFlow: await-dev-client.yaml
 - extendedWaitUntil:
