@@ -67,10 +67,11 @@ def tildify(value, home=None):
 def _recorded(trial, exclude=None, home=None):
     """(run id, state) for each run of the trial that has a state file in paths.state_dir. A folder or file that is not
     there holds no state; one that cannot be read (a folder without permission included), or is not a run's state, raises
-    OSError or ValueError."""
+    OSError or ValueError, as does no paths.state_dir to look in: that cannot say no run has a state, so it is not an empty
+    answer (#8815)."""
     root = trial.local_path('state_dir', home)
     if not root:
-        return
+        raise ValueError('paths.state_dir is not set in trial.json')
     for run in trial.runs:
         if run.id == exclude:
             continue
@@ -86,11 +87,12 @@ def _recorded(trial, exclude=None, home=None):
 
 
 def live_runs(trial, exclude=None, home=None):
-    """Run ids whose state records a start and no finish (a run in progress)."""
+    """Run ids whose state records a start and no finish (a run in progress). Raises as `_recorded` does, with no
+    paths.state_dir included: nothing to look in is not "no run is live"."""
     return [rid for rid, data in _recorded(trial, exclude, home) if data.get('start') and not data.get('finish')]
 
 
 def started(trial, home=None):
     """(run id, state) for each run whose state in paths.state_dir records a start, finished or not, in roster order. Raises as
-    `_recorded` does."""
+    `_recorded` does, with no paths.state_dir included."""
     return [(rid, data) for rid, data in _recorded(trial, home=home) if data.get('start')]

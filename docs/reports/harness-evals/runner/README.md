@@ -63,6 +63,11 @@ GitHub error). "Could not check" is never reported as a pass.
 | `disputes A B [--markdown]` | supervisor | the items where the two graders differ, for the owner's rulings |
 | `verify-key KEY.md` | grader, owner | digest and size against `<trial>/KEY-COMMITMENT.md` |
 
+`gate`'s and `preflight`'s `no other run live` check and `start`'s refusal to overlap another run read the other runs'
+states in `paths.state_dir`. With no `paths.state_dir` in `trial.json` (set it there), or a state in it that cannot be
+read (repair or move it), they cannot rule a live run out: the check is `UNVERIFIED` and `start` refuses (exit 1) and
+records no start.
+
 Meter keys for `start` and `finish`: `claude_5h_used`, `claude_weekly_used`,
 `claude_fable_used` (percent used) and `codex_weekly_left` (percent left), as the
 usage pages show them.
@@ -109,7 +114,7 @@ unless a run has started. Once T0 is recorded and any run's state in `paths.stat
 (finished or not), or a state there cannot be read or `paths.state_dir` is not set, `cut` refuses to take a
 missing snapshot (exit 2, nothing cut): text read after a run began may have moved since T0, and every later
 gate would pass it. Put the committed file back and cut again, after repairing or moving a state that is wrong,
-such as a dry run's start. The cut that records T0 is exempt: no run is meant to start before its base is cut
+such as a dry run's start, or setting `paths.state_dir` in `trial.json` if it is not set. The cut that records T0 is exempt: no run is meant to start before its base is cut
 from T0, so a start in the state folder then is a dry run's (PLAN step 5) and does not block it. A start
 recorded before the snapshot was read fails every later `gate` (below), so a dry run's state left in
 `paths.state_dir` must be moved before PLAN step 7. A later `cut` that does take a missing snapshot prints a
@@ -149,11 +154,11 @@ snapshot read at the same moment as a send, however either is spelled, is not la
 cannot be read, a `replaces` that is no record included, cannot be placed and fails (with no start recorded
 there is nothing to place the snapshot before, so its `at` is not read). Run states that cannot be read cannot
 rule a start out and leave the check `UNVERIFIED`: a state in `paths.state_dir` that cannot be read, or no
-`paths.state_dir` in `trial.json`. No text is read in any of these cases. If a start there is wrong, such as a
-dry run's, move that state; otherwise put back the snapshot taken at T0 (an earlier commit of the file, if this
-one replaced it); then run the gate again. `finish` applies the same rule but only records: it reads no issue
-and leaves every slot `unverified` in both fields, the detail saying why, and the repair is the same, then
-`finish` again.
+`paths.state_dir` in `trial.json`, for which the repair is to set it there. No text is read in any of these
+cases. If a start there is wrong, such as a dry run's, move that state; otherwise put back the snapshot taken at
+T0 (an earlier commit of the file, if this one replaced it); then run the gate again. `finish` applies the same
+rule but only records: it reads no issue and leaves every slot `unverified` in both fields, the detail saying why,
+and the repair is the same, then `finish` again.
 
 A gate only sees the text as of its own time, so an edit made after the last gate was never caught.
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
@@ -163,12 +168,14 @@ it), the two times compared as moments, not as strings: a gate half a second aft
 later. A gate recorded later, say one that accepted an edit made after the send, cannot say what the run
 started on. With no start or no gate recorded there is nothing to place and the acceptances count. If the
 gate's time or the first send's is missing or cannot be read, the gate cannot be placed before the send, which
-is as good as later. In either case its acceptances are not used. When it is the gate's time, every slot is
-compared with T0; when it is the first send's, the snapshot cannot be placed before it either (see `gate`
-above), so no slot is compared and every one is `unverified`.
-`finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the send's, or the
-unreadable value quoted), a `note:` line prints the same, each changed slot's `detail` says its acceptances
-were not used (not that the gate passed the T0 text), and `collect` prints the sentence as its first note.
+is as good as later. In either case its acceptances are not used, and the slots are compared with T0 as far as
+they can be: not at all when the T0 snapshot cannot be used as the baseline (below; a first send that cannot be
+read is one such case, since the snapshot cannot be placed before it, see `gate` above), and not a slot whose
+text cannot be read. `finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the
+send's, or the unreadable value quoted) and ends "the queue text is compared with T0 only" when at least one slot
+was compared, or "no slot is compared" when every slot is `unverified`; a `note:`
+line prints the same, each changed slot's `detail` says its acceptances were not used (not that the gate passed
+the T0 text), and `collect` prints the sentence as its first note.
 `finish.queue_text` holds `{"at": …, "acceptances_ignored": … (only when they were not used), "slots": {"Q03":
 {"issue", "since_t0", "since_gate", "title_sha256", "body_sha256", "comments_sha256", "comments", "parts",
 "accepted", "detail"}}}`: `since_t0` and `since_gate` are
@@ -213,8 +220,9 @@ does every slot when neither step brings the baseline back.
 A `detail` that says `queue-t0.json was read at …, after the first send of …` has the same cause as the `gate`
 failure above, as does one saying a time cannot be read, a run state cannot be read or `paths.state_dir` is not
 set: the snapshot is not shown to be the text at T0. If a start it names is wrong, such as a dry run's left in
-`paths.state_dir`, move that state; otherwise put back the snapshot `cut` took with T0 (an earlier commit of the
-file, if a later one replaced it). Then re-run `finish` as above, with `--ended-at`.
+`paths.state_dir`, move that state; if `paths.state_dir` is not set, set it in `trial.json`; otherwise put back the
+snapshot `cut` took with T0 (an earlier commit of the file, if a later one replaced it). Then re-run `finish` as
+above, with `--ended-at`.
 
 ## Evidence
 
