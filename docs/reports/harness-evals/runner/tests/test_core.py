@@ -212,6 +212,20 @@ class ConfigValidation(unittest.TestCase):
             d['blockers']['cy-gemini'] = [1]
         self.check_rejects(edit, 'unknown harness')
 
+    def test_blockers_must_map_each_harness_to_a_list_of_issue_numbers(self):
+        for label, blockers, fragment in (('a string number', {'all': ['9001']}, 'blockers.all must be a list of issue numbers'),
+                                          ('a nested list', {'cy-codex': [[9001]]}, 'blockers.cy-codex must be a list'),
+                                          ('a bare number', {'all': 9001}, 'blockers.all must be a list'),
+                                          ('a bool', {'cy-claude': [True]}, 'blockers.cy-claude must be a list'),
+                                          ('a list of lists', [[9001]], 'blockers must be an object')):
+            with self.subTest(label):
+                self.check_rejects(lambda d, b=blockers: d.__setitem__('blockers', b), fragment)
+
+    def test_absent_blockers_are_empty(self):
+        box = helpers.Sandbox(edit=lambda d: d.pop('blockers'))
+        self.addCleanup(box.cleanup)
+        self.assertEqual(box.trial().blockers, {})
+
     def test_duplicate_slot_issue(self):
         def edit(d):
             d['queue']['slots'].append({'slot': 'Q03', 'issue': 9001, 'title': 'dup'})

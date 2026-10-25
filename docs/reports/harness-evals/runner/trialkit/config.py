@@ -73,7 +73,7 @@ class Trial:
         self.paths = data.get('paths', {})
         self.versions = data.get('versions', {})
         self.allowance = data.get('allowance', {})
-        self.blockers = {k: list(v) for k, v in data.get('blockers', {}).items()}
+        self.blockers = _blockers(data.get('blockers'))
         self.prices = data.get('prices')
         self.queue_rules = _queue_rules(data.get('queue_rules'))
         self.harnesses = {k: _harness(k, v) for k, v in data['harnesses'].items()}
@@ -235,6 +235,21 @@ def _queue_rules(rules):
         if not isinstance(value, list) or not all(type(v) is kind for v in value):
             raise ConfigError(f'queue_rules.{key} must be a list of {"strings" if kind is str else "issue numbers"}')
     return {key: list(value) for key, value in rules.items()}
+
+
+def _blockers(blockers):
+    """`blockers` from trial.json: a harness key (or `all`) to the issue numbers that block it.
+
+    Another type is refused rather than kept: an issue number written as a string
+    would match no queue slot and no backlog issue, and look as if it had been checked."""
+    if blockers is None:
+        return {}
+    if not isinstance(blockers, dict):
+        raise ConfigError('blockers must be an object')
+    for key, value in blockers.items():
+        if not isinstance(value, list) or not all(type(v) is int for v in value):
+            raise ConfigError(f'blockers.{key} must be a list of issue numbers')
+    return {key: list(value) for key, value in blockers.items()}
 
 
 def _harness(key, h):

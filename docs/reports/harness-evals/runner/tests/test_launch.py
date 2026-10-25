@@ -4348,6 +4348,19 @@ class QueueRulesAtLoad(unittest.TestCase):
         self.assertFalse(os.path.exists(state_file), 'a gate that did not run recorded a verdict')
         self.assertFalse(os.path.exists(os.path.dirname(state_file)))
 
+    def test_gate_exits_2_on_slot_ids_with_a_gap_and_writes_no_run_state(self):
+        rig = Rig(self)
+        state_file = state.state_path(rig.trial, 'B-cy-r1', home=rig.box.home)
+        path = os.path.join(rig.box.trial_dir, 'trial.json')
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        data['queue']['slots'][-1]['slot'] = 'Q03'
+        rig.box.write_trial(data)
+        code, out = self.run_cli(rig, 'gate', 'B-cy-r1')
+        self.assertEqual(code, 2, out)
+        self.assertTrue('in order with no gap: expected Q01, Q02, got Q01, Q03' in out, out)
+        self.assertFalse(os.path.exists(state_file), 'a gate that did not run recorded a verdict')
+
     def test_cut_exits_2_and_records_no_t0_no_snapshot_and_pushes_no_base(self):
         rig = Rig(self, record_t0=False)
         held, path = self.reserve_first_slot(rig)
