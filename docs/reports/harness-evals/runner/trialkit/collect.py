@@ -22,7 +22,7 @@ import re
 from datetime import timedelta
 
 from . import state as state_mod
-from . import timeutil, workflow
+from . import queue_text, timeutil, workflow
 from .gh import FixtureGitHub, GitHubError, RecordingGitHub
 
 CI_PATH = '.github/workflows/ci.yml'
@@ -634,6 +634,34 @@ def update_runs_json(trial, run, data, st, start_text, t0, notes=None):
     return path
 
 
+def _queue_text_notes(trial, st):
+    """Notes on whether the queue's text moved during the run, from what `finish` recorded (`finish.queue_text`), for each slot of
+    the trial in order. A finish that did not re-read it, acceptances it did not use, a slot it recorded nothing for, a slot it
+    recorded that `trial.json` no longer has, and a slot that is changed or could not be read since the run's gate are named;
+    none when every slot is unchanged, and none before a finish."""
+    finish = st.get('finish')
+    if not isinstance(finish, dict):
+        return []
+    seen = finish.get('queue_text')
+    if not (isinstance(seen, dict) and isinstance(seen.get('slots'), dict)):
+        return ['finish did not re-read the queue text, so an edit during the run cannot be ruled out']
+    notes = []
+    if isinstance(seen.get('acceptances_ignored'), str) and seen['acceptances_ignored']:
+        notes.append(f'queue text: acceptances ignored at finish ({seen["acceptances_ignored"]})')
+    for slot in trial.slots:
+        if slot.slot not in seen['slots']:
+            notes.append(f'queue text {slot.slot}: not recorded at finish, so an edit during the run cannot be ruled out')
+            continue
+        row = seen['slots'][slot.slot]
+        row = row if isinstance(row, dict) else {}
+        if row.get('since_gate') != queue_text.UNCHANGED:
+            notes.append(f'queue text {slot.slot}: {row.get("since_gate", "unknown")} since this run\'s gate '
+                         f'({row.get("detail", "no detail recorded")})')
+    for slot in sorted(set(seen['slots']) - {slot.slot for slot in trial.slots}):
+        notes.append(f'queue text {slot}: recorded at finish, but trial.json no longer has the slot')
+    return notes
+
+
 def _summary(env, trial, run, ev, report_pr, notes):
     queue = [p for p in ev['prs'] if p['issue'] is not None]
     states = {s: sum(1 for p in queue if p['state'] == s) for s in ('merged', 'closed', 'open')}
@@ -695,6 +723,7 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
     except (GitHubError, ValueError) as exc:
         env.print(f'collect {run.id}: {exc}')
         return 2
+    notes.extend(_queue_text_notes(trial, st))
     data = data_dir or trial.repo_path('data')
     evidence = {'collected_at_utc': timeutil.iso(env.now()), 'trial': trial.id, 'run': run.id,
                 'methods': METHODS, 'runs': {run.id: ev}}

@@ -813,6 +813,124 @@ class StateAndExit(Scenario):
         self.assertNotIn(self.box.home, json.dumps(copied))
 
 
+class QueueTextNotes(Scenario):
+    """`finish` records whether the queue's text moved during the run (`finish.queue_text`); collect says so when it did, or when
+    it did not look."""
+    FINISH = {'ended_at': '2026-11-02T11:40:00Z', 'stop': 'queue exhausted'}
+
+    def seen(self, **slots):
+        rows = {slot: dict(row, issue=9001) for slot, row in slots.items()}
+        return dict(self.FINISH, queue_text={'at': '2026-11-02T11:40:00Z', 'slots': rows})
+
+    def row(self, since_gate, detail='the detail finish recorded'):
+        return {'since_t0': since_gate, 'since_gate': since_gate, 'detail': detail}
+
+    def test_a_finish_that_did_not_read_the_text_again_is_a_note(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.FINISH})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn('  note: finish did not re-read the queue text, so an edit during the run cannot be ruled out', self.output)
+
+    def test_a_record_that_is_not_one_is_taken_for_not_having_read_it(self):
+        for seen in (None, 'x', [], {}, {'slots': None}, {'slots': []}):
+            with self.subTest(seen=seen):
+                self.write_state({'start': {'sent_at': START}, 'finish': dict(self.FINISH, queue_text=seen)})
+                self.collect()
+                self.assertIn('finish did not re-read the queue text', self.output)
+
+    def test_no_finish_no_note(self):
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertNotIn('queue text', self.output)
+
+    def test_every_slot_unchanged_since_the_gate_is_no_note(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertNotIn('queue text', self.output)
+        self.assertNotIn('re-read', self.output)
+
+    def test_a_slot_changed_or_unverified_since_the_gate_is_named_with_what_finish_recorded(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(
+            Q01=self.row('changed', 'changed since the T0 snapshot of T: body; so it changed after this run\'s gate'),
+            Q02=self.row('unverified', 'cannot read Q02 #9002: rate limited'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn("  note: queue text Q01: changed since this run's gate (changed since the T0 snapshot of T: body; "
+                      "so it changed after this run's gate)", self.output)
+        self.assertIn("  note: queue text Q02: unverified since this run's gate (cannot read Q02 #9002: rate limited)", self.output)
+        self.assertNotIn('re-read', self.output)
+        self.assertNotIn('not recorded', self.output)
+
+    def test_the_notes_follow_the_trial_s_slots_not_the_order_they_were_recorded_in(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q02=self.row('changed'), Q01=self.row('unverified'))})
+        self.collect()
+        self.assertLess(self.output.index('queue text Q01: unverified'), self.output.index('queue text Q02: changed'))
+
+    def test_an_accepted_change_that_stayed_as_accepted_is_no_note(self):
+        accepted = {'since_t0': 'changed', 'since_gate': 'unchanged', 'detail': 'changed since T0 (body), the text this run\'s gate accepted: x'}
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=accepted)})
+        self.collect()
+        self.assertNotIn('queue text', self.output)
+
+    def test_a_slot_finish_recorded_nothing_for_is_a_note_not_taken_for_unchanged(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn('  note: queue text Q02: not recorded at finish, so an edit during the run cannot be ruled out', self.output)
+        self.assertNotIn('queue text Q01', self.output)
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen()})
+        self.collect()
+        for slot in ('Q01', 'Q02'):
+            self.assertIn(f'  note: queue text {slot}: not recorded at finish', self.output)
+        self.assertNotIn('re-read', self.output, 'a record with no slots is still a record')
+
+    def test_a_recorded_slot_the_trial_no_longer_has_is_named_whatever_its_status(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'),
+                                                                           Q09=self.row('changed'), Q08=self.row('unchanged'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        for slot in ('Q08', 'Q09'):
+            self.assertIn(f'  note: queue text {slot}: recorded at finish, but trial.json no longer has the slot', self.output)
+        self.assertLess(self.output.index('queue text Q08'), self.output.index('queue text Q09'), 'sorted')
+        self.assertNotIn('queue text Q01', self.output)
+        self.assertNotIn('queue text Q02', self.output)
+
+    def test_acceptances_finish_did_not_use_are_the_first_note(self):
+        sentence = 'the recorded gate (T) is later than the first send (S), so the queue text is compared with T0 only'
+        finish = self.seen(Q01=self.row('changed', 'a detail'), Q02=self.row('unchanged'))
+        finish['queue_text']['acceptances_ignored'] = sentence
+        self.write_state({'start': {'sent_at': START}, 'finish': finish})
+        self.collect()
+        note = f'  note: queue text: acceptances ignored at finish ({sentence})'
+        self.assertIn(note, self.output)
+        self.assertLess(self.output.index(note), self.output.index('queue text Q01: changed'))
+
+    def test_no_acceptances_ignored_note_without_a_sentence(self):
+        for value in (None, '', 5, ['x']):
+            with self.subTest(value=value):
+                finish = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+                finish['queue_text']['acceptances_ignored'] = value
+                self.write_state({'start': {'sent_at': START}, 'finish': finish})
+                self.collect()
+                self.assertNotIn('acceptances ignored', self.output)
+
+    def test_a_row_that_is_not_a_record_is_not_unchanged(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})
+        state = read_json(os.path.join(self.state_dir, 'A-cd-r1.json'))
+        state['finish']['queue_text']['slots']['Q02'] = 'unchanged'
+        write_json(os.path.join(self.state_dir, 'A-cd-r1.json'), state)
+        self.collect()
+        self.assertIn("  note: queue text Q02: unknown since this run's gate (no detail recorded)", self.output)
+
+    def test_the_notes_change_no_evidence(self):
+        without = self.collect()
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q02=self.row('changed'))})
+        with_note = self.collect()
+        self.assertIn('queue text Q02: changed', self.output)
+        self.assertEqual(with_note, without)
+
+
 class RunsJson(Scenario):
     def runs_json(self):
         return read_json(os.path.join(self.data, 'runs.json'))

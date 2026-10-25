@@ -108,7 +108,7 @@ def build_parser():
     s.add_argument('--since')
     s.add_argument('--state')
 
-    s = sub.add_parser('finish', help='record the end readings and the stop cause')
+    s = sub.add_parser('finish', help='record the end readings, the stop cause and the queue text at the end')
     s.add_argument('run')
     s.add_argument('--meter', action='append', metavar='KEY=PERCENT')
     s.add_argument('--cost')

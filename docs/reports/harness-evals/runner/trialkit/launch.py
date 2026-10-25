@@ -228,8 +228,8 @@ def gate(trial, run, env, accept_open, state_file, accept_changed=None):
     overrides = st.setdefault('overrides', [])
     for number, reason in accepted.items():
         _record_override(overrides, {'kind': 'accept-open', 'issue': int(number), 'reason': reason}, env)
-    for slot, reason in accepted_changed.items():
-        _record_override(overrides, {'kind': 'accept-changed', 'slot': slot, 'reason': reason}, env)
+    for slot, acceptance in accepted_changed.items():
+        _record_override(overrides, {'kind': 'accept-changed', 'slot': slot, **acceptance}, env)
     _save(trial, run, env, st, state_file)
     env.print(checks.render(results, f'gate {run.id}'))
     return checks.exit_code(results)
@@ -1225,6 +1225,42 @@ def verify_start(trial, run, env, since, state_file):
 
 # -- finish --------------------------------------------------------------------
 
+def _first_send(st):
+    """When the run was first sent: the `sent_at` of the earliest start, following `replaces` back through re-recorded
+    starts, or None when no start is recorded or the earliest has none."""
+    started = st.get('start')
+    while isinstance(started, dict) and isinstance(started.get('replaces'), dict):
+        started = started['replaces']
+    return started.get('sent_at') if isinstance(started, dict) else None
+
+
+def _instant(value):
+    """The moment an ISO-8601 timestamp names, or None when `value` is missing or cannot be read (a value that is no text, no
+    timestamp, or so near the end of the calendar that its UTC time is out of range, such as 9999-12-31T23:59:59-05:00)."""
+    try:
+        return timeutil.parse_ts(value)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
+def _acceptances_ignored(st):
+    """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
+    when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
+    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send."""
+    if not (st.get('start') and st.get('gate')):
+        return None
+    gate = st['gate'] if isinstance(st['gate'], dict) else {}
+    at, sent = gate.get('at'), _first_send(st)
+    gate_time, sent_time = _instant(at), _instant(sent)
+    if gate_time is None or sent_time is None:
+        return (f'the recorded gate\'s time ({at!r}) or the first send\'s ({sent!r}) cannot be read, so the gate cannot be placed before '
+                f'the send; its acceptances are not used and the queue text is compared with T0 only')
+    if gate_time > sent_time:
+        return (f'the recorded gate ({at}) is later than the first send ({sent}), so the text it let through or accepted '
+                f'is not the text the run started on; the queue text is compared with T0 only')
+    return None
+
+
 def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     st = _load(trial, run, env, state_file)
     ended = _at(env)
@@ -1261,7 +1297,22 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
             if record['settings_changed']:
                 env.print(f'WARNING: {settings} changed during the run (hash {str(before)[:12]} -> {str(now_hash)[:12]}). '
                           f'An isolated preview daemon once wrote a hook into it (#8704); inspect it before trusting the run\'s settings.')
+    gate_record = st.get('gate') if isinstance(st.get('gate'), dict) else {}
+    accepted, ignored = gate_record.get('accepted_changed'), _acceptances_ignored(st)
+    if ignored:
+        accepted = None
+        env.print(f'note: {ignored}')
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, ignored)
+    record['queue_text'] = {'at': _at(env), 'slots': slots}
+    if ignored:
+        record['queue_text']['acceptances_ignored'] = ignored
     st['finish'] = record
     _save(trial, run, env, st, state_file)
+    env.print(checks.render(results, f'queue text at the end of {run.id}'))
+    changed = [slot for slot, seen in slots.items() if seen['since_gate'] == queue_text.CHANGED]
+    if changed:
+        env.print(f'WARNING: the text of {", ".join(changed)} differs from what this run\'s gate let through, so the run may have read more than one '
+                  f'version of it; a grader must know which. A new comment is either a breach of mission rule 4 (the run may not comment on an '
+                  f'issue) or somebody else\'s.')
     env.print(f'finish {run.id}: recorded ended_at {ended}')
     return 0
