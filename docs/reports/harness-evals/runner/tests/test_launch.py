@@ -31,6 +31,11 @@ CI_MAIN_ONLY = "name: CI\non:\n  push:\n    branches: [main]\n"
 PROMPTS = {'prime-directive.md': 'prime directive prompt\n', 'full-review.md': 'full review prompt\n'}
 SHA_D = 'd' * 40
 SNAPSHOT_AT = '2026-11-02T09:00:00Z'
+# Spelled out here, not read from queue_text: a test built from the constant it checks passes whatever the constant says.
+LATE = ('a snapshot taken after a run began holds the text as it is then, which may have moved since T0, and every later gate would '
+        'pass it')
+WRONG_STATE = "if a run state there is wrong, such as a dry run's start or a file that cannot be read, repair or move it first"
+STATES = 'by the run states in ~/trial/t2/state'
 OPUS, ASTRA = 'claude-opus-5-5', 'gpt-6-astra'
 
 
@@ -287,15 +292,20 @@ def details(st, phase='pre'):
 
 
 def plant_unreadable_state(rig, rid, how):
-    """Put something the state reader cannot read where run `rid`'s state file belongs (corrupt JSON, or a
-    directory, which fails in open() rather than in the parser). Returns the undo."""
+    """Put something the state reader cannot read where run `rid`'s state file belongs: corrupt JSON, JSON that is not
+    a state, a directory (which fails in open() rather than in the parser), or a valid state in a folder that cannot be
+    searched. Returns the undo."""
     path = state.state_path(rig.trial, rid, home=rig.box.home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if how == 'directory':
         os.makedirs(path)
         return lambda: os.rmdir(path)
+    if how == 'folder without permission':
+        rig.save_state(rid, start={'sent_at': '2026-11-02T10:00:00Z'})
+        os.chmod(os.path.dirname(path), 0)
+        return lambda: (os.chmod(os.path.dirname(path), 0o755), os.remove(path))
     with open(path, 'w') as fh:
-        fh.write('{truncated')
+        fh.write('[]' if how == 'not a state' else '{truncated')
     return lambda: os.remove(path)
 
 
@@ -598,17 +608,19 @@ class GateQueueText(LaunchCase):
         self.assertFalse([r for r in gh.requests if r[0].endswith('/comments')], 'no text was read without a baseline')
 
     def missing_after(self, started):
-        return (f'queue-t0.json is missing from {self.rig.trial.trial_dir} and {started}: put the committed file back (pull the commit that '
-                f'added it with trial.json\'s t0, or restore it) and run the gate again. Do not run `cut` to write it now: {queue_text.LATE}')
+        return (f'queue-t0.json is missing from docs/reports/harness-evals/trial-2 and {started}: put the committed file back (pull the '
+                f'commit that added it with trial.json\'s t0, or restore it) and run the gate again ({WRONG_STATE}). Do not run `cut` to '
+                f'write it now: {LATE}')
 
     def test_a_missing_snapshot_once_a_run_has_started_is_never_advised_to_be_cut(self):
         # #8808: after a start, a snapshot taken now may hold text that moved since T0, and every later gate would pass it.
         os.remove(snapshot_path(self.rig))
         sent = {'sent_at': '2026-11-02T10:00:00Z'}
-        for runs, started in (({'A-cd-r1': {'start': sent}}, 'A-cd-r1 has started'),
-                              ({'A-cd-r1': {'start': sent, 'finish': {'ended_at': '2026-11-02T11:00:00Z'}}}, 'A-cd-r1 has started'),
-                              ({'B-cy-r1': {'start': sent}}, 'B-cy-r1 has started'),
-                              ({'A-cy-r1': {'start': sent, 'finish': {}}, 'A-cd-r1': {'start': sent, 'finish': {}}}, 'A-cd-r1, A-cy-r1 have started')):
+        for runs, started in (({'A-cd-r1': {'start': sent}}, f'A-cd-r1 has started, {STATES}'),
+                              ({'A-cd-r1': {'start': sent, 'finish': {'ended_at': '2026-11-02T11:00:00Z'}}}, f'A-cd-r1 has started, {STATES}'),
+                              ({'B-cy-r1': {'start': sent}}, f'B-cy-r1 has started, {STATES}'),
+                              ({'A-cy-r1': {'start': sent, 'finish': {}}, 'A-cd-r1': {'start': sent, 'finish': {}}},
+                               f'A-cd-r1, A-cy-r1 have started, {STATES}')):
             with self.subTest(started=started, runs=sorted(runs)):
                 for rid in ('A-cd-r1', 'A-cy-r1', 'B-cy-r1'):
                     path = state.state_path(self.rig.trial, rid, home=self.rig.box.home)
@@ -621,36 +633,37 @@ class GateQueueText(LaunchCase):
                 self.assertEqual(self.text_checks()['queue text at T0']['detail'], self.missing_after(started))
                 self.assertNotIn('run `cut` again', out)
 
-    def test_the_gate_s_own_start_counts_wherever_its_state_file_is(self):
-        os.remove(snapshot_path(self.rig))
-        own = os.path.join(self.rig.box.tmp, 'elsewhere', 'B-cy-r1.json')
-        state.save(self.rig.trial, 'B-cy-r1', {'run': 'B-cy-r1', 'trial': self.rig.trial.id, 'start': {'sent_at': '2026-11-02T10:00:00Z'}},
-                   override=own, home=self.rig.box.home)
+    def gate_elsewhere(self, rid, **sections):
+        """The real gate for `rid`, with its own state kept outside paths.state_dir (`--state-file`); the queue-text-at-T0 detail."""
+        own = os.path.join(self.rig.box.tmp, 'elsewhere', f'{rid}.json')
+        state.save(self.rig.trial, rid, {'run': rid, 'trial': self.rig.trial.id, **sections}, override=own, home=self.rig.box.home)
         env = self.rig.env(github=FakeGitHub())
-        code = launch.gate(self.rig.trial, self.rig.run('B-cy-r1'), env, {}, own)
+        code = launch.gate(self.rig.trial, self.rig.run(rid), env, {}, own)
         self.assertEqual(code, 1, env.out.getvalue())
-        detail = {c['name']: c['detail'] for c in state.load(self.rig.trial, 'B-cy-r1', override=own)['gate']['checks']}['queue text at T0']
-        self.assertEqual(detail, self.missing_after('B-cy-r1 has started'))
+        return {c['name']: c['detail'] for c in state.load(self.rig.trial, rid, override=own)['gate']['checks']}['queue text at T0']
+
+    def test_the_gate_s_own_start_counts_wherever_its_state_file_is_and_runs_are_named_in_roster_order(self):
+        os.remove(snapshot_path(self.rig))
+        self.assertEqual(self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}), self.missing_after(f'B-cy-r1 has started, {STATES}'))
+        self.rig.save_state('A-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}, finish={})
+        self.assertEqual(self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}),
+                         self.missing_after(f'B-cy-r1, A-cy-r1 have started, {STATES}'), 'trial.json lists B-cy-r1 before A-cy-r1')
 
     def test_a_run_state_that_cannot_be_read_cannot_rule_out_a_start(self):
         os.remove(snapshot_path(self.rig))
-        for how in ('corrupt', 'directory', 'not a state'):
+        for how in ('corrupt', 'directory', 'not a state', 'folder without permission'):
             with self.subTest(how):
-                if how == 'not a state':
-                    path = self.rig.save_state('A-cd-r1')
-                    with open(path, 'w') as fh:
-                        fh.write('[]')
-                    undo = lambda: os.remove(path)
-                else:
-                    undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
-                code, out, _ = self.go()
+                if how == 'folder without permission' and os.geteuid() == 0:
+                    self.skipTest('root reads a folder whatever its mode')
+                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
+                detail = self.gate_elsewhere('B-cy-r1')
                 undo()
-                self.assertEqual(code, 1, out)
-                detail = self.text_checks()['queue text at T0']['detail']
-                self.assertTrue(detail.startswith("queue-t0.json is missing from docs/reports/harness-evals/trial-2 and a run's state cannot "
-                                                  "be read ("), detail)
-                self.assertIn('so a started run cannot be ruled out: put the committed file back', detail)
-                self.assertNotIn('run `cut` again', out)
+                head, tail = detail.split(' (', 1)
+                self.assertEqual(head, "queue-t0.json is missing from docs/reports/harness-evals/trial-2 and a run state in ~/trial/t2/state "
+                                       "cannot be read")
+                self.assertTrue(tail.endswith(f'), so a started run cannot be ruled out: put the committed file back (pull the commit that '
+                                              f'added it with trial.json\'s t0, or restore it) and run the gate again ({WRONG_STATE}). Do '
+                                              f'not run `cut` to write it now: {LATE}'), detail)
 
     def test_a_snapshot_taken_at_another_t0_fails(self):
         edit_snapshot(self.rig, lambda d: d.update(t0='f' * 40))
@@ -1128,6 +1141,7 @@ class CutQueueText(unittest.TestCase):
             text = fh.read()
         self.assertFalse('title of' in text or 'body of' in text or 'a comment' in text, 'the file holds digests, never text')
         self.assertIn('queue-t0.json', out)
+        self.assertNotIn('note:', out, 'the cut that records T0 takes the snapshot at T0')
 
     def test_it_reads_each_slots_issue_and_comments_once_however_many_bases_are_cut(self):
         gh = FakeGitHub()
@@ -1200,6 +1214,9 @@ class CutQueueText(unittest.TestCase):
         self.assertEqual(code, 0, out)
         data = snapshot_file(self.rig)
         self.assertEqual((data['t0'], data['at']), (self.rig.t0, '2026-11-02T12:00:00Z'))
+        self.assertIn("note: T0 was recorded without queue-t0.json, so its text was read now, after T0. No run state in ~/trial/t2/state "
+                      "records a start; `cut` reads only this machine's run states, so if a run has started elsewhere, remove this snapshot "
+                      "and put the committed one back", out)
 
     def test_a_recorded_t0_with_no_snapshot_once_a_run_has_started_is_refused_not_taken(self):
         # #8808: each base is cut just before its run, so a lost snapshot would otherwise be retaken, late, by the next routine cut.
@@ -1208,8 +1225,8 @@ class CutQueueText(unittest.TestCase):
         gh = FakeGitHub()
         code, out = self.cut('B-cy-r1', github=gh, push=True)
         self.assertEqual(code, 2, out)
-        self.assertIn(f'cut: refusing: queue-t0.json is missing and A-cd-r1 has started: it is not taken now, because {queue_text.LATE}. '
-                      f'Put the committed file back, then cut again', out)
+        self.assertIn(f'cut: refusing: queue-t0.json is missing and A-cd-r1 has started, {STATES}: it is not taken now, because {LATE}. '
+                      f'Put the committed file back, then cut again ({WRONG_STATE})', out)
         self.assertFalse(os.path.exists(snapshot_path(self.rig)))
         self.assertEqual(gh.requests, [], 'no text was read')
         self.assertEqual(self.rig.branch(self.rig.run('B-cy-r1').base), '', 'no base was cut')
@@ -1220,13 +1237,26 @@ class CutQueueText(unittest.TestCase):
 
     def test_a_run_state_that_cannot_be_read_refuses_a_missing_snapshot_too(self):
         config.save_t0(self.rig.trial, self.rig.t0)
-        undo = plant_unreadable_state(self.rig, 'A-cd-r1', 'corrupt')
-        self.addCleanup(undo)
-        code, out = self.cut('B-cy-r1')
-        self.assertEqual(code, 2, out)
-        self.assertIn("cut: refusing: queue-t0.json is missing and a run's state cannot be read (", out)
-        self.assertIn('so a started run cannot be ruled out: it is not taken now, because', out)
-        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        for how in ('corrupt', 'folder without permission'):
+            with self.subTest(how):
+                if how == 'folder without permission' and os.geteuid() == 0:
+                    self.skipTest('root reads a folder whatever its mode')
+                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
+                code, out = self.cut('B-cy-r1')
+                undo()
+                self.assertEqual(code, 2, out)
+                self.assertIn('cut: refusing: queue-t0.json is missing and a run state in ~/trial/t2/state cannot be read (', out)
+                self.assertIn(f'), so a started run cannot be ruled out: it is not taken now, because {LATE}. Put the committed file back, '
+                              f'then cut again ({WRONG_STATE})', out)
+                self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+
+    def test_the_cut_that_records_t0_takes_the_snapshot_whatever_starts_the_state_folder_holds(self):
+        # Before T0 no run of the trial can have started (its base is cut from T0): a start there is a dry run's (PLAN step 5).
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-01T10:00:00Z'}, finish={'ended_at': '2026-11-01T10:30:00Z'})
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(snapshot_file(self.rig)['t0'], self.rig.t0)
+        self.assertNotIn('note:', out)
 
     def test_a_snapshot_taken_at_another_t0_refuses_and_is_never_overwritten(self):
         queue_text.write(self.rig.trial, {'t0': 'a' * 40, 'at': '2026-10-30T00:00:00Z', 'slots': {}})

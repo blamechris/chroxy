@@ -135,19 +135,27 @@ def _live_check(trial, run, env):
     return checks.passed(name, 'no other run has a start without a finish')
 
 
+def _state_dir(trial, env):
+    """paths.state_dir as printed: with `~` for the home directory."""
+    where = trial.local_path('state_dir', env.home)
+    return state.tildify(where, env.home) if where else 'paths.state_dir (not set)'
+
+
 def _started(trial, env, run=None, st=None):
     """Which runs of the trial have started, finished or not, as the clause `queue_text` gives when it will not take a missing T0
-    snapshot (#8808), or None when none has. A state file that cannot be read cannot rule one out, so it is such a clause too.
+    snapshot (#8808), or None when none has. A state that cannot be read cannot rule one out, so it is such a clause too.
     `st` is `run`'s own state, which `--state-file` may have put outside paths.state_dir."""
+    where = _state_dir(trial, env)
     try:
-        started = state.started_runs(trial, home=env.home)
+        runs = set(state.started_runs(trial, home=env.home))
     except (OSError, ValueError) as exc:
-        return f'a run\'s state cannot be read ({exc}), so a started run cannot be ruled out'
-    if run is not None and isinstance(st, dict) and st.get('start') and run.id not in started:
-        started.append(run.id)
-    if not started:
+        return f'a run state in {where} cannot be read ({exc}), so a started run cannot be ruled out'
+    if run is not None and isinstance(st, dict) and st.get('start'):
+        runs.add(run.id)
+    named = [r.id for r in trial.runs if r.id in runs]
+    if not named:
         return None
-    return f'{", ".join(started)} {"has" if len(started) == 1 else "have"} started'
+    return f'{", ".join(named)} {"has" if len(named) == 1 else "have"} started, by the run states in {where}'
 
 
 # -- gate ----------------------------------------------------------------------
@@ -378,9 +386,11 @@ def cut(trial, runs, env, t0, push, repo_dir):
         missions = {run.id: render.mission(trial, run).encode('utf-8') for run in runs}
         config.check_t0(trial, t0)
         # The queue's text is read before anything is recorded: a slot that cannot be read refuses the cut, with
-        # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut); a missing
-        # one is refused, not taken, once a run has started.
-        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env), _started(trial, env))
+        # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut). Once T0 is
+        # recorded a missing one is refused, not taken, if a run has started; before that no run of the trial can have
+        # (its base is cut from T0), so a start in the state folder is a dry run's and does not count.
+        late = bool(trial.t0)
+        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env), _started(trial, env) if late else None)
         config.save_t0(trial, t0)
     except (render.RenderError, config.ConfigError, queue_text.QueueTextError) as exc:
         env.print(f'cut: refusing: {exc}')
@@ -394,6 +404,10 @@ def cut(trial, runs, env, t0, push, repo_dir):
             return 2
         env.print(f'queue text at T0 recorded in {os.path.relpath(queue_text.path(trial), trial.root)} '
                   f'({len(frozen["slots"])} slots); commit it with trial.json\'s t0')
+        if late:
+            env.print(f'note: T0 was recorded without {queue_text.FILE}, so its text was read now, after T0. No run state in '
+                      f'{_state_dir(trial, env)} records a start; `cut` reads only this machine\'s run states, so if a run has '
+                      f'started elsewhere, remove this snapshot and put the committed one back')
     results = [_cut_one(trial, run, env, repo, t0, missions[run.id], push) for run in runs]
     env.print(checks.render(results, f'cut at T0 {t0[:12]} ({"pushing" if push else "local build only"})'))
     return checks.exit_code(results)

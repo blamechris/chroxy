@@ -65,19 +65,21 @@ def tildify(value, home=None):
 
 
 def _recorded(trial, exclude=None, home=None):
-    """(run id, state) for each run of the trial that has a state file in paths.state_dir. Raises OSError or ValueError
-    when one cannot be read or is not a run's state."""
+    """(run id, state) for each run of the trial that has a state file in paths.state_dir. A folder or file that is not
+    there holds no state; one that cannot be read (a folder without permission included), or is not a run's state, raises
+    OSError or ValueError."""
     root = trial.local_path('state_dir', home)
-    if not root or not os.path.isdir(root):
+    if not root:
         return
     for run in trial.runs:
         if run.id == exclude:
             continue
         path = os.path.join(root, f'{run.id}.json')
-        if not os.path.exists(path):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
             continue
-        with open(path, encoding='utf-8') as fh:
-            data = json.load(fh)
         if not isinstance(data, dict):
             raise ValueError(f'{path} is not a run state')
         yield run.id, data
