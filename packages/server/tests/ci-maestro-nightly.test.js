@@ -124,12 +124,14 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(steps[index('Run Maestro suite')].run.includes('run-all-sequential.sh'))
     const dispatch = workflow.on.workflow_dispatch.inputs.flow
     assert.equal(dispatch.default, 'all', 'scheduled and ordinary dispatch runs must keep the full suite')
-    assert.deepEqual(dispatch.options, ['all', 'connect-screen.yaml'])
+    assert.deepEqual(dispatch.options, ['all', 'connect-screen.yaml', 'permission-disconnected-noop.yaml'])
     const inventory = yaml.loadAll(readFileSync(join(root, 'packages/app/.maestro/run-all.yaml'), 'utf8'))[1]
       .map(command => command.runFlow)
     assert.ok(inventory.includes('connect-screen.yaml'), 'diagnostic choice must name an inventoried flow')
+    assert.ok(inventory.includes('permission-disconnected-noop.yaml'), 'disconnected diagnostic must name an inventoried flow')
     assert.ok(steps[index('Run Maestro suite')].run.includes('--max-failures 3'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow connect-screen.yaml'))
+    assert.ok(steps[index('Run Maestro suite')].run.includes('--flow permission-disconnected-noop.yaml'))
   })
 
   it('uploads only this run\'s bounded diagnostics on failure or cancellation', () => {
@@ -195,6 +197,12 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       const calls = readFileSync(f.trace, 'utf8').trim().split('\n')
       assert.equal(calls.length, 1)
       assert.ok(calls[0].endsWith('/connect-screen.yaml'))
+      rmSync(f.trace)
+      const disconnected = f.run(['--flow', 'permission-disconnected-noop.yaml', '--max-failures', '1'])
+      assert.equal(disconnected.status, 0, disconnected.stderr)
+      const selected = readFileSync(f.trace, 'utf8').trim().split('\n')
+      assert.equal(selected.length, 1)
+      assert.ok(selected[0].endsWith('/permission-disconnected-noop.yaml'))
       rmSync(f.trace)
       const invalid = f.run(['--flow', '../connect-screen.yaml'])
       assert.equal(invalid.status, 2)

@@ -9,6 +9,7 @@ import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
+import { isMaestroControlPeer } from './scripts/maestro-control-loopback.mjs'
 const { encodeBase64, decodeBase64 } = naclUtil
 
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '9876', 10)
@@ -52,19 +53,16 @@ let connectionCounter = 0
 // the flag stays consumed/unset, and reconnect.yaml fails at the assertion.
 let sawSimulateDisconnect = false
 
-// #5699: timed reconnect-hold. `simulate-disconnect-hold` drops the socket AND
-// makes the HTTP health endpoint return 503 for RECONNECT_HOLD_MS, so the app's
-// pre-WS health check keeps failing and the reconnect ladder stays in the
-// `reconnecting` phase — a STABLE disconnected window the
-// permission-disconnected-noop flow can assert against. The plain
-// `simulate-disconnect` window is ~1s (the mock health stays 200, so the app
-// re-dials almost immediately — see reconnect.yaml's "~1-in-3 catch rate"
-// note), too racy to tap a button inside. The hold self-releases (health 200
-// again) well before the ladder's 10-rung give-up (~59s → terminal
-// server_down), so the app auto-reconnects and the flow leaves the app usable
-// for the next run-all flow. reconnectHoldUntil is an absolute epoch-ms
-// deadline; 0 means "no hold active".
-const RECONNECT_HOLD_MS = 10000
+// #5699: keep health down until the disconnected-button flow explicitly
+// releases it. Maestro can spend more than ten seconds settling a tap on a
+// disabled element; a timer alone reconnects the app before the no-op assert.
+// The deadline is only a failsafe for an aborted flow, shorter than the app's
+// reconnect ladder (~59s). Tests may shorten it to prove expiry behavior.
+const requestedHoldMs = Number(process.env.MAESTRO_MOCK_HOLD_FAILSAFE_MS ?? 45000)
+if (!Number.isInteger(requestedHoldMs) || requestedHoldMs < 200 || requestedHoldMs > 45000) {
+  throw new Error('MAESTRO_MOCK_HOLD_FAILSAFE_MS must be 200-45000 milliseconds')
+}
+const RECONNECT_HOLD_FAILSAFE_MS = requestedHoldMs
 let reconnectHoldUntil = 0
 
 // #5469: per-connection counter for `show-stream-stall` hits.
@@ -157,6 +155,30 @@ function send(ws, msg) {
 }
 
 const httpServer = createServer((req, res) => {
+  if (req.url === '/maestro/reconnect-hold/release') {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'POST' })
+      res.end()
+      return
+    }
+    // This control route is for the host-side Maestro script only. The mock
+    // server also accepts simulator traffic, so never accept a remote release.
+    if (!isMaestroControlPeer(req.socket.remoteAddress)) {
+      res.writeHead(403)
+      res.end()
+      return
+    }
+    if (Date.now() >= reconnectHoldUntil) {
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ released: false, reason: 'no-active-hold' }))
+      return
+    }
+    reconnectHoldUntil = 0
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ released: true }))
+    console.log('[mock] reconnect hold released by Maestro')
+    return
+  }
   if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
     // #5699: while a reconnect-hold is active, fail health so the app's pre-WS
     // health check keeps the reconnect ladder in `reconnecting` (stable
@@ -591,16 +613,13 @@ wss.on('connection', (ws) => {
           break
         }
 
-        // #5699: like simulate-disconnect, but ALSO holds the HTTP health
-        // endpoint down (503) for RECONNECT_HOLD_MS so the reconnect ladder
-        // can't re-dial immediately — a stable disconnected window the
-        // permission-disconnected-noop flow taps a permission button inside.
-        // The hold self-releases so the app auto-reconnects afterwards.
+        // #5699: unlike the short-lived plain disconnect, keep health at 503
+        // until the flow verifies the disabled tap and releases the hold.
         if (text.trim() === 'simulate-disconnect-hold') {
-          reconnectHoldUntil = Date.now() + RECONNECT_HOLD_MS
+          reconnectHoldUntil = Date.now() + RECONNECT_HOLD_FAILSAFE_MS
           setTimeout(() => {
             console.log(
-              `[mock] simulate-disconnect-hold — terminating WS; health 503 for ${RECONNECT_HOLD_MS}ms`,
+              `[mock] simulate-disconnect-hold — terminating WS; health 503 until release (failsafe ${RECONNECT_HOLD_FAILSAFE_MS}ms)`,
             )
             try { ws.terminate() } catch {}
           }, 1000)
