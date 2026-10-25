@@ -142,7 +142,10 @@ function simulateDevClient(commands, events, destination) {
     promptCurly: ['Open in “Chroxy”?', 'Cancel', 'Open'],
     promptStraight: ['Open in "Chroxy"?', 'Cancel', 'Open'],
     intro: ['Continue'], menu: ['Reload'], onboarding: ['Welcome to Chroxy', 'Skip'],
-    connect: ['Connect to Chroxy'], chat: ['Chat'], connecting: ['Connecting', 'Cancel']
+    connect: ['Connect to Chroxy'], chat: ['Chat'], connecting: ['Connecting', 'Cancel'],
+    optimisticChat: ['Chat'],
+    authenticatedChat: ['Chat', 'Session Mock Session, SDK provider'],
+    authenticatedNoChat: ['Session Mock Session, SDK provider']
   }
   let state = events[0].state
   let time = events[0].at
@@ -164,6 +167,8 @@ function simulateDevClient(commands, events, destination) {
           time = events[next].at
           state = events[next++].state
         }
+      } else if (step.assertVisible) {
+        if (!matches(step.assertVisible)) throw new Error('readiness assertion failed')
       } else if (step.runFlow) {
         if (!step.runFlow.when || matches(step.runFlow.when.visible)) execute(step.runFlow.commands)
       } else if (step.tapOn) {
@@ -351,6 +356,21 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.equal(session[4].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
     assert.equal(encrypted[4].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
     assert.equal(connect.at(-1).extendedWaitUntil.visible, 'Connect to Chroxy')
+  })
+
+  it('waits for the authenticated mock session before callers can tap tabs', () => {
+    const session = flow('setup/ensure-session-screen.yaml')
+    const readiness = session.slice(-2)
+    const optimisticThenAuth = [
+      { at: 0, state: 'optimisticChat' },
+      { at: 1, state: 'authenticatedChat' }
+    ]
+    assert.equal(simulateDevClient(readiness, optimisticThenAuth, 'chat'), 'authenticatedChat')
+    assert.throws(() => simulateDevClient(readiness,
+      [{ at: 0, state: 'optimisticChat' }], 'chat'), /readiness timed out/)
+    assert.throws(() => simulateDevClient(readiness,
+      [{ at: 0, state: 'authenticatedNoChat' }], 'chat'),
+    /readiness assertion failed/)
   })
 
   it('waits for late native readiness before dismissing the dev menu', () => {

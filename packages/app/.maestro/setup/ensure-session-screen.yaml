@@ -79,7 +79,10 @@ name: Ensure SessionScreen (connected to mock server)
       - tapOn:
           id: "connect-submit"
 
-# Verify we're on SessionScreen (the Chat mode button indicates connected).
+# Chat can appear before authentication completes. The mock's authenticated
+# session_list adds this exact active pill above the mode tabs; wait for it so
+# the tabs have reached their final layout before callers tap them.
 - extendedWaitUntil:
-    visible: "Chat"
+    visible: "Session Mock Session, SDK provider"
     timeout: 15000
+- assertVisible: "Chat"
