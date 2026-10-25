@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -21,7 +21,7 @@ function fixture() {
   const command = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 })
   // The pause makes an early-closing `head -1` deterministic: xcodebuild writes
   // more output only after head has exited. The real hosted run died this way.
-  command('xcodebuild', 'set -e; printf "Xcode 16.4\\n"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
+  command('xcodebuild', 'set -e; printf "Xcode %s\\n" "${XCODE_VERSION:-16.4}"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
   command('osascript', 'echo "${SIMULATOR_ID:-com.apple.iphonesimulator}"')
   command('xcrun', 'if [ "$*" = "simctl list devices available -j" ]; then cat "$FAKE_DEVICES"; else echo "$*" >> "$FAKE_TRACE"; fi')
   const devicesFile = join(dir, 'devices.json')
@@ -77,6 +77,17 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       assert.equal(result.status, 0, result.stderr)
       assert.equal(readFileSync(f.envFile, 'utf8'), `DEVICE=${device}\n`)
       assert.equal(readFileSync(f.traceFile, 'utf8'), `simctl boot ${device}\nsimctl bootstatus ${device} -b\n`)
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('rejects a different Xcode version before selecting a simulator', () => {
+    const f = fixture()
+    try {
+      const result = f.run({ XCODE_VERSION: '27.0' })
+      assert.equal(result.status, 1, result.stderr)
+      assert.ok(result.stderr.includes('Expected Xcode 16.4, found Xcode 27.0'))
+      assert.equal(existsSync(f.envFile), false, 'must not export a simulator on mismatch')
+      assert.equal(existsSync(f.traceFile), false, 'must not call simctl on mismatch')
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
