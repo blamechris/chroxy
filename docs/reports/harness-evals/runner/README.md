@@ -58,7 +58,7 @@ GitHub error). "Could not check" is never reported as a pass.
 | `status RUN` | operator, anywhere with `gh` | read-only live view (October's `check-run.sh` for any trial): base tip, commits since T0, the base's PRs with mission-rule flags, the queue issues that must stay untouched, the main tip, whether the report has landed |
 | `evidence RUN [--state FILE] [--data DIR]` | owner, Mac, after `finish` | copies the run's native transcripts (and, for Chroxy, the daemon log lines of its window) into the vault with a SHA-256 manifest, and writes the derived extract `data/native/<RUN>.json`; refuses, writing nothing, when the vault path is inside the repository, the run's clone or a git work tree, or (with `paths.evidence_vault` set) outside the vault |
 | `queue-candidates [--json] [--limit N]` | supervisor | PLAN.md section 4's mechanical filters over the open backlog: a candidate table plus the rule that dropped each other issue; read-only |
-| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge. When `data/native/<RUN>.json` exists it also fills the run's `approvals`, `compactions` and `workers` in `runs.json`, only while each is absent or `not recorded`; an extract that could not verify one of them leaves it out (no `approvals` from an unverified daemon log), and the placeholder stays. A `finish` that recorded no `queue_text`, a slot of `trial.json` it recorded nothing for, and a slot that is `changed` or `unverified` since the run's gate are each a printed note |
+| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge. When `data/native/<RUN>.json` exists it also fills the run's `approvals`, `compactions` and `workers` in `runs.json`, only while each is absent or `not recorded`; an extract that could not verify one of them leaves it out (no `approvals` from an unverified daemon log), and the placeholder stays. A `finish` that recorded no `queue_text`, acceptances it did not use, a slot of `trial.json` it recorded nothing for, a recorded slot `trial.json` no longer has, and a slot that is `changed` or `unverified` since the run's gate are each a printed note |
 | `apply-verdicts FILE` | supervisor | folds a grader's `verdicts.json` into the evidence; refuses while a merged PR has no verdict |
 | `disputes A B [--markdown]` | supervisor | the items where the two graders differ, for the owner's rulings |
 | `verify-key KEY.md` | grader, owner | digest and size against `<trial>/KEY-COMMITMENT.md` |
@@ -129,11 +129,17 @@ A gate only sees the text as of its own time, so an edit made after the last gat
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
 this run's gate let through (the accepted text for a slot with a recorded acceptance, else the T0 text). An
 acceptance counts only if its gate is at or before the run's first send (`start.replaces` is followed back to
-it): a gate recorded later, say one that accepted an edit made after the send, cannot say what the run started
-on. Its acceptances are not used, every slot is compared with T0, and `finish.queue_text.acceptances_ignored`
-names the gate's time and the send's, with a `note:` line saying the same.
-`finish.queue_text` holds `{"at": …, "slots": {"Q03": {"issue", "since_t0", "since_gate", "title_sha256",
-"body_sha256", "comments_sha256", "comments", "parts", "accepted", "detail"}}}`: `since_t0` and `since_gate` are
+it), the two times compared as moments, not as strings: a gate half a second after a whole-second send is
+later. A gate recorded later, say one that accepted an edit made after the send, cannot say what the run
+started on. With no start or no gate recorded there is nothing to place and the acceptances count. If the
+gate's time or the first send's is missing or cannot be read, the gate cannot be placed before the send, which
+is as good as later. In either case its acceptances are not used and every slot is compared with T0;
+`finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the send's, or the
+unreadable value quoted), a `note:` line prints the same, each changed slot's `detail` says its acceptances
+were not used (not that the gate passed the T0 text), and `collect` prints the sentence as its first note.
+`finish.queue_text` holds `{"at": …, "acceptances_ignored": … (only when they were not used), "slots": {"Q03":
+{"issue", "since_t0", "since_gate", "title_sha256", "body_sha256", "comments_sha256", "comments", "parts",
+"accepted", "detail"}}}`: `since_t0` and `since_gate` are
 `unchanged`, `changed` or `unverified`, `parts` (title, body, comments, as `gate` names them) is present
 when the slot changed since T0, and `accepted` is the recorded reason when the slot has an acceptance. An
 acceptance that is not a record with a reason and digests for that issue (the bare reason an older gate
@@ -144,8 +150,9 @@ A slot `changed` since the gate prints a `FAIL` line and one `WARNING` naming th
 have read more than one version of their text and a grader must know which; mission rule 4 forbids a run
 from commenting on an issue, so a new comment is a breach of it or somebody else's. `finish` still exits 0,
 as it does for a changed `settings.json`. Only digests and part names are recorded, never the text.
-`collect` prints a note for a `finish` with no `queue_text`, for each slot of `trial.json` that `finish` recorded
-nothing for ("not recorded at finish"), and for each slot not `unchanged` since the gate.
+`collect` prints a note for a `finish` with no `queue_text`, for the acceptances `finish` did not use, for each slot
+of `trial.json` that `finish` recorded nothing for ("not recorded at finish"), for each slot `finish` recorded that
+`trial.json` no longer has (whatever its status), and for each slot not `unchanged` since the gate.
 
 ## Evidence
 

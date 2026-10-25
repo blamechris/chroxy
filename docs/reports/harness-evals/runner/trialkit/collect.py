@@ -636,8 +636,9 @@ def update_runs_json(trial, run, data, st, start_text, t0, notes=None):
 
 def _queue_text_notes(trial, st):
     """Notes on whether the queue's text moved during the run, from what `finish` recorded (`finish.queue_text`), for each slot of
-    the trial in order. A finish that did not re-read it, a slot it recorded nothing for, and a slot that is changed or could
-    not be read since the run's gate are named; none when every slot is unchanged, and none before a finish."""
+    the trial in order. A finish that did not re-read it, acceptances it did not use, a slot it recorded nothing for, a slot it
+    recorded that `trial.json` no longer has, and a slot that is changed or could not be read since the run's gate are named;
+    none when every slot is unchanged, and none before a finish."""
     finish = st.get('finish')
     if not isinstance(finish, dict):
         return []
@@ -645,6 +646,8 @@ def _queue_text_notes(trial, st):
     if not (isinstance(seen, dict) and isinstance(seen.get('slots'), dict)):
         return ['finish did not re-read the queue text, so an edit during the run cannot be ruled out']
     notes = []
+    if isinstance(seen.get('acceptances_ignored'), str) and seen['acceptances_ignored']:
+        notes.append(f'queue text: acceptances ignored at finish ({seen["acceptances_ignored"]})')
     for slot in trial.slots:
         if slot.slot not in seen['slots']:
             notes.append(f'queue text {slot.slot}: not recorded at finish, so an edit during the run cannot be ruled out')
@@ -654,6 +657,8 @@ def _queue_text_notes(trial, st):
         if row.get('since_gate') != queue_text.UNCHANGED:
             notes.append(f'queue text {slot.slot}: {row.get("since_gate", "unknown")} since this run\'s gate '
                          f'({row.get("detail", "no detail recorded")})')
+    for slot in sorted(set(seen['slots']) - {slot.slot for slot in trial.slots}):
+        notes.append(f'queue text {slot}: recorded at finish, but trial.json no longer has the slot')
     return notes
 
 

@@ -164,7 +164,7 @@ October's rules carry over (PROTOCOL §4, mission rules 1–6). Changes:
   reading anything under `docs/reports/harness-evals/` except the run's own mission and
   report; the extract's isolation scan counts such a read (`harness_evals_other`). (2) The
   queue issues' text is digested at T0 and `gate` fails, naming the slot, when it changes;
-  `finish` reads it again and records per slot whether it changed during the run.
+  `finish` reads it again and records per slot whether it changed after the run's gate.
   (3) A run's clone is single-branch (`trialctl clone` and the `clone refs` check), and
   rule 5 forbids reading `main`, which moves on after T0, and any PR the run did not open.
 

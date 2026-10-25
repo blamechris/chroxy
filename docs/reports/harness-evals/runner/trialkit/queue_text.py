@@ -236,9 +236,10 @@ def _unread(slot, detail):
     return {'issue': slot.issue, 'since_t0': NOT_VERIFIED, 'since_gate': NOT_VERIFIED, 'detail': detail}
 
 
-def _end_check(slot, entry, accepted, gh, taken):
+def _end_check(slot, entry, accepted, gh, taken, ignored):
     """(Check, record) for one slot: has its text changed since T0, and since the text this run's gate let through (the
-    text it accepted, else the T0 text)? Nothing that cannot be read is called unchanged."""
+    text it accepted, else the T0 text)? Nothing that cannot be read is called unchanged. `ignored` is set when the run's
+    acceptances were not used, which the detail then says in place of "this run's gate passed the T0 text"."""
     name = f'queue text {slot.slot} #{slot.issue}'
     problem = _entry_problem(slot, entry)
     if problem:
@@ -255,6 +256,9 @@ def _end_check(slot, entry, accepted, gh, taken):
         detail = f'title, body and {now["comments"]} comment(s) unchanged since the T0 snapshot of {taken}'
     elif not parts_gate:
         detail = f'changed since T0 ({shown}), the text this run\'s gate accepted: {accepted["reason"]}'
+    elif not accepted and ignored:
+        detail = (f'changed since the T0 snapshot of {taken}: {shown}; this run\'s gate cannot be placed at or before the first send, so its '
+                  f'acceptances were not used and the text is compared with T0')
     elif not accepted:
         detail = (f'changed since the T0 snapshot of {taken}: {shown}; this run\'s gate passed the T0 text, so it changed after this run\'s '
                   f'gate (or the run started without a passing gate)')
@@ -272,10 +276,11 @@ def _end_check(slot, entry, accepted, gh, taken):
     return (checks.failed if parts_gate else checks.passed)(name, detail), record
 
 
-def finish_checks(trial, gh, accepted):
+def finish_checks(trial, gh, accepted, ignored=None):
     """(checks, {slot: record}) for the queue text as `finish` reads it, to be compared with T0 and with what the run's gate
     let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not judged
-    here, so a baseline that cannot be used leaves every slot unverified, without reading any issue."""
+    here, so a baseline that cannot be used leaves every slot unverified, without reading any issue. `ignored`, when given, is the
+    sentence saying why `accepted` was not passed on, and changes what a changed slot's detail says."""
     if not trial.slots:
         return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
     data, taken, problem = _baseline(trial)
@@ -284,6 +289,6 @@ def finish_checks(trial, gh, accepted):
     accepted = accepted if isinstance(accepted, dict) else {}
     results, slots = [], {}
     for slot in trial.slots:
-        check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken)
+        check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken, ignored)
         results.append(check)
     return results, slots

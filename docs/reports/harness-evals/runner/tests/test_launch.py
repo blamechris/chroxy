@@ -2873,11 +2873,9 @@ class FinishQueueText(LaunchCase):
     EDITED = 'the body, edited during the run'
     TYPO = 'edited to fix a typo'
 
-    def started(self, gh=None, accept_changed=None, sent_at=None):
-        self.gated(gh, accept_changed)
-        gated = self.rig.state(self.RID)
-        later = dict(passing_preflight()[0], at='2026-11-02T12:30:00Z')
-        self.rig.save_state(self.RID, gate=gated['gate'], overrides=gated['overrides'], preflight=[later])
+    def started(self, gh=None, accept_changed=None, sent_at=None, gate_at=None):
+        self.gated(gh, accept_changed, gate_at)
+        self.rewrite(preflight=[dict(passing_preflight()[0], at='2026-11-02T12:30:00Z')])
         self.sent(sent_at)
 
     def gated(self, gh=None, accept_changed=None, at=None):
@@ -3061,14 +3059,98 @@ class FinishQueueText(LaunchCase):
         row = self.seen('Q02')
         self.assertEqual((row['since_t0'], row['since_gate'], row['parts']), ('changed', 'changed', ['body']))
         self.assertNotIn('accepted', row)
-        self.assertIn('this run\'s gate passed the T0 text', row['detail'])
-        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of ')
+        self.assertEqual(row['detail'], 'changed since the T0 snapshot of 2026-11-02T09:00:00Z: body; this run\'s gate cannot be placed at or '
+                                        'before the first send, so its acceptances were not used and the text is compared with T0')
+        self.assertNotIn('passed the T0 text', row['detail'])
+        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of .*cannot be placed at or before the first send')
         self.assertIn('WARNING: the text of Q02 differs', out)
+        self.assertEqual(self.seen('Q01')['detail'], 'title, body and 1 comment(s) unchanged since the T0 snapshot of 2026-11-02T09:00:00Z')
         ignored = self.recorded()['queue_text']['acceptances_ignored']
         self.assertIn('2026-11-02T14:00:00Z', ignored)
         self.assertIn('2026-11-02T13:00:00Z', ignored)
         self.assertIn(f'note: {ignored}', out.splitlines())
         self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q01')['since_gate']), ('unchanged', 'unchanged'))
+
+    def test_a_gate_half_a_second_after_a_whole_second_send_has_its_acceptance_ignored(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T12:00:00Z', gate_at='2026-11-02T12:00:00.500Z')
+        self.assertEqual(self.rig.state(self.RID)['gate']['at'], '2026-11-02T12:00:00.500Z')
+        self.assertEqual(self.rig.state(self.RID)['start']['sent_at'], '2026-11-02T12:00:00Z')
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+        ignored = self.recorded()['queue_text']['acceptances_ignored']
+        self.assertIn('2026-11-02T12:00:00.500Z', ignored)
+        self.assertIn('is later than the first send', ignored)
+
+    def test_a_gate_half_a_second_before_a_whole_second_send_keeps_its_acceptance(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T12:00:00.500Z')
+        self.assertEqual(self.rig.state(self.RID)['gate']['at'], '2026-11-02T12:00:00Z')
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], self.seen('Q02')['accepted']), ('unchanged', 'a typo fix'))
+        self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
+        self.assertNotIn('note:', out)
+
+    def test_a_gate_time_that_cannot_be_read_has_its_acceptance_ignored_and_says_why(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        for how, at in (('unparseable', 'yesterday-ish'), ('missing', None), ('no text', 5), ('out of range', '9999-12-31T23:59:59-05:00')):
+            with self.subTest(how):
+                self.setUp()
+                self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T13:00:00Z')
+                gate = {k: v for k, v in self.rig.state(self.RID)['gate'].items() if k != 'at'}
+                self.rewrite(gate=gate if how == 'missing' else dict(gate, at=at))
+                _code, out, _ = self.finish(edited)
+                self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+                ignored = self.recorded()['queue_text']['acceptances_ignored']
+                self.assertIn(f'the recorded gate\'s time ({at!r}) or the first send\'s (\'2026-11-02T13:00:00Z\') cannot be read', ignored)
+                self.assertIn('so the gate cannot be placed before the send', ignored)
+                self.assertIn(f'note: {ignored}', out.splitlines())
+                self.assertIn('cannot be placed at or before the first send', self.seen('Q02')['detail'])
+
+    def test_a_first_send_that_cannot_be_read_has_the_acceptance_ignored_and_says_why(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        cases = (('no sent_at', lambda start: {k: v for k, v in start.items() if k != 'sent_at'}, None),
+                 ('unparseable', lambda start: dict(start, sent_at='lunchtime'), 'lunchtime'),
+                 ('no text', lambda start: dict(start, sent_at=7), 7),
+                 ('the first of a chain has none', lambda start: dict(start, replaces={'meters': {}}), None),
+                 ('a start that is no record', lambda start: 'sent', None))
+        for how, edit, shown in cases:
+            with self.subTest(how):
+                self.setUp()
+                self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T13:00:00Z')
+                self.rewrite(start=edit(self.rig.state(self.RID)['start']))
+                _code, out, _ = self.finish(edited)
+                self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+                ignored = self.recorded()['queue_text']['acceptances_ignored']
+                self.assertIn(f'or the first send\'s ({shown!r}) cannot be read', ignored)
+                self.assertIn('2026-11-02T12:00:00Z', ignored)
+
+    def test_without_a_recorded_gate_there_is_nothing_to_place_and_nothing_is_ignored(self):
+        self.started()
+        for gate in (None, {}):
+            with self.subTest(gate=gate):
+                self.rewrite(gate=gate)
+                _code, out, _ = self.finish()
+                self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
+                self.assertNotIn('note:', out)
+
+    def test_a_gate_between_the_first_and_second_of_three_sends_is_after_the_first_send(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(sent_at='2026-11-02T12:10:00Z')
+        self.gated(edited, accept_changed={'Q02': 'a typo fix'}, at='2026-11-02T12:20:00Z')
+        self.sent('2026-11-02T12:30:00Z', override='the send was repeated')
+        self.sent('2026-11-02T12:40:00Z', override='and again')
+        chain = self.rig.state(self.RID)['start']
+        self.assertEqual([chain['sent_at'], chain['replaces']['sent_at'], chain['replaces']['replaces']['sent_at']],
+                         ['2026-11-02T12:40:00Z', '2026-11-02T12:30:00Z', '2026-11-02T12:10:00Z'])
+        self.assertNotIn('replaces', chain['replaces']['replaces'])
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+        ignored = self.recorded()['queue_text']['acceptances_ignored']
+        self.assertIn('2026-11-02T12:20:00Z', ignored)
+        self.assertIn('2026-11-02T12:10:00Z', ignored)
+        self.assertNotIn('2026-11-02T12:30:00Z', ignored)
+        self.assertNotIn('2026-11-02T12:40:00Z', ignored)
 
     def test_a_gate_after_the_send_that_accepted_nothing_is_noted_too(self):
         self.started(sent_at='2026-11-02T13:00:00Z')

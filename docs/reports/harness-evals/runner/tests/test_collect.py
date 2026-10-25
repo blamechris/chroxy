@@ -885,11 +885,35 @@ class QueueTextNotes(Scenario):
             self.assertIn(f'  note: queue text {slot}: not recorded at finish', self.output)
         self.assertNotIn('re-read', self.output, 'a record with no slots is still a record')
 
-    def test_a_recorded_slot_the_trial_no_longer_has_is_ignored(self):
+    def test_a_recorded_slot_the_trial_no_longer_has_is_named_whatever_its_status(self):
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'),
-                                                                           Q09=self.row('changed'))})
+                                                                           Q09=self.row('changed'), Q08=self.row('unchanged'))})
         self.collect()
-        self.assertNotIn('queue text', self.output)
+        self.assertEqual(self.code, 0, self.output)
+        for slot in ('Q08', 'Q09'):
+            self.assertIn(f'  note: queue text {slot}: recorded at finish, but trial.json no longer has the slot', self.output)
+        self.assertLess(self.output.index('queue text Q08'), self.output.index('queue text Q09'), 'sorted')
+        self.assertNotIn('queue text Q01', self.output)
+        self.assertNotIn('queue text Q02', self.output)
+
+    def test_acceptances_finish_did_not_use_are_the_first_note(self):
+        sentence = 'the recorded gate (T) is later than the first send (S), so the queue text is compared with T0 only'
+        finish = self.seen(Q01=self.row('changed', 'a detail'), Q02=self.row('unchanged'))
+        finish['queue_text']['acceptances_ignored'] = sentence
+        self.write_state({'start': {'sent_at': START}, 'finish': finish})
+        self.collect()
+        note = f'  note: queue text: acceptances ignored at finish ({sentence})'
+        self.assertIn(note, self.output)
+        self.assertLess(self.output.index(note), self.output.index('queue text Q01: changed'))
+
+    def test_no_acceptances_ignored_note_without_a_sentence(self):
+        for value in (None, '', 5, ['x']):
+            with self.subTest(value=value):
+                finish = self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))
+                finish['queue_text']['acceptances_ignored'] = value
+                self.write_state({'start': {'sent_at': START}, 'finish': finish})
+                self.collect()
+                self.assertNotIn('acceptances ignored', self.output)
 
     def test_a_row_that_is_not_a_record_is_not_unchanged(self):
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})
