@@ -425,7 +425,10 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // to complete, so the palette hides and keeps its hands off the keyboard:
   // Enter must send `/cmd args`, not select the row and replace the arguments.
   // An unrecognised token keeps the palette open on "No commands found".
-  const slashPickerVisible = pickerOpen && !(slashMatch.tokenComplete && filteredCommands.length > 0)
+  // The leading "/" is checked here too: a value replaced without an edit
+  // (history recall, Cmd+L) must not leave the full list up over plain text.
+  const slashPickerVisible = pickerOpen && value.startsWith('/') &&
+    !(slashMatch.tokenComplete && filteredCommands.length > 0)
 
   const dedupedAttachments = useMemo(() => {
     if (!attachments) return undefined
@@ -562,6 +565,10 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (entry === undefined) return
     setValue(entry)
     setHistoryIndex(depth)
+    // #8699 — recall is reachable while the palette is open but hidden (a
+    // command with arguments). Close it so a recalled `/cmd` is sent by Enter
+    // rather than completed, as it is when recalled with the palette closed.
+    closePicker()
     // Park the caret at the end on the next frame, after React applies the
     // controlled-value update. Without rAF the setSelectionRange runs before
     // the new value is reflected in textarea.value, so the caret ends up at
@@ -572,7 +579,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       const end = t.value.length
       t.setSelectionRange(end, end)
     })
-  }, [userMessageHistory, setValue])
+  }, [userMessageHistory, setValue, closePicker])
 
   // Voice keyboard shortcut. Space used to be a hold-to-talk trigger, but that
   // required suppressing and re-inserting native spaces in a controlled

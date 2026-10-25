@@ -1424,6 +1424,70 @@ describe('InputBar slash command picker (#1281)', () => {
       // Scoped to the picker: the textarea's own text is also "/prime-directive".
       expect(within(screen.getByTestId('slash-picker')).getByText('/prime-directive')).toBeInTheDocument()
     })
+
+    // With the palette hidden, ArrowUp reaches history recall, which replaces
+    // the value without an edit. The palette must not come back over it.
+    it('history recall from a hidden palette shows no palette, and Enter sends the recalled text', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter userMessageHistory={['hello world']} />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+      fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+      expect(textarea.value).toBe('hello world')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('hello world')
+    })
+
+    it('a recalled bare command is sent by Enter, not completed', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter userMessageHistory={['/commit']} />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+      fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+      expect(textarea.value).toBe('/commit')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('/commit')
+    })
+
+    it('Cmd+L leaves no palette over the cleared composer', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/notacommand' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(textarea.value).toBe('')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Escape with the palette hidden interrupts, as it does for any other text', () => {
+      const onInterrupt = vi.fn()
+      render(<InputBar onSend={vi.fn()} onInterrupt={onInterrupt} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      fireEvent.keyDown(textarea, { key: 'Escape' })
+      expect(onInterrupt).toHaveBeenCalledTimes(1)
+      expect(textarea.value).toBe('/prime-directive "a b"')
+    })
+
+    it('an @file argument after a known command is handled by the file picker', () => {
+      const files = [{ path: 'README.md', type: 'file' as const, size: 256 }]
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={commands} filePickerFiles={files} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive @READ', selectionStart: 21 } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      expect(screen.getByText('README.md')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(textarea.value.startsWith('/prime-directive ')).toBe(true)
+      expect(textarea.value).toContain('README.md')
+    })
   })
 })
 

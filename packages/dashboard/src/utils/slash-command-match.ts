@@ -31,8 +31,10 @@ export function matchSlashCommands(commands: SlashCommand[], input: string): Sla
       tokenComplete: false,
     }
   }
-  // A finished token matches only the command it names, exactly as the server
-  // dispatches it (split at the first whitespace, compared with ===).
+  // A finished token matches only the command it names, by its exact listed
+  // name. That is how the BYOK session dispatches an MCP prompt (split at the
+  // first whitespace, compared with ===); other providers hand the text to
+  // their own CLI or SDK, whose case handling Chroxy does not decide.
   const token = input.slice(0, wsIdx)
   return { commands: commands.filter(c => c.name === token), tokenComplete: true }
 }
