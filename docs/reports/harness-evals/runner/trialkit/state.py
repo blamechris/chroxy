@@ -90,6 +90,7 @@ def live_runs(trial, exclude=None, home=None):
     return [rid for rid, data in _recorded(trial, exclude, home) if data.get('start') and not data.get('finish')]
 
 
-def started_runs(trial, home=None):
-    """Run ids whose state records a start, finished or not."""
-    return [rid for rid, data in _recorded(trial, home=home) if data.get('start')]
+def started(trial, home=None):
+    """(run id, state) for each run whose state in paths.state_dir records a start, finished or not, in roster order. Raises as
+    `_recorded` does."""
+    return [(rid, data) for rid, data in _recorded(trial, home=home) if data.get('start')]

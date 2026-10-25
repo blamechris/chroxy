@@ -408,6 +408,22 @@ class StateFile(unittest.TestCase):
         self.assertEqual(state.live_runs(self.trial, home=self.box.home), ['A-cd-r1'])
         self.assertEqual(state.live_runs(self.trial, exclude='A-cd-r1', home=self.box.home), [])
 
+    def test_started_lists_every_run_with_a_start_finished_or_not_in_roster_order(self):
+        for rid, sections in (('B-cy-r1', {'start': {'sent_at': 'x'}, 'finish': {'ended_at': 'y'}}), ('A-cy-r1', {}),
+                              ('A-cd-r1', {'start': {'sent_at': 'z'}})):
+            state.save(self.trial, rid, {'run': rid, **sections}, home=self.box.home)
+        found = state.started(self.trial, home=self.box.home)
+        self.assertEqual([rid for rid, _ in found], ['A-cd-r1', 'B-cy-r1'])
+        self.assertEqual(found[0][1]['start'], {'sent_at': 'z'})
+
+    def test_started_raises_for_a_state_it_cannot_read_and_is_empty_without_a_state_folder(self):
+        self.assertEqual(state.started(self.trial, home=self.box.home), [])
+        os.makedirs(os.path.dirname(state.state_path(self.trial, 'A-cd-r1', home=self.box.home)))
+        with open(state.state_path(self.trial, 'A-cd-r1', home=self.box.home), 'w') as fh:
+            fh.write('{truncated')
+        with self.assertRaises(ValueError):
+            state.started(self.trial, home=self.box.home)
+
 
 class FakeInner:
     repo = 'o/r'
@@ -451,6 +467,15 @@ class Timestamps(unittest.TestCase):
         self.assertEqual(timeutil.iso(timeutil.parse_ts('2026-10-19T19:18:00.437Z')), '2026-10-19T19:18:00.437Z')
         self.assertEqual(timeutil.iso(timeutil.parse_ts('2026-10-19T19:18:00')), '2026-10-19T19:18:00Z')
         self.assertAlmostEqual(timeutil.minutes('2026-10-18T04:07:01Z', '2026-10-18T05:52:42Z'), 105.6833, places=3)
+
+    def test_instant_is_the_moment_however_it_is_spelled(self):
+        moment = timeutil.parse_ts('2026-11-02T09:00:00Z')
+        for spelling in ('2026-11-02T09:00:00Z', '2026-11-02T09:00:00.000Z', '2026-11-02T10:00:00+01:00', '2026-11-02T09:00:00'):
+            self.assertEqual(timeutil.instant(spelling), moment, spelling)
+
+    def test_instant_is_none_for_what_cannot_be_read(self):
+        for value in (None, '', 'not a time', 7, ['2026-11-02T09:00:00Z'], '9999-12-31T23:59:59-05:00'):
+            self.assertIsNone(timeutil.instant(value), repr(value))
 
 
 if __name__ == '__main__':

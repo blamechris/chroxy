@@ -233,7 +233,7 @@ Exposing Codex tokens in Chroxy's badge (REPORT rec 7) is a product follow-up.
 | 2 | Ruleset for `trial/t2-*`, Copilot setting | owner | runner README, "Owner commands" | — |
 | 3 | Queue candidates, owner picks ten, slots assigned | supervisor, owner | `trialctl queue-candidates` | one exploration session |
 | 4 | Key written, dry-graded, sealed; digest committed | owner, graders | `trialctl key-template`, `verify-key` | two short grader sessions |
-| 5 | Dry runs (the October three, on the current daemon), each with `prepare`, `start` and `verify-start`, so the transcript readers meet real files before run 1 | owner | as October step 5 | three short runs |
+| 5 | Dry runs (the October three, on the current daemon), each with `prepare`, `start` and `verify-start`, so the transcript readers meet real files before run 1; then move their states out of `paths.state_dir`, since a start recorded before the queue snapshot fails every gate | owner | as October step 5 | three short runs |
 | 6 | Record T0; cut each base from it just before that run's step 7, not all at once: every cut fires one full CI push run on its new base, and eight at once would queue on the single macOS and Windows runners | supervisor | `trialctl cut --run <run> --t0 <sha> --push` | — |
 | 7 | Per run: gate, clone, preflight (including no CI queued or running, so the base's own cut run has finished), launch card | owner on the Mac | `trialctl prepare <run>` | — |
 | 8 | Per run: send the invocation, record the start | owner | `trialctl start <run>` | the run |

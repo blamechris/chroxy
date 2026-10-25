@@ -141,21 +141,26 @@ def _state_dir(trial, env):
     return state.tildify(where, env.home) if where else 'paths.state_dir (not set)'
 
 
-def _started(trial, env, run=None, st=None):
-    """Which runs of the trial have started, finished or not, as the clause `queue_text` gives when it will not take a missing T0
-    snapshot (#8808), or None when none has. A state that cannot be read cannot rule one out, so it is such a clause too.
-    `st` is `run`'s own state, which `--state-file` may have put outside paths.state_dir."""
-    where = _state_dir(trial, env)
+def _starts(trial, env, run=None, st=None, state_file=None):
+    """Every start recorded for the trial, finished or not, as `queue_text` reads them (#8808, #8812): (rows, None), each row
+    (run id, when it was first sent, where the start is recorded), in roster order, or (None, (problem, remedy)) when the run
+    states cannot be read, which cannot rule a start out: paths.state_dir is not set, or a state in it cannot be read. `st` is
+    `run`'s own state, which `state_file` may have put outside paths.state_dir: a start recorded only there is a row of its
+    own, named as that file."""
+    root, where = trial.local_path('state_dir', env.home), _state_dir(trial, env)
+    if not root:
+        return None, ('paths.state_dir is not set in trial.json', 'set it')
     try:
-        runs = set(state.started_runs(trial, home=env.home))
+        found = state.started(trial, home=env.home)
     except (OSError, ValueError) as exc:
-        return f'a run state in {where} cannot be read ({exc}), so a started run cannot be ruled out'
-    if run is not None and isinstance(st, dict) and st.get('start'):
-        runs.add(run.id)
-    named = [r.id for r in trial.runs if r.id in runs]
-    if not named:
-        return None
-    return f'{", ".join(named)} {"has" if len(named) == 1 else "have"} started, by the run states in {where}'
+        return None, (f'a run state in {where} cannot be read ({exc})', 'repair or move that state')
+    rows = [(rid, _first_send(data), f'the run states in {where}') for rid, data in found]
+    if run is not None and state_file and isinstance(st, dict) and st.get('start'):
+        own = state.state_path(trial, run.id, state_file, env.home)
+        if os.path.realpath(own) != os.path.realpath(os.path.join(root, f'{run.id}.json')):
+            rows.append((run.id, _first_send(st), f"{run.id}'s state file {state.tildify(own, env.home)}"))
+    order = {r.id: i for i, r in enumerate(trial.runs)}
+    return sorted(rows, key=lambda row: order[row[0]]), None
 
 
 # -- gate ----------------------------------------------------------------------
@@ -237,7 +242,7 @@ def gate(trial, run, env, accept_open, state_file, accept_changed=None):
     for number in sorted(set(accept_open) - set(blockers)):
         env.print(f'note: --accept-open {number} ignored; it is not a blocker for {run.id}')
     results += _queue_checks(trial, gh)
-    results += queue_text.gate_checks(trial, gh, accept_changed, accepted_changed, _started(trial, env, run, st))
+    results += queue_text.gate_checks(trial, gh, accept_changed, accepted_changed, _starts(trial, env, run, st, state_file))
     for slot in sorted(set(accept_changed) - {s.slot for s in trial.slots}):
         env.print(f'note: --accept-changed {slot} ignored; it is not a queue slot')
     if trial.t0:
@@ -387,10 +392,11 @@ def cut(trial, runs, env, t0, push, repo_dir):
         config.check_t0(trial, t0)
         # The queue's text is read before anything is recorded: a slot that cannot be read refuses the cut, with
         # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut). Once T0 is
-        # recorded a missing one is refused, not taken, if a run has started; before that no run of the trial can have
-        # (its base is cut from T0), so a start in the state folder is a dry run's and does not count.
+        # recorded a missing one is refused, not taken, if a run has started. Before that none is meant to have (its base
+        # is cut from T0), so a start in the state folder is a dry run's and does not count here; it fails every later
+        # gate, which places the snapshot before each recorded first send (#8812), so it must be moved before the first gate.
         late = bool(trial.t0)
-        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env), _started(trial, env) if late else None)
+        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env), _starts(trial, env) if late else None)
         config.save_t0(trial, t0)
     except (render.RenderError, config.ConfigError, queue_text.QueueTextError) as exc:
         env.print(f'cut: refusing: {exc}')
@@ -407,7 +413,8 @@ def cut(trial, runs, env, t0, push, repo_dir):
         if late:
             env.print(f'note: T0 was recorded without {queue_text.FILE}, so its text was read now, after T0. No run state in '
                       f'{_state_dir(trial, env)} records a start; `cut` reads only this machine\'s run states, so if a run has '
-                      f'started elsewhere, remove this snapshot and put the committed one back')
+                      f'started elsewhere, the gate on the Mac fails against this snapshot: remove it and put back the committed '
+                      f'one, if there is one')
     results = [_cut_one(trial, run, env, repo, t0, missions[run.id], push) for run in runs]
     env.print(checks.render(results, f'cut at T0 {t0[:12]} ({"pushing" if push else "local build only"})'))
     return checks.exit_code(results)
@@ -1028,15 +1035,6 @@ def _not_passed(entry):
     return [f'{c.get("name")} {c.get("status")}' for c in entry['checks'] if c.get('status') != checks.PASS]
 
 
-def _instant(value):
-    """The moment an ISO-8601 timestamp names, or None when `value` is missing or cannot be read (a value that is no text, no
-    timestamp, or so near the end of the calendar that its UTC time is out of range, such as 9999-12-31T23:59:59-05:00)."""
-    try:
-        return timeutil.parse_ts(value)
-    except (ValueError, TypeError, AttributeError, OverflowError):
-        return None
-
-
 def _out_of_order(step, entry, again, base, base_entry, base_again):
     """[] when recorded step `entry` ran at or after `base_entry`, else the one problem saying why it cannot be placed after it.
     The two `at` times are compared as moments, not as strings: `timeutil.iso` writes no fraction, or one of three or six
@@ -1044,7 +1042,7 @@ def _out_of_order(step, entry, again, base, base_entry, base_again):
     A time that cannot be read places its step nowhere, which is not after the other. `again` and `base_again` say what to run
     when the step's own time, or the base's, is the one to record anew."""
     at, base_at = entry.get('at'), base_entry.get('at')
-    mine, theirs = _instant(at), _instant(base_at)
+    mine, theirs = timeutil.instant(at), timeutil.instant(base_at)
     if mine is None:
         return [f'the {step}\'s time ({at!r}) cannot be read, so it cannot be placed after the {base}; {again}']
     if theirs is None:
@@ -1285,9 +1283,10 @@ def verify_start(trial, run, env, since, state_file):
 
 def _first_send(st):
     """When the run was first sent: the `sent_at` of the earliest start, following `replaces` back through re-recorded
-    starts, or None when no start is recorded or the earliest has none."""
+    starts, or None when no start is recorded or the earliest has none. A `replaces` that is there and not null is followed
+    whatever it holds, so one that is no record is a first send that cannot be read, not a reason to stop at the later send."""
     started = st.get('start')
-    while isinstance(started, dict) and isinstance(started.get('replaces'), dict):
+    while isinstance(started, dict) and started.get('replaces') is not None:
         started = started['replaces']
     return started.get('sent_at') if isinstance(started, dict) else None
 
@@ -1295,15 +1294,18 @@ def _first_send(st):
 def _acceptances_ignored(st):
     """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
     when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
-    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send."""
+    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. When it
+    is the send's, the snapshot cannot be placed before it either (#8812), so no slot is compared and the sentence says no more
+    than that the acceptances are not used."""
     if not (st.get('start') and st.get('gate')):
         return None
     gate = st['gate'] if isinstance(st['gate'], dict) else {}
     at, sent = gate.get('at'), _first_send(st)
-    gate_time, sent_time = _instant(at), _instant(sent)
+    gate_time, sent_time = timeutil.instant(at), timeutil.instant(sent)
     if gate_time is None or sent_time is None:
+        compared = '' if sent_time is None else ' and the queue text is compared with T0 only'
         return (f'the recorded gate\'s time ({at!r}) or the first send\'s ({sent!r}) cannot be read, so the gate cannot be placed before '
-                f'the send; its acceptances are not used and the queue text is compared with T0 only')
+                f'the send; its acceptances are not used{compared}')
     if gate_time > sent_time:
         return (f'the recorded gate ({at}) is later than the first send ({sent}), so the text it let through or accepted '
                 f'is not the text the run started on; the queue text is compared with T0 only')
@@ -1323,9 +1325,9 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     previous = st.get('finish')
     if previous:
         was = previous.get('ended_at') if isinstance(previous, dict) else None
-        if was and _instant(was) is None:
+        if was and timeutil.instant(was) is None:
             moved = f'; its ended_at ({was!r}) cannot be read, so the new one ({ended}) cannot be checked against it'
-        elif was and _instant(was) != _instant(ended):
+        elif was and timeutil.instant(was) != timeutil.instant(ended):
             moved = f'; ended_at moves from {was} to {ended} (pass --ended-at {was} to keep it)'
         else:
             moved = ''
@@ -1361,7 +1363,7 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     if ignored:
         accepted = None
         env.print(f'note: {ignored}')
-    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, ignored)
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:
         record['queue_text']['acceptances_ignored'] = ignored

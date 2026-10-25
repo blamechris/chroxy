@@ -36,6 +36,7 @@ LATE = ('a snapshot taken after a run began holds the text as it is then, which 
         'pass it')
 WRONG_STATE = "if a run state there is wrong, such as a dry run's start or a file that cannot be read, repair or move it first"
 STATES = 'by the run states in ~/trial/t2/state'
+PLACE = 'the run states in ~/trial/t2/state'
 OPUS, ASTRA = 'claude-opus-5-5', 'gpt-6-astra'
 
 
@@ -310,6 +311,17 @@ def plant_unreadable_state(rig, rid, how):
 
 
 @contextlib.contextmanager
+def unreadable_state(rig, rid, how):
+    """`plant_unreadable_state` for the length of a `with`. The undo runs when an assertion fails too, so a folder without
+    permission never outlives its test (#8813)."""
+    undo = plant_unreadable_state(rig, rid, how)
+    try:
+        yield
+    finally:
+        undo()
+
+
+@contextlib.contextmanager
 def without(trial, bag, key):
     """The loaded trial with one setting removed: `trial.<bag>[key]`, or the attribute `trial.<key>` when bag is None."""
     if bag is None:
@@ -458,16 +470,15 @@ class Gate(LaunchCase):
         self.assertRegex(out, r'FAIL\s+no other run live\s+A-cd-r1')
 
     def test_a_finished_run_is_not_live(self):
-        self.rig.save_state('A-cd-r1', start={'sent_at': 'x'}, finish={'ended_at': 'y'})
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T10:00:00Z'}, finish={'ended_at': 'y'})
         code, out, _ = self.go()
         self.assertEqual(code, 0, out)
 
     def test_another_runs_unreadable_state_is_unverified_not_a_pass(self):
         for how in ('corrupt', 'directory'):
             with self.subTest(how):
-                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
-                code, out, _ = self.go()
-                undo()
+                with unreadable_state(self.rig, 'A-cd-r1', how):
+                    code, out, _ = self.go()
                 self.assertEqual(code, 2, out)
                 self.assertRegex(out, r'UNVERIFIED\s+no other run live\s+cannot read the other runs\' state files')
                 self.assertNotRegex(out, r'PASS\s+no other run live')
@@ -633,21 +644,48 @@ class GateQueueText(LaunchCase):
                 self.assertEqual(self.text_checks()['queue text at T0']['detail'], self.missing_after(started))
                 self.assertNotIn('run `cut` again', out)
 
-    def gate_elsewhere(self, rid, **sections):
-        """The real gate for `rid`, with its own state kept outside paths.state_dir (`--state-file`); the queue-text-at-T0 detail."""
-        own = os.path.join(self.rig.box.tmp, 'elsewhere', f'{rid}.json')
+    def elsewhere(self, rid):
+        """Where `gate_elsewhere` keeps `rid`'s state, as the gate prints it (outside the home directory, so not with a `~`)."""
+        return os.path.join(self.rig.box.tmp, 'elsewhere', f'{rid}.json')
+
+    def gate_elsewhere(self, rid, code=1, **sections):
+        """The real gate for `rid`, with its own state kept outside paths.state_dir (`--state`); the queue-text-at-T0 detail."""
+        own = self.elsewhere(rid)
         state.save(self.rig.trial, rid, {'run': rid, 'trial': self.rig.trial.id, **sections}, override=own, home=self.rig.box.home)
         env = self.rig.env(github=FakeGitHub())
-        code = launch.gate(self.rig.trial, self.rig.run(rid), env, {}, own)
-        self.assertEqual(code, 1, env.out.getvalue())
-        return {c['name']: c['detail'] for c in state.load(self.rig.trial, rid, override=own)['gate']['checks']}['queue text at T0']
+        self.assertEqual(launch.gate(self.rig.trial, self.rig.run(rid), env, {}, own), code, env.out.getvalue())
+        checks_ = {c['name']: c['detail'] for c in state.load(self.rig.trial, rid, override=own)['gate']['checks']}
+        return checks_.get('queue text at T0', f'no queue text at T0 check, only {sorted(checks_)}')
 
     def test_the_gate_s_own_start_counts_wherever_its_state_file_is_and_runs_are_named_in_roster_order(self):
         os.remove(snapshot_path(self.rig))
-        self.assertEqual(self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}), self.missing_after(f'B-cy-r1 has started, {STATES}'))
-        self.rig.save_state('A-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}, finish={})
-        self.assertEqual(self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'}),
-                         self.missing_after(f'B-cy-r1, A-cy-r1 have started, {STATES}'), 'trial.json lists B-cy-r1 before A-cy-r1')
+        sent = {'sent_at': '2026-11-02T10:00:00Z'}
+        own = self.elsewhere('B-cy-r1')
+        # #8813: a start found only in the gate's own state file is named as that file, not as the folder it is not in.
+        self.assertEqual(self.gate_elsewhere('B-cy-r1', start=sent), self.missing_after(f"B-cy-r1 has started, by B-cy-r1's state file {own}"))
+        self.rig.save_state('A-cy-r1', start=sent, finish={})
+        self.assertEqual(self.gate_elsewhere('B-cy-r1', start=sent),
+                         self.missing_after(f"B-cy-r1, A-cy-r1 have started, by B-cy-r1's state file {own} and {PLACE}"),
+                         'trial.json lists B-cy-r1 before A-cy-r1')
+        self.rig.save_state('B-cy-r1', start=sent)
+        self.assertEqual(self.gate_elsewhere('B-cy-r1', start=sent),
+                         self.missing_after(f"B-cy-r1, A-cy-r1 have started, by {PLACE} and B-cy-r1's state file {own}"),
+                         'a start recorded in both places is named in both')
+
+    def test_a_state_file_that_is_the_one_in_state_dir_is_not_named_as_somewhere_else(self):
+        os.remove(snapshot_path(self.rig))
+        own = state.state_path(self.rig.trial, 'B-cy-r1', home=self.rig.box.home)
+        for how, given in (('named', own), ('through a symlink', os.path.join(self.rig.box.tmp, 'link.json'))):
+            with self.subTest(how):
+                self.rig.save_state('B-cy-r1', start={'sent_at': '2026-11-02T10:00:00Z'})   # afresh: no gate record from an earlier pass
+                if how == 'through a symlink':
+                    os.symlink(own, given)
+                env = self.rig.env(github=FakeGitHub())
+                code = launch.gate(self.rig.trial, self.rig.run('B-cy-r1'), env, {}, given)
+                self.assertEqual(code, 1, env.out.getvalue())
+                recorded = state.load(self.rig.trial, 'B-cy-r1', override=given, home=self.rig.box.home)   # the gate saves over the link itself
+                detail = {c['name']: c['detail'] for c in recorded['gate']['checks']}['queue text at T0']
+                self.assertEqual(detail, self.missing_after(f'B-cy-r1 has started, {STATES}'))
 
     def test_a_run_state_that_cannot_be_read_cannot_rule_out_a_start(self):
         os.remove(snapshot_path(self.rig))
@@ -655,15 +693,249 @@ class GateQueueText(LaunchCase):
             with self.subTest(how):
                 if how == 'folder without permission' and os.geteuid() == 0:
                     self.skipTest('root reads a folder whatever its mode')
-                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
-                detail = self.gate_elsewhere('B-cy-r1')
-                undo()
+                with unreadable_state(self.rig, 'A-cd-r1', how):
+                    detail = self.gate_elsewhere('B-cy-r1')
                 head, tail = detail.split(' (', 1)
                 self.assertEqual(head, "queue-t0.json is missing from docs/reports/harness-evals/trial-2 and a run state in ~/trial/t2/state "
                                        "cannot be read")
                 self.assertTrue(tail.endswith(f'), so a started run cannot be ruled out: put the committed file back (pull the commit that '
                                               f'added it with trial.json\'s t0, or restore it) and run the gate again ({WRONG_STATE}). Do '
                                               f'not run `cut` to write it now: {LATE}'), detail)
+
+    # -- a snapshot read after a recorded first send (#8812)
+
+    # The repair, spelled out: the likeliest cause (a wrong start, such as a dry run's) first, with "if" capitalised after a full stop.
+    REPAIR = ("a start there is wrong, such as a dry run's, move that state; otherwise put back the snapshot `cut` took with T0 "
+              "(an earlier commit of the file, if this one replaced it); then run the gate again")
+
+    def sent(self, rid, at, **sections):
+        """Run `rid`'s state in paths.state_dir: finished, so it is not live, and first sent at `at`."""
+        self.rig.save_state(rid, start={'sent_at': at}, finish={'ended_at': '2026-11-02T23:00:00Z'}, **sections)
+
+    def late(self, at, listing, places=PLACE):
+        """The failure detail for a snapshot read at `at` after the first sends in `listing`, recorded by `places`."""
+        return (f'queue-t0.json was read at {at}, after the first send of {listing}, by {places}: {LATE}. '
+                f'If {self.REPAIR}')
+
+    def text_detail(self):
+        found = self.text_checks()
+        return found['queue text at T0']['detail'] if 'queue text at T0' in found else f'no queue text at T0 check, only {sorted(found)}'
+
+    def test_a_snapshot_read_before_a_first_send_passes_and_the_text_is_compared(self):
+        self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
+        code, out, gh = self.go()
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+        self.assertRegex(out, r'PASS\s+queue text Q02 #9002')
+        self.assertEqual(sorted(self.text_checks()), ['queue text Q01 #9001', 'queue text Q02 #9002'])
+
+    def test_a_snapshot_read_at_the_moment_of_the_first_send_is_not_later_however_either_is_spelled(self):
+        for snapshot, sent in (('2026-11-02T09:00:00Z', '2026-11-02T09:00:00Z'), ('2026-11-02T09:00:00Z', '2026-11-02T09:00:00.000Z'),
+                               ('2026-11-02T09:00:00Z', '2026-11-02T10:00:00+01:00'), ('2026-11-02T09:00:00Z', '2026-11-02T09:00:00'),
+                               ('2026-11-02T10:00:00+01:00', '2026-11-02T09:00:00Z'), ('2026-11-02T09:00:00.000Z', '2026-11-02T09:00:00+00:00')):
+            with self.subTest(snapshot=snapshot, sent=sent):
+                self.setUp()
+                edit_snapshot(self.rig, lambda d: d.update(at=snapshot))
+                self.sent('A-cd-r1', sent)
+                code, out, _ = self.go()
+                self.assertEqual(code, 0, out)
+                self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+
+    def test_a_snapshot_read_after_a_first_send_fails_naming_the_run_both_times_and_where_and_reads_no_text(self):
+        self.sent('A-cd-r1', '2026-11-02T08:00:00Z')
+        code, out, gh = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T08:00:00Z'))
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json was read at 2026-11-02T09:00:00Z, after the first send of A-cd-r1 at ')
+        self.assertEqual(sorted(self.text_checks()), ['queue text at T0'], 'no slot was compared')
+        self.assertEqual([r for r in gh.requests if r[0].endswith('/comments')], [], 'no text was read without a baseline')
+        self.assertNotRegex(out, r'queue text Q0')
+
+    def test_the_times_are_compared_as_moments_not_as_text(self):
+        # As text '.500Z' sorts before 'Z', so a snapshot half a second after a whole-second send reads as earlier, and the reverse.
+        edit_snapshot(self.rig, lambda d: d.update(at='2026-11-02T10:00:00.500Z'))
+        self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late('2026-11-02T10:00:00.500Z', 'A-cd-r1 at 2026-11-02T10:00:00Z'))
+        self.setUp()
+        edit_snapshot(self.rig, lambda d: d.update(at='2026-11-02T10:00:00Z'))
+        self.sent('A-cd-r1', '2026-11-02T10:00:00.500Z')
+        code, out, _ = self.go()
+        self.assertEqual(code, 0, out)
+
+    def test_the_first_send_is_the_earliest_of_a_re_recorded_start(self):
+        chain = {'sent_at': '2026-11-02T12:00:00Z', 'replaces': {'sent_at': '2026-11-02T08:00:00Z'}}
+        self.rig.save_state('A-cd-r1', start=chain, finish={'ended_at': '2026-11-02T23:00:00Z'})
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T08:00:00Z'), 'the later send is not the first')
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T12:00:00Z', 'replaces': {'sent_at': '2026-11-02T11:00:00Z',
+                                                                                                'replaces': {'sent_at': '2026-11-02T07:30:00Z'}}},
+                            finish={'ended_at': '2026-11-02T23:00:00Z'})
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T07:30:00Z'))
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T09:30:00Z', 'replaces': {'sent_at': '2026-11-02T09:00:00Z'}},
+                            finish={'ended_at': '2026-11-02T23:00:00Z'})
+        code, out, _ = self.go()
+        self.assertEqual(code, 0, out)
+
+    def test_every_run_that_started_is_named_in_roster_order_finished_or_not_and_the_gate_s_own_run_too(self):
+        self.sent('A-cy-r1', '2026-11-02T08:00:00Z')
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T07:00:00Z'})   # not finished: still a start
+        self.sent('B-cy-r1', '2026-11-02T08:30:00Z')   # the run being gated
+        self.sent('B-cx-r1', '2026-11-02T10:00:00Z')   # after the snapshot: not named
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T07:00:00Z, B-cy-r1 at 2026-11-02T08:30:00Z, '
+                                                                    'A-cy-r1 at 2026-11-02T08:00:00Z'))
+
+    def test_a_snapshot_time_that_cannot_be_read_is_not_before_every_send(self):
+        self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
+        for how, edit, shown in (('missing', lambda d: d.pop('at'), None), ('no timestamp', lambda d: d.update(at='not a time'), "'not a time'"),
+                                 ('no text', lambda d: d.update(at=123), '123'), ('null', lambda d: d.update(at=None), None),
+                                 ('out of range', lambda d: d.update(at='9999-12-31T23:59:59-05:00'), "'9999-12-31T23:59:59-05:00'")):
+            with self.subTest(how):
+                self.setUp()
+                self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
+                edit_snapshot(self.rig, edit)
+                code, out, gh = self.go()
+                self.assertEqual(code, 1, out)
+                self.assertEqual(self.text_detail(), f"queue-t0.json's time ({shown}) cannot be read, so it cannot be placed before the first "
+                                                     f'send of A-cd-r1 at 2026-11-02T10:00:00Z, by {PLACE}: if {self.REPAIR}')
+                self.assertEqual([r for r in gh.requests if r[0].endswith('/comments')], [])
+
+    def test_a_send_that_cannot_be_read_is_quoted_not_given_as_a_time_beside_an_unreadable_snapshot_time(self):
+        self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
+        self.sent('A-cy-r1', 'garbage')
+        edit_snapshot(self.rig, lambda d: d.update(at='not a time'))
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), "queue-t0.json's time ('not a time') cannot be read, so it cannot be placed before the first send "
+                                             f"of A-cd-r1 at 2026-11-02T10:00:00Z, A-cy-r1 ('garbage'), by {PLACE}: if {self.REPAIR}")
+
+    def test_a_snapshot_time_that_cannot_be_read_is_not_looked_at_when_no_run_has_started(self):
+        for edit in (lambda d: d.pop('at'), lambda d: d.update(at='not a time'), lambda d: d.update(at=123), lambda d: d.update(at=None),
+                     lambda d: d.update(at='9999-12-31T23:59:59-05:00')):
+            with self.subTest():
+                self.setUp()
+                edit_snapshot(self.rig, edit)
+                code, out, _ = self.go()
+                self.assertEqual(code, 0, out)
+                self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+
+    def test_a_first_send_that_cannot_be_read_cannot_be_placed_before_the_snapshot(self):
+        for how, start, shown in (('no sent_at', {'meters': {}}, 'None'), ('unparseable', {'sent_at': 'garbage'}, "'garbage'"),
+                                  ('no text', {'sent_at': 7}, '7'), ('out of range', {'sent_at': '9999-12-31T23:59:59-05:00'},
+                                                                      "'9999-12-31T23:59:59-05:00'"),
+                                  ('the first of a chain has none', {'sent_at': '2026-11-02T12:00:00Z', 'replaces': {'meters': {}}}, 'None')):
+            with self.subTest(how):
+                self.setUp()
+                self.rig.save_state('A-cd-r1', start=start, finish={'ended_at': '2026-11-02T23:00:00Z'})
+                code, out, gh = self.go()
+                self.assertEqual(code, 1, out)
+                self.assertEqual(self.text_detail(), f'the first send of A-cd-r1 ({shown}), by {PLACE}, cannot be read, so queue-t0.json '
+                                                     f'(read at 2026-11-02T09:00:00Z) cannot be placed before it: repair or move that state, '
+                                                     f'then run the gate again')
+                self.assertEqual([r for r in gh.requests if r[0].endswith('/comments')], [])
+
+    def test_a_late_send_and_one_that_cannot_be_read_are_both_named(self):
+        self.sent('A-cd-r1', '2026-11-02T08:00:00Z')
+        self.sent('A-cy-r1', 'garbage')
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T08:00:00Z') +
+                         f"; the first send of A-cy-r1 ('garbage'), by {PLACE}, cannot be read, so queue-t0.json (read at "
+                         f'2026-11-02T09:00:00Z) cannot be placed before it: repair or move that state, then run the gate again')
+
+    def test_a_start_only_in_the_gate_s_own_state_file_is_placed_too_and_named_as_that_file(self):
+        detail = self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T08:00:00Z'})
+        self.assertEqual(detail, self.late(SNAPSHOT_AT, 'B-cy-r1 at 2026-11-02T08:00:00Z', f"B-cy-r1's state file {self.elsewhere('B-cy-r1')}"))
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T07:00:00Z'}, finish={'ended_at': '2026-11-02T23:00:00Z'})
+        detail = self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T08:00:00Z'})
+        self.assertEqual(detail, self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T07:00:00Z, B-cy-r1 at 2026-11-02T08:00:00Z',
+                                           f"{PLACE} and B-cy-r1's state file {self.elsewhere('B-cy-r1')}"))
+
+    def test_a_run_recorded_in_two_places_is_named_once_for_the_same_send_and_twice_for_different_ones(self):
+        elsewhere = self.elsewhere('B-cy-r1')
+        both = f"{PLACE} and B-cy-r1's state file {elsewhere}"
+        self.rig.save_state('B-cy-r1', start={'sent_at': '2026-11-02T08:00:00Z'})
+        detail = self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T08:00:00Z'})
+        self.assertEqual(detail, self.late(SNAPSHOT_AT, 'B-cy-r1 at 2026-11-02T08:00:00Z', both), 'one send, recorded twice, is named once')
+        self.rig.save_state('B-cy-r1', start={'sent_at': '2026-11-02T07:00:00Z'})
+        detail = self.gate_elsewhere('B-cy-r1', start={'sent_at': '2026-11-02T08:00:00Z'})
+        self.assertEqual(detail, self.late(SNAPSHOT_AT, 'B-cy-r1 at 2026-11-02T07:00:00Z, B-cy-r1 at 2026-11-02T08:00:00Z', both),
+                         'two places that disagree are both first sends')
+        self.rig.save_state('B-cy-r1', start={'sent_at': ['x']})   # a value that cannot be hashed, twice
+        detail = self.gate_elsewhere('B-cy-r1', start={'sent_at': ['x']})
+        self.assertEqual(detail, f"the first send of B-cy-r1 (['x']), by {both}, cannot be read, so queue-t0.json (read at 2026-11-02T09:00:00Z) "
+                                 f'cannot be placed before it: repair or move that state, then run the gate again')
+
+    def test_a_replaces_that_is_no_record_is_a_first_send_that_cannot_be_read_not_a_reason_to_stop_at_the_later_send(self):
+        later = '2026-11-02T12:00:00Z'   # after the snapshot: all that is read if the walk stops here
+        for how, replaces in (('text', 'x'), ('empty text', ''), ('a list', [{'sent_at': '2026-11-02T08:00:00Z'}]), ('a number', 5),
+                              ('zero', 0), ('true', True), ('false', False)):
+            with self.subTest(how):
+                self.setUp()
+                self.rig.save_state('A-cd-r1', start={'sent_at': later, 'replaces': replaces}, finish={'ended_at': '2026-11-02T23:00:00Z'})
+                code, out, gh = self.go()
+                self.assertEqual(code, 1, out)
+                self.assertEqual(self.text_detail(), f'the first send of A-cd-r1 (None), by {PLACE}, cannot be read, so queue-t0.json (read at '
+                                                     f'2026-11-02T09:00:00Z) cannot be placed before it: repair or move that state, then run the gate again')
+                self.assertEqual([r for r in gh.requests if r[0].endswith('/comments')], [])
+
+    def test_a_replaces_that_is_null_is_not_a_link_and_the_send_is_read(self):
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T12:00:00Z', 'replaces': None}, finish={'ended_at': '2026-11-02T23:00:00Z'})
+        code, out, _ = self.go()
+        self.assertEqual(code, 0, out)
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T08:00:00Z', 'replaces': None}, finish={'ended_at': '2026-11-02T23:00:00Z'})
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.text_detail(), self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T08:00:00Z'))
+
+    def test_a_gate_with_no_state_dir_cannot_rule_out_a_start_and_is_unverified(self):
+        with without(self.rig.trial, 'paths', 'state_dir'):
+            detail = self.gate_elsewhere('B-cy-r1', code=2)
+        self.assertEqual(detail, 'paths.state_dir is not set in trial.json, so a run sent before queue-t0.json was read cannot be ruled out: '
+                                 'set it, then run the gate again')
+        recorded = state.load(self.rig.trial, 'B-cy-r1', override=self.elsewhere('B-cy-r1'), home=self.rig.box.home)['gate']['checks']
+        self.assertEqual([c['name'] for c in recorded if c['name'].startswith('queue text')], ['queue text at T0'], 'no text was compared')
+        self.assertEqual([c['status'] for c in recorded if c['name'] == 'queue text at T0'], ['UNVERIFIED'])
+
+    def test_a_missing_snapshot_with_no_state_dir_is_not_advised_to_be_cut(self):
+        os.remove(snapshot_path(self.rig))
+        with without(self.rig.trial, 'paths', 'state_dir'):
+            detail = self.gate_elsewhere('B-cy-r1')
+        self.assertEqual(detail, self.missing_after('paths.state_dir is not set in trial.json, so a started run cannot be ruled out'))
+
+    def test_the_text_checks_cannot_be_asked_for_without_saying_who_has_started(self):
+        trial = self.rig.trial
+        for name, call in (('gate_checks', lambda: queue_text.gate_checks(trial, FakeGitHub(), {}, {})),
+                           ('finish_checks', lambda: queue_text.finish_checks(trial, FakeGitHub(), {})),
+                           ('_baseline', lambda: queue_text._baseline(trial))):
+            with self.subTest(name), self.assertRaisesRegex(TypeError, r"missing 1 required positional argument: 'starts'"):
+                call()   # not any TypeError: a default of None would fail later in `started_clause`, for the wrong reason
+
+    def test_a_run_state_that_cannot_be_read_leaves_the_snapshot_unverified_and_reads_no_text(self):
+        for how in ('corrupt', 'directory', 'not a state', 'folder without permission'):
+            with self.subTest(how):
+                if how == 'folder without permission' and os.geteuid() == 0:
+                    self.skipTest('root reads a folder whatever its mode')
+                with unreadable_state(self.rig, 'A-cd-r1', how):
+                    detail = self.gate_elsewhere('B-cy-r1', code=2)
+                    self.assertFalse(detail.startswith('queue-t0.json'), detail)
+                self.assertTrue(detail.startswith('a run state in ~/trial/t2/state cannot be read ('), detail)
+                self.assertTrue(detail.endswith('), so a run sent before queue-t0.json was read cannot be ruled out: repair or move that '
+                                                'state, then run the gate again'), detail)
+
+    def test_an_unreadable_run_state_is_unverified_not_failed_and_no_comments_are_read(self):
+        with unreadable_state(self.rig, 'A-cd-r1', 'corrupt'):
+            code, out, gh = self.go()
+        self.assertEqual(code, 2, out)
+        self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+a run state in ~/trial/t2/state cannot be read \(')
+        self.assertNotRegex(out, r'FAIL')
+        self.assertEqual([r for r in gh.requests if r[0].endswith('/comments')], [])
 
     def test_a_snapshot_taken_at_another_t0_fails(self):
         edit_snapshot(self.rig, lambda d: d.update(t0='f' * 40))
@@ -1215,8 +1487,8 @@ class CutQueueText(unittest.TestCase):
         data = snapshot_file(self.rig)
         self.assertEqual((data['t0'], data['at']), (self.rig.t0, '2026-11-02T12:00:00Z'))
         self.assertIn("note: T0 was recorded without queue-t0.json, so its text was read now, after T0. No run state in ~/trial/t2/state "
-                      "records a start; `cut` reads only this machine's run states, so if a run has started elsewhere, remove this snapshot "
-                      "and put the committed one back", out)
+                      "records a start; `cut` reads only this machine's run states, so if a run has started elsewhere, the gate on the Mac "
+                      "fails against this snapshot: remove it and put back the committed one, if there is one", out)
 
     def test_a_recorded_t0_with_no_snapshot_once_a_run_has_started_is_refused_not_taken(self):
         # #8808: each base is cut just before its run, so a lost snapshot would otherwise be retaken, late, by the next routine cut.
@@ -1235,15 +1507,35 @@ class CutQueueText(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotEqual(self.rig.branch(self.rig.run('B-cy-r1').base), '', 'with the file back, the routine cut goes ahead')
 
+    def test_a_recorded_t0_with_no_snapshot_and_no_state_dir_is_refused_not_taken(self):
+        config.save_t0(self.rig.trial, self.rig.t0)
+        gh = FakeGitHub()
+        with without(self.rig.trial, 'paths', 'state_dir'):
+            code, out = self.cut('B-cy-r1', github=gh)
+        self.assertEqual(code, 2, out)
+        self.assertIn(f'cut: refusing: queue-t0.json is missing and paths.state_dir is not set in trial.json, so a started run cannot be ruled '
+                      f'out: it is not taken now, because {LATE}. Put the committed file back, then cut again ({WRONG_STATE})', out)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        self.assertEqual(gh.requests, [], 'no text was read')
+
+    def test_the_cut_that_records_t0_does_not_need_a_state_dir(self):
+        with open(os.path.join(self.rig.box.trial_dir, 'trial.json'), encoding='utf-8') as fh:
+            data = json.load(fh)
+        del data['paths']['state_dir']
+        self.rig.box.write_trial(data)
+        self.rig.trial = self.rig.box.trial()
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(snapshot_file(self.rig)['t0'], self.rig.t0)
+
     def test_a_run_state_that_cannot_be_read_refuses_a_missing_snapshot_too(self):
         config.save_t0(self.rig.trial, self.rig.t0)
         for how in ('corrupt', 'folder without permission'):
             with self.subTest(how):
                 if how == 'folder without permission' and os.geteuid() == 0:
                     self.skipTest('root reads a folder whatever its mode')
-                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
-                code, out = self.cut('B-cy-r1')
-                undo()
+                with unreadable_state(self.rig, 'A-cd-r1', how):
+                    code, out = self.cut('B-cy-r1')
                 self.assertEqual(code, 2, out)
                 self.assertIn('cut: refusing: queue-t0.json is missing and a run state in ~/trial/t2/state cannot be read (', out)
                 self.assertIn(f'), so a started run cannot be ruled out: it is not taken now, because {LATE}. Put the committed file back, '
@@ -1920,9 +2212,8 @@ class PreflightClaudeNative(LaunchCase):
     def test_another_runs_unreadable_state_leaves_the_live_check_unverified(self):
         for how in ('corrupt', 'directory'):
             with self.subTest(how):
-                undo = plant_unreadable_state(self.rig, 'B-cx-r1', how)
-                code, _out, st = self.pre('A-cd-r1')
-                undo()
+                with unreadable_state(self.rig, 'B-cx-r1', how):
+                    code, _out, st = self.pre('A-cd-r1')
                 self.assertEqual(code, 2)
                 self.assertStatus(statuses(st), 'no other run live', 'UNVERIFIED')
                 self.assertIn('cannot read the other runs\' state files', details(st)['no other run live'])
@@ -3086,10 +3377,10 @@ class FinishQueueText(LaunchCase):
         code = launch.start(self.rig.trial, self.rig.run(self.RID), env, {'codex_weekly_left': 100.0}, override, sent_at, None)
         self.assertEqual(code, 0, env.out.getvalue())
 
-    def finish(self, gh=None):
+    def finish(self, gh=None, state_file=None):
         gh = gh or FakeGitHub()
         env = self.rig.env(github=gh)
-        code = launch.finish(self.rig.trial, self.rig.run(self.RID), env, {'codex_weekly_left': 48.0}, 'n/a', None, 'queue exhausted', None)
+        code = launch.finish(self.rig.trial, self.rig.run(self.RID), env, {'codex_weekly_left': 48.0}, 'n/a', None, 'queue exhausted', state_file)
         return code, env.out.getvalue(), gh
 
     def rewrite(self, **sections):
@@ -3299,26 +3590,45 @@ class FinishQueueText(LaunchCase):
                 ignored = self.recorded()['queue_text']['acceptances_ignored']
                 self.assertIn(f'the recorded gate\'s time ({at!r}) or the first send\'s (\'2026-11-02T13:00:00Z\') cannot be read', ignored)
                 self.assertIn('so the gate cannot be placed before the send', ignored)
+                self.assertTrue(ignored.endswith('its acceptances are not used and the queue text is compared with T0 only'), ignored)
                 self.assertIn(f'note: {ignored}', out.splitlines())
                 self.assertIn('cannot be placed at or before the first send', self.seen('Q02')['detail'])
 
     def test_a_first_send_that_cannot_be_read_has_the_acceptance_ignored_and_says_why(self):
+        # The snapshot cannot be placed before such a send either (#8812), so the slots are unverified in both fields; what still
+        # says the gate's acceptance was not used is the sentence `finish` records and prints.
         edited = FakeGitHub(bodies={9002: self.TYPO})
         cases = (('no sent_at', lambda start: {k: v for k, v in start.items() if k != 'sent_at'}, None),
                  ('unparseable', lambda start: dict(start, sent_at='lunchtime'), 'lunchtime'),
                  ('no text', lambda start: dict(start, sent_at=7), 7),
                  ('the first of a chain has none', lambda start: dict(start, replaces={'meters': {}}), None),
+                 ('a link of the chain that is no record', lambda start: dict(start, replaces='x'), None),
                  ('a start that is no record', lambda start: 'sent', None))
         for how, edit, shown in cases:
             with self.subTest(how):
                 self.setUp()
                 self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T13:00:00Z')
                 self.rewrite(start=edit(self.rig.state(self.RID)['start']))
-                _code, out, _ = self.finish(edited)
-                self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+                _code, out, gh = self.finish(FakeGitHub(bodies={9002: self.TYPO}))
+                self.assertEqual((self.seen('Q02')['since_t0'], self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')),
+                                 ('unverified', 'unverified', False))
+                self.assertEqual(gh.requests, [], 'a send that cannot be placed leaves nothing to compare the text with')
+                self.assertIn(f"the first send of B-cx-r1 ({shown!r}), by {PLACE}, cannot be read, so queue-t0.json (read at 2026-11-02T09:00:00Z) "
+                              f"cannot be placed before it: repair or move that state, then run `finish` again", self.seen('Q02')['detail'])
                 ignored = self.recorded()['queue_text']['acceptances_ignored']
                 self.assertIn(f'or the first send\'s ({shown!r}) cannot be read', ignored)
                 self.assertIn('2026-11-02T12:00:00Z', ignored)
+                # No slot is compared, so the sentence does not say the queue text is compared with T0.
+                self.assertTrue(ignored.endswith('so the gate cannot be placed before the send; its acceptances are not used'), ignored)
+                self.assertIn(f'note: {ignored}', out.splitlines())
+
+    def test_a_gate_time_and_a_first_send_that_cannot_be_read_end_at_the_acceptances_not_being_used(self):
+        self.started(FakeGitHub(bodies={9002: self.TYPO}), accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T13:00:00Z')
+        self.rewrite(gate=dict(self.rig.state(self.RID)['gate'], at='yesterday-ish'), start={'sent_at': 'lunchtime'})
+        self.finish(FakeGitHub(bodies={9002: self.TYPO}))
+        self.assertEqual(self.recorded()['queue_text']['acceptances_ignored'],
+                         "the recorded gate's time ('yesterday-ish') or the first send's ('lunchtime') cannot be read, so the gate cannot be "
+                         "placed before the send; its acceptances are not used")
 
     def test_without_a_recorded_gate_there_is_nothing_to_place_and_nothing_is_ignored(self):
         self.started()
@@ -3475,6 +3785,108 @@ class FinishQueueText(LaunchCase):
                 self.assertNotRegex(out, r'FAIL\s+queue text')
                 self.assertEqual(gh.requests, [])
 
+    # -- a snapshot read after a recorded first send is not the T0 text (#8812)
+
+    def late(self, at, sent, places=PLACE):
+        return (f"queue-t0.json was read at {at}, after the first send of {sent}, by {places}: {LATE}. If a start there is wrong, such as a "
+                f"dry run's, move that state; otherwise put back the snapshot `cut` took with T0 (an earlier commit of the file, if this one "
+                f"replaced it); then run `finish` again")
+
+    def test_a_snapshot_read_after_the_run_s_first_send_leaves_every_slot_unverified_and_reads_nothing(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        edit_snapshot(self.rig, lambda d: d.update(at='2026-11-02T13:00:00.500Z'))
+        code, out, gh = self.finish(FakeGitHub(bodies={9002: self.EDITED}))
+        self.assertEqual(code, 0, out)
+        detail = self.late('2026-11-02T13:00:00.500Z', 'B-cx-r1 at 2026-11-02T13:00:00Z')
+        for slot, number in (('Q01', 9001), ('Q02', 9002)):
+            self.assertEqual(self.seen(slot), {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
+        self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+queue-t0.json was read at 2026-11-02T13:00:00.500Z, after the first send of B-cx-r1')
+        self.assertNotRegex(out, r'(PASS|FAIL)\s+queue text')
+        self.assertNotIn('WARNING', out)
+        self.assertEqual(gh.requests, [], 'no text was read without a baseline')
+
+    def test_a_snapshot_read_after_another_run_s_first_send_is_not_the_t0_text_either(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T08:00:00Z'}, finish={'ended_at': '2026-11-02T08:30:00Z'})
+        code, out, gh = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unverified', 'unverified'))
+        self.assertEqual(self.seen('Q01')['detail'], self.late(SNAPSHOT_AT, 'A-cd-r1 at 2026-11-02T08:00:00Z'))
+        self.assertEqual(gh.requests, [])
+
+    def test_a_snapshot_read_at_or_before_the_first_send_is_read_as_before(self):
+        for at in ('2026-11-02T13:00:00Z', '2026-11-02T13:00:00.000Z', '2026-11-02T14:00:00+01:00', '2026-11-02T12:59:59.999Z'):
+            with self.subTest(at=at):
+                self.setUp()
+                self.started(sent_at='2026-11-02T13:00:00Z')
+                edit_snapshot(self.rig, lambda d: d.update(at=at))
+                code, out, gh = self.finish()
+                self.assertEqual(code, 0, out)
+                self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+                self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+
+    def test_a_snapshot_time_that_cannot_be_read_is_unverified_once_a_run_has_started(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        edit_snapshot(self.rig, lambda d: d.update(at='yesterday-ish'))
+        code, out, gh = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.seen('Q01')['detail'], "queue-t0.json's time ('yesterday-ish') cannot be read, so it cannot be placed before the "
+                                                     f'first send of B-cx-r1 at 2026-11-02T13:00:00Z, by {PLACE}: if a start there is wrong, such '
+                                                     f"as a dry run's, move that state; otherwise put back the snapshot `cut` took with T0 (an earlier "
+                                                     f'commit of the file, if this one replaced it); then run `finish` again')
+        self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unverified', 'unverified'))
+        self.assertEqual(gh.requests, [])
+
+    def elsewhere_state(self, **sections):
+        """The run's state kept in a `--state` file outside paths.state_dir (nothing is saved in paths.state_dir for it)."""
+        own = os.path.join(self.rig.box.tmp, 'elsewhere', f'{self.RID}.json')
+        state.save(self.rig.trial, self.RID, {'run': self.RID, 'trial': self.rig.trial.id, **sections}, override=own, home=self.rig.box.home)
+        self.assertFalse(os.path.exists(state.state_path(self.rig.trial, self.RID, home=self.rig.box.home)))
+        return own
+
+    def test_a_first_send_recorded_only_in_the_state_file_given_is_placed_before_the_snapshot_too(self):
+        own = self.elsewhere_state(start={'sent_at': '2026-11-02T08:00:00Z'})
+        code, out, gh = self.finish(state_file=own)
+        self.assertEqual(code, 0, out)
+        recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']['slots']
+        detail = self.late(SNAPSHOT_AT, 'B-cx-r1 at 2026-11-02T08:00:00Z', f"B-cx-r1's state file {own}")
+        for slot, number in (('Q01', 9001), ('Q02', 9002)):
+            self.assertEqual(recorded[slot], {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
+        self.assertEqual(gh.requests, [], 'no text was read without a baseline')
+
+    def test_a_first_send_in_the_state_file_given_after_the_snapshot_is_read_as_before(self):
+        own = self.elsewhere_state(start={'sent_at': '2026-11-02T10:00:00Z'})
+        code, out, _ = self.finish(state_file=own)
+        self.assertEqual(code, 0, out)
+        recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']['slots']
+        self.assertEqual((recorded['Q01']['since_t0'], recorded['Q02']['since_gate']), ('unchanged', 'unchanged'))
+
+    def test_finish_with_no_state_dir_cannot_rule_out_a_start_and_leaves_every_slot_unverified(self):
+        own = self.elsewhere_state(start={'sent_at': '2026-11-02T10:00:00Z'})
+        with without(self.rig.trial, 'paths', 'state_dir'):
+            code, out, gh = self.finish(state_file=own)
+        self.assertEqual(code, 0, out)
+        recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']['slots']
+        detail = ('paths.state_dir is not set in trial.json, so a run sent before queue-t0.json was read cannot be ruled out: set it, '
+                  'then run `finish` again')
+        for slot, number in (('Q01', 9001), ('Q02', 9002)):
+            self.assertEqual(recorded[slot], {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
+        self.assertEqual(gh.requests, [])
+
+    def test_another_run_s_state_that_cannot_be_read_leaves_every_slot_unverified(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        for how in ('corrupt', 'not a state', 'directory'):
+            with self.subTest(how):
+                with unreadable_state(self.rig, 'A-cd-r1', how):
+                    code, out, gh = self.finish()
+                self.assertEqual(code, 0, out)
+                self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unverified', 'unverified'))
+                detail = self.seen('Q02')['detail']
+                self.assertTrue(detail.startswith('a run state in ~/trial/t2/state cannot be read ('), detail)
+                self.assertTrue(detail.endswith('), so a run sent before queue-t0.json was read cannot be ruled out: repair or move that state, '
+                                                'then run `finish` again'), detail)
+                self.assertEqual(gh.requests, [])
+
     def test_no_t0_leaves_every_slot_unverified(self):
         self.rig = Rig(self, record_t0=False)
         code, out, gh = self.finish()
@@ -3556,7 +3968,7 @@ class FinishQueueText(LaunchCase):
             "gate cannot be placed at or before the first send, so its acceptances were not used and the text is compared with T0)"])
 
     def test_a_finish_after_a_start_that_was_never_gated_compares_with_t0(self):
-        self.rig.save_state(self.RID, start={'sent_at': 'x'})
+        self.rig.save_state(self.RID, start={'sent_at': '2026-11-02T10:00:00Z'})
         _code, out, _ = self.finish(FakeGitHub(bodies={9001: self.EDITED}))
         self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q01')['since_gate']), ('changed', 'changed'))
         self.assertIn('(or the run started without a passing gate)', out)
