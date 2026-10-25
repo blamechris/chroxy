@@ -1,10 +1,11 @@
 # Controlled harness trial 2 — plan
 
-**Status (2026-10-22): draft, not started.** Trial 2 repeats the October trial
+**Status (2026-10-24): draft, not started.** Trial 2 repeats the October trial
 ([`../trial/`](../trial/)) with two runs per cell, a fresh queue, and the hand-work
 of README steps 2–12 replaced by the runner in [`../runner/`](../runner/). Nothing
-here launches a run. The first run waits on the entry gate (§2), which today fails:
-every blocking defect below is open.
+here launches a run. The first run waits on the entry gate (§2): every blocking
+defect below is closed and the queue is set (`trial.json`, §4); the gate still fails
+until T0 is recorded, which follows the sealed key (§5).
 
 The October trial answered its question at n = 1 (REPORT §1): same delivery, Chroxy
 slower by 40 and 68 minutes, and Chroxy lost on reliability. It cost five days for
@@ -48,9 +49,11 @@ session-phase preflight), so running the steps by hand cannot skip the gate.
 | none | — | #8709 (state reconciliation) helps supervision but does not change a run's result | — |
 
 `gate` also checks: `ci.yml` at T0 runs on push to `trial/**` (§1); no other
-trial-2 run is live (its state file has a start and no end); and the queue's
-issues are still open. (No open PR for a queue issue is a selection rule, checked
-when the queue is picked, §4.)
+trial-2 run is live (its state file has a start and no end); the queue's
+issues are still open; and each queue issue's title, body and comments are
+unchanged since T0 (digests that `cut` records in `queue-t0.json` with T0, §6).
+(No open PR for a queue issue is a selection rule, checked when the queue is
+picked, §4.)
 
 ## 3. Cells, repeats, order and allowance
 
@@ -154,6 +157,15 @@ October's rules carry over (PROTOCOL §4, mission rules 1–6). Changes:
   would sit.
 - **Run namespace.** Trial-2 bases are `trial/t2-*`; the October `trial/*` branches
   stay as evidence and remain forbidden reads.
+- **Frozen inputs (before T0).** Every base is one T0 commit plus the run's mission, so
+  what a run can read must not move between run 1 and run 8. (1) No selection, rationale
+  or risk note about a queue item stays in the tree: October's candidate read was moved
+  to the private key folder, a test pins that it is not tracked, and mission rule 5 forbids
+  reading anything under `docs/reports/harness-evals/` except the run's own mission and
+  report; the extract's isolation scan counts such a read (`harness_evals_other`). (2) The
+  queue issues' text is digested at T0 and `gate` fails, naming the slot, when it changes.
+  (3) A run's clone is single-branch (`trialctl clone` and the `clone refs` check), and
+  rule 5 forbids reading `main`, which moves on after T0, and any PR the run did not open.
 
 ## 7. Evidence: transcripts, permission journal, cost
 
@@ -173,7 +185,8 @@ evidence <run>` (package P2), run on the Mac after the run ends:
   by a rule, a timeout or the pending cap; resolved by a client or an automatic
   responder the log does not name; floored), human messages after the first,
   interrupts, compactions, token totals by model, and isolation-pattern hits (other
-  `trial/*` refs, the key folder, `NEXT-*.md`, native stores), with paths outside the
+  `trial/*` refs, the key folder, `NEXT-*.md`, native stores, earlier trials' records
+  under `docs/reports/harness-evals/`), with paths outside the
   clone reduced to a pattern name and a hash;
 - commits the manifest's digest beside the extract, so the vault copy can be
   verified later.

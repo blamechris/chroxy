@@ -1,0 +1,15 @@
+TN:
+SF:src/example.mjs
+FN:1,answer
+FNF:1
+FNH:1
+FNDA:1,answer
+DA:1,1
+LF:1
+LH:1
+BRDA:1,0,0,1
+BRDA:1,1,0,1
+BRDA:1,2,0,0
+BRF:3
+BRH:2
+end_of_record

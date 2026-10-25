@@ -26,7 +26,7 @@ to confirm the run is at the intended settings. Its timestamp is the run's start
 | Harness | {{HARNESS}} |
 | Coordinator model / effort | `{{MODEL}}` / {{EFFORT}} |
 | Base branch (the ONLY merge target) | `{{BASE_BRANCH}}` |
-| Base SHA (T0) | `git merge-base origin/{{BASE_BRANCH}} origin/main`; this mission is the only commit over it |
+| Base SHA (T0) | the parent of the commit that added this mission: `git rev-parse "$(git log -n 1 --format=%H --diff-filter=A -- {{MISSION_PATH}})^"`; this mission is the only commit over it |
 | Permission mode | unattended: the harness's no-prompt mode, selected before the first message (see Invocation); a human approval during the run is an incident, count it |
 | Run report path | `{{REPORT_PATH}}` |
 | Wall-clock cap | {{CAP_HOURS}} hours from your first command |
@@ -61,9 +61,13 @@ Refer to each item by its slot (`Q01`…) in everything you publish.
 4. **No shared-state writes.** Do not comment on, label, close or reopen any
    issue. Do not file new issues. Record follow-ups, deferred work and decisions
    in the run report instead.
-5. **Isolation.** Do not read, fetch, diff or list any `trial/*` branch other
-   than `{{BASE_BRANCH}}` (the October `trial/*` branches included), nor any PR
-   whose base is one. Do not read the sealed key's folder
+5. **Isolation.** Do not read, fetch, diff or list any branch other than
+   `{{BASE_BRANCH}}` and the branches you push for your own PRs: not `main`,
+   which moves on after T0, and no other `trial/*` branch (the October ones
+   included). Do not open the diff, body or comments of a PR you did not open.
+   Do not read anything under `docs/reports/harness-evals/` other than this
+   mission file (`{{MISSION_PATH}}`) and your run report (`{{REPORT_PATH}}`): it
+   holds earlier trials' records. Do not read the sealed key's folder
    (`{{KEY_FOLDER}}`) or any file named `KEY.md` or `KEY.md.enc`; do not read
    or resume from another run's handoff seed or brief (`NEXT-*.md`, and any
    brief that names a trial run); and do not read another session's native

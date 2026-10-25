@@ -296,7 +296,11 @@ def _derive(trial, run, env, stage, rows, clone_dir, permission_text):
     """(summary, permissions, isolation report, label) read from the staged copies, so the extract describes
     exactly what the manifest holds. `permission_text` is the daemon-log slice, or None when it cannot be taken
     as data (then there are no permission counts, not zero ones)."""
-    scanner = extract.Isolation(run.base, _path(trial, env, 'key_folder'), native.slug_candidates(clone_dir))
+    # What a run may read below docs/reports/harness-evals/: its mission, its report and the report's directory.
+    # Mission rule 5 names the first two ({{MISSION_PATH}}, {{REPORT_PATH}}); the third is where the report is written.
+    report = trial.report_relpath(run)
+    own = (trial.mission_relpath(run), report, os.path.dirname(report))
+    scanner = extract.Isolation(run.base, _path(trial, env, 'key_folder'), native.slug_candidates(clone_dir), own_paths=own)
     if run.harness.family == 'claude':
         files = []
         for _sha, rel in rows:

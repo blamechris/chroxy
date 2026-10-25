@@ -65,9 +65,8 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      # RUN_K8S_INTEGRATION=1 is the opt-in gate checked by the test file.
-      # The script also probes for `kind` on PATH before registering any tests,
-      # so a missing binary produces a clean skip rather than a crash.
+      # The dedicated script enables the opt-in test and requires all four
+      # roundtrip cases to pass. A missing kind binary fails the opted-in run.
       # The 14-minute timeout guard (just under the 15-minute job ceiling above,
       # so we exit with a diagnostic rather than take a hard runner kill) lives on
       # the `test:integration:k8s` script itself, because Node rejects

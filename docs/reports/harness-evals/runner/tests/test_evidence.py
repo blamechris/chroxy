@@ -356,6 +356,22 @@ class Extract(Evidence):
         self.assertFalse(self.home in text or self.box.tmp in text, 'no absolute path may reach the public extract')
         self.assertFalse('a1-cd' in text)
 
+    def test_the_extract_counts_a_read_of_another_path_under_harness_evals_but_not_the_runs_own_files(self):
+        rel = 'docs/reports/harness-evals'
+        mission, report = self.trial.mission_relpath(self.run), self.trial.report_relpath(self.run)
+        self.claude('s1.jsonl', user('/prime-directive "Trial run A-cd-r1: go"'),
+                    assistant('m1', tools=[{'command': f'cat {mission}'}, {'command': f'cat {report}'},
+                                           {'command': f'ls {os.path.dirname(report)}/'}]),
+                    assistant('m2', tools=[{'command': f'cat {rel}/trial/queue.md'},
+                                           {'command': f'cat {os.path.dirname(mission)}/B-cy-r1.md'}]))
+        self.assertEqual(self.run_evidence(), 0, self.out)
+        hits = {h['pattern']: h for h in self.extract()['isolation']['hits']}
+        self.assertEqual(sorted(hits), ['harness_evals_other'])
+        self.assertEqual((hits['harness_evals_other']['count'], hits['harness_evals_other']['distinct']), (2, 2))
+        self.assertEqual(hits['harness_evals_other']['sha256'],
+                         sorted([sha('harness-evals/trial/queue.md'), sha('harness-evals/trial-2/missions/B-cy-r1.md')]))
+        self.assertFalse('queue.md' in json.dumps(self.extract()))
+
     def test_the_extract_is_written_to_the_trial_data_by_default(self):
         self.basic_claude()
         env = self.box.env()

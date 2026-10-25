@@ -8,14 +8,18 @@
  *   RUN_K8S_INTEGRATION=1 node --test packages/server/tests/integration/k8s-sidecar-roundtrip.test.js
  *
  * Expected runtime: ~2-3 minutes including cluster bootstrap.
- * Skipped silently when RUN_K8S_INTEGRATION is unset or kind is not on PATH.
+ * Skipped when RUN_K8S_INTEGRATION is unset. An opted-in run fails if kind is missing.
  */
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execSync, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve as pathResolve } from 'node:path'
+import { dirname, join, resolve as pathResolve } from 'node:path'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { loadNamedKindKubeconfig } from './k8s-kind-kubeconfig.js'
+import { registerKindCleanup } from './k8s-roundtrip-cleanup.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -38,9 +42,10 @@ const KIND_AVAILABLE = SHOULD_RUN
     })()
   : false
 
-if (!SHOULD_RUN || !KIND_AVAILABLE) {
-  console.log('[k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 and install kind to run')
-  // No tests registered → file passes vacuously
+if (!SHOULD_RUN) {
+  console.log('[k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 to run')
+} else if (!KIND_AVAILABLE) {
+  throw new Error('K8s integration requested but kind is missing or kind version failed')
 } else {
 
   // ─── constants ─────────────────────────────────────────────────────────────
@@ -55,6 +60,12 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
   const EXEC_TIMEOUT = 30_000
   const STREAM_TIMEOUT = 30_000
   const POD_READY_POLL_MS = 2_000
+  let kubeconfigDir
+  const cleanup = registerKindCleanup({
+    clusterName: CLUSTER_NAME,
+    sidecarImage: SIDECAR_IMAGE,
+    getKubeconfigDir: () => kubeconfigDir,
+  })
 
   // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -76,35 +87,6 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
     throw new Error(`Pod ${podName} did not become Running within ${timeoutMs}ms`)
   }
 
-  // ─── cluster lifecycle ─────────────────────────────────────────────────────
-
-  /**
-   * Unconditionally delete the kind cluster.  Called from `after` and the
-   * SIGINT handler so cleanup always runs even on test failure.
-   */
-  async function deleteCluster() {
-    try {
-      execFileSync('kind', ['delete', 'cluster', '--name', CLUSTER_NAME], {
-        stdio: 'pipe', timeout: 60_000,
-      })
-      console.log(`[k8s-integration] Deleted cluster ${CLUSTER_NAME}`)
-    } catch (err) {
-      // Log but never throw — cleanup must be best-effort
-      console.warn(`[k8s-integration] Warning: cluster delete failed (may already be gone): ${err.message}`)
-    }
-  }
-
-  // Register SIGINT handler so Ctrl-C during a long test still cleans up.
-  // Guard with a flag so we don't double-delete when after() also runs.
-  let _cleanedUp = false
-  process.on('SIGINT', async () => {
-    if (_cleanedUp) return
-    _cleanedUp = true
-    console.log('\n[k8s-integration] SIGINT — cleaning up cluster before exit')
-    await deleteCluster()
-    process.exit(130)
-  })
-
   // ─── test suite ────────────────────────────────────────────────────────────
 
   describe('K8s sidecar roundtrip (integration)', { timeout: CLUSTER_BOOT_TIMEOUT + 180_000 }, () => {
@@ -125,6 +107,16 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
       })
       console.log('[k8s-integration] Cluster ready')
 
+      // Use the kubeconfig exported by this exact cluster. The client library's
+      // loadFromDefault() silently falls back to http://localhost:8080 when it
+      // cannot find a file; that fallback made the nightly fail before Pod
+      // creation. Keep the exported CA and client credentials intact.
+      const kubeconfig = loadNamedKindKubeconfig(CLUSTER_NAME)
+      kubeconfigDir = mkdtempSync(join(tmpdir(), 'chroxy-kind-'))
+      const kubeconfigPath = join(kubeconfigDir, 'config')
+      writeFileSync(kubeconfigPath, kubeconfig, { mode: 0o600 })
+      console.log(`[k8s-integration] Using verified HTTPS kubeconfig for kind-${CLUSTER_NAME}`)
+
       console.log('[k8s-integration] Building sidecar image …')
       execFileSync('docker', ['build', '-t', SIDECAR_IMAGE, SIDECAR_DIR], {
         stdio: 'inherit', timeout: 120_000,
@@ -138,13 +130,15 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
       console.log('[k8s-integration] Image loaded')
 
       // Instantiate K8sBackend with portforward mode (we are outside the cluster).
-      // kind writes a context to ~/.kube/config so loadFromDefault() picks it up.
+      // Pass the named-cluster config explicitly instead of relying on the
+      // runner's default kubeconfig or current context.
       // imagePullPolicy: 'IfNotPresent' prevents kind from trying to pull the
       // locally-loaded image from a remote registry (which would fail for a
       // test-only image that doesn't exist in any public registry).
       const { K8sBackend } = await import('../../src/environments/backends/k8s.js')
       backend = new K8sBackend({
         connectMode: 'portforward',
+        kubeconfigPath,
         sidecarImage: SIDECAR_IMAGE,
         imagePullPolicy: 'IfNotPresent',
       })
@@ -153,28 +147,7 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
 
     // ── after: cleanup unconditionally ─────────────────────────────────────
 
-    after(async () => {
-      if (_cleanedUp) return
-      _cleanedUp = true
-
-      // Best-effort pod cleanup — the test may have already done it
-      if (backend && podName) {
-        try { await backend.destroyEnvironment(podName) } catch { /* ignore */ }
-      }
-
-      await deleteCluster()
-
-      // Best-effort host image cleanup — kind loads the image into its own
-      // node container, so the host copy is no longer needed once the cluster
-      // is gone. Re-runs rebuild from cache anyway.
-      try {
-        execFileSync('docker', ['rmi', SIDECAR_IMAGE], {
-          stdio: 'pipe', timeout: 10_000,
-        })
-      } catch {
-        // Image may already be gone or in use — ignore
-      }
-    })
+    after(cleanup)
 
     // ── test 1: createEnvironment creates a Running Pod ────────────────────
 
@@ -293,14 +266,13 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
 
       await backend.destroyEnvironment(podName)
 
-      // Pod should no longer exist (getEnvironmentStatus throws on 404)
-      try {
-        await backend.getEnvironmentStatus(podName)
-        assert.fail('getEnvironmentStatus should have thrown after pod deletion')
-      } catch (err) {
-        // Any error (404 or "not found") is expected here
-        assert.ok(err, 'expected an error after pod deletion')
-      }
+      // Pod should no longer exist. Require the API's 404 specifically; the
+      // earlier try/catch also caught its own assert.fail and passed vacuously.
+      await assert.rejects(
+        () => backend.getEnvironmentStatus(podName),
+        err => [err?.code, err?.statusCode, err?.response?.statusCode, err?.body?.code].includes(404),
+        'getEnvironmentStatus should report a 404 after pod deletion',
+      )
 
       // Clear so `after` does not double-delete
       podName = null

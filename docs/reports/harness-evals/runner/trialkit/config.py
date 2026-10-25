@@ -243,10 +243,15 @@ def load(path, root=None):
     return Trial(path, data, root or find_root(os.path.dirname(os.path.abspath(path))))
 
 
-def save_t0(trial, sha):
-    """Record T0 in trial.json, refusing to change one already recorded."""
+def check_t0(trial, sha):
+    """Refuse a T0 that differs from the one trial.json already records. Nothing is written."""
     if trial.t0 and trial.t0 != sha:
         raise ConfigError(f'trial.json already records t0 {trial.t0}; refusing to change it to {sha}')
+
+
+def save_t0(trial, sha):
+    """Record T0 in trial.json, refusing to change one already recorded."""
+    check_t0(trial, sha)
     trial.data['t0'] = sha
     with open(trial.path, encoding='utf-8') as fh:
         text = fh.read()

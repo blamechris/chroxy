@@ -1,8 +1,11 @@
 """Config, rendering, checks, state, the GitHub double and the CLI's own wiring."""
 import json
 import os
+import posixpath
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from collections import Counter
 
@@ -45,6 +48,12 @@ class Trial2Roster(unittest.TestCase):
             self.assertEqual(ignored(self.trial.mission_relpath(run)), 0, run.id)
         self.assertEqual(ignored(f'{helpers.TRIAL_REL}/missions/TEMPLATE.md'), 1)
 
+    def test_the_queue_snapshot_cut_writes_can_be_committed(self):
+        # `cut` writes it beside trial.json and the supervisor commits the two together; an ignored one would never arrive.
+        rel = f'{helpers.TRIAL_REL}/queue-t0.json'
+        ignored = subprocess.run(['git', '-C', helpers.REPO_ROOT, 'check-ignore', '-q', '--no-index', rel]).returncode
+        self.assertEqual(ignored, 1)
+
     def test_bases_are_trial2_namespaced_and_unique(self):
         bases = [r.base for r in self.trial.runs]
         self.assertEqual(len(bases), len(set(bases)))
@@ -76,6 +85,98 @@ class Trial2Roster(unittest.TestCase):
         with self.assertRaises(config.ConfigError) as ctx:
             self.trial.run('A1-cd')
         self.assertIn('A-cd-r1', str(ctx.exception))
+
+
+EVALS_REL = posixpath.dirname(helpers.TRIAL_REL)
+OCTOBER_CANDIDATES = f'{EVALS_REL}/trial/queue-candidates.md'
+
+
+def tracked_files(root=helpers.REPO_ROOT, under=EVALS_REL):
+    """The paths git tracks below `under`. A git failure and an empty listing both raise: a scan over
+    "nothing" must not be able to read as "nothing found" (docs/false-safety-guards.md)."""
+    p = subprocess.run(['git', '-C', root, 'ls-files', '-z', '--', under], capture_output=True, text=True)
+    if p.returncode != 0:
+        raise AssertionError(f'git ls-files {under} failed in {root} (exit {p.returncode}): {p.stderr.strip()[:200]}')
+    paths = [x for x in p.stdout.split('\0') if x]
+    if not paths:
+        raise AssertionError(f'git ls-files {under} listed nothing in {root}, so there is nothing to scan')
+    return paths
+
+
+def notes_outside_trial_2(paths):
+    """The tracked Markdown notes below `docs/reports/harness-evals/` that are not trial 2's own. Data files
+    (`.csv`, `.json`) hold issue-list metadata, not notes, and are out of scope."""
+    return [p for p in paths if p.endswith('.md') and not p.startswith(f'{helpers.TRIAL_REL}/')]
+
+
+def queue_mentions(issues, rels, root=helpers.REPO_ROOT):
+    """(path, line number, issue) for each line of each file that names a queue issue as `#N` or as a bare whole
+    word. A file that cannot be read raises, so an unreadable note is not a clean one."""
+    pattern = re.compile(r'\b(' + '|'.join(str(n) for n in issues) + r')\b')
+    found = []
+    for rel in rels:
+        with open(os.path.join(root, rel), encoding='utf-8') as fh:
+            for number, line in enumerate(fh, 1):
+                found += [(rel, number, int(m.group(1))) for m in pattern.finditer(line)]
+    return found
+
+
+class OctoberNotesStayOutOfTheTree(unittest.TestCase):
+    """Every clone carries the whole tree, so a note about a queue item that sits in it is read by accident, mission
+    rule or no mission rule: a repo-wide grep for the item's symbol finds it (#8794)."""
+
+    def setUp(self):
+        self.trial = config.load(helpers.TRIAL2, root=helpers.REPO_ROOT)
+        self.issues = [s.issue for s in self.trial.slots]
+
+    def test_the_october_candidate_read_is_not_tracked(self):
+        self.assertFalse(OCTOBER_CANDIDATES in tracked_files(),
+                         f'{OCTOBER_CANDIDATES} is tracked: it holds selection, rationale and risk notes on queue '
+                         'items, and belongs in the private key folder, not in a clone')
+
+    def test_no_note_outside_trial_2_names_a_queue_issue(self):
+        self.assertTrue(self.issues, 'trial-2 records no queue slots, so there is no issue to look for')
+        notes = notes_outside_trial_2(tracked_files())
+        # The scan must reach the October tree and the runner's own docs, or an empty result means nothing.
+        for anchor in (f'{EVALS_REL}/trial/queue.md', f'{EVALS_REL}/runner/README.md'):
+            self.assertTrue(anchor in notes, f'{anchor} is not among the {len(notes)} notes scanned')
+        found = queue_mentions(self.issues, notes)
+        self.assertFalse(found, f'{len(found)} mention(s) of a trial-2 queue issue outside trial-2/ '
+                                f'(path, line, issue): {found[:10]}')
+
+    def test_the_scan_sees_the_forms_a_note_would_use(self):
+        tmp = tempfile.mkdtemp(prefix='trialctl-notes-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        files = {'a.md': 'rejected #9001: too large\n', 'b.md': 'first line\nbare 9001 here\nsee issues/9001.\n',
+                 'c.md': 'issue 19001 and 90010 and v9001a and x9001 are other numbers\n',
+                 'd.md': 'other issue #9999 only\n'}
+        for name, text in files.items():
+            with open(os.path.join(tmp, name), 'w', encoding='utf-8') as fh:
+                fh.write(text)
+        self.assertEqual(queue_mentions([9001, 4242], ['a.md', 'b.md', 'c.md', 'd.md'], root=tmp),
+                         [('a.md', 1, 9001), ('b.md', 2, 9001), ('b.md', 3, 9001)])
+
+    def test_only_markdown_outside_trial_2_is_scanned(self):
+        listing = [f'{EVALS_REL}/trial/queue.md', f'{EVALS_REL}/data/runs-2026-10-17.csv',
+                   f'{EVALS_REL}/data/raw/runs.json', f'{helpers.TRIAL_REL}/PLAN.md',
+                   f'{helpers.TRIAL_REL}/missions/TEMPLATE.md', f'{EVALS_REL}/runner/README.md',
+                   f'{EVALS_REL}/trial-20/notes.md']
+        self.assertEqual(notes_outside_trial_2(listing),
+                         [f'{EVALS_REL}/trial/queue.md', f'{EVALS_REL}/runner/README.md', f'{EVALS_REL}/trial-20/notes.md'])
+
+    def test_a_note_that_cannot_be_read_fails_the_scan(self):
+        with self.assertRaises(OSError):
+            queue_mentions([9001], ['no-such-note.md'], root=tempfile.gettempdir())
+
+    def test_a_git_failure_or_an_empty_listing_fails_instead_of_finding_nothing(self):
+        tmp = tempfile.mkdtemp(prefix='trialctl-notes-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with self.assertRaises(AssertionError) as missing:
+            tracked_files(root=os.path.join(tmp, 'no-such-directory'))
+        self.assertIn('failed', str(missing.exception))
+        with self.assertRaises(AssertionError) as empty:
+            tracked_files(under=f'{EVALS_REL}/no-such-directory')
+        self.assertIn('listed nothing', str(empty.exception))
 
 
 class ConfigValidation(unittest.TestCase):
@@ -161,6 +262,34 @@ class Rendering(unittest.TestCase):
             self.assertIn('| `Q01` | #9001 |', text)
             self.assertIn("TRIAL-PROBE run=%s", text)
             self.assertIn(f"'{run.id}'", text)
+
+    def rule_5(self, run):
+        text = render.mission(self.trial, run)
+        start, end = text.index('5. **Isolation.**'), text.index('6. **Stop conditions.**')
+        return ' '.join(text[start:end].split())
+
+    def test_rule_5_forbids_main_and_other_prs_and_the_earlier_trials_records(self):
+        for run in self.trial.runs:
+            rule = self.rule_5(run)
+            for fragment in (f'any branch other than `{run.base}` and the branches you push for your own PRs',
+                             'not `main`, which moves on after T0', 'no other `trial/*` branch (the October ones included)',
+                             'Do not open the diff, body or comments of a PR you did not open',
+                             'Do not read anything under `docs/reports/harness-evals/` other than this mission file'):
+                self.assertTrue(fragment in rule, f'{run.id}: rule 5 lacks {fragment!r}')
+
+    def test_the_files_rule_5_allows_under_harness_evals_are_the_ones_the_isolation_scan_allows(self):
+        from trialkit import extract
+        for run in self.trial.runs:
+            rule = self.rule_5(run)
+            named = set(re.findall(r'`([^`\s]*harness-evals/[^`\s]+)`', rule))
+            self.assertEqual(named, {self.trial.mission_relpath(run), self.trial.report_relpath(run)}, run.id)
+            report = self.trial.report_relpath(run)
+            scanner = extract.Isolation(run.base, None, (), own_paths=(self.trial.mission_relpath(run), report, os.path.dirname(report)))
+            for path in sorted(named) + [os.path.dirname(report) + '/']:
+                scanner.scan(f'cat {path}')
+            self.assertEqual(scanner.report()['hits'], [], run.id)
+            scanner.scan('ls docs/reports/harness-evals/')
+            self.assertEqual([h['pattern'] for h in scanner.report()['hits']], ['harness_evals_other'], run.id)
 
     def test_repeats_differ_only_in_run_fields(self):
         r1, r2 = self.trial.run('A-cd-r1'), self.trial.run('A-cd-r2')
