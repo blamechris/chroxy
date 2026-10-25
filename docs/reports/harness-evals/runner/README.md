@@ -430,7 +430,12 @@ is why the list exists. Survivors
 show their labels, creation date, whether the body has an acceptance-criteria section,
 and a type and package guess from labels; `--limit` shortens that list, never the scan.
 `queue_rules` in `trial.json` rejects an unknown key, so a misspelt list cannot silently
-filter nothing.
+filter nothing. Loading `trial.json` also refuses a queue whose slot ids do not run Q01, Q02, ...
+in order with no gap, whose slot count differs from `queue.size` (ten for trial 2, PLAN.md
+section 4), or which holds an issue on `queue_rules.exclude_issues`, `queue_rules.reserved` or
+any `blockers` list, naming each offending slot and list. Because this is the loader, `render`,
+`cut` and `gate` all refuse such a queue with exit 2 before anything is rendered, recorded or
+pushed; a base cut from it could not be rewritten.
 
 ## Owner commands (accounts)
 

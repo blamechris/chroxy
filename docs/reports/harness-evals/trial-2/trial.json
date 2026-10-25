@@ -40,6 +40,7 @@
   },
   "queue": {
     "status": "set 2026-10-24: ten issues approved by the owner from the candidate read; slot ids assigned in a random order",
+    "size": 10,
     "slots": [
       {"slot": "Q01", "issue": 8341, "title": "app: a duplicate permission_request adds a second activity-history row for a background session", "type": "bug, app"},
       {"slot": "Q02", "issue": 8457, "title": "containerLostPatch treats a live container-lost error inside a replay window as replayed", "type": "bug, store-core"},

@@ -42,6 +42,8 @@ class Sandbox:
         with open(os.path.join(self.trial_dir, 'trial.json'), encoding='utf-8') as fh:
             data = json.load(fh)
         data['queue']['slots'] = list(slots)
+        if slots:
+            data['queue']['size'] = len(slots)  # an empty queue keeps trial 2's own size
         data['queue']['status'] = 'set for tests'
         data['paths'] = {k: v for k, v in data['paths'].items()}
         if edit:

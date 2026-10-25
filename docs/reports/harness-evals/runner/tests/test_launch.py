@@ -9,6 +9,7 @@ developer's own home, daemon, transcripts or GitHub.
 import base64
 import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -4313,6 +4314,53 @@ class CliWiring(LaunchCase):
         code, out = self.run_cli('prepare', 'A-cd-r1', '--skip-install', runner=toolbox(self.rig), github=FakeGitHub())
         self.assertEqual(code, 0, out)
         self.assertIn('LAUNCH CARD A-cd-r1', out)
+
+
+class QueueRulesAtLoad(unittest.TestCase):
+    """A queue holding an issue the trial rules out is refused when trial.json loads, so `gate` and `cut` stop before they
+    record, render or push anything. The queue below is clean when the rig is built (so T0 and the snapshot are as a real
+    trial's would be); the issue is then put on a list afterwards, the way a hand edit would."""
+
+    def reserve_first_slot(self, rig):
+        path = os.path.join(rig.box.trial_dir, 'trial.json')
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        held = data['queue']['slots'][0]['issue']
+        data['queue_rules']['reserved'].append(held)
+        rig.box.write_trial(data)
+        return held, path
+
+    def run_cli(self, rig, *argv):
+        err = io.StringIO()
+        env = rig.env()
+        with contextlib.redirect_stderr(err):
+            code = cli.main(['--trial', rig.box.trial_dir, *argv], env=env)
+        return code, err.getvalue() + env.out.getvalue()
+
+    def test_gate_exits_2_names_the_list_and_writes_no_run_state(self):
+        rig = Rig(self)
+        state_file = state.state_path(rig.trial, 'B-cy-r1', home=rig.box.home)
+        self.assertFalse(os.path.exists(state_file))
+        held, _ = self.reserve_first_slot(rig)
+        code, out = self.run_cli(rig, 'gate', 'B-cy-r1')
+        self.assertEqual(code, 2, out)
+        self.assertTrue(f'Q01 #{held} is in queue_rules.reserved' in out, out)
+        self.assertFalse(os.path.exists(state_file), 'a gate that did not run recorded a verdict')
+        self.assertFalse(os.path.exists(os.path.dirname(state_file)))
+
+    def test_cut_exits_2_and_records_no_t0_no_snapshot_and_pushes_no_base(self):
+        rig = Rig(self, record_t0=False)
+        held, path = self.reserve_first_slot(rig)
+        with open(path, 'rb') as fh:
+            before = fh.read()
+        code, out = self.run_cli(rig, 'cut', '--run', 'A-cd-r1', '--t0', rig.t0, '--push', '--repo-dir', rig.seed)
+        self.assertEqual(code, 2, out)
+        self.assertTrue(f'Q01 #{held} is in queue_rules.reserved' in out, out)
+        with open(path, 'rb') as fh:
+            self.assertTrue(fh.read() == before, 'trial.json was rewritten')
+        self.assertIsNone(json.loads(before)['t0'])
+        self.assertFalse(os.path.exists(os.path.join(rig.box.trial_dir, queue_text.FILE)))
+        self.assertEqual(rig.branch('trial/t2-a-cd-r1'), '')
 
 
 if __name__ == '__main__':

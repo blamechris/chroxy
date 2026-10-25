@@ -128,6 +128,22 @@ class Trial:
                 raise ConfigError(f'queue slot {s.slot!r} / issue {s.issue}: malformed or duplicate')
             slots.add(s.slot)
             issues.add(s.issue)
+        # The queue is checked here and not in the gate: `cut` runs before any gate, renders the queue into every
+        # mission and records T0 and pushes bases that are never rewritten, so a check only the gate made would fire
+        # after the irreversible step. A gate copy of a loader check could not run either (the gate only ever sees a
+        # trial that loaded), so it could never be proven red.
+        found = [s.slot for s in self.slots]
+        expected = [f'Q{n:02d}' for n in range(1, len(found) + 1)]
+        if found != expected:
+            raise ConfigError('queue slot ids must run Q01, Q02, … in order with no gap: '
+                              f'expected {", ".join(expected)}, got {", ".join(found)}')
+        queue = self.data['queue']
+        size = queue.get('size')
+        if type(size) is not int or size < 1:
+            got = repr(size) if 'size' in queue else 'nothing (the key is missing)'
+            raise ConfigError(f'queue.size must be a whole number of at least 1 (the slots the plan fixes), got {got}')
+        if self.slots and len(self.slots) != size:
+            raise ConfigError(f'queue has {len(self.slots)} slots; queue.size says {size}')
         for c in self.contrasts:
             for k in ('native', 'chroxy'):
                 if c.get(k) not in self.cells:
@@ -135,6 +151,17 @@ class Trial:
         for key in self.blockers:
             if key not in self.harnesses and key != 'all':
                 raise ConfigError(f'blockers: unknown harness {key!r}')
+        # A spent, reserved or blocking issue in a slot would be rendered into every mission and cut into the bases.
+        ruled_out = {'queue_rules.exclude_issues': self.queue_rules.get('exclude_issues', []),
+                     'queue_rules.reserved': self.queue_rules.get('reserved', [])}
+        ruled_out.update({f'blockers.{key}': self.blockers[key] for key in sorted(self.blockers)})
+        held = []
+        for s in self.slots:
+            named = [name for name, issues in ruled_out.items() if s.issue in issues]
+            if named:
+                held.append(f'{s.slot} #{s.issue} is in {", ".join(named)}')
+        if held:
+            raise ConfigError(f'queue slots hold issues the trial rules out: {"; ".join(held)}')
 
     # -- lookups -------------------------------------------------------------
 

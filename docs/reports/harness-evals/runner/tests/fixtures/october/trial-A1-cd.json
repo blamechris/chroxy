@@ -12,6 +12,7 @@
   },
   "queue": {
     "status": "October queue",
+    "size": 10,
     "slots": [
       {
         "slot": "Q01",
