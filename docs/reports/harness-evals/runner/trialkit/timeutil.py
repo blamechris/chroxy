@@ -20,6 +20,15 @@ def parse_ts(value):
     return parsed.astimezone(timezone.utc)
 
 
+def instant(value):
+    """The moment an ISO-8601 timestamp names, or None when `value` is missing or cannot be read (a value that is no text, no
+    timestamp, or so near the end of the calendar that its UTC time is out of range, such as 9999-12-31T23:59:59-05:00)."""
+    try:
+        return parse_ts(value)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
 def iso(dt):
     """Format an aware datetime as `YYYY-MM-DDTHH:MM:SS[.mmm|.ffffff]Z` (milliseconds kept as three digits)."""
     dt = dt.astimezone(timezone.utc)

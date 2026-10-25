@@ -47,7 +47,7 @@ GitHub error). "Could not check" is never reported as a pass.
 |---|---|---|
 | `render [RUN…] [--graders]` | supervisor | missions (and grader prompts) from `trial.json`; refuses an empty queue or an unfilled placeholder |
 | `key-template` | owner | the structured answer-key skeleton, one section per slot |
-| `gate RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | either | blocking issues closed, queue still open, each queue issue's title, body and comments unchanged since T0 (`queue-t0.json`; `--accept-changed Q03=REASON` accepts one slot's change and records it, with the digests of the text it accepted, in the state's `overrides`), T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
+| `gate RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | either | blocking issues closed, queue still open, each queue issue's title, body and comments unchanged since T0 (`queue-t0.json`, and not read after any recorded first send; `--accept-changed Q03=REASON` accepts one slot's change and records it, with the digests of the text it accepted, in the state's `overrides`), T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
 | `cut --run RUN --t0 SHA [--push]` (or `--all`) | supervisor | each base = T0 plus the run's mission as the only commit; without `--push` it builds locally and prints the push. Cut each base just before its run: a new base fires a full CI push run. Recording T0 also records `queue-t0.json`, read before anything is written (an unreadable queue issue or comments listing refuses the cut, exit 2, with no T0 and no snapshot); an existing snapshot is never overwritten, and once T0 is recorded a missing one is not taken again after a run has started (see "Queue text at T0") |
 | `clone RUN` | owner, Mac | fresh single-branch clone (`git clone --branch BASE --single-branch`, so the only remote-tracking ref is the base's) outside the daemon checkout and every other work tree; git identity; `npm ci` under Node 22 |
 | `preflight RUN [--phase session --session ID]` | owner, Mac | clone shape (the only remote-tracking ref is `origin/BASE` and the only fetch refspec is the base's own), mission bytes, identity, Node, `gh` login, no `ci.yml` run queued or in progress (the runners the subject machine hosts are idle); Claude effort in `~/.claude/settings.json`; Codex prompts compiled from this clone and CLI parity with the Codex app; Chroxy `allowAutoPermissionMode`, deploy agent unloaded, daemon commit unchanged; in the session phase, the daemon log's model and permission-mode lines for the new session and no interrupt |
@@ -109,12 +109,14 @@ unless a run has started. Once T0 is recorded and any run's state in `paths.stat
 or not), or a state there cannot be read, `cut` refuses to take a missing snapshot (exit 2, nothing cut): text
 read after a run began may have moved since T0, and every later gate would pass it. Put the committed file back
 and cut again, after repairing or moving a state that is wrong, such as a dry run's start. The cut that records
-T0 is exempt, since no run of the trial can start before its base is cut from T0, so a dry run's state there
-does not block it (PLAN step 5). A later `cut` that does take a missing snapshot prints a `note:` saying it was
-read after T0, because `cut` reads only the state files on the machine it runs on and cannot see a run started
-elsewhere. The supervisor commits `trial.json`'s `t0` line and `queue-t0.json` together by PR after the first
-cut; the control clone on the Mac pulls that commit before any `gate`. The file is not in the runs' clones:
-their bases are cut from T0, which is older.
+T0 is exempt: no run is meant to start before its base is cut from T0, so a start in the state folder then is a
+dry run's (PLAN step 5) and does not block it. A start recorded before the snapshot was read fails every later
+`gate` (below), so a dry run's state left in `paths.state_dir` must be moved before PLAN step 7. A later `cut`
+that does take a missing snapshot prints a `note:` saying it was read after T0, because `cut` reads only the
+state files on the machine it runs on and cannot see a run started elsewhere: if one has, the gate on the Mac
+fails against that snapshot. The supervisor commits `trial.json`'s `t0` line and `queue-t0.json` together by PR
+after the first cut; the control clone on the Mac pulls that commit before any `gate`. The file is not in the
+runs' clones: their bases are cut from T0, which is older.
 
 `gate` reads each issue again and fails, naming the slot, when a digest differs. Its detail says which
 parts changed (title, body, or comments with the count before and after; `comments (2, text changed)` is
@@ -133,6 +135,21 @@ the acceptance goes into the state's `overrides`, as `--accept-open` does for a 
 The digests are those of the text accepted, so two gates that accept different edits of one slot under the
 same reason leave two entries, and the same edit accepted twice leaves one; `gate.accepted_changed` in the
 state holds the reason and digests per slot. The acceptance covers a changed slot only, not a missing baseline.
+
+`gate` also fails when the snapshot was read after the first send of any run of the trial, whoever wrote it: `cut`
+sees only the run states on its own machine, so a snapshot retaken elsewhere after a run started would otherwise
+pass every later gate against text that may have moved since T0. A run's first send is its state's
+`start.sent_at`, followed back through `start.replaces` to the earliest, read from every state in
+`paths.state_dir` (finished runs included) and from the gate's own state file. The detail names the runs, the
+snapshot's `at`, each first send and where it is recorded; a start found only in a command's own `--state` file
+is named as that file, not as `paths.state_dir`. The times are compared as moments, not as strings: a snapshot
+read at the same moment as a send, however either is spelled, is not later. An `at` or a send that cannot be
+read cannot be placed and fails (with no start recorded there is nothing to place the snapshot before, so its
+`at` is not read). A state in `paths.state_dir` that cannot be read cannot rule a start out and leaves the check
+`UNVERIFIED`. No text is read in any of these cases. Put back the snapshot taken at T0 (an earlier commit of the
+file, if this one replaced it), or move a wrong state such as a dry run's start, and run the gate again.
+`finish` applies the same rule but only records: it reads no issue and leaves every slot `unverified` in both
+fields, the detail saying why, and the repair is the same, then `finish` again.
 
 A gate only sees the text as of its own time, so an edit made after the last gate was never caught.
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
@@ -153,8 +170,9 @@ were not used (not that the gate passed the T0 text), and `collect` prints the s
 when the slot changed since T0, and `accepted` is the recorded reason when the slot has an acceptance. An
 acceptance that is not a record with a reason and digests for that issue (the bare reason an older gate
 recorded, for one) is no acceptance, and the slot is compared with T0. A read that fails, a baseline that
-is missing, unreadable or taken at another T0, or a slot the snapshot lacks leaves the slot `unverified` in
-both fields (and a missing baseline reads nothing): `finish` records, it does not judge the setup.
+is missing, unreadable, taken at another T0 or read after a recorded first send, or a slot the snapshot lacks
+leaves the slot `unverified` in both fields (and a baseline that cannot be used reads nothing): `finish`
+records, it does not judge the setup.
 A slot `changed` since the gate prints a `FAIL` line and one `WARNING` naming the slots, because the run may
 have read more than one version of their text and a grader must know which; mission rule 4 forbids a run
 from commenting on an issue, so a new comment is a breach of it or somebody else's. `finish` still exits 0,
@@ -181,10 +199,10 @@ recorded) means the control clone no longer has the snapshot and the `t0` its ga
 back, then re-run as above: `git -C ~/trial/t2/control status` shows a local edit or deletion, which
 `git -C ~/trial/t2/control restore --source=HEAD --staged --worktree docs/reports/harness-evals/trial-2/trial.json docs/reports/harness-evals/trial-2/queue-t0.json`
 undoes for those two files only, and a clone behind `main` takes `git -C ~/trial/t2/control pull --ff-only`.
-Never let a `cut` write a new snapshot instead (`finish`'s
-detail for a missing file says so, and `cut` refuses once a run has started): one taken after the run compares
-the end text with itself. A slot whose entry is still missing, malformed or for another issue once the files are
-back cannot be recovered and stays `unverified`, as does every slot when neither step brings the baseline back.
+Never let a `cut` write a new snapshot instead (`finish`'s detail for a missing file says so, and `cut` refuses
+once a run has started): one taken after the run compares the end text with itself. A slot whose entry is still
+missing, malformed or for another issue once the files are back cannot be recovered and stays `unverified`, as
+does every slot when neither step brings the baseline back.
 
 ## Evidence
 
