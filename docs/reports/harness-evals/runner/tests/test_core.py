@@ -1,4 +1,6 @@
 """Config, rendering, checks, state, the GitHub double and the CLI's own wiring."""
+import contextlib
+import io
 import json
 import os
 import posixpath
@@ -210,6 +212,20 @@ class ConfigValidation(unittest.TestCase):
             d['blockers']['cy-gemini'] = [1]
         self.check_rejects(edit, 'unknown harness')
 
+    def test_blockers_must_map_each_harness_to_a_list_of_issue_numbers(self):
+        for label, blockers, fragment in (('a string number', {'all': ['9001']}, 'blockers.all must be a list of issue numbers'),
+                                          ('a nested list', {'cy-codex': [[9001]]}, 'blockers.cy-codex must be a list'),
+                                          ('a bare number', {'all': 9001}, 'blockers.all must be a list'),
+                                          ('a bool', {'cy-claude': [True]}, 'blockers.cy-claude must be a list'),
+                                          ('a list of lists', [[9001]], 'blockers must be an object')):
+            with self.subTest(label):
+                self.check_rejects(lambda d, b=blockers: d.__setitem__('blockers', b), fragment)
+
+    def test_absent_blockers_are_empty(self):
+        box = helpers.Sandbox(edit=lambda d: d.pop('blockers'))
+        self.addCleanup(box.cleanup)
+        self.assertEqual(box.trial().blockers, {})
+
     def test_duplicate_slot_issue(self):
         def edit(d):
             d['queue']['slots'].append({'slot': 'Q03', 'issue': 9001, 'title': 'dup'})
@@ -244,6 +260,185 @@ class ConfigValidation(unittest.TestCase):
         changed = [(a, b) for a, b in zip(original.splitlines(), after.splitlines()) if a != b]
         self.assertEqual(len(original.splitlines()), len(after.splitlines()))
         self.assertEqual(changed, [('  "t0": null,', f'  "t0": "{"c" * 40}",')])
+
+
+class QueueRoster(unittest.TestCase):
+    """What loading trial.json refuses about the queue: an issue the trial rules out, slot ids that do not run Q01, Q02, ...
+    in order with no gap, and a slot count that is not the declared `queue.size`. Every case starts from the COMMITTED
+    trial-2 queue and changes one thing, with the offending numbers read from the committed file's own lists."""
+
+    def setUp(self):
+        with open(os.path.join(helpers.TRIAL2, 'trial.json'), encoding='utf-8') as fh:
+            self.committed = json.load(fh)
+        self.slots = [dict(s) for s in self.committed['queue']['slots']]
+        self.rules = self.committed['queue_rules']
+        self.blockers = self.committed['blockers']
+
+    def refusal(self, slots, edit=None):
+        box = helpers.Sandbox(slots=slots, edit=edit)
+        self.addCleanup(box.cleanup)
+        with self.assertRaises(config.ConfigError) as ctx:
+            box.trial()
+        return str(ctx.exception)
+
+    def holding(self, *issues_by_index):
+        """The committed slots with the issue at each (index, issue) pair replaced."""
+        slots = [dict(s) for s in self.slots]
+        for index, issue in issues_by_index:
+            slots[index]['issue'] = issue
+        return slots
+
+    def assertSays(self, message, *fragments):
+        for fragment in fragments:
+            self.assertTrue(fragment in message, f'{fragment!r} is not in {message!r}')
+
+    RULED_OUT = 'queue slots hold issues the trial rules out: '
+    IN_ORDER = 'in order with no gap'
+
+    # -- the committed file
+
+    def test_the_committed_queue_is_q01_to_q10_in_order_with_a_size_of_ten(self):
+        trial = config.load(helpers.TRIAL2, root=helpers.REPO_ROOT)
+        self.assertEqual([s.slot for s in trial.slots], ['Q01', 'Q02', 'Q03', 'Q04', 'Q05', 'Q06', 'Q07', 'Q08', 'Q09', 'Q10'])
+        self.assertEqual(self.committed['queue']['size'], 10)
+
+    # -- an issue the trial rules out
+
+    def test_a_slot_holding_a_spent_october_issue_names_the_slot_the_issue_and_the_list(self):
+        spent = self.rules['exclude_issues'][0]
+        message = self.refusal(self.holding((2, spent)))
+        self.assertEqual(message, f'{self.RULED_OUT}Q03 #{spent} is in queue_rules.exclude_issues')
+
+    def test_a_slot_holding_a_reserved_issue_names_the_slot_the_issue_and_the_list(self):
+        reserved = self.rules['reserved'][0]
+        message = self.refusal(self.holding((4, reserved)))
+        self.assertEqual(message, f'{self.RULED_OUT}Q05 #{reserved} is in queue_rules.reserved')
+
+    def test_a_slot_holding_a_codex_blocker_names_the_slot_the_issue_and_the_list(self):
+        blocker = self.blockers['cy-codex'][0]
+        message = self.refusal(self.holding((6, blocker)))
+        self.assertEqual(message, f'{self.RULED_OUT}Q07 #{blocker} is in blockers.cy-codex')
+
+    def test_a_slot_holding_a_claude_blocker_names_the_slot_the_issue_and_the_list(self):
+        blocker = self.blockers['cy-claude'][0]
+        message = self.refusal(self.holding((7, blocker)))
+        self.assertEqual(message, f'{self.RULED_OUT}Q08 #{blocker} is in blockers.cy-claude')
+
+    def test_a_slot_holding_an_issue_every_harness_is_blocked_on_names_blockers_all(self):
+        held = self.slots[1]['issue']
+        message = self.refusal(self.slots, lambda d: d['blockers'].__setitem__('all', [held]))
+        self.assertEqual(message, f'{self.RULED_OUT}Q02 #{held} is in blockers.all')
+
+    def test_an_issue_in_two_lists_names_both(self):
+        reserved = self.rules['reserved'][1]
+        message = self.refusal(self.holding((3, reserved)), lambda d: d['blockers']['cy-codex'].append(reserved))
+        self.assertEqual(message, f'{self.RULED_OUT}Q04 #{reserved} is in queue_rules.reserved, blockers.cy-codex')
+
+    def test_the_lists_are_named_in_a_fixed_order_the_rules_first_then_the_blockers_by_key(self):
+        spent = self.rules['exclude_issues'][1]
+
+        def edit(d):
+            d['queue_rules']['reserved'].append(spent)
+            d['blockers']['cy-codex'].append(spent)
+            d['blockers']['all'] = [spent]
+        message = self.refusal(self.holding((0, spent)), edit)
+        self.assertEqual(message, f'{self.RULED_OUT}Q01 #{spent} is in queue_rules.exclude_issues, queue_rules.reserved, '
+                                  'blockers.all, blockers.cy-codex')
+
+    def test_two_offending_slots_are_both_named_in_the_one_refusal(self):
+        reserved, spent = self.rules['reserved'][0], self.rules['exclude_issues'][0]
+        message = self.refusal(self.holding((2, reserved), (6, spent)))
+        self.assertEqual(message, f'{self.RULED_OUT}Q03 #{reserved} is in queue_rules.reserved; '
+                                  f'Q07 #{spent} is in queue_rules.exclude_issues')
+
+    def test_an_unknown_blocker_harness_is_reported_before_a_ruled_out_issue(self):
+        reserved = self.rules['reserved'][0]
+        message = self.refusal(self.holding((2, reserved)), lambda d: d['blockers'].__setitem__('cy-gemini', [1]))
+        self.assertSays(message, "blockers: unknown harness 'cy-gemini'")
+        self.assertFalse('rules out' in message, message)
+
+    # -- ids in order, with no gap
+
+    def test_a_gap_in_the_slot_ids_is_refused(self):
+        without_q05 = self.slots[:4] + self.slots[5:]
+        message = self.refusal(without_q05, lambda d: d['queue'].__setitem__('size', 9))
+        self.assertSays(message, self.IN_ORDER, 'expected Q01, Q02, Q03, Q04, Q05, Q06, Q07, Q08, Q09, '
+                        'got Q01, Q02, Q03, Q04, Q06, Q07, Q08, Q09, Q10')
+
+    def test_ids_renumbered_from_q02_are_refused(self):
+        renumbered = [dict(s, slot=f'Q{n:02d}') for n, s in enumerate(self.slots, start=2)]
+        message = self.refusal(renumbered)
+        self.assertSays(message, self.IN_ORDER, 'got Q02, Q03, Q04, Q05, Q06, Q07, Q08, Q09, Q10, Q11')
+
+    def test_two_entries_out_of_order_are_refused(self):
+        swapped = list(self.slots)
+        swapped[2], swapped[3] = swapped[3], swapped[2]
+        message = self.refusal(swapped)
+        self.assertSays(message, self.IN_ORDER, 'got Q01, Q02, Q04, Q03, Q05')
+
+    def test_a_q00_first_is_refused(self):
+        message = self.refusal([{'slot': 'Q00', 'issue': 9101, 'title': 'an extra first slot'}] + self.slots)
+        self.assertSays(message, self.IN_ORDER, 'got Q00, Q01, Q02')
+
+    # -- the declared size
+
+    def test_nine_slots_against_a_size_of_ten_is_refused(self):
+        message = self.refusal(self.slots[:9], lambda d: d['queue'].__setitem__('size', 10))
+        self.assertSays(message, 'queue has 9 slots; queue.size says 10')
+
+    def test_eleven_slots_against_a_size_of_ten_is_refused(self):
+        eleven = self.slots + [{'slot': 'Q11', 'issue': 9101, 'title': 'an eleventh slot'}]
+        message = self.refusal(eleven, lambda d: d['queue'].__setitem__('size', 10))
+        self.assertSays(message, 'queue has 11 slots; queue.size says 10')
+
+    def test_a_size_that_is_not_a_whole_number_of_at_least_one_is_refused_for_a_full_and_an_empty_queue(self):
+        missing = object()
+        for label, value in (('missing', missing), ('a string', '10'), ('a bool', True), ('zero', 0), ('negative', -1),
+                             ('a float', 10.0), ('null', None)):
+            def edit(d, value=value):
+                if value is missing:
+                    d['queue'].pop('size', None)
+                else:
+                    d['queue']['size'] = value
+            for queue_label, slots in (('full', self.slots), ('empty', [])):
+                with self.subTest(f'{label}, {queue_label} queue'):
+                    message = self.refusal(slots, edit)
+                    self.assertSays(message, 'queue.size must be a whole number of at least 1',
+                                    'the key is missing' if value is missing else f'got {value!r}')
+
+    def test_an_empty_queue_with_a_size_loads(self):
+        box = helpers.Sandbox(slots=[])
+        self.addCleanup(box.cleanup)
+        trial = box.trial()
+        self.assertEqual(trial.slots, [])
+        self.assertEqual(trial.data['queue']['size'], 10)
+
+    # -- every command refuses, before it renders, records or pushes anything
+
+    def test_render_refuses_a_ruled_out_issue_with_exit_2_and_leaves_every_mission_as_it_was(self):
+        box = helpers.Sandbox()
+        self.addCleanup(box.cleanup)
+        reserved = self.rules['reserved'][0]
+        with open(os.path.join(box.trial_dir, 'trial.json'), encoding='utf-8') as fh:
+            data = json.load(fh)
+        data['queue']['slots'][0]['issue'] = reserved
+        box.write_trial(data)
+        missions = os.path.join(box.trial_dir, 'missions')
+
+        def contents():
+            out = {}
+            for name in sorted(os.listdir(missions)):
+                with open(os.path.join(missions, name), 'rb') as fh:
+                    out[name] = fh.read()
+            return out
+        before = contents()
+        self.assertTrue(len(before) > 1, 'the committed missions are what a render would overwrite')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = cli.main(['--trial', box.trial_dir, 'render'], env=box.env())
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertSays(err.getvalue(), f'Q01 #{reserved} is in queue_rules.reserved')
+        self.assertTrue(contents() == before, 'a refused render rewrote a mission')
 
 
 class Rendering(unittest.TestCase):

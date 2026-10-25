@@ -26,7 +26,7 @@ repository, a run's raw transcripts (see "Evidence" below), and
 | `trialctl.py` | the command (`python3 trialctl.py --trial <trial dir> <command>`) |
 | `trialkit/` | the implementation, one module per concern (`config`, `render`, `launch`, `native`, `collect`, `verdicts`, …) |
 | `tests/run.py` | the test suite; CI runs it in the `Scripts Tests` job and it fails below a test-count floor |
-| `<trial>/trial.json` | everything about one trial: roster, cells, arms, harnesses and their invocations, queue slots, blockers, local paths, allowance floors |
+| `<trial>/trial.json` | everything about one trial: roster, cells, arms, harnesses and their invocations, queue slots and their declared count (`queue.size`), blockers, local paths, allowance floors |
 | `<trial>/missions/TEMPLATE.md`, `<trial>/graders/GRADER-PROMPT.md` | the templates `render` fills |
 | `<trial>/queue-t0.json` | each queue slot's issue number and SHA-256 digests of its title, body and comments at T0, written by `cut` with T0 and read by `gate` (see "Queue text at T0") |
 | `<paths.state_dir>/<RUN>.json` | the run's state on the Mac: clone, preflights, send, readings, applied settings, end |
@@ -430,7 +430,18 @@ is why the list exists. Survivors
 show their labels, creation date, whether the body has an acceptance-criteria section,
 and a type and package guess from labels; `--limit` shortens that list, never the scan.
 `queue_rules` in `trial.json` rejects an unknown key, so a misspelt list cannot silently
-filter nothing.
+filter nothing, and `blockers` must map each harness (or `all`) to a list of issue numbers.
+Loading `trial.json` also refuses a queue whose slot ids do not run Q01, Q02, … in order with
+no gap (printing the ids expected and the ids found), whose slot count differs from `queue.size`,
+or which holds an issue on `queue_rules.exclude_issues`, `queue_rules.reserved` or any
+`blockers` list (naming each offending slot and every list that holds its issue). `queue.size`
+is required even while the queue is empty (ten for trial 2, PLAN.md section 4), and a queue
+filled only part of the way is refused. Every command loads `trial.json` first, so each one,
+`queue-candidates` and `finish` included, refuses such a file with exit 2; `render`, `cut` and
+`gate` refuse it before anything is rendered, recorded or pushed, and a base cut from such a
+queue could not be rewritten. To replace a queue issue before T0, change that slot's issue and
+title and keep its id. A slot is not removed after T0: the ids must stay contiguous and match
+`queue.size`, and renumbering would break the `Trial-Item: Qnn` that PR bodies and verdicts carry.
 
 ## Owner commands (accounts)
 
