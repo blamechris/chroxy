@@ -75,12 +75,10 @@ jobs:
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
           "$HOME/.maestro/bin/maestro" --version
 
-      # Builds + installs the chroxy dev client (com.blamechris.chroxy) into the
-      # simulator WITHOUT starting Metro (started separately below so it can run
-      # in the background while Maestro drives the app). ~10-15 min cold.
+      # Build + install without Expo run:ios's unconditional dev-client launch.
+      # Metro starts and warms before Maestro opens the app. ~10-15 min cold.
       - name: Build + install the dev client
-        working-directory: packages/app
-        run: npx expo run:ios --device "$DEVICE" --no-bundler
+        run: bash scripts/maestro-build-install-ios.sh packages/app
 
       - name: Start Metro (background)
         working-directory: packages/app

@@ -9,6 +9,7 @@ import yaml from 'js-yaml'
 const root = resolve(import.meta.dirname, '../../..')
 const workflow = yaml.load(readFileSync(join(root, '.github/workflows/maestro-nightly.yml'), 'utf8'))
 const preflight = join(root, 'scripts/maestro-hosted-preflight.sh')
+const buildInstall = join(root, 'scripts/maestro-build-install-ios.sh')
 const sequentialRunner = join(root, 'packages/app/.maestro/scripts/run-all-sequential.sh')
 const device = '0AD31F77-82DF-4E28-99E6-CAE0A8BB5E54'
 const shellIt = process.platform === 'win32' ? it.skip : it
@@ -74,6 +75,48 @@ function runnerFixture({ reset = false } = {}) {
   return { ...f, trace, run }
 }
 
+function buildInstallFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-build-'))
+  const bin = join(dir, 'bin')
+  const project = join(dir, 'app')
+  const runnerTemp = join(dir, 'runner-temp')
+  const installed = join(dir, 'installed.app')
+  const trace = join(dir, 'trace')
+  mkdirSync(bin)
+  mkdirSync(project)
+  mkdirSync(runnerTemp)
+  mkdirSync(installed)
+  const command = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\nset -e\n${body}\n`, { mode: 0o755 })
+  command('npx', `echo "npx|$*" >> "$FAKE_TRACE"
+if [ "$FAKE_FAIL_STEP" = prebuild ]; then exit 23; fi
+if [ "$FAKE_FAIL_STEP" != workspace ]; then mkdir -p "$FAKE_PROJECT/ios/Chroxy.xcworkspace"; fi`)
+  command('xcodebuild', `echo "xcodebuild|$*|RCT_NO_LAUNCH_PACKAGER=$RCT_NO_LAUNCH_PACKAGER" >> "$FAKE_TRACE"
+if [ "$FAKE_FAIL_STEP" = build ]; then exit 24; fi
+if [ "$FAKE_FAIL_STEP" != product ]; then
+  mkdir -p "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/Debug-iphonesimulator/Chroxy.app"
+  touch "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/Debug-iphonesimulator/Chroxy.app/Info.plist"
+fi`)
+  command('plutil', `echo "plutil|$*" >> "$FAKE_TRACE"
+if [ "$FAKE_FAIL_STEP" = plist ]; then exit 25; fi
+if [ "$FAKE_FAIL_STEP" = identity ]; then echo com.example.other; else echo com.blamechris.chroxy; fi`)
+  command('xcrun', `echo "xcrun|$*" >> "$FAKE_TRACE"
+if [ "$2" = install ]; then
+  if [ "$FAKE_FAIL_STEP" = install ]; then exit 26; fi
+elif [ "$2" = get_app_container ]; then
+  if [ "$FAKE_FAIL_STEP" = container ]; then exit 27; fi
+  if [ "$FAKE_FAIL_STEP" = missing-container ]; then echo "$FAKE_PROJECT/missing.app"; else echo "$FAKE_INSTALLED"; fi
+else
+  exit 28
+fi`)
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+    DEVICE: device, RUNNER_TEMP: runnerTemp, FAKE_TRACE: trace,
+    FAKE_PROJECT: project, FAKE_INSTALLED: installed }
+  const run = (failStep) => spawnSync('bash', [buildInstall, project], {
+    env: { ...env, FAKE_FAIL_STEP: failStep || '' }, encoding: 'utf8', timeout: 5000
+  })
+  return { dir, trace, run }
+}
+
 function tracedFlows(trace) {
   return readFileSync(trace, 'utf8').trim().split('\n').map(line => line.match(/([^/ ]+\.yaml)$/)?.[1])
 }
@@ -132,6 +175,67 @@ function simulateDevClient(commands, events, destination) {
 }
 
 describe('Maestro nightly hosted runner (#7113)', () => {
+  shellIt('builds and installs the Debug simulator app without launching it', () => {
+    const f = buildInstallFixture()
+    try {
+      const result = f.run()
+      assert.equal(result.status, 0, result.stderr)
+      const commands = readFileSync(f.trace, 'utf8').trim().split('\n')
+      assert.equal(commands.length, 5)
+      assert.equal(commands[0], 'npx|expo prebuild --platform ios')
+      assert.ok(commands[1].startsWith('xcodebuild|-workspace '))
+      assert.ok(commands[1].includes(' -scheme Chroxy -configuration Debug '))
+      assert.ok(commands[1].includes(` -destination id=${device} `))
+      assert.ok(commands[1].includes(' -derivedDataPath '))
+      assert.ok(commands[1].endsWith(' build|RCT_NO_LAUNCH_PACKAGER=true'))
+      assert.ok(commands[2].startsWith('plutil|-extract CFBundleIdentifier raw -o - '))
+      assert.ok(commands[3].startsWith(`xcrun|simctl install ${device} `))
+      assert.equal(commands[4], `xcrun|simctl get_app_container ${device} com.blamechris.chroxy app`)
+      assert.ok(!commands.some(line => line.startsWith('xcrun|simctl openurl ') ||
+        line.startsWith('xcrun|simctl launch ')), 'the helper must not launch the app')
+      assert.match(result.stdout, /Installed com\.blamechris\.chroxy/)
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true })
+    }
+  })
+
+  shellIt('stops before install on preparation, build, product, or identity failures', () => {
+    for (const failedStep of ['prebuild', 'workspace', 'build', 'product', 'plist', 'identity']) {
+      const f = buildInstallFixture()
+      try {
+        const result = f.run(failedStep)
+        assert.notEqual(result.status, 0, `${failedStep} must fail the helper`)
+        assert.equal(result.signal, null, `${failedStep} must exit promptly, not time out`)
+        const commands = readFileSync(f.trace, 'utf8').trim().split('\n')
+        assert.ok(!commands.some(line => line.startsWith('xcrun|')),
+          `${failedStep} must not install an unverified app`)
+        if (failedStep === 'prebuild') assert.equal(result.status, 23)
+        if (failedStep === 'build') assert.equal(result.status, 24)
+        if (failedStep === 'plist') assert.equal(result.status, 25)
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  shellIt('fails when installation or installed-container verification fails', () => {
+    for (const failedStep of ['install', 'container', 'missing-container']) {
+      const f = buildInstallFixture()
+      try {
+        const result = f.run(failedStep)
+        assert.notEqual(result.status, 0, `${failedStep} must fail the helper`)
+        assert.equal(result.signal, null, `${failedStep} must exit promptly, not time out`)
+        const commands = readFileSync(f.trace, 'utf8').trim().split('\n')
+        assert.ok(commands.some(line => line.startsWith('xcrun|simctl install ')))
+        assert.ok(!commands.some(line => line.startsWith('xcrun|simctl openurl ') ||
+          line.startsWith('xcrun|simctl launch ')),
+          'no failure path may launch the app')
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('wires the scheduled and dispatch suite to a pinned, preflighted hosted image', () => {
     assert.ok(workflow.on.schedule?.length > 0, 'nightly schedule must exist')
     assert.ok(workflow.on.workflow_dispatch !== undefined, 'manual proof run must remain available')
@@ -147,6 +251,9 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.equal(preflightStep?.run, 'bash scripts/maestro-hosted-preflight.sh')
     assert.ok(index('Preflight Xcode and boot simulator') < index('Install dependencies'))
     assert.ok(index('Install dependencies') < index('Build + install the dev client'))
+    assert.equal(steps[index('Build + install the dev client')].run,
+      'bash scripts/maestro-build-install-ios.sh packages/app')
+    assert.ok(index('Build + install the dev client') < index('Start Metro (background)'))
     assert.ok(index('Start Metro (background)') < index('Warm the iOS Metro bundle'))
     assert.ok(index('Warm the iOS Metro bundle') < index('Run Maestro suite'))
     assert.ok(steps[index('Start Metro (background)')].run.includes('npx expo start --localhost'), 'simulator and warmup must share the verified loopback Metro origin')
