@@ -85,7 +85,14 @@ jobs:
             fi
             sleep 1
           done
-          echo "::warning::Metro did not answer on :8081 within 60s — running flows anyway"
+          echo "::error::Metro did not answer on :8081 within 60s" >&2
+          exit 1
+
+      # /status only proves Metro is listening. A fresh hosted runner still has
+      # to compile the iOS bundle, which can outlast a flow's UI wait. Fetch
+      # Expo's actual iOS launch asset to completion before starting Maestro.
+      - name: Warm the iOS Metro bundle
+        run: node scripts/maestro-warm-metro.mjs
 
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro
