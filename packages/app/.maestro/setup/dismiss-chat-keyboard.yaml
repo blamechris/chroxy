@@ -1,0 +1,19 @@
+appId: com.blamechris.chroxy
+name: Expose chat activity after sending
+---
+
+# ChatView's FlatList uses keyboardDismissMode="on-drag". The raised input bar
+# otherwise covers the activity-group header and entry even though Maestro
+# finds their accessibility IDs and reports the taps as completed.
+- swipe:
+    start: 50%,45%
+    end: 50%,30%
+    duration: 350
+
+# The iOS software keyboard exposes its space key with this ID. Fail if the
+# drag did not lower the keyboard; tapping a still-covered tool row can report
+# success without changing the app's expand state.
+- extendedWaitUntil:
+    notVisible:
+      id: "space"
+    timeout: 5000

@@ -37,15 +37,20 @@ name: ChatView TodoWrite tool rendering
 - tapOn:
     id: "chat-send-button"
 
-# Dismiss the keyboard so the activity group's bounds line up with the
-# unscrolled screen — the keyboard pushes content up by ~50% and would
-# move the entry row out from under our point-tap.
-
 # Wait for the activity group to land. testID set on the outer View
 # in ActivityGroup.tsx (the View wraps the header + body).
 - extendedWaitUntil:
     visible:
       id: "activity-group"
+    timeout: 10000
+
+- runFlow: setup/dismiss-chat-keyboard.yaml
+
+# Wait for this tool's result and idle transition before expanding. The group
+# auto-collapses on active→idle, which could undo an earlier header tap.
+- extendedWaitUntil:
+    visible:
+      text: ".*1 tool used — 1 TodoWrite.*"
     timeout: 10000
 
 # Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
@@ -57,6 +62,10 @@ name: ChatView TodoWrite tool rendering
 - tapOn:
     id: "activity-group-header"
 - waitForAnimationToEnd
+- extendedWaitUntil:
+    visible:
+      id: "activity-entry-tool-todowrite-mock-.*"
+    timeout: 5000
 
 # Screenshot the collapsed-entry state (group expanded, entry not).
 - takeScreenshot: chat-todolist-entry-collapsed

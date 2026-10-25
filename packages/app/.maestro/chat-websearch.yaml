@@ -46,6 +46,12 @@ name: ChatView WebSearch structured tool result
       id: "activity-group"
     timeout: 10000
 
+- runFlow: setup/dismiss-chat-keyboard.yaml
+- extendedWaitUntil:
+    visible:
+      text: ".*1 tool used — 1 WebSearch.*"
+    timeout: 10000
+
 - takeScreenshot: chat-websearch-activity-group-collapsed
 
 # Expand the activity group — the onPress lives on the inner
@@ -54,6 +60,10 @@ name: ChatView WebSearch structured tool result
 - tapOn:
     id: "activity-group-header"
 - waitForAnimationToEnd
+- extendedWaitUntil:
+    visible:
+      id: "activity-entry-tool-websearch-mock-.*"
+    timeout: 5000
 
 # Expand the WebSearch entry. Same rationale as chat-todolist.yaml: an
 # iOS XCUITest tap-by-id on a nested TouchableOpacity doesn't reliably
