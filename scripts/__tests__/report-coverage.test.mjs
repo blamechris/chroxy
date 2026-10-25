@@ -93,6 +93,8 @@ for (const [name, mutate, message] of [
   ['empty HTML', (directory) => writeFileSync(resolve(directory, 'index.html'), ''), /empty expected report/],
   ['plain text HTML', (directory) => writeFileSync(resolve(directory, 'index.html'), 'broken report'), /malformed HTML report/],
   ['truncated HTML', (directory) => writeFileSync(resolve(directory, 'index.html'), '<html><body>'), /malformed HTML report/],
+  ['empty HTML coverage table', (directory) => writeFileSync(resolve(directory, 'index.html'), '<!doctype html><html><head><title>Code coverage report for All files</title></head><body><table class="coverage-summary"></table></body></html>'), /malformed HTML report/],
+  ['empty HTML coverage body', (directory) => writeFileSync(resolve(directory, 'index.html'), readFileSync(resolve(directory, 'index.html'), 'utf8').replace(/<tbody>[\s\S]*?<\/tbody>/, '<tbody></tbody>')), /malformed HTML report/],
 ]) {
   test(`${name} fails legibly`, () => {
     const { root, directory } = fixture()

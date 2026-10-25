@@ -109,6 +109,15 @@ function verifyHtml(html, htmlPath) {
     cursor = position + marker.length
   }
   if (!content.trimEnd().endsWith('</html>')) fail(`malformed HTML report ${htmlPath}: truncated document`)
+  const tableStart = content.indexOf('<table class="coverage-summary">')
+  const tableEnd = content.indexOf('</table>', tableStart)
+  const bodyStart = content.indexOf('<tbody>', tableStart)
+  const bodyEnd = content.indexOf('</tbody>', bodyStart)
+  const body = content.slice(bodyStart + '<tbody>'.length, bodyEnd)
+  if (bodyStart < 0 || bodyStart >= tableEnd || bodyEnd < 0 || bodyEnd >= tableEnd ||
+      !/<tr\b[^>]*>\s*<td class="file[^"]*"[^>]*>\s*<a href="[^"]+\.html">[^<]+<\/a>/.test(body)) {
+    fail(`malformed HTML report ${htmlPath}: coverage table has no source row and file link`)
+  }
 }
 
 export function summarizeCoverage(packageName, repoRoot) {
