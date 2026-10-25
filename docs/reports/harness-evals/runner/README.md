@@ -200,7 +200,12 @@ strings it holds) is recorded so an unreadable transcript, or a renamed input fi
 as zero scanned rather than as clean. The scan counts what a tool input spells, not what the
 shell resolves: `cat trial/queue.md` run from inside `docs/reports/harness-evals/` names no
 `harness-evals/` and is not counted by itself (the `cd` that put the shell there is, and the
-graders' audit of the transcripts covers the rest).
+graders' audit of the transcripts covers the rest). Three more limits are left to that audit:
+October's candidate read is out of the tree but not out of the history (a read that names its
+path, such as `git show <commit>:<path>`, is counted; a content search such as `git log -S` is
+not); a read of `main` or of a PR the run did not open is forbidden by mission rule 5 but not
+measured; and an exclusion glob, or the run's own mission spelled as a URL, counts as a hit. A
+hit is a lead for the graders, not a verdict.
 
 **What is not carried when it is not verified.** A figure whose check is not a pass is
 left out of the extract (null, or absent from `runs_row`), not shown as data, and the

@@ -185,7 +185,8 @@ evidence <run>` (package P2), run on the Mac after the run ends:
   by a rule, a timeout or the pending cap; resolved by a client or an automatic
   responder the log does not name; floored), human messages after the first,
   interrupts, compactions, token totals by model, and isolation-pattern hits (other
-  `trial/*` refs, the key folder, `NEXT-*.md`, native stores), with paths outside the
+  `trial/*` refs, the key folder, `NEXT-*.md`, native stores, earlier trials' records
+  under `docs/reports/harness-evals/`), with paths outside the
   clone reduced to a pattern name and a hash;
 - commits the manifest's digest beside the extract, so the vault copy can be
   verified later.

@@ -26,7 +26,7 @@ to confirm the run is at the intended settings. Its timestamp is the run's start
 | Harness | {{HARNESS}} |
 | Coordinator model / effort | `{{MODEL}}` / {{EFFORT}} |
 | Base branch (the ONLY merge target) | `{{BASE_BRANCH}}` |
-| Base SHA (T0) | `git merge-base origin/{{BASE_BRANCH}} origin/main`; this mission is the only commit over it |
+| Base SHA (T0) | the parent of the commit that added this mission: `git rev-parse "$(git log -n 1 --format=%H --diff-filter=A -- {{MISSION_PATH}})^"`; this mission is the only commit over it |
 | Permission mode | unattended: the harness's no-prompt mode, selected before the first message (see Invocation); a human approval during the run is an incident, count it |
 | Run report path | `{{REPORT_PATH}}` |
 | Wall-clock cap | {{CAP_HOURS}} hours from your first command |
