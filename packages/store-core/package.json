@@ -17,7 +17,9 @@
     "build:crypto": "tsc src/crypto.ts --outDir dist --module ESNext --target ES2022 --declaration --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/postbuild-crypto.mjs",
     "prepare": "npm run build:crypto",
     "pretest": "npm run build:crypto",
+    "pretest:coverage": "npm run build:crypto",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "build:publish": "node scripts/build-publish-dir.mjs"
   },
   "dependencies": {
@@ -26,6 +28,7 @@
     "tweetnacl-util": "^0.15.1"
   },
   "devDependencies": {
-    "vitest": "^4.0.0"
+    "vitest": "4.1.12",
+    "@vitest/coverage-v8": "4.1.12"
   }
 }

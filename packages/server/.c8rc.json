@@ -1,6 +1,6 @@
 {
   "all": true,
-  "src": ["src/"],
+  "src": ["src/", "hooks/", "sidecar/"],
   "exclude": [
     "src/cli.js",
     "src/test-client.js",
@@ -8,6 +8,6 @@
     "scripts/**",
     "node_modules/**"
   ],
-  "reporter": ["text-summary", "html"],
+  "reporter": ["text-summary", "html", "lcov", "json-summary"],
   "report-dir": "coverage"
 }
