@@ -114,15 +114,15 @@ unless a run has started. Once T0 is recorded and any run's state in `paths.stat
 (finished or not), or a state there cannot be read or `paths.state_dir` is not set, `cut` refuses to take a
 missing snapshot (exit 2, nothing cut): text read after a run began may have moved since T0, and every later
 gate would pass it. Put the committed file back and cut again, after repairing or moving a state that is wrong,
-such as a dry run's start, or setting `paths.state_dir` in `trial.json` if it is not set. The cut that records T0 is exempt: no run is meant to start before its base is cut
-from T0, so a start in the state folder then is a dry run's (PLAN step 5) and does not block it. A start
-recorded before the snapshot was read fails every later `gate` (below), so a dry run's state left in
-`paths.state_dir` must be moved before PLAN step 7. A later `cut` that does take a missing snapshot prints a
-`note:` saying it was read after T0, because `cut` reads only the state files on the machine it runs on and
-cannot see a run started elsewhere: if one has, the gate on the Mac fails against that snapshot. The supervisor
-commits `trial.json`'s `t0` line and `queue-t0.json` together by PR after the first cut; the control clone on
-the Mac pulls that commit before any `gate`. The file is not in the runs' clones: their bases are cut from T0,
-which is older.
+such as a dry run's start, or setting `paths.state_dir` in `trial.json` if it is not set. The cut that
+records T0 is exempt: no run is meant to start before its base is cut from T0, so a start in the state
+folder then is a dry run's (PLAN step 5) and does not block it. A start recorded before the snapshot was
+read fails every later `gate` (below), so a dry run's state left in `paths.state_dir` must be moved before
+PLAN step 7. A later `cut` that does take a missing snapshot prints a `note:` saying it was read after T0,
+because `cut` reads only the state files on the machine it runs on and cannot see a run started elsewhere:
+if one has, the gate on the Mac fails against that snapshot. The supervisor commits `trial.json`'s `t0` line
+and `queue-t0.json` together by PR after the first cut; the control clone on the Mac pulls that commit
+before any `gate`. The file is not in the runs' clones: their bases are cut from T0, which is older.
 
 `gate` reads each issue again and fails, naming the slot, when a digest differs. Its detail says which
 parts changed (title, body, or comments with the count before and after; `comments (2, text changed)` is
@@ -156,9 +156,14 @@ there is nothing to place the snapshot before, so its `at` is not read). Run sta
 rule a start out and leave the check `UNVERIFIED`: a state in `paths.state_dir` that cannot be read, or no
 `paths.state_dir` in `trial.json`, for which the repair is to set it there. No text is read in any of these
 cases. If a start there is wrong, such as a dry run's, move that state; otherwise put back the snapshot taken at
-T0 (an earlier commit of the file, if this one replaced it); then run the gate again. `finish` applies the same
-rule but only records: it reads no issue and leaves every slot `unverified` in both fields, the detail saying why,
-and the repair is the same, then `finish` again.
+T0 (an earlier commit of the file, if this one replaced it); then run the gate again. When the snapshot
+can be placed, the gate prints `PASS queue text at T0` before the slot rows, naming the snapshot's `at`,
+the number of first sends it was read at or before, each send and where it is recorded; with no start
+recorded it says that no run has started and where it looked (`paths.state_dir`, and the gate's own
+`--state` file when that is elsewhere), so a pass over an empty or wrong state folder (another `HOME`, a
+gate run off the Mac, a mistyped `paths.state_dir`) shows in the row. `finish` applies the same rule but
+only records: it reads no issue and leaves every slot `unverified` in both fields, the detail saying
+why, and the repair is the same, then `finish` again.
 
 A gate only sees the text as of its own time, so an edit made after the last gate was never caught.
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
@@ -169,23 +174,27 @@ later. A gate recorded later, say one that accepted an edit made after the send,
 started on. With no start or no gate recorded there is nothing to place and the acceptances count. If the
 gate's time or the first send's is missing or cannot be read, the gate cannot be placed before the send, which
 is as good as later. In either case its acceptances are not used, and the slots are compared with T0 as far as
-they can be: not at all when the T0 snapshot cannot be used as the baseline (below; a first send that cannot be
-read is one such case, since the snapshot cannot be placed before it, see `gate` above), and not a slot whose
-text cannot be read. `finish.queue_text.acceptances_ignored` says which it was (the later gate's time and the
-send's, or the unreadable value quoted) and ends "the queue text is compared with T0 only" when at least one slot
-was compared, or "no slot is compared" when every slot is `unverified`; a `note:`
-line prints the same, each changed slot's `detail` says its acceptances were not used (not that the gate passed
-the T0 text), and `collect` prints the sentence as its first note.
+they can be: not at all when the T0 snapshot cannot be used as the baseline (every case is listed below; a first
+send that cannot be read is one, since the snapshot cannot be placed before it, see `gate` above), and not a
+slot whose text cannot be read or that has no usable entry in the snapshot. `finish.queue_text.acceptances_ignored`
+says which it was (the later gate's time and the send's, or the unreadable value quoted) and ends "the queue
+text is compared with T0 only" when every slot was compared, "the queue text is compared with T0 only where it
+could be read" when some slots are `unverified`, or "no slot is compared" when every slot is; a `note:` line
+prints the same, each changed slot's `detail` says its acceptances were not used (not that the gate passed the
+T0 text), and `collect` prints the sentence as its first note.
 `finish.queue_text` holds `{"at": …, "acceptances_ignored": … (only when they were not used), "slots": {"Q03":
 {"issue", "since_t0", "since_gate", "title_sha256", "body_sha256", "comments_sha256", "comments", "parts",
 "accepted", "detail"}}}`: `since_t0` and `since_gate` are
 `unchanged`, `changed` or `unverified`, `parts` (title, body, comments, as `gate` names them) is present
 when the slot changed since T0, and `accepted` is the recorded reason when the slot has an acceptance. An
 acceptance that is not a record with a reason and digests for that issue (the bare reason an older gate
-recorded, for one) is no acceptance, and the slot is compared with T0. A read that fails, a baseline that
-is missing, unreadable, taken at another T0 or read after a recorded first send, or a slot the snapshot lacks
-leaves the slot `unverified` in both fields (and a baseline that cannot be used reads nothing): `finish`
-records, it does not judge the setup.
+recorded, for one) is no acceptance, and the slot is compared with T0. A read that fails, a slot the
+snapshot has no entry for, holds a malformed entry for or records under another issue, and a baseline that
+cannot be used leave the slot `unverified` in both fields. A baseline cannot be used when no T0 is recorded;
+when the snapshot is missing, unreadable, not a snapshot (malformed) or taken at another T0; when it was
+read after a recorded first send, or cannot be placed before one because its `at` or the send cannot be
+read; when a run state in `paths.state_dir` cannot be read; and when `trial.json` sets no `paths.state_dir`.
+A baseline that cannot be used reads nothing: `finish` records, it does not judge the setup.
 A slot `changed` since the gate prints a `FAIL` line and one `WARNING` naming the slots, because the run may
 have read more than one version of their text and a grader must know which; mission rule 4 forbids a run
 from commenting on an issue, so a new comment is a breach of it or somebody else's. `finish` still exits 0,

@@ -142,25 +142,29 @@ def _state_dir(trial, env):
 
 
 def _starts(trial, env, run=None, st=None, state_file=None):
-    """Every start recorded for the trial, finished or not, as `queue_text` reads them (#8808, #8812): (rows, None), each row
-    (run id, when it was first sent, where the start is recorded), in roster order, or (None, (problem, remedy)) when the run
-    states cannot be read, which cannot rule a start out: paths.state_dir is not set, or a state in it cannot be read. `st` is
-    `run`'s own state, which `state_file` may have put outside paths.state_dir: a start recorded only there is a row of its
-    own, named as that file."""
+    """Every start recorded for the trial, finished or not, as `queue_text` reads them (#8808, #8812): (rows, None, read), each
+    row (run id, when it was first sent, where the start is recorded), in roster order, or (None, (problem, remedy), None) when
+    the run states cannot be read, which cannot rule a start out: paths.state_dir is not set, or a state in it cannot be read.
+    `read` says where they were looked for, for a pass that names no start (#8816). `st` is `run`'s own state, which `state_file`
+    may have put outside paths.state_dir: a start recorded only there is a row of its own, named as that file."""
     root, where = trial.local_path('state_dir', env.home), _state_dir(trial, env)
     if not root:
-        return None, ('paths.state_dir is not set in trial.json', 'set paths.state_dir in trial.json')
+        return None, ('paths.state_dir is not set in trial.json', 'set paths.state_dir in trial.json'), None
     try:
         found = state.started(trial, home=env.home)
     except (OSError, ValueError) as exc:
-        return None, (f'a run state in {where} cannot be read ({exc})', 'repair or move that state')
-    rows = [(rid, _first_send(data), f'the run states in {where}') for rid, data in found]
-    if run is not None and state_file and isinstance(st, dict) and st.get('start'):
+        return None, (f'a run state in {where} cannot be read ({exc})', 'repair or move that state'), None
+    states = f'the run states in {where}'
+    rows, read = [(rid, _first_send(data), states) for rid, data in found], [states]
+    if run is not None and state_file:
         own = state.state_path(trial, run.id, state_file, env.home)
         if os.path.realpath(own) != os.path.realpath(os.path.join(root, f'{run.id}.json')):
-            rows.append((run.id, _first_send(st), f"{run.id}'s state file {state.tildify(own, env.home)}"))
+            mine = f"{run.id}'s state file {state.tildify(own, env.home)}"
+            read.append(mine)
+            if isinstance(st, dict) and st.get('start'):
+                rows.append((run.id, _first_send(st), mine))
     order = {r.id: i for i, r in enumerate(trial.runs)}
-    return sorted(rows, key=lambda row: order[row[0]]), None
+    return sorted(rows, key=lambda row: order[row[0]]), None, ' and '.join(read)
 
 
 # -- gate ----------------------------------------------------------------------
@@ -1297,7 +1301,7 @@ def _acceptances_ignored(st):
     ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. The
     sentence says only that the acceptances are not used. What is compared instead is said once `finish` has read the slots: no
     slot is, when the T0 snapshot cannot be used (a send that cannot be read, or a snapshot read after one, leaves it unplaced,
-    #8812) or no slot's text can be read (#8817)."""
+    #8812) or no slot's text can be read (#8817), and only the slots whose text can be read are, when some cannot (#8819)."""
     if not (st.get('start') and st.get('gate')):
         return None
     gate = st['gate'] if isinstance(st['gate'], dict) else {}
@@ -1365,9 +1369,14 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     if ignored:
         # What stands in for the acceptances is what the slots recorded: no slot is compared when the T0 snapshot cannot be used,
-        # and none either when no slot's text could be read (#8817).
-        compared = any(seen['since_t0'] != queue_text.NOT_VERIFIED for seen in slots.values())
-        ignored += ' and the queue text is compared with T0 only' if compared else ', and no slot is compared (each slot\'s detail says why)'
+        # and none either when no slot's text could be read (#8817); when only some could, the sentence says so (#8819).
+        compared = [seen for seen in slots.values() if seen['since_t0'] != queue_text.NOT_VERIFIED]
+        if not compared:
+            ignored += ', and no slot is compared (each slot\'s detail says why)'
+        elif len(compared) < len(slots):
+            ignored += ' and the queue text is compared with T0 only where it could be read (each unverified slot\'s detail says why)'
+        else:
+            ignored += ' and the queue text is compared with T0 only'
         env.print(f'note: {ignored}')
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:
