@@ -139,6 +139,8 @@ function flow(path) {
 function simulateDevClient(commands, events, destination) {
   const labels = {
     loading: ['Loading from Metro...'], downloading: ['Downloading 100%...'],
+    promptCurly: ['Open in “Chroxy”?', 'Cancel', 'Open'],
+    promptStraight: ['Open in "Chroxy"?', 'Cancel', 'Open'],
     intro: ['Continue'], menu: ['Reload'], onboarding: ['Welcome to Chroxy', 'Skip'],
     connect: ['Connect to Chroxy'], chat: ['Chat'], connecting: ['Connecting', 'Cancel']
   }
@@ -155,6 +157,9 @@ function simulateDevClient(commands, events, destination) {
         const { visible, timeout } = step.extendedWaitUntil
         const deadline = time + timeout
         while (!matches(visible)) {
+          if (state === 'promptCurly' || state === 'promptStraight') {
+            throw new Error('readiness timed out: iOS link confirmation still open')
+          }
           if (next >= events.length || events[next].at > deadline) throw new Error('readiness timed out')
           time = events[next].at
           state = events[next++].state
@@ -162,7 +167,9 @@ function simulateDevClient(commands, events, destination) {
       } else if (step.runFlow) {
         if (!step.runFlow.when || matches(step.runFlow.when.visible)) execute(step.runFlow.commands)
       } else if (step.tapOn) {
-        if (step.tapOn.text === '^Continue$' && state === 'intro') state = 'menu'
+        if (step.tapOn.text === '^Open$' &&
+          (state === 'promptCurly' || state === 'promptStraight')) state = 'loading'
+        else if (step.tapOn.text === '^Continue$' && state === 'intro') state = 'menu'
         else if (step.tapOn.text === '^Skip$' && state === 'onboarding') state = destination
         else if (step.tapOn.text === '^Cancel$' && state === 'connecting') state = 'connect'
         else if (step.tapOn.point === '93%,43%' && state === 'menu') state = destination
@@ -353,11 +360,21 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.equal(simulateDevClient(commands, lateIntro, 'chat'), 'chat')
     assert.equal(simulateDevClient(commands, slowDownload, 'connect'), 'connect')
     assert.equal(simulateDevClient(commands, [{ at: 0, state: 'onboarding' }], 'connect'), 'connect')
+    const firstLink = [{ at: 0, state: 'promptCurly' }, { at: 45, state: 'intro' }]
+    const lateLink = [{ at: 0, state: 'loading' }, { at: 35, state: 'promptStraight' },
+      { at: 65, state: 'intro' }]
+    assert.equal(simulateDevClient(commands, firstLink, 'connect'), 'connect')
+    assert.equal(simulateDevClient(commands, lateLink, 'chat'), 'chat')
     assert.equal(simulateDevClient([
       ...commands, ...flow('setup/ensure-connect-screen.yaml').slice(4)
     ], [{ at: 0, state: 'connecting' }], 'connect'), 'connect')
     assert.throws(() => simulateDevClient(commands, [{ at: 0, state: 'loading' }], 'chat'), /readiness timed out/)
-    assert.throws(() => simulateDevClient(commands.slice(1), lateIntro, 'chat'), /readiness timed out/)
+    assert.throws(() => simulateDevClient(commands.slice(1),
+      [{ at: 0, state: 'loading' }, { at: 40, state: 'promptCurly' }], 'chat'),
+    /readiness timed out/)
+    assert.throws(() => simulateDevClient(commands.filter(step =>
+      step.runFlow?.when?.visible?.text !== '^Open in [“"]Chroxy[”"]\\?$'),
+    [{ at: 0, state: 'promptCurly' }], 'chat'), /readiness timed out/)
     assert.throws(() => simulateDevClient([
       { ...commands[0], extendedWaitUntil: { ...commands[0].extendedWaitUntil, timeout: 20 } },
       ...commands.slice(1)

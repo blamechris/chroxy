@@ -2,10 +2,26 @@ appId: com.blamechris.chroxy
 name: Wait for Chroxy dev client
 ---
 
-# The native client can still be downloading its bundle after Metro's HTTP
-# warmup. Wait for an actual app or dev-menu element before trying to dismiss
-# anything; optional taps made while "Loading from Metro" is visible miss the
-# intro sheet that appears later.
+# iOS asks once before opening the dev-client link in Chroxy. This system
+# confirmation survives clearState. Wait for that exact prompt or a real app /
+# dev-menu element before handling either path; optional taps while loading
+# miss sheets that appear later.
+- extendedWaitUntil:
+    visible:
+      text: '.*(Open in [“"]Chroxy[”"]\?|Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*'
+    timeout: 90000
+
+- runFlow:
+    when:
+      visible:
+        text: '^Open in [“"]Chroxy[”"]\?$'
+    commands:
+      - tapOn:
+          text: "^Open$"
+
+# After accepting the native prompt, the bundle and Expo sheet may still load.
+# Apply the same readiness allowance to the actual app or dev menu before any
+# introduction/menu taps.
 - extendedWaitUntil:
     visible:
       text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
