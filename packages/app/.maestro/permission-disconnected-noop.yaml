@@ -61,6 +61,7 @@ name: Permission tap while disconnected is a no-op (#5699)
 - extendedWaitUntil:
     visible:
       id: "approval-button-approve"
+      enabled: true
     timeout: 10000
 - assertVisible:
     id: "approval-button-deny"
@@ -131,5 +132,6 @@ name: Permission tap while disconnected is a no-op (#5699)
 # present so "recovery" means a usable prompt, not a wiped one.
 - assertVisible:
     id: "approval-button-approve"
+    enabled: true
 
 - takeScreenshot: permission-disconnected-recovered
