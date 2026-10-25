@@ -6,7 +6,7 @@ the task for the later runs, and nothing recorded or checked it (#8794). When `c
 `gate` reads the issues again and fails, naming the slot and the part, when a digest differs. `--accept-changed` records
 the digests of the text it accepted, and `finish` reads the issues once more and records, per slot, whether the text
 changed since T0 and since the text the run's gate let through: a gate only sees the text before its own run, so an
-edit during the last run was never caught.
+edit made after the last gate was never caught.
 
 Only the task text is digested: the title, the body ('' for none) and, for each comment in id order, its id, its
 author's login and its body. Labels, assignees, state, milestone and `updated_at` are not the task and are left out
@@ -256,12 +256,12 @@ def _end_check(slot, entry, accepted, gh, taken):
     elif not parts_gate:
         detail = f'changed since T0 ({shown}), the text this run\'s gate accepted: {accepted["reason"]}'
     elif not accepted:
-        detail = (f'changed since the T0 snapshot of {taken}: {shown}; this run\'s gate passed the T0 text, so it changed during the run '
-                  f'(or the run started without a passing gate)')
+        detail = (f'changed since the T0 snapshot of {taken}: {shown}; this run\'s gate passed the T0 text, so it changed after this run\'s '
+                  f'gate (or the run started without a passing gate)')
     elif parts_t0:
         detail = f'changed since the text this run\'s gate accepted ({accepted["reason"]}): {shown_gate}'
     else:
-        detail = f'back to the T0 text, but this run\'s gate accepted a changed text ({accepted["reason"]}), so it changed during the run'
+        detail = f'back to the T0 text, but this run\'s gate accepted a changed text ({accepted["reason"]}), so it changed after this run\'s gate'
     record = {'issue': slot.issue, 'since_t0': CHANGED if parts_t0 else UNCHANGED, 'since_gate': CHANGED if parts_gate else UNCHANGED,
               **{k: now[k] for k in TEXT_KEYS}}
     if parts_t0:

@@ -851,18 +851,45 @@ class QueueTextNotes(Scenario):
         self.assertNotIn('re-read', self.output)
 
     def test_a_slot_changed_or_unverified_since_the_gate_is_named_with_what_finish_recorded(self):
-        gate_text = {'since_t0': 'changed', 'since_gate': 'unchanged', 'detail': 'changed since T0 (body), the text this run\'s gate accepted: x'}
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(
-            Q01=self.row('unchanged'), Q02=self.row('changed', 'changed since the T0 snapshot of T: body; so it changed during the run'),
-            Q03=self.row('unverified', 'cannot read Q03 #9003: rate limited'), Q04=gate_text)})
+            Q01=self.row('changed', 'changed since the T0 snapshot of T: body; so it changed after this run\'s gate'),
+            Q02=self.row('unverified', 'cannot read Q02 #9002: rate limited'))})
         self.collect()
         self.assertEqual(self.code, 0, self.output)
-        self.assertIn("  note: queue text Q02: changed since this run's gate (changed since the T0 snapshot of T: body; so it changed during the run)",
-                      self.output)
-        self.assertIn("  note: queue text Q03: unverified since this run's gate (cannot read Q03 #9003: rate limited)", self.output)
-        self.assertNotIn('queue text Q01', self.output)
-        self.assertNotIn('queue text Q04', self.output, 'an accepted change that stayed as accepted is no note')
+        self.assertIn("  note: queue text Q01: changed since this run's gate (changed since the T0 snapshot of T: body; "
+                      "so it changed after this run's gate)", self.output)
+        self.assertIn("  note: queue text Q02: unverified since this run's gate (cannot read Q02 #9002: rate limited)", self.output)
         self.assertNotIn('re-read', self.output)
+        self.assertNotIn('not recorded', self.output)
+
+    def test_the_notes_follow_the_trial_s_slots_not_the_order_they_were_recorded_in(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q02=self.row('changed'), Q01=self.row('unverified'))})
+        self.collect()
+        self.assertLess(self.output.index('queue text Q01: unverified'), self.output.index('queue text Q02: changed'))
+
+    def test_an_accepted_change_that_stayed_as_accepted_is_no_note(self):
+        accepted = {'since_t0': 'changed', 'since_gate': 'unchanged', 'detail': 'changed since T0 (body), the text this run\'s gate accepted: x'}
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=accepted)})
+        self.collect()
+        self.assertNotIn('queue text', self.output)
+
+    def test_a_slot_finish_recorded_nothing_for_is_a_note_not_taken_for_unchanged(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn('  note: queue text Q02: not recorded at finish, so an edit during the run cannot be ruled out', self.output)
+        self.assertNotIn('queue text Q01', self.output)
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen()})
+        self.collect()
+        for slot in ('Q01', 'Q02'):
+            self.assertIn(f'  note: queue text {slot}: not recorded at finish', self.output)
+        self.assertNotIn('re-read', self.output, 'a record with no slots is still a record')
+
+    def test_a_recorded_slot_the_trial_no_longer_has_is_ignored(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'),
+                                                                           Q09=self.row('changed'))})
+        self.collect()
+        self.assertNotIn('queue text', self.output)
 
     def test_a_row_that_is_not_a_record_is_not_unchanged(self):
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})

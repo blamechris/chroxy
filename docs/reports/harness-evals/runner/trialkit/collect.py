@@ -634,10 +634,10 @@ def update_runs_json(trial, run, data, st, start_text, t0, notes=None):
     return path
 
 
-def _queue_text_notes(st):
-    """Notes on whether the queue's text moved during the run, from what `finish` recorded (`finish.queue_text`). A finish that
-    did not re-read it, or a slot that is changed or could not be read since the run's gate, is named; none when every slot is
-    unchanged, and none before a finish."""
+def _queue_text_notes(trial, st):
+    """Notes on whether the queue's text moved during the run, from what `finish` recorded (`finish.queue_text`), for each slot of
+    the trial in order. A finish that did not re-read it, a slot it recorded nothing for, and a slot that is changed or could
+    not be read since the run's gate are named; none when every slot is unchanged, and none before a finish."""
     finish = st.get('finish')
     if not isinstance(finish, dict):
         return []
@@ -645,10 +645,15 @@ def _queue_text_notes(st):
     if not (isinstance(seen, dict) and isinstance(seen.get('slots'), dict)):
         return ['finish did not re-read the queue text, so an edit during the run cannot be ruled out']
     notes = []
-    for slot, row in seen['slots'].items():
+    for slot in trial.slots:
+        if slot.slot not in seen['slots']:
+            notes.append(f'queue text {slot.slot}: not recorded at finish, so an edit during the run cannot be ruled out')
+            continue
+        row = seen['slots'][slot.slot]
         row = row if isinstance(row, dict) else {}
         if row.get('since_gate') != queue_text.UNCHANGED:
-            notes.append(f'queue text {slot}: {row.get("since_gate", "unknown")} since this run\'s gate ({row.get("detail", "no detail recorded")})')
+            notes.append(f'queue text {slot.slot}: {row.get("since_gate", "unknown")} since this run\'s gate '
+                         f'({row.get("detail", "no detail recorded")})')
     return notes
 
 
@@ -713,7 +718,7 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
     except (GitHubError, ValueError) as exc:
         env.print(f'collect {run.id}: {exc}')
         return 2
-    notes.extend(_queue_text_notes(st))
+    notes.extend(_queue_text_notes(trial, st))
     data = data_dir or trial.repo_path('data')
     evidence = {'collected_at_utc': timeutil.iso(env.now()), 'trial': trial.id, 'run': run.id,
                 'methods': METHODS, 'runs': {run.id: ev}}

@@ -1225,6 +1225,15 @@ def verify_start(trial, run, env, since, state_file):
 
 # -- finish --------------------------------------------------------------------
 
+def _first_send(st):
+    """When the run was first sent: the `sent_at` of the earliest start, following `replaces` back through re-recorded
+    starts, or None when no start is recorded."""
+    started = st.get('start')
+    while isinstance(started, dict) and isinstance(started.get('replaces'), dict):
+        started = started['replaces']
+    return started.get('sent_at') if isinstance(started, dict) else None
+
+
 def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     st = _load(trial, run, env, state_file)
     ended = _at(env)
@@ -1261,10 +1270,17 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
             if record['settings_changed']:
                 env.print(f'WARNING: {settings} changed during the run (hash {str(before)[:12]} -> {str(now_hash)[:12]}). '
                           f'An isolated preview daemon once wrote a hook into it (#8704); inspect it before trusting the run\'s settings.')
-    gate_record = st.get('gate')
-    results, slots = queue_text.finish_checks(trial, env.github(trial.repo),
-                                              gate_record.get('accepted_changed') if isinstance(gate_record, dict) else None)
+    gate_record = st.get('gate') if isinstance(st.get('gate'), dict) else {}
+    accepted, sent, ignored = gate_record.get('accepted_changed'), _first_send(st), None
+    if sent and str(gate_record.get('at') or '') > str(sent):
+        ignored = (f'the recorded gate ({gate_record["at"]}) is later than the first send ({sent}), so the text it let through or accepted '
+                   f'is not the text the run started on; the queue text is compared with T0 only')
+        accepted = None
+        env.print(f'note: {ignored}')
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted)
     record['queue_text'] = {'at': _at(env), 'slots': slots}
+    if ignored:
+        record['queue_text']['acceptances_ignored'] = ignored
     st['finish'] = record
     _save(trial, run, env, st, state_file)
     env.print(checks.render(results, f'queue text at the end of {run.id}'))

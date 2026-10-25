@@ -2873,15 +2873,25 @@ class FinishQueueText(LaunchCase):
     EDITED = 'the body, edited during the run'
     TYPO = 'edited to fix a typo'
 
-    def started(self, gh=None, accept_changed=None):
-        trial, run = self.rig.trial, self.rig.run(self.RID)
-        env = self.rig.env(github=gh or FakeGitHub())
-        self.assertEqual(launch.gate(trial, run, env, {}, None, accept_changed=accept_changed), 0, env.out.getvalue())
+    def started(self, gh=None, accept_changed=None, sent_at=None):
+        self.gated(gh, accept_changed)
         gated = self.rig.state(self.RID)
         later = dict(passing_preflight()[0], at='2026-11-02T12:30:00Z')
         self.rig.save_state(self.RID, gate=gated['gate'], overrides=gated['overrides'], preflight=[later])
+        self.sent(sent_at)
+
+    def gated(self, gh=None, accept_changed=None, at=None):
+        """The real `gate`, at `at` (the test clock's 12:00 by default)."""
+        env = self.rig.env(github=gh or FakeGitHub())
+        if at:
+            env.now = lambda: timeutil.parse_ts(at)
+        code = launch.gate(self.rig.trial, self.rig.run(self.RID), env, {}, None, accept_changed=accept_changed)
+        self.assertEqual(code, 0, env.out.getvalue())
+
+    def sent(self, sent_at=None, override=None):
         env = self.rig.env()
-        self.assertEqual(launch.start(trial, run, env, {'codex_weekly_left': 100.0}, None, None, None), 0, env.out.getvalue())
+        code = launch.start(self.rig.trial, self.rig.run(self.RID), env, {'codex_weekly_left': 100.0}, override, sent_at, None)
+        self.assertEqual(code, 0, env.out.getvalue())
 
     def finish(self, gh=None):
         gh = gh or FakeGitHub()
@@ -2943,7 +2953,7 @@ class FinishQueueText(LaunchCase):
         self.assertNotIn('accepted', edited)
         self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q01')['since_gate']), ('unchanged', 'unchanged'))
         self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of 2026-11-02T09:00:00Z: body; '
-                              r'this run\'s gate passed the T0 text, so it changed during the run')
+                              r'this run\'s gate passed the T0 text, so it changed after this run\'s gate \(or the run started without a passing gate\)')
         self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
         warning = [line for line in out.splitlines() if line.startswith('WARNING')]
         self.assertEqual(len(warning), 1, out)
@@ -3027,7 +3037,7 @@ class FinishQueueText(LaunchCase):
         self.assertEqual((row['since_t0'], row['since_gate'], row['accepted']), ('unchanged', 'changed', 'a typo fix'))
         self.assertNotIn('parts', row)
         self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+back to the T0 text, but this run\'s gate accepted a changed text '
-                              r'\(a typo fix\), so it changed during the run')
+                              r'\(a typo fix\), so it changed after this run\'s gate')
         self.assertIn('WARNING: the text of Q02 differs', out)
 
     def test_text_accepted_at_the_gate_and_then_edited_again_names_what_moved_since_the_gate(self):
@@ -3040,6 +3050,75 @@ class FinishQueueText(LaunchCase):
         self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the text this run\'s gate accepted \(a typo fix\): title\n')
         self.assertIn('WARNING: the text of Q02 differs', out)
         self.assert_text_not_kept(out, 'and a new title')
+
+    def test_text_edited_and_accepted_by_a_gate_after_the_send_is_not_an_acceptance(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        self.gated(edited, accept_changed={'Q02': 'a typo fix'}, at='2026-11-02T14:00:00Z')
+        self.assertEqual(self.rig.state(self.RID)['gate']['accepted_changed']['Q02']['reason'], 'a typo fix', 'the later gate recorded it')
+        code, out, _ = self.finish(edited)
+        self.assertEqual(code, 0, out)
+        row = self.seen('Q02')
+        self.assertEqual((row['since_t0'], row['since_gate'], row['parts']), ('changed', 'changed', ['body']))
+        self.assertNotIn('accepted', row)
+        self.assertIn('this run\'s gate passed the T0 text', row['detail'])
+        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of ')
+        self.assertIn('WARNING: the text of Q02 differs', out)
+        ignored = self.recorded()['queue_text']['acceptances_ignored']
+        self.assertIn('2026-11-02T14:00:00Z', ignored)
+        self.assertIn('2026-11-02T13:00:00Z', ignored)
+        self.assertIn(f'note: {ignored}', out.splitlines())
+        self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q01')['since_gate']), ('unchanged', 'unchanged'))
+
+    def test_a_gate_after_the_send_that_accepted_nothing_is_noted_too(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        self.gated(at='2026-11-02T14:00:00Z')
+        _code, out, _ = self.finish()
+        self.assertIn('acceptances_ignored', self.recorded()['queue_text'])
+        self.assertEqual((self.seen('Q01')['since_gate'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+
+    def test_an_acceptance_made_before_the_send_counts_whether_the_send_is_at_the_gate_or_later(self):
+        for sent_at in (None, '2026-11-02T12:00:00Z', '2026-11-02T13:00:00Z'):
+            with self.subTest(sent_at=sent_at):
+                self.setUp()
+                edited = FakeGitHub(bodies={9002: self.TYPO})
+                self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at=sent_at)
+                _code, out, _ = self.finish(edited)
+                self.assertEqual((self.seen('Q02')['since_t0'], self.seen('Q02')['since_gate'], self.seen('Q02')['accepted']),
+                                 ('changed', 'unchanged', 'a typo fix'))
+                self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
+                self.assertNotIn('note:', out)
+
+    def test_without_a_recorded_start_an_acceptance_counts(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.gated(edited, accept_changed={'Q02': 'a typo fix'}, at='2026-11-02T14:00:00Z')
+        self.assertNotIn('start', self.rig.state(self.RID))
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], self.seen('Q02')['accepted']), ('unchanged', 'a typo fix'))
+        self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
+
+    def test_a_re_recorded_start_is_measured_from_the_first_send(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(sent_at='2026-11-02T12:10:00Z')
+        self.gated(edited, accept_changed={'Q02': 'a typo fix'}, at='2026-11-02T12:20:00Z')   # after the first send, before the second
+        self.sent('2026-11-02T12:30:00Z', override='the send was repeated')
+        replaced = self.rig.state(self.RID)['start']
+        self.assertEqual((replaced['sent_at'], replaced['replaces']['sent_at']), ('2026-11-02T12:30:00Z', '2026-11-02T12:10:00Z'))
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], 'accepted' in self.seen('Q02')), ('changed', False))
+        ignored = self.recorded()['queue_text']['acceptances_ignored']
+        self.assertIn('2026-11-02T12:20:00Z', ignored)
+        self.assertIn('2026-11-02T12:10:00Z', ignored)
+        self.assertNotIn('2026-11-02T12:30:00Z', ignored)
+
+    def test_an_acceptance_before_the_first_send_survives_a_re_recorded_start(self):
+        edited = FakeGitHub(bodies={9002: self.TYPO})
+        self.started(edited, accept_changed={'Q02': 'a typo fix'}, sent_at='2026-11-02T12:10:00Z')
+        self.sent('2026-11-02T12:30:00Z', override='the send was repeated')
+        self.sent('2026-11-02T12:40:00Z', override='and again')
+        _code, out, _ = self.finish(edited)
+        self.assertEqual((self.seen('Q02')['since_gate'], self.seen('Q02')['accepted']), ('unchanged', 'a typo fix'))
+        self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
 
     def test_an_acceptance_is_not_taken_for_another_slot(self):
         gh = FakeGitHub(bodies={9002: self.TYPO})
@@ -3146,6 +3225,10 @@ class FinishQueueText(LaunchCase):
         _code, out, _ = self.finish(FakeGitHub(bodies={9001: self.EDITED}))
         self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q01')['since_gate']), ('changed', 'changed'))
         self.assertIn('(or the run started without a passing gate)', out)
+
+    def test_the_command_line_says_finish_records_the_queue_text(self):
+        helped = ' '.join(cli.build_parser().format_help().split())
+        self.assertIn('record the end readings, the stop cause and the queue text at the end', helped)
 
     def test_the_command_line_finish_prints_and_records_it(self):
         self.started()
