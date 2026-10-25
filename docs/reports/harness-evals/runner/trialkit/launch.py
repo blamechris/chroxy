@@ -8,7 +8,8 @@ back from the harness's own record after it. Each returns an exit code
 checked), and "could not check" is never folded into a pass.
 
 The only writes are the run's clone, the run's state file, `trial.json`'s T0
-(via config.save_t0) and, with `cut --push`, a git push of a new base branch.
+(via config.save_t0), the queue's text digests at T0 (`queue-t0.json`, via
+queue_text.write) and, with `cut --push`, a git push of a new base branch.
 Everything else reads: harness files, daemon logs, GitHub, `--version`.
 """
 import base64
@@ -20,7 +21,7 @@ import shutil
 import tempfile
 from datetime import timedelta
 
-from . import checks, config, native, render, state, timeutil, workflow
+from . import checks, config, native, queue_text, render, state, timeutil, workflow
 from .gh import GitHubError
 
 SHA = re.compile(r'^[0-9a-f]{40}$')
@@ -195,29 +196,40 @@ def _ci_check(trial, run, gh):
     return checks.failed(name, f'push branches {shown} do not cover {run.base}: red CI on the base would not be observable')
 
 
-def gate(trial, run, env, accept_open, state_file):
+def _record_override(overrides, entry, env):
+    """Append `entry` (with the time) unless the same acceptance is already recorded."""
+    if entry not in [{k: o.get(k) for k in entry} for o in overrides]:
+        overrides.append(dict(entry, at=_at(env)))
+
+
+def gate(trial, run, env, accept_open, state_file, accept_changed=None):
     st = _load(trial, run, env, state_file)
     gh = env.github(trial.repo)
     accept_open = dict(accept_open or {})
+    accept_changed = dict(accept_changed or {})
     blockers = trial.blockers_for(run)
-    accepted, results = {}, []
+    accepted, accepted_changed, results = {}, {}, []
     for number in blockers:
         results.append(_blocker_check(gh, number, accept_open, accepted))
     for number in sorted(set(accept_open) - set(blockers)):
         env.print(f'note: --accept-open {number} ignored; it is not a blocker for {run.id}')
     results += _queue_checks(trial, gh)
+    results += queue_text.gate_checks(trial, gh, accept_changed, accepted_changed)
+    for slot in sorted(set(accept_changed) - {s.slot for s in trial.slots}):
+        env.print(f'note: --accept-changed {slot} ignored; it is not a queue slot')
     if trial.t0:
         results.append(checks.passed('T0 set', trial.t0))
     else:
         results.append(checks.failed('T0 set', 'trial.json records no t0; cut the bases first'))
     results.append(_ci_check(trial, run, gh))
     results.append(_live_check(trial, run, env))
-    st['gate'] = {'at': _at(env), 't0': trial.t0, 'checks': _dicts(results), 'accepted_open': accepted}
+    st['gate'] = {'at': _at(env), 't0': trial.t0, 'checks': _dicts(results), 'accepted_open': accepted,
+                  'accepted_changed': accepted_changed}
     overrides = st.setdefault('overrides', [])
     for number, reason in accepted.items():
-        entry = {'kind': 'accept-open', 'issue': int(number), 'reason': reason}
-        if entry not in [{k: o.get(k) for k in entry} for o in overrides]:
-            overrides.append(dict(entry, at=_at(env)))
+        _record_override(overrides, {'kind': 'accept-open', 'issue': int(number), 'reason': reason}, env)
+    for slot, reason in accepted_changed.items():
+        _record_override(overrides, {'kind': 'accept-changed', 'slot': slot, 'reason': reason}, env)
     _save(trial, run, env, st, state_file)
     env.print(checks.render(results, f'gate {run.id}'))
     return checks.exit_code(results)
@@ -349,10 +361,23 @@ def cut(trial, runs, env, t0, push, repo_dir):
         return 2
     try:
         missions = {run.id: render.mission(trial, run).encode('utf-8') for run in runs}
+        config.check_t0(trial, t0)
+        # The queue's text is read before anything is recorded: a slot that cannot be read refuses the cut, with
+        # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut).
+        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env))
         config.save_t0(trial, t0)
-    except (render.RenderError, config.ConfigError) as exc:
+    except (render.RenderError, config.ConfigError, queue_text.QueueTextError) as exc:
         env.print(f'cut: refusing: {exc}')
         return 2
+    if frozen:
+        try:
+            queue_text.write(trial, frozen)
+        except (OSError, queue_text.QueueTextError) as exc:
+            env.print(f'cut: refusing: T0 is recorded but {queue_text.FILE} could not be written ({exc}); '
+                      f'nothing was cut. Run cut again once that is fixed: it writes the snapshot then')
+            return 2
+        env.print(f'queue text at T0 recorded in {os.path.relpath(queue_text.path(trial), trial.root)} '
+                  f'({len(frozen["slots"])} slots); commit it with trial.json\'s t0')
     results = [_cut_one(trial, run, env, repo, t0, missions[run.id], push) for run in runs]
     env.print(checks.render(results, f'cut at T0 {t0[:12]} ({"pushing" if push else "local build only"})'))
     return checks.exit_code(results)
@@ -423,7 +448,9 @@ def clone(trial, run, env, dest, skip_install, state_file):
         env.print(checks.render(refusals, f'clone {run.id}: refused, nothing written'))
         return 1
     source = trial.clone_source(env.home)
-    r = _run(env, ['git', 'clone', '--branch', run.base, source, target])
+    # --single-branch: a plain `--branch` clone still fetches every remote branch, so a fix that lands on main after T0
+    # would be one `git log origin/main` away (#8794).
+    r = _run(env, ['git', 'clone', '--branch', run.base, '--single-branch', source, target])
     if not r.ok:
         env.print(checks.render([checks.failed('git clone', f'{source} {run.base} -> {target}: {_tail(r)}')],
                                 f'clone {run.id}'))
@@ -434,7 +461,7 @@ def clone(trial, run, env, dest, skip_install, state_file):
             env.print(checks.render([checks.failed('clone identity', f'git config {key}: {_tail(r)}')], f'clone {run.id}'))
             return 1
     env.print(f'identity for {run.id}: {identity["name"]} <{identity["email"]}>')
-    results = [checks.passed('git clone', f'{run.base} -> {target}')]
+    results = [checks.passed('git clone', f'{run.base} -> {target}'), _refs_check(env, run, target)]
     installed = False
     if skip_install:
         results.append(checks.passed('npm ci', 'skipped (--skip-install)'))
@@ -483,6 +510,7 @@ def _clone_checks(trial, run, env, st, clone_dir, facts):
     else:
         out.append(checks.passed('clone clean', 'git status is empty'))
     out.append(_origin_check(run, env, clone_dir, head_sha))
+    out.append(_refs_check(env, run, clone_dir))
     out.append(_base_shape(trial, run, env, clone_dir))
     out.append(_mission_check(trial, run, clone_dir))
     out.append(_identity_check(env, st, clone_dir))
@@ -500,6 +528,40 @@ def _origin_check(run, env, clone_dir, head_sha):
     if tip == head_sha:
         return checks.passed(name, f'HEAD {head_sha[:12]} is origin\'s {run.base}')
     return checks.failed(name, f'HEAD is {head_sha[:12]} but origin\'s {run.base} is {tip[:12]}')
+
+
+def _refs_check(env, run, clone_dir):
+    """The clone knows no branch but its base: the only remote-tracking ref is origin/<base> (origin/HEAD too, when it
+    points at the base) and the only fetch refspec is the base's own. A run that can list another branch can read what
+    landed on it after T0 (#8794). Cloned with --single-branch; this reads what is actually there, so a clone made some
+    other way, or one that has since fetched another branch, fails too."""
+    name = 'clone refs'
+    base = f'refs/remotes/origin/{run.base}'
+    want = f'+refs/heads/{run.base}:{base}'
+    again = f'remove the clone and run `trialctl clone {run.id}` again'
+    refs = _git(env, clone_dir, 'for-each-ref', '--format=%(refname) %(symref)', 'refs/remotes')
+    if not refs.ok:
+        return checks.unverified(name, f'cannot list the remote-tracking refs: {_tail(refs)}')
+    configured = _git(env, clone_dir, 'config', '--get-all', 'remote.origin.fetch')
+    if not configured.ok and configured.returncode != 1:   # exit 1 is "no such key", which is an answer
+        return checks.unverified(name, f'cannot read remote.origin.fetch: {_tail(configured)}')
+    seen, extra = [], []
+    for line in refs.stdout.splitlines():
+        ref, _sep, target = line.strip().partition(' ')
+        seen.append(ref)
+        if ref != base and not (ref == 'refs/remotes/origin/HEAD' and target == base):
+            extra.append(ref + (f' -> {target}' if target else ''))
+    refspecs = [x for x in configured.stdout.splitlines() if x.strip()] if configured.ok else []
+    problems = []
+    if base not in seen:
+        problems.append(f'{base} is not among the remote-tracking refs {seen}')
+    if extra:
+        problems.append(f'extra remote-tracking ref(s): {", ".join(extra)}')
+    if refspecs != [want]:
+        problems.append(f'remote.origin.fetch is {refspecs}, expected exactly [{want!r}]')
+    if problems:
+        return checks.failed(name, f'{"; ".join(problems)}; {again}')
+    return checks.passed(name, f'only {base} (fetch refspec {want})')
 
 
 def _base_shape(trial, run, env, clone_dir):
@@ -883,8 +945,8 @@ def _meter_flags(run):
     return ' '.join(f'--meter {k}=<percent>' for k in _required_meters(run))
 
 
-def prepare(trial, run, env, accept_open, skip_install, state_file):
-    codes = [gate(trial, run, env, accept_open, state_file)]
+def prepare(trial, run, env, accept_open, skip_install, state_file, accept_changed=None):
+    codes = [gate(trial, run, env, accept_open, state_file, accept_changed)]
     if codes[0] == 1:
         env.print(f'prepare {run.id}: the entry gate failed; nothing was cloned. Fix it above, or accept an open blocker knowingly.')
         return 1

@@ -34,6 +34,16 @@ def _accept_open(values):
     return accepted
 
 
+def _accept_changed(values):
+    accepted = {}
+    for item in values or []:
+        slot, sep, reason = item.partition('=')
+        if not sep or not config.SLOT.match(slot) or not reason.strip():
+            raise SystemExit(f'--accept-changed expects SLOT=REASON (a slot such as Q03), got {item!r}')
+        accepted[slot] = reason.strip()
+    return accepted
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog='trialctl', description='Prepare, check and collect controlled harness trial runs.')
     p.add_argument('--trial', default=os.environ.get('TRIALCTL_TRIAL', DEFAULT_TRIAL),
@@ -53,9 +63,10 @@ def build_parser():
 
     sub.add_parser('key-template', help='print the structured answer-key template for the queue')
 
-    s = sub.add_parser('gate', help='entry gate: blockers closed, CI trigger at T0, no other run live')
+    s = sub.add_parser('gate', help='entry gate: blockers closed, queue text unchanged since T0, CI trigger at T0, no other run live')
     s.add_argument('run')
     s.add_argument('--accept-open', action='append', metavar='ISSUE=REASON')
+    s.add_argument('--accept-changed', action='append', metavar='SLOT=REASON', help='accept a queue issue whose text changed since T0')
     s.add_argument('--state')
 
     s = sub.add_parser('cut', help='cut base branches at T0 with the mission as the only commit')
@@ -81,6 +92,7 @@ def build_parser():
     s = sub.add_parser('prepare', help='gate + clone + preflight, then print the launch card')
     s.add_argument('run')
     s.add_argument('--accept-open', action='append', metavar='ISSUE=REASON')
+    s.add_argument('--accept-changed', action='append', metavar='SLOT=REASON', help='accept a queue issue whose text changed since T0')
     s.add_argument('--skip-install', action='store_true')
     s.add_argument('--state')
 
@@ -172,14 +184,16 @@ def dispatch(trial, args, env):
             return launch.cut(trial, runs, env, t0=args.t0, push=args.push, repo_dir=args.repo_dir)
         run = trial.run(args.run)
         if c == 'gate':
-            return launch.gate(trial, run, env, accept_open=_accept_open(args.accept_open), state_file=args.state)
+            return launch.gate(trial, run, env, accept_open=_accept_open(args.accept_open), state_file=args.state,
+                               accept_changed=_accept_changed(args.accept_changed))
         if c == 'clone':
             return launch.clone(trial, run, env, dest=args.dest, skip_install=args.skip_install, state_file=args.state)
         if c == 'preflight':
             return launch.preflight(trial, run, env, phase=args.phase, session=args.session, state_file=args.state)
         if c == 'prepare':
             return launch.prepare(trial, run, env, accept_open=_accept_open(args.accept_open),
-                                  skip_install=args.skip_install, state_file=args.state)
+                                  skip_install=args.skip_install, state_file=args.state,
+                                  accept_changed=_accept_changed(args.accept_changed))
         if c == 'start':
             return launch.start(trial, run, env, meters=_meters(args.meter), override=args.override,
                                 sent_at=args.sent_at, state_file=args.state)

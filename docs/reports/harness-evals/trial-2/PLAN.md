@@ -49,9 +49,11 @@ session-phase preflight), so running the steps by hand cannot skip the gate.
 | none | — | #8709 (state reconciliation) helps supervision but does not change a run's result | — |
 
 `gate` also checks: `ci.yml` at T0 runs on push to `trial/**` (§1); no other
-trial-2 run is live (its state file has a start and no end); and the queue's
-issues are still open. (No open PR for a queue issue is a selection rule, checked
-when the queue is picked, §4.)
+trial-2 run is live (its state file has a start and no end); the queue's
+issues are still open; and each queue issue's title, body and comments are
+unchanged since T0 (digests that `cut` records in `queue-t0.json` with T0, §6).
+(No open PR for a queue issue is a selection rule, checked when the queue is
+picked, §4.)
 
 ## 3. Cells, repeats, order and allowance
 
@@ -155,6 +157,15 @@ October's rules carry over (PROTOCOL §4, mission rules 1–6). Changes:
   would sit.
 - **Run namespace.** Trial-2 bases are `trial/t2-*`; the October `trial/*` branches
   stay as evidence and remain forbidden reads.
+- **Frozen inputs (before T0).** Every base is one T0 commit plus the run's mission, so
+  what a run can read must not move between run 1 and run 8. (1) No selection, rationale
+  or risk note about a queue item stays in the tree: October's candidate read was moved
+  to the private key folder, a test pins that it is not tracked, and mission rule 5 forbids
+  reading anything under `docs/reports/harness-evals/` except the run's own mission and
+  report; the extract's isolation scan counts such a read (`harness_evals_other`). (2) The
+  queue issues' text is digested at T0 and `gate` fails, naming the slot, when it changes.
+  (3) A run's clone is single-branch (`trialctl clone` and the `clone refs` check), and
+  rule 5 forbids reading `main`, which moves on after T0, and any PR the run did not open.
 
 ## 7. Evidence: transcripts, permission journal, cost
 

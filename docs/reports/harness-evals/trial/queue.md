@@ -1,9 +1,10 @@
 # Trial queue
 
 **Status: set (2026-10-17).** The owner approved the supervisor's suggested default
-from [`queue-candidates.md`](queue-candidates.md). The list lives in
-`scripts/queue.json` and is rendered identically into all four missions by
-`python3 scripts/render_missions.py`.
+from the supervisor's candidate list. That list was moved out of the repository before
+trial 2, whose queue reuses some of its candidates, and is kept with the October key
+material. The queue lives in `scripts/queue.json` and is rendered identically into all
+four missions by `python3 scripts/render_missions.py`.
 
 | # | Issue | Type |
 |---|---|---|

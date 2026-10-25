@@ -11,7 +11,7 @@ It is standard-library Python with no model calls, so an operator can run it
 during a Claude run without drawing on the Claude plan. It never launches a run,
 never sends a message to a session and never restarts the daemon. What it
 writes: a run's fresh clone (and its `node_modules` from `npm ci`), the run's
-state file, `trial.json`'s `t0`, rendered missions and grader prompts (previews;
+state file, `trial.json`'s `t0` and `queue-t0.json` (the queue issues' text digests at T0), rendered missions and grader prompts (previews;
 `missions/*.md` other than the template is gitignored, because the real copy is
 committed on each base by `cut`), the trial's `data/`, and in the checkout `cut`
 runs from, a `git fetch`, a temporary worktree it removes again, and with
@@ -28,6 +28,7 @@ repository, a run's raw transcripts (see "Evidence" below), and
 | `tests/run.py` | the test suite; CI runs it in the `Scripts Tests` job and it fails below a test-count floor |
 | `<trial>/trial.json` | everything about one trial: roster, cells, arms, harnesses and their invocations, queue slots, blockers, local paths, allowance floors |
 | `<trial>/missions/TEMPLATE.md`, `<trial>/graders/GRADER-PROMPT.md` | the templates `render` fills |
+| `<trial>/queue-t0.json` | each queue slot's issue number and SHA-256 digests of its title, body and comments at T0, written by `cut` with T0 and read by `gate` (see "Queue text at T0") |
 | `<paths.state_dir>/<RUN>.json` | the run's state on the Mac: clone, preflights, send, readings, applied settings, end |
 | `<paths.evidence_dir>/<RUN>/` | the run's raw transcripts and a SHA-256 manifest, on the owner's Mac, in the private vault, never in a work tree (`evidence`) |
 | `<trial>/data/native/<RUN>.json` | the public, derived extract of those transcripts: counts, models, tokens, hashes, no text (`evidence`) |
@@ -46,11 +47,11 @@ GitHub error). "Could not check" is never reported as a pass.
 |---|---|---|
 | `render [RUN…] [--graders]` | supervisor | missions (and grader prompts) from `trial.json`; refuses an empty queue or an unfilled placeholder |
 | `key-template` | owner | the structured answer-key skeleton, one section per slot |
-| `gate RUN [--accept-open N=REASON]` | either | blocking issues closed, queue still open, T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
-| `cut --run RUN --t0 SHA [--push]` (or `--all`) | supervisor | each base = T0 plus the run's mission as the only commit; without `--push` it builds locally and prints the push. Cut each base just before its run: a new base fires a full CI push run |
-| `clone RUN` | owner, Mac | fresh clone outside the daemon checkout and every other work tree; git identity; `npm ci` under Node 22 |
-| `preflight RUN [--phase session --session ID]` | owner, Mac | clone shape, mission bytes, identity, Node, `gh` login, no `ci.yml` run queued or in progress (the runners the subject machine hosts are idle); Claude effort in `~/.claude/settings.json`; Codex prompts compiled from this clone and CLI parity with the Codex app; Chroxy `allowAutoPermissionMode`, deploy agent unloaded, daemon commit unchanged; in the session phase, the daemon log's model and permission-mode lines for the new session and no interrupt |
-| `prepare RUN` | owner, Mac | `gate`, `clone`, `preflight`, then the launch card with the exact invocation |
+| `gate RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | either | blocking issues closed, queue still open, each queue issue's title, body and comments unchanged since T0 (`queue-t0.json`; `--accept-changed Q03=REASON` accepts one slot's change and records it in the state's `overrides`), T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
+| `cut --run RUN --t0 SHA [--push]` (or `--all`) | supervisor | each base = T0 plus the run's mission as the only commit; without `--push` it builds locally and prints the push. Cut each base just before its run: a new base fires a full CI push run. Recording T0 also records `queue-t0.json`, read before anything is written (an unreadable queue issue or comments listing refuses the cut, exit 2, with no T0 and no snapshot); an existing snapshot is never overwritten |
+| `clone RUN` | owner, Mac | fresh single-branch clone (`git clone --branch BASE --single-branch`, so the only remote-tracking ref is the base's) outside the daemon checkout and every other work tree; git identity; `npm ci` under Node 22 |
+| `preflight RUN [--phase session --session ID]` | owner, Mac | clone shape (the only remote-tracking ref is `origin/BASE` and the only fetch refspec is the base's own), mission bytes, identity, Node, `gh` login, no `ci.yml` run queued or in progress (the runners the subject machine hosts are idle); Claude effort in `~/.claude/settings.json`; Codex prompts compiled from this clone and CLI parity with the Codex app; Chroxy `allowAutoPermissionMode`, deploy agent unloaded, daemon commit unchanged; in the session phase, the daemon log's model and permission-mode lines for the new session and no interrupt |
+| `prepare RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | owner, Mac | `gate` (with the same acceptances), `clone`, `preflight`, then the launch card with the exact invocation |
 | `start RUN --meter …` | owner, Mac | records the usage readings and the send; refuses below the allowance floor, without a passing gate at the current T0 followed by a passing preflight (and session phase, for Chroxy), and for a run that already finished |
 | `verify-start RUN` | owner, Mac | reads the applied model, effort, permission mode and the mission's `TRIAL-PROBE` line back from the native transcript (Claude Code) or rollout (Codex); prints `STOP:` on any mismatch |
 | `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, and whether `~/.claude/settings.json` changed during the run (#8704) |
@@ -86,6 +87,36 @@ within ten minutes `trialctl verify-start <RUN>`; every three hours `trialctl st
 finish <RUN> --meter …`, then `trialctl evidence <RUN>`, and hand the state file and
 `data/native/<RUN>.json` to the supervisor, who copies them to `<trial>/data/state/<RUN>.json`
 and `<trial>/data/native/<RUN>.json` and runs `collect`.
+
+## Queue text at T0
+
+A run reads its queue issues from GitHub while it works, so an edit or a new comment between run 1 and
+run 8 would change the task for the later runs. `cut` therefore writes `queue-t0.json` beside
+`trial.json` when it records T0:
+
+```json
+{"t0": "<sha>", "at": "<UTC time the text was read>",
+ "slots": {"Q01": {"issue": 1234, "title_sha256": "…", "body_sha256": "…", "comments_sha256": "…", "comments": 3}}}
+```
+
+The title is hashed as a string, the body as a string (`''` for none), and the comments as canonical JSON
+(`sort_keys`, no padding, UTF-8) of `[{"id", "user" (login), "body"}]` in id order. Labels, assignees, state
+and `updated_at` are not task text and are left out; the file holds digests and a count, never text.
+Everything is read before anything is recorded, so a slot whose issue or comments cannot be read refuses
+the cut with no T0 and no snapshot. The snapshot is never overwritten: a later `cut` for the same T0 leaves
+it alone (and reads nothing), another T0 refuses, and if T0 was recorded without it the next `cut` writes
+it, its `at` saying when. The supervisor commits `trial.json`'s `t0` line and `queue-t0.json` together by
+PR after the first cut; the control clone on the Mac pulls that commit before any `gate`. The file is not
+in the runs' clones: their bases are cut from T0, which is older.
+
+`gate` reads each issue again and fails, naming the slot, when a digest differs. Its detail says which
+parts changed (title, body, or comments with the count before and after; `comments (2, text changed)` is
+an edited comment). A missing file, a file taken at another T0, an entry missing for a slot or for another
+issue are failures; a GitHub error or an unreadable file is `UNVERIFIED`, never a pass. A change the owner
+accepts is `gate RUN --accept-changed Q03=REASON` (also on `prepare`): that slot's check passes with the
+reason shown and `{"kind": "accept-changed", "slot": "Q03", "reason": …}` goes into the state's
+`overrides`, as `--accept-open` does for a blocker. The acceptance covers a changed slot only, not a
+missing baseline.
 
 ## Evidence
 
@@ -157,12 +188,19 @@ AWS `AKIA`/`ASIA`, Google `AIza`, npm, Hugging Face, GitLab, a JWT `eyJ`; any ca
 any of them, nor does a value holding a run of 32 hex digits (33 for a session id, which
 the daemon makes from 32). An isolation hit
 (another run's `trial/*` branch, the key folder, `KEY.md`/`KEY.md.enc`, a `NEXT-*.md`
-seed, another project's folder under `~/.claude/projects/`, `~/.codex/sessions/`) is
-a pattern name, a count and a SHA-256 of each distinct matched string; the patterns
+seed, another project's folder under `~/.claude/projects/`, `~/.codex/sessions/`, any path
+under `docs/reports/harness-evals/` (`harness_evals_other`) other than the run's own mission,
+its report and the report's folder) is
+a pattern name, a count and a SHA-256 of each distinct matched string (for
+`harness_evals_other`, of the path from `harness-evals` on, with `.`/`..` resolved, so the
+clone's prefix does not change it); the patterns
 read tool inputs only (Claude `tool_use.input`, Codex function-call arguments), and
 `tool_inputs_scanned` (tool inputs holding text; one input counts once, however many
 strings it holds) is recorded so an unreadable transcript, or a renamed input field, shows
-as zero scanned rather than as clean.
+as zero scanned rather than as clean. The scan counts what a tool input spells, not what the
+shell resolves: `cat trial/queue.md` run from inside `docs/reports/harness-evals/` names no
+`harness-evals/` and is not counted by itself (the `cd` that put the shell there is, and the
+graders' audit of the transcripts covers the rest).
 
 **What is not carried when it is not verified.** A figure whose check is not a pass is
 left out of the extract (null, or absent from `runs_row`), not shown as data, and the

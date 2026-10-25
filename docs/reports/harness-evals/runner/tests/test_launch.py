@@ -17,17 +17,19 @@ import subprocess
 import tempfile
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import helpers
 from helpers import ScriptedRunner, argv_starts
 from test_native import assistant, jl, meta, tool_result, turn, user
-from trialkit import cli, config, launch, native, render, state, timeutil
+from trialkit import cli, config, launch, native, queue_text, render, state, timeutil
 from trialkit.gh import GitHubError
 
 CI_OK = "name: CI\non:\n  push:\n    branches: [main, 'trial/**']\n  pull_request:\n"
 CI_MAIN_ONLY = "name: CI\non:\n  push:\n    branches: [main]\n"
 PROMPTS = {'prime-directive.md': 'prime directive prompt\n', 'full-review.md': 'full review prompt\n'}
 SHA_D = 'd' * 40
+SNAPSHOT_AT = '2026-11-02T09:00:00Z'
 OPUS, ASTRA = 'claude-opus-5-5', 'gpt-6-astra'
 
 
@@ -52,12 +54,22 @@ class Runner(ScriptedRunner):
         return [c for c in self.calls if c['argv'][:len(prefix)] == list(prefix)]
 
 
+def comment(cid, body='a comment', user='alice'):
+    return {'id': cid, 'user': {'login': user}, 'body': body}
+
+
 class FakeGitHub:
+    """The issues the gate and `cut` read. Each issue has a state, a title, a body and comments; the title and body
+    default to a text of the issue's number, and the comments to one comment. A value that is an Exception is raised
+    when that part is read (`comments={9002: GitHubError(...)}` fails only the comments listing)."""
     repo = 'blamechris/chroxy'
 
-    def __init__(self, issues=None, ci=CI_OK, default='closed'):
+    def __init__(self, issues=None, ci=CI_OK, default='closed', titles=None, bodies=None, comments=None):
         self.issues = {9001: 'open', 9002: 'open'}
         self.issues.update(issues or {})
+        self.titles = dict(titles or {})
+        self.bodies = dict(bodies or {})
+        self.comments = dict(comments or {})
         self.ci = ci
         self.default = default
         self.requests = []
@@ -69,14 +81,31 @@ class FakeGitHub:
         self.requests.append((path, dict(params or {})))
         m = re.search(r'/issues/(\d+)$', path)
         if m:
-            value = self.issues.get(int(m.group(1)), self.default)
+            number = int(m.group(1))
+            value = self.issues.get(number, self.default)
             if isinstance(value, Exception):
                 raise value
-            return {'number': int(m.group(1)), 'state': value}
+            title = self.titles.get(number, f'title of {number}')
+            body = self.bodies.get(number, f'body of {number}')
+            for part in (title, body):
+                if isinstance(part, Exception):
+                    raise part
+            return {'number': number, 'state': value, 'title': title, 'body': body}
         if path.endswith('contents/.github/workflows/ci.yml'):
             if isinstance(self.ci, Exception):
                 raise self.ci
             return {'content': base64.encodebytes(self.ci.encode()).decode(), 'encoding': 'base64'}
+        raise GitHubError(f'unexpected request {path}', 404)
+
+    def list(self, path, params=None, key=None):
+        self.requests.append((path, dict(params or {})))
+        m = re.search(r'/issues/(\d+)/comments$', path)
+        if m:
+            number = int(m.group(1))
+            value = self.comments.get(number, [comment(number * 10 + 1)])
+            if isinstance(value, Exception):
+                raise value
+            return [dict(c) for c in value]
         raise GitHubError(f'unexpected request {path}', 404)
 
 
@@ -129,8 +158,10 @@ class Rig:
         data['paths'].update(clone_source=self.origin, codex_app_cli='~/codex-app')
         self.box.write_trial(data)
         self.trial = self.box.trial()
+        self.github = FakeGitHub()
         if record_t0:
             config.save_t0(self.trial, self.t0)
+            queue_text.write(self.trial, queue_text.snapshot(self.trial, self.github, self.t0, lambda: SNAPSHOT_AT))
         self.write_home('.gitconfig', '[user]\n\tname = Chris Test\n\temail = chris@example.com\n')
         os.makedirs(os.path.join(self.box.home, 'chroxy'))
 
@@ -160,7 +191,7 @@ class Rig:
         return state.save(self.trial, rid, data, home=self.box.home, now=lambda: helpers.FIXED_NOW)
 
     def env(self, runner=None, github=None):
-        return self.box.env(runner=runner or Runner(), github=github)
+        return self.box.env(runner=runner or Runner(), github=github or self.github)
 
     def branch(self, base):
         return helpers.git(self.origin, 'for-each-ref', '--format=%(objectname)', f'refs/heads/{base}')
@@ -431,14 +462,296 @@ class Gate(LaunchCase):
                 self.assertNotRegex(out, r'PASS\s+no other run live')
 
 
+# -- gate: the queue's text since T0 --------------------------------------------------
+
+def sha256_of(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+
+
+def snapshot_path(rig):
+    return os.path.join(rig.box.trial_dir, 'queue-t0.json')
+
+
+def file_bytes(path):
+    with open(path, 'rb') as fh:
+        return fh.read()
+
+
+def snapshot_file(rig):
+    with open(snapshot_path(rig), encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+def plant_unreadable_snapshot(rig, how):
+    """Put something the snapshot reader cannot read where queue-t0.json belongs. Returns the undo."""
+    path = snapshot_path(rig)
+    if os.path.isfile(path):
+        os.remove(path)
+    if how == 'directory':
+        os.makedirs(path)
+        return lambda: os.rmdir(path)
+    with open(path, 'w') as fh:
+        fh.write('{truncated')
+    return lambda: os.remove(path)
+
+
+def edit_snapshot(rig, edit):
+    data = snapshot_file(rig)
+    edit(data)
+    with open(snapshot_path(rig), 'w', encoding='utf-8') as fh:
+        json.dump(data, fh)
+
+
+class GateQueueText(LaunchCase):
+    """`gate` compares each queue issue's title, body and comments with the digests `cut` wrote at T0 (the Rig
+    writes them when it records T0, from the same default issues the gate reads back)."""
+
+    def go(self, gh=None, accept_changed=None, rid='B-cy-r1'):
+        gh = gh or FakeGitHub()
+        env = self.rig.env(github=gh)
+        code = launch.gate(self.rig.trial, self.rig.run(rid), env, {}, None, accept_changed=accept_changed)
+        return code, env.out.getvalue(), gh
+
+    def text_checks(self, rid='B-cy-r1'):
+        return {c['name']: c for c in self.rig.state(rid)['gate']['checks'] if c['name'].startswith('queue text')}
+
+    def test_unchanged_text_passes_for_every_slot_and_is_recorded(self):
+        code, out, _ = self.go()
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001\s+title, body and 1 comment\(s\) unchanged since the T0 snapshot of 2026-11-02T09:00:00Z')
+        self.assertRegex(out, r'PASS\s+queue text Q02 #9002')
+        checks_ = self.text_checks()
+        self.assertEqual(sorted(checks_), ['queue text Q01 #9001', 'queue text Q02 #9002'])
+        self.assertTrue(all(c['status'] == 'PASS' for c in checks_.values()), checks_)
+
+    def test_the_text_checks_come_after_the_queue_checks(self):
+        self.go()
+        names = [c['name'] for c in self.rig.state('B-cy-r1')['gate']['checks']]
+        self.assertEqual(names.index('queue text Q01 #9001'), names.index('queue Q02 #9002') + 1)
+
+    def test_an_edited_body_fails_naming_the_slot_and_only_the_body(self):
+        code, out, _ = self.go(gh=FakeGitHub(bodies={9002: 'the body, edited after T0'}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of 2026-11-02T09:00:00Z: body;')
+        self.assertIn('--accept-changed Q02=REASON', out)
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+        self.assertFalse('edited after T0' in out, 'the changed text itself is never printed')
+        self.assertNotRegex(out, r'Q02 #9002\s+changed[^\n]*title')
+
+    def test_an_edited_title_fails_naming_the_slot_and_the_title(self):
+        code, out, _ = self.go(gh=FakeGitHub(titles={9001: 'a new title'}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+changed since the T0 snapshot of \S+: title;')
+        self.assertRegex(out, r'PASS\s+queue text Q02 #9002')
+
+    def test_title_and_body_changed_together_are_both_named(self):
+        _code, out, _ = self.go(gh=FakeGitHub(titles={9001: 'new'}, bodies={9001: 'new'}))
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+changed since the T0 snapshot of \S+: title, body;')
+
+    def test_an_added_comment_fails_with_the_counts_before_and_after(self):
+        extra = [comment(90011), comment(90019, 'a late comment', 'bob')]
+        code, out, _ = self.go(gh=FakeGitHub(comments={9001: extra}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+changed since the T0 snapshot of \S+: comments \(1 -> 2\);')
+        self.assertFalse('late comment' in out)
+
+    def test_an_edited_comment_fails_though_the_count_is_the_same(self):
+        code, out, _ = self.go(gh=FakeGitHub(comments={9002: [comment(90021, 'edited after T0')]}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+changed since the T0 snapshot of \S+: comments \(1, text changed\);')
+
+    def test_a_comment_posted_under_another_login_or_removed_fails(self):
+        code, out, _ = self.go(gh=FakeGitHub(comments={9001: [comment(90011, 'a comment', 'mallory')]}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+changed since the T0 snapshot of \S+: comments \(1, text changed\);')
+        code, out, _ = self.go(gh=FakeGitHub(comments={9001: []}))
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+changed since the T0 snapshot of \S+: comments \(1 -> 0\);')
+
+    def test_what_is_not_the_task_text_is_not_compared(self):
+        class Noisy(FakeGitHub):
+            def get(self, path, params=None):
+                reply = super().get(path, params)
+                if path.endswith('/issues/9001'):
+                    reply.update(labels=[{'name': 'new-label'}], assignees=[{'login': 'x'}], updated_at='2026-11-05T00:00:00Z')
+                return reply
+
+        code, out, _ = self.go(gh=Noisy())
+        self.assertEqual(code, 0, out)
+
+    def test_a_missing_snapshot_fails_and_nothing_is_compared(self):
+        os.remove(snapshot_path(self.rig))
+        code, out, gh = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json is missing')
+        self.assertNotRegex(out, r'queue text Q0')
+        self.assertFalse([r for r in gh.requests if r[0].endswith('/comments')], 'no text was read without a baseline')
+
+    def test_a_snapshot_taken_at_another_t0_fails(self):
+        edit_snapshot(self.rig, lambda d: d.update(t0='f' * 40))
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json was taken at T0 ffffffffffff, trial.json records ' + self.rig.t0[:12])
+
+    def test_a_slot_with_no_entry_fails_naming_the_slot(self):
+        edit_snapshot(self.rig, lambda d: d['slots'].pop('Q02'))
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q02 #9002\s+queue-t0.json has no entry for Q02')
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+
+    def test_a_slot_whose_issue_is_not_the_recorded_one_fails_naming_the_slot(self):
+        edit_snapshot(self.rig, lambda d: d['slots']['Q01'].update(issue=1234))
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+Q01 is issue 9001 in trial.json but 1234 in queue-t0.json')
+
+    def test_a_slot_the_trial_no_longer_has_fails(self):
+        edit_snapshot(self.rig, lambda d: d['slots'].update(Q09=dict(d['slots']['Q01'], issue=9009)))
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json holds Q09, which trial.json no longer has')
+
+    def test_a_malformed_entry_fails_naming_the_slot(self):
+        for how in (lambda d: d['slots']['Q01'].pop('body_sha256'), lambda d: d['slots']['Q01'].update(title_sha256='not a digest'),
+                    lambda d: d['slots']['Q01'].update(comments='1'), lambda d: d['slots'].update(Q01=[])):
+            with self.subTest():
+                self.setUp()
+                edit_snapshot(self.rig, how)
+                code, out, _ = self.go()
+                self.assertEqual(code, 1, out)
+                self.assertRegex(out, r'FAIL\s+queue text Q01 #9001\s+queue-t0.json holds a malformed entry for Q01')
+
+    def test_a_file_that_is_not_a_snapshot_fails_and_one_that_cannot_be_read_is_unverified(self):
+        with open(snapshot_path(self.rig), 'w') as fh:
+            fh.write('[]')
+        code, out, _ = self.go()
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json is not a snapshot')
+        for how in ('corrupt', 'directory'):
+            with self.subTest(how):
+                undo = plant_unreadable_snapshot(self.rig, how)
+                code, out, _ = self.go()
+                undo()
+                self.assertEqual(code, 2, out)
+                self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+cannot read ')
+                self.assertNotRegex(out, r'PASS\s+queue text')
+
+    def test_no_t0_leaves_one_unverified_check_and_reads_no_text(self):
+        self.rig = Rig(self, record_t0=False)
+        code, out, gh = self.go()
+        self.assertEqual(code, 1)     # 'T0 set' fails as it always did
+        self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+no T0 recorded')
+        self.assertEqual(sorted(self.text_checks()), ['queue text at T0'])
+        self.assertFalse([r for r in gh.requests if r[0].endswith('/comments')])
+
+    def test_an_empty_queue_has_no_text_to_compare_and_fails(self):
+        self.rig = Rig(self, slots=[])
+        code, out, _ = self.go()
+        self.assertEqual(code, 1)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+the queue has no slots')
+
+    def test_a_github_error_reading_the_comments_is_unverified_never_a_pass(self):
+        code, out, _ = self.go(gh=FakeGitHub(comments={9002: GitHubError('rate limited', 403)}))
+        self.assertEqual(code, 2, out)
+        self.assertRegex(out, r'UNVERIFIED\s+queue text Q02 #9002\s+cannot read Q02 #9002: rate limited')
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001')
+        self.assertNotRegex(out, r'PASS\s+queue text Q02')
+
+    def test_a_reply_this_cannot_read_is_unverified(self):
+        for comments in ([{'id': 'x', 'body': 'b'}], [{'id': 7}], [comment(7), comment(7)]):
+            with self.subTest(comments=comments):
+                code, out, _ = self.go(gh=FakeGitHub(comments={9001: comments}))
+                self.assertEqual(code, 2, out)
+                self.assertRegex(out, r'UNVERIFIED\s+queue text Q01 #9001\s+cannot read Q01 #9001: ')
+
+    def test_an_edit_is_accepted_for_its_slot_with_a_reason_and_the_acceptance_is_recorded(self):
+        gh = FakeGitHub(bodies={9002: 'edited to fix a typo'})
+        code, out, _ = self.go(gh=gh, accept_changed={'Q02': 'a typo fix, no change of meaning'})
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r'PASS\s+queue text Q02 #9002\s+changed since T0 \(body\), accepted: a typo fix, no change of meaning')
+        st = self.rig.state('B-cy-r1')
+        self.assertEqual(st['gate']['accepted_changed'], {'Q02': 'a typo fix, no change of meaning'})
+        self.assertEqual([{k: o[k] for k in ('kind', 'slot', 'reason')} for o in st['overrides']],
+                         [{'kind': 'accept-changed', 'slot': 'Q02', 'reason': 'a typo fix, no change of meaning'}])
+        self.assertEqual(st['overrides'][0]['at'], '2026-11-02T12:00:00Z')
+        self.go(gh=gh, accept_changed={'Q02': 'a typo fix, no change of meaning'})
+        self.assertEqual(len(self.rig.state('B-cy-r1')['overrides']), 1, 'the same acceptance is not recorded twice')
+
+    def test_an_acceptance_covers_only_its_own_slot(self):
+        code, out, _ = self.go(gh=FakeGitHub(bodies={9001: 'x', 9002: 'y'}), accept_changed={'Q02': 'fine'})
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001')
+        self.assertRegex(out, r'PASS\s+queue text Q02 #9002\s+changed since T0 \(body\), accepted')
+
+    def test_accepting_a_slot_that_did_not_change_records_nothing(self):
+        code, out, _ = self.go(accept_changed={'Q01': 'not needed'})
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r'PASS\s+queue text Q01 #9001\s+title, body and 1 comment\(s\) unchanged')
+        st = self.rig.state('B-cy-r1')
+        self.assertEqual((st['gate']['accepted_changed'], st['overrides']), ({}, []))
+
+    def test_accepting_a_slot_the_queue_does_not_have_is_a_note_and_changes_nothing(self):
+        code, out, _ = self.go(gh=FakeGitHub(bodies={9001: 'x'}), accept_changed={'Q99': 'x'})
+        self.assertEqual(code, 1, out)
+        self.assertIn('--accept-changed Q99 ignored; it is not a queue slot', out)
+        self.assertEqual(self.rig.state('B-cy-r1')['overrides'], [])
+
+    def test_an_acceptance_does_not_stand_in_for_a_missing_baseline(self):
+        os.remove(snapshot_path(self.rig))
+        code, out, _ = self.go(accept_changed={'Q01': 'x', 'Q02': 'x'})
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json is missing')
+
+    def test_the_command_line_takes_the_acceptance_for_gate_and_prepare(self):
+        args = cli.build_parser().parse_args(['gate', 'B-cy-r1', '--accept-changed', 'Q03=owner fixed a typo', '--accept-changed', 'Q04=x'])
+        self.assertEqual(cli._accept_changed(args.accept_changed), {'Q03': 'owner fixed a typo', 'Q04': 'x'})
+        args = cli.build_parser().parse_args(['prepare', 'B-cy-r1', '--accept-changed', 'Q03=reason'])
+        self.assertEqual(cli._accept_changed(args.accept_changed), {'Q03': 'reason'})
+        self.assertEqual(cli._accept_changed(None), {})
+
+    def test_a_malformed_acceptance_is_rejected_as_a_malformed_accept_open_is(self):
+        for bad in ('Q03', 'Q03=', 'Q03=  ', '=reason', 'q03=reason', 'Q3=reason', 'Q003=reason', '9001=reason', 'Q03 reason'):
+            with self.subTest(bad), self.assertRaises(SystemExit) as ctx:
+                cli._accept_changed([bad])
+            self.assertIn('--accept-changed expects SLOT=REASON', str(ctx.exception))
+        with self.assertRaises(SystemExit):
+            cli._accept_open(['not-a-number=reason'])
+
+    def test_gate_on_the_command_line_uses_the_acceptance(self):
+        gh = FakeGitHub(bodies={9001: 'edited'})
+        state_file = os.path.join(self.rig.box.tmp, 'gate-state.json')
+
+        def cli_gate(*extra):
+            env = self.rig.env(github=gh)
+            code = cli.main(['--trial', self.rig.box.trial_dir, 'gate', 'B-cy-r1', '--state', state_file, *extra], env=env)
+            return code, env.out.getvalue()
+
+        code, out = cli_gate()
+        self.assertEqual(code, 1, out)
+        code, out = cli_gate('--accept-changed', 'Q01=the owner agreed to the new wording')
+        self.assertEqual(code, 0, out)
+        self.assertIn('accepted: the owner agreed to the new wording', out)
+
+    def test_prepare_on_the_command_line_hands_the_acceptance_to_the_gate(self):
+        with mock.patch.object(launch, 'prepare', return_value=0) as prepare:
+            code = cli.main(['--trial', self.rig.box.trial_dir, 'prepare', 'B-cy-r1', '--accept-changed', 'Q02=reason'], env=self.rig.env())
+        self.assertEqual(code, 0)
+        self.assertEqual(prepare.call_args.kwargs['accept_changed'], {'Q02': 'reason'})
+
+
 # -- cut ---------------------------------------------------------------------------
 
 class Cut(unittest.TestCase):
     def setUp(self):
         self.rig = Rig(self, record_t0=False)
 
-    def cut(self, *ids, t0=None, push=False, runner=None):
-        env = self.rig.env(runner)
+    def cut(self, *ids, t0=None, push=False, runner=None, github=None):
+        env = self.rig.env(runner, github)
         code = launch.cut(self.rig.trial, [self.rig.run(i) for i in ids], env, t0=t0 or self.rig.t0,
                           push=push, repo_dir=self.rig.seed)
         return code, env.out.getvalue()
@@ -708,6 +1021,245 @@ class Cut(unittest.TestCase):
                 self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), tip)
 
 
+class CutQueueText(unittest.TestCase):
+    """`cut` records the queue's text digests with T0 (queue-t0.json), reading everything before anything is recorded."""
+
+    def setUp(self):
+        self.rig = Rig(self, record_t0=False)
+
+    def cut(self, *ids, github=None, push=False, t0=None):
+        env = self.rig.env(github=github)
+        code = launch.cut(self.rig.trial, [self.rig.run(i) for i in ids], env, t0=t0 or self.rig.t0, push=push, repo_dir=self.rig.seed)
+        return code, env.out.getvalue()
+
+    def assertNothingRecorded(self):
+        self.assertIsNone(self.rig.box.trial().t0, 'T0 was recorded')
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)), 'a snapshot was written')
+
+    def test_it_writes_the_digests_of_every_slot_with_t0(self):
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.rig.box.trial().t0, self.rig.t0)
+        data = snapshot_file(self.rig)
+        self.assertEqual(sorted(data), ['at', 'slots', 't0'])
+        self.assertEqual((data['t0'], data['at']), (self.rig.t0, '2026-11-02T12:00:00Z'))
+        self.assertEqual(list(data['slots']), ['Q01', 'Q02'])
+        for slot, number in (('Q01', 9001), ('Q02', 9002)):
+            self.assertEqual(data['slots'][slot], {
+                'issue': number, 'title_sha256': sha256_of(f'title of {number}'), 'body_sha256': sha256_of(f'body of {number}'),
+                'comments_sha256': sha256_of(canonical([{'id': number * 10 + 1, 'user': 'alice', 'body': 'a comment'}])), 'comments': 1})
+        with open(snapshot_path(self.rig), encoding='utf-8') as fh:
+            text = fh.read()
+        self.assertFalse('title of' in text or 'body of' in text or 'a comment' in text, 'the file holds digests, never text')
+        self.assertIn('queue-t0.json', out)
+
+    def test_it_reads_each_slots_issue_and_comments_once_however_many_bases_are_cut(self):
+        gh = FakeGitHub()
+        code, out = self.cut('A-cd-r1', 'B-cy-r1', github=gh)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(p for p, _ in gh.requests),
+                         sorted([f'repos/blamechris/chroxy/issues/{n}' for n in (9001, 9002)]
+                                + [f'repos/blamechris/chroxy/issues/{n}/comments' for n in (9001, 9002)]))
+
+    def test_the_text_is_read_whatever_the_issue_state_and_hashed_as_the_gate_will_read_it(self):
+        gh = FakeGitHub(titles={9001: 'Überschrift — ünïcode'}, bodies={9001: None, 9002: 'line one\r\nline two'},
+                        comments={9001: [comment(30, 'second', 'bob'), comment(5, 'first ✓', 'alice')],
+                                  9002: [{'id': 8, 'user': None, 'body': None}]})
+        code, out = self.cut('A-cd-r1', github=gh)
+        self.assertEqual(code, 0, out)
+        one, two = snapshot_file(self.rig)['slots']['Q01'], snapshot_file(self.rig)['slots']['Q02']
+        self.assertEqual(one['title_sha256'], sha256_of('Überschrift — ünïcode'))
+        self.assertEqual(one['body_sha256'], sha256_of(''), 'a null body is the empty string')
+        self.assertEqual(one['comments_sha256'], sha256_of(canonical([{'id': 5, 'user': 'alice', 'body': 'first ✓'},
+                                                                      {'id': 30, 'user': 'bob', 'body': 'second'}])))
+        self.assertEqual(two['body_sha256'], sha256_of('line one\r\nline two'))
+        self.assertEqual(two['comments_sha256'], sha256_of(canonical([{'id': 8, 'user': None, 'body': ''}])))
+        self.assertEqual((one['comments'], two['comments']), (2, 1))
+
+    def test_a_snapshot_taken_in_a_different_order_of_comments_is_the_same_snapshot(self):
+        a, b = comment(1, 'x'), comment(2, 'y')
+        env_a, env_b = FakeGitHub(comments={9001: [a, b]}), FakeGitHub(comments={9001: [b, a]})
+        slot = self.rig.trial.slots[0]
+        self.assertEqual(queue_text.read_slot(env_a, slot), queue_text.read_slot(env_b, slot))
+
+    def test_one_unreadable_comments_listing_refuses_the_cut_and_records_nothing(self):
+        code, out = self.cut('A-cd-r1', github=FakeGitHub(comments={9002: GitHubError('HTTP 502', 502)}), push=True)
+        self.assertEqual(code, 2, out)
+        self.assertIn('cut: refusing:', out)
+        self.assertIn('cannot read Q02 #9002', out)
+        self.assertNotIn('Q01 #9001', out)
+        self.assertNothingRecorded()
+        self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '', 'nothing was pushed')
+        self.assertEqual(len(helpers.git(self.rig.seed, 'worktree', 'list').splitlines()), 1, 'no base was even built')
+
+    def test_an_unreadable_issue_refuses_the_cut_and_every_unreadable_slot_is_named(self):
+        gh = FakeGitHub(issues={9001: GitHubError('HTTP 404', 404)}, comments={9002: GitHubError('HTTP 500', 500)})
+        code, out = self.cut('A-cd-r1', github=gh)
+        self.assertEqual(code, 2, out)
+        self.assertIn('cannot read Q01 #9001', out)
+        self.assertIn('cannot read Q02 #9002', out)
+        self.assertNothingRecorded()
+
+    def test_a_reply_that_is_not_an_issue_refuses_the_cut(self):
+        gh = FakeGitHub(comments={9001: [{'id': 4}]})
+        code, out = self.cut('A-cd-r1', github=gh)
+        self.assertEqual(code, 2, out)
+        self.assertIn('cannot read Q01 #9001', out)
+        self.assertNothingRecorded()
+
+    def test_an_existing_snapshot_for_the_same_t0_is_left_alone_and_nothing_is_read(self):
+        self.assertEqual(self.cut('A-cd-r1')[0], 0)
+        before = file_bytes(snapshot_path(self.rig))
+        gh = FakeGitHub(bodies={9001: 'edited since', 9002: 'edited since'})
+        code, out = self.cut('B-cy-r1', github=gh)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(file_bytes(snapshot_path(self.rig)), before)
+        self.assertEqual(gh.requests, [], 'the later cut needs no network')
+        self.assertNotIn('queue text at T0 recorded', out)
+
+    def test_a_recorded_t0_with_no_snapshot_gets_one_whose_time_says_when_it_was_read(self):
+        config.save_t0(self.rig.trial, self.rig.t0)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 0, out)
+        data = snapshot_file(self.rig)
+        self.assertEqual((data['t0'], data['at']), (self.rig.t0, '2026-11-02T12:00:00Z'))
+
+    def test_a_snapshot_taken_at_another_t0_refuses_and_is_never_overwritten(self):
+        queue_text.write(self.rig.trial, {'t0': 'a' * 40, 'at': '2026-10-30T00:00:00Z', 'slots': {}})
+        before = file_bytes(snapshot_path(self.rig))
+        code, out = self.cut('A-cd-r1', push=True)
+        self.assertEqual(code, 2, out)
+        self.assertIn('queue-t0.json was taken at T0 aaaaaaaaaaaa', out)
+        self.assertIn('never overwritten', out)
+        self.assertIsNone(self.rig.box.trial().t0)
+        self.assertEqual(file_bytes(snapshot_path(self.rig)), before)
+        self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
+
+    def test_a_snapshot_that_cannot_be_read_refuses_and_is_left_where_it_is(self):
+        for how in ('corrupt', 'directory'):
+            with self.subTest(how):
+                undo = plant_unreadable_snapshot(self.rig, how)
+                code, out = self.cut('A-cd-r1')
+                undo()
+                self.assertEqual(code, 2, out)
+                self.assertIn('queue-t0.json exists but is unreadable', out)
+                self.assertIsNone(self.rig.box.trial().t0)
+        with open(snapshot_path(self.rig), 'w') as fh:
+            fh.write('[]')
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 2, out)
+        self.assertIn('exists but is malformed', out)
+        self.assertEqual(file_bytes(snapshot_path(self.rig)), b'[]')
+
+    def test_a_different_recorded_t0_is_still_refused_first_and_no_text_is_read(self):
+        config.save_t0(self.rig.trial, 'a' * 40)
+        gh = FakeGitHub()
+        code, out = self.cut('A-cd-r1', github=gh)
+        self.assertEqual(code, 2, out)
+        self.assertIn('already records t0', out)
+        self.assertEqual(gh.requests, [])
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+
+    def test_a_snapshot_that_cannot_be_written_after_t0_is_recorded_says_so_and_a_second_cut_writes_it(self):
+        with mock.patch.object(queue_text, 'write', side_effect=OSError('disk full')):
+            code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 2, out)
+        self.assertIn('T0 is recorded but queue-t0.json could not be written (disk full)', out)
+        self.assertEqual(self.rig.box.trial().t0, self.rig.t0)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        self.rig.trial = self.rig.box.trial()
+        code, out = self.cut('A-cd-r1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(snapshot_file(self.rig)['t0'], self.rig.t0)
+
+    def test_a_refused_push_or_t0_records_no_snapshot(self):
+        code, out = self.cut('A-cd-r1', t0='1' * 40)
+        self.assertEqual(code, 2, out)
+        self.assertNothingRecorded()
+        code, out = self.cut('A-cd-r1', t0='z' * 40)
+        self.assertEqual(code, 2, out)
+        self.assertNothingRecorded()
+
+
+class QueueTextFile(unittest.TestCase):
+    """queue_text.write: whole or not at all, and never over a file that is there."""
+
+    def setUp(self):
+        self.rig = Rig(self, record_t0=False)
+        self.data = {'t0': self.rig.t0, 'at': SNAPSHOT_AT, 'slots': {}}
+
+    def leftovers(self):
+        return [n for n in os.listdir(self.rig.box.trial_dir) if n.startswith('.queue-t0.json')]
+
+    def test_it_writes_the_file_and_leaves_no_temporary_one(self):
+        queue_text.write(self.rig.trial, self.data)
+        self.assertEqual(snapshot_file(self.rig), self.data)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(os.stat(snapshot_path(self.rig)).st_mode & 0o777, 0o644)
+
+    def test_it_never_replaces_a_file_that_is_there(self):
+        queue_text.write(self.rig.trial, self.data)
+        with self.assertRaises(queue_text.QueueTextError):
+            queue_text.write(self.rig.trial, dict(self.data, at='2099-01-01T00:00:00Z'))
+        self.assertEqual(snapshot_file(self.rig)['at'], SNAPSHOT_AT)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_failure_while_putting_it_in_place_leaves_no_file_and_no_temporary_one(self):
+        with mock.patch.object(os, 'link', side_effect=OSError('no hard links here')):
+            with self.assertRaises(OSError):
+                queue_text.write(self.rig.trial, self.data)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_snapshot_that_would_not_read_back_as_written_is_refused(self):
+        with self.assertRaises(queue_text.QueueTextError):
+            queue_text.write(self.rig.trial, {'t0': self.rig.t0, 'at': 'x', 'slots': {1: {}}})   # an int key reads back as a string
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        self.assertEqual(self.leftovers(), [])
+
+
+class QueueTextReads(unittest.TestCase):
+    """queue_text.read_slot: the shapes it accepts and the ones it refuses."""
+    SLOT = config.Slot('Q01', 9001, 'a title')
+
+    def read(self, **kwargs):
+        return queue_text.read_slot(FakeGitHub(**kwargs), self.SLOT)
+
+    def test_a_missing_body_key_or_title_is_a_refusal_not_an_empty_text(self):
+        class Bare(FakeGitHub):
+            def __init__(self, drop):
+                super().__init__()
+                self.drop = drop
+
+            def get(self, path, params=None):
+                reply = super().get(path, params)
+                reply.pop(self.drop, None)
+                return reply
+
+        for drop in ('title', 'body'):
+            with self.subTest(drop), self.assertRaises(queue_text.QueueTextError):
+                queue_text.read_slot(Bare(drop), self.SLOT)
+
+    def test_a_comment_listing_that_returns_one_comment_twice_is_a_refusal(self):
+        with self.assertRaises(queue_text.QueueTextError) as ctx:
+            self.read(comments={9001: [comment(3), comment(3)]})
+        self.assertIn('comment 3 was listed twice', str(ctx.exception))
+
+    def test_a_reply_that_is_not_json_is_a_refusal(self):
+        with self.assertRaises(queue_text.QueueTextError) as ctx:
+            self.read(comments={9001: ValueError('Expecting value')})
+        self.assertIn('Expecting value', str(ctx.exception))
+
+    def test_the_comment_author_is_part_of_the_digest_and_a_deleted_account_reads_as_none(self):
+        a = self.read(comments={9001: [comment(1, 'x', 'alice')]})['comments_sha256']
+        b = self.read(comments={9001: [comment(1, 'x', 'bob')]})['comments_sha256']
+        ghost = self.read(comments={9001: [{'id': 1, 'user': None, 'body': 'x'}]})['comments_sha256']
+        nokey = self.read(comments={9001: [{'id': 1, 'body': 'x'}]})['comments_sha256']
+        self.assertEqual(len({a, b, ghost}), 3)
+        self.assertEqual(ghost, nokey)
+
+
 class FirstSha(unittest.TestCase):
     def test_only_the_exact_ref_counts(self):
         sha = 'a' * 40
@@ -859,6 +1411,59 @@ class Clone(LaunchCase):
         self.assertNotRegex(out, r'PASS\s+clone clean')
         self.assertIn('not usable as it is', out)
 
+    # -- the clone knows no branch but its base (#8794)
+
+    BASE = 'trial/t2-a-cd-r1'
+
+    def remote_refs(self, clone_dir):
+        listing = helpers.git(clone_dir, 'for-each-ref', '--format=%(refname)', 'refs/remotes')
+        return listing.splitlines()
+
+    def test_the_clone_holds_the_base_as_its_only_remote_tracking_ref(self):
+        self.rig.cut('B-cy-r1')           # origin now holds main and two bases
+        heads = helpers.git(self.rig.origin, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').splitlines()
+        self.assertEqual(sorted(heads), ['main', self.BASE, 'trial/t2-b-cy-r1'], 'the source must hold other branches for this to prove anything')
+        code, out, _ = self.clone()
+        self.assertEqual(code, 0, out)
+        dest = self.rig.clone_dir('A-cd-r1')
+        self.assertEqual(self.remote_refs(dest), [f'refs/remotes/origin/{self.BASE}'])
+        self.assertEqual(helpers.git(dest, 'config', '--get-all', 'remote.origin.fetch'),
+                         f'+refs/heads/{self.BASE}:refs/remotes/origin/{self.BASE}')
+        for other in ('origin/main', 'origin/trial/t2-b-cy-r1'):
+            self.assertNotEqual(subprocess.run(['git', '-C', dest, 'rev-parse', '--verify', '-q', other],
+                                               capture_output=True).returncode, 0, f'{other} is known to the clone')
+        self.assertRegex(out, r'PASS\s+clone refs\s+only refs/remotes/origin/trial/t2-a-cd-r1')
+
+    def test_the_clone_command_is_single_branch(self):
+        runner = Runner()
+        code, out, _ = self.clone(runner=runner)
+        self.assertEqual(code, 0, out)
+        argv = runner.ran('git', 'clone')[0]['argv']
+        self.assertEqual(argv[:5], ['git', 'clone', '--branch', self.BASE, '--single-branch'])
+
+    def test_a_clone_that_fetched_every_branch_fails_naming_what_it_should_not_know(self):
+        class Unfiltered(Runner):
+            def run(self, argv, cwd=None, env=None, timeout=None, input=None):
+                if argv[:2] == ['git', 'clone']:
+                    argv = [a for a in argv if a != '--single-branch']
+                return super().run(argv, cwd=cwd, env=env, timeout=timeout, input=input)
+
+        self.rig.cut('B-cy-r1')
+        code, out, _ = self.clone(runner=Unfiltered())
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+clone refs\s+extra remote-tracking ref\(s\): .*refs/remotes/origin/main')
+        self.assertIn('refs/remotes/origin/trial/t2-b-cy-r1', out)
+        self.assertIn('remote.origin.fetch is', out)
+        self.assertIn('remove the clone and run `trialctl clone A-cd-r1` again', out)
+        self.assertIn('not usable as it is', out)
+
+    def test_a_clone_whose_refs_cannot_be_listed_is_unverified_not_clean(self):
+        runner = Runner().on(argv_starts('git', 'for-each-ref'), 128, '', 'fatal: bad object')
+        code, out, _ = self.clone(runner=runner)
+        self.assertEqual(code, 2, out)
+        self.assertRegex(out, r'UNVERIFIED\s+clone refs\s+cannot list the remote-tracking refs: fatal: bad object')
+        self.assertNotRegex(out, r'PASS\s+clone refs')
+
 
 # -- preflight, before the send ------------------------------------------------------
 
@@ -871,7 +1476,7 @@ class PreflightClaudeNative(LaunchCase):
         code, out, st = self.pre('A-cd-r1')
         self.assertEqual(code, 0, out)
         self.assertTrue(all(s == 'PASS' for s in statuses(st).values()), statuses(st))
-        self.assertEqual(set(statuses(st)), {'clone exists', 'clone clean', 'clone matches origin', 'base shape', 'mission file',
+        self.assertEqual(set(statuses(st)), {'clone exists', 'clone clean', 'clone matches origin', 'clone refs', 'base shape', 'mission file',
                                              'clone identity', 'node version', 'gh login', 'CI fleet quiet',
                                              'no other run live', 'effort setting', 'claude version'})
         entry = st['preflight'][-1]
@@ -966,6 +1571,68 @@ class PreflightClaudeNative(LaunchCase):
         code, _out, st = self.pre('A-cd-r1')
         self.assertEqual(code, 1)
         self.assertStatus(statuses(st), 'clone clean', 'FAIL')
+
+    # -- `clone refs`: the clone knows no branch but its base (#8794)
+
+    BASE = 'trial/t2-a-cd-r1'
+
+    def in_clone(self, *args):
+        return helpers.git(self.rig.clone_dir('A-cd-r1'), *args)
+
+    def assertRefsFail(self, fragment):
+        code, out, st = self.pre('A-cd-r1')
+        self.assertEqual(code, 1, out)
+        self.assertStatus(statuses(st), 'clone refs', 'FAIL')
+        detail = details(st)['clone refs']
+        self.assertIn(fragment, detail)
+        self.assertIn('remove the clone and run `trialctl clone A-cd-r1` again', detail)
+        return detail
+
+    def test_the_clone_made_by_trialctl_passes_the_refs_check(self):
+        _code, _out, st = self.pre('A-cd-r1')
+        self.assertStatus(statuses(st), 'clone refs', 'PASS')
+
+    def test_another_remote_tracking_branch_fails_the_refs_check_and_names_it(self):
+        self.in_clone('fetch', 'origin', 'main:refs/remotes/origin/main')
+        detail = self.assertRefsFail('extra remote-tracking ref(s): refs/remotes/origin/main')
+        self.assertNotIn(f'refs/remotes/origin/{self.BASE},', detail)
+
+    def test_a_ref_of_another_remote_fails_the_refs_check(self):
+        self.in_clone('update-ref', 'refs/remotes/upstream/main', 'HEAD')
+        self.assertRefsFail('refs/remotes/upstream/main')
+
+    def test_a_wider_fetch_refspec_fails_the_refs_check_and_shows_the_refspecs(self):
+        self.in_clone('config', '--add', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+        detail = self.assertRefsFail('remote.origin.fetch is')
+        self.assertIn('+refs/heads/*:refs/remotes/origin/*', detail)
+
+    def test_a_clone_with_no_fetch_refspec_fails_the_refs_check(self):
+        self.in_clone('config', '--unset-all', 'remote.origin.fetch')
+        self.assertRefsFail('remote.origin.fetch is []')
+
+    def test_a_clone_that_lost_its_base_ref_fails_the_refs_check(self):
+        self.in_clone('update-ref', '-d', f'refs/remotes/origin/{self.BASE}')
+        self.assertRefsFail(f'refs/remotes/origin/{self.BASE} is not among the remote-tracking refs')
+
+    def test_origin_head_is_fine_when_it_points_at_the_base_and_not_otherwise(self):
+        self.in_clone('symbolic-ref', 'refs/remotes/origin/HEAD', f'refs/remotes/origin/{self.BASE}')
+        _code, _out, st = self.pre('A-cd-r1')
+        self.assertStatus(statuses(st), 'clone refs', 'PASS')
+        self.in_clone('fetch', 'origin', 'main:refs/remotes/origin/main')
+        self.in_clone('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+        self.assertRefsFail('refs/remotes/origin/HEAD -> refs/remotes/origin/main')
+
+    def test_refs_or_a_refspec_that_cannot_be_read_leave_the_check_unverified(self):
+        runner = toolbox(self.rig).on(argv_starts('git', 'for-each-ref'), 128, '', 'fatal: corrupt')
+        code, out, st = self.pre('A-cd-r1', runner=runner)
+        self.assertEqual(code, 2, out)
+        self.assertStatus(statuses(st), 'clone refs', 'UNVERIFIED')
+        self.assertIn('fatal: corrupt', details(st)['clone refs'])
+        runner = toolbox(self.rig).on(argv_starts('git', 'config', '--get-all', 'remote.origin.fetch'), 128, '', 'fatal: bad config')
+        code, out, st = self.pre('A-cd-r1', runner=runner)
+        self.assertEqual(code, 2, out)
+        self.assertStatus(statuses(st), 'clone refs', 'UNVERIFIED')
+        self.assertIn('fatal: bad config', details(st)['clone refs'])
 
     def push_second_commit(self):
         d = self.rig.clone_dir('A-cd-r1')
@@ -1390,10 +2057,25 @@ class PreflightSession(LaunchCase):
 # -- prepare -----------------------------------------------------------------------
 
 class Prepare(LaunchCase):
-    def go(self, rid='A-cd-r1', gh=None, runner=None):
+    def go(self, rid='A-cd-r1', gh=None, runner=None, accept_changed=None):
         env = self.rig.env(runner or toolbox(self.rig), github=gh or FakeGitHub())
-        code = launch.prepare(self.rig.trial, self.rig.run(rid), env, {}, True, None)
+        code = launch.prepare(self.rig.trial, self.rig.run(rid), env, {}, True, None, accept_changed=accept_changed)
         return code, env.out.getvalue(), env
+
+    def test_queue_text_edited_since_t0_stops_before_the_clone_unless_the_change_is_accepted(self):
+        self.rig.cut('A-cd-r1')
+        self.rig.claude_settings()
+        edited = FakeGitHub(bodies={9001: 'edited since T0'})
+        runner = toolbox(self.rig)
+        code, out, _ = self.go(gh=edited, runner=runner)
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r'FAIL\s+queue text Q01 #9001')
+        self.assertEqual(runner.ran('git', 'clone'), [], 'the gate stopped it before the clone')
+        self.assertNotIn('LAUNCH CARD', out)
+        code, out, _ = self.go(gh=edited, accept_changed={'Q01': 'a typo fix'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('LAUNCH CARD A-cd-r1', out)
+        self.assertEqual([o['kind'] for o in self.rig.state('A-cd-r1')['overrides']], ['accept-changed'])
 
     def test_gate_clone_preflight_then_the_launch_card(self):
         self.rig.cut('A-cd-r1')
@@ -1619,6 +2301,16 @@ class Start(LaunchCase):
         code, out = self.go()
         self.assertEqual(code, 1)
         self.assertIn('ci.yml runs on the base UNVERIFIED', out)
+
+    def test_a_gate_that_saw_the_queue_text_change_does_not_let_a_run_start(self):
+        env = self.rig.env(github=FakeGitHub(bodies={9002: 'edited since T0'}))
+        self.assertEqual(launch.gate(self.rig.trial, self.rig.run('A-cd-r1'), env, {}, None), 1)
+        st = self.rig.state('A-cd-r1')
+        self.rig.save_state('A-cd-r1', gate=st['gate'], preflight=[dict(passing_preflight()[0], at='2026-11-02T12:30:00Z')])
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('queue text Q02 #9002 FAIL', out)
+        self.assertNotIn('start', self.rig.state('A-cd-r1'))
 
     def test_a_gate_recorded_at_another_t0_or_after_the_preflight_does_not_count(self):
         stale = dict(passing_gate(self.rig), t0='f' * 40)
