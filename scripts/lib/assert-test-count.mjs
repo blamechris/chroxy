@@ -28,7 +28,7 @@
  *   1. It runs the underlying test command (passed as argv), streaming all
  *      output through unchanged so coverage + TAP land on the terminal/CI log.
  *   2. From the aggregate TAP summary it reads `# tests N`, `# fail M` and
- *      `# cancelled C`.
+ *      `# cancelled C`; `--min-passed N` also reads `# pass P`.
  *   3. It exits non-zero if:
  *        - the summary is missing (the runner died before reporting), OR
  *        - the run was killed by a signal, OR
@@ -38,7 +38,9 @@
  *          can see them), OR
  *        - `N < EXPECTED_MIN_TESTS` (enough of the suite went missing to fall
  *          below the documented floor — a glob that stopped matching, a file
- *          that failed to load, a bad merge that deleted a directory).
+ *          that failed to load, a bad merge that deleted a directory), OR
+ *        - with `--min-passed`, fewer than that many cases actually passed
+ *          (skipped tests count in `# tests` but not `# pass`).
  *
  * The floor (--min for the non-server consumers, EXPECTED_MIN_TESTS below for
  * the server) is a *lower bound*, not the exact count. The floor sits
@@ -91,17 +93,23 @@ const HEADROOM_NUDGE = 600
 // silently-disabled floor) — unlike the env var, it is committed configuration,
 // not a one-off override, so a typo must break the build loudly.
 let argIdx = 2
-if (process.argv[argIdx] === '--min') {
+let minPassed = null
+while (process.argv[argIdx] === '--min' || process.argv[argIdx] === '--min-passed') {
+  const option = process.argv[argIdx]
   const parsed = Number(process.argv[argIdx + 1])
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    console.error(`[assert-test-count] invalid --min '${process.argv[argIdx + 1]}' (must be a positive integer).`)
+    console.error(`[assert-test-count] invalid ${option} '${process.argv[argIdx + 1]}' (must be a positive integer).`)
     process.exit(2)
   }
-  // Only a VALID env override outranks --min (validity tracked explicitly —
-  // comparing values would let --min beat a valid override that happens to
-  // equal the default). An invalid override already warned, and must fall
-  // back to the package's floor, not to 13500.
-  if (!envOverrideValid) EXPECTED_MIN_TESTS = parsed
+  if (option === '--min') {
+    // Only a VALID env override outranks --min (validity tracked explicitly —
+    // comparing values would let --min beat a valid override that happens to
+    // equal the default). An invalid override already warned, and must fall
+    // back to the package's floor, not to 13500.
+    if (!envOverrideValid) EXPECTED_MIN_TESTS = parsed
+  } else {
+    minPassed = parsed
+  }
   argIdx += 2
 }
 
@@ -109,7 +117,7 @@ const cmd = process.argv[argIdx]
 const args = process.argv.slice(argIdx + 1)
 
 if (!cmd) {
-  console.error('[assert-test-count] usage: assert-test-count.mjs [--min N] <cmd> [...args]')
+  console.error('[assert-test-count] usage: assert-test-count.mjs [--min N] [--min-passed N] <cmd> [...args]')
   process.exit(2)
 }
 
@@ -151,6 +159,7 @@ child.on('close', (code, signal) => {
   const total = lastNumber('tests')
   const failed = lastNumber('fail')
   const cancelled = lastNumber('cancelled')
+  const passed = minPassed === null ? null : lastNumber('pass')
 
   if (signal) {
     console.error(`\n[assert-test-count] FAIL: test process was killed by signal ${signal}.`)
@@ -207,6 +216,14 @@ child.on('close', (code, signal) => {
       '  the count is the only symptom, because the run still exited 0. If you\n' +
       '  intentionally removed tests below the floor, lower it: the --min N in your\n' +
       '  package.json test script, or (server) EXPECTED_MIN_TESTS in this script.',
+    )
+    return fail()
+  }
+
+  if (minPassed !== null && (passed === null || passed < minPassed)) {
+    console.error(
+      `\n[assert-test-count] FAIL: only ${passed ?? 'unknown'} tests passed, below the floor of ${minPassed}. ` +
+      'Skipped cases are not executed cases; a missing `# pass` summary is also a failure.',
     )
     return fail()
   }
