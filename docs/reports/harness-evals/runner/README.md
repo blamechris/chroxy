@@ -163,11 +163,16 @@ the end moves to now, and a `note:` says so and names the flag to pass. The re-r
 record it replaced under `finish.replaces`, a chain newest first as `start.replaces` is, so nothing an earlier
 `finish` saw is lost: a slot it found `changed` stays on record when the re-read finds the T0 text again (the edit
 was reverted), and `collect` names it. An earlier `unverified` is no evidence either way and is not named. A
-baseline detail (`queue-t0.json` missing, unreadable or taken at another T0) means the control clone no longer has
-the snapshot its gate read: put the committed file back (`git -C ~/trial/t2/control fetch`, then
-`git -C ~/trial/t2/control checkout origin/main -- docs/reports/harness-evals/trial-2/queue-t0.json`) and re-run as
-above. Never let a `cut` write a new snapshot instead: one taken after the run compares the end text with itself.
-A slot the snapshot has no entry for cannot be recovered and stays `unverified`.
+re-run starts its record afresh: a `finish.queue_cutoff` added by hand is not carried over, so add it again.
+
+A baseline detail (`queue-t0.json` missing, unreadable, not a snapshot or taken at another T0, or no T0 recorded)
+means the control clone no longer has the snapshot and the `t0` its gate read. Put the committed files back, then
+re-run as above: `git -C ~/trial/t2/control status` shows a local edit or deletion, which
+`git -C ~/trial/t2/control restore --source=HEAD --staged --worktree docs/reports/harness-evals/trial-2` undoes, and a
+clone behind `main` takes `git -C ~/trial/t2/control pull --ff-only`. Never let a `cut` write a new snapshot
+instead (`finish`'s detail for a missing file says so too): one taken after the run compares the end text with
+itself. A slot whose entry is missing, malformed or for another issue cannot be recovered and stays `unverified`,
+as does every slot when neither step brings the baseline back.
 
 ## Evidence
 

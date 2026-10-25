@@ -592,6 +592,7 @@ class GateQueueText(LaunchCase):
         code, out, gh = self.go()
         self.assertEqual(code, 1, out)
         self.assertRegex(out, r'FAIL\s+queue text at T0\s+queue-t0.json is missing')
+        self.assertIn('if T0 was recorded without it, run `cut` again', out, 'before a run, `cut` is the way to write it')
         self.assertNotRegex(out, r'queue text Q0')
         self.assertFalse([r for r in gh.requests if r[0].endswith('/comments')], 'no text was read without a baseline')
 
@@ -2371,12 +2372,15 @@ class Start(LaunchCase):
 
     def test_a_step_time_that_cannot_be_read_is_reported_not_taken_as_in_order(self):
         for gate_at, pre_at, session_at, said in (
-                ('2026-11-02T11:00:00Z', 'soon', None, "the latest preflight's time ('soon') cannot be read, so it cannot be placed after the gate"),
-                ('x', '2026-11-02T11:30:00Z', None, "the gate's time ('x') cannot be read, so the latest preflight cannot be placed after it"),
+                ('2026-11-02T11:00:00Z', 'soon', None, "the latest preflight's time ('soon') cannot be read, so it cannot be placed after the gate; "
+                                                       "run `trialctl preflight` again"),
+                ('x', '2026-11-02T11:30:00Z', None, "the gate's time ('x') cannot be read, so the latest preflight cannot be placed after it; "
+                                                    "run `trialctl gate`, then `trialctl preflight`, again"),
                 ('2026-11-02T11:00:00Z', '2026-11-02T11:30:00Z', '',
                  "the session-phase preflight's time ('') cannot be read, so it cannot be placed after the pre-send preflight"),
                 ('2026-11-02T11:00:00Z', '2026-11-02T25:00:00Z', '2026-11-02T11:40:00Z',
-                 "the pre-send preflight's time ('2026-11-02T25:00:00Z') cannot be read, so the session-phase preflight cannot be placed after it")):
+                 "the pre-send preflight's time ('2026-11-02T25:00:00Z') cannot be read, so the session-phase preflight cannot be placed after it; "
+                 "run `trialctl preflight`, then the session phase, again")):
             with self.subTest(gate=gate_at, preflight=pre_at, session=session_at):
                 code, out = self.order('B-cy-r1' if session_at is not None else 'A-cd-r1', gate_at, pre_at, session_at)
                 self.assertEqual(code, 1, out)
@@ -2926,6 +2930,18 @@ class Finish(LaunchCase):
         self.assertEqual((third['replaces'], third['replaces']['replaces']), (second, first))
         self.assertEqual(state.live_runs(self.rig.trial, home=self.rig.box.home), [])
 
+    def test_a_re_run_over_a_record_that_is_not_one_keeps_it_and_names_an_end_it_cannot_read(self):
+        for earlier, said in (('x', 'kept under finish.replaces\n'), (['x'], 'kept under finish.replaces\n'),
+                              ({'ended_at': 'garbage'}, "kept under finish.replaces; its ended_at ('garbage') cannot be read, so the new one "
+                                                        "(2026-11-02T12:00:00Z) cannot be checked against it\n")):
+            with self.subTest(earlier=earlier):
+                self.rig.save_state('A-cd-r1', start={'sent_at': 'x', 'claude_settings_sha256': None}, finish=earlier)
+                code, out = self.go()
+                self.assertEqual(code, 0, out)
+                self.assertIn('note: a finish is already recorded; this one replaces it, and the earlier record is ' + said, out)
+                self.assertNotIn('pass --ended-at', out, 'a value finish would refuse is no advice')
+                self.assertEqual(self.rig.state('A-cd-r1')['finish']['replaces'], earlier)
+
 
 # -- finish: the queue's text again ------------------------------------------------
 
@@ -3313,6 +3329,10 @@ class FinishQueueText(LaunchCase):
             self.assertEqual((row['since_t0'], row['since_gate']), ('unverified', 'unverified'))
             self.assertIn('queue-t0.json is missing', row['detail'])
             self.assertEqual(sorted(row), ['detail', 'issue', 'since_gate', 'since_t0'])
+            # The gate's advice (run `cut` again) would write the end text as the baseline and read every slot as unchanged.
+            self.assertIn('put the committed file back and run `finish` again', row['detail'])
+            self.assertIn('Do not run `cut` to write it now', row['detail'])
+            self.assertNotIn('run `cut` again', row['detail'])
         self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+queue-t0.json is missing')
         self.assertNotRegex(out, r'(PASS|FAIL)\s+queue text')
         self.assertEqual(gh.requests, [], 'no text was read without a baseline')

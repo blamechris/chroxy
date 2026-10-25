@@ -676,10 +676,11 @@ def _earlier_changes(trial, finish):
         rows = seen.get('slots') if isinstance(seen, dict) else None
         if not isinstance(rows, dict):
             continue
+        at = seen['at'] if isinstance(seen.get('at'), str) and seen['at'] else 'an unrecorded time'
         for slot in trial.slots:
             row = rows.get(slot.slot)
             if isinstance(row, dict) and row.get('since_gate') == queue_text.CHANGED:
-                notes.append(f'queue text {slot.slot}: an earlier finish (queue text read at {seen.get("at")}) found it changed since this '
+                notes.append(f'queue text {slot.slot}: an earlier finish (queue text read at {at}) found it changed since this '
                              f'run\'s gate ({row.get("detail", "no detail recorded")})')
     return notes
 

@@ -1007,17 +1007,18 @@ def _instant(value):
         return None
 
 
-def _out_of_order(step, entry, base, base_entry, again):
+def _out_of_order(step, entry, again, base, base_entry, base_again):
     """[] when recorded step `entry` ran at or after `base_entry`, else the one problem saying why it cannot be placed after it.
     The two `at` times are compared as moments, not as strings: `timeutil.iso` writes no fraction, or one of three or six
     digits, and `Z` sorts above `.`, so as text a preflight half a second after a whole-second gate is older than it (#8805).
-    A time that cannot be read places its step nowhere, which is not after the other."""
+    A time that cannot be read places its step nowhere, which is not after the other. `again` and `base_again` say what to run
+    when the step's own time, or the base's, is the one to record anew."""
     at, base_at = entry.get('at'), base_entry.get('at')
     mine, theirs = _instant(at), _instant(base_at)
     if mine is None:
         return [f'the {step}\'s time ({at!r}) cannot be read, so it cannot be placed after the {base}; {again}']
     if theirs is None:
-        return [f'the {base}\'s time ({base_at!r}) cannot be read, so the {step} cannot be placed after it; run the {base} again']
+        return [f'the {base}\'s time ({base_at!r}) cannot be read, so the {step} cannot be placed after it; {base_again}']
     if mine < theirs:
         return [f'the {step} is older than the {base}; {again}']
     return []
@@ -1046,7 +1047,8 @@ def _order_problems(trial, run, st):
         if bad:
             problems.append(f'the latest preflight ({pre.get("at")}) did not pass: {", ".join(bad)}')
         if gate:
-            problems.extend(_out_of_order('latest preflight', pre, 'gate', gate, 'run `trialctl preflight` again'))
+            problems.extend(_out_of_order('latest preflight', pre, 'run `trialctl preflight` again',
+                                          'gate', gate, 'run `trialctl gate`, then `trialctl preflight`, again'))
     if run.harness.chroxy:
         session = _latest_pre(st, 'session')
         if session is None:
@@ -1056,7 +1058,8 @@ def _order_problems(trial, run, st):
             if bad:
                 problems.append(f'the session-phase preflight ({session.get("at")}) did not pass: {", ".join(bad)}')
             if pre:
-                problems.extend(_out_of_order('session-phase preflight', session, 'pre-send preflight', pre, 'run it again'))
+                problems.extend(_out_of_order('session-phase preflight', session, 'run it again',
+                                              'pre-send preflight', pre, 'run `trialctl preflight`, then the session phase, again'))
     return problems
 
 
@@ -1290,8 +1293,12 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     previous = st.get('finish')
     if previous:
         was = previous.get('ended_at') if isinstance(previous, dict) else None
-        moved = (f'; ended_at moves from {was} to {ended} (pass --ended-at {was} to keep it)'
-                 if was and _instant(was) != _instant(ended) else '')
+        if was and _instant(was) is None:
+            moved = f'; its ended_at ({was!r}) cannot be read, so the new one ({ended}) cannot be checked against it'
+        elif was and _instant(was) != _instant(ended):
+            moved = f'; ended_at moves from {was} to {ended} (pass --ended-at {was} to keep it)'
+        else:
+            moved = ''
         env.print(f'note: a finish is already recorded; this one replaces it, and the earlier record is kept under finish.replaces{moved}')
     if not st.get('start'):
         env.print(f'warning: no start is recorded for {run.id}; recording the finish anyway')
