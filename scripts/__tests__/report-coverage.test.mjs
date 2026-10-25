@@ -84,8 +84,26 @@ for (const [name, mutate, message] of [
   ['absent JSON summary', (directory) => rmSync(resolve(directory, 'coverage-summary.json')), /missing expected report/],
   ['malformed JSON summary', (directory) => writeFileSync(resolve(directory, 'coverage-summary.json'), '{'), /malformed JSON/],
   ['zero source files', (directory) => writeFileSync(resolve(directory, 'coverage-summary.json'), JSON.stringify({ total: validSummary.total })), /zero instrumented source files/],
+  ['non-source entry', (directory) => {
+    const path = resolve(directory, 'coverage-summary.json')
+    const summary = JSON.parse(readFileSync(path, 'utf8'))
+    const source = Object.keys(summary).find((key) => key !== 'total')
+    writeFileSync(path, JSON.stringify({ total: summary.total, '/runner/packages/server/lib/example.mjs': summary[source] }))
+  }, /unexpected source for server/],
   ['malformed source entry', (directory) => writeFileSync(resolve(directory, 'coverage-summary.json'), JSON.stringify({ ...validSummary, [Object.keys(validSummary)[1]]: {} })), /invalid or zero lines for/],
   ['zero instrumented lines', (directory) => writeFileSync(resolve(directory, 'coverage-summary.json'), JSON.stringify({ ...validSummary, total: { ...validSummary.total, lines: { total: 0, covered: 0, pct: 100 } } })), /invalid or zero lines total/],
+  ['valid file metrics disagree with total', (directory) => {
+    const path = resolve(directory, 'coverage-summary.json')
+    const summary = JSON.parse(readFileSync(path, 'utf8'))
+    summary.total.lines = { ...summary.total.lines, total: 2, covered: 2, pct: 100 }
+    writeFileSync(path, JSON.stringify(summary))
+  }, /inconsistent lines source totals/],
+  ['inconsistent percentage', (directory) => {
+    const path = resolve(directory, 'coverage-summary.json')
+    const summary = JSON.parse(readFileSync(path, 'utf8'))
+    summary.total.branches.pct = 90
+    writeFileSync(path, JSON.stringify(summary))
+  }, /inconsistent branches total.*percentage/],
   ['absent LCOV', (directory) => rmSync(resolve(directory, 'lcov.info')), /missing expected report/],
   ['malformed LCOV', (directory) => writeFileSync(resolve(directory, 'lcov.info'), 'SF:src/example.mjs\nDA:1,1\n'), /malformed or empty LCOV/],
   ['LCOV source outside JSON', (directory) => writeFileSync(resolve(directory, 'lcov.info'), readFileSync(resolve(directory, 'lcov.info'), 'utf8').replace('SF:src/example.mjs', 'SF:src/unrelated.mjs')), /LCOV source mismatch/],
@@ -109,6 +127,18 @@ for (const [name, mutate, message] of [
     }
   })
 }
+
+test('unknown package fails before reading reports', () => {
+  const { root } = fixture()
+  try {
+    const result = run(root, 'protocol')
+    assert.equal(result.status, 1, `unknown package unexpectedly passed: ${result.stdout}`)
+    assert.ok(/unknown package protocol/.test(result.stderr), result.stderr)
+    assert.equal(result.signal, null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('summary source from another package fails despite matching metrics', () => {
   const { root, directory } = fixture()

@@ -1876,7 +1876,7 @@ jobs:
         run: node scripts/__tests__/assert-test-count.test.mjs
 
       - name: Run coverage report guard tests
-        run: node scripts/__tests__/report-coverage.test.mjs
+        run: node scripts/lib/assert-test-count.mjs --min 25 node scripts/__tests__/report-coverage.test.mjs
 
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of

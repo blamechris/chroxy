@@ -191,6 +191,9 @@ const EXCLUDED_HARNESSES = [
   // the real non-root suite count — #7986 review N7).
   'packages/desktop/scripts/__tests__/find-macho.test.mjs',
   'packages/store-core/scripts/__tests__/export-targets.test.mjs',
+  // node:test owns this suite's verdict. The named Scripts Tests job checks
+  // its TAP summary with assert-test-count.mjs (minimum 25 cases).
+  'scripts/__tests__/report-coverage.test.mjs',
 ]
 
 
