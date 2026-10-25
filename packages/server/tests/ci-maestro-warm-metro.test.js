@@ -11,7 +11,9 @@ async function withMetro(options, verify) {
   const server = createServer((req, res) => {
     requests.push({ url: req.url, accept: req.headers.accept, platform: req.headers['expo-platform'] })
     if (req.url === '/' && options.manifestRedirect) {
-      res.writeHead(302, { location: '/redirected-manifest' }).end()
+      res.writeHead(302, { location: '/redirected-manifest' })
+      if (options.manifestRedirectHang) res.write('redirect pending')
+      else res.end()
     } else if (req.url === '/' || req.url === '/redirected-manifest') {
       res.writeHead(options.manifestStatus || 200, {
         'content-type': options.manifestType || 'application/expo+json'
@@ -27,7 +29,9 @@ async function withMetro(options, verify) {
         }
       }))
     } else if (req.url?.startsWith('/custom-entry.bundle?') && options.bundleRedirect) {
-      res.writeHead(302, { location: '/redirected-bundle' }).end()
+      res.writeHead(302, { location: '/redirected-bundle' })
+      if (options.bundleRedirectHang) res.write('redirect pending')
+      else res.end()
     } else if (req.url?.startsWith('/custom-entry.bundle?') || req.url === '/redirected-bundle') {
       res.writeHead(options.bundleStatus || 200, {
         'content-type': options.bundleType || 'application/javascript',
@@ -57,7 +61,7 @@ async function withMetro(options, verify) {
   }
 }
 
-function run(origin, timeoutMs = 1000) {
+function run(origin, timeoutMs = 1000, watchdogMs = 8000) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [script, origin], {
       env: { ...process.env, MAESTRO_METRO_TIMEOUT_MS: String(timeoutMs) }
@@ -66,7 +70,7 @@ function run(origin, timeoutMs = 1000) {
     let stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
-    const watchdog = setTimeout(() => child.kill('SIGKILL'), 4000)
+    const watchdog = setTimeout(() => child.kill('SIGKILL'), watchdogMs)
     child.on('error', reject)
     child.on('close', (code, signal) => {
       clearTimeout(watchdog)
@@ -77,7 +81,10 @@ function run(origin, timeoutMs = 1000) {
 
 describe('Maestro iOS Metro warmup', () => {
   it('derives the real iOS launch asset and waits for the entire JavaScript body', async () => {
-    await withMetro({ delay: 60 }, async ({ origin, requests }) => {
+    await withMetro({
+      delay: 60, manifestType: 'application/expo+json; charset=utf-8',
+      bundleType: 'text/javascript; charset=utf-8'
+    }, async ({ origin, requests }) => {
       const started = Date.now()
       const result = await run(origin)
       assert.equal(result.code, 0, result.stderr)
@@ -104,6 +111,12 @@ describe('Maestro iOS Metro warmup', () => {
       assert.ok(result.stderr.includes('no JavaScript launch asset'))
       assert.equal(requests.length, 1)
     })
+    await withMetro({ manifestType: 'application/notexpo+json' }, async ({ origin, requests }) => {
+      const result = await run(origin)
+      assert.equal(result.code, 1)
+      assert.ok(result.stderr.includes('unexpected content type'))
+      assert.equal(requests.length, 1)
+    })
   })
 
   it('rejects off-origin or non-iOS launch assets without fetching them', async () => {
@@ -125,7 +138,8 @@ describe('Maestro iOS Metro warmup', () => {
 
   it('rejects non-JavaScript, empty, and failed bundle responses', async () => {
     for (const options of [
-      { bundleType: 'text/html' }, { empty: true }, { bundleStatus: 500 }, { truncate: true }
+      { bundleType: 'text/html' }, { bundleType: 'application/notjavascript' },
+      { empty: true }, { bundleStatus: 500 }, { truncate: true }
     ]) {
       await withMetro(options, async ({ origin }) => {
         const result = await run(origin)
@@ -148,6 +162,22 @@ describe('Maestro iOS Metro warmup', () => {
         '/', '/custom-entry.bundle?platform=ios&dev=true'
       ])
     })
+  })
+
+  it('exits promptly when rejected response bodies never finish', async () => {
+    for (const [options, expected] of [
+      [{ manifestType: 'text/plain', manifestHang: true }, 'manifest returned HTTP 200'],
+      [{ bundleType: 'text/plain', hang: true }, 'bundle returned HTTP 200'],
+      [{ manifestRedirect: true, manifestRedirectHang: true }, 'manifest returned HTTP 302'],
+      [{ bundleRedirect: true, bundleRedirectHang: true }, 'bundle returned HTTP 302']
+    ]) {
+      await withMetro(options, async ({ origin }) => {
+        const result = await run(origin, 200)
+        assert.equal(result.code, 1, `rejected response must exit without watchdog kill: ${expected}`)
+        assert.equal(result.signal, null)
+        assert.ok(result.stderr.includes(expected), result.stderr)
+      })
+    }
   })
 
   it('times out stalled manifest and bundle streams', async () => {

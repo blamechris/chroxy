@@ -71,6 +71,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(index('Install dependencies') < index('Build + install the dev client'))
     assert.ok(index('Start Metro (background)') < index('Warm the iOS Metro bundle'))
     assert.ok(index('Warm the iOS Metro bundle') < index('Run Maestro suite'))
+    assert.ok(steps[index('Start Metro (background)')].run.includes('npx expo start --localhost'), 'simulator and warmup must share the verified loopback Metro origin')
     assert.equal(steps[index('Warm the iOS Metro bundle')].run, 'node scripts/maestro-warm-metro.mjs')
     assert.ok(steps[index('Start Metro (background)')].run.includes('exit 1'), 'Metro listening failure must stop the job')
     assert.ok(index('Build + install the dev client') < index('Run Maestro suite'))

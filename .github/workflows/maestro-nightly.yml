@@ -76,7 +76,7 @@ jobs:
       - name: Start Metro (background)
         working-directory: packages/app
         run: |
-          npx expo start > "$RUNNER_TEMP/metro.log" 2>&1 &
+          npx expo start --localhost > "$RUNNER_TEMP/metro.log" 2>&1 &
           echo "METRO_PID=$!" >> "$GITHUB_ENV"
           # Wait for the bundler to answer before running flows.
           for i in $(seq 1 60); do

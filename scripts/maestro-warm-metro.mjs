@@ -13,6 +13,10 @@ function localOrigin(value) {
   return url
 }
 
+function mediaType(response) {
+  return response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+}
+
 async function warmMetro() {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) {
     throw new Error('MAESTRO_METRO_TIMEOUT_MS must be 1-600000 milliseconds')
@@ -29,7 +33,7 @@ async function warmMetro() {
       headers: { accept: 'application/expo+json', 'expo-platform': 'ios' },
       redirect: 'manual', signal: controller.signal
     })
-    if (!manifest.ok || !manifest.headers.get('content-type')?.includes('application/expo+json')) {
+    if (!manifest.ok || mediaType(manifest) !== 'application/expo+json') {
       throw new Error(`iOS Expo manifest returned HTTP ${manifest.status} or an unexpected content type`)
     }
     const data = await manifest.json()
@@ -43,7 +47,7 @@ async function warmMetro() {
       throw new Error('iOS Expo launch asset is not a same-origin iOS bundle')
     }
     const bundle = await fetch(bundleUrl, { redirect: 'manual', signal: controller.signal })
-    if (!bundle.ok || !bundle.headers.get('content-type')?.includes('javascript') || !bundle.body) {
+    if (!bundle.ok || !['application/javascript', 'text/javascript'].includes(mediaType(bundle)) || !bundle.body) {
       throw new Error(`iOS Metro bundle returned HTTP ${bundle.status} or non-JavaScript content`)
     }
     let bytes = 0
@@ -51,6 +55,9 @@ async function warmMetro() {
     if (bytes === 0) throw new Error('iOS Metro bundle response was empty')
     console.log(`iOS Metro bundle ready: ${bytes} bytes in ${Math.round((Date.now() - started) / 1000)}s`)
   } finally {
+    // A rejected response may have an unfinished body. Cancel its fetch before
+    // removing the deadline, or Node can stay alive after reporting the error.
+    controller.abort()
     clearTimeout(timeout)
     clearInterval(progress)
   }
