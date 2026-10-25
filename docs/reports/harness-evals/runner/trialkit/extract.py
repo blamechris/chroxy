@@ -15,6 +15,7 @@ and tool-call records) are noted where they are read.
 import hashlib
 import json
 import os
+import posixpath
 import re
 from collections import Counter
 from datetime import date
@@ -155,17 +156,35 @@ KEY_FILE = re.compile(r'(?<![\w.-])KEY\.md(?:\.enc)?(?![\w-])')
 NEXT_SEED = re.compile(r'(?<![\w.-])NEXT-[A-Za-z0-9][\w.\-]*\.md\b')
 CLAUDE_STORE = re.compile(r'\.claude/projects(?:/([^/\s\'"\\]+))?')
 CODEX_STORE = re.compile(r'\.codex/(?:archived_)?sessions\b')
+# The earlier trials' records: a path below a `harness-evals/` directory, or that directory itself written as
+# `reports/harness-evals` (a listing of it is a read). Only the part from `harness-evals` on is kept, so one file under
+# two clone prefixes is one match. The scan is of what a tool input spells, not of what the shell resolves:
+# `cat trial/queue.md` run from inside `docs/reports/harness-evals/` names no `harness-evals/` and is not seen by
+# itself (the `cd` that put the shell there is).
+_PATH_CHAR = r"[^\s'\"`;|&<>()=,:\\]"
+HARNESS_EVALS = re.compile(rf'(?<![\w.-])harness-evals/{_PATH_CHAR}*|(?<=reports/)harness-evals(?![\w./-])')
+
+
+def _evals_tail(text):
+    """`text` from its first `harness-evals` on, with `.`/`..` segments and any trailing `/` resolved and a trailing
+    full stop (the end of a sentence, not of a file name) dropped. None when it holds no `harness-evals`."""
+    at = text.find('harness-evals')
+    if at < 0:
+        return None
+    return posixpath.normpath(re.sub(r'(?<=\w)\.+$', '', text[at:]))
 
 
 class Isolation:
     """Scans tool inputs for the places a run must not look, keeping only a pattern name, a count and hashes.
 
     `own_base` is the run's own base branch; `key_folder` the sealed key's folder; `own_slugs` the names Claude
-    Code gives the run's clone under `~/.claude/projects/`."""
+    Code gives the run's clone under `~/.claude/projects/`; `own_paths` the repository paths below `harness-evals/`
+    the run is allowed to read (its mission, its report and the report's directory), each matched exactly."""
 
-    def __init__(self, own_base, key_folder=None, own_slugs=()):
+    def __init__(self, own_base, key_folder=None, own_slugs=(), own_paths=()):
         self.own_base = own_base
         self.own_slugs = tuple(own_slugs)
+        self.own_paths = frozenset(t for t in map(_evals_tail, own_paths) if t)
         name = os.path.basename((key_folder or '').rstrip('/'))
         self.key_name = re.compile(r'(?<![\w-])' + re.escape(name) + r'(?![\w-])') if name else None
         self.scanned = 0
@@ -173,7 +192,8 @@ class Isolation:
 
     @property
     def patterns(self):
-        names = ['other_trial_branch', 'key_file', 'next_seed', 'claude_projects_other', 'codex_sessions']
+        names = ['other_trial_branch', 'key_file', 'next_seed', 'claude_projects_other', 'codex_sessions',
+                 'harness_evals_other']
         if self.key_name:
             names.insert(1, 'key_folder')
         return names
@@ -216,6 +236,10 @@ class Isolation:
                 self._hit('claude_projects_other', match.group(0))
         for match in CODEX_STORE.finditer(text):
             self._hit('codex_sessions', match.group(0))
+        for match in HARNESS_EVALS.finditer(text):
+            path = _evals_tail(match.group(0))
+            if path not in self.own_paths:
+                self._hit('harness_evals_other', path)
 
     def report(self):
         hits = []

@@ -12,6 +12,10 @@ from trialkit import extract, native
 
 CLONE = '/Users/x/trial/t2/A-cd-r1'
 OWN_BASE = 'trial/t2-a-cd-r1'
+EVALS = 'docs/reports/harness-evals'
+OWN_MISSION = f'{EVALS}/trial-2/missions/A-cd-r1.md'
+OWN_REPORT = f'{EVALS}/trial-2/runs/A-cd-r1/REPORT.md'
+OWN_PATHS = (OWN_MISSION, OWN_REPORT, f'{EVALS}/trial-2/runs/A-cd-r1')
 SECRET = 'SECRET-SENTINEL-3f9a'  # message text, tool output and command lines must never reach an extract
 
 
@@ -71,7 +75,8 @@ class TempFiles(unittest.TestCase):
         return path
 
     def scanner(self):
-        return extract.Isolation(OWN_BASE, '~/Obsidian/no-it-all/reviews/harness-trial-2', native.slug_candidates(CLONE))
+        return extract.Isolation(OWN_BASE, '~/Obsidian/no-it-all/reviews/harness-trial-2', native.slug_candidates(CLONE),
+                                 own_paths=OWN_PATHS)
 
 
 class ClaudeRoles(unittest.TestCase):
@@ -219,6 +224,15 @@ class ClaudeIsolationScan(TempFiles):
             assistant('m1', use=usage(o=1), tools=[{'command': 'git log origin/trial/a1-cd'}, {'file_path': '/x/KEY.md.enc'}]))
         self.assertEqual(report['tool_inputs_scanned'], 2)
         self.assertEqual({h['pattern']: h['count'] for h in report['hits']}, {'other_trial_branch': 1, 'key_file': 1})
+
+    def test_a_read_under_harness_evals_is_counted_from_a_tool_input_and_the_runs_own_files_are_not(self):
+        report = self.scan(
+            user(f'please look at {EVALS}/trial/queue.md'),
+            assistant('m1', use=usage(o=1), tools=[{'file_path': f'/Users/x/trial/t2/A-cd-r1/{OWN_MISSION}'}, {'command': f'cat {OWN_REPORT}'},
+                                                  {'file_path': f'/Users/x/trial/t2/A-cd-r1/{EVALS}/trial/REPORT.md'},
+                                                  {'command': f'ls {EVALS}/trial-2/missions/'}]))
+        self.assertEqual({h['pattern']: h['count'] for h in report['hits']}, {'harness_evals_other': 2})
+        self.assertTrue('harness_evals_other' in report['patterns_checked'])
 
     def test_nested_input_values_are_reached(self):
         report = self.scan(assistant('m1', use=usage(o=1), tools=[{'edits': [{'old': 'x', 'new': 'cat NEXT-chroxy.md'}]}]))
@@ -475,7 +489,8 @@ class IsolationPatterns(unittest.TestCase):
 
     @staticmethod
     def fresh():
-        return extract.Isolation(OWN_BASE, '~/Obsidian/no-it-all/reviews/harness-trial-2', native.slug_candidates(CLONE))
+        return extract.Isolation(OWN_BASE, '~/Obsidian/no-it-all/reviews/harness-trial-2', native.slug_candidates(CLONE),
+                                 own_paths=OWN_PATHS)
 
     def hits(self, *texts):
         scanner = self.fresh()
@@ -495,8 +510,12 @@ class IsolationPatterns(unittest.TestCase):
         self.assertEqual(self.hits(f'git log {OWN_BASE}0'), {'other_trial_branch': 1})
 
     def test_repository_directories_named_trial_are_not_branches(self):
-        self.assertEqual(self.hits('cat docs/reports/harness-evals/trial/data/runs.json', 'ls trial/data', 'cat trial/scripts/measures.py',
+        # No `harness-evals/` in any of these: a path relative to a directory the command changed into is not seen
+        # (see `test_a_path_relative_to_a_directory_the_command_changed_into_is_not_seen`).
+        self.assertEqual(self.hits('ls trial/data', 'cat trial/scripts/measures.py',
                                    'less trial/README.md', 'cat trial/queue-candidates.md', 'python3 trial/scripts/run-all.py'), {})
+        # The same directory spelled from the repository root is no branch either, but it is a read of the records.
+        self.assertEqual(self.hits(f'cat {EVALS}/trial/data/runs.json'), {'harness_evals_other': 1})
         self.assertEqual(self.hits('ls some/dir/trial/a1-cd', 'cat ../trial/b1-cx/x', 'ls mytrial/a1-cd', 'ls -trial/a1-cd'), {})
 
     def test_the_key_folder_in_any_spelling(self):
@@ -523,6 +542,66 @@ class IsolationPatterns(unittest.TestCase):
     def test_the_codex_store(self):
         self.assertEqual(self.hits('ls ~/.codex/sessions', 'find ~/.codex/archived_sessions -name x', 'ls ~/.codex/prompts'),
                          {'codex_sessions': 2})
+
+    def test_another_path_under_harness_evals_is_a_hit_the_runs_own_mission_report_and_folder_are_not(self):
+        self.assertEqual(self.hits(f'cat {OWN_MISSION}', f'Read {OWN_REPORT}', f'ls {EVALS}/trial-2/runs/A-cd-r1',
+                                   f'ls {EVALS}/trial-2/runs/A-cd-r1/', f'git add -- {OWN_REPORT}', f'/Users/x/clone/{OWN_MISSION}',
+                                   OWN_REPORT.split('docs/reports/')[1], f'git show origin/main:{OWN_MISSION}'), {})
+        self.assertEqual(self.hits(f'cat {EVALS}/trial/queue.md'), {'harness_evals_other': 1})
+        self.assertEqual(self.hits(f'cat {EVALS}/trial/REPORT.md', f'cat {EVALS}/runner/README.md'), {'harness_evals_other': 2})
+
+    def test_another_runs_mission_or_report_is_a_hit(self):
+        self.assertEqual(self.hits(f'cat {EVALS}/trial-2/missions/B-cy-r1.md', f'cat {EVALS}/trial-2/runs/B-cy-r1/REPORT.md',
+                                   f'ls {EVALS}/trial-2/missions/', f'grep -r x {EVALS}/trial-2/missions/*.md'),
+                         {'harness_evals_other': 4})
+
+    def test_the_runs_own_paths_are_matched_whole_not_by_prefix(self):
+        self.assertEqual(self.hits(f'cat {EVALS}/trial-2/missions/A-cd-r10.md', f'cat {EVALS}/trial-2/missions/A-cd-r1.md.bak',
+                                   f'cat {EVALS}/trial-2/runs/A-cd-r1/NOTES.md', f'cat {EVALS}/trial-2/runs/A-cd-r10/REPORT.md',
+                                   f'ls {EVALS}/trial-2/runs', f'ls {EVALS}/trial-2'),
+                         {'harness_evals_other': 6})
+
+    def test_a_path_that_climbs_out_of_the_runs_own_folder_is_resolved_before_it_is_compared(self):
+        self.assertEqual(self.hits(f'cat {EVALS}/trial-2/runs/A-cd-r1/../../missions/B-cy-r1.md', f'ls {EVALS}/trial-2/runs/A-cd-r1/..'),
+                         {'harness_evals_other': 2})
+        self.assertEqual(self.hits(f'cat {EVALS}/trial-2/missions/../missions/A-cd-r1.md', f'cat {EVALS}/./trial-2/missions/A-cd-r1.md'), {})
+
+    def test_the_directory_itself_is_a_hit_with_or_without_a_trailing_slash(self):
+        self.assertEqual(self.hits('ls docs/reports/harness-evals', 'ls -la docs/reports/harness-evals/', 'find docs/reports/harness-evals -name x'),
+                         {'harness_evals_other': 3})
+
+    def test_a_path_is_taken_from_its_own_token_whatever_surrounds_it(self):
+        self.assertEqual(self.hits(f'cat "{EVALS}/trial/queue.md"', f"cat '{EVALS}/trial/queue.md'", f'cd /tmp; cat {EVALS}/trial/queue.md|head',
+                                   f'--path={EVALS}/trial/queue.md', f'git show origin/main:{EVALS}/trial/queue.md'),
+                         {'harness_evals_other': 5})
+        self.assertEqual(self.hits(f'see {OWN_REPORT}.', f'{OWN_MISSION},'), {})
+
+    def test_names_that_only_contain_the_directory_name_are_not_hits(self):
+        self.assertEqual(self.hits('ls docs/reports/harness-evals-old', 'cat my-harness-evals/x', 'git commit -m "fix(harness-evals): x"',
+                                   'echo harness-evals', 'cat docs/reports/harness-evalsx/y'), {})
+
+    def test_a_path_relative_to_a_directory_the_command_changed_into_is_not_seen(self):
+        # Known limit, pinned so nobody reads the scan as stronger than it is: it counts what a tool input spells,
+        # not what the shell resolves. After a `cd` into the directory, what follows is bare (the `cd` itself is a hit).
+        self.assertEqual(self.hits('cat trial/queue.md', 'cat ../trial/REPORT.md', 'cd trial && cat REPORT.md'), {})
+        self.assertEqual(self.hits('cd docs/reports/harness-evals'), {'harness_evals_other': 1})
+
+    def test_the_hit_is_hashed_from_harness_evals_on_so_a_clone_prefix_does_not_change_it(self):
+        self.s.scan(f'cat /Users/x/one/{EVALS}/trial/queue.md')
+        self.s.scan(f'cat /Users/y/two/{EVALS}/trial/queue.md')
+        hit = next(h for h in self.s.report()['hits'] if h['pattern'] == 'harness_evals_other')
+        self.assertEqual((hit['count'], hit['distinct']), (2, 1))
+        self.assertEqual(hit['sha256'], [extract.sha256_text('harness-evals/trial/queue.md')])
+        self.assertFalse('queue.md' in json.dumps(self.s.report()))
+
+    def test_without_own_paths_the_runs_own_mission_is_a_hit(self):
+        s = extract.Isolation(OWN_BASE, None, ())
+        s.scan(f'cat {OWN_MISSION}')
+        self.assertEqual([h['pattern'] for h in s.report()['hits']], ['harness_evals_other'])
+
+    def test_the_pattern_is_listed_among_those_checked(self):
+        self.assertTrue('harness_evals_other' in self.s.patterns)
+        self.assertTrue('harness_evals_other' in self.s.report()['patterns_checked'])
 
     def test_the_report_holds_a_hash_and_never_the_string(self):
         for text in ('git log trial/a1-cd', 'git log trial/a1-cd', 'cat NEXT-chroxy.md'):
