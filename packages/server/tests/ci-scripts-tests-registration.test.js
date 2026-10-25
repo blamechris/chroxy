@@ -230,28 +230,32 @@ const GLOB_COVERED = [
     tree: 'packages/store-core/',
     pkg: 'packages/store-core/package.json',
     test: 'vitest run',
-    // The config the `why` below makes a claim about, and the keys that would
-    // falsify it. `vitest run` names the runner; `vitest.config.ts` decides what
-    // it discovers, and until #7640 nothing here read it.
-    //
-    // NOT line-anchored. The first version of this regex required the key to
-    // begin a line (`/^\s*(include|...)\s*:/m`), so the identical config written
-    // compactly — `test: { include: ['src/**\/*.test.ts'], testTimeout: 30_000 }` —
-    // was invisible to it: the exact edit the check exists to catch, passing in
-    // one spelling and failing in another. Two spellings of identical config
-    // must not disagree, which is the lesson this repo's shared workflow-reader
-    // was built around. A key is now matched wherever it sits, quoted or not,
-    // and both spellings are pinned by cases below.
+    // `vitest run` names the runner; this config decides what it discovers.
+    // Check Vitest's own file list, so nested coverage include/exclude settings
+    // cannot be mistaken for narrowing test discovery.
     config: 'packages/store-core/vitest.config.ts',
-    narrowsDiscovery: /(^|[{,\s])['"]?(include|exclude|dir|root|projects|workspace)['"]?\s*:/,
+    witness: 'scripts/__tests__/export-targets.test.mjs',
     covers: /\.test\.(mjs|cjs|js)$/,
     why:
       "vitest's defaultInclude is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which matches .mjs and is " +
-      'not confined to src/; packages/store-core/vitest.config.ts sets only timeouts and workers ' +
-      'and says so. Measured: `npx vitest list --filesOnly` in packages/store-core lists ' +
-      'scripts/__tests__/export-targets.test.mjs.',
+      'not confined to src/; native `vitest list --filesOnly` in packages/store-core must list ' +
+      'scripts/__tests__/export-targets.test.mjs even with coverage reporter settings.',
   },
 ]
+
+function assertVitestDiscovers(entry, configPath) {
+  const root = join(REPO_ROOT, entry.tree)
+  const cli = join(REPO_ROOT, 'node_modules/vitest/vitest.mjs')
+  const result = spawnSync(process.execPath, [cli, 'list', '--filesOnly', '--config', configPath], {
+    cwd: root, encoding: 'utf8', timeout: 30_000,
+  })
+  assert.equal(result.signal, null, `Vitest discovery timed out or was killed: ${result.stderr}`)
+  assert.equal(result.status, 0, `Vitest discovery failed: ${result.stderr || result.error?.message}`)
+  const files = result.stdout.replaceAll('\\', '/').split(/\r?\n/).map(line => line.trim())
+  assert.ok(files.includes(entry.witness),
+    `${entry.config} no longer discovers ${entry.witness}. ${entry.why}\n` +
+      'Re-measure the runner after any test discovery change; do not exempt an undiscovered suite.')
+}
 
 /**
  * The files that LOOK like a suite of the kinds this guard covers, before any
@@ -765,37 +769,11 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
       )
     })
 
-    it(`${entry.tree}'s runner config still declares no discovery narrowing`, async () => {
-      // The exemption's `why` is a claim about DISCOVERY — vitest's
-      // defaultInclude reaches .mjs and is not confined to src/, and the config
-      // "sets only timeouts and workers and says so". The first half is a
-      // property of vitest; the second is a property of a file in this repo,
-      // and nothing asserted it. Adding
-      //
-      //     test: { include: ['src/**/*.test.ts'], testTimeout: 30_000, ... }
-      //
-      // — a routine "stop vitest wandering outside src" edit — leaves every
-      // other check in this block green (the `test` script is unchanged, `pkg`
-      // is unchanged, `covers` is unchanged, a covered .mjs is still present)
-      // while making the exemption FALSE. And
-      // packages/store-core/scripts/__tests__/export-targets.test.mjs is named
-      // by NO workflow step (verified), so it would then be discovered by
-      // nothing and enumerated by nothing: #7504 reproduced through the very
-      // block written to prevent it.
-      //
-      // A text check, deliberately: evaluating a TypeScript config to ask what
-      // it declares needs the config's own toolchain, and the direction this
-      // fails in is the safe one — a config that gains a discovery key fails
-      // the guard loudly and the answer is to re-measure, not to widen the
-      // regex. Collapsed to a boolean before asserting so a failure does not
-      // carry the whole file as the error payload (#7340).
-      const text = await readFile(new URL(`../../../${entry.config}`, import.meta.url), 'utf8')
-      assert.ok(
-        !entry.narrowsDiscovery.test(text),
-        `${entry.config} now declares a discovery key (include/exclude/dir/root). This exemption ` +
-          `rests on: ${entry.why}\nRe-measure which files that runner discovers and update or ` +
-          'delete the entry — do not delete this assertion to make it pass.'
-      )
+    it(`${entry.tree}'s runner still discovers its exempted suite`, () => {
+      // Test discovery, not the spelling of its config, is the exemption's
+      // premise. This catches include/exclude/dir/root narrowing while letting
+      // coverage.include and coverage.exclude select instrumented sources.
+      assertVitestDiscovers(entry, join(REPO_ROOT, entry.config))
     })
 
     it(`${entry.tree} still holds a *.test.mjs the exemption is doing work for`, () => {
@@ -1839,42 +1817,39 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
   })
 
   describe('the GLOB_COVERED exemption checks are not vacuous', () => {
-    // Each check above passes against the real tree, and a check that reported
-    // nothing would pass identically. These are the controls.
+    // Exercise the same native discovery check on configurations that do and
+    // do not remove the witness suite. A command that merely exits 0, or a
+    // check that denies every config, fails these controls.
     for (const entry of GLOB_COVERED) {
-      it(`${entry.tree}: narrowsDiscovery REPORTS a config that declares include:`, () => {
-        assert.ok(
-          entry.narrowsDiscovery.test("export default defineConfig({\n  test: {\n    include: ['src/**/*.test.ts'],\n  },\n})\n"),
-          'the discovery-key regex must match a config that narrows discovery, or the check above ' +
-            'is satisfied by a pattern matching nothing (#7503: a filter whose terms match nothing ' +
-            'is a gate satisfied by zero rows)'
-        )
+      const withConfig = (source, check) => {
+        const directory = mkdtempSync(join(tmpdir(), 'chroxy-vitest-discovery-'))
+        const config = join(directory, 'vitest.config.mjs')
+        try {
+          writeFileSync(config, `export default { test: ${source} }\n`)
+          check(config)
+        } finally {
+          rmSync(directory, { recursive: true, force: true })
+        }
+      }
+
+      it(`${entry.tree}: nested coverage include/exclude preserve the exempted suite`, () => {
+        withConfig("{ coverage: { include: ['src/**/*.ts'], exclude: ['src/**/*.test.ts'] } }",
+          config => assertVitestDiscovers(entry, config))
       })
 
-      it(`${entry.tree}: narrowsDiscovery REPORTS the same narrowing on ONE LINE`, () => {
-        // The spelling the line-anchored first version missed entirely. Two
-        // spellings of identical config must not disagree — that is the lesson
-        // the shared workflow-reader was built around, and this check had the
-        // same split until #7650's review measured it.
-        assert.ok(
-          entry.narrowsDiscovery.test("export default defineConfig({ test: { include: ['src/**/*.test.ts'], testTimeout: 30_000 } })\n"),
-          'a one-line config that narrows discovery must be reported'
-        )
-      })
-
-      it(`${entry.tree}: narrowsDiscovery REPORTS a QUOTED key and the project-level spellings`, () => {
-        assert.ok(entry.narrowsDiscovery.test('{ test: { "include": [\'a\'] } }'), 'a quoted key must be reported')
-        assert.ok(entry.narrowsDiscovery.test('{ test: { projects: [\'p\'] } }'), 'projects narrows discovery')
-        assert.ok(entry.narrowsDiscovery.test('{ test: { workspace: \'w\' } }'), 'workspace narrows discovery')
-      })
-
-      it(`${entry.tree}: narrowsDiscovery does NOT report the timeouts-only shape`, () => {
-        assert.ok(
-          !entry.narrowsDiscovery.test("export default defineConfig({\n  test: {\n    testTimeout: 30_000,\n    maxWorkers: '50%',\n  },\n})\n"),
-          'the regex must not fire on a config that only bounds the clock — a check that reports ' +
-            'everything passes its negative cases for the wrong reason (#7273)'
-        )
-      })
+      for (const [key, value] of [
+        ['include', "['src/**/*.test.ts']"],
+        ['exclude', "['**/*.test.mjs']"],
+        ['dir', "'src'"],
+        ['root', "'src'"],
+      ]) {
+        it(`${entry.tree}: test.${key} narrowing removes the exempted suite`, () => {
+          withConfig(`{ ${key}: ${value} }`, config => {
+            assert.throws(() => assertVitestDiscovers(entry, config),
+              new RegExp(`no longer discovers ${entry.witness.replaceAll('.', '\\.')}`))
+          })
+        })
+      }
 
       it(`${entry.tree}: covers REPORTS the extension it exempts, and refuses shell`, () => {
         assert.ok(entry.covers.test(`${entry.tree}scripts/__tests__/x.test.mjs`))
