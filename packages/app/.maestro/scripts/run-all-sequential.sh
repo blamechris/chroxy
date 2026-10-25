@@ -38,6 +38,7 @@
 #   MAX_RETRIES      per-flow retry count on failure (default: 1)
 #   FLOW_TIMEOUT     per-flow timeout in seconds (default: 300)
 #   MAX_FAILURES     stop after N failed flows (default: 0, run every flow)
+#   MAESTRO_ARTIFACT_DIR  optional current-run diagnostics under RUNNER_TEMP
 #   MOCK_PORT        mock-server port (default: 9876)
 #   JAVA_HOME        validated; falls back to the Homebrew openjdk@21 symlink
 
@@ -54,6 +55,7 @@ FLOW_TIMEOUT="${FLOW_TIMEOUT:-300}"
 MAX_FAILURES="${MAX_FAILURES:-0}"
 ONLY_FLOW=""
 RESET_ON_FAIL=1
+MAESTRO_ARTIFACT_DIR="${MAESTRO_ARTIFACT_DIR:-}"
 
 need_val() { [ $# -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
@@ -73,6 +75,13 @@ done
 case "$MAX_RETRIES" in (*[!0-9]*|'') echo "ERROR: --retries must be a non-negative integer" >&2; exit 2 ;; esac
 case "$FLOW_TIMEOUT" in (*[!0-9]*|'') echo "ERROR: --timeout must be a positive integer (seconds)" >&2; exit 2 ;; esac
 case "$MAX_FAILURES" in (*[!0-9]*|'') echo "ERROR: --max-failures must be a non-negative integer" >&2; exit 2 ;; esac
+if [ -n "$MAESTRO_ARTIFACT_DIR" ]; then
+  if [ -z "${RUNNER_TEMP:-}" ] || [[ "$RUNNER_TEMP" != /* ]] || \
+    [ "$MAESTRO_ARTIFACT_DIR" != "${RUNNER_TEMP%/}/maestro-diagnostics" ]; then
+    echo "ERROR: MAESTRO_ARTIFACT_DIR must be this run's RUNNER_TEMP/maestro-diagnostics" >&2
+    exit 2
+  fi
+fi
 
 # maestro needs Java. A JAVA_HOME inherited from the user's profile is often a
 # pinned Cellar version path (e.g. openjdk@21/21.0.9) that goes stale on the next
@@ -256,8 +265,17 @@ for flow in "${FLOWS[@]}"; do
     fi
     # Each invocation is its own JVM + XCUITest session, time-bounded so a wedged
     # driver can't hang the whole run.
+    MAESTRO_OUTPUT_ARGS=()
+    if [ -n "$MAESTRO_ARTIFACT_DIR" ]; then
+      # Use numbered per-attempt directories so a retry cannot overwrite the
+      # first failure's screenshot or hierarchy. Both Maestro output streams
+      # go here directly; nothing is copied from ~/.maestro/tests.
+      artifact_path="$MAESTRO_ARTIFACT_DIR/flow-$((${#PASSED[@]} + ${#FAILED[@]} + 1))-attempt-$attempt"
+      mkdir -p "$artifact_path"
+      MAESTRO_OUTPUT_ARGS=("--test-output-dir=$artifact_path" "--debug-output=$artifact_path")
+    fi
     rc=0
-    run_with_timeout "$FLOW_TIMEOUT" maestro test --device "$DEVICE" "$flow_path" || rc=$?
+    run_with_timeout "$FLOW_TIMEOUT" maestro test --device "$DEVICE" "${MAESTRO_OUTPUT_ARGS[@]+"${MAESTRO_OUTPUT_ARGS[@]}"}" "$flow_path" || rc=$?
     if [ "$rc" -eq 0 ]; then
       ok=1
       break

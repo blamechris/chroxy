@@ -81,6 +81,21 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow connect-screen.yaml'))
   })
 
+  it('uploads only this run\'s bounded diagnostics on failure or cancellation', () => {
+    const steps = workflow.jobs.maestro.steps
+    const run = steps.find(step => step.name === 'Run Maestro suite')
+    const upload = steps.find(step => step.name === 'Upload this run\'s Maestro diagnostics')
+    assert.equal(run.env.MAESTRO_ARTIFACT_DIR, '${{ runner.temp }}/maestro-diagnostics')
+    assert.equal(upload.if, 'failure() || cancelled()')
+    assert.equal(upload.with.name, 'maestro-diagnostics')
+    assert.equal(upload.with.path.trim(), [
+      '${{ runner.temp }}/maestro-diagnostics/',
+      '${{ runner.temp }}/metro.log'
+    ].join('\n'))
+    assert.equal(upload.with['retention-days'], 7)
+    assert.equal(upload.with['if-no-files-found'], 'warn')
+  })
+
   it('opens the same Metro dev-client link in connect and session setup', () => {
     const flow = name => yaml.loadAll(readFileSync(join(root, `packages/app/.maestro/setup/${name}.yaml`), 'utf8'))[1]
     const connect = flow('ensure-connect-screen')
@@ -103,6 +118,32 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       assert.equal(invalid.status, 2)
       assert.ok(invalid.stderr.includes('--flow must name a flow in run-all.yaml'))
       assert.equal(existsSync(f.trace), false, 'invalid flow must not start Maestro')
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('routes both Maestro output streams into a distinct current-run attempt', () => {
+    const f = runnerFixture()
+    try {
+      const runnerTemp = join(f.dir, 'runner-temp')
+      const output = join(runnerTemp, 'maestro-diagnostics')
+      const result = f.run(['--flow', 'connect-screen.yaml'], {
+        RUNNER_TEMP: runnerTemp, MAESTRO_ARTIFACT_DIR: output
+      })
+      assert.equal(result.status, 0, result.stderr)
+      const attempt = join(output, 'flow-1-attempt-1')
+      assert.equal(existsSync(attempt), true)
+      const call = readFileSync(f.trace, 'utf8')
+      assert.ok(call.includes(`--test-output-dir=${attempt}`))
+      assert.ok(call.includes(`--debug-output=${attempt}`))
+      assert.equal(call.trim().split('\n').length, 1)
+
+      rmSync(f.trace)
+      const broad = f.run(['--flow', 'connect-screen.yaml'], {
+        RUNNER_TEMP: runnerTemp, MAESTRO_ARTIFACT_DIR: join(f.dir, '.maestro/tests')
+      })
+      assert.equal(broad.status, 2)
+      assert.ok(broad.stderr.includes('must be this run\'s RUNNER_TEMP/maestro-diagnostics'))
+      assert.equal(existsSync(f.trace), false, 'broad path must not start Maestro')
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 

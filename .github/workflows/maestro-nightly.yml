@@ -95,6 +95,7 @@ jobs:
       - name: Run Maestro suite
         env:
           MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
+          MAESTRO_ARTIFACT_DIR: ${{ runner.temp }}/maestro-diagnostics
         run: |
           case "$MAESTRO_FLOW" in
             all)
@@ -110,10 +111,13 @@ jobs:
         if: always()
         run: kill "${METRO_PID}" 2>/dev/null || true
 
-      - name: Upload screenshots on failure
-        if: failure()
+      - name: Upload this run's Maestro diagnostics
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maestro-screenshots
-          path: packages/app/*.png
+          name: maestro-diagnostics
+          path: |
+            ${{ runner.temp }}/maestro-diagnostics/
+            ${{ runner.temp }}/metro.log
           retention-days: 7
+          if-no-files-found: warn
