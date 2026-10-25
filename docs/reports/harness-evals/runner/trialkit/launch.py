@@ -149,7 +149,7 @@ def _starts(trial, env, run=None, st=None, state_file=None):
     own, named as that file."""
     root, where = trial.local_path('state_dir', env.home), _state_dir(trial, env)
     if not root:
-        return None, ('paths.state_dir is not set in trial.json', 'set it')
+        return None, ('paths.state_dir is not set in trial.json', 'set paths.state_dir in trial.json')
     try:
         found = state.started(trial, home=env.home)
     except (OSError, ValueError) as exc:
@@ -1294,21 +1294,20 @@ def _first_send(st):
 def _acceptances_ignored(st):
     """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
     when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
-    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. When it
-    is the send's, the snapshot cannot be placed before it either (#8812), so no slot is compared and the sentence says no more
-    than that the acceptances are not used."""
+    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. The
+    sentence says only that the acceptances are not used. What is compared instead is said once `finish` knows whether the T0
+    snapshot could be used (a send that cannot be read, or a snapshot read after one, leaves it unplaced, #8812) (#8817)."""
     if not (st.get('start') and st.get('gate')):
         return None
     gate = st['gate'] if isinstance(st['gate'], dict) else {}
     at, sent = gate.get('at'), _first_send(st)
     gate_time, sent_time = timeutil.instant(at), timeutil.instant(sent)
     if gate_time is None or sent_time is None:
-        compared = '' if sent_time is None else ' and the queue text is compared with T0 only'
         return (f'the recorded gate\'s time ({at!r}) or the first send\'s ({sent!r}) cannot be read, so the gate cannot be placed before '
-                f'the send; its acceptances are not used{compared}')
+                f'the send; its acceptances are not used')
     if gate_time > sent_time:
         return (f'the recorded gate ({at}) is later than the first send ({sent}), so the text it let through or accepted '
-                f'is not the text the run started on; the queue text is compared with T0 only')
+                f'is not the text the run started on; its acceptances are not used')
     return None
 
 
@@ -1362,8 +1361,12 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     accepted, ignored = gate_record.get('accepted_changed'), _acceptances_ignored(st)
     if ignored:
         accepted = None
+    results, slots, compared = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file),
+                                                        ignored)
+    if ignored:
+        ignored += (' and the queue text is compared with T0 only' if compared
+                    else ', and no slot is compared: the T0 snapshot cannot be used either (each slot\'s detail says why)')
         env.print(f'note: {ignored}')
-    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:
         record['queue_text']['acceptances_ignored'] = ignored

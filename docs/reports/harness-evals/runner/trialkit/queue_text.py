@@ -121,9 +121,21 @@ def started_clause(starts):
     return f'{", ".join(names)} {"has" if len(names) == 1 else "have"} started, by {" and ".join(places)}'
 
 
+def _state_repair(starts):
+    """The repair to make before trying again, for a message built on `started_clause`: the remedy `starts` gives when the run
+    states cannot be read (no paths.state_dir to look in, or a state there that cannot be read), else WRONG_STATE (a start named
+    there may be a dry run's)."""
+    why = starts[1]
+    return f'{why[1]} first' if why else WRONG_STATE
+
+
 def _unique(values, key=lambda value: value):
-    """The values once each, in first-seen order; `key` says which are the same (for values that cannot be hashed)."""
-    return list({key(value): value for value in values}.values())
+    """The values once each, in first-seen order; `key` says which are the same (for values that cannot be hashed). The first
+    value seen for a key is the one kept."""
+    kept = {}
+    for value in values:
+        kept.setdefault(key(value), value)
+    return list(kept.values())
 
 
 def plan(trial, gh, t0, now, starts=None):
@@ -143,7 +155,7 @@ def plan(trial, gh, t0, now, starts=None):
     started = started_clause(starts) if starts is not None else None
     if started:
         raise QueueTextError(f'{FILE} is missing and {started}: it is not taken now, because {LATE}. Put the committed file back, then cut '
-                             f'again ({WRONG_STATE})')
+                             f'again ({_state_repair(starts)})')
     return snapshot(trial, gh, t0, now)
 
 
@@ -283,8 +295,8 @@ def _baseline(trial, starts, after_run=False):
                                                f'now: a snapshot taken after the run compares the end text with itself')
     if status == 'missing' and started:
         return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir} and {started}: put the committed file back (pull the '
-                                               f'commit that added it with trial.json\'s t0, or restore it) and run the gate again ({WRONG_STATE}). '
-                                               f'Do not run `cut` to write it now: {LATE}')
+                                               f'commit that added it with trial.json\'s t0, or restore it) and run the gate again '
+                                               f'({_state_repair(starts)}). Do not run `cut` to write it now: {LATE}')
     if status == 'missing':
         return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir}: `cut` writes it with T0 and the supervisor commits it '
                                                f'with trial.json\'s t0. Pull that commit, or, if T0 was recorded without it, run `cut` again '
@@ -375,20 +387,21 @@ def _end_check(slot, entry, accepted, gh, taken, ignored):
 
 
 def finish_checks(trial, gh, accepted, starts, ignored=None):
-    """(checks, {slot: record}) for the queue text as `finish` reads it, to be compared with T0 and with what the run's gate
-    let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not judged
-    here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read after
-    a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
-    `ignored`, when given, is the sentence saying why `accepted` was not passed on, and changes what a changed slot's detail
-    says."""
+    """(checks, {slot: record}, compared) for the queue text as `finish` reads it, to be compared with T0 and with what the
+    run's gate let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not
+    judged here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read
+    after a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
+    `compared` is True when the T0 snapshot was usable as the baseline (each slot then compared, or unverified on its own
+    read) and False when it was not, or there are no slots: nothing was compared. `ignored`, when given, is the sentence saying
+    why `accepted` was not passed on, and changes what a changed slot's detail says."""
     if not trial.slots:
-        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
+        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}, False
     data, taken, problem = _baseline(trial, starts, after_run=True)
     if problem:
-        return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}
+        return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}, False
     accepted = accepted if isinstance(accepted, dict) else {}
     results, slots = [], {}
     for slot in trial.slots:
         check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken, ignored)
         results.append(check)
-    return results, slots
+    return results, slots, True
