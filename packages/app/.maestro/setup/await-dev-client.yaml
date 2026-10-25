@@ -19,13 +19,13 @@ name: Wait for Chroxy dev client
       - tapOn:
           text: "^Open$"
 
-# After accepting the native prompt, the bundle and Expo sheet may still load.
-# Apply the same readiness allowance to the actual app or dev menu before any
-# introduction/menu taps.
+# Hosted cold dispatch took 93 seconds after Open before Chroxy started;
+# bundle loading and the Expo sheet still follow. Give actual app/dev-menu
+# readiness its own bounded allowance before any introduction/menu taps.
 - extendedWaitUntil:
     visible:
       text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
-    timeout: 90000
+    timeout: 180000
 
 - runFlow:
     when:

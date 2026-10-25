@@ -403,6 +403,33 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       step.runFlow?.when?.visible?.text !== '^Continue$'), lateIntro, 'chat'), /readiness timed out/)
   })
 
+  it('allows delayed native launch after confirmation within a separate bounded readiness window', () => {
+    const commands = flow('setup/await-dev-client.yaml')
+    // Hosted iOS dispatch took 93 seconds after Open, before Chroxy started.
+    // These independent millisecond timelines include dispatch plus bundle load.
+    for (const destination of ['connect', 'chat']) {
+      const delayedLaunch = [
+        { at: 0, state: 'promptCurly' },
+        { at: 93000, state: 'downloading' },
+        { at: 135000, state: 'intro' }
+      ]
+      assert.equal(simulateDevClient(commands, delayedLaunch, destination), destination)
+    }
+    assert.throws(() => simulateDevClient(commands, [
+      { at: 0, state: 'promptCurly' }
+    ], 'connect'), /readiness timed out/)
+    assert.throws(() => simulateDevClient(commands, [
+      { at: 0, state: 'promptCurly' },
+      { at: 180001, state: 'intro' }
+    ], 'chat'), /readiness timed out/)
+    // Initial link-confirmation readiness retains its shorter 90-second bound.
+    assert.throws(() => simulateDevClient(commands, [
+      { at: 0, state: 'loading' },
+      { at: 90001, state: 'promptStraight' },
+      { at: 135000, state: 'intro' }
+    ], 'chat'), /readiness timed out/)
+  })
+
   shellIt('runs only an inventoried diagnostic flow and rejects path aliases', () => {
     const f = runnerFixture()
     try {
