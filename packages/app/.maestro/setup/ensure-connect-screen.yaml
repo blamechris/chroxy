@@ -10,43 +10,18 @@ name: Ensure ConnectScreen
 #
 # The app now requires a dev build (expo-speech-recognition + expo-secure-store
 # native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
-# rather than Expo Go. The dev client auto-connects to the Metro bundler it was
-# last launched against; launchApp brings it up.
+# rather than Expo Go. On a fresh hosted runner there is no remembered Metro
+# server. Stop the app without clearing saved connection state, preserve
+# launchApp's default allow-all permissions, then open the Metro launcher URL
+# once. launchApp followed by openLink can trigger a second bundle load after
+# readiness passes.
 
-- launchApp
-
-# Wait for the app (or the Expo dev-client menu) to appear. Could show any of:
-# - "Welcome to Chroxy" (first-run onboarding carousel)
-# - "Connect to Chroxy" (ConnectScreen, possibly behind the dev menu)
-# - "Session" (auto-connected from saved state)
-# - "Connecting" (auto-connect spinner)
-# - "Reload" (the Expo dev-client menu card)
-- extendedWaitUntil:
-    visible:
-      text: ".*(Welcome to Chroxy|Session|Connect to Chroxy|Connecting|Reload).*"
-    timeout: 20000
-
-# Dismiss the Expo dev-client menu ONLY if it actually appeared (its card shows
-# "Reload"). A blind point-tap when no menu is present lands on the app
-# underneath and can navigate into the QR scanner — so gate it on "Reload".
-- runFlow:
-    when:
-      visible:
-        text: "^Reload$"
-    commands:
-      - tapOn:
-          point: "93%,43%"
-      - waitForAnimationToEnd
-
-# Skip the first-run onboarding carousel if present (Welcome to Chroxy → Skip).
-- runFlow:
-    when:
-      visible:
-        text: "^Skip$"
-    commands:
-      - tapOn:
-          text: "^Skip$"
-      - waitForAnimationToEnd
+- stopApp
+- setPermissions:
+    permissions:
+      all: allow
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+- runFlow: await-dev-client.yaml
 
 # If on SessionScreen (auto-connected from saved state — possibly wedged on
 # the reconnect banner, or live-connected to the mock server), tap the

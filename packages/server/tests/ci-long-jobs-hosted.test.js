@@ -31,7 +31,7 @@ const LONG_JOBS = ['server-tests', 'dashboard-tests', 'scripts-tests']
 // label fails (it may be a billed larger runner), and a listed label that no
 // workflow uses fails (a stale entry would silently pre-approve it later).
 // Adding a label is a deliberate edit: confirm it is a standard runner first.
-const STANDARD_HOSTED_LABELS = new Set(['ubuntu-24.04', 'ubuntu-latest', 'windows-latest', 'macos-latest'])
+const STANDARD_HOSTED_LABELS = new Set(['ubuntu-24.04', 'ubuntu-latest', 'windows-latest', 'macos-latest', 'macos-15'])
 
 // runner-target outputs that jobs consume as `runs-on`, in ci.yml ONLY.
 const ROUTED_OUTPUTS = ['runner', 'winrunner']
@@ -334,6 +334,8 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
     assert.equal(classify('${{ fromJSON(needs.runner-target.outputs.bigrunner) }}', 'ci.yml').kind, 'unknown')
     assert.deepEqual(classify('ubuntu-24.04-16core', 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04-16core' })
     assert.equal(STANDARD_HOSTED_LABELS.has('ubuntu-24.04-16core'), false)
+    assert.equal(STANDARD_HOSTED_LABELS.has('macos-15-large'), false)
+    assert.equal(STANDARD_HOSTED_LABELS.has('macos-15-xlarge'), false)
     assert.equal(classifyJson('["windows-latest-8-cores"]').kind, 'hosted')
     assert.equal(classifyJson('not json').kind, 'unknown')
     assert.equal(classify('["self-hosted", "linux"]', 'ci.yml').kind, 'self-hosted')

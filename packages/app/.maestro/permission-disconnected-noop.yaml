@@ -8,7 +8,8 @@ name: Permission tap while disconnected is a no-op (#5699)
 # silent loss (the bubble flips to "answered" but the answer never reaches the
 # now-expired pending request on the server).
 #
-# The fix is two layers, both pinned here:
+# The production fix has two layers; this flow pins their combined visible
+# behavior, not each layer independently:
 #   (a) UI gate — MessageBubble disables the option buttons when
 #       `connectionPhase !== 'connected'` (isDisabled = ... || !connected) and
 #       renders the `prompt-disconnected-hint` caption
@@ -26,12 +27,9 @@ name: Permission tap while disconnected is a no-op (#5699)
 #
 # Stable disconnected window: the plain `simulate-disconnect` trigger drops the
 # socket but leaves mock health at 200, so the app re-dials in ~1s — too racy
-# to tap a button inside (see reconnect.yaml). This flow uses
-# `simulate-disconnect-hold`, which additionally fails the mock's HTTP health
-# endpoint (503) for ~10s so the reconnect ladder stays in `reconnecting`. The
-# hold self-releases well before the ladder's 10-rung give-up (~59s →
-# server_down), so the app auto-reconnects at the end and the flow leaves it
-# usable for the next run-all flow.
+# to tap a button inside (see reconnect.yaml). `simulate-disconnect-hold`
+# keeps mock health at 503 until this flow verifies the no-op and explicitly
+# releases it. A bounded failsafe expires the hold if the flow aborts.
 #
 # Deliberately RED run (for on-device verification): comment out the
 # `!connected` term in MessageBubble's `isDisabled` AND the `sent === 'sent'`
@@ -63,13 +61,14 @@ name: Permission tap while disconnected is a no-op (#5699)
 - extendedWaitUntil:
     visible:
       id: "approval-button-approve"
+      enabled: true
     timeout: 10000
 - assertVisible:
     id: "approval-button-deny"
 
 # Now drop the connection AND hold it down so we have a stable disconnected
-# window. Mock terminates the WS ~1s later and returns 503 from /health for
-# ~10s, keeping the app in `reconnecting`.
+# window. Mock terminates the WS ~1s later and returns 503 from /health until
+# the explicit release below, keeping the app in `reconnecting`.
 - tapOn:
     id: "chat-message-input"
 - inputText: "simulate-disconnect-hold"
@@ -84,6 +83,9 @@ name: Permission tap while disconnected is a no-op (#5699)
     visible:
       id: "prompt-disconnected-hint"
     timeout: 20000
+- assertVisible:
+    id: "approval-button-approve"
+    enabled: false
 
 - takeScreenshot: permission-disconnected-hint
 
@@ -92,7 +94,6 @@ name: Permission tap while disconnected is a no-op (#5699)
 # never marks answered. Either way this must be a no-op.
 - tapOn:
     id: "approval-button-approve"
-- waitForAnimationToEnd
 
 # Load-bearing no-op assertion: the prompt is STILL unanswered. The hint stays
 # visible (it requires `answered == null`); if the tap had optimistically
@@ -101,10 +102,31 @@ name: Permission tap while disconnected is a no-op (#5699)
     id: "prompt-disconnected-hint"
 - assertVisible:
     id: "approval-button-approve"
+    enabled: false
 
 - takeScreenshot: permission-disconnected-after-tap-noop
 
-# Recovery: the hold self-releases (health → 200) and the app auto-reconnects.
+# Release only after proving the prompt stayed unanswered and the action stayed
+# disabled. The host-side script rejects a missing/expired hold rather than
+# turning an unverified disconnected window into a green recovery step.
+- runScript: scripts/release-reconnect-hold.js
+
+# The health probe can exhaust its retry ladder while the hold is active. Once
+# health is restored, explicitly retry from either the native failure alert or
+# the terminal server-down banner if it appeared. Live reconnects need no tap.
+- runFlow:
+    when:
+      visible: "Connection Failed"
+    commands:
+      - tapOn: "^Retry$"
+- runFlow:
+    when:
+      visible:
+        id: "server-down-reconnect"
+    commands:
+      - tapOn:
+          id: "server-down-reconnect"
+
 # Wait for the connected happy-path layout (the input placeholder flips back to
 # "Message Claude...") so the flow leaves the app usable for the next flow and
 # proves the disconnect was transient, not a crash.
@@ -124,5 +146,6 @@ name: Permission tap while disconnected is a no-op (#5699)
 # present so "recovery" means a usable prompt, not a wiped one.
 - assertVisible:
     id: "approval-button-approve"
+    enabled: true
 
 - takeScreenshot: permission-disconnected-recovered

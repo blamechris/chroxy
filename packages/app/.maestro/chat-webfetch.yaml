@@ -35,9 +35,19 @@ name: ChatView WebFetch structured tool result
       id: "activity-group"
     timeout: 10000
 
+- runFlow: setup/dismiss-chat-keyboard.yaml
+- extendedWaitUntil:
+    visible:
+      text: ".*1 tool used — 1 WebFetch.*"
+    timeout: 10000
+
 - tapOn:
     id: "activity-group-header"
 - waitForAnimationToEnd
+- extendedWaitUntil:
+    visible:
+      id: "activity-entry-tool-webfetch-mock-.*"
+    timeout: 5000
 
 # Expand the WebFetch entry by tapping its collapsed-preview text (the
 # head of the raw tool_result, which begins with the Prompt: line). Same

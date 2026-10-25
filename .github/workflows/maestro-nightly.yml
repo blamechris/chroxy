@@ -2,14 +2,10 @@
 #
 # The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
 # was deferred from per-PR because it needs a booted iOS simulator + a built dev
-# client + Metro, which only the self-hosted macOS runner can host and is too
-# costly to run on every PR. This runs it once a night instead.
-#
-# NOTE (#6355): the build + Metro orchestration below could not be validated
-# from a dev machine — verify it via the `workflow_dispatch` trigger on the
-# self-hosted runner before relying on the nightly. The runner must have the iOS
-# toolchain (Xcode + an "iPhone 16 Pro" simulator) available; the suite is
-# documented as tested only on that device (see CLAUDE.md). `run-all-sequential.sh`
+# client + Metro. Run once a night on two isolated hosted macOS 15 simulators
+# with Xcode 16.4, partitioning the canonical inventory across them:
+# Expo SDK 54 needs Simulator.app, which Xcode 27 removed (#7113).
+# `run-all-sequential.sh`
 # runs each flow in its own maestro process and retries a failure once — the
 # resilient runner required over `run-all.yaml` on a single simulator (#6091).
 name: Maestro App E2E (nightly)
@@ -18,11 +14,22 @@ on:
   schedule:
     # ~01:00 America/Los_Angeles (09:00 UTC). Adjust to a runner-idle window.
     - cron: '0 9 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      flow:
+        description: Run the full inventory or one diagnostic flow
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - connect-screen.yaml
+          - permission-disconnected-noop.yaml
 
-# Never overlap with a still-running prior night.
+# Cancel a duplicate run on the same ref without a scheduled main run
+# cancelling a branch diagnostic (or vice versa).
 concurrency:
-  group: maestro-nightly
+  group: maestro-nightly-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -34,33 +41,30 @@ permissions:
 env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
+  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
 
 jobs:
   maestro:
-    name: Maestro App E2E
-    # No fork-PR guard (unlike ci.yml's self-hosted jobs) is needed: this workflow
-    # is schedule + workflow_dispatch only, neither of which is reachable from a
-    # fork PR — so untrusted code can never land on the self-hosted runner here.
-    runs-on: [self-hosted, macOS, ARM64, chroxy-mac]
+    name: Maestro App E2E (shard ${{ matrix.shard }})
+    runs-on: macos-15
     timeout-minutes: 90
+    strategy:
+      # Keep both halves running if one fails, so full-inventory proof is visible.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON((inputs.flow || 'all') == 'all' && '[0,1]' || '[0]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          # No `cache:` — #7383. This job is pinned to the self-hosted macOS
-          # runner and, as the comment above says, is unreachable from a fork, so
-          # there is no hosted branch to route for: it is ALWAYS on a box whose
-          # ~/.npm is already warm (4.8 GB on the current runner). `cache: npm`
-          # only restored a 1.86 GB actions/cache entry over a superset of
-          # itself. ci.yml's 13 consumers took the routed form instead because
-          # they DO have a fork-PR branch that still needs the restore.
-          #
-          # It also carried `cache-dependency-path: package-lock.json` — the bare
-          # root lockfile that ci-cache-key.test.js forbids, in a repo with three
-          # lockfiles, so a change under packages/ never busted the key. Both are
-          # gone with the cache.
+
+      # Check the exact prerequisites Expo and the suite need before an expensive
+      # npm install or native build. Selects an iPhone 16 Pro with iOS 18.5 and
+      # exports DEVICE for the build and flow steps.
+      - name: Preflight Xcode and boot simulator
+        run: bash scripts/maestro-hosted-preflight.sh
 
       - name: Install dependencies
         run: npm ci
@@ -69,30 +73,17 @@ jobs:
         run: |
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          "$HOME/.maestro/bin/maestro" --version
 
-      - name: Boot the iPhone 16 Pro simulator
-        run: |
-          DEVICE=$(xcrun simctl list devices available \
-            | grep -m1 'iPhone 16 Pro (' | grep -oE '[0-9A-F-]{36}')
-          if [ -z "$DEVICE" ]; then
-            echo "::error::no available 'iPhone 16 Pro' simulator on this runner"
-            exit 1
-          fi
-          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
-          xcrun simctl boot "$DEVICE" || true
-          xcrun simctl bootstatus "$DEVICE" -b || true
-
-      # Builds + installs the chroxy dev client (com.blamechris.chroxy) into the
-      # simulator WITHOUT starting Metro (started separately below so it can run
-      # in the background while Maestro drives the app). ~10-15 min cold.
+      # Build + install without Expo run:ios's unconditional dev-client launch.
+      # Metro starts and warms before Maestro opens the app. ~10-15 min cold.
       - name: Build + install the dev client
-        working-directory: packages/app
-        run: npx expo run:ios --device "$DEVICE" --no-bundler
+        run: bash scripts/maestro-build-install-ios.sh packages/app
 
       - name: Start Metro (background)
         working-directory: packages/app
         run: |
-          npx expo start > "$RUNNER_TEMP/metro.log" 2>&1 &
+          npx expo start --localhost > "$RUNNER_TEMP/metro.log" 2>&1 &
           echo "METRO_PID=$!" >> "$GITHUB_ENV"
           # Wait for the bundler to answer before running flows.
           for i in $(seq 1 60); do
@@ -101,22 +92,52 @@ jobs:
             fi
             sleep 1
           done
-          echo "::warning::Metro did not answer on :8081 within 60s — running flows anyway"
+          echo "::error::Metro did not answer on :8081 within 60s" >&2
+          exit 1
+
+      # /status only proves Metro is listening. A fresh hosted runner still has
+      # to compile the iOS bundle, which can outlast a flow's UI wait. Fetch
+      # Expo's actual iOS launch asset to completion before starting Maestro.
+      - name: Warm the iOS Metro bundle
+        run: node scripts/maestro-warm-metro.mjs
 
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro
       # process, retries a failing flow once, and exits non-zero on a real failure.
+      # A diagnostic dispatch runs one selected inventoried flow in one job. Full
+      # runs partition the canonical inventory by the actual matrix index/count;
+      # each shard stops after one failed flow, bounding a broken shared setup.
       - name: Run Maestro suite
-        run: bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE"
+        env:
+          MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
+          MAESTRO_ARTIFACT_DIR: ${{ runner.temp }}/maestro-diagnostics
+          # XCTest started just beyond Maestro's 120s default on a hosted shard.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
+        run: |
+          case "$MAESTRO_FLOW" in
+            all)
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --shard-index "${{ strategy.job-index }}" --shard-count "${{ strategy.job-total }}" --max-failures 1
+              ;;
+            connect-screen.yaml)
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow connect-screen.yaml --retries 0 --max-failures 1
+              ;;
+            permission-disconnected-noop.yaml)
+              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow permission-disconnected-noop.yaml --retries 0 --max-failures 1
+              ;;
+            *) echo "::error::Unexpected Maestro flow: $MAESTRO_FLOW" >&2; exit 2 ;;
+          esac
 
       - name: Stop Metro
         if: always()
         run: kill "${METRO_PID}" 2>/dev/null || true
 
-      - name: Upload screenshots on failure
-        if: failure()
+      - name: Upload this run's Maestro diagnostics
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maestro-screenshots
-          path: packages/app/*.png
+          name: maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}
+          path: |
+            ${{ runner.temp }}/maestro-diagnostics/
+            ${{ runner.temp }}/metro.log
           retention-days: 7
+          if-no-files-found: warn

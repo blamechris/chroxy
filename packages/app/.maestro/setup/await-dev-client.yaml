@@ -1,0 +1,66 @@
+appId: com.blamechris.chroxy
+name: Wait for Chroxy dev client
+---
+
+# iOS asks once before opening the dev-client link in Chroxy. This system
+# confirmation survives clearState. Wait for that exact prompt or a real app /
+# dev-menu element before handling either path; optional taps while loading
+# miss sheets that appear later.
+- extendedWaitUntil:
+    visible:
+      text: '.*(Open in [“"]Chroxy[”"]\?|Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*'
+    timeout: 90000
+
+- runFlow:
+    when:
+      visible:
+        text: '^Open in [“"]Chroxy[”"]\?$'
+    commands:
+      - tapOn:
+          text: "^Open$"
+
+# After accepting the native prompt, the bundle and Expo sheet may still load.
+# Apply the same readiness allowance to the actual app or dev menu before any
+# introduction/menu taps.
+- extendedWaitUntil:
+    visible:
+      text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
+    timeout: 90000
+
+- runFlow:
+    when:
+      visible:
+        text: "^Continue$"
+    commands:
+      - tapOn:
+          text: "^Continue$"
+      - waitForAnimationToEnd
+
+# The main dev menu can appear after the intro sheet. Its Reload action is a
+# reliable signal that the menu is open; the close point must not be tapped
+# over the app itself.
+- runFlow:
+    when:
+      visible:
+        text: "^Reload$"
+    commands:
+      - tapOn:
+          point: "93%,43%"
+      - waitForAnimationToEnd
+
+- runFlow:
+    when:
+      visible:
+        text: "^Skip$"
+    commands:
+      - tapOn:
+          text: "^Skip$"
+      - waitForAnimationToEnd
+
+# A visible app control proves the native sheet no longer masks the app.
+# Connecting/Cancel is a valid transient state for ensure-connect-screen's
+# recovery branch; callers that need a session still wait for Connect or Chat.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat|Connecting|Cancel"
+    timeout: 15000

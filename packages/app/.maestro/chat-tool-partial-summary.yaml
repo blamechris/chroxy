@@ -58,6 +58,8 @@ name: ChatView ToolBubble collapsed-preview field-priority (#4260)
       id: "activity-group"
     timeout: 10000
 
+- runFlow: setup/dismiss-chat-keyboard.yaml
+
 # Screenshot the activity-group collapsed (in-flight pulse + per-tool
 # breakdown header).
 - takeScreenshot: chat-tool-partial-summary-activity-collapsed
@@ -66,6 +68,10 @@ name: ChatView ToolBubble collapsed-preview field-priority (#4260)
 - tapOn:
     id: "activity-group-header"
 - waitForAnimationToEnd
+- extendedWaitUntil:
+    visible:
+      id: "activity-entry-tool-bash-partial-mock-.*"
+    timeout: 5000
 
 - takeScreenshot: chat-tool-partial-summary-activity-expanded
 
