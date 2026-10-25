@@ -143,18 +143,21 @@ def _state_dir(trial, env):
 
 def _starts(trial, env, run=None, st=None, state_file=None):
     """Every start recorded for the trial, finished or not, as `queue_text` reads them (#8808, #8812): (rows, None), each row
-    (run id, when it was first sent, where the start is recorded), in roster order, or (None, why) when a run state in
-    paths.state_dir cannot be read, which cannot rule a start out. `st` is `run`'s own state, which `state_file` may have put
-    outside paths.state_dir: a start recorded only there is a row of its own, named as that file."""
-    where = _state_dir(trial, env)
+    (run id, when it was first sent, where the start is recorded), in roster order, or (None, (problem, remedy)) when the run
+    states cannot be read, which cannot rule a start out: paths.state_dir is not set, or a state in it cannot be read. `st` is
+    `run`'s own state, which `state_file` may have put outside paths.state_dir: a start recorded only there is a row of its
+    own, named as that file."""
+    root, where = trial.local_path('state_dir', env.home), _state_dir(trial, env)
+    if not root:
+        return None, ('paths.state_dir is not set in trial.json', 'set it')
     try:
         found = state.started(trial, home=env.home)
     except (OSError, ValueError) as exc:
-        return None, f'a run state in {where} cannot be read ({exc})'
+        return None, (f'a run state in {where} cannot be read ({exc})', 'repair or move that state')
     rows = [(rid, _first_send(data), f'the run states in {where}') for rid, data in found]
     if run is not None and state_file and isinstance(st, dict) and st.get('start'):
-        own, root = state.state_path(trial, run.id, state_file, env.home), trial.local_path('state_dir', env.home)
-        if not root or os.path.realpath(own) != os.path.realpath(os.path.join(root, f'{run.id}.json')):
+        own = state.state_path(trial, run.id, state_file, env.home)
+        if os.path.realpath(own) != os.path.realpath(os.path.join(root, f'{run.id}.json')):
             rows.append((run.id, _first_send(st), f"{run.id}'s state file {state.tildify(own, env.home)}"))
     order = {r.id: i for i, r in enumerate(trial.runs)}
     return sorted(rows, key=lambda row: order[row[0]]), None
@@ -1280,9 +1283,10 @@ def verify_start(trial, run, env, since, state_file):
 
 def _first_send(st):
     """When the run was first sent: the `sent_at` of the earliest start, following `replaces` back through re-recorded
-    starts, or None when no start is recorded or the earliest has none."""
+    starts, or None when no start is recorded or the earliest has none. A `replaces` that is there and not null is followed
+    whatever it holds, so one that is no record is a first send that cannot be read, not a reason to stop at the later send."""
     started = st.get('start')
-    while isinstance(started, dict) and isinstance(started.get('replaces'), dict):
+    while isinstance(started, dict) and started.get('replaces') is not None:
         started = started['replaces']
     return started.get('sent_at') if isinstance(started, dict) else None
 
@@ -1290,15 +1294,18 @@ def _first_send(st):
 def _acceptances_ignored(st):
     """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
     when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
-    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send."""
+    ordered as moments, not as strings. A time that cannot be read puts the gate nowhere, so it is not before the send. When it
+    is the send's, the snapshot cannot be placed before it either (#8812), so no slot is compared and the sentence says no more
+    than that the acceptances are not used."""
     if not (st.get('start') and st.get('gate')):
         return None
     gate = st['gate'] if isinstance(st['gate'], dict) else {}
     at, sent = gate.get('at'), _first_send(st)
     gate_time, sent_time = timeutil.instant(at), timeutil.instant(sent)
     if gate_time is None or sent_time is None:
+        compared = '' if sent_time is None else ' and the queue text is compared with T0 only'
         return (f'the recorded gate\'s time ({at!r}) or the first send\'s ({sent!r}) cannot be read, so the gate cannot be placed before '
-                f'the send; its acceptances are not used and the queue text is compared with T0 only')
+                f'the send; its acceptances are not used{compared}')
     if gate_time > sent_time:
         return (f'the recorded gate ({at}) is later than the first send ({sent}), so the text it let through or accepted '
                 f'is not the text the run started on; the queue text is compared with T0 only')
@@ -1356,7 +1363,7 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     if ignored:
         accepted = None
         env.print(f'note: {ignored}')
-    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, ignored, _starts(trial, env, run, st, state_file))
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:
         record['queue_text']['acceptances_ignored'] = ignored

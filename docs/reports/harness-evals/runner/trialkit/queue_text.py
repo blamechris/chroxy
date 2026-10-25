@@ -109,19 +109,21 @@ def load(trial):
 
 def started_clause(starts):
     """The clause naming who has started, for a message about a missing snapshot, or None when nothing says a run has.
-    `starts` is `launch._starts`'s answer: (rows of run id, first send and where it is recorded, None), or (None, why) when
-    a run state cannot be read, which cannot rule a start out."""
+    `starts` is `launch._starts`'s answer: (rows of run id, first send and where it is recorded, None), or (None, (problem,
+    remedy)) when the run states cannot be read (a state that cannot be, or no paths.state_dir to look in), which cannot rule
+    a start out."""
     rows, why = starts
     if why:
-        return f'{why}, so a started run cannot be ruled out'
+        return f'{why[0]}, so a started run cannot be ruled out'
     if not rows:
         return None
     names, places = _unique(rid for rid, _, _ in rows), _unique(where for _, _, where in rows)
     return f'{", ".join(names)} {"has" if len(names) == 1 else "have"} started, by {" and ".join(places)}'
 
 
-def _unique(values):
-    return list(dict.fromkeys(values))
+def _unique(values, key=lambda value: value):
+    """The values once each, in first-seen order; `key` says which are the same (for values that cannot be hashed)."""
+    return list({key(value): value for value in values}.values())
 
 
 def plan(trial, gh, t0, now, starts=None):
@@ -212,12 +214,16 @@ def _slot_check(slot, entry, gh, taken, accept_changed, accepted):
 
 
 def _put_back(again):
-    return f'put back the snapshot `cut` took with T0 (an earlier commit of the file, if this one replaced it) and {again} ({WRONG_STATE})'
+    """The repair, led by the likeliest cause: a wrong start (in trial 2 a dry run's, with no earlier snapshot to put back)."""
+    return (f"if a start there is wrong, such as a dry run's, move that state; otherwise put back the snapshot `cut` took with T0 "
+            f"(an earlier commit of the file, if this one replaced it); then {again}")
 
 
 def _listing(rows):
-    """Each row's run and first send as recorded; a send that cannot be read is quoted, not given as a time."""
-    return ', '.join(f'{rid} at {sent}' if timeutil.instant(sent) is not None else f'{rid} ({sent!r})' for rid, sent, _ in rows)
+    """Each run's first send as recorded, once per distinct send: a start recorded in two places with the same send is one entry,
+    and two places that disagree keep both. A send that cannot be read is quoted, not given as a time."""
+    sends = _unique(((rid, sent) for rid, sent, _ in rows), key=lambda row: (row[0], repr(row[1])))
+    return ', '.join(f'{rid} at {sent}' if timeutil.instant(sent) is not None else f'{rid} ({sent!r})' for rid, sent in sends)
 
 
 def _places(rows):
@@ -236,7 +242,8 @@ def _late(data, starts, after_run):
     again = 'run `finish` again' if after_run else 'run the gate again'
     at = data.get('at')
     if why:
-        return checks.unverified(name, f'{why}, so a run sent before {FILE} was read cannot be ruled out: repair or move that state, then {again}')
+        problem, remedy = why
+        return checks.unverified(name, f'{problem}, so a run sent before {FILE} was read cannot be ruled out: {remedy}, then {again}')
     if not rows:
         return None
     taken = timeutil.instant(at)
@@ -257,16 +264,16 @@ def _late(data, starts, after_run):
     return checks.failed(name, '; '.join(problems)) if problems else None
 
 
-def _baseline(trial, after_run=False, starts=None):
+def _baseline(trial, starts, after_run=False):
     """The T0 snapshot a comparison starts from: (data, taken, None), or (None, None, the Check saying why there is none).
     `taken` is when the text was read. Used by `gate` (where a bad baseline is a failure) and `finish` (where it is not).
     `after_run` is set by `finish`: a missing file must then not be written again by `cut`, whose snapshot would be the
-    text as it is after the run, so the end text would be compared with itself. `starts`, from `launch._starts` (see
-    `started_clause`), is set by `gate` and `finish`: a missing file must not be written by `cut` once a run has started,
-    for the same reason, so the gate's advice for it says so (#8808), and a snapshot read after a recorded first send is
-    no baseline either (#8812)."""
+    text as it is after the run, so the end text would be compared with itself. `starts` is `launch._starts`'s answer (see
+    `started_clause`), and is required, because a caller that left it out would skip the placement without a word: a missing
+    file must not be written by `cut` once a run has started, for the same reason, so the gate's advice for it says so
+    (#8808), and a snapshot read after a recorded first send is no baseline either (#8812)."""
     name = 'queue text at T0'
-    started = started_clause(starts) if starts is not None else None
+    started = started_clause(starts)
     if not trial.t0:
         return None, None, checks.unverified(name, 'no T0 recorded, so the queue text at T0 cannot be compared')
     data, status = load(trial)
@@ -288,20 +295,20 @@ def _baseline(trial, after_run=False, starts=None):
         return None, None, checks.failed(name, f'{FILE} is not a snapshot (it needs "t0" and "slots")')
     if data['t0'] != trial.t0:
         return None, None, checks.failed(name, f'{FILE} was taken at T0 {data["t0"][:12]}, trial.json records {trial.t0[:12]}')
-    problem = _late(data, starts, after_run) if starts is not None else None
+    problem = _late(data, starts, after_run)
     if problem:
         return None, None, problem
     return data, data.get('at') if isinstance(data.get('at'), str) else 'an unrecorded time', None
 
 
-def gate_checks(trial, gh, accept_changed, accepted, starts=None):
+def gate_checks(trial, gh, accept_changed, accepted, starts):
     """The gate's checks that each queue issue's text is what `cut` recorded at T0. `accept_changed` maps a slot to
     the reason the owner accepts its change; for each slot it was used for, `accepted` gets the reason and the digests of
-    the text accepted. `starts` is `launch._starts`'s answer (see `started_clause`): with it the snapshot must also have
+    the text accepted. `starts` is `launch._starts`'s answer (see `started_clause`), required: the snapshot must also have
     been read at or before the first send of every run that has started, and no text is read when it was not."""
     if not trial.slots:
         return [checks.failed('queue text at T0', 'the queue has no slots, so there is no text to compare')]
-    data, taken, problem = _baseline(trial, starts=starts)
+    data, taken, problem = _baseline(trial, starts)
     if problem:
         return [problem]
     out = []
@@ -367,15 +374,16 @@ def _end_check(slot, entry, accepted, gh, taken, ignored):
     return (checks.failed if parts_gate else checks.passed)(name, detail), record
 
 
-def finish_checks(trial, gh, accepted, ignored=None, starts=None):
+def finish_checks(trial, gh, accepted, starts, ignored=None):
     """(checks, {slot: record}) for the queue text as `finish` reads it, to be compared with T0 and with what the run's gate
     let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not judged
     here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read after
-    a first send in `starts` (see `started_clause`) is not the T0 text, so it is one. `ignored`, when given, is the
-    sentence saying why `accepted` was not passed on, and changes what a changed slot's detail says."""
+    a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
+    `ignored`, when given, is the sentence saying why `accepted` was not passed on, and changes what a changed slot's detail
+    says."""
     if not trial.slots:
         return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
-    data, taken, problem = _baseline(trial, after_run=True, starts=starts)
+    data, taken, problem = _baseline(trial, starts, after_run=True)
     if problem:
         return [checks.unverified(problem.name, problem.detail)], {slot.slot: _unread(slot, problem.detail) for slot in trial.slots}
     accepted = accepted if isinstance(accepted, dict) else {}
