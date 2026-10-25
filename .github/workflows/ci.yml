@@ -1876,12 +1876,12 @@ jobs:
         run: node scripts/__tests__/assert-test-count.test.mjs
 
       - name: Run coverage report guard tests
-        run: node scripts/__tests__/report-coverage.test.mjs
-
-      - name: Check coverage report guard case count
-        # Keep a direct invocation above for the repository's workflow
-        # registration guard; this separate run enforces the node:test floor.
-        run: node scripts/lib/assert-test-count.mjs --min 25 node scripts/__tests__/report-coverage.test.mjs
+        # Run the suite once. The direct invocation satisfies the workflow
+        # registration guard, and the saved TAP gets an exact case-count floor.
+        run: |
+          set -o pipefail
+          node scripts/__tests__/report-coverage.test.mjs | tee /tmp/chroxy-report-coverage.tap
+          node scripts/lib/assert-test-count.mjs --min 25 cat /tmp/chroxy-report-coverage.tap > /dev/null
 
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of
