@@ -764,13 +764,14 @@ class GateQueueText(LaunchCase):
             self.assertEqual(self.text_checks()['queue text at T0']['status'], 'PASS')
             self.assertRegex(out, r'PASS\s+queue text at T0\s+no run has started, by the run states in ~/trial/t2/state')
         with self.subTest('two first sends, listed in roster order'):
+            # trial.json lists B-cy-r1 before A-cy-r1: neither the names' order nor the sends' puts B-cy-r1 first.
             self.setUp()
-            self.sent('A-cd-r1', '2026-11-02T10:00:00Z')
-            self.sent('A-cy-r1', '2026-11-02T11:00:00Z')
+            self.sent('A-cy-r1', '2026-11-02T10:00:00Z')
+            self.sent('B-cy-r1', '2026-11-02T11:00:00Z')
             code, out, _ = self.go()
             self.assertEqual(code, 0, out)
             self.assertEqual(self.text_detail(), 'queue-t0.json was read at 2026-11-02T09:00:00Z, at or before every recorded first send (2): '
-                                                 f'A-cd-r1 at 2026-11-02T10:00:00Z, A-cy-r1 at 2026-11-02T11:00:00Z, by {PLACE}')
+                                                 f'B-cy-r1 at 2026-11-02T11:00:00Z, A-cy-r1 at 2026-11-02T10:00:00Z, by {PLACE}')
             self.assertEqual(self.text_checks()['queue text at T0']['status'], 'PASS')
         with self.subTest("a send at the snapshot's own moment"):
             self.setUp()
@@ -786,6 +787,21 @@ class GateQueueText(LaunchCase):
                              f"no run has started, by {PLACE} and B-cy-r1's state file {self.elsewhere('B-cy-r1')}, "
                              'so there is no first send to place queue-t0.json before')
             self.assertEqual(self.placement_elsewhere('B-cy-r1')[0], 'PASS')
+        for how in ('named', 'through a symlink'):
+            with self.subTest(f"a --state that is the gate's own file in paths.state_dir, {how}, with no start"):
+                self.setUp()
+                own = state.state_path(self.rig.trial, 'B-cy-r1', home=self.rig.box.home)
+                given = own if how == 'named' else os.path.join(self.rig.box.tmp, 'link.json')
+                self.rig.save_state('B-cy-r1')
+                if how == 'through a symlink':
+                    os.symlink(own, given)
+                env = self.rig.env(github=FakeGitHub())
+                self.assertEqual(launch.gate(self.rig.trial, self.rig.run('B-cy-r1'), env, {}, given), 0, env.out.getvalue())
+                recorded = state.load(self.rig.trial, 'B-cy-r1', override=given, home=self.rig.box.home)
+                found = {c['name']: c for c in recorded['gate']['checks']}['queue text at T0']
+                self.assertEqual((found['status'], found['detail']),
+                                 ('PASS', f'no run has started, by {PLACE}, so there is no first send to place queue-t0.json before'),
+                                 'the folder is named once, not again as a state file elsewhere')
         with self.subTest("a start only in the gate's own state file, after the snapshot"):
             self.setUp()
             self.assertEqual(self.gate_elsewhere('B-cy-r1', code=0, start=sent),
@@ -3824,7 +3840,7 @@ class FinishQueueText(LaunchCase):
             self.assertEqual(self.seen(slot), {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
         self.assertEqual(gh.requests, [], 'no text was read without a baseline')
 
-    def test_a_late_gate_with_a_usable_snapshot_says_no_slot_is_compared_when_no_text_can_be_read(self):
+    def test_a_late_gate_with_a_usable_snapshot_says_which_slots_are_compared(self):
         # The snapshot loads, but a GitHub that answers no read compares nothing: the sentence follows what the slots recorded, and says
         # "where it could be read" when only some slots were (#8819).
         self.started(sent_at='2026-11-02T13:00:00Z')

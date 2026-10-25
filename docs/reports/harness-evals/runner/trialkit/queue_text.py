@@ -109,9 +109,9 @@ def load(trial):
 
 def started_clause(starts):
     """The clause naming who has started, for a message about a missing snapshot, or None when nothing says a run has.
-    `starts` is `launch._starts`'s answer: (rows of run id, first send and where it is recorded, None, where they were looked
-    for), or (None, (problem, remedy), None) when the run states cannot be read (a state that cannot be, or no paths.state_dir
-    to look in), which cannot rule a start out."""
+    `starts` is `launch._starts`'s answer: (rows, None, read), each row (run id, first send, where it is recorded) and `read`
+    where they were looked for; or (None, (problem, remedy), None) when the run states cannot be read (a state that cannot be,
+    or no paths.state_dir to look in), which cannot rule a start out."""
     rows, why, _ = starts
     if why:
         return f'{why[0]}, so a started run cannot be ruled out'
@@ -285,8 +285,9 @@ def _placement(data, starts, after_run):
 
 
 def _baseline(trial, starts, after_run=False):
-    """The T0 snapshot a comparison starts from: (data, taken, the placement Check, a pass), or (None, None, the Check saying why
-    there is none). Every path returns a Check, so a caller tests `data is None`, never the Check's truthiness.
+    """The T0 snapshot a comparison starts from: (data, taken, placed), `placed` being the placement Check, which passed; or
+    (None, None, the Check saying why there is none). Every path returns a Check, so a caller tests `data is None`, never the
+    Check's truthiness.
     `taken` is when the text was read. Used by `gate` (where a bad baseline is a failure) and `finish` (where it is not).
     `after_run` is set by `finish`: a missing file must then not be written again by `cut`, whose snapshot would be the
     text as it is after the run, so the end text would be compared with itself. `starts` is `launch._starts`'s answer (see
