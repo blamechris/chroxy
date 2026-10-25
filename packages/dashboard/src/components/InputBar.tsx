@@ -9,6 +9,7 @@ import { useState, useEffect, useLayoutEffect, useMemo, useId, useRef, useCallba
 import { FilePicker, FILE_PICKER_DISPLAY_CAP, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
+import { matchSlashCommands } from '../utils/slash-command-match'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload, MCPResourceItem } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
@@ -413,15 +414,18 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // Derive slash filter from current value (text after "/")
   const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''
 
-  // Single source of truth for filtered commands — used by both picker and keyboard handler
-  const filteredCommands = useMemo(() => {
-    if (!slashCommands || slashCommands.length === 0) return []
-    if (!slashFilter) return slashCommands
-    const lower = slashFilter.toLowerCase()
-    return slashCommands.filter(
-      c => c.name.toLowerCase().includes(lower) || c.description.toLowerCase().includes(lower)
-    )
-  }, [slashCommands, slashFilter])
+  // Single source of truth for filtered commands — the picker lists the same
+  // matches through the same matcher (#8699)
+  const slashMatch = useMemo(
+    () => matchSlashCommands(slashCommands ?? [], slashFilter),
+    [slashCommands, slashFilter]
+  )
+  const filteredCommands = slashMatch.commands
+  // #8699 — once arguments follow a recognised command there is nothing left
+  // to complete, so the palette hides and keeps its hands off the keyboard:
+  // Enter must send `/cmd args`, not select the row and replace the arguments.
+  // An unrecognised token keeps the palette open on "No commands found".
+  const slashPickerVisible = pickerOpen && !(slashMatch.tokenComplete && filteredCommands.length > 0)
 
   const dedupedAttachments = useMemo(() => {
     if (!attachments) return undefined
@@ -777,7 +781,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     }
 
     // Slash command picker keyboard handling
-    if (pickerOpen) {
+    if (slashPickerVisible) {
       if (e.key === 'Escape') {
         e.preventDefault()
         closePicker()
@@ -965,7 +969,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
         e.preventDefault()
       }
     }
-  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, pickerItemCount, selectPickerIndex])
+  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, slashPickerVisible, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, pickerItemCount, selectPickerIndex])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
@@ -1264,7 +1268,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
         {sendOnEnter ? 'Press Enter to send, Shift+Enter for newline, Escape to interrupt' : 'Press Cmd/Ctrl+Enter to send, Escape to interrupt'}
         {voiceInput?.isAvailable ? ', hold Control for voice input, Cmd/Ctrl+Shift+M to toggle voice input' : ''}
       </span>
-      {pickerOpen && slashCommands && (
+      {slashPickerVisible && slashCommands && (
         <SlashCommandPicker
           commands={slashCommands}
           filter={slashFilter}

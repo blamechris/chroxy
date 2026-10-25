@@ -114,6 +114,33 @@ describe('SlashCommandPicker', () => {
     expect(screen.getByText(/no commands found/i)).toBeInTheDocument()
   })
 
+  // #8699 — the filter is the whole text after "/", arguments included; the
+  // picker matches on the command token, not on that whole text.
+  it('lists the named command when arguments follow it', () => {
+    render(
+      <SlashCommandPicker
+        commands={mockCommands}
+        filter={'review-pr "check docs/api.md"'}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText('/review-pr')).toBeInTheDocument()
+    expect(screen.queryByText(/no commands found/i)).not.toBeInTheDocument()
+  })
+
+  it('shows empty state for an unknown command followed by arguments', () => {
+    render(
+      <SlashCommandPicker
+        commands={mockCommands}
+        filter={'notacommand "a b"'}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText(/no commands found/i)).toBeInTheDocument()
+  })
+
   it('shows empty state when commands array is empty', () => {
     render(
       <SlashCommandPicker

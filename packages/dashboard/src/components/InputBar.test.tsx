@@ -2,7 +2,7 @@
  * InputBar tests (#1162)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor, act, createEvent } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, act, createEvent, within } from '@testing-library/react'
 import { useState } from 'react'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -1348,6 +1348,81 @@ describe('InputBar slash command picker (#1281)', () => {
       fireEvent.keyDown(textarea, { key: 'Tab' })
       expect(textarea.value).toBe('/unknown')
       expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+  })
+
+  // #8699 — matching is on the command token. Once arguments follow a known
+  // command the palette hides (nothing left to complete) and leaves Enter to
+  // send; an unknown token still reports "No commands found".
+  describe('arguments after the command token (#8699)', () => {
+    const commands = [
+      ...mockCommands,
+      { name: 'prime-directive', description: 'Unattended work toward an outcome', source: 'project' as const },
+    ]
+    const launch = '/prime-directive "Some task: follow docs/reports/PLAN.md exactly"'
+
+    it('hides the palette, never "No commands found", once a known command has arguments', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      expect(screen.queryByText(/no commands found/i)).not.toBeInTheDocument()
+      fireEvent.change(textarea, { target: { value: launch } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('still reports "No commands found" for an unknown token with arguments', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/notacommand "a b"' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      expect(screen.getByText(/no commands found/i)).toBeInTheDocument()
+    })
+
+    it('Enter sends the command with its arguments intact', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: launch } })
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith(launch)
+    })
+
+    it('Tab and Enter leave the arguments alone without sendOnEnter', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: launch } })
+      const tab = createEvent.keyDown(textarea, { key: 'Tab' })
+      fireEvent(textarea, tab)
+      expect(tab.defaultPrevented).toBe(false)
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(textarea.value).toBe(launch)
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('Tab still completes a bare partial token, and typing arguments keeps the palette hidden', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime' } })
+      expect(screen.getByText('/prime-directive')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Tab' })
+      expect(textarea.value).toBe('/prime-directive ')
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('/prime-directive "a b"')
+    })
+
+    it('shows the palette again when the arguments are deleted back to the bare token', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={commands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/prime-directive "a b"' } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      fireEvent.change(textarea, { target: { value: '/prime-directive' } })
+      // Scoped to the picker: the textarea's own text is also "/prime-directive".
+      expect(within(screen.getByTestId('slash-picker')).getByText('/prime-directive')).toBeInTheDocument()
     })
   })
 })
