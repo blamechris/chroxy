@@ -13,7 +13,8 @@ author's login and its body. Labels, assignees, state, milestone and `updated_at
 (`gate` reads the state of each queue issue in its own check). The file holds digests and counts, never text.
 
 Nothing here writes to GitHub, and the snapshot is never overwritten: a later `cut` (one per base, each just before
-its run) leaves it alone.
+its run) leaves it alone. Nor is a missing one taken again once a run has started: that text may have moved since T0, and
+every later gate would pass it.
 """
 import hashlib
 import json
@@ -25,6 +26,7 @@ from . import checks
 from .gh import GitHubError
 
 FILE = 'queue-t0.json'
+LATE = 'a snapshot taken after a run began holds the text as it is then, which may have moved since T0, and every later gate would pass it'
 DIGEST = re.compile(r'^[0-9a-f]{64}$')
 DIGEST_KEYS = ('title_sha256', 'body_sha256', 'comments_sha256')
 TEXT_KEYS = DIGEST_KEYS + ('comments',)  # what read_slot records of a slot's text, besides the issue number
@@ -103,11 +105,12 @@ def load(trial):
     return data, 'ok'
 
 
-def plan(trial, gh, t0, now):
+def plan(trial, gh, t0, now, started=None):
     """What `cut` must write for this T0: None when the snapshot already exists for it, else the snapshot read now.
 
     An existing snapshot is never replaced: the same T0 leaves it as it is (and reads nothing from GitHub, so the
-    cuts after the first need no network); another T0, or a file that cannot be read, refuses. Raises QueueTextError."""
+    cuts after the first need no network); another T0, or a file that cannot be read, refuses. So does a missing file
+    once `started` says which runs of the trial have started (#8808). Raises QueueTextError."""
     existing, status = load(trial)
     if status == 'ok':
         if existing['t0'] == t0:
@@ -115,6 +118,8 @@ def plan(trial, gh, t0, now):
         raise QueueTextError(f'{FILE} was taken at T0 {existing["t0"][:12]}, not {t0[:12]}; it is never overwritten')
     if status != 'missing':
         raise QueueTextError(f'{FILE} exists but is {status}; it is never overwritten, so remove it by hand if it is wrong')
+    if started:
+        raise QueueTextError(f'{FILE} is missing and {started}: it is not taken now, because {LATE}. Put the committed file back, then cut again')
     return snapshot(trial, gh, t0, now)
 
 
@@ -184,11 +189,12 @@ def _slot_check(slot, entry, gh, taken, accept_changed, accepted):
                                f'Restore it, or accept it with --accept-changed {slot.slot}=REASON')
 
 
-def _baseline(trial, after_run=False):
+def _baseline(trial, after_run=False, started=None):
     """The T0 snapshot a comparison starts from: (data, taken, None), or (None, None, the Check saying why there is none).
     `taken` is when the text was read. Used by `gate` (where a bad baseline is a failure) and `finish` (where it is not).
     `after_run` is set by `finish`: a missing file must then not be written again by `cut`, whose snapshot would be the
-    text as it is after the run, so the end text would be compared with itself."""
+    text as it is after the run, so the end text would be compared with itself. `started` is set by `gate` to say which
+    runs of the trial have started, when any has: its advice for a missing file is then not to `cut` either (#8808)."""
     name = 'queue text at T0'
     if not trial.t0:
         return None, None, checks.unverified(name, 'no T0 recorded, so the queue text at T0 cannot be compared')
@@ -197,6 +203,10 @@ def _baseline(trial, after_run=False):
         return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir}: put the committed file back and run `finish` again '
                                                f'(runner README, "When `finish` recorded `unverified` slots"). Do not run `cut` to write it '
                                                f'now: a snapshot taken after the run compares the end text with itself')
+    if status == 'missing' and started:
+        return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir} and {started}: put the committed file back (pull the '
+                                               f'commit that added it with trial.json\'s t0, or restore it) and run the gate again. Do not run '
+                                               f'`cut` to write it now: {LATE}')
     if status == 'missing':
         return None, None, checks.failed(name, f'{FILE} is missing from {trial.trial_dir}: `cut` writes it with T0 and the supervisor commits it '
                                                f'with trial.json\'s t0. Pull that commit, or, if T0 was recorded without it, run `cut` again '
@@ -210,13 +220,13 @@ def _baseline(trial, after_run=False):
     return data, data.get('at') if isinstance(data.get('at'), str) else 'an unrecorded time', None
 
 
-def gate_checks(trial, gh, accept_changed, accepted):
+def gate_checks(trial, gh, accept_changed, accepted, started=None):
     """The gate's checks that each queue issue's text is what `cut` recorded at T0. `accept_changed` maps a slot to
     the reason the owner accepts its change; for each slot it was used for, `accepted` gets the reason and the digests of
-    the text accepted."""
+    the text accepted. `started` says which runs of the trial have started, or None when none has."""
     if not trial.slots:
         return [checks.failed('queue text at T0', 'the queue has no slots, so there is no text to compare')]
-    data, taken, problem = _baseline(trial)
+    data, taken, problem = _baseline(trial, started=started)
     if problem:
         return [problem]
     out = []

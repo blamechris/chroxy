@@ -135,6 +135,21 @@ def _live_check(trial, run, env):
     return checks.passed(name, 'no other run has a start without a finish')
 
 
+def _started(trial, env, run=None, st=None):
+    """Which runs of the trial have started, finished or not, as the clause `queue_text` gives when it will not take a missing T0
+    snapshot (#8808), or None when none has. A state file that cannot be read cannot rule one out, so it is such a clause too.
+    `st` is `run`'s own state, which `--state-file` may have put outside paths.state_dir."""
+    try:
+        started = state.started_runs(trial, home=env.home)
+    except (OSError, ValueError) as exc:
+        return f'a run\'s state cannot be read ({exc}), so a started run cannot be ruled out'
+    if run is not None and isinstance(st, dict) and st.get('start') and run.id not in started:
+        started.append(run.id)
+    if not started:
+        return None
+    return f'{", ".join(started)} {"has" if len(started) == 1 else "have"} started'
+
+
 # -- gate ----------------------------------------------------------------------
 
 def _issue_state(gh, number):
@@ -214,7 +229,7 @@ def gate(trial, run, env, accept_open, state_file, accept_changed=None):
     for number in sorted(set(accept_open) - set(blockers)):
         env.print(f'note: --accept-open {number} ignored; it is not a blocker for {run.id}')
     results += _queue_checks(trial, gh)
-    results += queue_text.gate_checks(trial, gh, accept_changed, accepted_changed)
+    results += queue_text.gate_checks(trial, gh, accept_changed, accepted_changed, _started(trial, env, run, st))
     for slot in sorted(set(accept_changed) - {s.slot for s in trial.slots}):
         env.print(f'note: --accept-changed {slot} ignored; it is not a queue slot')
     if trial.t0:
@@ -363,8 +378,9 @@ def cut(trial, runs, env, t0, push, repo_dir):
         missions = {run.id: render.mission(trial, run).encode('utf-8') for run in runs}
         config.check_t0(trial, t0)
         # The queue's text is read before anything is recorded: a slot that cannot be read refuses the cut, with
-        # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut).
-        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env))
+        # no T0 and no snapshot written. None when the snapshot already exists for this T0 (a later cut); a missing
+        # one is refused, not taken, once a run has started.
+        frozen = queue_text.plan(trial, env.github(trial.repo), t0, lambda: _at(env), _started(trial, env))
         config.save_t0(trial, t0)
     except (render.RenderError, config.ConfigError, queue_text.QueueTextError) as exc:
         env.print(f'cut: refusing: {exc}')

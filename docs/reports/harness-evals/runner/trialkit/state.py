@@ -64,12 +64,12 @@ def tildify(value, home=None):
     return value
 
 
-def live_runs(trial, exclude=None, home=None):
-    """Run ids whose state records a start and no finish (a run in progress)."""
+def _recorded(trial, exclude=None, home=None):
+    """(run id, state) for each run of the trial that has a state file in paths.state_dir. Raises OSError or ValueError
+    when one cannot be read or is not a run's state."""
     root = trial.local_path('state_dir', home)
     if not root or not os.path.isdir(root):
-        return []
-    live = []
+        return
     for run in trial.runs:
         if run.id == exclude:
             continue
@@ -78,6 +78,16 @@ def live_runs(trial, exclude=None, home=None):
             continue
         with open(path, encoding='utf-8') as fh:
             data = json.load(fh)
-        if data.get('start') and not data.get('finish'):
-            live.append(run.id)
-    return live
+        if not isinstance(data, dict):
+            raise ValueError(f'{path} is not a run state')
+        yield run.id, data
+
+
+def live_runs(trial, exclude=None, home=None):
+    """Run ids whose state records a start and no finish (a run in progress)."""
+    return [rid for rid, data in _recorded(trial, exclude, home) if data.get('start') and not data.get('finish')]
+
+
+def started_runs(trial, home=None):
+    """Run ids whose state records a start, finished or not."""
+    return [rid for rid, data in _recorded(trial, home=home) if data.get('start')]

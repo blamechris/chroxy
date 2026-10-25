@@ -885,14 +885,16 @@ class QueueTextNotes(Scenario):
             self.assertIn(f'  note: queue text {slot}: not recorded at finish', self.output)
         self.assertNotIn('re-read', self.output, 'a record with no slots is still a record')
 
-    def test_a_recorded_slot_the_trial_no_longer_has_is_named_whatever_its_status(self):
-        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'),
-                                                                           Q09=self.row('changed'), Q08=self.row('unchanged'))})
+    def test_a_recorded_slot_the_trial_no_longer_has_is_named_whatever_its_status_in_sorted_order(self):
+        # `collect` finds these through a set, whose order follows the hash seed: with two of them the order went unchecked under 9
+        # of 12 seeds (#8805). Sixteen, recorded in reverse, came out sorted under none of 2000 seeds without the sort.
+        extras = [f'Q{n:02d}' for n in range(18, 2, -1)]
+        rows = {slot: self.row(('changed', 'unchanged', 'unverified')[n % 3]) for n, slot in enumerate(extras)}
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'), **rows)})
         self.collect()
         self.assertEqual(self.code, 0, self.output)
-        for slot in ('Q08', 'Q09'):
-            self.assertIn(f'  note: queue text {slot}: recorded at finish, but trial.json no longer has the slot', self.output)
-        self.assertLess(self.output.index('queue text Q08'), self.output.index('queue text Q09'), 'sorted')
+        named = re.findall(r'^  note: queue text (Q\d\d): recorded at finish, but trial\.json no longer has the slot$', self.output, re.M)
+        self.assertEqual(named, sorted(extras))
         self.assertNotIn('queue text Q01', self.output)
         self.assertNotIn('queue text Q02', self.output)
 

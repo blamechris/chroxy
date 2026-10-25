@@ -20,6 +20,7 @@ from datetime import timedelta
 from unittest import mock
 
 import helpers
+import test_collect
 from helpers import ScriptedRunner, argv_starts
 from test_native import assistant, jl, meta, tool_result, turn, user
 from trialkit import cli, collect, config, launch, native, queue_text, render, state, timeutil
@@ -596,6 +597,61 @@ class GateQueueText(LaunchCase):
         self.assertNotRegex(out, r'queue text Q0')
         self.assertFalse([r for r in gh.requests if r[0].endswith('/comments')], 'no text was read without a baseline')
 
+    def missing_after(self, started):
+        return (f'queue-t0.json is missing from {self.rig.trial.trial_dir} and {started}: put the committed file back (pull the commit that '
+                f'added it with trial.json\'s t0, or restore it) and run the gate again. Do not run `cut` to write it now: {queue_text.LATE}')
+
+    def test_a_missing_snapshot_once_a_run_has_started_is_never_advised_to_be_cut(self):
+        # #8808: after a start, a snapshot taken now may hold text that moved since T0, and every later gate would pass it.
+        os.remove(snapshot_path(self.rig))
+        sent = {'sent_at': '2026-11-02T10:00:00Z'}
+        for runs, started in (({'A-cd-r1': {'start': sent}}, 'A-cd-r1 has started'),
+                              ({'A-cd-r1': {'start': sent, 'finish': {'ended_at': '2026-11-02T11:00:00Z'}}}, 'A-cd-r1 has started'),
+                              ({'B-cy-r1': {'start': sent}}, 'B-cy-r1 has started'),
+                              ({'A-cy-r1': {'start': sent, 'finish': {}}, 'A-cd-r1': {'start': sent, 'finish': {}}}, 'A-cd-r1, A-cy-r1 have started')):
+            with self.subTest(started=started, runs=sorted(runs)):
+                for rid in ('A-cd-r1', 'A-cy-r1', 'B-cy-r1'):
+                    path = state.state_path(self.rig.trial, rid, home=self.rig.box.home)
+                    if os.path.exists(path):
+                        os.remove(path)
+                for rid, sections in runs.items():
+                    self.rig.save_state(rid, **sections)
+                code, out, _ = self.go()
+                self.assertEqual(code, 1, out)
+                self.assertEqual(self.text_checks()['queue text at T0']['detail'], self.missing_after(started))
+                self.assertNotIn('run `cut` again', out)
+
+    def test_the_gate_s_own_start_counts_wherever_its_state_file_is(self):
+        os.remove(snapshot_path(self.rig))
+        own = os.path.join(self.rig.box.tmp, 'elsewhere', 'B-cy-r1.json')
+        state.save(self.rig.trial, 'B-cy-r1', {'run': 'B-cy-r1', 'trial': self.rig.trial.id, 'start': {'sent_at': '2026-11-02T10:00:00Z'}},
+                   override=own, home=self.rig.box.home)
+        env = self.rig.env(github=FakeGitHub())
+        code = launch.gate(self.rig.trial, self.rig.run('B-cy-r1'), env, {}, own)
+        self.assertEqual(code, 1, env.out.getvalue())
+        detail = {c['name']: c['detail'] for c in state.load(self.rig.trial, 'B-cy-r1', override=own)['gate']['checks']}['queue text at T0']
+        self.assertEqual(detail, self.missing_after('B-cy-r1 has started'))
+
+    def test_a_run_state_that_cannot_be_read_cannot_rule_out_a_start(self):
+        os.remove(snapshot_path(self.rig))
+        for how in ('corrupt', 'directory', 'not a state'):
+            with self.subTest(how):
+                if how == 'not a state':
+                    path = self.rig.save_state('A-cd-r1')
+                    with open(path, 'w') as fh:
+                        fh.write('[]')
+                    undo = lambda: os.remove(path)
+                else:
+                    undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
+                code, out, _ = self.go()
+                undo()
+                self.assertEqual(code, 1, out)
+                detail = self.text_checks()['queue text at T0']['detail']
+                self.assertTrue(detail.startswith("queue-t0.json is missing from docs/reports/harness-evals/trial-2 and a run's state cannot "
+                                                  "be read ("), detail)
+                self.assertIn('so a started run cannot be ruled out: put the committed file back', detail)
+                self.assertNotIn('run `cut` again', out)
+
     def test_a_snapshot_taken_at_another_t0_fails(self):
         edit_snapshot(self.rig, lambda d: d.update(t0='f' * 40))
         code, out, _ = self.go()
@@ -1144,6 +1200,33 @@ class CutQueueText(unittest.TestCase):
         self.assertEqual(code, 0, out)
         data = snapshot_file(self.rig)
         self.assertEqual((data['t0'], data['at']), (self.rig.t0, '2026-11-02T12:00:00Z'))
+
+    def test_a_recorded_t0_with_no_snapshot_once_a_run_has_started_is_refused_not_taken(self):
+        # #8808: each base is cut just before its run, so a lost snapshot would otherwise be retaken, late, by the next routine cut.
+        config.save_t0(self.rig.trial, self.rig.t0)
+        self.rig.save_state('A-cd-r1', start={'sent_at': '2026-11-02T10:00:00Z'}, finish={'ended_at': '2026-11-02T11:00:00Z'})
+        gh = FakeGitHub()
+        code, out = self.cut('B-cy-r1', github=gh, push=True)
+        self.assertEqual(code, 2, out)
+        self.assertIn(f'cut: refusing: queue-t0.json is missing and A-cd-r1 has started: it is not taken now, because {queue_text.LATE}. '
+                      f'Put the committed file back, then cut again', out)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
+        self.assertEqual(gh.requests, [], 'no text was read')
+        self.assertEqual(self.rig.branch(self.rig.run('B-cy-r1').base), '', 'no base was cut')
+        queue_text.write(self.rig.trial, {'t0': self.rig.t0, 'at': SNAPSHOT_AT, 'slots': {}})
+        code, out = self.cut('B-cy-r1', github=gh, push=True)
+        self.assertEqual(code, 0, out)
+        self.assertNotEqual(self.rig.branch(self.rig.run('B-cy-r1').base), '', 'with the file back, the routine cut goes ahead')
+
+    def test_a_run_state_that_cannot_be_read_refuses_a_missing_snapshot_too(self):
+        config.save_t0(self.rig.trial, self.rig.t0)
+        undo = plant_unreadable_state(self.rig, 'A-cd-r1', 'corrupt')
+        self.addCleanup(undo)
+        code, out = self.cut('B-cy-r1')
+        self.assertEqual(code, 2, out)
+        self.assertIn("cut: refusing: queue-t0.json is missing and a run's state cannot be read (", out)
+        self.assertIn('so a started run cannot be ruled out: it is not taken now, because', out)
+        self.assertFalse(os.path.exists(snapshot_path(self.rig)))
 
     def test_a_snapshot_taken_at_another_t0_refuses_and_is_never_overwritten(self):
         queue_text.write(self.rig.trial, {'t0': 'a' * 40, 'at': '2026-10-30T00:00:00Z', 'slots': {}})
@@ -2360,7 +2443,8 @@ class Start(LaunchCase):
                                        ('2026-11-02T11:00:00Z', '2026-11-02T11:00:00+00:00', True)):
             with self.subTest(gate=gate_at, preflight=pre_at):
                 code, out = self.order('A-cd-r1', gate_at, pre_at)
-                self.assertEqual((code, 'older than the gate' in out), (0, False) if after else (1, True), out)
+                said = 'the latest preflight is older than the gate; run `trialctl preflight` again'
+                self.assertEqual((code, said in out), (0, False) if after else (1, True), out)
 
     def test_the_session_phase_is_placed_after_the_preflight_as_a_moment_not_as_text(self):
         for pre_at, session_at, after in (('2026-11-02T11:30:00Z', '2026-11-02T11:30:00.500Z', True),
@@ -2368,7 +2452,8 @@ class Start(LaunchCase):
                                           ('2026-11-02T11:30:00.500Z', '2026-11-02T11:30:00Z', False)):
             with self.subTest(preflight=pre_at, session=session_at):
                 code, out = self.order('B-cy-r1', '2026-11-02T11:00:00Z', pre_at, session_at)
-                self.assertEqual((code, 'session-phase preflight is older' in out), (0, False) if after else (1, True), out)
+                said = 'the session-phase preflight is older than the pre-send preflight; run it again'
+                self.assertEqual((code, said in out), (0, False) if after else (1, True), out)
 
     def test_a_step_time_that_cannot_be_read_is_reported_not_taken_as_in_order(self):
         for gate_at, pre_at, session_at, said in (
@@ -2377,7 +2462,7 @@ class Start(LaunchCase):
                 ('x', '2026-11-02T11:30:00Z', None, "the gate's time ('x') cannot be read, so the latest preflight cannot be placed after it; "
                                                     "run `trialctl gate`, then `trialctl preflight`, again"),
                 ('2026-11-02T11:00:00Z', '2026-11-02T11:30:00Z', '',
-                 "the session-phase preflight's time ('') cannot be read, so it cannot be placed after the pre-send preflight"),
+                 "the session-phase preflight's time ('') cannot be read, so it cannot be placed after the pre-send preflight; run it again"),
                 ('2026-11-02T11:00:00Z', '2026-11-02T25:00:00Z', '2026-11-02T11:40:00Z',
                  "the pre-send preflight's time ('2026-11-02T25:00:00Z') cannot be read, so the session-phase preflight cannot be placed after it; "
                  "run `trialctl preflight`, then the session phase, again")):
@@ -3417,6 +3502,28 @@ class FinishQueueText(LaunchCase):
         self.assertEqual((self.seen('Q02')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
         self.assertEqual(fin['replaces']['queue_text']['slots']['Q02']['since_gate'], 'unverified')
         self.assertEqual(collect._queue_text_notes(self.rig.trial, self.rig.state(self.RID)), [])
+
+    def test_what_finish_records_reaches_collect_s_notes(self):
+        # collect's tests write `finish.queue_text` by hand and these assert what `finish` writes, so a key renamed on one side with its own
+        # tests stayed green (#8805). Here the real `finish` writes the state the real `collect` reads, and the notes are spelled out.
+        self.started(FakeGitHub(bodies={9002: self.TYPO}), accept_changed={'Q02': 'a typo fix'},
+                     sent_at='2026-11-02T12:00:00Z', gate_at='2026-11-02T12:00:00.500Z')
+        code, out, _ = self.finish(FakeGitHub(bodies={9002: self.EDITED}))
+        self.assertEqual(code, 0, out)
+        github = test_collect.FakeGitHub()
+        for pattern, reply in ((r'^pulls$', []), (r'^issues/\d+/timeline$', []), (r'^git/ref/heads/', {'object': {'sha': 'basetip'}}),
+                               (r'^actions/runs$', []), (r'^contents/\.github/workflows/ci\.yml$', test_collect.ci_contents(CI_OK))):
+            github.route(pattern, reply)
+        env = self.rig.env(github=github)
+        code = collect.collect(self.rig.trial, self.rig.run(self.RID), env, data_dir=os.path.join(self.rig.box.tmp, 'data'))
+        out = env.out.getvalue()
+        self.assertEqual(code, 0, out)
+        self.assertEqual([line for line in out.splitlines() if line.startswith('  note: queue text')], [
+            '  note: queue text: acceptances ignored at finish (the recorded gate (2026-11-02T12:00:00.500Z) is later than the first send '
+            '(2026-11-02T12:00:00Z), so the text it let through or accepted is not the text the run started on; the queue text is compared '
+            'with T0 only)',
+            "  note: queue text Q02: changed since this run's gate (changed since the T0 snapshot of 2026-11-02T09:00:00Z: body; this run's "
+            "gate cannot be placed at or before the first send, so its acceptances were not used and the text is compared with T0)"])
 
     def test_a_finish_after_a_start_that_was_never_gated_compares_with_t0(self):
         self.rig.save_state(self.RID, start={'sent_at': 'x'})
