@@ -80,6 +80,29 @@ function run(origin, timeoutMs = 1000, watchdogMs = 8000) {
 }
 
 describe('Maestro iOS Metro warmup', () => {
+  it('accepts the loopback alias Expo emits for a localhost iOS manifest', async () => {
+    await withMetro({}, async ({ origin, requests }) => {
+      const result = await run(origin.replace('127.0.0.1', 'localhost'))
+      assert.equal(result.code, 0, result.stderr)
+      assert.ok(result.stdout.includes('iOS Metro bundle ready:'))
+      assert.deepEqual(requests.map(request => request.url), [
+        '/', '/custom-entry.bundle?platform=ios&dev=true'
+      ])
+    })
+  })
+
+  it('rejects a loopback alias when the advertised port differs', async () => {
+    await withMetro({ manifest: port => ({ launchAsset: {
+      contentType: 'application/javascript',
+      url: `http://127.0.0.1:${port + 1}/custom-entry.bundle?platform=ios`
+    } }) }, async ({ origin, requests }) => {
+      const result = await run(origin.replace('127.0.0.1', 'localhost'))
+      assert.equal(result.code, 1)
+      assert.ok(result.stderr.includes('not a same-origin iOS bundle'))
+      assert.deepEqual(requests.map(request => request.url), ['/'])
+    })
+  })
+
   it('derives the real iOS launch asset and waits for the entire JavaScript body', async () => {
     await withMetro({
       delay: 60, manifestType: 'application/expo+json; charset=utf-8',
@@ -123,6 +146,7 @@ describe('Maestro iOS Metro warmup', () => {
     for (const assetUrl of [
       () => 'https://example.invalid/index.bundle?platform=ios',
       () => 'http://127.0.0.1:1/index.bundle?platform=ios',
+      origin => `${origin.replace('http://', 'http://user@')}/index.bundle?platform=ios`,
       origin => `${origin}/index.bundle?platform=android`
     ]) {
       await withMetro({ manifest: port => ({ launchAsset: {

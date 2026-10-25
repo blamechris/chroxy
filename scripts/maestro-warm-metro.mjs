@@ -1,7 +1,7 @@
 // A listening Metro server can still be minutes away from serving its first
 // native bundle on a cold CI runner. Resolve the URL Expo itself puts in the
 // iOS manifest, then consume that bundle before Maestro starts its UI timer.
-const originArg = process.argv[2] || 'http://localhost:8081'
+const originArg = process.argv[2] || 'http://127.0.0.1:8081'
 const timeoutMs = Number(process.env.MAESTRO_METRO_TIMEOUT_MS || 300000)
 
 function localOrigin(value) {
@@ -15,6 +15,16 @@ function localOrigin(value) {
 
 function mediaType(response) {
   return response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+}
+
+function sameMetroOrigin(origin, asset) {
+  if (asset.username || asset.password) return false
+  if (asset.origin === origin.origin) return true
+  // Expo --localhost may advertise 127.0.0.1 in its iOS manifest. These
+  // spellings share one loopback server only when the HTTP port also matches.
+  return asset.protocol === 'http:' && asset.port === origin.port &&
+    ['localhost', '127.0.0.1'].includes(origin.hostname) &&
+    ['localhost', '127.0.0.1'].includes(asset.hostname)
 }
 
 async function warmMetro() {
@@ -42,7 +52,7 @@ async function warmMetro() {
       throw new Error('iOS Expo manifest has no JavaScript launch asset')
     }
     const bundleUrl = new URL(asset.url)
-    if (bundleUrl.origin !== origin.origin || !bundleUrl.pathname.endsWith('.bundle') ||
+    if (!sameMetroOrigin(origin, bundleUrl) || !bundleUrl.pathname.endsWith('.bundle') ||
       bundleUrl.searchParams.get('platform') !== 'ios' || bundleUrl.hash) {
       throw new Error('iOS Expo launch asset is not a same-origin iOS bundle')
     }
