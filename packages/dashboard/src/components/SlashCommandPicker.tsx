@@ -6,6 +6,7 @@
  */
 import { Fragment, useEffect, useRef, useMemo } from 'react'
 import type { SlashCommand } from '../store/types'
+import { matchSlashCommands } from '../utils/slash-command-match'
 
 // Chat redesign #6391 (slice 8): section headers for the source groups. Any
 // future/unknown source falls into "Other".
@@ -45,13 +46,7 @@ export function SlashCommandPicker({
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
-  const filtered = useMemo(() => {
-    if (!filter) return commands
-    const lower = filter.toLowerCase()
-    return commands.filter(
-      c => c.name.toLowerCase().includes(lower) || c.description.toLowerCase().includes(lower)
-    )
-  }, [commands, filter])
+  const filtered = useMemo(() => matchSlashCommands(commands, filter).commands, [commands, filter])
 
   if (filtered.length === 0) {
     return (
