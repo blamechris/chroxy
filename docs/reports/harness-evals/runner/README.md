@@ -47,18 +47,18 @@ GitHub error). "Could not check" is never reported as a pass.
 |---|---|---|
 | `render [RUN…] [--graders]` | supervisor | missions (and grader prompts) from `trial.json`; refuses an empty queue or an unfilled placeholder |
 | `key-template` | owner | the structured answer-key skeleton, one section per slot |
-| `gate RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | either | blocking issues closed, queue still open, each queue issue's title, body and comments unchanged since T0 (`queue-t0.json`; `--accept-changed Q03=REASON` accepts one slot's change and records it in the state's `overrides`), T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
+| `gate RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | either | blocking issues closed, queue still open, each queue issue's title, body and comments unchanged since T0 (`queue-t0.json`; `--accept-changed Q03=REASON` accepts one slot's change and records it, with the digests of the text it accepted, in the state's `overrides`), T0 set, `ci.yml` at T0 runs on push to the base, no other run live |
 | `cut --run RUN --t0 SHA [--push]` (or `--all`) | supervisor | each base = T0 plus the run's mission as the only commit; without `--push` it builds locally and prints the push. Cut each base just before its run: a new base fires a full CI push run. Recording T0 also records `queue-t0.json`, read before anything is written (an unreadable queue issue or comments listing refuses the cut, exit 2, with no T0 and no snapshot); an existing snapshot is never overwritten |
 | `clone RUN` | owner, Mac | fresh single-branch clone (`git clone --branch BASE --single-branch`, so the only remote-tracking ref is the base's) outside the daemon checkout and every other work tree; git identity; `npm ci` under Node 22 |
 | `preflight RUN [--phase session --session ID]` | owner, Mac | clone shape (the only remote-tracking ref is `origin/BASE` and the only fetch refspec is the base's own), mission bytes, identity, Node, `gh` login, no `ci.yml` run queued or in progress (the runners the subject machine hosts are idle); Claude effort in `~/.claude/settings.json`; Codex prompts compiled from this clone and CLI parity with the Codex app; Chroxy `allowAutoPermissionMode`, deploy agent unloaded, daemon commit unchanged; in the session phase, the daemon log's model and permission-mode lines for the new session and no interrupt |
 | `prepare RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | owner, Mac | `gate` (with the same acceptances), `clone`, `preflight`, then the launch card with the exact invocation |
 | `start RUN --meter …` | owner, Mac | records the usage readings and the send; refuses below the allowance floor, without a passing gate at the current T0 followed by a passing preflight (and session phase, for Chroxy), and for a run that already finished |
 | `verify-start RUN` | owner, Mac | reads the applied model, effort, permission mode and the mission's `TRIAL-PROBE` line back from the native transcript (Claude Code) or rollout (Codex); prints `STOP:` on any mismatch |
-| `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, and whether `~/.claude/settings.json` changed during the run (#8704) |
+| `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, whether `~/.claude/settings.json` changed during the run (#8704), and whether each queue issue's text changed during it: it reads the issues again and records, per slot, `unchanged`, `changed` or `unverified` since T0 and since the text this run's gate let through, in `finish.queue_text` (a read it could not make is `unverified`, never `unchanged`; a change prints a `WARNING`, and `finish` still succeeds) |
 | `status RUN` | operator, anywhere with `gh` | read-only live view (October's `check-run.sh` for any trial): base tip, commits since T0, the base's PRs with mission-rule flags, the queue issues that must stay untouched, the main tip, whether the report has landed |
 | `evidence RUN [--state FILE] [--data DIR]` | owner, Mac, after `finish` | copies the run's native transcripts (and, for Chroxy, the daemon log lines of its window) into the vault with a SHA-256 manifest, and writes the derived extract `data/native/<RUN>.json`; refuses, writing nothing, when the vault path is inside the repository, the run's clone or a git work tree, or (with `paths.evidence_vault` set) outside the vault |
 | `queue-candidates [--json] [--limit N]` | supervisor | PLAN.md section 4's mechanical filters over the open backlog: a candidate table plus the rule that dropped each other issue; read-only |
-| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge. When `data/native/<RUN>.json` exists it also fills the run's `approvals`, `compactions` and `workers` in `runs.json`, only while each is absent or `not recorded`; an extract that could not verify one of them leaves it out (no `approvals` from an unverified daemon log), and the placeholder stays |
+| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge. When `data/native/<RUN>.json` exists it also fills the run's `approvals`, `compactions` and `workers` in `runs.json`, only while each is absent or `not recorded`; an extract that could not verify one of them leaves it out (no `approvals` from an unverified daemon log), and the placeholder stays. A `finish` that recorded no `queue_text`, or a slot that is `changed` or `unverified` since the run's gate, is a printed note |
 | `apply-verdicts FILE` | supervisor | folds a grader's `verdicts.json` into the evidence; refuses while a merged PR has no verdict |
 | `disputes A B [--markdown]` | supervisor | the items where the two graders differ, for the owner's rulings |
 | `verify-key KEY.md` | grader, owner | digest and size against `<trial>/KEY-COMMITMENT.md` |
@@ -114,9 +114,33 @@ parts changed (title, body, or comments with the count before and after; `commen
 an edited comment). A missing file, a file taken at another T0, an entry missing for a slot or for another
 issue are failures; a GitHub error or an unreadable file is `UNVERIFIED`, never a pass. A change the owner
 accepts is `gate RUN --accept-changed Q03=REASON` (also on `prepare`): that slot's check passes with the
-reason shown and `{"kind": "accept-changed", "slot": "Q03", "reason": …}` goes into the state's
-`overrides`, as `--accept-open` does for a blocker. The acceptance covers a changed slot only, not a
-missing baseline.
+reason shown, and the acceptance goes into the state's `overrides`, as `--accept-open` does for a blocker:
+
+```json
+{"kind": "accept-changed", "slot": "Q03", "reason": "…", "issue": 1234,
+ "title_sha256": "…", "body_sha256": "…", "comments_sha256": "…", "comments": 3, "at": "<UTC time>"}
+```
+
+The digests are those of the text accepted, so two gates that accept different edits of one slot under the
+same reason leave two entries, and the same edit accepted twice leaves one; `gate.accepted_changed` in the
+state holds the reason and digests per slot. The acceptance covers a changed slot only, not a missing baseline.
+
+A gate only sees the text before its own run, so an edit made during the last run was never caught.
+`finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
+this run's gate let through (the accepted text for a slot with a recorded acceptance, else the T0 text).
+`finish.queue_text` holds `{"at": …, "slots": {"Q03": {"issue", "since_t0", "since_gate", "title_sha256",
+"body_sha256", "comments_sha256", "comments", "parts", "accepted", "detail"}}}`: `since_t0` and `since_gate` are
+`unchanged`, `changed` or `unverified`, `parts` (title, body, comments, as `gate` names them) is present
+when the slot changed since T0, and `accepted` is the recorded reason when the slot has an acceptance. An
+acceptance that is not a record with a reason and digests for that issue (the bare reason an older gate
+recorded, for one) is no acceptance, and the slot is compared with T0. A read that fails, a baseline that
+is missing, unreadable or taken at another T0, or a slot the snapshot lacks leaves the slot `unverified` in
+both fields (and a missing baseline reads nothing): `finish` records, it does not judge the setup.
+A slot `changed` since the gate prints a `FAIL` line and one `WARNING` naming the slots, because the run may
+have read more than one version of their text and a grader must know which; mission rule 4 forbids a run
+from commenting on an issue, so a new comment is a breach of it or somebody else's. `finish` still exits 0,
+as it does for a changed `settings.json`. Only digests and part names are recorded, never the text.
+`collect` prints a note for a `finish` with no `queue_text` and for each slot not `unchanged` since the gate.
 
 ## Evidence
 

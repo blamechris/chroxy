@@ -813,6 +813,73 @@ class StateAndExit(Scenario):
         self.assertNotIn(self.box.home, json.dumps(copied))
 
 
+class QueueTextNotes(Scenario):
+    """`finish` records whether the queue's text moved during the run (`finish.queue_text`); collect says so when it did, or when
+    it did not look."""
+    FINISH = {'ended_at': '2026-11-02T11:40:00Z', 'stop': 'queue exhausted'}
+
+    def seen(self, **slots):
+        rows = {slot: dict(row, issue=9001) for slot, row in slots.items()}
+        return dict(self.FINISH, queue_text={'at': '2026-11-02T11:40:00Z', 'slots': rows})
+
+    def row(self, since_gate, detail='the detail finish recorded'):
+        return {'since_t0': since_gate, 'since_gate': since_gate, 'detail': detail}
+
+    def test_a_finish_that_did_not_read_the_text_again_is_a_note(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.FINISH})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn('  note: finish did not re-read the queue text, so an edit during the run cannot be ruled out', self.output)
+
+    def test_a_record_that_is_not_one_is_taken_for_not_having_read_it(self):
+        for seen in (None, 'x', [], {}, {'slots': None}, {'slots': []}):
+            with self.subTest(seen=seen):
+                self.write_state({'start': {'sent_at': START}, 'finish': dict(self.FINISH, queue_text=seen)})
+                self.collect()
+                self.assertIn('finish did not re-read the queue text', self.output)
+
+    def test_no_finish_no_note(self):
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertNotIn('queue text', self.output)
+
+    def test_every_slot_unchanged_since_the_gate_is_no_note(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'), Q02=self.row('unchanged'))})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertNotIn('queue text', self.output)
+        self.assertNotIn('re-read', self.output)
+
+    def test_a_slot_changed_or_unverified_since_the_gate_is_named_with_what_finish_recorded(self):
+        gate_text = {'since_t0': 'changed', 'since_gate': 'unchanged', 'detail': 'changed since T0 (body), the text this run\'s gate accepted: x'}
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(
+            Q01=self.row('unchanged'), Q02=self.row('changed', 'changed since the T0 snapshot of T: body; so it changed during the run'),
+            Q03=self.row('unverified', 'cannot read Q03 #9003: rate limited'), Q04=gate_text)})
+        self.collect()
+        self.assertEqual(self.code, 0, self.output)
+        self.assertIn("  note: queue text Q02: changed since this run's gate (changed since the T0 snapshot of T: body; so it changed during the run)",
+                      self.output)
+        self.assertIn("  note: queue text Q03: unverified since this run's gate (cannot read Q03 #9003: rate limited)", self.output)
+        self.assertNotIn('queue text Q01', self.output)
+        self.assertNotIn('queue text Q04', self.output, 'an accepted change that stayed as accepted is no note')
+        self.assertNotIn('re-read', self.output)
+
+    def test_a_row_that_is_not_a_record_is_not_unchanged(self):
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q01=self.row('unchanged'))})
+        state = read_json(os.path.join(self.state_dir, 'A-cd-r1.json'))
+        state['finish']['queue_text']['slots']['Q02'] = 'unchanged'
+        write_json(os.path.join(self.state_dir, 'A-cd-r1.json'), state)
+        self.collect()
+        self.assertIn("  note: queue text Q02: unknown since this run's gate (no detail recorded)", self.output)
+
+    def test_the_notes_change_no_evidence(self):
+        without = self.collect()
+        self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q02=self.row('changed'))})
+        with_note = self.collect()
+        self.assertIn('queue text Q02: changed', self.output)
+        self.assertEqual(with_note, without)
+
+
 class RunsJson(Scenario):
     def runs_json(self):
         return read_json(os.path.join(self.data, 'runs.json'))

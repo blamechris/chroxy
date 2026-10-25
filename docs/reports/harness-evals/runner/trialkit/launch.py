@@ -228,8 +228,8 @@ def gate(trial, run, env, accept_open, state_file, accept_changed=None):
     overrides = st.setdefault('overrides', [])
     for number, reason in accepted.items():
         _record_override(overrides, {'kind': 'accept-open', 'issue': int(number), 'reason': reason}, env)
-    for slot, reason in accepted_changed.items():
-        _record_override(overrides, {'kind': 'accept-changed', 'slot': slot, 'reason': reason}, env)
+    for slot, acceptance in accepted_changed.items():
+        _record_override(overrides, {'kind': 'accept-changed', 'slot': slot, **acceptance}, env)
     _save(trial, run, env, st, state_file)
     env.print(checks.render(results, f'gate {run.id}'))
     return checks.exit_code(results)
@@ -1261,7 +1261,17 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
             if record['settings_changed']:
                 env.print(f'WARNING: {settings} changed during the run (hash {str(before)[:12]} -> {str(now_hash)[:12]}). '
                           f'An isolated preview daemon once wrote a hook into it (#8704); inspect it before trusting the run\'s settings.')
+    gate_record = st.get('gate')
+    results, slots = queue_text.finish_checks(trial, env.github(trial.repo),
+                                              gate_record.get('accepted_changed') if isinstance(gate_record, dict) else None)
+    record['queue_text'] = {'at': _at(env), 'slots': slots}
     st['finish'] = record
     _save(trial, run, env, st, state_file)
+    env.print(checks.render(results, f'queue text at the end of {run.id}'))
+    changed = [slot for slot, seen in slots.items() if seen['since_gate'] == queue_text.CHANGED]
+    if changed:
+        env.print(f'WARNING: the text of {", ".join(changed)} differs from what this run\'s gate let through, so the run may have read more than one '
+                  f'version of it; a grader must know which. A new comment is either a breach of mission rule 4 (the run may not comment on an '
+                  f'issue) or somebody else\'s.')
     env.print(f'finish {run.id}: recorded ended_at {ended}')
     return 0
