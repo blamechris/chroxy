@@ -73,6 +73,7 @@ jobs:
         run: |
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          "$HOME/.maestro/bin/maestro" --version
 
       # Builds + installs the chroxy dev client (com.blamechris.chroxy) into the
       # simulator WITHOUT starting Metro (started separately below so it can run
@@ -112,6 +113,8 @@ jobs:
         env:
           MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
           MAESTRO_ARTIFACT_DIR: ${{ runner.temp }}/maestro-diagnostics
+          # XCTest started just beyond Maestro's 120s default on a hosted shard.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
         run: |
           case "$MAESTRO_FLOW" in
             all)

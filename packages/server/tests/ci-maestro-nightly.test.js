@@ -181,6 +181,19 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.equal(upload.with['if-no-files-found'], 'warn')
   })
 
+  it('bounds the hosted iOS driver startup allowance to the Maestro suite step', () => {
+    const job = workflow.jobs.maestro
+    const suite = job.steps.find(step => step.name === 'Run Maestro suite')
+    assert.equal(suite.env.MAESTRO_DRIVER_STARTUP_TIMEOUT, '180000',
+      'the hosted XCTest startup observed just beyond 120s needs Maestro\'s 180s allowance')
+    assert.equal(workflow.env.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined)
+    assert.equal(job.env?.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined)
+    for (const step of job.steps.filter(step => step !== suite)) {
+      assert.equal(step.env?.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined,
+        `${step.name ?? step.uses} must not inherit the suite startup allowance`)
+    }
+  })
+
   it('opens the same Metro dev-client link in connect and session setup', () => {
     const connect = flow('setup/ensure-connect-screen.yaml')
     const session = flow('setup/ensure-session-screen.yaml')
