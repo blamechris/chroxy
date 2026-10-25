@@ -36,7 +36,7 @@
     "test": "node --import tsx/esm --import ../../scripts/lib/no-test-force-exit-hook.mjs --import ../../scripts/lib/assert-match-payload-guard-hook.mjs --test tests/*.test.js"
   },
   "dependencies": {
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "*",
