@@ -998,6 +998,31 @@ def _not_passed(entry):
     return [f'{c.get("name")} {c.get("status")}' for c in entry['checks'] if c.get('status') != checks.PASS]
 
 
+def _instant(value):
+    """The moment an ISO-8601 timestamp names, or None when `value` is missing or cannot be read (a value that is no text, no
+    timestamp, or so near the end of the calendar that its UTC time is out of range, such as 9999-12-31T23:59:59-05:00)."""
+    try:
+        return timeutil.parse_ts(value)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
+def _out_of_order(step, entry, base, base_entry, again):
+    """[] when recorded step `entry` ran at or after `base_entry`, else the one problem saying why it cannot be placed after it.
+    The two `at` times are compared as moments, not as strings: `timeutil.iso` writes no fraction, or one of three or six
+    digits, and `Z` sorts above `.`, so as text a preflight half a second after a whole-second gate is older than it (#8805).
+    A time that cannot be read places its step nowhere, which is not after the other."""
+    at, base_at = entry.get('at'), base_entry.get('at')
+    mine, theirs = _instant(at), _instant(base_at)
+    if mine is None:
+        return [f'the {step}\'s time ({at!r}) cannot be read, so it cannot be placed after the {base}; {again}']
+    if theirs is None:
+        return [f'the {base}\'s time ({base_at!r}) cannot be read, so the {step} cannot be placed after it; run the {base} again']
+    if mine < theirs:
+        return [f'the {step} is older than the {base}; {again}']
+    return []
+
+
 def _order_problems(trial, run, st):
     """What the recorded steps say about sending now: the gate passed at this T0, then a pre-send
     preflight passed, then (Chroxy) the session-phase preflight passed. `start` is the step that
@@ -1020,8 +1045,8 @@ def _order_problems(trial, run, st):
         bad = _not_passed(pre)
         if bad:
             problems.append(f'the latest preflight ({pre.get("at")}) did not pass: {", ".join(bad)}')
-        if gate and str(pre.get('at') or '') < str(gate.get('at') or ''):
-            problems.append('the latest preflight is older than the gate; run `trialctl preflight` again')
+        if gate:
+            problems.extend(_out_of_order('latest preflight', pre, 'gate', gate, 'run `trialctl preflight` again'))
     if run.harness.chroxy:
         session = _latest_pre(st, 'session')
         if session is None:
@@ -1030,8 +1055,8 @@ def _order_problems(trial, run, st):
             bad = _not_passed(session)
             if bad:
                 problems.append(f'the session-phase preflight ({session.get("at")}) did not pass: {", ".join(bad)}')
-            if pre and str(session.get('at') or '') < str(pre.get('at') or ''):
-                problems.append('the session-phase preflight is older than the pre-send preflight; run it again')
+            if pre:
+                problems.extend(_out_of_order('session-phase preflight', session, 'pre-send preflight', pre, 'run it again'))
     return problems
 
 
@@ -1234,15 +1259,6 @@ def _first_send(st):
     return started.get('sent_at') if isinstance(started, dict) else None
 
 
-def _instant(value):
-    """The moment an ISO-8601 timestamp names, or None when `value` is missing or cannot be read (a value that is no text, no
-    timestamp, or so near the end of the calendar that its UTC time is out of range, such as 9999-12-31T23:59:59-05:00)."""
-    try:
-        return timeutil.parse_ts(value)
-    except (ValueError, TypeError, AttributeError, OverflowError):
-        return None
-
-
 def _acceptances_ignored(st):
     """Why the recorded gate's acceptances cannot stand for the text the run started on, or None when they can. They can
     when no start or no gate is recorded (nothing says the gate came late) and when the gate is at or before the first send,
@@ -1271,6 +1287,12 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
             env.print(f'finish {run.id}: --ended-at {ended_at!r} is not an ISO-8601 timestamp')
             return 2
     record = {'ended_at': ended, 'meters': dict(meters or {}), 'cost': cost, 'stop': stop}
+    previous = st.get('finish')
+    if previous:
+        was = previous.get('ended_at') if isinstance(previous, dict) else None
+        moved = (f'; ended_at moves from {was} to {ended} (pass --ended-at {was} to keep it)'
+                 if was and _instant(was) != _instant(ended) else '')
+        env.print(f'note: a finish is already recorded; this one replaces it, and the earlier record is kept under finish.replaces{moved}')
     if not st.get('start'):
         env.print(f'warning: no start is recorded for {run.id}; recording the finish anyway')
     if run.harness.family == 'claude':
@@ -1306,6 +1328,10 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     record['queue_text'] = {'at': _at(env), 'slots': slots}
     if ignored:
         record['queue_text']['acceptances_ignored'] = ignored
+    if previous:
+        # A re-run (to read an unverified slot again, say) keeps what the earlier finish saw, as `start.replaces` does:
+        # a slot it found changed must stay on record when the edit is reverted before the re-read (#8802).
+        record['replaces'] = previous
     st['finish'] = record
     _save(trial, run, env, st, state_file)
     env.print(checks.render(results, f'queue text at the end of {run.id}'))

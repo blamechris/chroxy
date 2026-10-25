@@ -22,7 +22,7 @@ from unittest import mock
 import helpers
 from helpers import ScriptedRunner, argv_starts
 from test_native import assistant, jl, meta, tool_result, turn, user
-from trialkit import cli, config, launch, native, queue_text, render, state, timeutil
+from trialkit import cli, collect, config, launch, native, queue_text, render, state, timeutil
 from trialkit.gh import GitHubError
 
 CI_OK = "name: CI\non:\n  push:\n    branches: [main, 'trial/**']\n  pull_request:\n"
@@ -2343,6 +2343,46 @@ class Start(LaunchCase):
         self.assertEqual(code, 1)
         self.assertIn('older than the gate', out)
 
+    def order(self, rid, gate_at, pre_at, session_at=None):
+        """Start `rid` from a passing gate, preflight and (when given) session phase recorded at those times."""
+        preflight = [dict(passing_preflight()[0], at=pre_at)]
+        if session_at is not None:
+            preflight.append({'phase': 'session', 'at': session_at, 'facts': {}, 'checks': [{'name': 's', 'status': 'PASS', 'detail': ''}]})
+        self.rig.save_state(rid, gate=passing_gate(self.rig, at=gate_at), preflight=preflight)
+        return self.go(rid, {'codex_weekly_left': 100.0} if session_at is not None else None)
+
+    def test_the_preflight_is_placed_after_the_gate_as_a_moment_not_as_text(self):
+        # `timeutil.iso` drops a zero fraction, and `Z` sorts above `.`: as text, half a second after is older (#8805).
+        for gate_at, pre_at, after in (('2026-11-02T11:00:00Z', '2026-11-02T11:00:00.500Z', True),
+                                       ('2026-11-02T11:00:00Z', '2026-11-02T10:59:59.500Z', False),
+                                       ('2026-11-02T11:00:00.500Z', '2026-11-02T11:00:00Z', False),
+                                       ('2026-11-02T11:00:00Z', '2026-11-02T11:00:00+00:00', True)):
+            with self.subTest(gate=gate_at, preflight=pre_at):
+                code, out = self.order('A-cd-r1', gate_at, pre_at)
+                self.assertEqual((code, 'older than the gate' in out), (0, False) if after else (1, True), out)
+
+    def test_the_session_phase_is_placed_after_the_preflight_as_a_moment_not_as_text(self):
+        for pre_at, session_at, after in (('2026-11-02T11:30:00Z', '2026-11-02T11:30:00.500Z', True),
+                                          ('2026-11-02T11:30:00Z', '2026-11-02T11:29:59.500Z', False),
+                                          ('2026-11-02T11:30:00.500Z', '2026-11-02T11:30:00Z', False)):
+            with self.subTest(preflight=pre_at, session=session_at):
+                code, out = self.order('B-cy-r1', '2026-11-02T11:00:00Z', pre_at, session_at)
+                self.assertEqual((code, 'session-phase preflight is older' in out), (0, False) if after else (1, True), out)
+
+    def test_a_step_time_that_cannot_be_read_is_reported_not_taken_as_in_order(self):
+        for gate_at, pre_at, session_at, said in (
+                ('2026-11-02T11:00:00Z', 'soon', None, "the latest preflight's time ('soon') cannot be read, so it cannot be placed after the gate"),
+                ('x', '2026-11-02T11:30:00Z', None, "the gate's time ('x') cannot be read, so the latest preflight cannot be placed after it"),
+                ('2026-11-02T11:00:00Z', '2026-11-02T11:30:00Z', '',
+                 "the session-phase preflight's time ('') cannot be read, so it cannot be placed after the pre-send preflight"),
+                ('2026-11-02T11:00:00Z', '2026-11-02T25:00:00Z', '2026-11-02T11:40:00Z',
+                 "the pre-send preflight's time ('2026-11-02T25:00:00Z') cannot be read, so the session-phase preflight cannot be placed after it")):
+            with self.subTest(gate=gate_at, preflight=pre_at, session=session_at):
+                code, out = self.order('B-cy-r1' if session_at is not None else 'A-cd-r1', gate_at, pre_at, session_at)
+                self.assertEqual(code, 1, out)
+                self.assertIn(said, out)
+                self.assertNotIn('start', self.rig.state('B-cy-r1' if session_at is not None else 'A-cd-r1'))
+
     def test_a_chroxy_run_needs_a_passing_session_phase_after_the_preflight(self):
         meters = {'codex_weekly_left': 100.0}
         self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
@@ -2862,6 +2902,30 @@ class Finish(LaunchCase):
         self.assertIn('no start is recorded', out)
         self.assertIn('finish', self.rig.state('B-cx-r1'))
 
+    def test_a_re_run_keeps_every_earlier_record_under_replaces_newest_first(self):
+        self.settled_run()
+        code, out = self.go(ended_at='2026-11-02T18:30:00Z')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('already recorded', out)
+        first = self.rig.state('A-cd-r1')['finish']
+        self.assertNotIn('replaces', first)
+        code, out = self.go(meters={'claude_5h_used': 42.0})
+        self.assertEqual(code, 0, out)
+        self.assertIn('note: a finish is already recorded; this one replaces it, and the earlier record is kept under finish.replaces; '
+                      'ended_at moves from 2026-11-02T18:30:00Z to 2026-11-02T12:00:00Z (pass --ended-at 2026-11-02T18:30:00Z to keep it)', out)
+        second = self.rig.state('A-cd-r1')['finish']
+        self.assertEqual((second['ended_at'], second['meters'], second['replaces']), ('2026-11-02T12:00:00Z', {'claude_5h_used': 42.0}, first))
+        st = self.rig.state('A-cd-r1')
+        st['finish']['ended_at'] = '2026-11-02T12:00:00.000+00:00'  # the same moment, as a hand edit or another writer spells it
+        self.rig.save_state('A-cd-r1', **{k: v for k, v in st.items() if k not in ('run', 'trial', 'updated_at')})
+        second = self.rig.state('A-cd-r1')['finish']
+        code, out = self.go(ended_at='2026-11-02T12:00:00Z')
+        self.assertIn('kept under finish.replaces', out)
+        self.assertNotIn('moves', out, 'the same moment written another way does not move it')
+        third = self.rig.state('A-cd-r1')['finish']
+        self.assertEqual((third['replaces'], third['replaces']['replaces']), (second, first))
+        self.assertEqual(state.live_runs(self.rig.trial, home=self.rig.box.home), [])
+
 
 # -- finish: the queue's text again ------------------------------------------------
 
@@ -3129,7 +3193,7 @@ class FinishQueueText(LaunchCase):
         self.started()
         for gate in (None, {}):
             with self.subTest(gate=gate):
-                self.rewrite(gate=gate)
+                self.rewrite(gate=gate, finish=None)  # each a first finish: a re-run notes the record it replaces
                 _code, out, _ = self.finish()
                 self.assertNotIn('acceptances_ignored', self.recorded()['queue_text'])
                 self.assertNotIn('note:', out)
@@ -3301,6 +3365,38 @@ class FinishQueueText(LaunchCase):
         self.assertEqual(self.recorded()['queue_text']['slots'], {})
         self.assertRegex(out, r'UNVERIFIED\s+queue text at the end\s+the queue has no slots')
         self.assertEqual(gh.requests, [])
+
+    def test_a_re_run_after_the_edit_was_reverted_keeps_the_changed_record(self):
+        # #8802: the re-read finds the T0 text again; the change the first finish saw must still be in the state, and collect names it.
+        self.started()
+        _code, out, _ = self.finish(FakeGitHub(bodies={9002: self.EDITED}))
+        first = self.recorded()
+        self.assertEqual((first['queue_text']['slots']['Q02']['since_t0'], first['queue_text']['slots']['Q02']['since_gate']), ('changed', 'changed'))
+        code, out, _ = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertIn('kept under finish.replaces', out)
+        self.assertEqual((self.seen('Q02')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+        self.assertEqual(self.recorded()['replaces'], first)
+        notes = collect._queue_text_notes(self.rig.trial, self.rig.state(self.RID))
+        self.assertEqual(notes, ["queue text Q02: an earlier finish (queue text read at 2026-11-02T12:00:00Z) found it changed since this run's "
+                                 f"gate ({first['queue_text']['slots']['Q02']['detail']})"])
+
+    def test_a_re_run_reads_an_unverified_slot_again_and_the_earlier_unverified_is_no_note(self):
+        # The README's recovery: the first read failed, a re-run with the same end reads it.
+        self.started()
+        _code, out, _ = self.finish(FakeGitHub(issues={9002: GitHubError('boom', 502)}))
+        self.assertEqual(self.seen('Q02')['since_gate'], 'unverified')
+        env = self.rig.env(github=FakeGitHub())
+        code = cli.main(['--trial', self.rig.box.trial_dir, 'finish', self.RID, '--ended-at', '2026-11-02T12:00:00Z',
+                         '--meter', 'codex_weekly_left=48', '--cost', 'n/a', '--stop', 'queue exhausted'], env=env)
+        out = env.out.getvalue()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('moves', out)
+        fin = self.recorded()
+        self.assertEqual((fin['ended_at'], fin['meters'], fin['cost'], fin['stop']), ('2026-11-02T12:00:00Z', {'codex_weekly_left': 48.0}, 'n/a', 'queue exhausted'))
+        self.assertEqual((self.seen('Q02')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+        self.assertEqual(fin['replaces']['queue_text']['slots']['Q02']['since_gate'], 'unverified')
+        self.assertEqual(collect._queue_text_notes(self.rig.trial, self.rig.state(self.RID)), [])
 
     def test_a_finish_after_a_start_that_was_never_gated_compares_with_t0(self):
         self.rig.save_state(self.RID, start={'sent_at': 'x'})
