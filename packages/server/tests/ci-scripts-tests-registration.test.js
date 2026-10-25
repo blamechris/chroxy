@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   readWorkflows,
@@ -234,16 +234,23 @@ const GLOB_COVERED = [
     // Check Vitest's own file list, so nested coverage include/exclude settings
     // cannot be mistaken for narrowing test discovery.
     config: 'packages/store-core/vitest.config.ts',
-    witness: 'scripts/__tests__/export-targets.test.mjs',
     covers: /\.test\.(mjs|cjs|js)$/,
     why:
       "vitest's defaultInclude is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which matches .mjs and is " +
-      'not confined to src/; native `vitest list --filesOnly` in packages/store-core must list ' +
-      'scripts/__tests__/export-targets.test.mjs even with coverage reporter settings.',
+      'not confined to src/; native `vitest list --filesOnly` must list every tracked suite ' +
+      'this exemption removes from the named-step registration check.',
   },
 ]
 
-function assertVitestDiscovers(entry, configPath) {
+function exemptedSuites(entry, paths = trackedFiles()) {
+  // Mirror the actual exemption predicate in isSubject. Derive the expected
+  // roster from tracked files, never from a single named witness.
+  return paths.filter(p => isSuiteShaped(p) && p.startsWith(entry.tree) && entry.covers.test(p)).sort()
+}
+
+function assertVitestDiscovers(entry, configPath, candidates = exemptedSuites(entry)) {
+  assert.ok(candidates.length > 0,
+    `${entry.tree} has no tracked suites under its exemption; remove the entry rather than pass an empty check`)
   const root = join(REPO_ROOT, entry.tree)
   const cli = join(REPO_ROOT, 'node_modules/vitest/vitest.mjs')
   const result = spawnSync(process.execPath, [cli, 'list', '--filesOnly', '--config', configPath], {
@@ -251,9 +258,10 @@ function assertVitestDiscovers(entry, configPath) {
   })
   assert.equal(result.signal, null, `Vitest discovery timed out or was killed: ${result.stderr}`)
   assert.equal(result.status, 0, `Vitest discovery failed: ${result.stderr || result.error?.message}`)
-  const files = result.stdout.replaceAll('\\', '/').split(/\r?\n/).map(line => line.trim())
-  assert.ok(files.includes(entry.witness),
-    `${entry.config} no longer discovers ${entry.witness}. ${entry.why}\n` +
+  const files = new Set(result.stdout.replaceAll('\\', '/').split(/\r?\n/).map(line => line.trim()))
+  const missing = candidates.filter(path => !files.has(path.slice(entry.tree.length)))
+  assert.ok(missing.length === 0,
+    `${entry.config} does not discover exempted suites: ${missing.join(', ')}. ${entry.why}\n` +
       'Re-measure the runner after any test discovery change; do not exempt an undiscovered suite.')
 }
 
@@ -769,7 +777,7 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
       )
     })
 
-    it(`${entry.tree}'s runner still discovers its exempted suite`, () => {
+    it(`${entry.tree}'s runner still discovers every exempted suite`, () => {
       // Test discovery, not the spelling of its config, is the exemption's
       // premise. This catches include/exclude/dir/root narrowing while letting
       // coverage.include and coverage.exclude select instrumented sources.
@@ -777,9 +785,7 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
     })
 
     it(`${entry.tree} still holds a *.test.mjs the exemption is doing work for`, () => {
-      const covered = trackedFiles().filter(
-        p => p.startsWith(entry.tree) && isSuiteShaped(p) && entry.covers.test(p)
-      )
+      const covered = exemptedSuites(entry)
       assert.ok(
         covered.length > 0,
         `no *.test.mjs under ${entry.tree}, so this exemption excludes nothing and is unfalsifiable. ` +
@@ -1818,8 +1824,8 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
 
   describe('the GLOB_COVERED exemption checks are not vacuous', () => {
     // Exercise the same native discovery check on configurations that do and
-    // do not remove the witness suite. A command that merely exits 0, or a
-    // check that denies every config, fails these controls.
+    // do not remove exempted suites. A command that merely exits 0, or a check
+    // that denies every config, fails these controls.
     for (const entry of GLOB_COVERED) {
       const withConfig = (source, check) => {
         const directory = mkdtempSync(join(tmpdir(), 'chroxy-vitest-discovery-'))
@@ -1837,6 +1843,33 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
           config => assertVitestDiscovers(entry, config))
       })
 
+      it(`${entry.tree}: an empty exemption roster fails before Vitest runs`, () => {
+        assert.throws(() => assertVitestDiscovers(entry, join(REPO_ROOT, entry.config), []),
+          /has no tracked suites under its exemption/)
+      })
+
+      it(`${entry.tree}: discovering one of two exempted suites fails`, () => {
+        const root = join(REPO_ROOT, entry.tree)
+        const directory = mkdtempSync(join(root, 'scripts/__tests__/coverage-discovery-'))
+        const second = join(directory, 'second.test.mjs')
+        try {
+          writeFileSync(second, '// discovery-only fixture\n')
+          const first = exemptedSuites(entry)[0]
+          assert.ok(first, 'the real exemption roster must have a first suite')
+          const secondPath = `${entry.tree}${relative(root, second).replaceAll('\\', '/')}`
+          const candidates = exemptedSuites(entry, [first, secondPath, `${entry.tree}scripts/__tests__/ignored.test.sh`])
+          assert.deepEqual(candidates, [first, secondPath].sort(), 'the enumeration must keep both eligible suites')
+          withConfig(`{ include: [${JSON.stringify(first.slice(entry.tree.length))}] }`, config => {
+            assert.throws(() => assertVitestDiscovers(entry, config, candidates), error => {
+              assert.ok(error.message.includes(`does not discover exempted suites: ${secondPath}`), error.message)
+              return true
+            })
+          })
+        } finally {
+          rmSync(directory, { recursive: true, force: true })
+        }
+      })
+
       for (const [key, value] of [
         ['include', "['src/**/*.test.ts']"],
         ['exclude', "['**/*.test.mjs']"],
@@ -1846,7 +1879,7 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         it(`${entry.tree}: test.${key} narrowing removes the exempted suite`, () => {
           withConfig(`{ ${key}: ${value} }`, config => {
             assert.throws(() => assertVitestDiscovers(entry, config),
-              new RegExp(`no longer discovers ${entry.witness.replaceAll('.', '\\.')}`))
+              /does not discover exempted suites/)
           })
         })
       }
