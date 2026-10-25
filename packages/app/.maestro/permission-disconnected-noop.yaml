@@ -94,7 +94,6 @@ name: Permission tap while disconnected is a no-op (#5699)
 # never marks answered. Either way this must be a no-op.
 - tapOn:
     id: "approval-button-approve"
-- waitForAnimationToEnd
 
 # Load-bearing no-op assertion: the prompt is STILL unanswered. The hint stays
 # visible (it requires `answered == null`); if the tap had optimistically
@@ -112,7 +111,22 @@ name: Permission tap while disconnected is a no-op (#5699)
 # turning an unverified disconnected window into a green recovery step.
 - runScript: scripts/release-reconnect-hold.js
 
-# Recovery: the released hold restores health → 200 and the app auto-reconnects.
+# The health probe can exhaust its retry ladder while the hold is active. Once
+# health is restored, explicitly retry from either the native failure alert or
+# the terminal server-down banner if it appeared. Live reconnects need no tap.
+- runFlow:
+    when:
+      visible: "Connection Failed"
+    commands:
+      - tapOn: "^Retry$"
+- runFlow:
+    when:
+      visible:
+        id: "server-down-reconnect"
+    commands:
+      - tapOn:
+          id: "server-down-reconnect"
+
 # Wait for the connected happy-path layout (the input placeholder flips back to
 # "Message Claude...") so the flow leaves the app usable for the next flow and
 # proves the disconnect was transient, not a crash.

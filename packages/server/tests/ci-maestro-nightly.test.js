@@ -194,6 +194,31 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     }
   })
 
+  it('keeps the disconnected no-op proof before release and handles terminal recovery afterward', () => {
+    const commands = flow('permission-disconnected-noop.yaml')
+    const tap = commands.findIndex(command => command.tapOn?.id === 'approval-button-approve')
+    const release = commands.findIndex(command => command.runScript === 'scripts/release-reconnect-hold.js')
+    const connected = commands.findIndex(command => command.extendedWaitUntil?.visible?.text === 'Message Claude...')
+    assert.ok(tap >= 0 && tap < release && release < connected)
+    assert.equal(commands[tap + 1]?.assertVisible?.id, 'prompt-disconnected-hint',
+      'the no-op assertion must immediately follow the disabled tap')
+    assert.ok(commands.slice(tap + 1, release).some(command =>
+      command.assertVisible?.id === 'approval-button-approve' && command.assertVisible.enabled === false),
+    'the option must stay disabled until the hold is released')
+    const recovery = commands.slice(release + 1, connected)
+    assert.ok(recovery.some(command =>
+      command.runFlow?.when?.visible === 'Connection Failed' &&
+      command.runFlow.commands?.some(step => step.tapOn === '^Retry$')),
+    'the native terminal alert must offer a recovery path after release')
+    assert.ok(recovery.some(command =>
+      command.runFlow?.when?.visible?.id === 'server-down-reconnect' &&
+      command.runFlow.commands?.some(step => step.tapOn?.id === 'server-down-reconnect')),
+    'the terminal banner must offer a recovery path after release')
+    assert.ok(commands.slice(connected + 1).some(command =>
+      command.assertVisible?.id === 'approval-button-approve' && command.assertVisible.enabled === true),
+    'the prompt must be answerable once connected')
+  })
+
   it('opens the same Metro dev-client link in connect and session setup', () => {
     const connect = flow('setup/ensure-connect-screen.yaml')
     const session = flow('setup/ensure-session-screen.yaml')

@@ -56,8 +56,9 @@ let sawSimulateDisconnect = false
 // #5699: keep health down until the disconnected-button flow explicitly
 // releases it. Maestro can spend more than ten seconds settling a tap on a
 // disabled element; a timer alone reconnects the app before the no-op assert.
-// The deadline is only a failsafe for an aborted flow, shorter than the app's
-// reconnect ladder (~59s). Tests may shorten it to prove expiry behavior.
+// The deadline bounds a stalled or aborted flow. The app may reach its
+// terminal server_down state before this deadline; the flow explicitly retries
+// after releasing the hold. Tests may shorten it to prove expiry behavior.
 const requestedHoldMs = Number(process.env.MAESTRO_MOCK_HOLD_FAILSAFE_MS ?? 45000)
 if (!Number.isInteger(requestedHoldMs) || requestedHoldMs < 200 || requestedHoldMs > 45000) {
   throw new Error('MAESTRO_MOCK_HOLD_FAILSAFE_MS must be 200-45000 milliseconds')

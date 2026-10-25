@@ -135,11 +135,12 @@ name: All E2E flows
 # Flow 22: Permission tap while disconnected is a no-op (#5699) — pins
 # the last acceptance criterion of the optimistic-action-loss fix:
 # seeds an AskUserQuestion prompt, drops + holds the connection down
-# (mock 'simulate-disconnect-hold' fails /health for ~10s), asserts the
+# (mock 'simulate-disconnect-hold' fails /health until explicit release), asserts the
 # `prompt-disconnected-hint` feedback, taps Approve, and asserts the
 # bubble is STILL unanswered (hint persists). The non-vacuity hinge —
 # a regression that optimistically answered the tap would clear the
-# hint and fail the flow. Recovers via the self-releasing hold.
+# hint and fail the flow. Releases the hold, then retries if connection recovery
+# reached the terminal server-down state.
 - runFlow: permission-disconnected-noop.yaml
 
 # Flow 23: DiffViewer inline comment → submit (#6800 follow-up) — opens
