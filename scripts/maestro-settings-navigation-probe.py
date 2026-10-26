@@ -83,7 +83,7 @@ def hierarchy(label):
 original = (ROOT / 'packages/app/.maestro/setup/disable-password-autofill.yaml').read_text()
 old_tap = '      - tapOn:\n          id: AUTOFILL\n          index: 0'
 assert original.count(old_tap) == 1
-candidate = original.replace(old_tap, '      - tapOn:\n          containsChild:\n            id: AUTOFILL')
+candidate = original.replace(old_tap, '      - waitForAnimationToEnd:\n          timeout: 10000\n' + old_tap)
 RESULT['sources'] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in [('original', original), ('candidate', candidate)]}
 RESULT['baseline_exit'] = flow('original', original)
 hierarchy('after-original')
@@ -116,7 +116,7 @@ hierarchy('general-geometry')
 RESULT['candidate_exit'] = flow('candidate', candidate)
 if RESULT['candidate_exit'] != 0:
     hierarchy('after-candidate-failure')
-    raise AssertionError('parent selection did not establish OFF')
+    raise AssertionError('settled navigation did not establish OFF')
 observed = hierarchy('after-candidate')
 assert any(x['attributes'].get('resource-id') == 'AutoFillToggle' and x['attributes'].get('checked') == 'false' for x in observed)
 assert flow('candidate-already-off', candidate) == 0
