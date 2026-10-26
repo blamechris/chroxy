@@ -27,6 +27,11 @@ name: Wait for Chroxy dev client
       text: ".*(Welcome to Chroxy|Connect to Chroxy|Connecting|Chat|Reload|Continue).*"
     timeout: 180000
 
+# Expo's project-load error also offers Reload. Reject its exact title before
+# treating Reload as a development-menu action; keep the real app anchor below.
+- assertNotVisible:
+    text: '^There was a problem loading the project\.$'
+
 - runFlow:
     when:
       visible:
@@ -37,7 +42,7 @@ name: Wait for Chroxy dev client
       - waitForAnimationToEnd
 
 # The main dev menu can appear after the intro sheet. Its Reload action is a
-# reliable signal that the menu is open; the close point must not be tapped
+# menu signal only after rejecting the project-load error; do not tap it
 # over the app itself.
 - runFlow:
     when:

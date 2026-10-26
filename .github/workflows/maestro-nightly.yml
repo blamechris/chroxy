@@ -46,7 +46,7 @@ env:
 jobs:
   maestro:
     name: Maestro App E2E (shard ${{ matrix.shard }})
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 90
     strategy:
       # Keep both halves running if one fails, so full-inventory proof is visible.
@@ -89,6 +89,7 @@ jobs:
         # Keep the listener, readiness probe and simulator asset on IPv4.
         env:
           NODE_OPTIONS: --dns-result-order=ipv4first
+          DEBUG: expo:start:server:middleware:manifest,expo:start:server:middleware:resolveRuntimeVersion,expo:start:project:devices
           CHROXY_MAESTRO_RUNTIME_CACHE: '1'
           CHROXY_MAESTRO_RUNTIME_VERSION: ${{ steps.native-runtime.outputs.runtimeVersion }}
         working-directory: packages/app
@@ -112,6 +113,21 @@ jobs:
       # Expo's actual iOS launch asset to completion before starting Maestro.
       - name: Warm the iOS Metro bundle
         run: node scripts/maestro-warm-metro.mjs
+
+      # One-shot observations for the controlled hosted-environment comparison.
+      # Each command has a five-second ceiling; no monitor stays running.
+      - name: Snapshot hosted hardware and memory
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process'
+          for (const [command, args] of [['uname', ['-m']], ['sysctl', ['hw.ncpu', 'hw.memsize']], ['vm_stat', []]]) {
+            const result = spawnSync(command, args, { stdio: 'inherit', timeout: 5000 })
+            if (result.error || result.status !== 0) {
+              console.error(`::error::Hosted snapshot ${command} failed (${result.error?.code || result.status})`)
+              process.exit(1)
+            }
+          }
+          NODE
 
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro

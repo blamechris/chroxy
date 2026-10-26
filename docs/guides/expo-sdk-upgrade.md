@@ -136,8 +136,26 @@ the Tools button can still be enabled from the menu. The shared Maestro
 password-sheet helper declines only the observed `Save Password?` prompt after
 manual fixture-token entry, before requiring the existing authenticated UI.
 
+The hosted job uses the standard `macos-15-intel` image while retaining Xcode
+26.2 and iOS 26.2. GitHub lists this image as four Intel CPUs and 14 GB RAM,
+compared with three M1 CPUs and 7 GB for `macos-15`. This is a controlled
+host-environment correction after repeated native launch, manifest-request and
+XCTest startup delays; the artifacts do not prove memory pressure caused them.
+The upgraded app client passed all 26 flows locally without retries before
+this runner/diagnostic correction.
+The hosted Intel build and complete flow inventory remain required acceptance.
+
+Three narrow Expo DEBUG namespaces record manifest, runtime-resolver and device
+persistence phases. A one-shot hardware/memory snapshot after bundle warmup
+records the loaded host immediately before Maestro. Each command has a
+five-second ceiling; the snapshot adds no background monitor. The readiness helper rejects the
+exact Expo project-load error before treating Reload as a development-menu
+action, then still requires a real app anchor.
+
 ## References
 
+- [GitHub hosted runner hardware](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+- [Intel macOS 15 image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)
 - [SDK 55 release notes](https://expo.dev/changelog/sdk-55)
 - [Incremental SDK upgrade instructions](https://docs.expo.dev/workflow/upgrading-expo-sdk-walkthrough/)
 - [Runtime policies and incompatible updates](https://docs.expo.dev/eas-update/runtime-versions/)

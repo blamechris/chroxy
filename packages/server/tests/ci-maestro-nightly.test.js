@@ -136,11 +136,13 @@ function flow(path) {
 
 // Exercise the actual shared command order against the native states captured
 // by the failed run: late Expo sheet, slow bundle download, and no readiness.
-function simulateDevClient(commands, events, destination) {
+function simulateDevClient(commands, events, destination, observation = {}) {
   const labels = {
     loading: ['Loading from Metro...'], downloading: ['Downloading 100%...'],
     promptCurly: ['Open in “Chroxy”?', 'Cancel', 'Open'],
     promptStraight: ['Open in "Chroxy"?', 'Cancel', 'Open'],
+    projectError: ['There was a problem loading the project.', 'This development build encountered the following error:',
+      'Failed to load app from http://localhost:8081 with error: The request timed out.', 'Reload'],
     intro: ['Continue'], menu: ['Reload'], onboarding: ['Welcome to Chroxy', 'Skip'],
     connect: ['Connect to Chroxy'], chat: ['Chat'], connecting: ['Connecting', 'Cancel'],
     optimisticChat: ['Chat'],
@@ -150,6 +152,7 @@ function simulateDevClient(commands, events, destination) {
   let state = events[0].state
   let time = events[0].at
   let next = 1
+  const taps = []
   const matches = selector => {
     const text = typeof selector === 'string' ? selector : selector.text
     return labels[state].some(label => new RegExp(text).test(label))
@@ -163,27 +166,40 @@ function simulateDevClient(commands, events, destination) {
           if (state === 'promptCurly' || state === 'promptStraight') {
             throw new Error('readiness timed out: iOS link confirmation still open')
           }
-          if (next >= events.length || events[next].at > deadline) throw new Error('readiness timed out')
+          if (next >= events.length || events[next].at > deadline) {
+            time = deadline
+            throw new Error('readiness timed out')
+          }
           time = events[next].at
           state = events[next++].state
         }
+      } else if (step.assertNotVisible) {
+        if (matches(step.assertNotVisible)) throw new Error(`readiness rejected visible element: ${labels[state][0]}`)
       } else if (step.assertVisible) {
         if (!matches(step.assertVisible)) throw new Error('readiness assertion failed')
       } else if (step.runFlow) {
         if (!step.runFlow.when || matches(step.runFlow.when.visible)) execute(step.runFlow.commands)
       } else if (step.tapOn) {
+        taps.push(step.tapOn)
         if (step.tapOn.text === '^Open$' &&
           (state === 'promptCurly' || state === 'promptStraight')) state = 'loading'
         else if (step.tapOn.text === '^Continue$' && state === 'intro') state = 'menu'
         else if (step.tapOn.text === '^Skip$' && state === 'onboarding') state = destination
         else if (step.tapOn.text === '^Cancel$' && state === 'connecting') state = 'connect'
         else if (step.tapOn.point === '93%,43%' && state === 'menu') state = destination
+        else if (step.tapOn.point === '93%,43%' && state === 'projectError') {
+          // The captured error page stays open after this misplaced tap.
+        }
         else throw new Error(`tap would miss or hit the app: ${JSON.stringify(step.tapOn)}`)
       }
     }
   }
-  execute(commands)
-  return state
+  try {
+    execute(commands)
+    return state
+  } finally {
+    Object.assign(observation, { time, state, taps })
+  }
 }
 
 describe('Maestro nightly hosted runner (#7113)', () => {
@@ -251,7 +267,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   it('wires the scheduled and dispatch suite to a pinned, preflighted hosted image', () => {
     assert.ok(workflow.on.schedule?.length > 0, 'nightly schedule must exist')
     assert.ok(workflow.on.workflow_dispatch !== undefined, 'manual proof run must remain available')
-    assert.equal(workflow.jobs.maestro['runs-on'], 'macos-15')
+    assert.equal(workflow.jobs.maestro['runs-on'], 'macos-15-intel')
     assert.equal(workflow.jobs.maestro['timeout-minutes'], 90)
     assert.equal(workflow.jobs.maestro.strategy['fail-fast'], false)
     assert.equal(workflow.jobs.maestro.strategy.matrix.shard,
@@ -283,6 +299,51 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(steps[index('Run Maestro suite')].run.includes('--shard-index "${{ strategy.job-index }}" --shard-count "${{ strategy.job-total }}" --max-failures 1'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow connect-screen.yaml'))
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow permission-disconnected-noop.yaml'))
+  })
+
+  shellIt('executes bounded one-shot hardware observations and reports command failures', () => {
+    const snapshot = workflow.jobs.maestro.steps.find(step => step.name === 'Snapshot hosted hardware and memory')
+    assert.ok(snapshot, 'the environment comparison must record its actual hardware')
+    const f = fixture()
+    try {
+      const trace = join(f.dir, 'snapshot-trace')
+      for (const [command, output] of [['uname', 'x86_64'], ['sysctl', 'hw.ncpu: 4\nhw.memsize: 15032385536'], ['vm_stat', 'Pages free: 12345.']]) {
+        writeFileSync(join(f.dir, 'bin', command), `#!/bin/bash
+printf '%s\\n' "${command}|$*" >> "$FAKE_SNAPSHOT_TRACE"
+if [ "$FAKE_SNAPSHOT_FAILURE" = '${command}' ]; then exit 9; fi
+if [ "$FAKE_SNAPSHOT_STALL" = '${command}' ]; then exec sleep 8; fi
+printf '%s\\n' '${output}'
+`, { mode: 0o755 })
+      }
+      const run = overrides => spawnSync('bash', ['-e', '-o', 'pipefail', '-c', snapshot.run], {
+        cwd: f.dir, env: { ...f.env, FAKE_SNAPSHOT_TRACE: trace, ...overrides }, encoding: 'utf8', timeout: 10000
+      })
+      const good = run({})
+      assert.equal(good.status, 0, good.stderr)
+      assert.ok(good.stdout.includes('x86_64') && good.stdout.includes('15032385536'))
+      assert.equal(readFileSync(trace, 'utf8'), 'uname|-m\nsysctl|hw.ncpu hw.memsize\nvm_stat|\n')
+      rmSync(trace)
+      const failed = run({ FAKE_SNAPSHOT_FAILURE: 'vm_stat' })
+      assert.equal(failed.status, 1)
+      assert.ok(failed.stderr.includes('Hosted snapshot vm_stat failed (9)'))
+      rmSync(trace)
+      const stalled = run({ FAKE_SNAPSHOT_STALL: 'vm_stat' })
+      assert.equal(stalled.signal, null, 'the authored command deadline must fail before the outer test deadline')
+      assert.equal(stalled.status, 1)
+      assert.ok(stalled.stderr.includes('Hosted snapshot vm_stat failed (ETIMEDOUT)'))
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  it('scopes exactly the official request-phase DEBUG namespaces to Metro', () => {
+    const startup = workflow.jobs.maestro.steps.find(step => step.name === 'Start Metro (background)')
+    assert.deepEqual(startup.env.DEBUG.split(','), ['expo:start:server:middleware:manifest',
+      'expo:start:server:middleware:resolveRuntimeVersion', 'expo:start:project:devices'])
+    assert.equal(workflow.env.DEBUG, undefined)
+    assert.equal(workflow.jobs.maestro.env?.DEBUG, undefined)
+    const steps = workflow.jobs.maestro.steps
+    const snapshotIndex = steps.findIndex(step => step.name === 'Snapshot hosted hardware and memory')
+    assert.ok(steps.findIndex(step => step.name === 'Warm the iOS Metro bundle') < snapshotIndex)
+    assert.ok(snapshotIndex < steps.findIndex(step => step.name === 'Run Maestro suite'))
   })
 
   shellIt('binds localhost to the IPv4 readiness and advertised launch asset address', () => {
@@ -445,6 +506,22 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.throws(() => simulateDevClient(readiness,
       [{ at: 0, state: 'authenticatedNoChat' }], 'chat'),
     /readiness assertion failed/)
+  })
+
+  it('rejects the actual Expo project-load error immediately before any menu tap', () => {
+    const commands = flow('setup/await-dev-client.yaml')
+    for (const events of [[{ at: 0, state: 'projectError' }],
+      [{ at: 0, state: 'loading' }, { at: 10000, state: 'projectError' }]]) {
+      const observation = {}
+      assert.throws(() => simulateDevClient(commands, events, 'chat', observation),
+        { message: 'readiness rejected visible element: There was a problem loading the project.' })
+      assert.equal(observation.time, events.at(-1).at, 'the error must fail at arrival, without another readiness wait')
+      assert.deepEqual(observation.taps, [], 'Reload on the error page must never trigger the menu-close point')
+    }
+    for (const state of ['connect', 'chat', 'menu', 'intro', 'onboarding', 'connecting']) {
+      const destination = state === 'connecting' ? 'connecting' : state === 'connect' ? 'connect' : 'chat'
+      assert.equal(simulateDevClient(commands, [{ at: 0, state }], destination), destination)
+    }
   })
 
   it('waits for late native readiness before dismissing the dev menu', () => {
