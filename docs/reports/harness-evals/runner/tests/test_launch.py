@@ -73,15 +73,17 @@ def comment(cid, body='a comment', user='alice'):
 class FakeGitHub:
     """The issues the gate and `cut` read. Each issue has a state, a title, a body and comments; the title and body
     default to a text of the issue's number, and the comments to one comment. A value that is an Exception is raised
-    when that part is read (`comments={9002: GitHubError(...)}` fails only the comments listing)."""
+    when that part is read (`comments={9002: GitHubError(...)}` fails only the comments listing). `reasons` maps an
+    issue to its `state_reason`; a closed issue without an entry was `completed`, an open one has none."""
     repo = 'blamechris/chroxy'
 
-    def __init__(self, issues=None, ci=CI_OK, default='closed', titles=None, bodies=None, comments=None):
+    def __init__(self, issues=None, ci=CI_OK, default='closed', titles=None, bodies=None, comments=None, reasons=None):
         self.issues = {9001: 'open', 9002: 'open'}
         self.issues.update(issues or {})
         self.titles = dict(titles or {})
         self.bodies = dict(bodies or {})
         self.comments = dict(comments or {})
+        self.reasons = dict(reasons or {})
         self.ci = ci
         self.default = default
         self.requests = []
@@ -102,7 +104,8 @@ class FakeGitHub:
             for part in (title, body):
                 if isinstance(part, Exception):
                     raise part
-            return {'number': number, 'state': value, 'title': title, 'body': body}
+            reason = self.reasons.get(number, 'completed' if value == 'closed' else None)
+            return {'number': number, 'state': value, 'state_reason': reason, 'title': title, 'body': body}
         if path.endswith('contents/.github/workflows/ci.yml'):
             if isinstance(self.ci, Exception):
                 raise self.ci
@@ -399,6 +402,26 @@ class Gate(LaunchCase):
         self.assertTrue(all(c['status'] == 'PASS' for c in gate['checks']), gate['checks'])
         self.assertEqual(gate['accepted_open'], {})
         self.assertIn(('repos/blamechris/chroxy/contents/.github/workflows/ci.yml', {'ref': self.rig.t0}), gh.requests)
+
+    def blocker_details(self, **kwargs):
+        code, out, _ = self.go(gh=FakeGitHub(**kwargs))
+        checks = {c['name']: c for c in self.rig.state('B-cy-r1')['gate']['checks']}
+        return code, out, {n: (checks[n]['status'], checks[n]['detail']) for n in ('blocker #8710', 'blocker #8743')}
+
+    def test_a_closed_blocker_passes_and_the_detail_names_how_it_was_closed(self):
+        code, out, details = self.blocker_details(reasons={8710: 'not_planned', 8743: 'duplicate'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(details, {'blocker #8710': ('PASS', 'closed (not_planned)'),
+                                   'blocker #8743': ('PASS', 'closed (duplicate)')})
+        self.assertRegex(out, r'PASS\s+blocker #8710\s+closed \(not_planned\)')
+        _code, _out, details = self.blocker_details()
+        self.assertEqual(details['blocker #8710'], ('PASS', 'closed (completed)'))
+
+    def test_a_closed_blocker_with_no_state_reason_says_so(self):
+        code, out, details = self.blocker_details(reasons={8710: None})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(details['blocker #8710'], ('PASS', 'closed (no state_reason)'))
+        self.assertEqual(details['blocker #8743'], ('PASS', 'closed (completed)'))
 
     def test_an_open_blocker_refuses(self):
         code, out, _ = self.go(gh=FakeGitHub(issues={8710: 'open'}))
@@ -1239,6 +1262,28 @@ class Cut(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertEqual(helpers.git(other, 'for-each-ref', 'refs/heads/trial'), '')
         self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
+
+    def test_push_refuses_when_any_one_of_several_push_urls_is_not_the_trial_repository(self):
+        # `get-url --push` prints only the first pushurl; git pushes to all of them, so the second one counts.
+        other = os.path.join(self.rig.box.tmp, 'other.git')
+        helpers.git(self.rig.box.tmp, 'clone', '--bare', '-q', self.rig.origin, other)
+        helpers.git(self.rig.seed, 'config', '--add', 'remote.origin.pushurl', self.rig.origin)
+        helpers.git(self.rig.seed, 'config', '--add', 'remote.origin.pushurl', other)
+        code, out = self.cut('A-cd-r1', push=True)
+        self.assertEqual(code, 2, out)
+        self.assertIn(f'origin pushes to {other}, not {self.rig.trial.repo}; nothing fetched, recorded or pushed', out)
+        for repo in (other, self.rig.origin):
+            self.assertEqual(helpers.git(repo, 'for-each-ref', 'refs/heads/trial'), '')
+        self.assertIsNone(self.rig.box.trial().t0, 'a refused push records no T0')
+
+    def test_the_origin_is_checked_before_anything_is_fetched(self):
+        # An origin that cannot be fetched from is refused as the wrong repository, not for the failed fetch.
+        helpers.git(self.rig.seed, 'remote', 'set-url', 'origin', os.path.join(self.rig.box.tmp, 'missing.git'))
+        code, out = self.cut('A-cd-r1', push=True)
+        self.assertEqual(code, 2, out)
+        self.assertIn('nothing fetched, recorded or pushed', out)
+        self.assertNotIn('git fetch origin failed', out)
+        self.assertIsNone(self.rig.box.trial().t0, 'a refused push records no T0')
 
     def test_the_trial_repository_is_recognised_in_its_github_spellings(self):
         env = self.rig.env()
@@ -2350,7 +2395,7 @@ class PreflightCodexNative(LaunchCase):
         self.assertEqual(statuses(st)['codex prompts'], 'PASS')
         self.assertEqual(statuses(st)['codex roster parity'], 'PASS')
         self.assertNotIn('effort setting', statuses(st))
-        self.assertNotIn('daemon commit', statuses(st))
+        self.assertNotIn('daemon checkout HEAD', statuses(st))
         facts = st['preflight'][-1]['facts']
         self.assertEqual((facts['codex_version'], facts['codex_app_version']), ('codex-cli 0.163.0', 'codex-cli 0.163.0'))
 
@@ -2382,6 +2427,9 @@ class PreflightCodexNative(LaunchCase):
         self.rig.write_home('.codex/prompts/my-own.md', 'mine\n')
         _code, _out, st = self.pre('B-cx-r1')
         self.assertStatus(statuses(st), 'codex prompts', 'PASS')
+        # the wording says what was compared: the compiled prompts, not everything installed
+        self.assertIn('every compiled prompt', details(st)['codex prompts'])
+        self.assertIn('not compared', details(st)['codex prompts'])
 
     def test_a_compiler_that_writes_nothing_is_a_fail_not_a_vacuous_pass(self):
         _code, _out, st = self.pre('B-cx-r1', toolbox(self.rig, prompts={}))
@@ -2432,7 +2480,7 @@ class PreflightChroxy(LaunchCase):
         self.prep('A-cy-r1')
         code, out, st = self.pre('A-cy-r1')
         self.assertEqual(code, 0, out)
-        for name in ('allowAutoPermissionMode', 'deploy agent unloaded', 'daemon commit', 'effort setting'):
+        for name in ('allowAutoPermissionMode', 'deploy agent unloaded', 'daemon checkout HEAD', 'effort setting'):
             self.assertStatus(statuses(st), name, 'PASS')
         self.assertEqual(st['preflight'][-1]['facts']['daemon_commit'], SHA_D)
 
@@ -2440,7 +2488,7 @@ class PreflightChroxy(LaunchCase):
         self.prep('B-cy-r1')
         code, out, st = self.pre('B-cy-r1')
         self.assertEqual(code, 0, out)
-        for name in ('codex prompts', 'codex roster parity', 'allowAutoPermissionMode', 'deploy agent unloaded', 'daemon commit'):
+        for name in ('codex prompts', 'codex roster parity', 'allowAutoPermissionMode', 'deploy agent unloaded', 'daemon checkout HEAD'):
             self.assertStatus(statuses(st), name, 'PASS')
 
     def test_auto_not_allowed_in_the_daemon_config_fails(self):
@@ -2480,20 +2528,20 @@ class PreflightChroxy(LaunchCase):
         self.other_run_recorded('e' * 40)
         code, _out, st = self.pre('A-cy-r1')
         self.assertEqual(code, 1)
-        self.assertStatus(statuses(st), 'daemon commit', 'FAIL')
-        self.assertIn('B-cy-r1 recorded eeeeeeeeeeee', details(st)['daemon commit'])
+        self.assertStatus(statuses(st), 'daemon checkout HEAD', 'FAIL')
+        self.assertIn('B-cy-r1 recorded eeeeeeeeeeee', details(st)['daemon checkout HEAD'])
 
     def test_the_same_daemon_commit_as_another_run_passes(self):
         self.prep('A-cy-r1')
         self.other_run_recorded(SHA_D)
         code, out, st = self.pre('A-cy-r1')
         self.assertEqual(code, 0, out)
-        self.assertIn('same as B-cy-r1', details(st)['daemon commit'])
+        self.assertIn('same as B-cy-r1', details(st)['daemon checkout HEAD'])
 
     def test_an_unreadable_daemon_checkout_is_unverified(self):
         self.prep('A-cy-r1')
         _code, _out, st = self.pre('A-cy-r1', toolbox(self.rig, daemon=None))
-        self.assertStatus(statuses(st), 'daemon commit', 'UNVERIFIED')
+        self.assertStatus(statuses(st), 'daemon checkout HEAD', 'UNVERIFIED')
 
     def test_an_unreadable_state_of_another_run_makes_the_commit_check_unverified(self):
         self.prep('A-cy-r1')
@@ -2501,12 +2549,12 @@ class PreflightChroxy(LaunchCase):
         with open(state.state_path(self.rig.trial, 'B-cy-r1', home=self.rig.box.home), 'w') as fh:
             fh.write('{truncated')
         _code, _out, st = self.pre('A-cy-r1')
-        self.assertStatus(statuses(st), 'daemon commit', 'UNVERIFIED')
+        self.assertStatus(statuses(st), 'daemon checkout HEAD', 'UNVERIFIED')
 
     def test_native_runs_skip_the_chroxy_checks(self):
         self.prep('A-cd-r1')
         _code, _out, st = self.pre('A-cd-r1')
-        self.assertNotIn('daemon commit', statuses(st))
+        self.assertNotIn('daemon checkout HEAD', statuses(st))
         self.assertNotIn('deploy agent unloaded', statuses(st))
 
 
@@ -3311,7 +3359,7 @@ class UnsetInTrialJson(LaunchCase):
         ('B-cx-r1', 'paths', 'codex_prompts', 'codex prompts', 'paths.codex_prompts'),
         ('B-cx-r1', 'paths', 'codex_app_cli', 'codex roster parity', 'paths.codex_app_cli'),
         ('A-cy-r1', 'paths', 'daemon_config', 'allowAutoPermissionMode', 'paths.daemon_config'),
-        ('A-cy-r1', 'paths', 'daemon_checkout', 'daemon commit', 'paths.daemon_checkout'),
+        ('A-cy-r1', 'paths', 'daemon_checkout', 'daemon checkout HEAD', 'paths.daemon_checkout'),
     ]
     VERIFY = [
         ('A-cd-r1', 'claude_projects', 'transcript found'),

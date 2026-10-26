@@ -452,6 +452,12 @@ class ReportPr(Scenario):
         self.assertIn('PR 105 maps to no queue slot and is not the report PR', self.output)
         self.assertEqual(self.pr_of(105)['issue'], None)
 
+    def test_the_notes_are_stored_in_the_evidence(self):
+        self.assertEqual(self.collect().get('notes'), [])  # nothing to say: an empty list, not a missing key
+        ev = self.collect(self.github(edit=lambda prs, runs: prs.append(
+            pr(105, 'Stray.\n', '2026-11-02T11:40:00Z', merged='2026-11-02T11:45:00Z'))))
+        self.assertEqual(ev.get('notes'), ['PR 105 maps to no queue slot and is not the report PR'])
+
     def test_no_report_pr_uses_the_recorded_end(self):
         self.write_state({'start': {'sent_at': START}, 'finish': {'ended_at': '2026-11-02T10:58:00Z'}})
         fake = self.github(edit=lambda prs, runs: prs.pop())
@@ -514,6 +520,37 @@ class WindowAndCounts(Scenario):
         self.assertEqual(p['review_comment_ids'], [21, 25])
         self.assertEqual(p['excluded_smoke_only_comment_ids'], [22])
         self.assertEqual(p['owner_gate_pattern_comment_bodies'], 1)  # only "LGTM, merging" matches the Claude gate pattern
+
+    def test_the_window_start_is_inclusive(self):
+        # What is created in the window's first second counts; the same thing a second before it does not.
+        before = '2026-11-02T09:59:59Z'
+        fake = self.github(edit=lambda prs, runs: runs['br/101'].extend([wf(51, START), wf(52, before)]))
+        fake.routes.insert(0, (re.compile(r'^pulls/102/reviews$'), [
+            review(61, COPILOT, 'Copilot review at the window start', START, 'Bot'),
+            review(62, COPILOT, 'Copilot review a second before it', before, 'Bot'),
+            review(63, 'blamechris', 'Owner review at the window start', START)]))
+        fake.routes.insert(0, (re.compile(r'^issues/102/comments$'), [
+            comment(71, 'blamechris', 'Owner comment at the window start: approve.', START),
+            comment(72, 'blamechris', 'Owner comment a second before it: approve.', before)]))
+        self.collect(fake)
+        self.assertEqual([r['id'] for r in self.pr_of(101)['ci_runs']], [51, 1])  # 52 is a second early
+        p = self.pr_of(102)
+        self.assertEqual(p['copilot_review_ids'], [61])
+        self.assertEqual(p['owner_formal_review_bodies'], 1)
+        self.assertEqual(p['review_comment_ids'], [71])
+
+    def test_a_pending_review_is_not_counted(self):
+        # A draft review is the reviewer's own and unsubmitted: it has a body and a time, and is not a review yet.
+        fake = self.github()
+        fake.routes.insert(0, (re.compile(r'^pulls/102/reviews$'), [
+            review(81, COPILOT, 'Copilot review still pending', '2026-11-02T10:11:00Z', 'Bot', state='PENDING'),
+            review(82, 'blamechris', 'Owner review still pending', '2026-11-02T10:12:00Z', state='PENDING'),
+            review(83, COPILOT, 'Copilot review submitted', '2026-11-02T10:13:00Z', 'Bot'),
+            review(84, 'blamechris', 'Owner review submitted', '2026-11-02T10:14:00Z')]))
+        self.collect(fake)
+        p = self.pr_of(102)
+        self.assertEqual((p['copilot_review_bodies'], p['copilot_review_ids']), (1, [83]))
+        self.assertEqual(p['owner_formal_review_bodies'], 1)
 
     def test_cycle_diff_and_summary_numbers(self):
         ev = self.collect()
@@ -632,6 +669,51 @@ class RedCi(Scenario):
         ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.ok(extra=[stray])))
         self.assertIsNone(ev['red_ci_on_base'])
         self.assertIn('push run 44 (not a merge) had not finished', ev['red_ci_incomplete'])
+
+    def test_a_cancelled_run_is_not_covered_by_a_later_run_that_did_not_finish(self):
+        # Only a finished later run (it passed or failed) says what the base looked like; a cancelled or
+        # still-running one after the cancelled push run leaves that merge unseen.
+        cover = 'the push run for PR 101 ended cancelled and no later push run covers it'
+        for later in ('cancelled', None):
+            with self.subTest(later):
+                runs = [self.push(41, 'm101', '2026-11-02T10:36:00Z', 'cancelled'),
+                        self.push(42, 'm103', '2026-11-02T10:56:00Z', later),
+                        self.push(43, 'm104', '2026-11-02T11:31:00Z', later)]
+                ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=runs))
+                self.assertIsNone(ev['red_ci_on_base'])
+                self.assertIn(cover, ev['red_ci_incomplete'])
+
+    def lone_pushes(self, stray):
+        """Push runs for a run with no report PR (PR 104's own push run, always the last, would cover any run
+        in the window), so the window runs to the cap and `stray` is the only one that can leave a gap."""
+        return self.github(ci_text=CI_PUSH_TRIAL, edit=lambda prs, runs: prs.pop(), push_runs=[
+            self.push(41, 'm101', '2026-11-02T10:36:00Z'), self.push(42, 'm103', '2026-11-02T10:56:00Z'), *stray])
+
+    def test_a_push_that_is_no_merge_s_and_did_not_finish_cleanly_is_no_count(self):
+        # The rule for a merge's push run applies to a direct push as well: a cancelled, skipped, neutral or
+        # action-required run with no later finished push run says nothing about the base.
+        for conclusion in ('cancelled', 'skipped', 'neutral', 'action_required'):
+            with self.subTest(conclusion):
+                ev = self.collect(self.lone_pushes([self.push(44, 'direct', '2026-11-02T11:00:00Z', conclusion)]))
+                self.assertIsNone(ev['red_ci_on_base'])
+                self.assertEqual(ev['red_ci_incomplete'],
+                                 f'push run 44 (not a merge) ended {conclusion} and no later push run covers it')
+
+    def test_a_push_that_is_no_merge_s_and_was_cancelled_is_covered_by_a_later_finished_run(self):
+        ev = self.collect(self.lone_pushes([self.push(44, 'direct', '2026-11-02T11:00:00Z', 'cancelled'),
+                                            self.push(45, 'direct2', '2026-11-02T11:10:00Z')]))
+        self.assertEqual(ev['red_ci_on_base'], 0)
+        self.assertNotIn('red_ci_incomplete', ev)
+
+    def test_a_failing_push_that_is_no_merge_s_counts_only_inside_the_window(self):
+        # 46 is inside the window and counts; 44 is before its start and 45 after its end (the report PR's merge,
+        # 11:30), so they belong to another run on the same base and do not.
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.ok(extra=[
+            self.push(44, 'earlier', '2026-11-02T09:59:59Z', 'failure'),
+            self.push(45, 'later', '2026-11-02T11:30:01Z', 'failure'),
+            self.push(46, 'direct', '2026-11-02T11:00:00Z', 'failure')])))
+        self.assertEqual([r['id'] for r in ev['red_ci_unattributed']], [46])
+        self.assertEqual(ev['red_ci_on_base'], 1)
 
     def test_not_observable_when_ci_does_not_run_on_push_to_the_base(self):
         ev = self.collect(self.github(ci_text=CI_PUSH_MAIN, push_runs=self.PUSHES))
@@ -1008,12 +1090,16 @@ class QueueTextNotes(Scenario):
         self.collect()
         self.assertIn("  note: queue text Q02: unknown since this run's gate (no detail recorded)", self.output)
 
-    def test_the_notes_change_no_evidence(self):
+    def test_the_notes_are_stored_and_change_no_other_evidence(self):
         without = self.collect()
         self.write_state({'start': {'sent_at': START}, 'finish': self.seen(Q02=self.row('changed'))})
         with_note = self.collect()
         self.assertIn('queue text Q02: changed', self.output)
-        self.assertEqual(with_note, without)
+        self.assertEqual(without.get('notes'), [])
+        self.assertIn("queue text Q02: changed since this run's gate (the detail finish recorded)",
+                      with_note.get('notes') or [])
+        self.assertEqual({k: v for k, v in with_note.items() if k != 'notes'},
+                         {k: v for k, v in without.items() if k != 'notes'})
 
 
 class RunsJson(Scenario):

@@ -56,8 +56,10 @@ METHODS = (
     'Report-only PRs are excluded from queue totals. cycle_minutes is created to merged; wall time is the '
     "first command to the last report-PR commit's committer date. diff_added/diff_deleted are the merge "
     "commit's stats against its first parent. Red CI on the base is the failed ci.yml push runs on the base "
-    'in the window, and is null unless ci.yml at T0 runs on push to the base. timeline_events lists '
-    'cross-reference, mention, reference and connect events on every queue issue inside the window.')
+    'in the window, and is null unless ci.yml at T0 runs on push to the base; it is also null when a push run '
+    "did not finish, or was cancelled or skipped (a merge's or not) with no later finished push run. "
+    'timeline_events lists cross-reference, mention, reference and connect events on every queue issue inside '
+    'the window. notes lists the mapping and queue-text notes `collect` printed.')
 
 
 # -- fixtures ------------------------------------------------------------------
@@ -426,8 +428,15 @@ def _gather(trial, run, client, st, start, env):
         # A count is only a measurement when every merge into the base has a finished verdict: its own
         # push run passed or failed, or, when that run was cancelled or skipped (ci.yml's concurrency
         # group cancels a pending run when the next merge queues one), a later finished push run on the
-        # base covers it. Anything else would read as "not red" while nothing was seen.
+        # base covers it. Anything else would read as "not red" while nothing was seen. A direct push's run
+        # follows the same rule.
         finished = ('success',) + RED
+
+        def covered(r):
+            # The later run is not checked to descend from this one: only a force-push to the base breaks
+            # that, and ci.yml's concurrency group cancels a pending run only for a newer push to the same branch.
+            return any(x.get('conclusion') in finished and _stamp_key(x) > _stamp_key(r) for x in ci_push)
+
         gaps = []
         missing = sorted(pr for sha, pr in merge_shas.items() if sha not in latest)
         if missing:
@@ -435,12 +444,13 @@ def _gather(trial, run, client, st, start, env):
         for r in push_ci:
             if r.get('conclusion') is None:
                 gaps.append(f'the push run for PR {r["pr"]} had not finished')
-            elif r['conclusion'] not in finished and not any(
-                    x.get('conclusion') in finished and _stamp_key(x) > _stamp_key(r) for x in ci_push):
+            elif r['conclusion'] not in finished and not covered(r):
                 gaps.append(f'the push run for PR {r["pr"]} ended {r["conclusion"]} and no later push run covers it')
         for r in unattributed:
             if r.get('conclusion') is None:
                 gaps.append(f'push run {r["id"]} (not a merge) had not finished')
+            elif r['conclusion'] not in finished and not covered(r):
+                gaps.append(f'push run {r["id"]} (not a merge) ended {r["conclusion"]} and no later push run covers it')
         if gaps:
             red_gap = '; '.join(gaps)
         else:
@@ -747,6 +757,7 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
         env.print(f'collect {run.id}: {exc}')
         return 2
     notes.extend(_queue_text_notes(trial, st))
+    ev['notes'] = list(notes)
     data = data_dir or trial.repo_path('data')
     evidence = {'collected_at_utc': timeutil.iso(env.now()), 'trial': trial.id, 'run': run.id,
                 'methods': METHODS, 'runs': {run.id: ev}}
