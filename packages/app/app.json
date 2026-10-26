@@ -109,7 +109,8 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "./plugins/withAndroidDevMenu.js"
     ],
     "extra": {
       "eas": {

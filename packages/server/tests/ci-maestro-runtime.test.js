@@ -63,9 +63,9 @@ function configFixture() {
     delete env.CI
     return spawnSync(process.execPath, ['-e', `
 const { getConfig } = require(${JSON.stringify(expoConfig)})
-const exp = getConfig(process.argv[1]).exp
+const exp = getConfig(process.cwd()).exp
 console.log(JSON.stringify({ runtimeVersion: exp.runtimeVersion, iosRuntimeVersion: exp.ios.runtimeVersion, version: exp.version }))
-`, dir], { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000 })
+`], { cwd: dir, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000 })
   }
   return { dir, run }
 }
@@ -198,3 +198,30 @@ fs.writeFileSync(process.env.FAKE_RESULT, JSON.stringify(exp.ios.runtimeVersion)
 function readable(path) {
   try { readFileSync(path); return true } catch { return false }
 }
+
+it('applies the registered Android dev-menu default idempotently without changing other native preferences', async () => {
+  const { withPlugins } = appRequire('expo/config-plugins')
+  const appConfig = JSON.parse(readFileSync(join(root, 'packages/app/app.json'), 'utf8')).expo
+  const plugins = appConfig.plugins.filter(plugin => typeof plugin === 'string' && plugin.startsWith('./plugins/'))
+    .map(plugin => resolve(root, 'packages/app', plugin))
+  assert.ok(plugins.length > 0, 'the native preference plugin must be registered')
+  for (const existing of [undefined, [{ $: { 'android:name': 'EXDevMenuShowFloatingActionButton', 'android:value': 'true' } }]]) {
+    const application = { $: { 'android:name': '.MainApplication' }, activity: [{ $: { 'android:name': '.MainActivity' } }],
+      'meta-data': [...(existing || []), { $: { 'android:name': 'unrelated', 'android:value': 'kept' } }] }
+    const base = { name: 'Fixture', slug: 'fixture', ios: appConfig.ios, runtimeVersion: appConfig.runtimeVersion,
+      _internal: { projectRoot: join(root, 'packages/app') } }
+    const configured = withPlugins(base, plugins)
+    assert.deepEqual(configured.ios, appConfig.ios)
+    assert.deepEqual(configured.runtimeVersion, { policy: 'fingerprint' })
+    assert.equal(configured.mods.ios, undefined)
+    let mod = { ...configured, modResults: { manifest: { application: [application] } },
+      modRequest: { platform: 'android', modName: 'manifest', projectRoot: join(root, 'packages/app') } }
+    for (let pass = 0; pass < 2; pass++) mod = await configured.mods.android.manifest(mod)
+    const metadata = mod.modResults.manifest.application[0]['meta-data']
+    assert.deepEqual(metadata.filter(item => item.$['android:name'] === 'EXDevMenuShowFloatingActionButton'),
+      [{ $: { 'android:name': 'EXDevMenuShowFloatingActionButton', 'android:value': 'false' } }])
+    assert.deepEqual(metadata.filter(item => item.$['android:name'] !== 'EXDevMenuShowFloatingActionButton'),
+      [{ $: { 'android:name': 'unrelated', 'android:value': 'kept' } }])
+    assert.deepEqual(application.activity, [{ $: { 'android:name': '.MainActivity' } }])
+  }
+})

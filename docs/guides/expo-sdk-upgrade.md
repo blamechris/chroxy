@@ -128,8 +128,10 @@ which exceeded the iOS dev launcher's ten-second manifest timeout on the hosted
 runner. It uses Expo's dynamic configuration and runtime-version interfaces;
 no vendor package is patched.
 
-The iOS development menu's floating Tools button defaults to off so it cannot
-cover header controls. Shake, gesture and keyboard menu access remain enabled;
+The development menu's floating Tools button defaults to off on both platforms
+so it cannot cover header controls. iOS uses its Info.plist preference; the
+Android config plugin writes the supported application metadata preference.
+Shake, gesture and keyboard menu access remain enabled;
 the Tools button can still be enabled from the menu. The shared Maestro
 password-sheet helper declines only the observed `Save Password?` prompt after
 manual fixture-token entry, before requiring the existing authenticated UI.
