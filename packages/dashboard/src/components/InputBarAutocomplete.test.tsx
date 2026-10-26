@@ -1,11 +1,11 @@
 /**
- * InputBar autocomplete regressions (#8432, #8433, #8831, #8832).
+ * InputBar autocomplete regressions (#8432, #8433, #8831, #8832, #8834).
  *
  * The real InputBar is driven by an App-like parent: per-session drafts, and an
  * `onValueChange` whose identity changes when the active session changes (App's
  * `handleDraftChange` closes over `activeSessionId`).
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within, waitFor, act } from '@testing-library/react'
 import { useCallback, useRef, useState, type ComponentProps } from 'react'
 import { InputBar } from './InputBar'
@@ -400,5 +400,77 @@ describe('a late evaluator result after the draft is replaced from outside (#883
 
     await act(async () => { call.resolve(REWRITE) })
     expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'rewrite')
+  })
+})
+
+// #8834 — the box kept the previous draft's height when the draft was replaced
+// from outside: a 3-line draft switched to an empty one stayed 3 lines tall, an
+// empty one switched to a multi-line draft stayed one line. jsdom does no
+// layout, so getComputedStyle and scrollHeight are stubbed; scrollHeight is
+// derived from the textarea's CURRENT value, so a pass proves the resize
+// measured the new draft rather than the old one.
+describe('an outside write sizes the composer to the new draft (#8834)', () => {
+  const originalGetComputedStyle = window.getComputedStyle
+  beforeEach(() => {
+    window.getComputedStyle = vi.fn().mockReturnValue({
+      lineHeight: '24px',
+      paddingTop: '8px',
+      paddingBottom: '8px',
+      borderTopWidth: '1px',
+      borderBottomWidth: '1px',
+      boxSizing: 'border-box',
+    }) as unknown as typeof window.getComputedStyle
+  })
+  afterEach(() => {
+    window.getComputedStyle = originalGetComputedStyle
+  })
+
+  // One line is 24 + 8 + 8 + 2 = 42px (border-box); five lines cap at 138px.
+  function stubScrollHeight() {
+    Object.defineProperty(box(), 'scrollHeight', {
+      configurable: true,
+      get() { return (this as HTMLTextAreaElement).value.split('\n').length * 24 + 16 },
+    })
+  }
+
+  it('a switch from a multi-line draft to an empty one shrinks the box to one line, and a switch back grows it', () => {
+    render(<AppLikeParent initial={{}} />)
+    stubScrollHeight()
+    fireEvent.change(box(), { target: { value: 'a\nb\nc' } })
+    expect(box().style.height).toBe('90px')
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().value).toBe('')
+    expect(box().style.height).toBe('42px')
+
+    // Typed, so B's one-line height is set by the edit path whatever the
+    // switch did, and only the switch back can grow the box again.
+    fireEvent.change(box(), { target: { value: 'one line' } })
+    expect(box().style.height).toBe('42px')
+    fireEvent.click(screen.getByTestId('switch-A'))
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('90px')
+  })
+
+  it('a switch to a multi-line draft grows the box up to the five-line cap', () => {
+    render(<AppLikeParent initial={{ B: '1\n2\n3\n4\n5\n6\n7' }} />)
+    stubScrollHeight()
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().style.height).toBe('138px')
+
+    fireEvent.click(screen.getByTestId('switch-A'))
+    expect(box().value).toBe('')
+    expect(box().style.height).toBe('42px')
+  })
+
+  it('the parent emptying the active draft itself (CI prefill, queued-message reopen) resizes too', () => {
+    render(<AppLikeParent initial={{}} />)
+    stubScrollHeight()
+    fireEvent.change(box(), { target: { value: 'a\nb\nc' } })
+    expect(box().style.height).toBe('90px')
+
+    fireEvent.click(screen.getByTestId('empty-active-draft'))
+    expect(box().value).toBe('')
+    expect(box().style.height).toBe('42px')
   })
 })

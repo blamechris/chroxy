@@ -220,6 +220,30 @@ function findAtTrigger(text: string, caret: number): number {
   return -1
 }
 
+// Auto-expand the composer up to 5 lines, derived from computed styles (#1172,
+// #1246). Measures the element's current DOM value, so it must run once the new
+// value has reached the textarea (in an onChange handler, or in a layout effect
+// after the commit) — which is why resetComposer keeps 'auto' instead: its
+// setValue('') has not reached the DOM yet.
+function autoResizeComposer(el: HTMLTextAreaElement): void {
+  el.style.height = 'auto'
+  const computed = getComputedStyle(el)
+  const lineHeight = parseFloat(computed.lineHeight) || 20
+  const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)
+  const borderY = (parseFloat(computed.borderTopWidth) || 0) + (parseFloat(computed.borderBottomWidth) || 0)
+  const maxLines = 5
+  // Normalize to outer height (content + padding + border)
+  const outerMax = lineHeight * maxLines + paddingY + borderY
+  const outerScrollHeight = el.scrollHeight + borderY
+  const outerHeight = Math.min(outerScrollHeight, outerMax)
+  // Adjust for box-sizing: border-box includes padding+border in height,
+  // content-box sets content height only (#1246)
+  const assignedHeight = computed.boxSizing === 'border-box'
+    ? outerHeight
+    : outerHeight - paddingY - borderY
+  el.style.height = assignedHeight + 'px'
+}
+
 export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendStatus, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
@@ -532,7 +556,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     // #3853 review: reset the explicit height set by handleChange's auto-
     // resize logic. setValue('') alone doesn't re-run the resize path, so a
     // cleared multi-line draft would leave the textarea visually tall. Not part
-    // of resetDraftState: on an outside write the new value may be multi-line.
+    // of resetDraftState: on an outside write the new value may be multi-line,
+    // so the outside-write effect sizes the box to that value instead (#8834).
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -546,11 +571,15 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // Adopting the value as the baseline means a later outside write of an
   // earlier own value still counts as outside. Known limit: a switch between
   // two sessions with identical drafts changes no `value`, so the state is
-  // kept. The reset also drops an evaluation still pending here (#8832).
+  // kept. The reset also drops an evaluation still pending here (#8832). The
+  // box is also re-sized to the new value, as an edit would (#8834).
   useLayoutEffect(() => {
     if (value === ownWriteRef.current) return
     ownWriteRef.current = value
     resetDraftState()
+    // #8834 — size the box to the new draft, as an edit would. Not 'auto': that
+    // would collapse a multi-line draft.
+    if (textareaRef.current) autoResizeComposer(textareaRef.current)
   }, [value, resetDraftState])
 
   const send = useCallback(() => {
@@ -1081,24 +1110,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       setFileSelectedIndex(0)
     }
 
-    // Auto-expand up to 5 lines, derived from computed styles (#1172, #1246)
-    const el = e.target
-    el.style.height = 'auto'
-    const computed = getComputedStyle(el)
-    const lineHeight = parseFloat(computed.lineHeight) || 20
-    const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)
-    const borderY = (parseFloat(computed.borderTopWidth) || 0) + (parseFloat(computed.borderBottomWidth) || 0)
-    const maxLines = 5
-    // Normalize to outer height (content + padding + border)
-    const outerMax = lineHeight * maxLines + paddingY + borderY
-    const outerScrollHeight = el.scrollHeight + borderY
-    const outerHeight = Math.min(outerScrollHeight, outerMax)
-    // Adjust for box-sizing: border-box includes padding+border in height,
-    // content-box sets content height only (#1246)
-    const assignedHeight = computed.boxSizing === 'border-box'
-      ? outerHeight
-      : outerHeight - paddingY - borderY
-    el.style.height = assignedHeight + 'px'
+    autoResizeComposer(e.target)
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger, historyIndex, userMessageHistory, setValue])
 
   // #8433 — caret moves without an edit (arrows, click): keep the filter in step
@@ -1400,8 +1412,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
           onPaste={handlePaste}
           // Scroll-sync the overlay to the textarea so multi-line drafts
           // keep keyword highlights aligned as the user scrolls within the
-          // textarea. Direct DOM write (not state) — same reason as the
-          // auto-resize logic in handleChange. Handler is memoised (#4403)
+          // textarea. Direct DOM write (not state) — same reason as
+          // autoResizeComposer. Handler is memoised (#4403)
           // so it doesn't churn a fresh function per keystroke.
           onScroll={tokens ? handleOverlayScrollSync : undefined}
           disabled={disabled}
