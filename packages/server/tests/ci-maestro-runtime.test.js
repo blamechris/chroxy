@@ -15,6 +15,14 @@ const fingerprint = 'a'.repeat(40)
 const shellIt = process.platform === 'win32' ? it.skip : it
 const appRequire = createRequire(join(root, 'packages/app/package.json'))
 const expoConfig = appRequire.resolve('expo/config')
+const baselineConfig = { name: 'Fixture', slug: 'fixture', version: '0.11.7', runtimeVersion: { policy: 'fingerprint' },
+  ios: { bundleIdentifier: 'com.blamechris.chroxy' }, updates: { enabled: true, url: 'https://example.invalid/updates' } }
+
+function cleanEnv() {
+  const env = { ...process.env }
+  for (const key of ['CHROXY_MAESTRO_BUILD_MODE', 'CHROXY_MAESTRO_RUNTIME_CACHE', 'CHROXY_MAESTRO_RUNTIME_VERSION', 'CI']) delete env[key]
+  return env
+}
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-runtime-'))
@@ -25,78 +33,95 @@ function fixture() {
   mkdirSync(join(app, 'EXUpdates.bundle'), { recursive: true })
   mkdirSync(join(updates, 'bin'), { recursive: true })
   mkdirSync(bin)
+  symlinkSync(appRequire.resolve('expo/package.json').replace(/[/\\]package\.json$/, ''), join(project, 'node_modules/expo'), process.platform === 'win32' ? 'junction' : 'dir')
   writeFileSync(join(project, 'package.json'), '{"name":"runtime-fixture","version":"1.0.0"}')
+  writeFileSync(join(project, 'app.json'), JSON.stringify({ expo: baselineConfig }))
+  copyFileSync(configSource, join(project, 'app.config.js'))
   writeFileSync(join(updates, 'package.json'), '{"name":"expo-updates","version":"55.0.33"}')
   writeFileSync(join(updates, 'bin/cli.js'), `
-if (process.env.CHROXY_MAESTRO_RUNTIME_CACHE !== undefined || process.env.CHROXY_MAESTRO_RUNTIME_VERSION !== undefined) throw new Error('cache leaked into real resolution')
 if (process.argv.slice(2).join(' ') !== 'runtimeversion:resolve --platform ios') throw new Error('wrong resolver command')
+if (process.env.CHROXY_MAESTRO_BUILD_MODE !== 'bundled' || process.env.CI !== 'true') throw new Error('variant lost during resolution')
 if (process.env.FAKE_RESOLVER_FAIL === '1') process.exit(23)
 console.log(JSON.stringify({ runtimeVersion: process.env.FAKE_RESOLVED_RUNTIME }))
 `)
+  const info = { CFBundleIdentifier: 'com.blamechris.chroxy', NSAppTransportSecurity: { NSAllowsLocalNetworking: true, NSAllowsArbitraryLoads: false } }
+  const nativeUpdates = { EXUpdatesRuntimeVersion: 'file:fingerprint', EXUpdatesEnabled: true,
+    EXUpdatesCheckOnLaunch: 'NEVER', EXUpdatesURL: baselineConfig.updates.url }
+  writeFileSync(join(app, 'Info.plist'), JSON.stringify(info))
+  writeFileSync(join(app, 'Expo.plist'), JSON.stringify(nativeUpdates))
   writeFileSync(join(app, 'EXUpdates.bundle/fingerprint'), fingerprint + '\n')
-  writeFileSync(join(app, 'Expo.plist'), 'fixture plist')
-  for (const [name, body] of Object.entries({
-    xcrun: 'printf "%s\\n" "$FAKE_INSTALLED_APP"',
-    plutil: 'printf "%s\\n" "$FAKE_SENTINEL"'
-  })) writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 })
+  writeFileSync(join(app, 'main.jsbundle'), 'nonempty embedded bundle')
+  writeFileSync(join(app, 'EXUpdates.bundle/app.manifest'), JSON.stringify({ id: 'fixture-update', assets: [] }))
+  writeFileSync(join(bin, 'xcrun'), '#!/bin/bash\nprintf "%s\\n" "$FAKE_INSTALLED_APP"\n', { mode: 0o755 })
+  writeFileSync(join(bin, 'plutil'), '#!/bin/bash\ncat "${@: -1}"\n', { mode: 0o755 })
   const output = join(dir, 'output')
   writeFileSync(output, 'existing=kept\n')
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DEVICE: device, GITHUB_OUTPUT: output,
-    FAKE_INSTALLED_APP: app, FAKE_SENTINEL: 'file:fingerprint', FAKE_RESOLVED_RUNTIME: fingerprint }
+  const env = { ...cleanEnv(), CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled', PATH: `${bin}:${process.env.PATH}`,
+    DEVICE: device, GITHUB_OUTPUT: output, FAKE_INSTALLED_APP: app, FAKE_RESOLVED_RUNTIME: fingerprint }
   const run = (overrides = {}) => spawnSync(process.execPath, [script, project], {
     env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000
   })
-  return { dir, app, project, output, run }
+  return { dir, app, project, output, info, nativeUpdates, run }
 }
 
 function configFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-config-'))
   writeFileSync(join(dir, 'package.json'), '{"name":"config-fixture","version":"1.0.0"}')
-  writeFileSync(join(dir, 'app.json'), JSON.stringify({ expo: { name: 'Fixture', slug: 'fixture', version: '0.11.7',
-    runtimeVersion: { policy: 'fingerprint' }, ios: { bundleIdentifier: 'com.example.fixture' } } }))
+  writeFileSync(join(dir, 'app.json'), JSON.stringify({ expo: baselineConfig }))
   copyFileSync(configSource, join(dir, 'app.config.js'))
   symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
-  const run = (overrides = {}) => {
-    const env = { ...process.env }
-    delete env.CHROXY_MAESTRO_RUNTIME_CACHE
-    delete env.CHROXY_MAESTRO_RUNTIME_VERSION
-    delete env.CI
-    return spawnSync(process.execPath, ['-e', `
-const { getConfig } = require(${JSON.stringify(expoConfig)})
-const exp = getConfig(process.cwd()).exp
-console.log(JSON.stringify({ runtimeVersion: exp.runtimeVersion, iosRuntimeVersion: exp.ios.runtimeVersion, version: exp.version }))
-`], { cwd: dir, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000 })
-  }
+  const run = (overrides = {}) => spawnSync(process.execPath, ['-e', `
+console.log(JSON.stringify(require(${JSON.stringify(expoConfig)}).getConfig(process.cwd()).exp))
+`], { cwd: dir, env: { ...cleanEnv(), ...overrides }, encoding: 'utf8', timeout: 10000 })
   return { dir, run }
 }
 
-describe('Maestro installed runtime preparation', () => {
-  shellIt('publishes only the matching installed fingerprint and strips reuse env before resolution', () => {
+function changeJson(path, mutate) {
+  const data = JSON.parse(readFileSync(path, 'utf8'))
+  mutate(data)
+  writeFileSync(path, JSON.stringify(data))
+}
+
+describe('Maestro bundled installed artifact verification', () => {
+  shellIt('publishes only the matching installed fingerprint after verifying actual embedded resources', () => {
     const f = fixture()
     try {
-      const result = f.run({ CHROXY_MAESTRO_RUNTIME_CACHE: '1', CHROXY_MAESTRO_RUNTIME_VERSION: 'stale' })
+      const result = f.run()
       assert.equal(result.status, 0, result.stderr)
       assert.equal(result.signal, null)
       assert.equal(readFileSync(f.output, 'utf8'), `existing=kept\nruntimeVersion=${fingerprint}\n`)
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
-
-  for (const [label, overrides, installed] of [
-    ['different current fingerprint', { FAKE_RESOLVED_RUNTIME: 'b'.repeat(40) }],
-    ['invalid current fingerprint', { FAKE_RESOLVED_RUNTIME: 'not-a-fingerprint' }],
-    ['wrong installed runtime policy', { FAKE_SENTINEL: '0.11.7' }],
-    ['resolver failure', { FAKE_RESOLVER_FAIL: '1' }],
-    ['missing selected simulator', { DEVICE: '' }],
-    ['invalid installed fingerprint', {}, 'not-a-fingerprint'],
-    ['missing installed fingerprint', {}, null]
+  for (const [label, mutate, env] of [
+    ['different current fingerprint', () => {}, { FAKE_RESOLVED_RUNTIME: 'b'.repeat(40) }],
+    ['malformed current fingerprint', () => {}, { FAKE_RESOLVED_RUNTIME: 'invalid' }],
+    ['resolver failure', () => {}, { FAKE_RESOLVER_FAIL: '1' }],
+    ['missing device', () => {}, { DEVICE: '' }],
+    ['invalid build mode', () => {}, { CHROXY_MAESTRO_BUILD_MODE: 'debug' }],
+    ['outside CI', () => {}, { CI: '' }],
+    ['retired mixed runtime mode', () => {}, { CHROXY_MAESTRO_RUNTIME_CACHE: '1' }],
+    ['missing embedded bundle', f => rmSync(join(f.app, 'main.jsbundle'))],
+    ['empty embedded bundle', f => writeFileSync(join(f.app, 'main.jsbundle'), '')],
+    ['missing embedded manifest', f => rmSync(join(f.app, 'EXUpdates.bundle/app.manifest'))],
+    ['malformed embedded manifest', f => writeFileSync(join(f.app, 'EXUpdates.bundle/app.manifest'), '{}')],
+    ['malformed installed fingerprint', f => writeFileSync(join(f.app, 'EXUpdates.bundle/fingerprint'), 'invalid')],
+    ['wrong identity', f => changeJson(join(f.app, 'Info.plist'), x => { x.CFBundleIdentifier = 'com.example.other' })],
+    ['non-fingerprint native policy', f => changeJson(join(f.app, 'Expo.plist'), x => { x.EXUpdatesRuntimeVersion = '0.11.7' })],
+    ['enabled automatic updates', f => changeJson(join(f.app, 'Expo.plist'), x => { x.EXUpdatesCheckOnLaunch = 'ALWAYS' })],
+    ['disabled native updates', f => changeJson(join(f.app, 'Expo.plist'), x => { x.EXUpdatesEnabled = false })],
+    ['mismatched native update URL', f => changeJson(join(f.app, 'Expo.plist'), x => { x.EXUpdatesURL = 'https://example.invalid/other' })],
+    ['broadened ATS', f => changeJson(join(f.app, 'Info.plist'), x => { x.NSAppTransportSecurity.NSAllowsArbitraryLoads = true })],
+    ['missing local ATS', f => changeJson(join(f.app, 'Info.plist'), x => { x.NSAppTransportSecurity.NSAllowsLocalNetworking = false })],
+    ['current explicit runtime', f => changeJson(join(f.project, 'app.json'), x => { x.expo.runtimeVersion = fingerprint })],
+    ['current disabled updates', f => changeJson(join(f.project, 'app.json'), x => { x.expo.updates.enabled = false })],
+    ['current missing update URL', f => changeJson(join(f.project, 'app.json'), x => { delete x.expo.updates.url })]
   ]) {
     shellIt(`fails before publishing output for ${label}`, () => {
       const f = fixture()
       try {
-        if (installed === null) rmSync(join(f.app, 'EXUpdates.bundle/fingerprint'))
-        if (installed) writeFileSync(join(f.app, 'EXUpdates.bundle/fingerprint'), installed)
-        const result = f.run(overrides)
-        assert.equal(result.signal, null, 'invalid input must fail promptly')
+        mutate(f)
+        const result = f.run(env)
+        assert.equal(result.signal, null, 'must fail legibly before the outer deadline')
         assert.equal(result.status, 1, result.stderr)
         assert.ok(result.stderr.includes('Maestro runtime preparation failed'))
         assert.equal(readFileSync(f.output, 'utf8'), 'existing=kept\n')
@@ -105,99 +130,60 @@ describe('Maestro installed runtime preparation', () => {
   }
 })
 
-describe('Maestro runtime config through the real Expo loader', () => {
-  it('retains production fingerprint and product version by default, including ordinary CI', () => {
+describe('Bundled CI config through the real Expo loader', () => {
+  it('keeps ordinary production and EAS config exactly equal, including ordinary CI', () => {
     const f = configFixture()
     try {
-      for (const env of [{}, { CI: 'true' }]) {
-        const result = f.run(env)
-        assert.equal(result.status, 0, result.stderr)
-        assert.deepEqual(JSON.parse(result.stdout), { runtimeVersion: { policy: 'fingerprint' }, version: '0.11.7' })
-      }
+      const ordinary = f.run()
+      const ci = f.run({ CI: 'true' })
+      assert.equal(ordinary.status, 0, ordinary.stderr)
+      assert.equal(ci.status, 0, ci.stderr)
+      const baseline = JSON.parse(ordinary.stdout)
+      assert.deepEqual(JSON.parse(ci.stdout), baseline)
+      assert.deepEqual(baseline.runtimeVersion, baselineConfig.runtimeVersion)
+      assert.deepEqual(baseline.updates, baselineConfig.updates)
+      const variant = f.run({ CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled' })
+      assert.equal(variant.status, 0, variant.stderr)
+      assert.deepEqual(JSON.parse(variant.stdout), { ...baseline, updates: { ...baseline.updates, checkAutomatically: 'NEVER' } })
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
-
-  it('reuses the verified iOS hash only under explicit CI activation', () => {
-    const f = configFixture()
-    try {
-      const result = f.run({ CI: 'true', CHROXY_MAESTRO_RUNTIME_CACHE: '1', CHROXY_MAESTRO_RUNTIME_VERSION: fingerprint })
-      assert.equal(result.status, 0, result.stderr)
-      assert.deepEqual(JSON.parse(result.stdout), { runtimeVersion: { policy: 'fingerprint' }, iosRuntimeVersion: fingerprint, version: '0.11.7' })
-    } finally { rmSync(f.dir, { recursive: true, force: true }) }
-  })
-
   for (const [label, env] of [
-    ['outside CI', { CHROXY_MAESTRO_RUNTIME_CACHE: '1', CHROXY_MAESTRO_RUNTIME_VERSION: fingerprint }],
-    ['missing marker', { CI: 'true', CHROXY_MAESTRO_RUNTIME_VERSION: fingerprint }],
-    ['missing fingerprint', { CI: 'true', CHROXY_MAESTRO_RUNTIME_CACHE: '1' }],
-    ['malformed fingerprint', { CI: 'true', CHROXY_MAESTRO_RUNTIME_CACHE: '1', CHROXY_MAESTRO_RUNTIME_VERSION: 'invalid' }]
+    ['outside CI', { CHROXY_MAESTRO_BUILD_MODE: 'bundled' }],
+    ['invalid mode', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'debug' }],
+    ['empty mode', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: '' }],
+    ['retired cache marker', { CHROXY_MAESTRO_RUNTIME_CACHE: '1' }],
+    ['retired runtime string', { CHROXY_MAESTRO_RUNTIME_VERSION: fingerprint }],
+    ['mixed old and bundled mode', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled', CHROXY_MAESTRO_RUNTIME_CACHE: '1' }]
   ]) {
-    it(`refuses reuse ${label}`, () => {
+    it(`rejects ${label}`, () => {
       const f = configFixture()
       try {
         const result = f.run(env)
         assert.equal(result.signal, null)
         assert.equal(result.status, 1)
-        assert.ok(result.stderr.includes('Maestro runtime reuse requires'))
       } finally { rmSync(f.dir, { recursive: true, force: true }) }
     })
   }
 })
 
-
-shellIt('requires both runtime step inputs before the actual workflow can launch Metro', () => {
-  const workflow = yaml.load(readFileSync(join(root, '.github/workflows/maestro-nightly.yml'), 'utf8'))
-  const steps = workflow.jobs.maestro.steps
-  const producer = steps.find(step => step.name === 'Verify installed iOS runtime')
-  const startup = steps.find(step => step.name === 'Start Metro (background)')
-  assert.ok(producer?.id, 'the verified runtime must have a step output identity')
-  assert.ok(steps.indexOf(producer) < steps.indexOf(startup))
-  assert.equal(workflow.env.CHROXY_MAESTRO_RUNTIME_CACHE, undefined)
-  assert.equal(workflow.env.CHROXY_MAESTRO_RUNTIME_VERSION, undefined)
-  const f = configFixture()
+shellIt('checks no-Metro absence fail closed instead of killing an unknown listener', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-no-metro-'))
   try {
-    const bin = join(f.dir, 'bin')
-    mkdirSync(bin)
-    const launched = join(f.dir, 'launched')
-    const resultFile = join(f.dir, 'launch-result')
-    const probe = join(f.dir, 'metro-probe.cjs')
-    writeFileSync(probe, `
-const fs = require('node:fs')
-fs.writeFileSync(process.env.FAKE_LAUNCHED, 'started')
-const exp = require(${JSON.stringify(expoConfig)}).getConfig(process.cwd()).exp
-fs.writeFileSync(process.env.FAKE_RESULT, JSON.stringify(exp.ios.runtimeVersion))
-`)
-    writeFileSync(join(bin, 'npx'), '#!/bin/bash\nexec "$FAKE_NODE" "$FAKE_PROBE"\n', { mode: 0o755 })
-    writeFileSync(join(bin, 'curl'), '#!/bin/bash\nexit 0\n', { mode: 0o755 })
-    const resolveExpression = value => value.replace(/\$\{\{\s*steps\.([^.]+)\.outputs\.([^\s}]+)\s*\}\}/g, (_, id, key) => {
-      assert.equal(id, producer.id)
-      assert.equal(key, 'runtimeVersion')
-      return fingerprint
-    })
-    const env = { ...process.env, CI: 'true', PATH: `${bin}:${process.env.PATH}`,
-      RUNNER_TEMP: f.dir, GITHUB_ENV: join(f.dir, 'github-env'),
-      FAKE_NODE: process.execPath, FAKE_PROBE: probe, FAKE_LAUNCHED: launched, FAKE_RESULT: resultFile }
-    for (const [key, value] of Object.entries(startup.env)) env[key] = resolveExpression(String(value))
-    const positive = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', startup.run], { cwd: f.dir, env, encoding: 'utf8', timeout: 10000 })
-    assert.equal(positive.status, 0, positive.stderr)
-    for (let i = 0; i < 100 && !readable(resultFile); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
-    assert.equal(JSON.parse(readFileSync(resultFile, 'utf8')), fingerprint, 'actual workflow env must reach the real Expo loader')
-    rmSync(launched)
-    rmSync(resultFile)
-    for (const missing of [['CHROXY_MAESTRO_RUNTIME_CACHE'], ['CHROXY_MAESTRO_RUNTIME_VERSION'], ['CHROXY_MAESTRO_RUNTIME_CACHE', 'CHROXY_MAESTRO_RUNTIME_VERSION']]) {
-      const broken = { ...env }
-      for (const key of missing) delete broken[key]
-      const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', startup.run], { cwd: f.dir, env: broken, encoding: 'utf8', timeout: 10000 })
-      assert.equal(result.signal, null)
-      assert.equal(result.status, 1, result.stderr)
-      assert.equal(readable(launched), false, 'incomplete verified runtime must stop before Metro launch')
+    const command = join(dir, 'lsof')
+    const run = body => {
+      writeFileSync(command, `#!/bin/bash\n${body}\n`, { mode: 0o755 })
+      return spawnSync(process.execPath, [join(root, 'scripts/maestro-no-metro.mjs')], {
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf8', timeout: 10000
+      })
     }
-  } finally { rmSync(f.dir, { recursive: true, force: true }) }
+    assert.equal(run('exit 1').status, 0)
+    for (const body of ['echo listener; exit 0', 'echo unexpected; exit 1', 'echo permission-denied >&2; exit 1', 'exit 2']) {
+      const result = run(body)
+      assert.equal(result.status, 1)
+      assert.ok(result.stderr.includes('Cannot establish'))
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
-
-function readable(path) {
-  try { readFileSync(path); return true } catch { return false }
-}
 
 it('applies the registered Android dev-menu default idempotently without changing other native preferences', async () => {
   const { withPlugins } = appRequire('expo/config-plugins')

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import yaml from 'js-yaml'
+import { runInNewContext } from 'node:vm'
 
 const root = resolve(import.meta.dirname, '../../..')
 const workflow = yaml.load(readFileSync(join(root, '.github/workflows/maestro-nightly.yml'), 'utf8'))
@@ -93,8 +94,10 @@ if [ "$FAKE_FAIL_STEP" != workspace ]; then mkdir -p "$FAKE_PROJECT/ios/Chroxy.x
   command('xcodebuild', `echo "xcodebuild|$*|RCT_NO_LAUNCH_PACKAGER=$RCT_NO_LAUNCH_PACKAGER" >> "$FAKE_TRACE"
 if [ "$FAKE_FAIL_STEP" = build ]; then exit 24; fi
 if [ "$FAKE_FAIL_STEP" != product ]; then
-  mkdir -p "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/Debug-iphonesimulator/Chroxy.app"
-  touch "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/Debug-iphonesimulator/Chroxy.app/Info.plist"
+  configuration=Debug
+  case " $* " in *" -configuration Release "*) configuration=Release ;; esac
+  mkdir -p "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/$configuration-iphonesimulator/Chroxy.app"
+  touch "$RUNNER_TEMP/chroxy-maestro-derived-data/Build/Products/$configuration-iphonesimulator/Chroxy.app/Info.plist"
 fi`)
   command('plutil', `echo "plutil|$*" >> "$FAKE_TRACE"
 if [ "$FAKE_FAIL_STEP" = plist ]; then exit 25; fi
@@ -111,8 +114,8 @@ fi`)
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
     DEVICE: device, RUNNER_TEMP: runnerTemp, FAKE_TRACE: trace,
     FAKE_PROJECT: project, FAKE_INSTALLED: installed }
-  const run = (failStep) => spawnSync('bash', [buildInstall, project], {
-    env: { ...env, FAKE_FAIL_STEP: failStep || '' }, encoding: 'utf8', timeout: 5000
+  const run = (failStep, overrides = {}) => spawnSync('bash', [buildInstall, project], {
+    env: { ...env, FAKE_FAIL_STEP: failStep || '', ...overrides }, encoding: 'utf8', timeout: 5000
   })
   return { dir, trace, run }
 }
@@ -227,6 +230,54 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     }
   })
 
+  shellIt('builds the explicit CI variant as a clean bundled Release simulator app', () => {
+    const f = buildInstallFixture()
+    try {
+      const result = f.run('', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled' })
+      assert.equal(result.status, 0, result.stderr)
+      const trace = readFileSync(f.trace, 'utf8')
+      assert.ok(trace.includes('npx|expo prebuild --clean --platform ios'))
+      assert.ok(trace.includes(' -configuration Release ') && trace.includes(' CODE_SIGNING_ALLOWED=NO build|'))
+      assert.ok(trace.includes('/Release-iphonesimulator/Chroxy.app'))
+      for (const env of [{ CI: '', CHROXY_MAESTRO_BUILD_MODE: 'bundled' },
+        { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'invalid' }, { CHROXY_MAESTRO_RUNTIME_CACHE: '1' }]) {
+        rmSync(f.trace, { force: true })
+        const bad = f.run('', env)
+        assert.equal(bad.status, 1)
+        assert.equal(existsSync(f.trace), false, 'invalid variants must stop before prebuild')
+      }
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
+  shellIt('passes the actual workflow verified runtime into the canonical bundled runner and rejects missing inputs', () => {
+    const f = runnerFixture()
+    try {
+      const suite = workflow.jobs.maestro.steps.find(step => step.name === 'Run Maestro suite')
+      const producer = workflow.jobs.maestro.steps.find(step => step.name === 'Verify installed bundled iOS artifact')
+      const runtime = 'b'.repeat(40)
+      const value = suite.env.CHROXY_MAESTRO_VERIFIED_RUNTIME.replace(/\$\{\{\s*steps\.([^.]+)\.outputs\.runtimeVersion\s*\}\}/g, (_, id) => {
+        assert.equal(id, producer.id)
+        return runtime
+      })
+      const env = { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: workflow.env.CHROXY_MAESTRO_BUILD_MODE,
+        CHROXY_MAESTRO_LAUNCH_MODE: suite.env.CHROXY_MAESTRO_LAUNCH_MODE, CHROXY_MAESTRO_VERIFIED_RUNTIME: value }
+      const good = f.run(['--flow', 'connect-screen.yaml'], env)
+      assert.equal(good.status, 0, good.stderr)
+      const trace = readFileSync(f.trace, 'utf8')
+      assert.ok(trace.includes('-e CHROXY_MAESTRO_LAUNCH_MODE=bundled'))
+      assert.ok(trace.includes(`-e CHROXY_MAESTRO_VERIFIED_RUNTIME=${runtime}`))
+      assert.ok(trace.includes('-e CHROXY_MAESTRO_BUILD_MODE=bundled') && trace.includes('-e CHROXY_MAESTRO_CI=1'))
+      for (const overrides of [{ CHROXY_MAESTRO_VERIFIED_RUNTIME: undefined }, { CHROXY_MAESTRO_VERIFIED_RUNTIME: 'bad' },
+        { CHROXY_MAESTRO_BUILD_MODE: undefined }, { CI: '' }, { CHROXY_MAESTRO_LAUNCH_MODE: 'invalid' },
+        { CHROXY_MAESTRO_LAUNCH_MODE: 'dev-client' }, { CHROXY_MAESTRO_RUNTIME_VERSION: runtime }]) {
+        rmSync(f.trace, { force: true })
+        const bad = f.run(['--flow', 'connect-screen.yaml'], { ...env, ...overrides })
+        assert.equal(bad.status, 2, bad.stderr)
+        assert.equal(existsSync(f.trace), false, 'invalid launch inputs must fail before Maestro')
+      }
+    } finally { rmSync(f.dir, { recursive: true, force: true }) }
+  })
+
   shellIt('stops before install on preparation, build, product, or identity failures', () => {
     for (const failedStep of ['prebuild', 'workspace', 'build', 'product', 'plist', 'identity']) {
       const f = buildInstallFixture()
@@ -278,16 +329,20 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     const preflightStep = steps[index('Preflight Xcode and boot simulator')]
     assert.equal(preflightStep?.run, 'bash scripts/maestro-hosted-preflight.sh')
     assert.ok(index('Preflight Xcode and boot simulator') < index('Install dependencies'))
-    assert.ok(index('Install dependencies') < index('Build + install the dev client'))
-    assert.equal(steps[index('Build + install the dev client')].run,
-      'bash scripts/maestro-build-install-ios.sh packages/app')
-    assert.ok(index('Build + install the dev client') < index('Start Metro (background)'))
-    assert.ok(index('Start Metro (background)') < index('Warm the iOS Metro bundle'))
-    assert.ok(index('Warm the iOS Metro bundle') < index('Run Maestro suite'))
-    assert.ok(steps[index('Start Metro (background)')].run.includes('npx expo start --localhost'), 'simulator and warmup must share the verified loopback Metro origin')
-    assert.equal(steps[index('Warm the iOS Metro bundle')].run, 'node scripts/maestro-warm-metro.mjs')
-    assert.ok(steps[index('Start Metro (background)')].run.includes('exit 1'), 'Metro listening failure must stop the job')
-    assert.ok(index('Build + install the dev client') < index('Run Maestro suite'))
+    const build = 'Build + install the bundled Release client'
+    const verify = 'Verify installed bundled iOS artifact'
+    assert.equal(workflow.env.CHROXY_MAESTRO_BUILD_MODE, 'bundled')
+    assert.ok(index('Install dependencies') < index(build))
+    assert.equal(steps[index(build)].run, 'bash scripts/maestro-build-install-ios.sh packages/app')
+    assert.ok(index(build) < index(verify))
+    assert.ok(steps[index(verify)].run.includes('node scripts/maestro-resolve-runtime.mjs packages/app'))
+    assert.ok(index(verify) < index('Verify no Metro listener before suite'))
+    assert.ok(index('Verify no Metro listener before suite') < index('Run Maestro suite'))
+    assert.equal(steps[index('Verify no Metro listener after suite')].if, 'always()')
+    assert.equal(steps[index('Verify no Metro listener before suite')].run, 'node scripts/maestro-no-metro.mjs')
+    assert.equal(steps[index('Verify no Metro listener after suite')].run, 'node scripts/maestro-no-metro.mjs')
+    assert.ok(index('Run Maestro suite') < index('Verify no Metro listener after suite'))
+    assert.ok(!steps.some(step => /Start Metro|Stop Metro|Warm the iOS/.test(step.name || '')))
     assert.ok(steps[index('Run Maestro suite')].run.includes('run-all-sequential.sh'))
     const dispatch = workflow.on.workflow_dispatch.inputs.flow
     assert.equal(dispatch.default, 'all', 'scheduled and ordinary dispatch runs must keep the full suite')
@@ -334,90 +389,16 @@ printf '%s\\n' '${output}'
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
-  it('scopes exactly the official request-phase DEBUG namespaces to Metro', () => {
-    const startup = workflow.jobs.maestro.steps.find(step => step.name === 'Start Metro (background)')
-    assert.deepEqual(startup.env.DEBUG.split(','), ['expo:start:server:middleware:manifest',
-      'expo:start:server:middleware:resolveRuntimeVersion', 'expo:start:project:devices'])
-    assert.equal(workflow.env.DEBUG, undefined)
-    assert.equal(workflow.jobs.maestro.env?.DEBUG, undefined)
+  it('records loaded-host hardware immediately before bundled execution without a Metro environment', () => {
     const steps = workflow.jobs.maestro.steps
     const snapshotIndex = steps.findIndex(step => step.name === 'Snapshot hosted hardware and memory')
-    assert.ok(steps.findIndex(step => step.name === 'Warm the iOS Metro bundle') < snapshotIndex)
-    assert.ok(snapshotIndex < steps.findIndex(step => step.name === 'Run Maestro suite'))
-  })
-
-  shellIt('binds localhost to the IPv4 readiness and advertised launch asset address', () => {
-    const startup = workflow.jobs.maestro.steps.find(step => step.name === 'Start Metro (background)')
-    const readinessUrl = startup.run.match(/curl -sf (http:\/\/[^\s]+\/status)/)?.[1]
-    assert.ok(readinessUrl, 'the startup step must expose its actual readiness URL')
-    const warmer = join(root, 'scripts/maestro-warm-metro.mjs')
-    // Use Node's actual DNS ordering and localhost listener on an ephemeral
-    // port. The control models the IPv6-first macOS lookup that broke Expo;
-    // the positive case consumes the authored startup env and readiness URL.
-    const listener = String.raw`
-      import { createServer } from 'node:http'
-      import { spawn } from 'node:child_process'
-      import { lookup } from 'node:dns/promises'
-      const addresses = await lookup('localhost', { all: true })
-      if (!addresses.some(address => address.family === 6)) throw new Error('fixture needs IPv6 localhost')
-      const server = createServer((req, res) => {
-        if (req.url === '/status') return res.end('packager-status:running')
-        if (req.url === '/index.bundle?platform=ios') {
-          res.setHeader('content-type', 'application/javascript')
-          return res.end('globalThis.metroReady = true;')
-        }
-        res.setHeader('content-type', 'application/expo+json')
-        res.end(JSON.stringify({ launchAsset: {
-          contentType: 'application/javascript',
-          url: 'http://127.0.0.1:' + server.address().port + '/index.bundle?platform=ios'
-        } }))
-      })
-      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, 'localhost', resolve) })
-      try {
-        const readiness = new URL(process.env.FIXTURE_READINESS_URL)
-        readiness.port = String(server.address().port)
-        const response = await fetch(readiness, { signal: AbortSignal.timeout(1500) })
-        await response.text()
-        const child = spawn(process.execPath, [process.env.FIXTURE_WARMER, 'http://127.0.0.1:' + server.address().port], {
-          env: { ...process.env, MAESTRO_METRO_TIMEOUT_MS: '2000' }
-        })
-        let output = ''
-        child.stdout.on('data', data => { output += data })
-        child.stderr.on('data', data => { output += data })
-        const status = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) })
-        console.log(JSON.stringify({ address: server.address().address, readiness: response.status, warmStatus: status, output }))
-      } finally {
-        server.closeAllConnections()
-        await new Promise(resolve => server.close(resolve))
-      }
-    `
-    const run = (env, readiness, expectedStatus = 0) => {
-      const result = spawnSync(process.execPath, ['--input-type=module', '-e', listener], {
-        env: { ...process.env, NODE_OPTIONS: '--dns-result-order=ipv6first', ...env,
-          FIXTURE_READINESS_URL: readiness, FIXTURE_WARMER: warmer },
-        encoding: 'utf8', timeout: 10000
-      })
-      assert.equal(result.signal, null, 'binding proof must finish without a timeout')
-      assert.equal(result.status, expectedStatus, result.stderr)
-      return expectedStatus === 0 ? JSON.parse(result.stdout) : result.stderr
+    assert.equal(snapshotIndex + 1, steps.findIndex(step => step.name === 'Run Maestro suite'))
+    assert.ok(steps.findIndex(step => step.name === 'Verify installed bundled iOS artifact') < snapshotIndex)
+    for (const env of [workflow.env, workflow.jobs.maestro.env, ...steps.map(step => step.env)]) {
+      assert.equal(env?.CHROXY_MAESTRO_RUNTIME_CACHE, undefined)
+      assert.equal(env?.CHROXY_MAESTRO_RUNTIME_VERSION, undefined)
+      assert.equal(env?.DEBUG, undefined)
     }
-    const broken = run({}, 'http://localhost:8081/status')
-    assert.equal(broken.address, '::1')
-    assert.equal(broken.readiness, 200, 'localhost readiness alone misses the IPv4 failure')
-    assert.equal(broken.warmStatus, 1)
-    assert.ok(broken.output.includes('Metro warmup failed'))
-
-    const rejected = run({}, readinessUrl, 1)
-    assert.ok(rejected.includes('ECONNREFUSED'), 'configured readiness must reject an IPv6-only listener')
-    assert.ok(rejected.includes('127.0.0.1'), 'readiness must probe the advertised IPv4 address')
-
-    const fixed = run(startup.env, readinessUrl)
-    assert.equal(fixed.address, '127.0.0.1')
-    assert.equal(fixed.readiness, 200)
-    assert.equal(fixed.warmStatus, 0, fixed.output)
-    assert.ok(fixed.output.includes('iOS Metro bundle ready:'))
-    assert.equal(workflow.env.NODE_OPTIONS, undefined, 'DNS ordering must stay scoped to Metro')
-    assert.equal(workflow.jobs.maestro.env?.NODE_OPTIONS, undefined)
   })
 
   it('uploads only this run\'s bounded diagnostics on failure or cancellation', () => {
@@ -428,8 +409,7 @@ printf '%s\\n' '${output}'
     assert.equal(upload.if, 'failure() || cancelled()')
     assert.equal(upload.with.name, 'maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}')
     assert.equal(upload.with.path.trim(), [
-      '${{ runner.temp }}/maestro-diagnostics/',
-      '${{ runner.temp }}/metro.log'
+      '${{ runner.temp }}/maestro-diagnostics/'
     ].join('\n'))
     assert.equal(upload.with['retention-days'], 7)
     assert.equal(upload.with['if-no-files-found'], 'warn')
@@ -473,23 +453,19 @@ printf '%s\\n' '${output}'
     'the prompt must be answerable once connected')
   })
 
-  it('opens the same Metro dev-client link in connect and session setup', () => {
+  it('routes all three launch callers through the shared default/bundled launcher', () => {
     const connect = flow('setup/ensure-connect-screen.yaml')
     const session = flow('setup/ensure-session-screen.yaml')
     const encrypted = flow('key-exchange.yaml')
     assert.equal(connect[0], 'stopApp')
-    assert.equal(connect[1].setPermissions.permissions.all, 'allow')
-    assert.equal(connect[2].openLink, session.find(step => step.openLink).openLink)
-    assert.equal(connect[2].openLink, encrypted.find(step => step.openLink).openLink)
     assert.equal(session[0], 'clearState')
     assert.equal(encrypted[0], 'clearState')
-    assert.equal(session[1].setPermissions.permissions.all, 'allow')
-    assert.equal(encrypted[1].setPermissions.permissions.all, 'allow')
-    assert.equal(connect[3].runFlow, 'await-dev-client.yaml')
-    assert.equal(session[3].runFlow, 'await-dev-client.yaml')
-    assert.equal(encrypted[3].runFlow, 'setup/await-dev-client.yaml')
-    assert.equal(session[4].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
-    assert.equal(encrypted[4].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
+    for (const caller of [connect, session, encrypted]) assert.equal(caller[1].setPermissions.permissions.all, 'allow')
+    assert.equal(connect[2].runFlow, 'launch-app.yaml')
+    assert.equal(session[2].runFlow, 'launch-app.yaml')
+    assert.equal(encrypted[2].runFlow, 'setup/launch-app.yaml')
+    assert.equal(session[3].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
+    assert.equal(encrypted[3].extendedWaitUntil.visible.text, 'Connect to Chroxy|Chat')
     assert.equal(connect.at(-1).extendedWaitUntil.visible, 'Connect to Chroxy')
   })
 
@@ -537,7 +513,7 @@ printf '%s\\n' '${output}'
     assert.equal(simulateDevClient(commands, firstLink, 'connect'), 'connect')
     assert.equal(simulateDevClient(commands, lateLink, 'chat'), 'chat')
     assert.equal(simulateDevClient([
-      ...commands, ...flow('setup/ensure-connect-screen.yaml').slice(4)
+      ...commands, ...flow('setup/ensure-connect-screen.yaml').slice(3)
     ], [{ at: 0, state: 'connecting' }], 'connect'), 'connect')
     assert.throws(() => simulateDevClient(commands, [{ at: 0, state: 'loading' }], 'chat'), /readiness timed out/)
     assert.throws(() => simulateDevClient(commands.slice(1),
@@ -911,4 +887,75 @@ it('the password-sheet caller guard rejects a new unlisted manual-token flow', (
   const fixed = manualTokenCallerViolations([[file, [[...commands, { runFlow: 'setup/dismiss-password-save.yaml' }]]]])
   assert.deepEqual(fixed.missing, [])
   assert.deepEqual(fixed.callers, [file])
+})
+
+
+function selectLauncher(variables = {}) {
+  const context = { ...variables, output: {} }
+  const selected = []
+  // Maestro interpolates the first ${...} span; an inner closing brace truncates it.
+  const evaluate = expression => {
+    const match = expression.match(/\$\{([^}]+)\}/)
+    assert.equal(match?.[0], expression, 'Launcher expression must survive Maestro interpolation')
+    return runInNewContext(match[1], context, { timeout: 50 })
+  }
+  const visit = commands => {
+    for (const command of commands) {
+      if (command.evalScript) evaluate(command.evalScript)
+      else if (command.assertTrue) {
+        if (!evaluate(command.assertTrue.condition)) throw new Error(command.assertTrue.label)
+      } else if (command.runFlow?.when?.true) {
+        if (evaluate(command.runFlow.when.true)) visit(command.runFlow.commands)
+      } else selected.push(command)
+    }
+  }
+  visit(flow('setup/launch-app.yaml'))
+  return selected
+}
+
+it('executes the authored shared launcher with a local default and verified bundled mode', () => {
+  const dev = selectLauncher()
+  assert.equal(dev[0].openLink, 'exp+chroxy://expo-development-client/?url=http://localhost:8081')
+  assert.equal(dev[1].runFlow, 'await-dev-client.yaml')
+  const bundled = selectLauncher({ CHROXY_MAESTRO_LAUNCH_MODE: 'bundled', CHROXY_MAESTRO_BUILD_MODE: 'bundled',
+    CHROXY_MAESTRO_CI: '1', CHROXY_MAESTRO_VERIFIED_RUNTIME: 'a'.repeat(40) })
+  assert.equal(bundled[0], 'launchApp')
+  assert.ok(!bundled.some(command => command.openLink || command.runFlow === 'await-dev-client.yaml'))
+  assert.equal(bundled.at(-1).extendedWaitUntil.visible, 'Connect to Chroxy|Chat|Connecting|Cancel')
+  for (const variables of [{ CHROXY_MAESTRO_LAUNCH_MODE: 'invalid' }, { CHROXY_MAESTRO_LAUNCH_MODE: 'bundled' },
+    { CHROXY_MAESTRO_LAUNCH_MODE: 'dev-client', CHROXY_MAESTRO_VERIFIED_RUNTIME: 'a'.repeat(40) },
+    { CHROXY_MAESTRO_RUNTIME_CACHE: '1' }, { CHROXY_MAESTRO_LAUNCH_MODE: 'dev-client', CHROXY_MAESTRO_BUILD_MODE: 'bundled' }]) {
+    assert.throws(() => selectLauncher(variables), /Launch mode|requires the verified|must be absent|must not use/)
+  }
+})
+
+function launchCallerViolations(sources) {
+  const helper = resolve(root, 'packages/app/.maestro/setup/launch-app.yaml')
+  const callers = []
+  const missing = []
+  const visit = (value, file) => {
+    if (Array.isArray(value)) {
+      if (value.some(command => command === 'stopApp' || command === 'clearState') &&
+          value.some(command => command?.setPermissions)) {
+        callers.push(file)
+        if (!value.some(command => typeof command?.runFlow === 'string' && resolve(dirname(file), command.runFlow) === helper)) missing.push(file)
+      }
+      for (const item of value) visit(item, file)
+    } else if (value && typeof value === 'object') for (const item of Object.values(value)) visit(item, file)
+  }
+  for (const [file, documents] of sources) visit(documents, file)
+  return { callers, missing }
+}
+
+it('covers the independently expected launch callers and catches an unlisted new caller', () => {
+  const sources = passwordSources()
+  const found = launchCallerViolations(sources)
+  const expected = ['key-exchange.yaml', 'setup/ensure-connect-screen.yaml', 'setup/ensure-session-screen.yaml']
+    .map(file => resolve(root, 'packages/app/.maestro', file)).sort()
+  assert.deepEqual(found.callers.sort(), expected)
+  assert.deepEqual(found.missing, [])
+  const extra = resolve(root, 'packages/app/.maestro/new-launch-flow.yaml')
+  const bad = launchCallerViolations([...sources, [extra, [['stopApp', { setPermissions: { permissions: { all: 'allow' } } },
+    { openLink: 'exp+chroxy://unlisted' }]]]])
+  assert.ok(bad.missing.includes(extra), 'new launch sites must fail without adding them to the expected roster')
 })

@@ -73,13 +73,6 @@ The root `readAsStringAsync` compatibility export throws at runtime. Clipboard
 calls use `setStringAsync` and do not use the listener `content` field removed
 in SDK 55.
 
-Hosted Metro startup scopes Node's `--dns-result-order=ipv4first` option to
-that step and probes `127.0.0.1:8081`. SDK 55 binds `localhost` but normalizes
-the advertised launch asset to `127.0.0.1`; an IPv6-first localhost lookup can
-otherwise make readiness succeed while the simulator and bundle warmer cannot
-reach the IPv4 asset. The warmer still fetches the manifest and its complete
-JavaScript launch asset before UI flows start.
-
 ## Runtime versions and updates
 
 `runtimeVersion.policy` is now `fingerprint`. Expo derives the runtime from
@@ -108,49 +101,54 @@ Pinned Expo Doctor improves from 15/17 to 16/17 checks in this upgrade. The
 remaining warning is the existing unmaintained `expo-live-activity` metadata;
 no additional warning suppression is introduced.
 
-## Hosted development-client startup
+## Hosted bundled acceptance and local development
 
-The hosted iOS job resolves the current fingerprint once after installation,
-checks that the installed app uses `file:fingerprint`, and compares the result
-with `EXUpdates.bundle/fingerprint` in that actual installed app. Preparation
-fails before Metro starts if either fingerprint is missing, malformed or
-mismatched. Only a matching value is published as a workflow step output.
+The hosted iOS gate builds a Release simulator client with Expo's generated
+embedded JavaScript and assets. It runs the same canonical 26 flows, assertions,
+per-flow limits and built-in retry policy. The standard `macos-15-intel` runner
+retains Xcode 26.2 and iOS 26.2. A one-shot, bounded hardware/memory snapshot
+records the loaded host immediately before Maestro.
 
-The Metro step explicitly enables reuse of that exact iOS runtime through
-`app.config.js`. The marker and verified value are scoped to that step; both
-are required before launch. Ordinary configuration, production builds and
-updates retain the automatic fingerprint policy and the existing remote EAS
-version authority. The immutable CI checkout must be rebuilt if native inputs
-change before starting another Metro session.
+The explicit CI build variant (`CI=1 CHROXY_MAESTRO_BUILD_MODE=bundled`) changes
+only `updates.checkAutomatically` to Expo's supported `NEVER` setting. Updates
+remain enabled with the same URL and automatic fingerprint policy. This variant
+has its own fingerprint: it exercises the upgraded native module graph and
+embedded app behavior, while separate configuration tests verify that ordinary
+production/EAS configuration remains unchanged. It does not exercise production
+update delivery. Existing remote EAS version authority is unchanged. Invalid
+modes and retired runtime-reuse inputs fail before launch.
 
-This avoids [Expo's uncached per-request fingerprint calculation](https://github.com/expo/expo/issues/46415),
-which exceeded the iOS dev launcher's ten-second manifest timeout on the hosted
-runner. It uses Expo's dynamic configuration and runtime-version interfaces;
-no vendor package is patched.
+After installation, the verifier reads the actual app's identity, update policy,
+local-only ATS settings, nonempty embedded bundle/manifest and fingerprint
+resource. It resolves the current variant's fingerprint and requires an exact
+match before publishing the runtime output consumed by the canonical runner.
+The bundled launcher requires that verified output and an explicit CI marker.
+The workflow verifies port 8081 has no Metro/proxy listener before and after the
+suite; it neither starts a development server nor kills an unrelated listener.
+
+Ordinary local helpers and standalone flows retain the development-client
+launch default. The SDK 55 CLI still starts an expo-updates runtime resolver
+child on every manifest request, even with an explicit runtime value. Hosted
+measurements exceeded the native launcher's ten-second timeout after earlier
+requests succeeded. The remaining development-client limitation is tracked in
+[#8840](https://github.com/blamechris/chroxy/issues/8840); the bundled gate does
+not fix or close it. No vendor patch, manifest proxy or runtime-match bypass is
+used. Local development can continue with `npx expo run:ios` and Metro. The
+existing readiness helper rejects Expo's exact project-load error before
+handling a development-menu Reload action and requires a real app anchor.
 
 The development menu's floating Tools button defaults to off on both platforms
 so it cannot cover header controls. iOS uses its Info.plist preference; the
 Android config plugin writes the supported application metadata preference.
-Shake, gesture and keyboard menu access remain enabled;
-the Tools button can still be enabled from the menu. The shared Maestro
-password-sheet helper declines only the observed `Save Password?` prompt after
-manual fixture-token entry, before requiring the existing authenticated UI.
+Shake, gesture and keyboard menu access remain enabled; the Tools button can
+still be enabled from the menu. The shared Maestro password-sheet helper
+declines only the observed `Save Password?` prompt after manual fixture-token
+entry, before requiring the existing authenticated UI.
 
-The hosted job uses the standard `macos-15-intel` image while retaining Xcode
-26.2 and iOS 26.2. GitHub lists this image as four Intel CPUs and 14 GB RAM,
-compared with three M1 CPUs and 7 GB for `macos-15`. This is a controlled
-host-environment correction after repeated native launch, manifest-request and
-XCTest startup delays; the artifacts do not prove memory pressure caused them.
-The upgraded app client passed all 26 flows locally without retries before
-this runner/diagnostic correction.
-The hosted Intel build and complete flow inventory remain required acceptance.
-
-Three narrow Expo DEBUG namespaces record manifest, runtime-resolver and device
-persistence phases. A one-shot hardware/memory snapshot after bundle warmup
-records the loaded host immediately before Maestro. Each command has a
-five-second ceiling; the snapshot adds no background monitor. The readiness helper rejects the
-exact Expo project-load error before treating Reload as a development-menu
-action, then still requires a real app anchor.
+The upgraded app client passed all 26 flows locally without retries before this
+bundled acceptance correction. Fresh bundled local and hosted acceptance must
+be recorded separately; a successful bundled run does not validate the hosted
+development-client path.
 
 ## References
 

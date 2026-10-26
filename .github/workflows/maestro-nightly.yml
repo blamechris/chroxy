@@ -1,8 +1,8 @@
 # Maestro app E2E — nightly (#6355, the deferred half of #6315).
 #
 # The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
-# was deferred from per-PR because it needs a booted iOS simulator + a built dev
-# client + Metro. Run once a night on two isolated hosted macOS 15 simulators
+# was deferred from per-PR because it needs a booted iOS simulator and native
+# application build. The hosted gate exercises a bundled Release client. Run once a night on two isolated hosted macOS 15 simulators
 # with Xcode 26.2, partitioning the canonical inventory across them:
 # Expo SDK 55 requires Xcode 26 or later.
 # `run-all-sequential.sh`
@@ -42,6 +42,7 @@ env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+  CHROXY_MAESTRO_BUILD_MODE: bundled
 
 jobs:
   maestro:
@@ -75,44 +76,17 @@ jobs:
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
           "$HOME/.maestro/bin/maestro" --version
 
-      # Build + install without Expo run:ios's unconditional dev-client launch.
-      # Metro starts and warms before Maestro opens the app. ~10-15 min cold.
-      - name: Build + install the dev client
+      # The CI-only variant retains fingerprint compatibility and loads the
+      # Release bundle embedded by Expo; no Metro server or proxy is started.
+      - name: Build + install the bundled Release client
         run: bash scripts/maestro-build-install-ios.sh packages/app
 
-      - name: Verify installed iOS runtime
+      - name: Verify installed bundled iOS artifact
         id: native-runtime
         run: node scripts/maestro-resolve-runtime.mjs packages/app
 
-      - name: Start Metro (background)
-        # Expo binds localhost but advertises its launch asset at 127.0.0.1.
-        # Keep the listener, readiness probe and simulator asset on IPv4.
-        env:
-          NODE_OPTIONS: --dns-result-order=ipv4first
-          DEBUG: expo:start:server:middleware:manifest,expo:start:server:middleware:resolveRuntimeVersion,expo:start:project:devices
-          CHROXY_MAESTRO_RUNTIME_CACHE: '1'
-          CHROXY_MAESTRO_RUNTIME_VERSION: ${{ steps.native-runtime.outputs.runtimeVersion }}
-        working-directory: packages/app
-        run: |
-          : "${CHROXY_MAESTRO_RUNTIME_CACHE:?Verified runtime marker is required}"
-          : "${CHROXY_MAESTRO_RUNTIME_VERSION:?Verified installed runtime is required}"
-          npx expo start --localhost > "$RUNNER_TEMP/metro.log" 2>&1 &
-          echo "METRO_PID=$!" >> "$GITHUB_ENV"
-          # Wait for the bundler to answer before running flows.
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:8081/status >/dev/null 2>&1; then
-              echo "Metro up after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Metro did not answer on :8081 within 60s" >&2
-          exit 1
-
-      # /status only proves Metro is listening. A fresh hosted runner still has
-      # to compile the iOS bundle, which can outlast a flow's UI wait. Fetch
-      # Expo's actual iOS launch asset to completion before starting Maestro.
-      - name: Warm the iOS Metro bundle
-        run: node scripts/maestro-warm-metro.mjs
+      - name: Verify no Metro listener before suite
+        run: node scripts/maestro-no-metro.mjs
 
       # One-shot observations for the controlled hosted-environment comparison.
       # Each command has a five-second ceiling; no monitor stays running.
@@ -137,6 +111,8 @@ jobs:
       # each shard stops after one failed flow, bounding a broken shared setup.
       - name: Run Maestro suite
         env:
+          CHROXY_MAESTRO_LAUNCH_MODE: bundled
+          CHROXY_MAESTRO_VERIFIED_RUNTIME: ${{ steps.native-runtime.outputs.runtimeVersion }}
           MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
           MAESTRO_ARTIFACT_DIR: ${{ runner.temp }}/maestro-diagnostics
           # XCTest started just beyond Maestro's 120s default on a hosted shard.
@@ -155,9 +131,9 @@ jobs:
             *) echo "::error::Unexpected Maestro flow: $MAESTRO_FLOW" >&2; exit 2 ;;
           esac
 
-      - name: Stop Metro
+      - name: Verify no Metro listener after suite
         if: always()
-        run: kill "${METRO_PID}" 2>/dev/null || true
+        run: node scripts/maestro-no-metro.mjs
 
       - name: Upload this run's Maestro diagnostics
         if: failure() || cancelled()
@@ -166,6 +142,5 @@ jobs:
           name: maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}
           path: |
             ${{ runner.temp }}/maestro-diagnostics/
-            ${{ runner.temp }}/metro.log
           retention-days: 7
           if-no-files-found: warn

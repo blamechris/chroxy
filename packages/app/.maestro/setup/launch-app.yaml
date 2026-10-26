@@ -1,0 +1,40 @@
+appId: com.blamechris.chroxy
+name: Launch the selected Chroxy client
+---
+# Standalone local flows retain the development-client default.
+- evalScript: "${output.chroxyLaunchMode = typeof CHROXY_MAESTRO_LAUNCH_MODE === 'undefined' ? 'dev-client' : CHROXY_MAESTRO_LAUNCH_MODE}"
+- assertTrue:
+    condition: ${output.chroxyLaunchMode === 'dev-client' || output.chroxyLaunchMode === 'bundled'}
+    label: Launch mode must be dev-client or bundled
+- assertTrue:
+    condition: ${typeof CHROXY_MAESTRO_RUNTIME_CACHE === 'undefined' && typeof CHROXY_MAESTRO_RUNTIME_VERSION === 'undefined'}
+    label: Retired runtime-reuse inputs must be absent
+- assertTrue:
+    condition: ${output.chroxyLaunchMode !== 'dev-client' || (typeof CHROXY_MAESTRO_BUILD_MODE === 'undefined' && typeof CHROXY_MAESTRO_VERIFIED_RUNTIME === 'undefined')}
+    label: Development launch must not use the bundled build variant
+- assertTrue:
+    condition: ${output.chroxyLaunchMode !== 'bundled' || (typeof CHROXY_MAESTRO_BUILD_MODE !== 'undefined' && CHROXY_MAESTRO_BUILD_MODE === 'bundled' && typeof CHROXY_MAESTRO_CI !== 'undefined' && CHROXY_MAESTRO_CI === '1' && typeof CHROXY_MAESTRO_VERIFIED_RUNTIME !== 'undefined' && CHROXY_MAESTRO_VERIFIED_RUNTIME.length === 40 && !/[^0-9a-f]/.test(CHROXY_MAESTRO_VERIFIED_RUNTIME))}
+    label: Bundled launch requires the verified CI artifact
+- runFlow:
+    when:
+      true: ${output.chroxyLaunchMode === 'dev-client'}
+    commands:
+      - openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+      - runFlow: await-dev-client.yaml
+- runFlow:
+    when:
+      true: ${output.chroxyLaunchMode === 'bundled'}
+    commands:
+      - launchApp
+      - extendedWaitUntil:
+          visible: "Welcome to Chroxy|Connect to Chroxy|Chat|Connecting|Cancel"
+          timeout: 180000
+      - runFlow:
+          when:
+            visible: "^Skip$"
+          commands:
+            - tapOn: "^Skip$"
+            - waitForAnimationToEnd
+      - extendedWaitUntil:
+          visible: "Connect to Chroxy|Chat|Connecting|Cancel"
+          timeout: 15000

@@ -1,15 +1,14 @@
-// Production builds and updates keep automatic native compatibility detection.
-// Only the immutable Maestro Metro session may reuse its verified installed hash.
+// Ordinary builds and updates retain automatic native compatibility detection.
+// The isolated bundled CI variant must execute its embedded, reviewed JavaScript.
 module.exports = ({ config }) => {
-  const marker = process.env.CHROXY_MAESTRO_RUNTIME_CACHE
-  const runtimeVersion = process.env.CHROXY_MAESTRO_RUNTIME_VERSION
-  if (marker === undefined && runtimeVersion === undefined) return config
-
-  if (marker !== '1' || !['1', 'true'].includes(process.env.CI)) {
-    throw new Error('Maestro runtime reuse requires its explicit marker and CI mode')
+  if (process.env.CHROXY_MAESTRO_RUNTIME_CACHE !== undefined ||
+      process.env.CHROXY_MAESTRO_RUNTIME_VERSION !== undefined) {
+    throw new Error('Maestro runtime reuse is retired; remove the old runtime inputs')
   }
-  if (!/^[0-9a-f]{40}$/.test(runtimeVersion || '')) {
-    throw new Error('Maestro runtime reuse requires a verified 40-character fingerprint')
+  const mode = process.env.CHROXY_MAESTRO_BUILD_MODE
+  if (mode === undefined) return config
+  if (mode !== 'bundled' || !['1', 'true'].includes(process.env.CI)) {
+    throw new Error('Bundled Maestro builds require explicit bundled mode and CI')
   }
-  return { ...config, ios: { ...config.ios, runtimeVersion } }
+  return { ...config, updates: { ...config.updates, checkAutomatically: 'NEVER' } }
 }

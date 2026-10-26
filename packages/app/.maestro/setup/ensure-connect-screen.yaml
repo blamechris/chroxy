@@ -8,20 +8,14 @@ name: Ensure ConnectScreen
 # Shared setup: ensure we're on ConnectScreen regardless of initial state.
 # Usage: - runFlow: setup/ensure-connect-screen.yaml
 #
-# The app now requires a dev build (expo-speech-recognition + expo-secure-store
-# native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
-# rather than Expo Go. On a fresh hosted runner there is no remembered Metro
-# server. Stop the app without clearing saved connection state, preserve
-# launchApp's default allow-all permissions, then open the Metro launcher URL
-# once. launchApp followed by openLink can trigger a second bundle load after
-# readiness passes.
-
+# The shared launcher defaults to the custom development client locally and
+# explicitly selects the verified embedded Release app for the hosted gate.
+# Reset permissions before launch; saved SecureStore connections may survive.
 - stopApp
 - setPermissions:
     permissions:
       all: allow
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-- runFlow: await-dev-client.yaml
+- runFlow: launch-app.yaml
 
 # If on SessionScreen (auto-connected from saved state — possibly wedged on
 # the reconnect banner, or live-connected to the mock server), tap the
