@@ -147,6 +147,20 @@ still be enabled from the menu. The shared Maestro password-sheet helper
 declines only the observed `Save Password?` prompt after manual fixture-token
 entry, before requiring the existing authenticated UI.
 
+Before the hosted suite, a separate bounded Settings flow turns off Password
+AutoFill on the disposable simulator and asserts the actual OFF state. It is
+idempotent when already off and uses the supported Settings UI and a
+selector-relative switch tap. A native comparison on local Xcode 27/iOS 26.5
+observed password-saving service requests with AutoFill on and none with it off,
+while the original connection, message and encrypted-roundtrip flows passed in
+both states. The target hosted Xcode 26.2/iOS 26.2 still requires verification.
+This fixture preparation retains every Chroxy input, authentication/encryption
+assertion, canonical flow, deadline and retry. Its diagnostics stay under the
+existing per-run directory and seven-day failure/cancellation upload policy.
+Maestro is pinned to the validated 2.12.0 distribution for reproducibility;
+the pin does not fix the upstream Safari hierarchy race. Ordinary local flows
+and production app configuration are unchanged by this fixture preparation.
+
 The upgraded app client passed all 26 flows locally without retries before this
 bundled acceptance correction. Fresh bundled local and hosted acceptance must
 be recorded separately; a successful bundled run does not validate the hosted

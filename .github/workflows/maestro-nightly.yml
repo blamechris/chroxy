@@ -71,6 +71,9 @@ jobs:
         run: npm ci
 
       - name: Install Maestro
+        # Pin the locally validated tool for reproducibility, not a driver fix.
+        env:
+          MAESTRO_VERSION: '2.12.0'
         run: |
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
@@ -87,6 +90,20 @@ jobs:
 
       - name: Verify no Metro listener before suite
         run: node scripts/maestro-no-metro.mjs
+
+      # Change only the disposable simulator's supported Settings preference.
+      # Keep the app's original manual authentication and password-sheet helper.
+      - name: Disable Password AutoFill on the disposable simulator
+        timeout-minutes: 6
+        env:
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
+        run: |
+          source scripts/lib/run-with-timeout.sh
+          run_with_timeout 300 maestro test --device "$DEVICE" \
+            --test-output-dir "$RUNNER_TEMP/maestro-diagnostics/fixture-preparation" \
+            --debug-output "$RUNNER_TEMP/maestro-diagnostics/fixture-preparation" \
+            packages/app/.maestro/setup/disable-password-autofill.yaml
+          echo 'Verified disposable simulator Password AutoFill is OFF'
 
       # One-shot observations for the controlled hosted-environment comparison.
       # Each command has a five-second ceiling; no monitor stays running.

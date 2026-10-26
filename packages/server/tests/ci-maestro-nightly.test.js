@@ -422,16 +422,18 @@ printf '%s\\n' '${output}'
     assert.equal(upload.with['if-no-files-found'], 'warn')
   })
 
-  it('bounds the hosted iOS driver startup allowance to the Maestro suite step', () => {
+  it('bounds the hosted iOS driver startup allowance to the two Maestro steps', () => {
     const job = workflow.jobs.maestro
     const suite = job.steps.find(step => step.name === 'Run Maestro suite')
     assert.equal(suite.env.MAESTRO_DRIVER_STARTUP_TIMEOUT, '180000',
       'the hosted XCTest startup observed just beyond 120s needs Maestro\'s 180s allowance')
     assert.equal(workflow.env.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined)
     assert.equal(job.env?.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined)
-    for (const step of job.steps.filter(step => step !== suite)) {
+    const prepare = job.steps.find(step => step.name === 'Disable Password AutoFill on the disposable simulator')
+    assert.equal(prepare.env.MAESTRO_DRIVER_STARTUP_TIMEOUT, '180000')
+    for (const step of job.steps.filter(step => step !== suite && step !== prepare)) {
       assert.equal(step.env?.MAESTRO_DRIVER_STARTUP_TIMEOUT, undefined,
-        `${step.name ?? step.uses} must not inherit the suite startup allowance`)
+        `${step.name ?? step.uses} must not inherit the Maestro startup allowance`)
     }
   })
 
@@ -1015,4 +1017,112 @@ it('prepares the multi-question viewport before its preserved assertions and cho
     assert.ok(revealSubmit < submit)
     assert.ok(commands.findIndex(command => command?.extendedWaitUntil?.visible?.id === 'question-multi-summary') > submit)
   }
+})
+
+// Independent native Settings fixture: the row has an ID/state, but only its
+// trailing child switch reacts to a tap. Bounds came from the real ON/OFF proof.
+function simulatePasswordAutofill(commands, { page = 'home', checked = true, missingSwitch = false, ignoreTap = false } = {}) {
+  const taps = []
+  const matches = selector => {
+    const present = selector.id === 'com.apple.settings.general' ? page === 'home'
+      : selector.id === 'AUTOFILL' ? page === 'general'
+        : selector.id === 'AutoFillToggle' && page === 'autofill' && !missingSwitch
+    return present && (selector.checked === undefined || selector.checked === checked)
+  }
+  const execute = steps => {
+    for (const command of steps) {
+      if (command === 'launchApp' || command === 'waitForAnimationToEnd' || command.takeScreenshot) continue
+      if (command.runFlow) {
+        const { when, commands: nested } = command.runFlow
+        if (when.visible ? matches(when.visible) : !matches(when.notVisible)) execute(nested)
+      } else if (command.tapOn) {
+        const selector = command.tapOn
+        assert.ok(matches(selector), `Settings target unavailable: ${selector.id}`)
+        taps.push(selector.id)
+        if (selector.id === 'com.apple.settings.general') page = 'general'
+        else if (selector.id === 'AUTOFILL') page = 'autofill'
+        else {
+          const [px, py] = (selector.point || '50%,50%').split(',').map(value => Number.parseFloat(value) / 100)
+          const x = 16 + px * 370
+          const y = 151 + py * 52
+          if (!ignoreTap && x >= 309 && x <= 372 && y >= 163 && y <= 191) checked = !checked
+        }
+      } else if (command.extendedWaitUntil) {
+        assert.equal(command.extendedWaitUntil.timeout, 10000)
+        assert.ok(matches(command.extendedWaitUntil.visible), 'Settings control did not become available')
+      } else if (command.assertVisible) {
+        assert.ok(matches(command.assertVisible), 'Password AutoFill OFF state was not established')
+      } else assert.fail('Unexpected Settings preparation command')
+    }
+  }
+  execute(commands)
+  return { page, checked, taps }
+}
+
+it('executes the authored Settings flow from observed entry states and is idempotent when already OFF', () => {
+  const path = join(root, 'packages/app/.maestro/setup/disable-password-autofill.yaml')
+  const [config, commands] = yaml.loadAll(readFileSync(path, 'utf8'))
+  assert.equal(config.appId, 'com.apple.Preferences')
+  for (const page of ['home', 'general', 'autofill']) {
+    const first = simulatePasswordAutofill(commands, { page })
+    assert.equal(first.checked, false)
+    assert.equal(first.taps.filter(id => id === 'AutoFillToggle').length, 1)
+    const again = simulatePasswordAutofill(commands, first)
+    assert.equal(again.checked, false)
+    assert.deepEqual(again.taps, [], 'already OFF must not be toggled ON')
+  }
+})
+
+it('rejects a missing control, ignored tap, deleted tap or row-center tap instead of accepting unchanged ON state', () => {
+  const commands = flow('setup/disable-password-autofill.yaml')
+  assert.throws(() => simulatePasswordAutofill(commands, { page: 'general', missingSwitch: true }), /did not become available/)
+  assert.throws(() => simulatePasswordAutofill(commands, { ignoreTap: true }), /OFF state was not established/)
+  const change = commands.findIndex(command => command.runFlow?.when?.visible?.id === 'AutoFillToggle')
+  assert.ok(change >= 0, 'negative control must locate the actual change branch')
+  assert.throws(() => simulatePasswordAutofill(commands.filter((_, index) => index !== change)), /OFF state was not established/)
+  const centered = structuredClone(commands)
+  delete centered[change].runFlow.commands[0].tapOn.point
+  assert.throws(() => simulatePasswordAutofill(centered), /OFF state was not established/)
+})
+
+shellIt('executes bounded hosted Settings preparation with the selected device and existing run diagnostics, preserving failures', () => {
+  const step = workflow.jobs.maestro.steps.find(item => item.name === 'Disable Password AutoFill on the disposable simulator')
+  assert.equal(step['timeout-minutes'], 6)
+  const steps = workflow.jobs.maestro.steps
+  assert.ok(steps.indexOf(step) > steps.findIndex(item => item.name === 'Verify no Metro listener before suite'))
+  assert.ok(steps.indexOf(step) < steps.findIndex(item => item.name === 'Snapshot hosted hardware and memory'))
+  assert.equal(steps.find(item => item.name === 'Install Maestro').env.MAESTRO_VERSION, '2.12.0')
+  const f = fixture()
+  try {
+    const trace = join(f.dir, 'prepare-trace')
+    const timeoutTrace = join(f.dir, 'timeout-trace')
+    const runnerTemp = join(f.dir, 'runner temp')
+    writeFileSync(join(f.dir, 'bin/timeout'), `#!/bin/bash
+printf '<%s>\\n' "$@" > "$FAKE_TIMEOUT_TRACE"
+shift 3
+exec "$@"
+`, { mode: 0o755 })
+    writeFileSync(join(f.dir, 'bin/maestro'), `#!/bin/bash
+printf 'driver=%s\\n' "$MAESTRO_DRIVER_STARTUP_TIMEOUT" > "$FAKE_PREPARE_TRACE"
+printf '<%s>\\n' "$@" >> "$FAKE_PREPARE_TRACE"
+exit "$FAKE_PREPARE_EXIT"
+`, { mode: 0o755 })
+    const run = code => spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], {
+      cwd: root, env: { ...f.env, ...step.env, DEVICE: device, RUNNER_TEMP: runnerTemp,
+        FAKE_PREPARE_TRACE: trace, FAKE_TIMEOUT_TRACE: timeoutTrace, FAKE_PREPARE_EXIT: String(code) },
+      encoding: 'utf8', timeout: 5000
+    })
+    const good = run(0)
+    assert.equal(good.status, 0, good.stderr)
+    assert.ok(good.stdout.includes('Verified disposable simulator Password AutoFill is OFF'))
+    const args = readFileSync(trace, 'utf8').trim().split('\n')
+    const output = join(runnerTemp, 'maestro-diagnostics/fixture-preparation')
+    assert.deepEqual(args, ['driver=180000', '<test>', '<--device>', `<${device}>`,
+      '<--test-output-dir>', `<${output}>`, '<--debug-output>', `<${output}>`,
+      '<packages/app/.maestro/setup/disable-password-autofill.yaml>'])
+    assert.deepEqual(readFileSync(timeoutTrace, 'utf8').split('\n').slice(0, 4), ['<-k>', '<10>', '<300>', '<maestro>'])
+    const failed = run(23)
+    assert.equal(failed.status, 23, 'a preparation failure must fail the authored workflow step')
+    assert.ok(!failed.stdout.includes('Verified disposable simulator Password AutoFill is OFF'))
+  } finally { rmSync(f.dir, { recursive: true, force: true }) }
 })
