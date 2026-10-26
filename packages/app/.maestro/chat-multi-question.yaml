@@ -54,6 +54,7 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 
 # Ensure Chat tab.
 - tapOn: "Chat"
+
 - waitForAnimationToEnd
 
 # Type the trigger phrase that makes the mock server emit the mixed
@@ -61,11 +62,25 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 # with-Other).
 - tapOn:
     id: "chat-message-input"
+
 - inputText: "show-multi-question"
 
 - tapOn:
     id: "chat-send-button"
 
+# Dismiss the keyboard before checking the header and options (#8843).
+# The target portrait fixture's chat region is y327..775 after dismissal.
+# A bounded gesture inside that region exposes the upper form; screen-wide
+# visibility matching alone does not account for clipping by the sticky header.
+- hideKeyboard
+
+- waitForAnimationToEnd
+
+# Swipe wholly inside the keyboard-dismissed chat region on the target portrait iPhone.
+- swipe:
+    start: 50%,55%
+    end: 50%,65%
+    duration: 350
 
 # Wait for the interactive multi-question form container to render
 # (#4973). The mock session is `provider: 'claude-sdk'`, so the mobile
@@ -86,56 +101,61 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 #     synthetic `__chroxy_other__` sentinel appended by handleUserQuestion.
 - assertVisible:
     id: "question-multi-option-0-approve"
+
 - assertVisible:
     id: "question-multi-option-0-deny"
+
 - assertVisible:
     id: "question-multi-option-0-Other"
+
 - assertVisible:
     id: "question-multi-option-1-app"
+
 - assertVisible:
     id: "question-multi-option-1-server"
+
 - assertVisible:
     id: "question-multi-option-1-dashboard"
+
 - assertVisible:
     id: "question-multi-option-2-auto-rollback"
+
 - assertVisible:
     id: "question-multi-option-2-manual-rollback"
+
 # Wildcard matches — the multi-question card flattens its children
 # into accessible containers, so exact text matches find nothing.
 - assertVisible:
     text: ".*Q1 — deploy to production\\?.*"
+
 - assertVisible:
     text: ".*Q2 — which areas to verify\\?.*"
+
 - assertVisible:
     text: ".*Q3 — rollback strategy\\?.*"
-
-# Dismiss the keyboard and bring Q1 fully into view before tapping
-# (#6103). With the keyboard up and the sticky session/tab header, the
-# chat list sits scrolled to the form's bottom — the upper questions
-# land under the header, so their taps miss, the form stays partly
-# unanswered and Submit never enables. hideKeyboard frees the space;
-# scrollUntilVisible (100% by default) guarantees Q1 is clear of the
-# header before the first tap.
-- hideKeyboard
-- waitForAnimationToEnd
-- scrollUntilVisible:
-    element:
-      id: "question-multi-option-0-approve"
-    direction: UP
 
 # Answer every question: Q[0] approve (single-select radio), Q[1]
 # app + server (multi-select checkbox — two taps add to the array),
 # Q[2] auto-rollback (single-select radio).
 - tapOn:
     id: "question-multi-option-0-approve"
+
 - tapOn:
     id: "question-multi-option-1-app"
+
 - tapOn:
     id: "question-multi-option-1-server"
+
 - tapOn:
     id: "question-multi-option-2-auto-rollback"
 
 - takeScreenshot: chat-multi-question-form-filled
+
+# Swipe wholly inside the keyboard-dismissed chat region on the target portrait iPhone.
+- swipe:
+    start: 50%,65%
+    end: 50%,55%
+    duration: 350
 
 # Submit the form. The mobile `sendUserQuestionResponse` (widened in
 # #4761 / PR #4859) serializes the per-question `answers` map (with
@@ -143,6 +163,7 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 # summary on the wire.
 - tapOn:
     id: "question-multi-submit"
+
 - waitForAnimationToEnd
 
 # Post-answer the form is replaced by the summary chip (#4973). Assert
@@ -152,6 +173,7 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
     visible:
       id: "question-multi-summary"
     timeout: 10000
+
 # Wildcard match — the summary chip flattens like the card above.
 - assertVisible:
     text: ".*Q2 — which areas to verify\\?: app, server.*"

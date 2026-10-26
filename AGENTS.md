@@ -17,7 +17,7 @@ directly; `CLAUDE.md` and `GEMINI.md` import it. References to Claude, the
 chroxy/
 ├── packages/
 │   ├── server/       # Node.js daemon + CLI (ES modules, no TypeScript)
-│   ├── app/          # React Native mobile app (TypeScript, Expo 54)
+│   ├── app/          # React Native mobile app (TypeScript, Expo 55)
 │   ├── desktop/      # Tauri tray app (Rust, wraps the dashboard)
 │   ├── dashboard/    # Web dashboard (React + Vite, served by the server)
 │   ├── protocol/     # Shared protocol types and Zod schemas (@chroxy/protocol)

@@ -21,7 +21,8 @@
         "NSLocalNetworkUsageDescription": "Chroxy scans your local network to discover running Chroxy servers",
         "NSSpeechRecognitionUsageDescription": "Allow Chroxy to use speech recognition for voice input.",
         "NSMicrophoneUsageDescription": "Allow Chroxy to use the microphone for voice input.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "EXDevMenuShowFloatingActionButton": false
       },
       "privacyManifests": {
         "NSPrivacyAccessedAPITypes": [
@@ -72,7 +73,7 @@
     },
     "scheme": "chroxy",
     "runtimeVersion": {
-      "policy": "appVersion"
+      "policy": "fingerprint"
     },
     "updates": {
       "url": "https://u.expo.dev/5747b2cd-e15a-4742-9562-de949408f896",
@@ -108,7 +109,8 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "./plugins/withAndroidDevMenu.js"
     ],
     "extra": {
       "eas": {

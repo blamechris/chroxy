@@ -1,14 +1,32 @@
 #!/bin/bash
-# Build and install the Debug dev client without launching it. Maestro opens
-# the dev-client link only after Metro's iOS bundle has been warmed.
+# Build and install without launching. Local use defaults to the Debug client;
+# the explicit bundled CI variant embeds its Release JavaScript and assets.
 set -euo pipefail
 
 project_dir="${1:?pass the Expo app directory}"
 : "${DEVICE:?DEVICE must be set by the simulator preflight}"
 : "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
 
+if [ "${CHROXY_MAESTRO_RUNTIME_CACHE+x}" = x ] || [ "${CHROXY_MAESTRO_RUNTIME_VERSION+x}" = x ]; then
+  echo '::error::Retired Maestro runtime inputs must be removed' >&2
+  exit 1
+fi
+configuration=Debug
+prebuild_args=(--platform ios)
+build_args=()
+if [ "${CHROXY_MAESTRO_BUILD_MODE+x}" = x ]; then
+  if [ "$CHROXY_MAESTRO_BUILD_MODE" != bundled ] || { [ "${CI:-}" != 1 ] && [ "${CI:-}" != true ]; }; then
+    echo '::error::Bundled build requires explicit bundled mode and CI' >&2
+    exit 1
+  fi
+  configuration=Release
+  prebuild_args=(--clean --platform ios)
+  # This concrete simulator destination needs only its active CPU architecture.
+  build_args=(CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES)
+fi
+
 cd "$project_dir"
-npx expo prebuild --platform ios
+npx expo prebuild "${prebuild_args[@]}"
 
 workspace="$PWD/ios/Chroxy.xcworkspace"
 if [ ! -d "$workspace" ]; then
@@ -17,16 +35,14 @@ if [ ! -d "$workspace" ]; then
 fi
 
 derived_data="$RUNNER_TEMP/chroxy-maestro-derived-data"
-# Match Expo's simulator defaults: generated workspace/scheme, Debug, selected
-# simulator, and no packager launched by the Xcode build phase. Debug simulator
-# builds do not set SKIP_BUNDLING in Expo's XcodeBuild.getProcessOptions.
+# Release runs Expo's generated export:embed build phase. Never launch Metro.
 RCT_NO_LAUNCH_PACKAGER=true xcodebuild \
-  -workspace "$workspace" -scheme Chroxy -configuration Debug \
-  -destination "id=$DEVICE" -derivedDataPath "$derived_data" build
+  -workspace "$workspace" -scheme Chroxy -configuration "$configuration" \
+  -destination "id=$DEVICE" -derivedDataPath "$derived_data" "${build_args[@]+"${build_args[@]}"}" build
 
-app="$derived_data/Build/Products/Debug-iphonesimulator/Chroxy.app"
+app="$derived_data/Build/Products/$configuration-iphonesimulator/Chroxy.app"
 if [ ! -d "$app" ] || [ ! -f "$app/Info.plist" ]; then
-  echo "::error::Xcode build did not produce the Debug simulator app at $app" >&2
+  echo "::error::Xcode build did not produce the $configuration simulator app at $app" >&2
   exit 1
 fi
 

@@ -429,7 +429,7 @@ chroxy/
 │   ├── server/      # Node.js daemon, CLI, and bundled web dashboard server
 │   ├── dashboard/   # Web dashboard (React + Vite) — built into the server bundle
 │   ├── desktop/     # Tauri tray app (Rust) wrapping the dashboard
-│   ├── app/         # React Native mobile app (TypeScript, Expo 54)
+│   ├── app/         # React Native mobile app (TypeScript, Expo 55)
 │   ├── protocol/    # Shared WebSocket protocol types and Zod schemas
 │   └── store-core/  # Shared store logic and crypto for app + dashboard
 ├── docs/            # Setup guides, architecture, provider reference

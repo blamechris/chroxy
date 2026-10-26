@@ -34,15 +34,30 @@ name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 - runFlow: setup/ensure-session-screen.yaml
 
 - tapOn: "Chat"
+
 - waitForAnimationToEnd
 
 - tapOn:
     id: "chat-message-input"
+
 - inputText: "show-ask-user-question-multi"
 
 - tapOn:
     id: "chat-send-button"
 
+# Dismiss the keyboard before checking the header and options (#8843).
+# The target portrait fixture's chat region is y327..775 after dismissal.
+# A bounded gesture inside that region exposes the upper form; screen-wide
+# visibility matching alone does not account for clipping by the sticky header.
+- hideKeyboard
+
+- waitForAnimationToEnd
+
+# Swipe wholly inside the keyboard-dismissed chat region on the target portrait iPhone.
+- swipe:
+    start: 50%,55%
+    end: 50%,65%
+    duration: 350
 
 # Wait for Q[0]'s prompt to render — same selector as the single-
 # question flow because Q[0] IS the rendered question.
@@ -58,44 +73,44 @@ name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 # merges questions surfaces as a missing id here.
 - assertVisible:
     id: "question-multi-option-0-approve"
+
 - assertVisible:
     id: "question-multi-option-1-yes-notify"
+
 - assertVisible:
     id: "question-multi-option-2-wait"
+
 - assertVisible:
     id: "question-multi-option-3-auto-rollback"
+
 # Wildcard match — the question card flattens its children into one
 # accessibility element, so exact text matches find nothing.
 - assertVisible:
     text: ".*Q1 — deploy to production\\?.*"
 
-# Dismiss the keyboard and bring Q1 fully into view before tapping
-# (#6103). With the keyboard up and the sticky session/tab header, the
-# chat list sits scrolled to the form's bottom — the upper questions
-# (Q1/Q2) land under the header, so their taps miss, the form stays
-# partly unanswered and Submit never enables. hideKeyboard frees the
-# space; scrollUntilVisible (100% by default) guarantees Q1 is clear of
-# the header before the first tap.
-- hideKeyboard
-- waitForAnimationToEnd
-- scrollUntilVisible:
-    element:
-      id: "question-multi-option-0-approve"
-    direction: UP
-
 # Answer all four questions (each is single-select) and submit —
 # round-trips the per-question answers map on the wire.
 - tapOn:
     id: "question-multi-option-0-approve"
+
 - tapOn:
     id: "question-multi-option-1-yes-notify"
+
 - tapOn:
     id: "question-multi-option-2-wait"
+
 - tapOn:
     id: "question-multi-option-3-auto-rollback"
 
+# Swipe wholly inside the keyboard-dismissed chat region on the target portrait iPhone.
+- swipe:
+    start: 50%,65%
+    end: 50%,55%
+    duration: 350
+
 - tapOn:
     id: "question-multi-submit"
+
 - waitForAnimationToEnd
 
 # Post-answer the form is replaced by the summary chip (#4973).

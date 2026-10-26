@@ -1,6 +1,6 @@
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
-import { readAsStringAsync } from 'expo-file-system';
+import { readAsStringAsync } from 'expo-file-system/legacy';
 import { Alert } from 'react-native';
 // #6453 — the WIRE shape `toWireAttachments` produces is the protocol's canonical
 // `BinaryAttachment` (the local `Attachment` below is the device-side picker type:

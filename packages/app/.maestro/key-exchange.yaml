@@ -64,7 +64,7 @@ name: E2E key exchange eager handshake (#6019)
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
 
-# Clear state and open the Metro link directly (not setup/ensure-session-screen.yaml)
+# Clear state and use the selected client (not setup/ensure-session-screen.yaml)
 # because this flow must connect with a different token
 # (test-token-maestro-encrypted) than the standard fixture. We replicate
 # the same reset + connect sequence that ensure-session-screen.yaml uses,
@@ -73,8 +73,7 @@ name: E2E key exchange eager handshake (#6019)
 - setPermissions:
     permissions:
       all: allow
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-- runFlow: setup/await-dev-client.yaml
+- runFlow: setup/launch-app.yaml
 - extendedWaitUntil:
     visible:
       text: "Connect to Chroxy|Chat"
@@ -125,6 +124,7 @@ name: E2E key exchange eager handshake (#6019)
       # coordinate tap risks hitting the QR/manual toggle.)
       - tapOn:
           id: "connect-submit"
+      - runFlow: setup/dismiss-password-save.yaml
 
 # SessionScreen should land — the encrypted post-auth burst completes
 # just like the unencrypted path; the session_list / session_switched

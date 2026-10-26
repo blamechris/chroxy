@@ -161,6 +161,32 @@ if [ -z "$DEVICE" ]; then
   exit 1
 fi
 
+# Launch selection is explicit in CI, with the existing development default.
+LAUNCH_MODE="${CHROXY_MAESTRO_LAUNCH_MODE-dev-client}"
+if [ "${CHROXY_MAESTRO_RUNTIME_CACHE+x}" = x ] || [ "${CHROXY_MAESTRO_RUNTIME_VERSION+x}" = x ]; then
+  echo 'ERROR: Retired Maestro runtime inputs must be removed' >&2
+  exit 2
+fi
+MAESTRO_LAUNCH_ARGS=("-e" "CHROXY_MAESTRO_LAUNCH_MODE=$LAUNCH_MODE")
+case "$LAUNCH_MODE" in
+  dev-client)
+    if [ "${CHROXY_MAESTRO_BUILD_MODE+x}" = x ] || [ "${CHROXY_MAESTRO_VERIFIED_RUNTIME+x}" = x ]; then
+      echo 'ERROR: Development launch must not use bundled artifact inputs' >&2
+      exit 2
+    fi
+    ;;
+  bundled)
+    if [ "${CHROXY_MAESTRO_BUILD_MODE:-}" != bundled ] || { [ "${CI:-}" != 1 ] && [ "${CI:-}" != true ]; } ||
+      [[ ! "${CHROXY_MAESTRO_VERIFIED_RUNTIME:-}" =~ ^[0-9a-f]{40}$ ]]; then
+      echo 'ERROR: Bundled launch requires CI and the verified artifact runtime' >&2
+      exit 2
+    fi
+    MAESTRO_LAUNCH_ARGS+=("-e" "CHROXY_MAESTRO_BUILD_MODE=bundled" "-e" "CHROXY_MAESTRO_CI=1"
+      "-e" "CHROXY_MAESTRO_VERIFIED_RUNTIME=$CHROXY_MAESTRO_VERIFIED_RUNTIME")
+    ;;
+  *) echo 'ERROR: Launch mode must be dev-client or bundled' >&2; exit 2 ;;
+esac
+
 # Parse the ordered flow list from run-all.yaml (single source of truth).
 if [ ! -f "$RUN_ALL" ]; then
   echo "ERROR: $RUN_ALL not found" >&2
@@ -356,7 +382,7 @@ for flow in "${FLOWS[@]}"; do
       MAESTRO_OUTPUT_ARGS=("--test-output-dir=$artifact_path" "--debug-output=$artifact_path")
     fi
     rc=0
-    run_with_timeout "$FLOW_TIMEOUT" maestro test --device "$DEVICE" "${MAESTRO_OUTPUT_ARGS[@]+"${MAESTRO_OUTPUT_ARGS[@]}"}" "$flow_path" || rc=$?
+    run_with_timeout "$FLOW_TIMEOUT" maestro test --device "$DEVICE" "${MAESTRO_LAUNCH_ARGS[@]}" "${MAESTRO_OUTPUT_ARGS[@]+"${MAESTRO_OUTPUT_ARGS[@]}"}" "$flow_path" || rc=$?
     if [ "$rc" -eq 0 ]; then
       ok=1
       break

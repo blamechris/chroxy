@@ -9,25 +9,14 @@ name: Ensure SessionScreen (connected to mock server)
 # Requires: mock server running on port 9876 (see scripts/start-mock-server.sh)
 # Usage: - runFlow: setup/ensure-session-screen.yaml
 #
-# The app requires a dev build (expo-speech-recognition + expo-secure-store
-# native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
-# rather than Expo Go. This is the same launch + connect sequence the
-# self-contained session flows (chat-todolist.yaml, terminal-view.yaml, …)
-# inline — kept in sync with them.
-
-# Launch via the dev client's deep link so we skip the "Development Build /
-# pick a dev server" screen and load the chroxy bundle directly.
-# Clear app data without launching a first dev-client process before the Metro
-# link. The Keychain entry holding saved connections survives, so the app may
-# auto-connect to a previously-used server; the conditional below handles
-# fresh and warm starts. Standalone clearState unsets permissions, so restore
-# launchApp's default allow-all setting before the link opens the app.
+# The shared launcher defaults to the custom development client locally and
+# explicitly selects the verified embedded Release app for the hosted gate.
+# Reset permissions before launch; saved SecureStore connections may survive.
 - clearState
 - setPermissions:
     permissions:
       all: allow
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-- runFlow: await-dev-client.yaml
+- runFlow: launch-app.yaml
 - extendedWaitUntil:
     visible:
       text: "Connect to Chroxy|Chat"
@@ -78,6 +67,7 @@ name: Ensure SessionScreen (connected to mock server)
       # this manual block entirely.)
       - tapOn:
           id: "connect-submit"
+      - runFlow: dismiss-password-save.yaml
 
 # Chat can appear before authentication completes. The mock's authenticated
 # session_list adds this exact active pill above the mode tabs; wait for it so

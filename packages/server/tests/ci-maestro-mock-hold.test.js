@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { once } from 'node:events'
+import { on, once } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
@@ -125,5 +125,64 @@ describe('Maestro mock disconnected-action window (#5699)', () => {
     assert.throws(() => execute({ status: 409, body: '{"released":false}' }), /release failed \(HTTP 409\)/)
     assert.throws(() => execute({ status: 200, body: 'not JSON' }), /invalid JSON/)
     assert.throws(() => execute({ status: 200, body: '{"released":false}' }), /release failed/)
+  })
+})
+
+
+describe('Maestro mock plan completion (#8844)', () => {
+  it('finishes each plan turn in production order and preserves the canonical approval roundtrip', { timeout: 15000 }, async t => {
+    const { port } = await startMock(t)
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    t.after(() => ws.terminate())
+    await once(ws, 'open', { signal: AbortSignal.timeout(5000) })
+
+    // The mock handles each input synchronously. A following ping is a wire
+    // barrier: collect every preceding reply without sleeps or assuming the
+    // completion events exist (a deleted event must fail an assertion promptly).
+    const exchange = async message => {
+      const replies = on(ws, 'message', { signal: AbortSignal.timeout(2000), close: ['close'] })
+      const frames = []
+      try {
+        ws.send(JSON.stringify(message))
+        ws.send(JSON.stringify({ type: 'ping' }))
+        for await (const [raw] of replies) {
+          const { seq: _seq, ...frame } = JSON.parse(raw.toString())
+          if (frame.type === 'pong') return frames
+          frames.push(frame)
+        }
+        assert.fail('mock socket closed before the reply barrier')
+      } finally { await replies.return() }
+    }
+
+    const authenticated = await exchange({ type: 'auth', token: 'test-token-maestro' })
+    assert.equal(authenticated[0].type, 'auth_ok')
+    const sessionId = 'mock-sess-1'
+    const result = { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId }
+    for (let turn = 0; turn < 2; turn++) {
+      const plan = await exchange({ type: 'input', data: 'show-plan-approval', sessionId })
+      assert.deepEqual(plan, [
+        { type: 'plan_ready', sessionId, allowedPrompts: [
+          { tool: 'Bash', prompt: 'npm test' },
+          { tool: 'Edit', prompt: 'src/index.js' },
+        ] },
+        result,
+        { type: 'agent_idle', sessionId },
+      ], 'each plan turn must complete after plan_ready, in the same session')
+
+      const approval = await exchange({ type: 'input', data: 'Go ahead with the plan', sessionId })
+      assert.deepEqual(approval.map(frame => frame.type), [
+        'stream_start', 'agent_busy', 'stream_delta', 'stream_end', 'result', 'agent_idle',
+      ])
+      assert.ok(approval.every(frame => frame.sessionId === sessionId))
+      const messageId = approval[0].messageId
+      assert.equal(typeof messageId, 'string')
+      assert.ok(messageId.length > 0)
+      assert.deepEqual(approval[2], {
+        type: 'stream_delta', messageId, sessionId,
+        delta: 'I received your message: "Go ahead with the plan". This is a mock response for E2E testing.',
+      })
+      assert.equal(approval[3].messageId, messageId)
+      assert.deepEqual(approval[4], result)
+    }
   })
 })

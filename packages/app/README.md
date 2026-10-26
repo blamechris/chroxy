@@ -2,7 +2,7 @@
 
 React Native mobile app for connecting to your Chroxy server.
 
-**Built with:** TypeScript, Expo 54, Zustand, React Navigation
+**Built with:** TypeScript, Expo 55, Zustand, React Navigation
 
 ## Development
 

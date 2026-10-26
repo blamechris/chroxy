@@ -24,8 +24,5 @@
   "bugs": {
     "url": "https://github.com/blamechris/chroxy/issues"
   },
-  "homepage": "https://github.com/blamechris/chroxy#readme",
-  "overrides": {
-    "expo-font": "14.0.12"
-  }
+  "homepage": "https://github.com/blamechris/chroxy#readme"
 }
