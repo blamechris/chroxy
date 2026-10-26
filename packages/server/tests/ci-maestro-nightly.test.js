@@ -93,6 +93,12 @@ if [ "$FAKE_FAIL_STEP" = prebuild ]; then exit 23; fi
 if [ "$FAKE_FAIL_STEP" != workspace ]; then mkdir -p "$FAKE_PROJECT/ios/Chroxy.xcworkspace"; fi`)
   command('xcodebuild', `echo "xcodebuild|$*|RCT_NO_LAUNCH_PACKAGER=$RCT_NO_LAUNCH_PACKAGER" >> "$FAKE_TRACE"
 if [ "$FAKE_FAIL_STEP" = build ]; then exit 24; fi
+if [ "$FAKE_REQUIRE_ACTIVE_ARCH" = 1 ]; then
+  case " $* " in
+    *" ONLY_ACTIVE_ARCH=YES "*) ;;
+    *) echo 'Expected only the selected simulator architecture' >&2; exit 29 ;;
+  esac
+fi
 if [ "$FAKE_FAIL_STEP" != product ]; then
   configuration=Debug
   case " $* " in *" -configuration Release "*) configuration=Release ;; esac
@@ -216,6 +222,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       assert.equal(commands[0], 'npx|expo prebuild --platform ios')
       assert.ok(commands[1].startsWith('xcodebuild|-workspace '))
       assert.ok(commands[1].includes(' -scheme Chroxy -configuration Debug '))
+      assert.ok(!commands[1].includes('ONLY_ACTIVE_ARCH='), 'ordinary Debug helper keeps its existing architecture selection')
       assert.ok(commands[1].includes(` -destination id=${device} `))
       assert.ok(commands[1].includes(' -derivedDataPath '))
       assert.ok(commands[1].endsWith(' build|RCT_NO_LAUNCH_PACKAGER=true'))
@@ -233,11 +240,11 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   shellIt('builds the explicit CI variant as a clean bundled Release simulator app', () => {
     const f = buildInstallFixture()
     try {
-      const result = f.run('', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled' })
+      const result = f.run('', { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'bundled', FAKE_REQUIRE_ACTIVE_ARCH: '1' })
       assert.equal(result.status, 0, result.stderr)
       const trace = readFileSync(f.trace, 'utf8')
       assert.ok(trace.includes('npx|expo prebuild --clean --platform ios'))
-      assert.ok(trace.includes(' -configuration Release ') && trace.includes(' CODE_SIGNING_ALLOWED=NO build|'))
+      assert.ok(trace.includes(' -configuration Release ') && trace.includes(' CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES build|'))
       assert.ok(trace.includes('/Release-iphonesimulator/Chroxy.app'))
       for (const env of [{ CI: '', CHROXY_MAESTRO_BUILD_MODE: 'bundled' },
         { CI: 'true', CHROXY_MAESTRO_BUILD_MODE: 'invalid' }, { CHROXY_MAESTRO_RUNTIME_CACHE: '1' }]) {
@@ -958,4 +965,54 @@ it('covers the independently expected launch callers and catches an unlisted new
   const bad = launchCallerViolations([...sources, [extra, [['stopApp', { setPermissions: { permissions: { all: 'allow' } } },
     { openLink: 'exp+chroxy://unlisted' }]]]])
   assert.ok(bad.missing.includes(extra), 'new launch sites must fail without adding them to the expected roster')
+})
+
+it('prepares the multi-question viewport before its preserved assertions and choices (#8843)', () => {
+  const cases = [
+    { file: 'ask-user-question-multi.yaml', header: 'approval-question-0',
+      options: [['approve'], ['yes-notify'], ['wait'], ['auto-rollback']],
+      choices: [['approve'], ['yes-notify'], ['wait'], ['auto-rollback']],
+      texts: ['.*Q1 — deploy to production\\?.*'] },
+    { file: 'chat-multi-question.yaml', header: 'question-prompt-multi',
+      options: [['approve', 'deny', 'Other'], ['app', 'server', 'dashboard'], ['auto-rollback', 'manual-rollback']],
+      choices: [['approve'], ['app', 'server'], ['auto-rollback']],
+      texts: ['.*Q1 — deploy to production\\?.*', '.*Q2 — which areas to verify\\?.*',
+        '.*Q3 — rollback strategy\\?.*', '.*Q2 — which areas to verify\\?: app, server.*'] }
+  ]
+  for (const expected of cases) {
+    const commands = flow(expected.file)
+    const keyboard = commands.indexOf('hideKeyboard')
+    const prompt = commands.findIndex(command => command?.extendedWaitUntil?.visible?.id === expected.header)
+    const send = commands.findIndex(command => command?.tapOn?.id === 'chat-send-button')
+    const gestures = commands.flatMap((command, index) => command?.swipe ? [{ index, ...command.swipe }] : [])
+    assert.deepEqual(gestures.map(gesture => ({ start: gesture.start, end: gesture.end, duration: gesture.duration })), [
+      { start: '50%,55%', end: '50%,65%', duration: 350 },
+      { start: '50%,65%', end: '50%,55%', duration: 350 }
+    ], 'use bounded gestures inside the partial chat region rather than screen-wide visibility matching')
+    const [prepare, revealSubmit] = gestures.map(gesture => gesture.index)
+    assert.ok(send < keyboard && keyboard < prepare && prepare < prompt && prompt < revealSubmit)
+    assert.ok(!commands.some(command => command?.scrollUntilVisible), 'screen-wide matcher cannot establish parent-clipped visibility')
+    assert.deepEqual(commands.filter(command => command?.extendedWaitUntil).map(command => [
+      command.extendedWaitUntil.visible?.id, command.extendedWaitUntil.timeout
+    ]), [[expected.header, 10000], ['question-multi-summary', 10000]])
+    const ids = rows => rows.flatMap((values, index) => values.map(value => `question-multi-option-${index}-${value}`))
+    assert.deepEqual(commands.filter(command => command?.assertVisible?.id?.startsWith('question-multi-option-'))
+      .map(command => command.assertVisible.id), ids(expected.options))
+    assert.deepEqual(commands.filter(command => command?.assertVisible?.text).map(command => command.assertVisible.text), expected.texts)
+    assert.deepEqual(commands.filter(command => command?.tapOn?.id?.startsWith('question-multi-option-'))
+      .map(command => command.tapOn.id), ids(expected.choices))
+    for (const id of [...ids(expected.options), ...ids(expected.choices)]) {
+      for (const index of commands.flatMap((command, position) =>
+        command?.assertVisible?.id === id || command?.tapOn?.id === id ? [position] : [])) {
+        assert.ok(index > prepare && index < revealSubmit, `${expected.file}: check and choose within the prepared question viewport`)
+      }
+    }
+    for (const text of expected.texts.slice(0, expected.file === 'chat-multi-question.yaml' ? 3 : 1)) {
+      const index = commands.findIndex(command => command?.assertVisible?.text === text)
+      assert.ok(index > prepare && index < revealSubmit, 'check question text inside the prepared viewport')
+    }
+    const submit = commands.findIndex(command => command?.tapOn?.id === 'question-multi-submit')
+    assert.ok(revealSubmit < submit)
+    assert.ok(commands.findIndex(command => command?.extendedWaitUntil?.visible?.id === 'question-multi-summary') > submit)
+  }
 })

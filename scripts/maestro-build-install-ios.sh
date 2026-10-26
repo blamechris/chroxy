@@ -21,7 +21,8 @@ if [ "${CHROXY_MAESTRO_BUILD_MODE+x}" = x ]; then
   fi
   configuration=Release
   prebuild_args=(--clean --platform ios)
-  build_args=(CODE_SIGNING_ALLOWED=NO)
+  # This concrete simulator destination needs only its active CPU architecture.
+  build_args=(CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES)
 fi
 
 cd "$project_dir"
