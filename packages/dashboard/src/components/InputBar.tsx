@@ -412,9 +412,10 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   }, [filteredFiles, visibleFileCount, filteredResources, selectFile, selectResource])
 
   // The palette is only live while it is open AND the value still starts with
-  // "/": a value replaced without an edit (history recall, Cmd+L) must not
-  // leave it acting on plain text. Shared by the filter and the visibility
-  // gate below so the two cannot drift apart (#8799).
+  // "/": a value replaced from outside without an edit (a controlled draft that
+  // changes on a session switch) must not leave it acting on plain text.
+  // Shared by the filter and the visibility gate below so the two cannot drift
+  // apart (#8799). #8831 tracks the picker state that path still leaves behind.
   const slashActive = pickerOpen && value.startsWith('/')
 
   // Derive slash filter from current value (text after "/")
@@ -476,6 +477,11 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     return hasText || hasAtts || hasImgs || hasReferencedPaste
   }, [value, dedupedAttachments, imageAttachments, hasReferencedPaste])
 
+  const closePicker = useCallback(() => {
+    setPickerOpen(false)
+    setSelectedIndex(0)
+  }, [])
+
   // #8799 — the composer-local state that belongs to the draft being
   // discarded: both pickers, history cycling, the evaluator panel and the
   // auto-resized height. send() and clearComposer() (Cmd+L) both discard the
@@ -485,15 +491,13 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     setValue('')
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
-    setPickerOpen(false)
-    setSelectedIndex(0)
+    closePicker()
     // #3068: drop any visible evaluator panel — its draft has been discarded so
     // the result no longer applies to the current input value.
     setEvaluatorState({ kind: 'idle' })
-    // #3698: discarding the draft exits cycling. The userMessageHistory effect
-    // already resets when the parent rebuilds the array, but doing it here too
-    // makes the local state consistent immediately (before the parent re-render
-    // pushes the new history through).
+    // #3698: discarding the draft exits cycling. On a send the
+    // userMessageHistory effect also resets it once the parent rebuilds the
+    // array; this is the immediate reset, and the only one on Cmd+L.
     setHistoryIndex(null)
     setDraftBeforeCycle('')
     // #3853 review: reset the explicit height set by handleChange's auto-
@@ -502,7 +506,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [setValue])
+  }, [setValue, closePicker])
 
   const send = useCallback(() => {
     const trimmed = value.trim()
@@ -525,11 +529,6 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     textareaRef.current?.focus()
   }, [setValue])
 
-  const closePicker = useCallback(() => {
-    setPickerOpen(false)
-    setSelectedIndex(0)
-  }, [])
-
   // #3853: Cmd+L / Ctrl+L — clear the composer (text + all queued attachments,
   // images, and pasted-text blocks). Returns true if something was cleared so
   // the keydown handler only preventDefault()s when the shortcut actually did
@@ -543,9 +542,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     const hasPastes = (pastedTextBlocks?.length ?? 0) > 0
     if (!hasText && !hasAtts && !hasImgs && !hasPastes) return false
 
-    // #8799 — resets the pickers, history cycling and evaluator panel along
-    // with the value, as send() does; also resets the auto-resized height
-    // (#3853 review), which setValue('') alone would leave tall.
+    // #8799 — resets everything send() resets (see resetComposer).
     resetComposer()
     if (attachments && onRemoveAttachment) {
       for (const att of attachments) onRemoveAttachment(att.path)

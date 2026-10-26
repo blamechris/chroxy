@@ -310,6 +310,34 @@ describe('InputBar', () => {
       expect(textarea.value).toBe('/commit ')
     })
 
+    it('a send resets the palette the same way, so the two paths cannot drift', () => {
+      const onSend = vi.fn()
+      const onSlashTrigger = vi.fn()
+      const slashCommands = [
+        { name: 'commit', description: 'Create a git commit', source: 'project' as const },
+        { name: 'compact', description: 'Compact the context', source: 'project' as const },
+      ]
+      render(
+        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={slashCommands} onSlashTrigger={onSlashTrigger} sendOnEnter />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/co' } })
+      expect(onSlashTrigger).toHaveBeenCalledTimes(1)
+      fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+      // A complete token hides the palette (tokenComplete) while the picker
+      // stays open, so Enter sends rather than completing a row.
+      fireEvent.change(textarea, { target: { value: '/commit msg' } })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('/commit msg')
+      expect(textarea.value).toBe('')
+
+      fireEvent.change(textarea, { target: { value: '/' } })
+      expect(onSlashTrigger).toHaveBeenCalledTimes(2)
+      const highlighted = within(screen.getByTestId('slash-picker')).getAllByRole('option').map(o => o.getAttribute('aria-selected'))
+      expect(highlighted).toEqual(['true', 'false'])
+    })
+
     it('closes the file picker and reopens it with the first row highlighted', () => {
       const onFileTrigger = vi.fn()
       const files = [
@@ -1554,9 +1582,10 @@ describe('InputBar slash command picker (#1281)', () => {
     // over it, and Enter must still send the draft untouched.
     it('walking history away from a hidden palette and back keeps it hidden', () => {
       const onSend = vi.fn()
+      const onSlashTrigger = vi.fn()
       const draft = '/prime-directive "a b"'
       render(
-        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter userMessageHistory={['hello world']} />,
+        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} onSlashTrigger={onSlashTrigger} sendOnEnter userMessageHistory={['hello world']} />,
       )
       const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
       fireEvent.change(textarea, { target: { value: draft } })
@@ -1567,15 +1596,22 @@ describe('InputBar slash command picker (#1281)', () => {
       fireEvent.keyDown(textarea, { key: 'ArrowDown' })
       expect(textarea.value).toBe(draft)
       expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      // The draft is a complete token, so the palette is hidden whatever the
+      // picker state is. This edit reopens the picker only if the round trip
+      // left it closed: a second trigger proves it did.
+      fireEvent.change(textarea, { target: { value: `${draft} c` } })
+      expect(onSlashTrigger).toHaveBeenCalledTimes(2)
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
       fireEvent.keyDown(textarea, { key: 'Enter' })
-      expect(onSend).toHaveBeenCalledWith(draft)
+      expect(onSend).toHaveBeenCalledWith(`${draft} c`)
     })
 
     it('Escape out of history cycling restores a hidden-palette draft with no palette', () => {
       const onSend = vi.fn()
+      const onSlashTrigger = vi.fn()
       const draft = '/prime-directive "a b"'
       render(
-        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} sendOnEnter userMessageHistory={['hello world']} />,
+        <InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={commands} onSlashTrigger={onSlashTrigger} sendOnEnter userMessageHistory={['hello world']} />,
       )
       const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
       fireEvent.change(textarea, { target: { value: draft } })
@@ -1585,8 +1621,13 @@ describe('InputBar slash command picker (#1281)', () => {
       fireEvent.keyDown(textarea, { key: 'Escape' })
       expect(textarea.value).toBe(draft)
       expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      // Same probe as above: a second trigger means the restore left the
+      // picker closed rather than reopening it behind the hidden palette.
+      fireEvent.change(textarea, { target: { value: `${draft} c` } })
+      expect(onSlashTrigger).toHaveBeenCalledTimes(2)
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
       fireEvent.keyDown(textarea, { key: 'Enter' })
-      expect(onSend).toHaveBeenCalledWith(draft)
+      expect(onSend).toHaveBeenCalledWith(`${draft} c`)
     })
 
     it('Cmd+L leaves no palette over the cleared composer', () => {
