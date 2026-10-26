@@ -106,7 +106,9 @@ export interface InputBarProps {
   onFileAttach?: (path: string) => void
   /** Controlled value for per-session draft persistence */
   controlledValue?: string
-  /** Called when text changes (for per-session draft persistence) */
+  /** Called when text changes (for per-session draft persistence). The parent
+   *  must hand the text back as given: a `controlledValue` that differs from
+   *  the composer's last write counts as replaced from outside (#8831). */
   onValueChange?: (value: string) => void
   /** When true, bare Enter sends; when false (default), Cmd/Ctrl+Enter sends. */
   sendOnEnter?: boolean
@@ -528,11 +530,12 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // #8831 — a value the composer did not write replaced the draft (session
   // switch, CI prefill, queued-message reopen, removed paste marker), so the
   // old draft's pickers, history cycling and evaluator panel no longer apply.
-  // A layout effect so the old draft's file picker is never painted over the
-  // new one. Adopting the value as the baseline means a later outside write of
-  // an earlier own value still counts as outside. Known limit: a switch
-  // between two sessions with identical drafts changes no `value`, so the
-  // state is kept; it still matches the text on screen.
+  // A layout effect, so the reset commits before the browser paints the new
+  // draft (no test observes the paint: jsdom passes with useEffect too).
+  // Adopting the value as the baseline means a later outside write of an
+  // earlier own value still counts as outside. Known limit: a switch between
+  // two sessions with identical drafts changes no `value`, so the state is
+  // kept. An evaluation still pending here resolves afterwards (#8832).
   useLayoutEffect(() => {
     if (value === ownWriteRef.current) return
     ownWriteRef.current = value
