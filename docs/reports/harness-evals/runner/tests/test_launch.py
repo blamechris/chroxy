@@ -765,7 +765,7 @@ class GateQueueText(LaunchCase):
             self.assertEqual(self.text_checks()['queue text at T0']['status'], 'PASS')
             self.assertRegex(out, r'PASS\s+queue text at T0\s+no run has started, by the run states in ~/trial/t2/state')
         with self.subTest('two first sends, listed in roster order'):
-            # trial.json lists B-cy-r1 before A-cy-r1: neither the names' order nor the sends' puts B-cy-r1 first.
+            # trial.json lists B-cy-r1 before A-cy-r1: neither the names' ascending order nor the sends' puts B-cy-r1 first.
             self.setUp()
             self.sent('A-cy-r1', '2026-11-02T10:00:00Z')
             self.sent('B-cy-r1', '2026-11-02T11:00:00Z')
@@ -4049,6 +4049,7 @@ class FinishQueueText(LaunchCase):
         self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+queue-t0.json was read at 2026-11-02T13:00:00.500Z, after the first send of B-cx-r1')
         self.assertNotRegex(out, r'(PASS|FAIL)\s+queue text')
         self.assertNotIn('WARNING', out)
+        self.assertNotIn('placement', self.recorded()['queue_text'], 'a snapshot that was not placed records no placement')
         self.assertEqual(gh.requests, [], 'no text was read without a baseline')
 
     def test_a_snapshot_read_after_another_run_s_first_send_is_not_the_t0_text_either(self):
@@ -4107,16 +4108,58 @@ class FinishQueueText(LaunchCase):
         recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']['slots']
         self.assertEqual((recorded['Q01']['since_t0'], recorded['Q02']['since_gate']), ('unchanged', 'unchanged'))
 
+    # -- finish records what the snapshot was placed before, as the gate's row says it (#8821)
+
+    def test_finish_records_the_first_send_the_snapshot_was_placed_before_and_where_it_is_recorded(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        code, out, _ = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.recorded()['queue_text'].get('placement'),
+                         'queue-t0.json was read at 2026-11-02T09:00:00Z, at or before every recorded first send (1): '
+                         f'B-cx-r1 at 2026-11-02T13:00:00Z, by {PLACE}')
+        self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+        self.assertNotIn('first send', out, 'the sentence is recorded, not printed')
+
+    def test_finish_with_no_start_anywhere_records_that_no_run_has_started_and_where_that_was_read(self):
+        # The wrong HOME or a mistyped paths.state_dir reads zero starts and places the snapshot all the same: the record must say so.
+        code, out, _ = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.recorded()['queue_text'].get('placement'),
+                         f'no run has started, by {PLACE}, so there is no first send to place queue-t0.json before')
+        self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unchanged', 'unchanged'))
+
+    def test_finish_records_the_state_file_it_was_given_as_the_place_the_first_send_was_read(self):
+        own = self.elsewhere_state(start={'sent_at': '2026-11-02T10:00:00Z'})
+        code, out, _ = self.finish(state_file=own)
+        self.assertEqual(code, 0, out)
+        recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']
+        self.assertEqual(recorded.get('placement'),
+                         'queue-t0.json was read at 2026-11-02T09:00:00Z, at or before every recorded first send (1): '
+                         f"B-cx-r1 at 2026-11-02T10:00:00Z, by B-cx-r1's state file {own}")
+
+    def test_a_re_run_keeps_the_earlier_finish_s_placement_under_replaces(self):
+        self.started(sent_at='2026-11-02T13:00:00Z')
+        self.finish()
+        first = self.recorded()['queue_text'].get('placement')
+        self.assertEqual(first, 'queue-t0.json was read at 2026-11-02T09:00:00Z, at or before every recorded first send (1): '
+                                f'B-cx-r1 at 2026-11-02T13:00:00Z, by {PLACE}')
+        code, out, _ = self.finish()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.recorded()['queue_text'].get('placement'), first)
+        self.assertEqual(self.recorded()['replaces']['queue_text'].get('placement'), first)
+
     def test_finish_with_no_state_dir_cannot_rule_out_a_start_and_leaves_every_slot_unverified(self):
         own = self.elsewhere_state(start={'sent_at': '2026-11-02T10:00:00Z'})
         with without(self.rig.trial, 'paths', 'state_dir'):
             code, out, gh = self.finish(state_file=own)
         self.assertEqual(code, 0, out)
-        recorded = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']['slots']
+        queue_record = state.load(self.rig.trial, self.RID, override=own, home=self.rig.box.home)['finish']['queue_text']
+        recorded = queue_record['slots']
         detail = ('paths.state_dir is not set in trial.json, so a run sent before queue-t0.json was read cannot be ruled out: set '
                   'paths.state_dir in trial.json, then run `finish` again')
         for slot, number in (('Q01', 9001), ('Q02', 9002)):
             self.assertEqual(recorded[slot], {'issue': number, 'since_t0': 'unverified', 'since_gate': 'unverified', 'detail': detail})
+        self.assertNotIn('placement', queue_record, 'a baseline that cannot be used records no placement')
         self.assertEqual(gh.requests, [])
 
     def test_another_run_s_state_that_cannot_be_read_leaves_every_slot_unverified(self):
@@ -4139,6 +4182,7 @@ class FinishQueueText(LaunchCase):
         self.assertEqual(code, 0, out)
         self.assertEqual((self.seen('Q01')['since_t0'], self.seen('Q02')['since_gate']), ('unverified', 'unverified'))
         self.assertRegex(out, r'UNVERIFIED\s+queue text at T0\s+no T0 recorded')
+        self.assertNotIn('placement', self.recorded()['queue_text'], 'a baseline that cannot be used records no placement')
         self.assertEqual(gh.requests, [])
 
     def test_a_slot_with_no_entry_in_the_snapshot_is_unverified_and_the_rest_are_read(self):
@@ -4156,6 +4200,7 @@ class FinishQueueText(LaunchCase):
         code, out, gh = self.finish()
         self.assertEqual(code, 0, out)
         self.assertEqual(self.recorded()['queue_text']['slots'], {})
+        self.assertNotIn('placement', self.recorded()['queue_text'], 'no baseline was read, so none was placed')
         self.assertRegex(out, r'UNVERIFIED\s+queue text at the end\s+the queue has no slots')
         self.assertEqual(gh.requests, [])
 

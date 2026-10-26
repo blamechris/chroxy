@@ -1366,7 +1366,7 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     accepted, ignored = gate_record.get('accepted_changed'), _acceptances_ignored(st)
     if ignored:
         accepted = None
-    results, slots = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
+    results, slots, placement = queue_text.finish_checks(trial, env.github(trial.repo), accepted, _starts(trial, env, run, st, state_file), ignored)
     if ignored:
         # What stands in for the acceptances is what the slots recorded: no slot is compared when the T0 snapshot cannot be used,
         # and none either when no slot's text could be read (#8817); when only some could, the sentence says so (#8819).
@@ -1379,6 +1379,10 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
             ignored += ' and the queue text is compared with T0 only'
         env.print(f'note: {ignored}')
     record['queue_text'] = {'at': _at(env), 'slots': slots}
+    if placement:
+        # What the T0 snapshot was placed before, as the gate's row says it (#8821): a finish with the wrong HOME or state_dir reads
+        # no starts and places the snapshot all the same, and this is where the record shows it.
+        record['queue_text']['placement'] = placement
     if ignored:
         record['queue_text']['acceptances_ignored'] = ignored
     if previous:
