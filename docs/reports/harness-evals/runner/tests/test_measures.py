@@ -78,7 +78,7 @@ def pr(number, issue, cycle, verdict='yes', state='merged'):
             'correct_vs_key': verdict if state == 'merged' else None}
 
 
-def run_evidence(report_minutes, cycles, verdicts=('yes', 'yes'), observable=None, red=None, pushes=0):
+def run_evidence(report_minutes, cycles, verdicts=('yes', 'yes'), observable=None, red=None, pushes=0, others=0):
     start = '2026-11-02T10:00:00Z'
     prs = [pr(100 + i, 9001 + i, c, v) for i, (c, v) in enumerate(zip(cycles, verdicts))]
     prs.append(pr(98, 9002, None, state='closed'))                                     # closed, never graded
@@ -91,6 +91,8 @@ def run_evidence(report_minutes, cycles, verdicts=('yes', 'yes'), observable=Non
     ev = {'start': start, 'report_merged_or_cutoff': '2026-11-02T13:00:00Z', 'queue_ci_runs': 4,
           'queue_ci_attempts': 4, 'queue_all_pr_workflow_runs': 9, 'report_last_commit': commit, 'prs': prs,
           'base_push_ci': [{'id': i, 'conclusion': 'success'} for i in range(pushes)]}
+    if others:
+        ev['red_ci_unattributed'] = [{'id': 500 + i, 'conclusion': ('success', 'failure')[i % 2]} for i in range(others)]
     if observable is not None:
         ev['ci_push_observable'] = observable
         ev['red_ci_on_base'] = red
@@ -102,7 +104,8 @@ class TrialTwoMode(unittest.TestCase):
     RUNS = {
         'A-cd-r1': ('A-native', 1, run_evidence(100, (20, 40), ('yes', 'yes'), observable=False, red=0)),
         'A-cd-r2': ('A-native', 2, run_evidence(120, (30, 50), ('yes', 'partial'))),
-        'A-cy-r1': ('A-chroxy', 1, run_evidence(60, (10, 20), ('yes', 'yes'), observable=True, red=1, pushes=3)),
+        'A-cy-r1': ('A-chroxy', 1, run_evidence(60, (10, 20), ('yes', 'yes'), observable=True, red=1, pushes=3,
+                                                others=2)),
         'A-cy-r2': ('A-chroxy', 2, run_evidence(80, (20, 30), ('yes', 'yes'), observable=True, red=0, pushes=2)),
     }
 
@@ -173,16 +176,20 @@ class TrialTwoMode(unittest.TestCase):
 
     def test_red_ci_is_not_observable_unless_observable_and_never_a_zero(self):
         lines = self.lines(run_measures(self.data))
-        self.assertIn('| A-cd-r1 | not observable | not observable |', lines)  # observable False, with a stored 0
-        self.assertIn('| A-cd-r2 | not observable | not observable |', lines)  # observability never recorded
-        self.assertIn('| A-cy-r1 | 3 | 1 |', lines)
-        self.assertIn('| A-cy-r2 | 2 | 0 |', lines)
+        self.assertIn('| Run | Merge push runs of `ci.yml` on the base | Other push runs of `ci.yml` on the base | '
+                      'Red CI on the base |', lines)
+        # observable False, with a stored 0
+        self.assertIn('| A-cd-r1 | not observable | not observable | not observable |', lines)
+        # observability never recorded
+        self.assertIn('| A-cd-r2 | not observable | not observable | not observable |', lines)
+        self.assertIn('| A-cy-r1 | 3 | 2 | 1 |', lines)  # three merge runs, two other push runs, red once
+        self.assertIn('| A-cy-r2 | 2 | 0 | 0 |', lines)
 
     def test_observable_but_unknown_red_count_is_not_a_zero(self):
         runs = dict(self.RUNS)
         runs['A-cy-r2'] = ('A-chroxy', 2, run_evidence(80, (20, 30), observable=True, red=None, pushes=2))
         self.write(runs)
-        self.assertIn('| A-cy-r2 | not observable | not observable |', self.lines(run_measures(self.data)))
+        self.assertIn('| A-cy-r2 | not observable | not observable | not observable |', self.lines(run_measures(self.data)))
 
     def test_per_run_json_gains_cell_and_red_ci_keys_in_this_mode_only(self):
         run_measures(self.data)
@@ -190,6 +197,7 @@ class TrialTwoMode(unittest.TestCase):
         self.assertEqual(list(out), list(self.RUNS))
         self.assertEqual((out['A-cy-r1']['cell'], out['A-cy-r1']['repeat']), ('A-chroxy', 1))
         self.assertEqual((out['A-cy-r1']['ci_push_observable'], out['A-cy-r1']['red_ci_on_base']), (True, 1))
+        self.assertEqual((out['A-cy-r1']['base_push_runs'], out['A-cy-r1']['other_push_runs']), (3, 2))
         self.assertEqual((out['A-cd-r1']['ci_push_observable'], out['A-cd-r1']['red_ci_on_base']), (False, None))
         october = json.loads(read_bytes(os.path.join(helpers.OCTOBER, 'data', 'measures-output.json')))
         self.assertNotIn('cell', october['A1-cd'])

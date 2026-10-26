@@ -140,6 +140,11 @@ class ClaudeSummary(TempDir):
         self.assertEqual(s['interrupts'], 1)
         self.assertEqual(self.summarize(tool_result('[Request interrupted by user]'))['interrupts'], 0)
 
+    def test_an_interrupt_in_a_sidechain_is_not_the_coordinators(self):
+        stop = [{'type': 'text', 'text': '[Request interrupted by user]'}]
+        self.assertEqual(self.summarize(user(stop))['interrupts'], 1)
+        self.assertEqual(self.summarize(user(stop, isSidechain=True))['interrupts'], 0)
+
     def test_malformed_lines_are_counted_and_skipped(self):
         path = self.write('m.jsonl', text=jl(assistant(effort='high'), '{"type": "assistant", "mess', 'not json', '[1, 2]'))
         s = native.claude_summary(path)

@@ -146,14 +146,14 @@ def print_cell_tables(rows, order, runs):
         dlv = f"{s['delivered']:g}" if s['delivered'] is not None else 'n/a'
         print(f"| **{cell}** | **median of {len(s['runs'])}** | | **{dlv}** | **{fmt_wall(s['wall'])}** | **{cyc}** |")
     print('\n## Table 5 — red CI on the base after a merge\n')
-    print('| Run | Push runs of `ci.yml` on the base | Red CI on the base |')
-    print('|---|---|---|')
+    print('| Run | Merge push runs of `ci.yml` on the base | Other push runs of `ci.yml` on the base | Red CI on the base |')
+    print('|---|---|---|---|')
     for run in order:
         r = rows[run]
         if r['ci_push_observable'] is True and r['red_ci_on_base'] is not None:
-            print(f"| {run} | {r['base_push_runs']} | {r['red_ci_on_base']} |")
+            print(f"| {run} | {r['base_push_runs']} | {r['other_push_runs']} | {r['red_ci_on_base']} |")
         else:
-            print(f'| {run} | not observable | not observable |')
+            print(f'| {run} | not observable | not observable | not observable |')
 
 
 def print_contrasts(rows, order, runs):
@@ -236,7 +236,8 @@ def main(argv=None):
             rows[run].update({'cell': meta.get('cell'), 'repeat': meta.get('repeat'),
                               'ci_push_observable': observable,
                               'red_ci_on_base': e.get('red_ci_on_base') if observable is True else None,
-                              'base_push_runs': len(e.get('base_push_ci') or [])})
+                              'base_push_runs': len(e.get('base_push_ci') or []),
+                              'other_push_runs': len(e.get('red_ci_unattributed') or [])})
     if ungraded:
         listing = ', '.join(f'{run} PR {pr} (issue {issue})' for run, pr, issue in ungraded)
         print(f'measures: {len(ungraded)} merged queue PR(s) have no grader verdict (correct_vs_key is null): {listing}',

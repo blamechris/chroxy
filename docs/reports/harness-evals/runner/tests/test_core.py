@@ -261,6 +261,23 @@ class ConfigValidation(unittest.TestCase):
         self.assertEqual(len(original.splitlines()), len(after.splitlines()))
         self.assertEqual(changed, [('  "t0": null,', f'  "t0": "{"c" * 40}",')])
 
+    def test_save_t0_refuses_a_rewrite_that_changes_more_than_t0(self):
+        # The file has no top-level t0, only one nested in a run: the line pattern finds exactly one match and
+        # rewrites that, which is the wrong value. The self-check catches it and the file is left as it was.
+        def edit(d):
+            del d['t0']
+            d['runs'][0]['t0'] = None
+        box = helpers.Sandbox(edit=edit)
+        self.addCleanup(box.cleanup)
+        path = os.path.join(box.trial_dir, 'trial.json')
+        with open(path, 'rb') as fh:
+            before = fh.read()
+        trial = box.trial()
+        with self.assertRaisesRegex(config.ConfigError, 'would change more than t0'):
+            config.save_t0(trial, 'c' * 40)
+        with open(path, 'rb') as fh:
+            self.assertEqual(fh.read(), before)
+
 
 class QueueRoster(unittest.TestCase):
     """What loading trial.json refuses about the queue: an issue the trial rules out, slot ids that do not run Q01, Q02, ...

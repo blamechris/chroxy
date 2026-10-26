@@ -170,23 +170,26 @@ def _starts(trial, env, run=None, st=None, state_file=None):
 # -- gate ----------------------------------------------------------------------
 
 def _issue_state(gh, number):
+    """(state, state_reason, error): `state_reason` is how GitHub says the issue was closed (completed,
+    not_planned, duplicate), or None when it gives none."""
     try:
         issue = gh.get(gh.repo_path(f'issues/{number}'))
     except (GitHubError, ValueError) as exc:
-        return None, str(exc)
+        return None, None, str(exc)
     value = issue.get('state') if isinstance(issue, dict) else None
     if value in ('open', 'closed'):
-        return value, None
-    return None, f'unexpected response for issue {number}'
+        reason = issue.get('state_reason')
+        return value, reason if isinstance(reason, str) and reason else None, None
+    return None, None, f'unexpected response for issue {number}'
 
 
 def _blocker_check(gh, number, accept_open, accepted):
     name = f'blocker #{number}'
-    value, error = _issue_state(gh, number)
+    value, reason, error = _issue_state(gh, number)
     if error:
         return checks.unverified(name, error)
     if value == 'closed':
-        return checks.passed(name, 'closed')
+        return checks.passed(name, f'closed ({reason or "no state_reason"})')
     if number in accept_open:
         accepted[str(number)] = accept_open[number]
         return checks.passed(name, f'open, accepted: {accept_open[number]}')
@@ -199,7 +202,7 @@ def _queue_checks(trial, gh):
     out = [checks.passed('queue non-empty', f'{len(trial.slots)} slots')]
     for slot in trial.slots:
         name = f'queue {slot.slot} #{slot.issue}'
-        value, error = _issue_state(gh, slot.issue)
+        value, _reason, error = _issue_state(gh, slot.issue)
         if error:
             out.append(checks.unverified(name, error))
         elif value == 'closed':
@@ -375,12 +378,14 @@ def cut(trial, runs, env, t0, push, repo_dir):
         env.print(f'cut: refusing: T0 must be a full 40-character commit SHA, got {t0!r}')
         return 2
     if push:
-        # The push URL, not the fetch URL: `remote.origin.pushurl` or `pushInsteadOf` can send a push
-        # somewhere `get-url` does not show. Checked before anything is fetched or T0 is recorded.
-        url = _git(env, repo, 'remote', 'get-url', '--push', 'origin')
-        pushes_to = url.stdout.strip() if url.ok else ''
-        if not pushes_to or not _origin_is_trial_repo(trial, env, pushes_to):
-            env.print(f'cut: refusing: origin pushes to {pushes_to or "an unreadable URL"}, not {trial.repo}; nothing fetched, recorded or pushed')
+        # Every push URL, not the fetch URL: `remote.origin.pushurl` or `pushInsteadOf` can send a push
+        # somewhere `get-url` does not show, and with several pushurls `get-url --push` prints only the first
+        # while git pushes to all of them. Checked before anything is fetched or T0 is recorded.
+        urls = _git(env, repo, 'remote', 'get-url', '--push', '--all', 'origin')
+        pushes_to = [line.strip() for line in urls.stdout.splitlines() if line.strip()] if urls.ok else []
+        elsewhere = [url for url in pushes_to if not _origin_is_trial_repo(trial, env, url)]
+        if not pushes_to or elsewhere:
+            env.print(f'cut: refusing: origin pushes to {", ".join(elsewhere) or "an unreadable URL"}, not {trial.repo}; nothing fetched, recorded or pushed')
             return 2
     fetched = _git(env, repo, 'fetch', 'origin')
     if not fetched.ok:
@@ -805,7 +810,8 @@ def _codex_prompts(trial, env, clone_dir):
             if differ:
                 parts.append(f'different from the clone\'s: {", ".join(differ)}')
             return checks.failed(name, '; '.join(parts) + f'; recompile: cd {clone_dir} && node scripts/compile-skill-targets.mjs --targets codex')
-        return checks.passed(name, f'{len(made)} prompt(s) byte-equal to {installed}')
+        return checks.passed(name, f'every compiled prompt ({len(made)}) is byte-equal to its copy in {installed}; '
+                                   'other files there are not compared')
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -878,7 +884,7 @@ def _recorded_daemon_commits(trial, run, env):
 
 
 def _daemon_commit(trial, run, env, facts):
-    name = 'daemon commit'
+    name = 'daemon checkout HEAD'
     checkout = _path(trial, env, 'daemon_checkout')
     if not checkout:
         return checks.unverified(name, 'paths.daemon_checkout is not set in trial.json')
@@ -891,7 +897,8 @@ def _daemon_commit(trial, run, env, facts):
     differ = {rid: commit for rid, commit in others.items() if commit != sha}
     if differ:
         shown = ', '.join(f'{rid} recorded {commit[:12]}' for rid, commit in sorted(differ.items()))
-        return checks.failed(name, f'the daemon is at {sha[:12]} but {shown}; the harness version must stay constant across the trial')
+        return checks.failed(name, f"the daemon checkout's HEAD is {sha[:12]} but {shown}; the harness version must stay constant "
+                                   'across the trial')
     if unreadable:
         return checks.unverified(name, f'{sha[:12]}, but the state of {", ".join(unreadable)} is unreadable')
     note = f'same as {", ".join(sorted(others))}' if others else 'first recorded'
