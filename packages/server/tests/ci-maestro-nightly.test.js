@@ -285,6 +285,80 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.ok(steps[index('Run Maestro suite')].run.includes('--flow permission-disconnected-noop.yaml'))
   })
 
+  shellIt('binds localhost to the IPv4 readiness and advertised launch asset address', () => {
+    const startup = workflow.jobs.maestro.steps.find(step => step.name === 'Start Metro (background)')
+    const readinessUrl = startup.run.match(/curl -sf (http:\/\/[^\s]+\/status)/)?.[1]
+    assert.ok(readinessUrl, 'the startup step must expose its actual readiness URL')
+    const warmer = join(root, 'scripts/maestro-warm-metro.mjs')
+    // Use Node's actual DNS ordering and localhost listener on an ephemeral
+    // port. The control models the IPv6-first macOS lookup that broke Expo;
+    // the positive case consumes the authored startup env and readiness URL.
+    const listener = String.raw`
+      import { createServer } from 'node:http'
+      import { spawn } from 'node:child_process'
+      import { lookup } from 'node:dns/promises'
+      const addresses = await lookup('localhost', { all: true })
+      if (!addresses.some(address => address.family === 6)) throw new Error('fixture needs IPv6 localhost')
+      const server = createServer((req, res) => {
+        if (req.url === '/status') return res.end('packager-status:running')
+        if (req.url === '/index.bundle?platform=ios') {
+          res.setHeader('content-type', 'application/javascript')
+          return res.end('globalThis.metroReady = true;')
+        }
+        res.setHeader('content-type', 'application/expo+json')
+        res.end(JSON.stringify({ launchAsset: {
+          contentType: 'application/javascript',
+          url: 'http://127.0.0.1:' + server.address().port + '/index.bundle?platform=ios'
+        } }))
+      })
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, 'localhost', resolve) })
+      try {
+        const readiness = new URL(process.env.FIXTURE_READINESS_URL)
+        readiness.port = String(server.address().port)
+        const response = await fetch(readiness, { signal: AbortSignal.timeout(1500) })
+        await response.text()
+        const child = spawn(process.execPath, [process.env.FIXTURE_WARMER, 'http://127.0.0.1:' + server.address().port], {
+          env: { ...process.env, MAESTRO_METRO_TIMEOUT_MS: '2000' }
+        })
+        let output = ''
+        child.stdout.on('data', data => { output += data })
+        child.stderr.on('data', data => { output += data })
+        const status = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) })
+        console.log(JSON.stringify({ address: server.address().address, readiness: response.status, warmStatus: status, output }))
+      } finally {
+        server.closeAllConnections()
+        await new Promise(resolve => server.close(resolve))
+      }
+    `
+    const run = (env, readiness, expectedStatus = 0) => {
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', listener], {
+        env: { ...process.env, NODE_OPTIONS: '--dns-result-order=ipv6first', ...env,
+          FIXTURE_READINESS_URL: readiness, FIXTURE_WARMER: warmer },
+        encoding: 'utf8', timeout: 10000
+      })
+      assert.equal(result.signal, null, 'binding proof must finish without a timeout')
+      assert.equal(result.status, expectedStatus, result.stderr)
+      return expectedStatus === 0 ? JSON.parse(result.stdout) : result.stderr
+    }
+    const broken = run({}, 'http://localhost:8081/status')
+    assert.equal(broken.address, '::1')
+    assert.equal(broken.readiness, 200, 'localhost readiness alone misses the IPv4 failure')
+    assert.equal(broken.warmStatus, 1)
+    assert.ok(broken.output.includes('Metro warmup failed'))
+
+    const rejected = run({}, readinessUrl, 1)
+    assert.ok(rejected.includes('ECONNREFUSED'), 'configured readiness must reject an IPv6-only listener')
+    assert.ok(rejected.includes('127.0.0.1'), 'readiness must probe the advertised IPv4 address')
+
+    const fixed = run(startup.env, readinessUrl)
+    assert.equal(fixed.address, '127.0.0.1')
+    assert.equal(fixed.readiness, 200)
+    assert.equal(fixed.warmStatus, 0, fixed.output)
+    assert.ok(fixed.output.includes('iOS Metro bundle ready:'))
+    assert.equal(workflow.env.NODE_OPTIONS, undefined, 'DNS ordering must stay scoped to Metro')
+    assert.equal(workflow.jobs.maestro.env?.NODE_OPTIONS, undefined)
+  })
+
   it('uploads only this run\'s bounded diagnostics on failure or cancellation', () => {
     const steps = workflow.jobs.maestro.steps
     const run = steps.find(step => step.name === 'Run Maestro suite')

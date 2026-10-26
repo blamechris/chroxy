@@ -81,13 +81,17 @@ jobs:
         run: bash scripts/maestro-build-install-ios.sh packages/app
 
       - name: Start Metro (background)
+        # Expo binds localhost but advertises its launch asset at 127.0.0.1.
+        # Keep the listener, readiness probe and simulator asset on IPv4.
+        env:
+          NODE_OPTIONS: --dns-result-order=ipv4first
         working-directory: packages/app
         run: |
           npx expo start --localhost > "$RUNNER_TEMP/metro.log" 2>&1 &
           echo "METRO_PID=$!" >> "$GITHUB_ENV"
           # Wait for the bundler to answer before running flows.
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8081/status >/dev/null 2>&1; then
+            if curl -sf http://127.0.0.1:8081/status >/dev/null 2>&1; then
               echo "Metro up after ${i}s"; exit 0
             fi
             sleep 1

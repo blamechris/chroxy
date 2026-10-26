@@ -39,7 +39,7 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Project Structure
 
 - `packages/server` — Node.js daemon (CLI headless mode) with WebSocket API and web dashboard
-- `packages/app` — React Native app (TypeScript, Expo 54) with chat view, xterm.js terminal, voice input, and plan mode UI
+- `packages/app` — React Native app (TypeScript, Expo 55) with chat view, xterm.js terminal, voice input, and plan mode UI
 - `packages/desktop` — Tauri tray app (Rust + web dashboard) with voice-to-text and system integration
 - `packages/protocol` — Shared WebSocket protocol types and Zod schemas (`@chroxy/protocol`)
 - `packages/store-core` — Shared store logic and crypto utilities (`@chroxy/store-core`)

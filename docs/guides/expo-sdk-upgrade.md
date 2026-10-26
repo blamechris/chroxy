@@ -73,6 +73,13 @@ The root `readAsStringAsync` compatibility export throws at runtime. Clipboard
 calls use `setStringAsync` and do not use the listener `content` field removed
 in SDK 55.
 
+Hosted Metro startup scopes Node's `--dns-result-order=ipv4first` option to
+that step and probes `127.0.0.1:8081`. SDK 55 binds `localhost` but normalizes
+the advertised launch asset to `127.0.0.1`; an IPv6-first localhost lookup can
+otherwise make readiness succeed while the simulator and bundle warmer cannot
+reach the IPv4 asset. The warmer still fetches the manifest and its complete
+JavaScript launch asset before UI flows start.
+
 ## Runtime versions and updates
 
 `runtimeVersion.policy` is now `fingerprint`. Expo derives the runtime from
