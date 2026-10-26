@@ -1264,11 +1264,13 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
 
     def test_push_refuses_when_any_one_of_several_push_urls_is_not_the_trial_repository(self):
-        # `get-url --push` prints only the first pushurl; git pushes to all of them, so the second one counts.
+        # `get-url --push` prints only the first pushurl; git pushes to all of them, so every one counts. The
+        # wrong one sits between two right ones, so checking only the first or only the last lets it through.
         other = os.path.join(self.rig.box.tmp, 'other.git')
         helpers.git(self.rig.box.tmp, 'clone', '--bare', '-q', self.rig.origin, other)
         helpers.git(self.rig.seed, 'config', '--add', 'remote.origin.pushurl', self.rig.origin)
         helpers.git(self.rig.seed, 'config', '--add', 'remote.origin.pushurl', other)
+        helpers.git(self.rig.seed, 'config', '--add', 'remote.origin.pushurl', self.rig.origin)
         code, out = self.cut('A-cd-r1', push=True)
         self.assertEqual(code, 2, out)
         self.assertIn(f'origin pushes to {other}, not {self.rig.trial.repo}; nothing fetched, recorded or pushed', out)
@@ -2530,6 +2532,7 @@ class PreflightChroxy(LaunchCase):
         self.assertEqual(code, 1)
         self.assertStatus(statuses(st), 'daemon checkout HEAD', 'FAIL')
         self.assertIn('B-cy-r1 recorded eeeeeeeeeeee', details(st)['daemon checkout HEAD'])
+        self.assertIn("the daemon checkout's HEAD is", details(st)['daemon checkout HEAD'])
 
     def test_the_same_daemon_commit_as_another_run_passes(self):
         self.prep('A-cy-r1')

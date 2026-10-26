@@ -897,7 +897,8 @@ def _daemon_commit(trial, run, env, facts):
     differ = {rid: commit for rid, commit in others.items() if commit != sha}
     if differ:
         shown = ', '.join(f'{rid} recorded {commit[:12]}' for rid, commit in sorted(differ.items()))
-        return checks.failed(name, f'the daemon is at {sha[:12]} but {shown}; the harness version must stay constant across the trial')
+        return checks.failed(name, f"the daemon checkout's HEAD is {sha[:12]} but {shown}; the harness version must stay constant "
+                                   'across the trial')
     if unreadable:
         return checks.unverified(name, f'{sha[:12]}, but the state of {", ".join(unreadable)} is unreadable')
     note = f'same as {", ".join(sorted(others))}' if others else 'first recorded'

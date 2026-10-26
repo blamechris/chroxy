@@ -11,14 +11,17 @@ and none failed. MIN_TESTS is a floor, not today's count.
 The total alone hides one file going missing while the rest grow, so every
 `test_*.py` also has a floor in MIN_PER_MODULE, and the roster is checked both
 ways: a test file with no entry fails (a new file needs one), an entry that names
-no file fails, and a module that ran fewer tests than its floor fails.
+no file fails, and a module that ran fewer tests than its floor fails. A module's
+count is the tests that started, as `testsRun` counts them (a test skipped by a
+decorator starts; a class or module whose set-up skips or fails starts none).
 """
 import os
 import sys
 import unittest
 
 MIN_TESTS = 540
-# About 60% of each module's count when the floor was set, so a few removals pass and a lost file or class does not.
+# About 60% of each module's count when the floor was set: a lost file, or a module cut below 60%, fails.
+# One class of a large module can go missing above its floor; the floor is for a file, not a class.
 MIN_PER_MODULE = {
     'test_collect': 67,
     'test_core': 43,
@@ -28,6 +31,7 @@ MIN_PER_MODULE = {
     'test_measures': 9,
     'test_native': 18,
     'test_queue': 43,
+    'test_run': 1,
     'test_status': 2,
     'test_verdicts': 16,
     'test_workflow': 6,
@@ -35,17 +39,17 @@ MIN_PER_MODULE = {
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def count_by_module(suite):
-    """{module: tests} for a discovered suite. Walk it before it runs: a run empties the suite as it goes."""
-    counts = {}
-    for item in suite:
-        if isinstance(item, unittest.TestSuite):
-            for module, n in count_by_module(item).items():
-                counts[module] = counts.get(module, 0) + n
-        else:
-            module = item.id().split('.')[0]
-            counts[module] = counts.get(module, 0) + 1
-    return counts
+class CountingResult(unittest.TextTestResult):
+    """A text result that also counts, in `by_module`, the tests each module started."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.by_module = {}
+
+    def startTest(self, test):
+        super().startTest(test)
+        module = test.id().split('.')[0]
+        self.by_module[module] = self.by_module.get(module, 0) + 1
 
 
 def floor_problems(counts, files, floors):
@@ -63,8 +67,7 @@ def main():
     sys.path.insert(0, os.path.dirname(HERE))
     sys.path.insert(0, HERE)
     suite = unittest.defaultTestLoader.discover(HERE, pattern='test_*.py', top_level_dir=HERE)
-    counts = count_by_module(suite)
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    result = unittest.TextTestRunner(verbosity=1, resultclass=CountingResult).run(suite)
     ran = result.testsRun
     if not result.wasSuccessful():
         return 1
@@ -73,12 +76,12 @@ def main():
               file=sys.stderr)
         return 1
     files = {f[:-3] for f in os.listdir(HERE) if f.startswith('test_') and f.endswith('.py')}
-    problems = floor_problems(counts, files, MIN_PER_MODULE)
+    problems = floor_problems(result.by_module, files, MIN_PER_MODULE)
     for problem in problems:
         print(f'FAIL: {problem}', file=sys.stderr)
     if problems:
         return 1
-    print(f'{ran} tests ran (floor {MIN_TESTS}); every module is at or above its floor')
+    print(f'{ran} tests ran (floor {MIN_TESTS}); every module ran at least its floor')
     return 0
 
 

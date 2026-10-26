@@ -57,7 +57,8 @@ METHODS = (
     "first command to the last report-PR commit's committer date. diff_added/diff_deleted are the merge "
     "commit's stats against its first parent. Red CI on the base is the failed ci.yml push runs on the base "
     'in the window, and is null unless ci.yml at T0 runs on push to the base; it is also null when a push run '
-    "did not finish, or was cancelled or skipped (a merge's or not) with no later finished push run. "
+    "did not finish, or ended cancelled, skipped, neutral or action_required (a merge's or not) with no later "
+    'finished push run. '
     'timeline_events lists cross-reference, mention, reference and connect events on every queue issue inside '
     'the window. notes lists the mapping and queue-text notes `collect` printed.')
 
@@ -757,6 +758,7 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
         env.print(f'collect {run.id}: {exc}')
         return 2
     notes.extend(_queue_text_notes(trial, st))
+    # A copy: the notes `update_runs_json` adds below, about runs.json's native fields, are printed and not stored.
     ev['notes'] = list(notes)
     data = data_dir or trial.repo_path('data')
     evidence = {'collected_at_utc': timeutil.iso(env.now()), 'trial': trial.id, 'run': run.id,
