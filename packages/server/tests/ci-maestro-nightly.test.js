@@ -1019,33 +1019,54 @@ it('prepares the multi-question viewport before its preserved assertions and cho
   }
 })
 
-// Independent native Settings fixture: the row has an ID/state, but only its
-// trailing child switch reacts to a tap. Bounds came from the real ON/OFF proof.
-function simulatePasswordAutofill(commands, { page = 'home', checked = true, missingSwitch = false, ignoreTap = false } = {}) {
+// Independent iOS 26.2 frames: General exposes AUTOFILL before its label
+// settles 53pt upward. A stale label-center tap hits the settled Dictionary row.
+// The AutoFill page's trailing child switch has its own observed hit region.
+function simulatePasswordAutofill(commands, {
+  page = 'home', checked = true, missingSwitch = false, ignoreTap = false,
+  generalSettled = false, settleSucceeds = true
+} = {}) {
   const taps = []
+  const trace = []
   const matches = selector => {
     const present = selector.id === 'com.apple.settings.general' ? page === 'home'
       : selector.id === 'AUTOFILL' ? page === 'general'
         : selector.id === 'AutoFillToggle' && page === 'autofill' && !missingSwitch
     return present && (selector.checked === undefined || selector.checked === checked)
   }
+  const tapPoint = (bounds, point = '50%,50%') => {
+    const [px, py] = point.split(',').map(value => Number.parseFloat(value) / 100)
+    return { x: bounds[0] + px * (bounds[2] - bounds[0]), y: bounds[1] + py * (bounds[3] - bounds[1]) }
+  }
+  const within = ({ x, y }, [left, top, right, bottom]) => x >= left && x <= right && y >= top && y <= bottom
   const execute = steps => {
     for (const command of steps) {
       if (command === 'launchApp' || command === 'waitForAnimationToEnd' || command.takeScreenshot) continue
-      if (command.runFlow) {
+      if (command.waitForAnimationToEnd) {
+        assert.equal(command.waitForAnimationToEnd.timeout, 10000)
+        if (page === 'general' && settleSucceeds) generalSettled = true
+        trace.push({ action: 'settle', page, settled: generalSettled })
+      } else if (command.runFlow) {
         const { when, commands: nested } = command.runFlow
         if (when.visible ? matches(when.visible) : !matches(when.notVisible)) execute(nested)
       } else if (command.tapOn) {
         const selector = command.tapOn
         assert.ok(matches(selector), `Settings target unavailable: ${selector.id}`)
         taps.push(selector.id)
-        if (selector.id === 'com.apple.settings.general') page = 'general'
-        else if (selector.id === 'AUTOFILL') page = 'autofill'
-        else {
-          const [px, py] = (selector.point || '50%,50%').split(',').map(value => Number.parseFloat(value) / 100)
-          const x = 16 + px * 370
-          const y = 151 + py * 52
-          if (!ignoreTap && x >= 309 && x <= 372 && y >= 163 && y <= 191) checked = !checked
+        if (selector.id === 'com.apple.settings.general') {
+          page = 'general'
+          generalSettled = false
+        } else if (selector.id === 'AUTOFILL') {
+          assert.equal(selector.index, 0)
+          const bounds = generalSettled ? [34, 545, 234, 573] : [34, 598, 234, 626]
+          const point = tapPoint(bounds, selector.point)
+          // These destination hit regions are independent of selected bounds.
+          if (within(point, [20, 532, 382, 585])) page = 'autofill'
+          else if (within(point, [20, 585, 382, 638])) page = 'dictionary'
+          trace.push({ action: 'navigate', ...point, page })
+        } else {
+          const point = tapPoint([16, 151, 386, 203], selector.point)
+          if (!ignoreTap && within(point, [309, 163, 372, 191])) checked = !checked
         }
       } else if (command.extendedWaitUntil) {
         assert.equal(command.extendedWaitUntil.timeout, 10000)
@@ -1056,21 +1077,56 @@ function simulatePasswordAutofill(commands, { page = 'home', checked = true, mis
     }
   }
   execute(commands)
-  return { page, checked, taps }
+  return { page, checked, taps, trace, generalSettled }
 }
 
 it('executes the authored Settings flow from observed entry states and is idempotent when already OFF', () => {
   const path = join(root, 'packages/app/.maestro/setup/disable-password-autofill.yaml')
   const [config, commands] = yaml.loadAll(readFileSync(path, 'utf8'))
   assert.equal(config.appId, 'com.apple.Preferences')
-  for (const page of ['home', 'general', 'autofill']) {
-    const first = simulatePasswordAutofill(commands, { page })
+  for (const initial of [{ page: 'home' }, { page: 'general' }, { page: 'general', generalSettled: true }, { page: 'autofill' }]) {
+    const first = simulatePasswordAutofill(commands, initial)
     assert.equal(first.checked, false)
     assert.equal(first.taps.filter(id => id === 'AutoFillToggle').length, 1)
+    assert.deepEqual(first.trace, initial.page === 'autofill' ? [] : [
+      { action: 'settle', page: 'general', settled: true },
+      { action: 'navigate', x: 134, y: 559, page: 'autofill' }
+    ])
     const again = simulatePasswordAutofill(commands, first)
     assert.equal(again.checked, false)
     assert.deepEqual(again.taps, [], 'already OFF must not be toggled ON')
   }
+  const off = simulatePasswordAutofill(commands, { checked: false })
+  assert.equal(off.checked, false)
+  assert.ok(!off.taps.includes('AutoFillToggle'), 'navigate to already OFF without toggling ON')
+})
+
+it('rejects missing, misplaced or ineffective General settlement instead of tapping the Dictionary row', () => {
+  const commands = flow('setup/disable-password-autofill.yaml')
+  const navigate = commands.findIndex(command => command.runFlow?.when?.notVisible?.id === 'AutoFillToggle')
+  assert.ok(navigate >= 0, 'negative control must locate the actual navigation branch')
+  const steps = commands[navigate].runFlow.commands
+  const wait = steps.findIndex(command => command.waitForAnimationToEnd)
+  const tap = steps.findIndex(command => command.tapOn?.id === 'AUTOFILL')
+  assert.ok(wait >= 0 && tap > wait, 'negative control must locate settlement before the actual row tap')
+  const withoutWait = structuredClone(commands)
+  withoutWait[navigate].runFlow.commands.splice(wait, 1)
+  for (const page of ['home', 'general']) {
+    assert.throws(() => simulatePasswordAutofill(withoutWait, { page }), /did not become available/)
+  }
+  // Observe the old source's actual coordinate outcome before its readiness guard.
+  const oldNavigation = simulatePasswordAutofill(withoutWait.slice(0, navigate + 1))
+  assert.equal(oldNavigation.checked, true)
+  assert.deepEqual(oldNavigation.trace, [{ action: 'navigate', x: 134, y: 612, page: 'dictionary' }])
+  for (const position of [0, tap]) {
+    const moved = structuredClone(withoutWait)
+    moved[navigate].runFlow.commands.splice(position, 0, structuredClone(steps[wait]))
+    assert.throws(() => simulatePasswordAutofill(moved), /did not become available/)
+  }
+  assert.throws(() => simulatePasswordAutofill(commands, { settleSucceeds: false }), /did not become available/)
+  const withoutTap = structuredClone(commands)
+  withoutTap[navigate].runFlow.commands.splice(tap, 1)
+  assert.throws(() => simulatePasswordAutofill(withoutTap), /did not become available/)
 })
 
 it('rejects a missing control, ignored tap, deleted tap or row-center tap instead of accepting unchanged ON state', () => {
