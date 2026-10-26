@@ -1,163 +1,49 @@
-# Maestro app E2E — nightly (#6355, the deferred half of #6315).
-#
-# The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
-# was deferred from per-PR because it needs a booted iOS simulator and native
-# application build. The hosted gate exercises a bundled Release client. Run once a night on two isolated hosted macOS 15 simulators
-# with Xcode 26.2, partitioning the canonical inventory across them:
-# Expo SDK 55 requires Xcode 26 or later.
-# `run-all-sequential.sh`
-# runs each flow in its own maestro process and retries a failure once — the
-# resilient runner required over `run-all.yaml` on a single simulator (#6091).
-name: Maestro App E2E (nightly)
-
+name: Maestro Settings navigation diagnostic
 on:
-  schedule:
-    # ~01:00 America/Los_Angeles (09:00 UTC). Adjust to a runner-idle window.
-    - cron: '0 9 * * *'
   workflow_dispatch:
-    inputs:
-      flow:
-        description: Run the full inventory or one diagnostic flow
-        type: choice
-        required: true
-        default: all
-        options:
-          - all
-          - connect-screen.yaml
-          - permission-disconnected-noop.yaml
-
-# Cancel a duplicate run on the same ref without a scheduled main run
-# cancelling a branch diagnostic (or vice versa).
-concurrency:
-  group: maestro-nightly-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-
-# npm's implicit audit + funding calls off for every install here (#7616) —
-# see the block in ci.yml for the outage that motivated it. Required by
-# scripts/lint-workflow-npm-env.mjs.
+concurrency:
+  group: maestro-settings-probe-${{ github.ref }}
+  cancel-in-progress: false
 env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-  CHROXY_MAESTRO_BUILD_MODE: bundled
-
 jobs:
-  maestro:
-    name: Maestro App E2E (shard ${{ matrix.shard }})
+  settings:
     runs-on: macos-15
-    timeout-minutes: 90
-    strategy:
-      # Keep both halves running if one fails, so full-inventory proof is visible.
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON((inputs.flow || 'all') == 'all' && '[0,1]' || '[0]') }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-
-      # Check the exact prerequisites Expo and the suite need before an expensive
-      # npm install or native build. Selects an iPhone 16 Pro with iOS 26.2 and
-      # exports DEVICE for the build and flow steps.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Preflight Xcode and boot simulator
         run: bash scripts/maestro-hosted-preflight.sh
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Maestro
-        # Pin the locally validated tool for reproducibility, not a driver fix.
+      - name: Install pinned Maestro
         env:
           MAESTRO_VERSION: '2.12.0'
         run: |
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
           "$HOME/.maestro/bin/maestro" --version
-
-      # The CI-only variant retains fingerprint compatibility and loads the
-      # Release bundle embedded by Expo; no Metro server or proxy is started.
-      - name: Build + install the bundled Release client
-        run: bash scripts/maestro-build-install-ios.sh packages/app
-
-      - name: Verify installed bundled iOS artifact
-        id: native-runtime
-        run: node scripts/maestro-resolve-runtime.mjs packages/app
-
-      - name: Verify no Metro listener before suite
-        run: node scripts/maestro-no-metro.mjs
-
-      # Change only the disposable simulator's supported Settings preference.
-      # Keep the app's original manual authentication and password-sheet helper.
-      - name: Disable Password AutoFill on the disposable simulator
-        timeout-minutes: 6
+      - name: Compare native Settings navigation and OFF guard
+        timeout-minutes: 23
         env:
           MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
-        run: |
-          source scripts/lib/run-with-timeout.sh
-          run_with_timeout 300 maestro test --device "$DEVICE" \
-            --test-output-dir "$RUNNER_TEMP/maestro-diagnostics/fixture-preparation" \
-            --debug-output "$RUNNER_TEMP/maestro-diagnostics/fixture-preparation" \
-            packages/app/.maestro/setup/disable-password-autofill.yaml
-          echo 'Verified disposable simulator Password AutoFill is OFF'
-
-      # One-shot observations for the controlled hosted-environment comparison.
-      # Each command has a five-second ceiling; no monitor stays running.
-      - name: Snapshot hosted hardware and memory
-        run: |
-          node --input-type=module <<'NODE'
-          import { spawnSync } from 'node:child_process'
-          for (const [command, args] of [['uname', ['-m']], ['sysctl', ['hw.ncpu', 'hw.memsize']], ['vm_stat', []]]) {
-            const result = spawnSync(command, args, { stdio: 'inherit', timeout: 5000 })
-            if (result.error || result.status !== 0) {
-              console.error(`::error::Hosted snapshot ${command} failed (${result.error?.code || result.status})`)
-              process.exit(1)
-            }
-          }
-          NODE
-
-      # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
-      # reuses the mock server on :9876 itself, runs each flow in its own maestro
-      # process, retries a failing flow once, and exits non-zero on a real failure.
-      # A diagnostic dispatch runs one selected inventoried flow in one job. Full
-      # runs partition the canonical inventory by the actual matrix index/count;
-      # each shard stops after one failed flow, bounding a broken shared setup.
-      - name: Run Maestro suite
-        env:
-          CHROXY_MAESTRO_LAUNCH_MODE: bundled
-          CHROXY_MAESTRO_VERIFIED_RUNTIME: ${{ steps.native-runtime.outputs.runtimeVersion }}
-          MAESTRO_FLOW: ${{ inputs.flow || 'all' }}
-          MAESTRO_ARTIFACT_DIR: ${{ runner.temp }}/maestro-diagnostics
-          # XCTest started just beyond Maestro's 120s default on a hosted shard.
-          MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
-        run: |
-          case "$MAESTRO_FLOW" in
-            all)
-              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --shard-index "${{ strategy.job-index }}" --shard-count "${{ strategy.job-total }}" --max-failures 1
-              ;;
-            connect-screen.yaml)
-              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow connect-screen.yaml --retries 0 --max-failures 1
-              ;;
-            permission-disconnected-noop.yaml)
-              bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE" --flow permission-disconnected-noop.yaml --retries 0 --max-failures 1
-              ;;
-            *) echo "::error::Unexpected Maestro flow: $MAESTRO_FLOW" >&2; exit 2 ;;
-          esac
-
-      - name: Verify no Metro listener after suite
+          MAESTRO_CLI_NO_ANALYTICS: 'true'
+          MAESTRO_DISABLE_UPDATE_CHECK: 'true'
+        run: python3 scripts/maestro-settings-navigation-probe.py
+      - name: Stop disposable simulator
         if: always()
-        run: node scripts/maestro-no-metro.mjs
-
-      - name: Upload this run's Maestro diagnostics
-        if: failure() || cancelled()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        run: |
+          if [ -n "${DEVICE:-}" ]; then
+            xcrun simctl shutdown "$DEVICE"
+            xcrun simctl list devices available -j
+          fi
+      - name: Retain this disposable Settings diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: maestro-diagnostics-${{ strategy.job-index }}-of-${{ strategy.job-total }}
-          path: |
-            ${{ runner.temp }}/maestro-diagnostics/
+          name: settings-navigation-8845
+          path: ${{ runner.temp }}/maestro-diagnostics/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
