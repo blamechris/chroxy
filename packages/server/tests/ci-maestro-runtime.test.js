@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
-import yaml from 'js-yaml'
 
 const root = resolve(import.meta.dirname, '../../..')
 const script = join(root, 'scripts/maestro-resolve-runtime.mjs')
