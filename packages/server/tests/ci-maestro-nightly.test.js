@@ -31,20 +31,20 @@ const expectedInventory = [
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-maestro-preflight-'))
-  const developerDir = join(dir, 'Xcode_16.4.app/Contents/Developer')
+  const developerDir = join(dir, 'Xcode_26.2.app/Contents/Developer')
   const bin = join(dir, 'bin')
   mkdirSync(join(developerDir, 'Applications/Simulator.app'), { recursive: true })
   mkdirSync(bin)
   const command = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 })
   // The pause makes an early-closing `head -1` deterministic: xcodebuild writes
   // more output only after head has exited. The real hosted run died this way.
-  command('xcodebuild', 'set -e; printf "Xcode %s\\n" "${XCODE_VERSION:-16.4}"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
+  command('xcodebuild', 'set -e; printf "Xcode %s\\n" "${XCODE_VERSION:-26.2}"; sleep 0.05; for i in $(seq 1 128); do printf "Build detail %s\\n" "$i"; done')
   command('osascript', 'echo "${SIMULATOR_ID:-com.apple.iphonesimulator}"')
   command('xcrun', 'if [ "$*" = "simctl list devices available -j" ]; then cat "$FAKE_DEVICES"; else echo "$*" >> "$FAKE_TRACE"; if [ "$1" = simctl ] && [ "$2" = shutdown ]; then sleep "${FAKE_SHUTDOWN_DELAY:-0}"; exit "${FAKE_SHUTDOWN_EXIT:-0}"; fi; if [ "$1" = simctl ] && [ "$2" = bootstatus ]; then sleep "${FAKE_BOOTSTATUS_DELAY:-0}"; exit "${FAKE_BOOTSTATUS_EXIT:-0}"; fi; fi')
   command('pkill', 'exit 0') // Keep the reset fixture from touching host Maestro processes.
   const devicesFile = join(dir, 'devices.json')
   writeFileSync(devicesFile, JSON.stringify({
-    devices: { 'com.apple.CoreSimulator.SimRuntime.iOS-18-5': [
+    devices: { 'com.apple.CoreSimulator.SimRuntime.iOS-26-2': [
       { name: 'iPhone 16 Pro', isAvailable: true, udid: device }
     ] }
   }))
@@ -256,7 +256,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
     assert.equal(workflow.jobs.maestro.strategy['fail-fast'], false)
     assert.equal(workflow.jobs.maestro.strategy.matrix.shard,
       "${{ fromJSON((inputs.flow || 'all') == 'all' && '[0,1]' || '[0]') }}")
-    assert.equal(workflow.env.DEVELOPER_DIR, '/Applications/Xcode_16.4.app/Contents/Developer')
+    assert.equal(workflow.env.DEVELOPER_DIR, '/Applications/Xcode_26.2.app/Contents/Developer')
     const steps = workflow.jobs.maestro.steps
     const index = name => steps.findIndex(step => step.name === name)
     const preflightStep = steps[index('Preflight Xcode and boot simulator')]
@@ -639,14 +639,14 @@ describe('Maestro nightly hosted runner (#7113)', () => {
         env: f.env, encoding: 'utf8', timeout: 5000
       })
       assert.notEqual(oldPipeline.status, 0, 'fixture must reproduce the early-close failure')
-      assert.equal(oldPipeline.stdout, 'Xcode 16.4\n')
+      assert.equal(oldPipeline.stdout, 'Xcode 26.2\n')
       const repaired = f.run()
       assert.equal(repaired.status, 0, repaired.stderr)
-      assert.ok(repaired.stdout.includes('Using Xcode 16.4 and iPhone 16 Pro'))
+      assert.ok(repaired.stdout.includes('Using Xcode 26.2 and iPhone 16 Pro'))
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
-  shellIt('exports the exact iOS 18.5 simulator and boots it before a build', () => {
+  shellIt('exports the exact iOS 26.2 simulator and boots it before a build', () => {
     const f = fixture()
     try {
       const result = f.run()
@@ -659,11 +659,14 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   shellIt('rejects a different Xcode version before selecting a simulator', () => {
     const f = fixture()
     try {
-      const result = f.run({ XCODE_VERSION: '27.0' })
-      assert.equal(result.status, 1, result.stderr)
-      assert.ok(result.stderr.includes('Expected Xcode 16.4, found Xcode 27.0'))
-      assert.equal(existsSync(f.envFile), false, 'must not export a simulator on mismatch')
-      assert.equal(existsSync(f.traceFile), false, 'must not call simctl on mismatch')
+      for (const version of ['16.4', '27.0']) {
+        const result = f.run({ XCODE_VERSION: version })
+        assert.equal(result.signal, null, 'version mismatch must exit promptly')
+        assert.equal(result.status, 1, result.stderr)
+        assert.ok(result.stderr.includes(`Expected Xcode 26.2, found Xcode ${version}`))
+        assert.equal(existsSync(f.envFile), false, 'must not export a simulator on mismatch')
+        assert.equal(existsSync(f.traceFile), false, 'must not call simctl on mismatch')
+      }
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
@@ -684,12 +687,21 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   shellIt('fails when the selected iOS runtime has no available iPhone 16 Pro', () => {
     const f = fixture()
     try {
-      writeFileSync(f.devicesFile, JSON.stringify({ devices: {
-        'com.apple.CoreSimulator.SimRuntime.iOS-18-5': [{ name: 'iPhone 16 Pro', isAvailable: false, udid: device }]
-      } }))
-      const result = f.run()
-      assert.notEqual(result.status, 0)
-      assert.ok(result.stderr.includes('No available iPhone 16 Pro with iOS 18.5'))
+      for (const [runtime, name, available] of [
+        ['26-2', 'iPhone 16 Pro', false],
+        ['26-2', 'iPhone 15', true],
+        ['18-5', 'iPhone 16 Pro', true]
+      ]) {
+        writeFileSync(f.devicesFile, JSON.stringify({ devices: {
+          [`com.apple.CoreSimulator.SimRuntime.iOS-${runtime}`]: [{ name, isAvailable: available, udid: device }]
+        } }))
+        const result = f.run()
+        assert.equal(result.signal, null, 'device mismatch must exit promptly')
+        assert.equal(result.status, 1, result.stderr)
+        assert.ok(result.stderr.includes('No available iPhone 16 Pro with iOS 26.2'))
+        assert.equal(existsSync(f.envFile), false, 'must not export an incompatible device')
+        assert.equal(existsSync(f.traceFile), false, 'must not boot an incompatible device')
+      }
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 })

@@ -27,6 +27,31 @@ for the app, rather than the newest individual package releases.
 upgrade and still has an open advisory. This upgrade does not clear that alert
 or the separate Agent SDK dependency work.
 
+## Remaining Expo CLI Zod advisory
+
+The SDK 55 CLI introduces a nested `zod@3.25.76` through
+`@expo/cli@55.0.37` → `zod@^3.25.76`. It is covered by
+[GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5),
+whose affected range is below `4.6.6`. The latest published SDK 56, 57 and 58
+CLIs also require this Zod 3 range; upgrading further does not supply a
+supported fix. The root Zod `4.6.7` used by Chroxy's server and protocol remains
+patched and unchanged.
+
+In the installed SDK 55 CLI, Zod imports are limited to
+`DevToolsPlugin.schema.js` and `createMCPDevToolsExtensionSchema.js`. The array
+schemas parse autolinked local development-tool plugin descriptors and results
+from locally spawned plugin entry points. MCP command parameters use primitive
+string, number and boolean schemas. Querying Expo's actual
+`DevToolsPluginManager` for this app returns no plugins. These findings bound
+the current inputs to the development-tool integration; they do not remove the
+published advisory or prove safety for subsequently installed plugins.
+
+Keep this advisory open under #7178. No dependency override, advisory
+suppression or claim of a fully clean audit is part of this upgrade. Treating
+this remaining alert as nonblocking requires independent review of that
+containment. The upgrade removes the two image-size and four PostCSS advisory
+records but introduces this one Zod record in the dependency audit.
+
 ## Native compatibility
 
 SDK 55 requires the New Architecture and Xcode 26 or later. The app already
@@ -34,7 +59,7 @@ used the default New Architecture setting in SDK 54. Hosted Maestro jobs pin
 Xcode 26.2 and an iPhone 16 Pro running iOS 26.2. Use Node 22.13 or later within
 the Node 22 line for Expo commands.
 
-The app retains `expo-speech-recognition@3.1.3` and
+The app retains `expo-speech-recognition@3.1.2` and
 `expo-live-activity@0.4.2`. Both declare unrestricted Expo/React Native peers,
 but their published development manifests target SDK 54; peer declarations
 alone do not prove native compatibility. Speech recognition's next major is
