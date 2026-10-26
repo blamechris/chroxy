@@ -16,6 +16,14 @@ class FloorProblems(unittest.TestCase):
             'MIN_PER_MODULE names test_c, which is not a test_*.py file here',
             'test_a ran 1 tests (floor 2); its tests were removed or are not discovered'])
 
+    def test_a_module_that_started_no_test_is_under_its_floor(self):
+        # A file whose tests all skipped at set-up started none, so it is absent from the counts: that is 0, not a pass.
+        self.assertEqual(run.floor_problems({}, {'test_a'}, {'test_a': 2}),
+                         ['test_a ran 0 tests (floor 2); its tests were removed or are not discovered'])
+
+    def test_a_module_at_exactly_its_floor_passes(self):
+        self.assertEqual(run.floor_problems({'test_a': 2}, {'test_a'}, {'test_a': 2}), [])
+
 
 class CountingResultCounts(unittest.TestCase):
     def test_a_module_counts_the_tests_it_started_and_a_skipped_class_none(self):

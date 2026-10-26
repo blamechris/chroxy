@@ -31,7 +31,7 @@ MIN_PER_MODULE = {
     'test_measures': 9,
     'test_native': 18,
     'test_queue': 43,
-    'test_run': 1,
+    'test_run': 3,
     'test_status': 2,
     'test_verdicts': 16,
     'test_workflow': 6,

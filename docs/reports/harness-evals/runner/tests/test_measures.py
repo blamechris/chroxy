@@ -92,7 +92,7 @@ def run_evidence(report_minutes, cycles, verdicts=('yes', 'yes'), observable=Non
           'queue_ci_attempts': 4, 'queue_all_pr_workflow_runs': 9, 'report_last_commit': commit, 'prs': prs,
           'base_push_ci': [{'id': i, 'conclusion': 'success'} for i in range(pushes)]}
     if others:
-        ev['red_ci_unattributed'] = [{'id': 500 + i, 'conclusion': 'success'} for i in range(others)]
+        ev['red_ci_unattributed'] = [{'id': 500 + i, 'conclusion': ('success', 'failure')[i % 2]} for i in range(others)]
     if observable is not None:
         ev['ci_push_observable'] = observable
         ev['red_ci_on_base'] = red

@@ -57,8 +57,8 @@ METHODS = (
     "first command to the last report-PR commit's committer date. diff_added/diff_deleted are the merge "
     "commit's stats against its first parent. Red CI on the base is the failed ci.yml push runs on the base "
     'in the window, and is null unless ci.yml at T0 runs on push to the base; it is also null when a push run '
-    "did not finish, or ended cancelled, skipped, neutral or action_required (a merge's or not) with no later "
-    'finished push run. '
+    "did not finish, or ended with any other conclusion than success or red (cancelled, skipped, neutral, "
+    "action_required, stale; a merge's or not) with no later finished push run. "
     'timeline_events lists cross-reference, mention, reference and connect events on every queue issue inside '
     'the window. notes lists the mapping and queue-text notes `collect` printed.')
 
