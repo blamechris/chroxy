@@ -391,4 +391,14 @@ describe('a late evaluator result after the draft is replaced from outside (#883
     await act(async () => { call.resolve(REWRITE) })
     expect(screen.queryByTestId('evaluator-panel')).toBeNull()
   })
+
+  it('typing while pending is the composer\'s own write: the result still shows', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    typeWithCaret('A draft, edited', 15)
+
+    await act(async () => { call.resolve(REWRITE) })
+    expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'rewrite')
+  })
 })
