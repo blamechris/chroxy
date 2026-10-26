@@ -395,6 +395,84 @@ describe('InputBar', () => {
     })
   })
 
+  // #8832 — an evaluation still pending when its draft is discarded resolves
+  // afterwards. Its result belongs to a draft that is gone, so it must not
+  // bring the panel back (and with it an Apply rewrite into the new draft).
+  describe('a late evaluator result after its draft is discarded (#8832)', () => {
+    function deferred<T>() {
+      let resolve!: (v: T) => void
+      let reject!: (e: unknown) => void
+      const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+      return { promise, resolve, reject }
+    }
+    const REWRITE: EvaluatorResultPayload = { verdict: 'rewrite', rewritten: 'old draft, rewritten', reasoning: 'Clearer' }
+
+    it('Cmd+L while pending: the result is dropped', async () => {
+      const call = deferred<EvaluatorResultPayload>()
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={() => call.promise} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'old draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('aria-busy', 'true')
+
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(screen.queryByTestId('evaluator-panel')).not.toBeInTheDocument()
+
+      await act(async () => { call.resolve(REWRITE) })
+      expect(screen.queryByTestId('evaluator-panel')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('evaluator-apply')).not.toBeInTheDocument()
+    })
+
+    it('a send while pending: the result is dropped', async () => {
+      const call = deferred<EvaluatorResultPayload>()
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} onEvaluate={() => call.promise} sendOnEnter />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'old draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('old draft')
+      expect(textarea.value).toBe('')
+
+      await act(async () => { call.resolve(REWRITE) })
+      expect(screen.queryByTestId('evaluator-panel')).not.toBeInTheDocument()
+    })
+
+    it('a failure that arrives after Cmd+L is dropped too', async () => {
+      const call = deferred<EvaluatorResultPayload>()
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={() => call.promise} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'old draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+
+      await act(async () => { call.reject(new Error('network down')) })
+      expect(screen.queryByTestId('evaluator-panel')).not.toBeInTheDocument()
+    })
+
+    it('the stale result does not land on a newer evaluation, which still shows its own', async () => {
+      const first = deferred<EvaluatorResultPayload>()
+      const second = deferred<EvaluatorResultPayload>()
+      const onEvaluate = vi.fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise)
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'old draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      fireEvent.change(textarea, { target: { value: 'new draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      expect(onEvaluate).toHaveBeenLastCalledWith('new draft')
+
+      await act(async () => { first.resolve(REWRITE) })
+      expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('aria-busy', 'true')
+
+      await act(async () => { second.resolve({ verdict: 'forward', reasoning: 'Looks good' }) })
+      expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'forward')
+    })
+  })
+
   it('disables input when disabled prop is true', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} disabled />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement

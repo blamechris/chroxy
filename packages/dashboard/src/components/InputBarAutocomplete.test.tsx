@@ -1,14 +1,15 @@
 /**
- * InputBar autocomplete regressions (#8432, #8433, #8831).
+ * InputBar autocomplete regressions (#8432, #8433, #8831, #8832).
  *
  * The real InputBar is driven by an App-like parent: per-session drafts, and an
  * `onValueChange` whose identity changes when the active session changes (App's
  * `handleDraftChange` closes over `activeSessionId`).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, waitFor, act } from '@testing-library/react'
 import { useCallback, useRef, useState, type ComponentProps } from 'react'
 import { InputBar } from './InputBar'
+import type { EvaluatorResultPayload } from '../store/types'
 
 afterEach(cleanup)
 
@@ -351,5 +352,53 @@ describe('a value replaced from outside the composer resets its picker and histo
     box().setSelectionRange(5, 5)
     fireEvent.keyDown(box(), { key: 'ArrowDown' })
     expect(box().value).toBe('newest')
+  })
+})
+
+// #8832 — an evaluation still pending when the parent replaces the draft
+// resolves afterwards, over the other session's draft. Its result must be
+// dropped, or its Apply rewrite would replace that draft.
+describe('a late evaluator result after the draft is replaced from outside (#8832)', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>(res => { resolve = res })
+    return { promise, resolve }
+  }
+  const REWRITE: EvaluatorResultPayload = { verdict: 'rewrite', rewritten: 'A draft, rewritten', reasoning: 'Clearer' }
+
+  it('a switch while pending: the result is dropped and B\'s draft is untouched', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft', B: 'B draft' }} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('aria-busy', 'true')
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().value).toBe('B draft')
+
+    await act(async () => { call.resolve(REWRITE) })
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+    expect(screen.queryByTestId('evaluator-apply')).toBeNull()
+    expect(draft('B')).toBe('B draft')
+  })
+
+  it('the parent emptying the draft while pending: the result is dropped', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    fireEvent.click(screen.getByTestId('empty-active-draft'))
+    expect(box().value).toBe('')
+
+    await act(async () => { call.resolve(REWRITE) })
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+  })
+
+  it('typing while pending is the composer\'s own write: the result still shows', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    typeWithCaret('A draft, edited', 15)
+
+    await act(async () => { call.resolve(REWRITE) })
+    expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'rewrite')
   })
 })

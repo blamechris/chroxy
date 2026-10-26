@@ -281,6 +281,12 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // #3068 — manual prompt evaluator state machine. Lives in InputBar because
   // applying a rewrite has to swap the textarea value and re-focus it.
   const [evaluatorState, setEvaluatorState] = useState<EvaluatorState>({ kind: 'idle' })
+  // #8832 — the draft's generation, bumped by resetDraftState when the draft is
+  // discarded or replaced. handleEvaluate records it before the await, so a
+  // result that resolves under a later generation is dropped instead of
+  // reopening the panel. Evaluations cannot overlap otherwise: the button is
+  // disabled while one is pending.
+  const draftGenRef = useRef(0)
 
   // #3698 — terminal-style Up/Down history cycling. `historyIndex === null`
   // means we're not currently cycling (so the next Up may stash the in-
@@ -312,11 +318,14 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (!onEvaluate) return
     const draft = value.trim()
     if (!draft) return
+    const gen = draftGenRef.current
     setEvaluatorState({ kind: 'pending' })
     try {
       const result = await onEvaluate(draft)
+      if (gen !== draftGenRef.current) return
       setEvaluatorState({ kind: 'result', result })
     } catch (err) {
+      if (gen !== draftGenRef.current) return
       setEvaluatorState({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
     }
   }, [onEvaluate, value])
@@ -506,8 +515,10 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     setFileSelectedIndex(0)
     closePicker()
     // #3068: drop any visible evaluator panel — its draft has been discarded so
-    // the result no longer applies to the current input value.
+    // the result no longer applies to the current input value. The bump also
+    // drops a result still in flight, so it cannot reopen the panel (#8832).
     setEvaluatorState({ kind: 'idle' })
+    draftGenRef.current++
     // #3698: discarding the draft exits cycling. On a send the
     // userMessageHistory effect also resets it once the parent rebuilds the
     // array; this is the immediate reset, and the only one on Cmd+L.
@@ -535,7 +546,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // Adopting the value as the baseline means a later outside write of an
   // earlier own value still counts as outside. Known limit: a switch between
   // two sessions with identical drafts changes no `value`, so the state is
-  // kept. An evaluation still pending here resolves afterwards (#8832).
+  // kept. The reset also drops an evaluation still pending here (#8832).
   useLayoutEffect(() => {
     if (value === ownWriteRef.current) return
     ownWriteRef.current = value
