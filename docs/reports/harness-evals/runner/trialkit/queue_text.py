@@ -409,13 +409,12 @@ def finish_checks(trial, gh, accepted, starts, ignored=None):
     has no slots."""
     if not trial.slots:
         return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}, None
-    data, taken, check = _baseline(trial, starts, after_run=True)
+    data, taken, placed = _baseline(trial, starts, after_run=True)
     if data is None:
-        return [checks.unverified(check.name, check.detail)], {slot.slot: _unread(slot, check.detail) for slot in trial.slots}, None
-    placement = check.detail
+        return [checks.unverified(placed.name, placed.detail)], {slot.slot: _unread(slot, placed.detail) for slot in trial.slots}, None
     accepted = accepted if isinstance(accepted, dict) else {}
     results, slots = [], {}
     for slot in trial.slots:
         check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken, ignored)
         results.append(check)
-    return results, slots, placement
+    return results, slots, placed.detail

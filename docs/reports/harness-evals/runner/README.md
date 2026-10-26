@@ -165,7 +165,7 @@ gate run off the Mac, a mistyped `paths.state_dir`) shows in the row. `finish` a
 only records: it reads no issue and leaves every slot `unverified` in both fields, the detail saying
 why, and the repair is the same, then `finish` again. When `finish` can place the snapshot it records the
 sentence that row carries in `finish.queue_text.placement`, so a finish over an empty or wrong state folder
-shows in the record that `collect` and a grader read, not only in the gate's output (#8821).
+shows in the run's state, which a grader reads (`collect` does not print it), not only in the gate's output (#8821).
 
 A gate only sees the text as of its own time, so an edit made after the last gate was never caught.
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
