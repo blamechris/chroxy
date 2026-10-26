@@ -106,7 +106,9 @@ export interface InputBarProps {
   onFileAttach?: (path: string) => void
   /** Controlled value for per-session draft persistence */
   controlledValue?: string
-  /** Called when text changes (for per-session draft persistence) */
+  /** Called when text changes (for per-session draft persistence). The parent
+   *  must hand the text back as given: a `controlledValue` that differs from
+   *  the composer's last write counts as replaced from outside (#8831). */
   onValueChange?: (value: string) => void
   /** When true, bare Enter sends; when false (default), Cmd/Ctrl+Enter sends. */
   sendOnEnter?: boolean
@@ -221,7 +223,16 @@ function findAtTrigger(text: string, caret: number): number {
 export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendStatus, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
-  const setValue = onValueChange || setInternalValue
+  const writeValue = onValueChange || setInternalValue
+  // #8831 — the last value the composer wrote itself. A `value` that differs
+  // from it came from outside (a controlled parent replacing the draft) and
+  // resets the draft state below. Initialised to the first value so mount is
+  // not an outside write.
+  const ownWriteRef = useRef(value)
+  const setValue = useCallback((next: string) => {
+    ownWriteRef.current = next
+    writeValue(next)
+  }, [writeValue])
   const dictationStartRef = useRef(0)
   // #5610 — text that sat *after* the dictation anchor when capture began.
   // The transcript is spliced between the prefix and this suffix so caret-
@@ -415,7 +426,9 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // "/": a value replaced from outside without an edit (a controlled draft that
   // changes on a session switch) must not leave it acting on plain text.
   // Shared by the filter and the visibility gate below so the two cannot drift
-  // apart (#8799). #8831 tracks the picker state that path still leaves behind.
+  // apart (#8799). #8831 now resets the picker state on such a change (the
+  // outside-write layout effect below); the gate stays as the guard for the
+  // render before that reset.
   const slashActive = pickerOpen && value.startsWith('/')
 
   // Derive slash filter from current value (text after "/")
@@ -483,12 +496,12 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   }, [])
 
   // #8799 — the composer-local state that belongs to the draft being
-  // discarded: both pickers, history cycling, the evaluator panel and the
-  // auto-resized height. send() and clearComposer() (Cmd+L) both discard the
-  // draft, so both reset through here; a value emptied without this leaves a
+  // discarded: both pickers, history cycling and the evaluator panel — the
+  // state of the draft apart from its text, shared with the outside-write
+  // reset below. send() and clearComposer() (Cmd+L) both discard the draft, so
+  // both reset through resetComposer; a value emptied without this leaves a
   // picker or a stashed history draft acting on text that is gone.
-  const resetComposer = useCallback(() => {
-    setValue('')
+  const resetDraftState = useCallback(() => {
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
     closePicker()
@@ -500,13 +513,34 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     // array; this is the immediate reset, and the only one on Cmd+L.
     setHistoryIndex(null)
     setDraftBeforeCycle('')
+  }, [closePicker])
+
+  const resetComposer = useCallback(() => {
+    setValue('')
+    resetDraftState()
     // #3853 review: reset the explicit height set by handleChange's auto-
     // resize logic. setValue('') alone doesn't re-run the resize path, so a
-    // cleared multi-line draft would leave the textarea visually tall.
+    // cleared multi-line draft would leave the textarea visually tall. Not part
+    // of resetDraftState: on an outside write the new value may be multi-line.
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [setValue, closePicker])
+  }, [setValue, resetDraftState])
+
+  // #8831 — a value the composer did not write replaced the draft (session
+  // switch, CI prefill, queued-message reopen, removed paste marker), so the
+  // old draft's pickers, history cycling and evaluator panel no longer apply.
+  // A layout effect, so the reset commits before the browser paints the new
+  // draft (no test observes the paint: jsdom passes with useEffect too).
+  // Adopting the value as the baseline means a later outside write of an
+  // earlier own value still counts as outside. Known limit: a switch between
+  // two sessions with identical drafts changes no `value`, so the state is
+  // kept. An evaluation still pending here resolves afterwards (#8832).
+  useLayoutEffect(() => {
+    if (value === ownWriteRef.current) return
+    ownWriteRef.current = value
+    resetDraftState()
+  }, [value, resetDraftState])
 
   const send = useCallback(() => {
     const trimmed = value.trim()

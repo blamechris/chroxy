@@ -1,13 +1,13 @@
 /**
- * InputBar autocomplete regressions (#8432, #8433).
+ * InputBar autocomplete regressions (#8432, #8433, #8831).
  *
  * The real InputBar is driven by an App-like parent: per-session drafts, and an
  * `onValueChange` whose identity changes when the active session changes (App's
  * `handleDraftChange` closes over `activeSessionId`).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { useCallback, useRef, useState } from 'react'
+import { render, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/react'
+import { useCallback, useRef, useState, type ComponentProps } from 'react'
 import { InputBar } from './InputBar'
 
 afterEach(cleanup)
@@ -22,7 +22,12 @@ const FILES = [
   { path: 'src/index.ts', type: 'file' as const, size: 1024 },
 ]
 
-function AppLikeParent({ initial, onSend = vi.fn() }: { initial: Record<string, string>; onSend?: (t: string) => void }) {
+type InputBarProps = ComponentProps<typeof InputBar>
+
+function AppLikeParent({ initial, onSend = vi.fn(), onSlashTrigger, onFileTrigger, onFileAttach, onEvaluate, userMessageHistory }: {
+  initial: Record<string, string>
+  onSend?: (t: string) => void
+} & Pick<InputBarProps, 'onSlashTrigger' | 'onFileTrigger' | 'onFileAttach' | 'onEvaluate' | 'userMessageHistory'>) {
   const [activeSessionId, setActiveSessionId] = useState('A')
   const draftsRef = useRef<Map<string, string>>(new Map(Object.entries(initial)))
   const [, bump] = useState(0)
@@ -35,6 +40,12 @@ function AppLikeParent({ initial, onSend = vi.fn() }: { initial: Record<string, 
     <div>
       <button data-testid="switch-A" onClick={() => setActiveSessionId('A')} />
       <button data-testid="switch-B" onClick={() => setActiveSessionId('B')} />
+      {/* The parent writing the active draft itself, as App does for a CI
+          prefill, a queued-message reopen or a removed paste marker. */}
+      <button data-testid="empty-active-draft" onClick={() => {
+        draftsRef.current.set(activeSessionId, '')
+        bump(n => n + 1)
+      }} />
       <pre data-testid="draft-A">{draftsRef.current.get('A') ?? ''}</pre>
       <pre data-testid="draft-B">{draftsRef.current.get('B') ?? ''}</pre>
       <InputBar
@@ -42,7 +53,12 @@ function AppLikeParent({ initial, onSend = vi.fn() }: { initial: Record<string, 
         onInterrupt={vi.fn()}
         sendOnEnter
         slashCommands={COMMANDS}
+        onSlashTrigger={onSlashTrigger}
         filePickerFiles={FILES}
+        onFileTrigger={onFileTrigger}
+        onFileAttach={onFileAttach}
+        onEvaluate={onEvaluate}
+        userMessageHistory={userMessageHistory}
         controlledValue={draftsRef.current.get(activeSessionId) ?? ''}
         onValueChange={handleDraftChange}
       />
@@ -184,5 +200,156 @@ describe('@ file picker follows the caret (#8433)', () => {
     expect(screen.getByTestId('file-picker')).toBeTruthy()
     typeWithCaret('@RE ', 4)
     expect(screen.queryByTestId('file-picker')).toBeNull()
+  })
+})
+
+describe('a value replaced from outside the composer resets its picker and history state (#8831)', () => {
+  const slashRows = () =>
+    within(screen.getByTestId('slash-picker')).getAllByRole('option').map(o => o.getAttribute('aria-selected'))
+  const fileRows = () =>
+    within(screen.getByTestId('file-picker')).getAllByRole('option').map(o => o.getAttribute('aria-selected'))
+
+  it('a switch to an empty draft: / refetches the commands and highlights row 1', () => {
+    const onSlashTrigger = vi.fn()
+    render(<AppLikeParent initial={{}} onSlashTrigger={onSlashTrigger} />)
+    typeWithCaret('/', 1)
+    expect(onSlashTrigger).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(slashRows()).toEqual(['false', 'true'])
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().value).toBe('')
+    expect(screen.queryByTestId('slash-picker')).toBeNull()
+
+    typeWithCaret('/', 1)
+    expect(onSlashTrigger).toHaveBeenCalledTimes(2)
+    expect(slashRows()).toEqual(['true', 'false'])
+    fireEvent.keyDown(box(), { key: 'Enter' })
+    expect(draft('B')).toBe('/commit ')
+  })
+
+  it('a switch to an empty draft closes the @ picker; @ refetches the files and highlights row 1', () => {
+    const onFileTrigger = vi.fn()
+    render(<AppLikeParent initial={{}} onFileTrigger={onFileTrigger} />)
+    typeWithCaret('@', 1)
+    expect(onFileTrigger).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(fileRows()).toEqual(['false', 'true', 'false'])
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().value).toBe('')
+    expect(screen.queryByTestId('file-picker')).toBeNull()
+
+    typeWithCaret('@', 1)
+    expect(onFileTrigger).toHaveBeenCalledTimes(2)
+    expect(fileRows()).toEqual(['true', 'false', 'false'])
+    fireEvent.keyDown(box(), { key: 'Enter' })
+    expect(draft('B')).toBe('README.md ')
+  })
+
+  it('Enter on the switched-to empty draft attaches no file from the previous picker', () => {
+    const onFileAttach = vi.fn()
+    render(<AppLikeParent initial={{}} onFileAttach={onFileAttach} />)
+    typeWithCaret('@', 1)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    fireEvent.keyDown(box(), { key: 'Enter' })
+    expect(onFileAttach).not.toHaveBeenCalled()
+    expect(draft('B')).toBe('')
+  })
+
+  it('a switch leaves history cycling, so Down does not write the stashed draft into the other session', () => {
+    // One history array across the switch, so the userMessageHistory identity
+    // reset never fires and only the value-change reset is under test.
+    const history = ['older', 'newest']
+    render(<AppLikeParent initial={{ A: 'mine' }} userMessageHistory={history} />)
+    box().setSelectionRange(4, 4)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('newest')
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(box().value).toBe('')
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().value).toBe('')
+    expect(draft('B')).toBe('')
+  })
+
+  it('a switch ends history cycling, so Up starts again from the newest entry', () => {
+    const history = ['older', 'newest']
+    render(<AppLikeParent initial={{ A: 'mine' }} userMessageHistory={history} />)
+    box().setSelectionRange(4, 4)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('newest')
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('newest')
+  })
+
+  it('a switch drops the evaluator panel, whose result belongs to the other draft', async () => {
+    const onEvaluate = vi.fn().mockResolvedValue({ verdict: 'forward', reasoning: 'Looks good' })
+    render(<AppLikeParent initial={{ A: 'draft text' }} onEvaluate={onEvaluate} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await waitFor(() => {
+      expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'forward')
+    })
+
+    fireEvent.click(screen.getByTestId('switch-B'))
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+  })
+
+  it('the parent emptying the draft without a switch resets the palette the same way', () => {
+    const onSlashTrigger = vi.fn()
+    render(<AppLikeParent initial={{}} onSlashTrigger={onSlashTrigger} />)
+    typeWithCaret('/', 1)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+
+    fireEvent.click(screen.getByTestId('empty-active-draft'))
+    expect(box().value).toBe('')
+
+    typeWithCaret('/', 1)
+    expect(onSlashTrigger).toHaveBeenCalledTimes(2)
+    expect(slashRows()).toEqual(['true', 'false'])
+  })
+
+  it('an outside value equal to an earlier own write still counts as outside', async () => {
+    const onEvaluate = vi.fn().mockResolvedValue({ verdict: 'forward', reasoning: 'Looks good' })
+    render(<AppLikeParent initial={{ B: 'other' }} onEvaluate={onEvaluate} />)
+    typeWithCaret('mine', 4)
+    fireEvent.click(screen.getByTestId('switch-B'))
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await waitFor(() => {
+      expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'forward')
+    })
+
+    // Back to A: 'mine' is the composer's last own write, but this time the
+    // parent wrote it, so B's evaluation must not stay up over it.
+    fireEvent.click(screen.getByTestId('switch-A'))
+    expect(box().value).toBe('mine')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+  })
+
+  it('the composer\'s own writes keep the state: typing keeps the highlight', () => {
+    const onSlashTrigger = vi.fn()
+    render(<AppLikeParent initial={{}} onSlashTrigger={onSlashTrigger} />)
+    typeWithCaret('/', 1)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    // "i" matches both commands, so both rows stay listed.
+    typeWithCaret('/i', 2)
+    expect(slashRows()).toEqual(['false', 'true'])
+    expect(onSlashTrigger).toHaveBeenCalledTimes(1)
+  })
+
+  it('the composer\'s own writes keep the state: a history recall walks deeper', () => {
+    render(<AppLikeParent initial={{}} userMessageHistory={['older', 'newest']} />)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('newest')
+    box().setSelectionRange(0, 0)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('older')
+    box().setSelectionRange(5, 5)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().value).toBe('newest')
   })
 })
