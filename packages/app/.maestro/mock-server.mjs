@@ -946,7 +946,7 @@ wss.on('connection', (ws) => {
         // Mirrors the production wire shape — see
         // packages/server/src/event-normalizer.js `plan_ready` builder which
         // ships `{ type: 'plan_ready', allowedPrompts }` after the CLI
-        // session detects ExitPlanMode (cli-session.js#L883). The mobile
+        // session detects ExitPlanMode. The mobile
         // handler is store-core/handlers/index.ts handlePlanReady (mapped
         // in packages/app/src/store/message-handler.ts `case 'plan_ready'`)
         // which flips `isPlanPending` true + stores prompts. ChatView then
@@ -956,10 +956,10 @@ wss.on('connection', (ws) => {
         // sends the canonical PLAN_APPROVAL_MESSAGE ('Go ahead with the
         // plan') back through `sendInput`, which loops into this `input`
         // handler. The default branch echoes it back as a normal assistant
-        // response, satisfying the post-approval assertion. We do NOT emit
-        // anything else here for the plan_ready trigger — `agent_busy` is
-        // not set because plan-ready arrives at end-of-turn (the prior
-        // turn that produced the plan already cleared busy via `result`).
+        // response, satisfying the post-approval assertion. The turn that
+        // produces the plan completes with plan_ready before result, as in
+        // CliSession and SdkSession. event-normalizer follows result with
+        // agent_idle; include both so this input settles before approval.
         if (text.trim() === 'show-plan-approval') {
           secureSend(ws, {
             type: 'plan_ready',
@@ -969,6 +969,8 @@ wss.on('connection', (ws) => {
               { tool: 'Edit', prompt: 'src/index.js' },
             ],
           })
+          secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
           break
         }
 
