@@ -3,8 +3,8 @@
 # The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
 # was deferred from per-PR because it needs a booted iOS simulator + a built dev
 # client + Metro. Run once a night on two isolated hosted macOS 15 simulators
-# with Xcode 16.4, partitioning the canonical inventory across them:
-# Expo SDK 54 needs Simulator.app, which Xcode 27 removed (#7113).
+# with Xcode 26.2, partitioning the canonical inventory across them:
+# Expo SDK 55 requires Xcode 26 or later.
 # `run-all-sequential.sh`
 # runs each flow in its own maestro process and retries a failure once — the
 # resilient runner required over `run-all.yaml` on a single simulator (#6091).
@@ -41,7 +41,7 @@ permissions:
 env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
-  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
 
 jobs:
   maestro:
@@ -61,7 +61,7 @@ jobs:
           node-version: 22
 
       # Check the exact prerequisites Expo and the suite need before an expensive
-      # npm install or native build. Selects an iPhone 16 Pro with iOS 18.5 and
+      # npm install or native build. Selects an iPhone 16 Pro with iOS 26.2 and
       # exports DEVICE for the build and flow steps.
       - name: Preflight Xcode and boot simulator
         run: bash scripts/maestro-hosted-preflight.sh

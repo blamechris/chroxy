@@ -1836,6 +1836,9 @@ jobs:
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs
 
+      - name: Test hosted Maestro preflight
+        run: node --test scripts/__tests__/maestro-hosted-preflight.test.mjs
+
       - name: Test PRIME fixture evidence verifier (offline)
         run: python3 scripts/fixtures/prime-compatibility/test_evaluator.py
 

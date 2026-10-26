@@ -44,8 +44,8 @@ jest.mock('expo-document-picker', () => ({
   getDocumentAsync: jest.fn(() => Promise.resolve({ canceled: true })),
 }));
 
-// Mock expo-file-system (native module not available in Jest)
-jest.mock('expo-file-system', () => ({
+// Mock the supported legacy file API (native module not available in Jest).
+jest.mock('expo-file-system/legacy', () => ({
   readAsStringAsync: jest.fn(() => Promise.resolve('')),
 }));
 
