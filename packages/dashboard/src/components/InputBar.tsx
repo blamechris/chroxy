@@ -411,8 +411,14 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (r) selectResource(r.uri)
   }, [filteredFiles, visibleFileCount, filteredResources, selectFile, selectResource])
 
+  // The palette is only live while it is open AND the value still starts with
+  // "/": a value replaced without an edit (history recall, Cmd+L) must not
+  // leave it acting on plain text. Shared by the filter and the visibility
+  // gate below so the two cannot drift apart (#8799).
+  const slashActive = pickerOpen && value.startsWith('/')
+
   // Derive slash filter from current value (text after "/")
-  const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''
+  const slashFilter = slashActive ? value.slice(1) : ''
 
   // Single source of truth for filtered commands — the picker lists the same
   // matches through the same matcher (#8699)
@@ -425,9 +431,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // to complete, so the palette hides and keeps its hands off the keyboard:
   // Enter must send `/cmd args`, not select the row and replace the arguments.
   // An unrecognised token keeps the palette open on "No commands found".
-  // The leading "/" is checked here too: a value replaced without an edit
-  // (history recall, Cmd+L) must not leave the full list up over plain text.
-  const slashPickerVisible = pickerOpen && value.startsWith('/') &&
+  const slashPickerVisible = slashActive &&
     !(slashMatch.tokenComplete && filteredCommands.length > 0)
 
   const dedupedAttachments = useMemo(() => {
@@ -472,6 +476,34 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     return hasText || hasAtts || hasImgs || hasReferencedPaste
   }, [value, dedupedAttachments, imageAttachments, hasReferencedPaste])
 
+  // #8799 — the composer-local state that belongs to the draft being
+  // discarded: both pickers, history cycling, the evaluator panel and the
+  // auto-resized height. send() and clearComposer() (Cmd+L) both discard the
+  // draft, so both reset through here; a value emptied without this leaves a
+  // picker or a stashed history draft acting on text that is gone.
+  const resetComposer = useCallback(() => {
+    setValue('')
+    setFilePickerOpen(false)
+    setFileSelectedIndex(0)
+    setPickerOpen(false)
+    setSelectedIndex(0)
+    // #3068: drop any visible evaluator panel — its draft has been discarded so
+    // the result no longer applies to the current input value.
+    setEvaluatorState({ kind: 'idle' })
+    // #3698: discarding the draft exits cycling. The userMessageHistory effect
+    // already resets when the parent rebuilds the array, but doing it here too
+    // makes the local state consistent immediately (before the parent re-render
+    // pushes the new history through).
+    setHistoryIndex(null)
+    setDraftBeforeCycle('')
+    // #3853 review: reset the explicit height set by handleChange's auto-
+    // resize logic. setValue('') alone doesn't re-run the resize path, so a
+    // cleared multi-line draft would leave the textarea visually tall.
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [setValue])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
     const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
@@ -483,24 +515,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       accepted = onSend(trimmed)
     }
     if (accepted === false) return
-    setValue('')
-    setFilePickerOpen(false)
-    setFileSelectedIndex(0)
-    setPickerOpen(false)
-    setSelectedIndex(0)
-    // #3068: drop any visible evaluator panel — its draft has been sent so the
-    // result no longer applies to the current input value.
-    setEvaluatorState({ kind: 'idle' })
-    // #3698: sending exits cycling mode. The userMessageHistory effect already
-    // resets when the parent rebuilds the array, but doing it here too makes
-    // the local state consistent immediately (before the parent re-render
-    // pushes the new history through).
-    setHistoryIndex(null)
-    setDraftBeforeCycle('')
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
-  }, [value, onSend, dedupedAttachments, canSubmit, sendInhibited, setValue])
+    resetComposer()
+  }, [value, onSend, dedupedAttachments, canSubmit, sendInhibited, resetComposer])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -527,7 +543,10 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     const hasPastes = (pastedTextBlocks?.length ?? 0) > 0
     if (!hasText && !hasAtts && !hasImgs && !hasPastes) return false
 
-    setValue('')
+    // #8799 — resets the pickers, history cycling and evaluator panel along
+    // with the value, as send() does; also resets the auto-resized height
+    // (#3853 review), which setValue('') alone would leave tall.
+    resetComposer()
     if (attachments && onRemoveAttachment) {
       for (const att of attachments) onRemoveAttachment(att.path)
     }
@@ -539,16 +558,9 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (pastedTextBlocks && onRemovePastedText) {
       for (const blk of pastedTextBlocks) onRemovePastedText(blk.id)
     }
-    // #3853 review: reset the explicit height set by handleChange's auto-
-    // resize logic. setValue('') alone doesn't re-run the resize path, so
-    // a cleared multi-line draft would leave the textarea visually tall.
-    // Mirrors the height reset send() does after a successful send.
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
     textareaRef.current?.focus()
     return true
-  }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, setValue])
+  }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, resetComposer])
 
   // #3698 — recall a history entry by depth (0 = newest, 1 = one back, …).
   // Walks the textarea value through the parent's setValue (so controlled
