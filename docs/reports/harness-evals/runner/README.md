@@ -54,7 +54,7 @@ GitHub error). "Could not check" is never reported as a pass.
 | `prepare RUN [--accept-open N=REASON] [--accept-changed SLOT=REASON]` | owner, Mac | `gate` (with the same acceptances), `clone`, `preflight`, then the launch card with the exact invocation |
 | `start RUN --meter …` | owner, Mac | records the usage readings and the send; refuses below the allowance floor, without a passing gate at the current T0 followed by a passing preflight (and session phase, for Chroxy), and for a run that already finished. The steps' times are ordered as moments, not as strings (a preflight half a second after a whole-second gate is after it), and a time that cannot be read is a refusal, never taken as in order |
 | `verify-start RUN` | owner, Mac | reads the applied model, effort, permission mode and the mission's `TRIAL-PROBE` line back from the native transcript (Claude Code) or rollout (Codex); prints `STOP:` on any mismatch |
-| `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, whether `~/.claude/settings.json` changed during the run (#8704), and whether each queue issue's text changed after this run's gate: it reads the issues again and records, per slot, `unchanged`, `changed` or `unverified` since T0 and since the text this run's gate let through, in `finish.queue_text` (a read it could not make is `unverified`, never `unchanged`; a change prints a `WARNING`, and `finish` still succeeds). Run again, it keeps the record it replaces under `finish.replaces` (see "Queue text at T0" for recovering `unverified` slots) |
+| `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, whether `~/.claude/settings.json` changed during the run (#8704), and whether each queue issue's text changed after this run's gate: it reads the issues again and records, per slot, `unchanged`, `changed` or `unverified` since T0 and since the text this run's gate let through, in `finish.queue_text` (a read it could not make is `unverified`, never `unchanged`; a change prints a `WARNING`, and `finish` still succeeds). When the T0 snapshot is placed it also records what it was placed before (`placement`, the sentence the gate's `PASS queue text at T0` row carries). Run again, it keeps the record it replaces under `finish.replaces` (see "Queue text at T0" for recovering `unverified` slots) |
 | `status RUN` | operator, anywhere with `gh` | read-only live view (October's `check-run.sh` for any trial): base tip, commits since T0, the base's PRs with mission-rule flags, the queue issues that must stay untouched, the main tip, whether the report has landed |
 | `evidence RUN [--state FILE] [--data DIR]` | owner, Mac, after `finish` | copies the run's native transcripts (and, for Chroxy, the daemon log lines of its window) into the vault with a SHA-256 manifest, and writes the derived extract `data/native/<RUN>.json`; refuses, writing nothing, when the vault path is inside the repository, the run's clone or a git work tree, or (with `paths.evidence_vault` set) outside the vault |
 | `queue-candidates [--json] [--limit N]` | supervisor | PLAN.md section 4's mechanical filters over the open backlog: a candidate table plus the rule that dropped each other issue; read-only |
@@ -163,7 +163,9 @@ recorded it says that no run has started and where it looked (`paths.state_dir`,
 `--state` file when that is elsewhere), so a pass over an empty or wrong state folder (another `HOME`, a
 gate run off the Mac, a mistyped `paths.state_dir`) shows in the row. `finish` applies the same rule but
 only records: it reads no issue and leaves every slot `unverified` in both fields, the detail saying
-why, and the repair is the same, then `finish` again.
+why, and the repair is the same, then `finish` again. When `finish` can place the snapshot it records the
+sentence that row carries in `finish.queue_text.placement`, so a finish over an empty or wrong state folder
+shows in the run's state, which a grader reads (`collect` does not print it), not only in the gate's output (#8821).
 
 A gate only sees the text as of its own time, so an edit made after the last gate was never caught.
 `finish` therefore reads each queue issue once more and compares it with the T0 snapshot and with the text
@@ -182,7 +184,8 @@ text is compared with T0 only" when every slot was compared, "the queue text is 
 could be read" when some slots are `unverified`, or "no slot is compared" when every slot is; a `note:` line
 prints the same, each changed slot's `detail` says its acceptances were not used (not that the gate passed the
 T0 text), and `collect` prints the sentence as its first note.
-`finish.queue_text` holds `{"at": …, "acceptances_ignored": … (only when they were not used), "slots": {"Q03":
+`finish.queue_text` holds `{"at": …, "placement": … (only when the snapshot was placed),
+"acceptances_ignored": … (only when they were not used), "slots": {"Q03":
 {"issue", "since_t0", "since_gate", "title_sha256", "body_sha256", "comments_sha256", "comments", "parts",
 "accepted", "detail"}}}`: `since_t0` and `since_gate` are
 `unchanged`, `changed` or `unverified`, `parts` (title, body, comments, as `gate` names them) is present
@@ -194,7 +197,8 @@ cannot be used leave the slot `unverified` in both fields. A baseline cannot be 
 when the snapshot is missing, unreadable, not a snapshot (malformed) or taken at another T0; when it was
 read after a recorded first send, or cannot be placed before one because its `at` or the send cannot be
 read; when a run state in `paths.state_dir` cannot be read; and when `trial.json` sets no `paths.state_dir`.
-A baseline that cannot be used reads nothing: `finish` records, it does not judge the setup.
+A baseline that cannot be used reads nothing and records no `placement`: `finish` records, it does not judge
+the setup.
 A slot `changed` since the gate prints a `FAIL` line and one `WARNING` naming the slots, because the run may
 have read more than one version of their text and a grader must know which; mission rule 4 forbids a run
 from commenting on an issue, so a new comment is a breach of it or somebody else's. `finish` still exits 0,
@@ -430,7 +434,8 @@ is why the list exists. Survivors
 show their labels, creation date, whether the body has an acceptance-criteria section,
 and a type and package guess from labels; `--limit` shortens that list, never the scan.
 `queue_rules` in `trial.json` rejects an unknown key, so a misspelt list cannot silently
-filter nothing, and `blockers` must map each harness (or `all`) to a list of issue numbers.
+filter nothing, and each key of `blockers` must be a harness (or `all`) and each value a list of issue
+numbers; a harness need not appear.
 Loading `trial.json` also refuses a queue whose slot ids do not run Q01, Q02, … in order with
 no gap (printing the ids expected and the ids found), whose slot count differs from `queue.size`,
 or which holds an issue on `queue_rules.exclude_issues`, `queue_rules.reserved` or any
@@ -439,9 +444,11 @@ is required even while the queue is empty (ten for trial 2, PLAN.md section 4), 
 filled only part of the way is refused. Every command loads `trial.json` first, so each one,
 `queue-candidates` and `finish` included, refuses such a file with exit 2; `render`, `cut` and
 `gate` refuse it before anything is rendered, recorded or pushed, and a base cut from such a
-queue could not be rewritten. To replace a queue issue before T0, change that slot's issue and
-title and keep its id. A slot is not removed after T0: the ids must stay contiguous and match
-`queue.size`, and renumbering would break the `Trial-Item: Qnn` that PR bodies and verdicts carry.
+queue could not be rewritten. To replace a queue issue before T0, change that slot's issue, title and
+type and keep its id. A slot is not removed after T0: the ids must stay contiguous and match
+`queue.size`, and renumbering would break the `Trial-Item: Qnn` that PR bodies and verdicts carry. Dropping
+the last slot and lowering `queue.size` loads, but the gate fails it, because `queue-t0.json` still holds
+that slot (`queue-t0.json holds Qnn, which trial.json no longer has`).
 
 ## Owner commands (accounts)
 

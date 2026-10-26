@@ -398,20 +398,23 @@ def _end_check(slot, entry, accepted, gh, taken, ignored):
 
 
 def finish_checks(trial, gh, accepted, starts, ignored=None):
-    """(checks, {slot: record}) for the queue text as `finish` reads it, to be compared with T0 and with what the run's gate
-    let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not judged
-    here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read after
-    a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
+    """(checks, {slot: record}, placement) for the queue text as `finish` reads it, to be compared with T0 and with what the
+    run's gate let through. `accepted` is the run's recorded `gate.accepted_changed`, whatever shape it has. A run is not
+    judged here, so a baseline that cannot be used leaves every slot unverified, without reading any issue: a snapshot read
+    after a first send in `starts` (`launch._starts`'s answer, required; see `started_clause`) is not the T0 text, so it is one.
     `ignored`, when given, is the sentence saying why `accepted` was not passed on, and changes what a changed slot's detail
-    says. A snapshot that is placed adds no row of its own: `finish` records per slot."""
+    says. A snapshot that is placed still prints no row of its own: `finish` records per slot. The sentence the gate's row
+    carries, saying what it was placed before and by which places, is returned as `placement` for `finish` to record
+    (#8821), so a finish that read the wrong state folder shows it; `None` when the baseline could not be used, or the queue
+    has no slots."""
     if not trial.slots:
-        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}
-    data, taken, check = _baseline(trial, starts, after_run=True)
+        return [checks.unverified('queue text at the end', 'the queue has no slots, so there is no text to compare')], {}, None
+    data, taken, placed = _baseline(trial, starts, after_run=True)
     if data is None:
-        return [checks.unverified(check.name, check.detail)], {slot.slot: _unread(slot, check.detail) for slot in trial.slots}
+        return [checks.unverified(placed.name, placed.detail)], {slot.slot: _unread(slot, placed.detail) for slot in trial.slots}, None
     accepted = accepted if isinstance(accepted, dict) else {}
     results, slots = [], {}
     for slot in trial.slots:
         check, slots[slot.slot] = _end_check(slot, data['slots'].get(slot.slot), accepted.get(slot.slot), gh, taken, ignored)
         results.append(check)
-    return results, slots
+    return results, slots, placed.detail
