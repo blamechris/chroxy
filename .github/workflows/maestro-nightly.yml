@@ -80,14 +80,21 @@ jobs:
       - name: Build + install the dev client
         run: bash scripts/maestro-build-install-ios.sh packages/app
 
+      - name: Verify installed iOS runtime
+        id: native-runtime
+        run: node scripts/maestro-resolve-runtime.mjs packages/app
+
       - name: Start Metro (background)
         # Expo binds localhost but advertises its launch asset at 127.0.0.1.
         # Keep the listener, readiness probe and simulator asset on IPv4.
         env:
           NODE_OPTIONS: --dns-result-order=ipv4first
-          DEBUG: expo:start:server:middleware:manifest,expo:start:server:middleware:resolveRuntimeVersion
+          CHROXY_MAESTRO_RUNTIME_CACHE: '1'
+          CHROXY_MAESTRO_RUNTIME_VERSION: ${{ steps.native-runtime.outputs.runtimeVersion }}
         working-directory: packages/app
         run: |
+          : "${CHROXY_MAESTRO_RUNTIME_CACHE:?Verified runtime marker is required}"
+          : "${CHROXY_MAESTRO_RUNTIME_VERSION:?Verified installed runtime is required}"
           npx expo start --localhost > "$RUNNER_TEMP/metro.log" 2>&1 &
           echo "METRO_PID=$!" >> "$GITHUB_ENV"
           # Wait for the bundler to answer before running flows.
@@ -105,19 +112,6 @@ jobs:
       # Expo's actual iOS launch asset to completion before starting Maestro.
       - name: Warm the iOS Metro bundle
         run: node scripts/maestro-warm-metro.mjs
-
-      # Temporary hosted diagnosis: mirror the dev launcher's first request.
-      # The actual Maestro app anchors remain the acceptance gate.
-      - name: Diagnose native HEAD before Maestro
-        continue-on-error: true
-        run: |
-          curl --silent --head --max-time 15 \
-            --header 'accept: application/expo+json,application/json' \
-            --header 'expo-platform: ios' \
-            --header 'Expo-Dev-Client-ID: maestro-hosted-diagnostic' \
-            --output /dev/null \
-            --write-out 'Native HEAD status=%{http_code} seconds=%{time_total}\n' \
-            http://localhost:8081/
 
       # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
       # reuses the mock server on :9876 itself, runs each flow in its own maestro
@@ -144,18 +138,6 @@ jobs:
               ;;
             *) echo "::error::Unexpected Maestro flow: $MAESTRO_FLOW" >&2; exit 2 ;;
           esac
-
-      - name: Diagnose native HEAD after Maestro
-        if: always()
-        continue-on-error: true
-        run: |
-          curl --silent --head --max-time 15 \
-            --header 'accept: application/expo+json,application/json' \
-            --header 'expo-platform: ios' \
-            --header 'Expo-Dev-Client-ID: maestro-hosted-diagnostic' \
-            --output /dev/null \
-            --write-out 'Native HEAD status=%{http_code} seconds=%{time_total}\n' \
-            http://localhost:8081/
 
       - name: Stop Metro
         if: always()

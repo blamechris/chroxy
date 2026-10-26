@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import yaml from 'js-yaml'
 
@@ -778,4 +778,60 @@ describe('Maestro nightly hosted runner (#7113)', () => {
       }
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
+})
+
+// Discover manual token-entry branches from the actual YAML command trees,
+// rather than maintaining another list of flows that needs to grow with them.
+function manualTokenCallerViolations(sources) {
+  const helper = resolve(root, 'packages/app/.maestro/setup/dismiss-password-save.yaml')
+  const callers = []
+  const missing = []
+  const visit = (value, file) => {
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index++) {
+        if (value[index]?.tapOn?.id === 'connect-submit' &&
+          value.slice(0, index).some(command => command?.tapOn?.id === 'connect-api-token')) {
+          callers.push(file)
+          const target = value[index + 1]?.runFlow
+          if (typeof target !== 'string' || resolve(dirname(file), target) !== helper) missing.push(file)
+        }
+        visit(value[index], file)
+      }
+    } else if (value && typeof value === 'object') {
+      for (const item of Object.values(value)) visit(item, file)
+    }
+  }
+  for (const [file, documents] of sources) visit(documents, file)
+  return { callers, missing }
+}
+
+function passwordSources() {
+  const sources = []
+  const visit = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile() && entry.name.endsWith('.yaml')) sources.push([path, yaml.loadAll(readFileSync(path, 'utf8'))])
+    }
+  }
+  visit(join(root, 'packages/app/.maestro'))
+  return sources
+}
+
+it('every real manual token-entry branch dismisses only the observed native password-save sheet', () => {
+  const { callers, missing } = manualTokenCallerViolations(passwordSources())
+  assert.ok(callers.length > 0, 'the guard must discover real manual token-entry branches')
+  assert.equal(missing.length, 0, `manual branches missing the shared dismissal: ${missing.join(', ')}`)
+  const commands = flow('setup/dismiss-password-save.yaml')
+  assert.deepEqual(commands, [{ tapOn: { text: '^Not Now$', below: { text: '^Save Password\\?$' }, optional: true } }])
+})
+
+it('the password-sheet caller guard rejects a new unlisted manual-token flow', () => {
+  const file = join(root, 'packages/app/.maestro/new-manual-token-flow.yaml')
+  const commands = [{ tapOn: { id: 'connect-api-token' } }, { inputText: 'fixture-token' }, { tapOn: { id: 'connect-submit' } }]
+  const broken = manualTokenCallerViolations([...passwordSources(), [file, [commands]]])
+  assert.ok(broken.missing.includes(file), 'a new caller must fail without being added to a roster')
+  const fixed = manualTokenCallerViolations([[file, [[...commands, { runFlow: 'setup/dismiss-password-save.yaml' }]]]])
+  assert.deepEqual(fixed.missing, [])
+  assert.deepEqual(fixed.callers, [file])
 })

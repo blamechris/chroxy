@@ -78,6 +78,7 @@ name: Ensure SessionScreen (connected to mock server)
       # this manual block entirely.)
       - tapOn:
           id: "connect-submit"
+      - runFlow: dismiss-password-save.yaml
 
 # Chat can appear before authentication completes. The mock's authenticated
 # session_list adds this exact active pill above the mode tabs; wait for it so

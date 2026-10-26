@@ -108,6 +108,32 @@ Pinned Expo Doctor improves from 15/17 to 16/17 checks in this upgrade. The
 remaining warning is the existing unmaintained `expo-live-activity` metadata;
 no additional warning suppression is introduced.
 
+## Hosted development-client startup
+
+The hosted iOS job resolves the current fingerprint once after installation,
+checks that the installed app uses `file:fingerprint`, and compares the result
+with `EXUpdates.bundle/fingerprint` in that actual installed app. Preparation
+fails before Metro starts if either fingerprint is missing, malformed or
+mismatched. Only a matching value is published as a workflow step output.
+
+The Metro step explicitly enables reuse of that exact iOS runtime through
+`app.config.js`. The marker and verified value are scoped to that step; both
+are required before launch. Ordinary configuration, production builds and
+updates retain the automatic fingerprint policy and the existing remote EAS
+version authority. The immutable CI checkout must be rebuilt if native inputs
+change before starting another Metro session.
+
+This avoids [Expo's uncached per-request fingerprint calculation](https://github.com/expo/expo/issues/46415),
+which exceeded the iOS dev launcher's ten-second manifest timeout on the hosted
+runner. It uses Expo's dynamic configuration and runtime-version interfaces;
+no vendor package is patched.
+
+The iOS development menu's floating Tools button defaults to off so it cannot
+cover header controls. Shake, gesture and keyboard menu access remain enabled;
+the Tools button can still be enabled from the menu. The shared Maestro
+password-sheet helper declines only the observed `Save Password?` prompt after
+manual fixture-token entry, before requiring the existing authenticated UI.
+
 ## References
 
 - [SDK 55 release notes](https://expo.dev/changelog/sdk-55)

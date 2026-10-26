@@ -125,6 +125,7 @@ name: E2E key exchange eager handshake (#6019)
       # coordinate tap risks hitting the QR/manual toggle.)
       - tapOn:
           id: "connect-submit"
+      - runFlow: setup/dismiss-password-save.yaml
 
 # SessionScreen should land — the encrypted post-auth burst completes
 # just like the unencrypted path; the session_list / session_switched

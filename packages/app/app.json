@@ -21,7 +21,8 @@
         "NSLocalNetworkUsageDescription": "Chroxy scans your local network to discover running Chroxy servers",
         "NSSpeechRecognitionUsageDescription": "Allow Chroxy to use speech recognition for voice input.",
         "NSMicrophoneUsageDescription": "Allow Chroxy to use the microphone for voice input.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "EXDevMenuShowFloatingActionButton": false
       },
       "privacyManifests": {
         "NSPrivacyAccessedAPITypes": [
