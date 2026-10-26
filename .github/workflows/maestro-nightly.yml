@@ -47,7 +47,7 @@ env:
 jobs:
   maestro:
     name: Maestro App E2E (shard ${{ matrix.shard }})
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 90
     strategy:
       # Keep both halves running if one fails, so full-inventory proof is visible.

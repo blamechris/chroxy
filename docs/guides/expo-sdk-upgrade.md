@@ -105,9 +105,11 @@ no additional warning suppression is introduced.
 
 The hosted iOS gate builds a Release simulator client with Expo's generated
 embedded JavaScript and assets. It runs the same canonical 26 flows, assertions,
-per-flow limits and built-in retry policy. The standard `macos-15-intel` runner
-retains Xcode 26.2 and iOS 26.2. A one-shot, bounded hardware/memory snapshot
-records the loaded host immediately before Maestro.
+per-flow limits and built-in retry policy. The standard ARM `macos-15` runner
+retains Xcode 26.2 and iOS 26.2. This is a controlled bundled-build environment
+change; performance and full hosted acceptance must be measured on this runner.
+A one-shot, bounded hardware/memory snapshot records the loaded host immediately
+before Maestro.
 
 The explicit CI build variant (`CI=1 CHROXY_MAESTRO_BUILD_MODE=bundled`) changes
 only `updates.checkAutomatically` to Expo's supported `NEVER` setting. Updates
@@ -153,7 +155,7 @@ development-client path.
 ## References
 
 - [GitHub hosted runner hardware](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-- [Intel macOS 15 image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)
+- [ARM macOS 15 image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)
 - [SDK 55 release notes](https://expo.dev/changelog/sdk-55)
 - [Incremental SDK upgrade instructions](https://docs.expo.dev/workflow/upgrading-expo-sdk-walkthrough/)
 - [Runtime policies and incompatible updates](https://docs.expo.dev/eas-update/runtime-versions/)

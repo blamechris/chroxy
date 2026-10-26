@@ -31,7 +31,7 @@ const LONG_JOBS = ['server-tests', 'dashboard-tests', 'scripts-tests']
 // label fails (it may be a billed larger runner), and a listed label that no
 // workflow uses fails (a stale entry would silently pre-approve it later).
 // Adding a label is a deliberate edit: confirm it is a standard runner first.
-const STANDARD_HOSTED_LABELS = new Set(['ubuntu-24.04', 'ubuntu-latest', 'windows-latest', 'macos-latest', 'macos-15-intel'])
+const STANDARD_HOSTED_LABELS = new Set(['ubuntu-24.04', 'ubuntu-latest', 'windows-latest', 'macos-latest', 'macos-15'])
 
 // runner-target outputs that jobs consume as `runs-on`, in ci.yml ONLY.
 const ROUTED_OUTPUTS = ['runner', 'winrunner']

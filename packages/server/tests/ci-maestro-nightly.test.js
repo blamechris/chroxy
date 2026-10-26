@@ -325,7 +325,7 @@ describe('Maestro nightly hosted runner (#7113)', () => {
   it('wires the scheduled and dispatch suite to a pinned, preflighted hosted image', () => {
     assert.ok(workflow.on.schedule?.length > 0, 'nightly schedule must exist')
     assert.ok(workflow.on.workflow_dispatch !== undefined, 'manual proof run must remain available')
-    assert.equal(workflow.jobs.maestro['runs-on'], 'macos-15-intel')
+    assert.equal(workflow.jobs.maestro['runs-on'], 'macos-15')
     assert.equal(workflow.jobs.maestro['timeout-minutes'], 90)
     assert.equal(workflow.jobs.maestro.strategy['fail-fast'], false)
     assert.equal(workflow.jobs.maestro.strategy.matrix.shard,
