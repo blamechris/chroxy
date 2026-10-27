@@ -652,6 +652,116 @@ describe('SdkSession effort (#8847) — newest live setting owns the report', ()
     assert.equal(events.length, 1)
   })
 
+  // Hold sendMessage before init while its query is available to a live
+  // setter. Read-start signals keep the response ordering deterministic.
+  function controlledTurn(t, s, q, { repeatedInit = false } = {}) {
+    const init = deferred()
+    const nextInit = deferred()
+    const finish = deferred()
+    const queryReady = deferred()
+    const readStarted = [deferred(), deferred()]
+    const reads = []
+    s._processReady = true
+    s._callQuery = () => {
+      queryReady.resolve()
+      return Object.assign((async function* () {
+        await init.promise
+        yield { type: 'system', subtype: 'init', session_id: 'ordered-read-test', model: 'claude-opus-5-5', tools: [] }
+        if (repeatedInit) {
+          await nextInit.promise
+          yield { type: 'system', subtype: 'init', session_id: 'ordered-read-test', model: 'claude-opus-5-5', tools: [] }
+        }
+        await finish.promise
+        yield { type: 'result', session_id: 'ordered-read-test', total_cost_usd: 0, duration_ms: 0, usage: {} }
+      })(), {
+        ...q,
+        getSettings: () => {
+          const read = deferred()
+          reads.push(read)
+          readStarted[reads.length - 1]?.resolve()
+          return read.promise
+        },
+      })
+    }
+    t.after(() => { init.resolve(); nextInit.resolve(); finish.resolve() })
+    const turn = s.sendMessage('go')
+    return { init, nextInit, finish, queryReady, readStarted, reads, turn }
+  }
+
+  for (const staleAnswer of ['success', 'rejected', 'unsupported']) {
+    it(`ignores an older same-epoch init ${staleAnswer} after the pending setter reports`, async (t) => {
+      const { s, q, events } = await running(t)
+      const setter = deferred()
+      t.after(() => setter.resolve())
+      q.applyFlagSettings = () => setter.promise
+      const { init, finish, queryReady, readStarted, reads, turn } = controlledTurn(t, s, q)
+      await queryReady.promise
+      const change = s.setThinkingLevel('low')
+      init.resolve()
+      await readStarted[0].promise
+      assert.equal(reads.length, 1, 'init reads while the live setter is pending')
+      setter.resolve()
+      await readStarted[1].promise
+      reads[1].resolve(answer('low', 'new-model'))
+      await change
+      const newestEvents = [...events]
+      if (staleAnswer === 'rejected') reads[0].reject(new Error('old init failed'))
+      else reads[0].resolve(staleAnswer === 'unsupported' ? {} : answer('high', 'old-model'))
+      await flush()
+      finish.resolve()
+      await turn
+      assert.deepEqual(buildThinkingLevelChanged(s), { type: 'thinking_level_changed', level: 'low', effective: 'low' })
+      assert.equal(s._effectiveModel, 'new-model')
+      assert.deepEqual(events, newestEvents, 'the older same-epoch read must remain quiet')
+      assert.equal(events.length, 1, 'the pending setter still owns its successful readback')
+    })
+  }
+
+  it('orders repeated init reads even without a setting change', async (t) => {
+    const { s, q, events } = await running(t)
+    const { init, nextInit, finish, readStarted, reads, turn } = controlledTurn(t, s, q, { repeatedInit: true })
+    init.resolve()
+    await readStarted[0].promise
+    nextInit.resolve()
+    await readStarted[1].promise
+    reads[1].resolve(answer('low', 'new-model'))
+    await flush()
+    reads[0].resolve(answer('high', 'old-model'))
+    await flush()
+    finish.resolve()
+    await turn
+    assert.equal(s.effectiveThinkingLevel, 'low')
+    assert.equal(s._effectiveModel, 'new-model')
+    assert.equal(events.length, 1)
+  })
+
+  it('still accepts the latest read after its own turn ends without another read', async (t) => {
+    const { s, q, events } = await running(t)
+    const { init, finish, readStarted, reads, turn } = controlledTurn(t, s, q)
+    init.resolve()
+    await readStarted[0].promise
+    finish.resolve()
+    await turn
+    assert.equal(s._query, null, 'the turn ended while its report was pending')
+    reads[0].resolve(answer('medium'))
+    await flush()
+    assert.equal(s.effectiveThinkingLevel, 'medium')
+    assert.equal(events.length, 1)
+  })
+
+  it('keeps a newest same-epoch report failure unknown despite an older success', async (t) => {
+    const { s, reads, events } = await running(t)
+    const older = s._readEffectiveEffort()
+    const newer = s._readEffectiveEffort()
+    reads[1].reject(new Error('newest read failed'))
+    await newer
+    reads[0].resolve(answer('high'))
+    await older
+    assert.equal(s.effectiveThinkingLevel, null)
+    assert.equal(s._effectiveModel, null)
+    assert.equal(events.length, 1)
+  })
+
   for (const delayedSetter of ['applyFlagSettings', 'setMaxThinkingTokens']) {
     it(`does not let an older ${delayedSetter} continuation read under a newer identity`, async (t) => {
       const { s, q, reads, events } = await running(t, { heard: delayedSetter !== 'setMaxThinkingTokens' })

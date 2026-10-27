@@ -696,6 +696,9 @@ export class SdkSession extends BaseSession {
     this._effectiveModel = null
     this._lastEffortReport = null
     this._effortEpoch = 0
+    // Read order is independent of setting epochs: init can read while a live
+    // setter is pending, then that setter reads again within the same epoch.
+    this._effortReadSeq = 0
     // #8700: the SDK's own per-model effort answer from `supportedModels()`,
     // keyed by the row's `value` and its `resolvedModel`: 'effort' for a model
     // that takes Claude Code's effort, 'budget' for one that still reads only
@@ -3229,6 +3232,7 @@ export class SdkSession extends BaseSession {
    * @param {string} [when] - for the log line
    */
   async _readEffectiveEffort(when = 'when the turn started') {
+    const readSeq = ++this._effortReadSeq
     const query = this._query
     const turnSeq = this._turnSeq
     const epoch = this._effortEpoch
@@ -3246,9 +3250,11 @@ export class SdkSession extends BaseSession {
     }
     // A report that lands after the session went away, after a newer turn
     // started (which makes its own), or after a model or level change
-    // (`_forgetEffortReport`) is not this session's current answer. One that
-    // lands after its own turn ended, with nothing changed since, still is.
-    if (this._destroying || this._turnSeq !== turnSeq || this._effortEpoch !== epoch) return
+    // (`_forgetEffortReport`) is not this session's current answer. Within one
+    // epoch only the latest read owns the answer, even when an init read races
+    // the live setter's read. A latest read that lands after its own turn ended,
+    // with nothing changed since, still is current.
+    if (this._destroying || this._turnSeq !== turnSeq || this._effortEpoch !== epoch || this._effortReadSeq !== readSeq) return
     const effort = isWellFormedThinkingLevel(applied?.effort) ? applied.effort : null
     const model = typeof applied?.model === 'string' && applied.model.length > 0 ? applied.model : null
     if (applied && applied.effort === null) {
