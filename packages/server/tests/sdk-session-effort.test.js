@@ -487,6 +487,222 @@ describe('SdkSession effort (#8700) — mid-turn changes and stale reports', () 
   })
 })
 
+describe('SdkSession effort (#8847) — newest live setting owns the report', () => {
+  afterEach(() => resetModels())
+
+  function deferred() {
+    let resolve, reject
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  const answer = (effort, model = 'claude-opus-5-5') => ({ applied: { model, effort } })
+
+  async function running(t, { model = 'claude-opus-5-5', heard = true } = {}) {
+    const s = createSession({ model })
+    t.after(() => { s._query = null; s.destroy() })
+    if (heard) await hearModels(s)
+    const reads = []
+    const applied = []
+    const q = {
+      applyFlagSettings: async ({ effortLevel }) => { applied.push(effortLevel) },
+      setMaxThinkingTokens: async () => {},
+      getSettings: () => {
+        const read = deferred()
+        reads.push(read)
+        return read.promise
+      },
+    }
+    s._query = q
+    const events = []
+    s.on('thinking_level_changed', () => events.push({
+      ...buildThinkingLevelChanged(s), model: s._effectiveModel,
+    }))
+    return { s, q, reads, applied, events }
+  }
+
+  for (const [name, level, model, setterAvailable] of [
+    ['effort', 'high', 'claude-opus-5-5', true],
+    ['Auto', 'default', 'claude-opus-5-5', true],
+    ['Max deferred to the next turn', 'max', 'claude-opus-5-5', true],
+    ['budget only', 'high', 'claude-haiku-4-5', true],
+    ['no live effort setter', 'high', 'claude-opus-5-5', false],
+  ]) {
+    it(`forgets the previous report immediately for ${name}`, async (t) => {
+      const { s, q, reads } = await running(t, { model })
+      const initial = s._readEffectiveEffort()
+      reads[0].resolve(answer('medium'))
+      await initial
+      assert.equal(s.effectiveThinkingLevel, 'medium')
+      const setter = deferred()
+      t.after(() => setter.resolve())
+      if (setterAvailable) q.applyFlagSettings = () => setter.promise
+      else delete q.applyFlagSettings
+      q.setMaxThinkingTokens = () => setter.promise
+      const change = s.setThinkingLevel(level)
+      assert.equal(s.effectiveThinkingLevel, null, 'the previous setting is no longer a current answer')
+      assert.equal(s._effectiveModel, null)
+      setter.resolve()
+      await flush()
+      reads[1]?.resolve(answer('low'))
+      await change
+    })
+  }
+
+  it('keeps the newest of two reversed readbacks and emits no stale event', async (t) => {
+    const { s, reads, applied, events } = await running(t)
+    const older = s.setThinkingLevel('high')
+    await flush()
+    const newer = s.setThinkingLevel('low')
+    await flush()
+    assert.equal(reads.length, 2)
+    reads[1].resolve(answer('low', 'new-model'))
+    await newer
+    const newestEvents = [...events]
+    reads[0].resolve(answer('high', 'old-model'))
+    await older
+    assert.deepEqual(applied, ['high', 'low'], 'native setter invocation order is unchanged')
+    assert.equal(s.thinkingLevel, 'low')
+    assert.equal(s.effectiveThinkingLevel, 'low')
+    assert.deepEqual(buildThinkingLevelChanged(s), { type: 'thinking_level_changed', level: 'low', effective: 'low' })
+    assert.equal(s._effectiveModel, 'new-model')
+    assert.deepEqual(events, newestEvents)
+    assert.equal(events.length, 1, 'the newest successful report must still be announced')
+  })
+
+  it('uses a generation rather than level equality across High → Low → High', async (t) => {
+    const { s, reads, events } = await running(t)
+    const changes = []
+    for (const level of ['high', 'low', 'high']) {
+      changes.push(s.setThinkingLevel(level))
+      await flush()
+    }
+    reads[2].resolve(answer('high', 'new-model'))
+    await changes[2]
+    reads[0].resolve(answer('medium', 'old-model'))
+    reads[1].resolve(answer('low', 'old-model'))
+    await Promise.all(changes)
+    assert.equal(s.effectiveThinkingLevel, 'high')
+    assert.equal(s._effectiveModel, 'new-model')
+    assert.equal(events.length, 1)
+  })
+
+  for (const failure of ['rejected', 'unsupported']) {
+    it(`ignores a late ${failure} answer after a newer success`, async (t) => {
+      const { s, reads, events } = await running(t)
+      const older = s.setThinkingLevel('high')
+      await flush()
+      const newer = s.setThinkingLevel('low')
+      await flush()
+      reads[1].resolve(answer('low'))
+      await newer
+      if (failure === 'rejected') reads[0].reject(new Error('old read failed'))
+      else reads[0].resolve({})
+      await older
+      assert.equal(s.effectiveThinkingLevel, 'low')
+      assert.equal(events.length, 1)
+    })
+  }
+
+  it('still asks for the newest report after both native setters reject', async (t) => {
+    const { s, q, reads, events } = await running(t, { heard: false })
+    const calls = []
+    q.applyFlagSettings = async () => { calls.push('effort'); throw new Error('effort refused') }
+    q.setMaxThinkingTokens = async () => { calls.push('budget'); throw new Error('budget refused') }
+    const change = s.setThinkingLevel('high')
+    await flush()
+    assert.deepEqual(calls, ['effort', 'budget'])
+    assert.equal(reads.length, 1, 'each refusal is handled independently before the readback')
+    reads[0].resolve(answer('medium'))
+    await change
+    assert.deepEqual(buildThinkingLevelChanged(s), { type: 'thinking_level_changed', level: 'high', effective: 'medium' })
+    assert.equal(events.length, 1)
+  })
+
+  it('ignores a turn-init readback after a live change', async (t) => {
+    const { s, q, reads, events } = await running(t)
+    const finishTurn = deferred()
+    const initialRead = deferred()
+    t.after(() => finishTurn.resolve())
+    s._processReady = true
+    q.getSettings = () => {
+      const read = deferred()
+      reads.push(read)
+      initialRead.resolve()
+      return read.promise
+    }
+    s._callQuery = () => Object.assign((async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'race-test', model: 'claude-opus-5-5', tools: [] }
+      await finishTurn.promise
+      yield { type: 'result', session_id: 'race-test', total_cost_usd: 0, duration_ms: 0, usage: {} }
+    })(), q)
+    const turn = s.sendMessage('go')
+    await initialRead.promise
+    const change = s.setThinkingLevel('low')
+    await flush()
+    assert.equal(reads.length, 2)
+    reads[1].resolve(answer('low'))
+    await change
+    reads[0].resolve(answer('high'))
+    await flush()
+    finishTurn.resolve()
+    await turn
+    assert.equal(s.effectiveThinkingLevel, 'low')
+    assert.equal(events.length, 1)
+  })
+
+  for (const delayedSetter of ['applyFlagSettings', 'setMaxThinkingTokens']) {
+    it(`does not let an older ${delayedSetter} continuation read under a newer identity`, async (t) => {
+      const { s, q, reads, events } = await running(t, { heard: delayedSetter !== 'setMaxThinkingTokens' })
+      const oldSetter = deferred()
+      t.after(() => oldSetter.resolve())
+      let first = true
+      q[delayedSetter] = async () => {
+        if (first) { first = false; await oldSetter.promise }
+      }
+      const older = s.setThinkingLevel('high')
+      await flush()
+      const newer = s.setThinkingLevel('low')
+      await flush()
+      assert.equal(reads.length, 1)
+      reads[0].resolve(answer('low'))
+      await newer
+      oldSetter.resolve()
+      await flush()
+      // Resolve an erroneous extra read as well, so a regression fails rather
+      // than hanging while the old setter awaits its stolen current identity.
+      reads[1]?.resolve(answer('high'))
+      await older
+      assert.equal(reads.length, 1, 'an older setter must not start another readback')
+      assert.equal(s.effectiveThinkingLevel, 'low')
+      assert.equal(events.length, 1)
+    })
+  }
+
+  for (const invalidation of ['turn', 'model', 'query', 'destroy']) {
+    it(`does not start an old setter readback after ${invalidation} invalidation`, async (t) => {
+      const { s, q, reads, events } = await running(t)
+      const setter = deferred()
+      t.after(() => setter.resolve())
+      q.applyFlagSettings = () => setter.promise
+      const change = s.setThinkingLevel('high')
+      if (invalidation === 'turn') s._turnSeq = (s._turnSeq || 0) + 1
+      if (invalidation === 'model') s.setModel('claude-sonnet-5-5')
+      if (invalidation === 'query') s._query = { getSettings: q.getSettings }
+      if (invalidation === 'destroy') { q.interrupt = async () => {}; s.destroy() }
+      const priorEvents = [...events]
+      setter.resolve()
+      await flush()
+      reads[0]?.resolve(answer('high'))
+      await change
+      assert.equal(reads.length, 0, 'the setter belongs to the captured turn, model, query and session')
+      assert.equal(s.effectiveThinkingLevel, null)
+      assert.deepEqual(events, priorEvents)
+    })
+  }
+})
+
 describe('SdkSession effort (#8700) — the operator\'s log line', () => {
   afterEach(() => resetModels())
 

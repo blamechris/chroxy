@@ -3101,12 +3101,14 @@ export class SdkSession extends BaseSession {
    */
   async setThinkingLevel(level) {
     this._thinkingLevel = level === LEGACY_DEFAULT_THINKING_LEVEL ? null : level
+    // Invalidate pending reads and the previous answer before any live setter
+    // can yield. Even Auto, Max and budget-only changes leave that answer behind.
+    this._forgetEffortReport()
     // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
     const query = this._query
-    if (!query) {
-      this._forgetEffortReport()
-      return
-    }
+    const turnSeq = this._turnSeq
+    const epoch = this._effortEpoch
+    if (!query) return
 
     // The same choice `_thinkingOptions` makes for the next turn, made live:
     // the effort is set when the next turn would send one, and cleared at
@@ -3133,7 +3135,9 @@ export class SdkSession extends BaseSession {
         ;(this._log || log).warn(`Failed to apply the thinking budget for ${level} to the running turn: ${err?.message || err}`)
       }
     }
-    if (asksEffort) {
+    // Capture ownership before the setters await: an older continuation must
+    // not start a read under a newer setting, model, turn or query's identity.
+    if (asksEffort && this._query === query && this._turnSeq === turnSeq && this._effortEpoch === epoch) {
       try {
         await this._readEffectiveEffort('after a mid-turn change')
       } catch (err) {
