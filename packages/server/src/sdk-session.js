@@ -696,6 +696,9 @@ export class SdkSession extends BaseSession {
     this._effectiveModel = null
     this._lastEffortReport = null
     this._effortEpoch = 0
+    // Read order is independent of setting epochs: init can read while a live
+    // setter is pending, then that setter reads again within the same epoch.
+    this._effortReadSeq = 0
     // #8700: the SDK's own per-model effort answer from `supportedModels()`,
     // keyed by the row's `value` and its `resolvedModel`: 'effort' for a model
     // that takes Claude Code's effort, 'budget' for one that still reads only
@@ -3101,12 +3104,14 @@ export class SdkSession extends BaseSession {
    */
   async setThinkingLevel(level) {
     this._thinkingLevel = level === LEGACY_DEFAULT_THINKING_LEVEL ? null : level
+    // Invalidate pending reads and the previous answer before any live setter
+    // can yield. Even Auto, Max and budget-only changes leave that answer behind.
+    this._forgetEffortReport()
     // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
     const query = this._query
-    if (!query) {
-      this._forgetEffortReport()
-      return
-    }
+    const turnSeq = this._turnSeq
+    const epoch = this._effortEpoch
+    if (!query) return
 
     // The same choice `_thinkingOptions` makes for the next turn, made live:
     // the effort is set when the next turn would send one, and cleared at
@@ -3133,7 +3138,9 @@ export class SdkSession extends BaseSession {
         ;(this._log || log).warn(`Failed to apply the thinking budget for ${level} to the running turn: ${err?.message || err}`)
       }
     }
-    if (asksEffort) {
+    // Capture ownership before the setters await: an older continuation must
+    // not start a read under a newer setting, model, turn or query's identity.
+    if (asksEffort && this._query === query && this._turnSeq === turnSeq && this._effortEpoch === epoch) {
       try {
         await this._readEffectiveEffort('after a mid-turn change')
       } catch (err) {
@@ -3225,6 +3232,7 @@ export class SdkSession extends BaseSession {
    * @param {string} [when] - for the log line
    */
   async _readEffectiveEffort(when = 'when the turn started') {
+    const readSeq = ++this._effortReadSeq
     const query = this._query
     const turnSeq = this._turnSeq
     const epoch = this._effortEpoch
@@ -3242,9 +3250,11 @@ export class SdkSession extends BaseSession {
     }
     // A report that lands after the session went away, after a newer turn
     // started (which makes its own), or after a model or level change
-    // (`_forgetEffortReport`) is not this session's current answer. One that
-    // lands after its own turn ended, with nothing changed since, still is.
-    if (this._destroying || this._turnSeq !== turnSeq || this._effortEpoch !== epoch) return
+    // (`_forgetEffortReport`) is not this session's current answer. Within one
+    // epoch only the latest read owns the answer, even when an init read races
+    // the live setter's read. A latest read that lands after its own turn ended,
+    // with nothing changed since, still is current.
+    if (this._destroying || this._turnSeq !== turnSeq || this._effortEpoch !== epoch || this._effortReadSeq !== readSeq) return
     const effort = isWellFormedThinkingLevel(applied?.effort) ? applied.effort : null
     const model = typeof applied?.model === 'string' && applied.model.length > 0 ? applied.model : null
     if (applied && applied.effort === null) {
