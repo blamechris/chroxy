@@ -10,8 +10,13 @@
       "installed": "2026-07-30"
     },
     "autonomous-dev-flow": {
-      "hash": "8196307",
-      "installed": "2026-07-30"
+      "hash": "84fe5f4",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "batch-merge": {
       "hash": "8c8e472",
@@ -66,8 +71,13 @@
       "installed": "2026-07-30"
     },
     "prime-directive": {
-      "hash": "8196307",
-      "installed": "2026-07-30"
+      "hash": "84fe5f4",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "project-audit": {
       "hash": "a09dcc2",
@@ -78,8 +88,13 @@
       "installed": "2026-07-30"
     },
     "session-lifecycle": {
-      "hash": "8196307",
-      "installed": "2026-07-30"
+      "hash": "e3a4b43",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "skill": {
       "hash": "7b4d37f",
@@ -103,8 +118,13 @@
       "installed": "2026-07-30"
     },
     "tackle-issues": {
-      "hash": "8196307",
-      "installed": "2026-07-30"
+      "hash": "84fe5f4",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "tiered-delegation": {
       "hash": "8196307",
@@ -114,6 +134,24 @@
       "hash": "a85c799",
       "installed": "2026-07-30",
       "profileHash": "57b5312"
+    },
+    "decide": {
+      "hash": "84fe5f4",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
+    },
+    "pulse": {
+      "hash": "84fe5f4",
+      "installed": "2026-10-28",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     }
   }
 }
