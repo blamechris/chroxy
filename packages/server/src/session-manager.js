@@ -2398,6 +2398,9 @@ export class SessionManager extends EventEmitter {
       // has since moved on (the session committed again and was deleted
       // again): forcing the old commit would drop the newer one's only ref.
       const registered = this._registeredWorktreeHead(repoDir, worktreeDir)
+      if (registered === undefined) {
+        throw missing(`git's worktree registrations could not be read, so the commit pinned at ${recoveryRef} cannot be checked against them`)
+      }
       if (registered && registered !== commit) {
         throw missing(`git still registers it at ${registered}, which differs from the commit pinned at ${recoveryRef} (${commit}); resolve that by hand`)
       }
@@ -2455,30 +2458,37 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The HEAD commit git still records for `worktreeDir` as a worktree of
-   * `repoDir`, or null when that cannot be established — not registered, or
-   * the registrations could not be read. Callers treat null as "do not
-   * replace anything". Read NUL-delimited so no path spelling can split a
-   * record, and compared against the path canonicalised the way git stores
-   * it, resolving through the nearest ancestor that still exists (the whole
-   * worktree base may be gone, under a symlinked prefix such as macOS /var).
+   * `repoDir`; null when it is not registered; undefined when the
+   * registrations could not be read at all. Neither falsy result may
+   * authorise replacing anything. Read NUL-delimited so no path spelling can
+   * split a record, and compared against the path canonicalised the way git
+   * stores it: resolved through the nearest ancestor that still exists (the
+   * whole worktree base may be gone, under a symlinked prefix such as macOS
+   * /var), with both realpath flavours (the native one expands Windows 8.3
+   * short names), and on Windows with git's forward slashes and any letter
+   * case folded by resolve() and toLowerCase().
    * @param {string} repoDir
    * @param {string} worktreeDir
-   * @returns {string|null}
+   * @returns {string|null|undefined}
    */
   _registeredWorktreeHead(repoDir, worktreeDir) {
-    const candidates = new Set([resolve(worktreeDir)])
+    const norm = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+    const candidates = new Set([norm(worktreeDir)])
     let dir = resolve(worktreeDir)
     const rest = []
     for (;;) {
-      try {
-        candidates.add(join(realpathSync(dir), ...rest))
-        break
-      } catch {
-        const parent = dirname(dir)
-        if (parent === dir) break
-        rest.unshift(basename(dir))
-        dir = parent
+      let found = false
+      for (const real of [realpathSync, realpathSync.native]) {
+        try {
+          candidates.add(norm(join(real(dir), ...rest)))
+          found = true
+        } catch { /* try the parent */ }
       }
+      if (found) break
+      const parent = dirname(dir)
+      if (parent === dir) break
+      rest.unshift(basename(dir))
+      dir = parent
     }
     let out
     try {
@@ -2487,13 +2497,13 @@ export class SessionManager extends EventEmitter {
         encoding: 'utf-8',
       })
     } catch {
-      return null
+      return undefined
     }
     let path = null
     let head = null
     for (const field of `${out}\0`.split('\0')) {
       if (field === '') {
-        if (path !== null && head !== null && candidates.has(path)) return head
+        if (path !== null && head !== null && candidates.has(norm(path))) return head
         path = null
         head = null
       } else if (field.startsWith('worktree ')) {

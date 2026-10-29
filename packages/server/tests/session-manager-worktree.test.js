@@ -506,6 +506,20 @@ describe('SessionManager worktree isolation', () => {
       mgr2.destroyAll()
     })
 
+    it('refuses a pin when the registrations cannot be read', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, repoHead], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2._registeredWorktreeHead = () => undefined // `git worktree list` failed
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(registeredHeads().includes(sessionHead), 'the registration is not replaced')
+      mgr2.destroyAll()
+    })
+
     it('ignores a pin that does not name a commit', () => {
       const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
       const tree = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf-8' }).trim()
