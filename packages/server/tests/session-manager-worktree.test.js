@@ -493,6 +493,33 @@ describe('SessionManager worktree isolation', () => {
       mgr2.destroyAll()
     })
 
+    it('refuses a stale pin that differs from a live registration', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, repoHead], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(registeredHeads().includes(sessionHead), 'the newer registered commit is not replaced')
+      mgr2.destroyAll()
+    })
+
+    it('ignores a pin that does not name a commit', () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const tree = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, tree], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored from the registration instead')
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead)
+      mgr2.destroyAll()
+    })
+
     it('finds the registered HEAD when the whole worktree base was deleted', () => {
       const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
       rmSync(dirname(wtPath), { recursive: true, force: true })

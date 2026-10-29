@@ -2355,6 +2355,8 @@ export class SessionManager extends EventEmitter {
    *   HEAD cannot be read with certainty the restore fails and nothing is
    *   replaced. If the forced add fails, the pin stays and the next attempt
    *   (Retry) checks it out; it is dropped once a checkout references it.
+   *   A pin is deliberately never removed anywhere else (not on destroy or
+   *   dismiss): keeping one commit reachable is the point of it.
    * Either way uncommitted work from the deleted worktree is gone; that is
    * logged loudly. Without the recreation the session could only ever be
    * parked as a failed restore whose Retry runs this same path and fails again.
@@ -2391,7 +2393,15 @@ export class SessionManager extends EventEmitter {
     const recoveryRef = `refs/chroxy/worktree-recovery/${basename(worktreeDir)}`
     assertSafeArgvValue(recoveryRef, 'recovery ref')
     let commit = this._readGitCommit(repoDir, recoveryRef)
-    if (!commit) {
+    if (commit) {
+      // A pin left by an earlier attempt must not replace a registration that
+      // has since moved on (the session committed again and was deleted
+      // again): forcing the old commit would drop the newer one's only ref.
+      const registered = this._registeredWorktreeHead(repoDir, worktreeDir)
+      if (registered && registered !== commit) {
+        throw missing(`git still registers it at ${registered}, which differs from the commit pinned at ${recoveryRef} (${commit}); resolve that by hand`)
+      }
+    } else {
       try {
         this._addDetachedWorktree(repoDir, worktreeDir, { noHooks: true })
         log.warn(`Recreated the deleted worktree for session ${sessionId} at ${worktreeDir} as a fresh detached checkout of ${repoDir} HEAD; uncommitted work from the deleted worktree is not recoverable (#8856)`)
@@ -2423,15 +2433,17 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * The commit `ref` names in `repoDir`, or null when it does not exist.
+   * The commit `ref` names in `repoDir`, or null when it does not exist or
+   * does not peel to a commit.
    * @param {string} repoDir
    * @param {string} ref
    * @returns {string|null}
    */
   _readGitCommit(repoDir, ref) {
-    assertSafeArgvValue(ref, 'git ref')
+    const commitRef = `${ref}^{commit}`
+    assertSafeArgvValue(commitRef, 'git ref')
     try {
-      const out = execFileSync(GIT, ['-C', repoDir, 'rev-parse', '--verify', '--quiet', ref], {
+      const out = execFileSync(GIT, ['-C', repoDir, 'rev-parse', '--verify', '--quiet', commitRef], {
         stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf-8',
       }).trim()
