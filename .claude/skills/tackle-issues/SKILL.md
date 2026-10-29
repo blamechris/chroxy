@@ -425,6 +425,34 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 3. **Branch from main for new attempts** — Never stack branches. A replacement retry starts fresh from current main; an interrupted attempt resumes its verified owned branch and saved allowance.
 4. **Respect existing authorization** — No repeat queue approval or routine decision pause. Continue all waves within scope and caps; preserve owner-reserved actions, genuine dependencies and the verified continuation contract.
 5. **Self-merge authority for this repo** — Delegated implementation includes gated synchronous merge and ledger updates in both normal and prime-directive mode. Merge only through the Unattended Merge Gate — /full-review clean + ALL checks green on the final commit + ALL review threads resolved; verify `MERGED` into the intended base branch. No `gh pr merge --auto`, no GitHub auto-merge, no protection overrides, no repeated routine merge approval. Only selected work and necessary prerequisites are covered; unrelated PRs are outside scope. Honor explicit user merge holds and actual repository/host restrictions. Honor `merge:off` as an explicit run hold. Every self-merged PR MUST appear as an entry in the Morning Summary.
+
+### Chroxy wave selection and old-debt accounting
+
+**Old-debt quota (enforced here, declared in `/prime-directive`).** A wave's completions are not
+interchangeable. Two rules apply when building the next wave queue (2e) and when reporting a
+wave's result:
+
+- **At least 2 issues per wave must predate that wave by 30+ days.** Select them explicitly in
+  2e rather than hoping the replenishment scan surfaces them — it sorts by tractability, not age,
+  which is why old debt never gets picked. Derive age from `createdAt`, not `updatedAt`:
+  measured on this repo, 72.4% of open issues have `updatedAt == createdAt`, so `updatedAt` is
+  not an engagement signal.
+- **A `from-review` issue created during the current session is ineligible** to count toward a
+  wave's completions. It still gets worked and still gets closed — it just does not satisfy the
+  quota, because a pipeline closing its own same-generation output is the failure this exists to
+  prevent. Measured over the 30 days to 2026-09-12: 208 of 209 closes were issues created inside
+  that same window, exactly one touched anything older, and 122 of the 123 issues open at the
+  start were still open at the end.
+
+**When fewer than 2 eligible issues remain, take all of them.** The quota is a floor on effort,
+never a blocker, and **never a convergence condition** — missing it does not stop a session.
+Report both numbers in the wave table below (`eligible` and `taken`) so a wave that took 0
+because none were eligible is distinguishable from one that took 0 because nobody looked. Those
+two states are identical in every metric that counts only completions, which is exactly how this
+went unnoticed for 30 days.
+
+
+When this wave is part of the selected Chroxy PRIME mission, apply its pain-first ordering after explicitly reserving the eligible old-debt slots, its isolated owner-path smoke before Full review, and its final-head smoke gate. A narrower current request and explicit holds take precedence; the quota adds no authority outside selected work and never stops independent authorized work.
 6. **Clean up replaced failed attempts** — Follow Phase 2d: preserve useful work, then close the superseded PR and delete its stale branch. Retain interrupted or prerequisite-blocked attempts that will resume; requeueing alone does not authorize cleanup.
 7. **Escalate strategy across waves** — Wave 1: standard approach. Wave 2: fresh context + address failures. Wave 3: alternative approach + scope reduction. Don't repeat the same failing approach.
 8. **Converge, don't loop forever** — Zero completions triggers a bounded reassessment, not automatic failure. Keep the configured wave/attempt/budget caps, preserve them across restarts, and do not repeat a failing approach unchanged.

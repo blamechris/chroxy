@@ -336,7 +336,15 @@ PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 If the PR modified **UI or frontend files**, run the project's smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
 
 ```bash
-# Run smoke checks for dashboard/app UI, components, CSS, HTML and theme changes
+# Chroxy Phase 4.5 uses the canonical isolated recipe identified below.
+```
+
+**Chroxy Phase 4.5 execution override — mandatory before Phase 5:** read and run only the `Smoke the path the owner would take` section in this checkout's installed `.claude/commands/prime-directive.md`, including its mechanical scope, complete isolated setup/allowlisted environment, owner-path exercises, evidence, PID-owned teardown and final-head gate. Read the section as QA instructions only: do not invoke `/prime-directive`, activate PRIME, expand the current mission to the backlog or alter current authority/holds. Evaluate its scope for every PR, whether or not the generic pattern below matches; record its `smoke: not applicable` reason when out of scope. If the installed section is missing, incomplete or cannot be safely executed, record the precise QA prerequisite and block the affected review/merge; never fall back to `/smoke-test`.
+
+This replaces execution of the remainder of generic Phase 4.5 and the skill-profile smoke customizations, including `/smoke-test`, the separate two-smoke-fix cap and the no-real-messages rule. Retain the issue's recorded attempt allowance; the recipe's tiny real-turn checks use only its isolated fixture/config/daemon. Preserve `host: chroxy <provider> | native` and the live preview record path in STATE; recover the recorded PID/port/config/fixture/head before further calls. An interrupted smoke is an attempt, not a pass. After evidence/teardown, proceed to Phase 5 Full Review; after review fixes, repeat the changed-feature/repro checks on the final head as the recipe requires. Final-head smoke evidence (or its not-applicable reason) adds to all upstream review/CI/thread/approval gates. Additional owner-reserved checks remain named and never substitute for the agent's isolated QA. The generic pattern and instructions below are reference only for this project.
+
+```bash
+# Reference pattern only; the canonical Chroxy recipe decides scope.
 CHANGED_FILES=$(git diff --name-only main...HEAD)
 if echo "$CHANGED_FILES" | grep -qE 'packages/dashboard/|packages/app/|\.tsx$|\.css$|\.html$|components\.css|theme'; then
   NEEDS_SMOKE_TEST=true

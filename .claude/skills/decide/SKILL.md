@@ -93,7 +93,7 @@ Use the host question UI equivalent. If unavailable, present numbered options wi
 **A block on one thread is not a block on the work.** Before you ask anything:
 
 - **Split the work** into what actually depends on the answer and what does not. The dependent slice is almost always smaller than it feels.
-- **Keep going on everything else** — the other items in the queue, the tests, the docs, the parts of this change that both answers share. the current authorized package and review queue.
+- **Keep going on everything else** — the other items in the queue, the tests, the docs, the parts of this change that both answers share. Select independent work from the current authorized package and review queue.
 - **If everything truly depends on the answer**, build the recommendation, marked provisional, while the question stays open. A provisional implementation is far easier to redirect than a blank branch.
 - **Report progress alongside the question.** Never send a message whose entire content is a question. *"Asked about X; meanwhile Y and Z landed and CI is green"* is a report. *"I'm blocked on X"* is not.
 

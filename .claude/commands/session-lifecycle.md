@@ -39,7 +39,7 @@ Run these in order; each step re-derives state rather than trusting memory:
    hard precondition, never softened) — that is *not* agreement; say so rather than proceeding as if
    it passed.
 
-   Then `/next` itself, which is distributed **verbatim** (no rule classes, no `{{CUSTOMIZE}}`), so a
+   Then `/next` itself, which is distributed **verbatim** (no rule classes, no customization markers), so a
    plain `diff -q` is its whole drift detector — and **a missing file is not drift**:
 
    ```bash
@@ -328,4 +328,4 @@ Run with no arguments it prompts for the two `/usage` percentages, so neither fo
 placeholder substitution — which is the point: a documented command carrying `<angle brackets>`
 is read by the shell as a redirection and cannot be run as written.
 
-<!-- skill-templates: session-lifecycle 84fe5f4 2026-10-28 -->
+<!-- skill-templates: session-lifecycle e3a4b43 2026-10-28 -->

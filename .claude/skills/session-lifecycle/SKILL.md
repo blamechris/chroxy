@@ -43,7 +43,7 @@ Run these in order; each step re-derives state rather than trusting memory:
    hard precondition, never softened) — that is *not* agreement; say so rather than proceeding as if
    it passed.
 
-   Then `/next` itself, which is distributed **verbatim** (no rule classes, no `{{CUSTOMIZE}}`), so a
+   Then `/next` itself, which is distributed **verbatim** (no rule classes, no customization markers), so a
    plain `diff -q` is its whole drift detector — and **a missing file is not drift**:
 
    ```bash
