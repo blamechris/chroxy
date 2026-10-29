@@ -230,10 +230,10 @@ describe('InputBar', () => {
       expect(document.activeElement).toBe(textarea)
     })
 
-    // Copilot review of #3853: handleChange's auto-resize sets an explicit
-    // height on the textarea. setValue('') alone doesn't re-run that path,
-    // so without this reset a cleared multi-line draft would leave the
-    // textarea visually tall.
+    // Copilot review of #3853: auto-resize sets an explicit height on the
+    // textarea, so a cleared multi-line draft must not stay visually tall. The
+    // `[value]` layout effect re-sizes the emptied box; under jsdom (no layout,
+    // scrollHeight 0) that resize leaves 'auto' (#8839).
     it('resets the explicit height set by auto-resize', () => {
       render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
       const textarea = screen.getByRole('textbox') as HTMLTextAreaElement

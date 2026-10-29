@@ -221,12 +221,17 @@ function findAtTrigger(text: string, caret: number): number {
 }
 
 // Auto-expand the composer up to 5 lines, derived from computed styles (#1172,
-// #1246). Measures the element's current DOM value, so it must run once the new
-// value has reached the textarea (in an onChange handler, or in a layout effect
-// after the commit) — which is why resetComposer keeps 'auto' instead: its
-// setValue('') has not reached the DOM yet.
+// #1246). Measures the element's current DOM value, so it runs from one layout
+// effect on `value`, after the commit has put the new value in the textarea
+// (#8839).
 function autoResizeComposer(el: HTMLTextAreaElement): void {
   el.style.height = 'auto'
+  // A laid-out textarea's scrollHeight always includes its padding and one
+  // line, so 0 means it has no layout (a `display: none` ancestor, or jsdom). A
+  // px height computed from it would collapse the box to its border, while
+  // 'auto' keeps its one-row height.
+  const scrollHeight = el.scrollHeight
+  if (scrollHeight === 0) return
   const computed = getComputedStyle(el)
   const lineHeight = parseFloat(computed.lineHeight) || 20
   const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)
@@ -234,7 +239,7 @@ function autoResizeComposer(el: HTMLTextAreaElement): void {
   const maxLines = 5
   // Normalize to outer height (content + padding + border)
   const outerMax = lineHeight * maxLines + paddingY + borderY
-  const outerScrollHeight = el.scrollHeight + borderY
+  const outerScrollHeight = scrollHeight + borderY
   const outerHeight = Math.min(outerScrollHeight, outerMax)
   // Adjust for box-sizing: border-box includes padding+border in height,
   // content-box sets content height only (#1246)
@@ -418,6 +423,16 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     textareaRef.current?.focus()
   }, [value, triggerAtIdx, effectiveCaret, setValue])
 
+  // Every write sizes the box: the composer's own (typing, history recall,
+  // Apply rewrite, dictation, the paste marker), an outside one, and mount (a
+  // Control Room round trip remounts the composer with its draft) — #8839. It
+  // runs after the commit, so the measured DOM value is the new one. Declared
+  // before the pending-caret effect so the box has its final height before the
+  // caret is placed.
+  useLayoutEffect(() => {
+    if (textareaRef.current) autoResizeComposer(textareaRef.current)
+  }, [value])
+
   // Apply the caret once the new value has reached the textarea. Runs after the
   // commit (controlled parent included), unlike a call made inside the handler.
   useLayoutEffect(() => {
@@ -553,14 +568,6 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   const resetComposer = useCallback(() => {
     setValue('')
     resetDraftState()
-    // #3853 review: reset the explicit height set by handleChange's auto-
-    // resize logic. setValue('') alone doesn't re-run the resize path, so a
-    // cleared multi-line draft would leave the textarea visually tall. Not part
-    // of resetDraftState: on an outside write the new value may be multi-line,
-    // so the outside-write effect sizes the box to that value instead (#8834).
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
   }, [setValue, resetDraftState])
 
   // #8831 — a value the composer did not write replaced the draft (session
@@ -572,14 +579,12 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // earlier own value still counts as outside. Known limit: a switch between
   // two sessions with identical drafts changes no `value`, so the state is
   // kept. The reset also drops an evaluation still pending here (#8832). The
-  // box is also re-sized to the new value, as an edit would (#8834).
+  // box is re-sized to the new value by the `[value]` effect above, like every
+  // other write (#8834, #8839).
   useLayoutEffect(() => {
     if (value === ownWriteRef.current) return
     ownWriteRef.current = value
     resetDraftState()
-    // #8834 — size the box to the new draft, as an edit would. Not 'auto': that
-    // would collapse a multi-line draft.
-    if (textareaRef.current) autoResizeComposer(textareaRef.current)
   }, [value, resetDraftState])
 
   const send = useCallback(() => {
@@ -1109,8 +1114,6 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       setFilePickerOpen(false)
       setFileSelectedIndex(0)
     }
-
-    autoResizeComposer(e.target)
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger, historyIndex, userMessageHistory, setValue])
 
   // #8433 — caret moves without an edit (arrows, click): keep the filter in step
