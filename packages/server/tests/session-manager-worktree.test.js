@@ -8,7 +8,7 @@
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, renameSync, readFileSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
@@ -309,6 +309,354 @@ describe('SessionManager worktree isolation', () => {
 
     mgr2.destroyAll()
     rmSync(sensitive, { recursive: true, force: true })
+  })
+
+  // #8856 — the agent in a worktree session can delete its own cwd (a close-out
+  // `git worktree remove --force`). The next restore must recreate the worktree
+  // instead of parking the session as a failed restore that Retry can never fix.
+  describe('restore recreates a deleted session worktree (#8856)', () => {
+    function persistWithHistory(mgr, id) {
+      mgr.serializeState()
+      const stateFile = join(gitRepo, 'session-state.json')
+      const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+      const entry = persisted.sessions.find((s) => s.id === id)
+      entry.history = [
+        { type: 'user', content: 'before the worktree was deleted' },
+        { type: 'response', content: 'still here after restore' },
+      ]
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      return { stateFile, persisted }
+    }
+
+    it('recreates a worktree removed with `git worktree remove` and restores the session', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      persistWithHistory(mgr, id)
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+      assert.equal(existsSync(wtPath), false, 'precondition: the worktree is gone')
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.equal(mgr2._failedRestores.has(id), false, 'not parked as a failed restore')
+      const r = mgr2.getSession(id)
+      assert.ok(r, 'session restored under its preserved id')
+      assert.equal(r.worktreePath, wtPath, 'rebound to the same per-session path')
+      assert.equal(r.cwd, wtPath)
+      assert.equal(r.isolation, 'worktree')
+      assert.ok(existsSync(join(wtPath, '.git')), 'a real git worktree exists again at the path')
+      const history = mgr2._history.getHistory(id)
+      assert.deepEqual(history.map((h) => h.content), ['before the worktree was deleted', 'still here after restore'])
+
+      mgr2.destroySession(id)
+      assert.equal(existsSync(wtPath), false, 'the recreated worktree is still GC\'d on destroy')
+      mgr2.destroyAll()
+    })
+
+    it('recreates a worktree deleted without git (still registered but missing)', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      persistWithHistory(mgr, id)
+      rmSync(wtPath, { recursive: true, force: true })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      const r = mgr2.getSession(id)
+      assert.ok(r, 'restored despite git still listing the missing worktree')
+      assert.equal(r.worktreePath, wtPath)
+      assert.ok(existsSync(join(wtPath, '.git')), 'worktree recreated over the stale registration')
+      mgr2.destroyAll()
+    })
+
+    it('stays parked, naming the repository, when the repository is gone too; Retry recovers once it is back', async () => {
+      const otherRepo = makeGitRepo()
+      const movedRepo = `${otherRepo}-moved`
+      let mgr2
+      try {
+        const mgr = makeManager(gitRepo)
+        const id = mgr.createSession({ cwd: otherRepo, worktree: true })
+        const wtPath = mgr.getSession(id).worktreePath
+        persistWithHistory(mgr, id)
+        execFileSync(GIT, ['-C', otherRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+        renameSync(otherRepo, movedRepo)
+
+        mgr2 = makeManager(gitRepo)
+        const failures = []
+        mgr2.on('session_restore_failed', (e) => failures.push(e))
+        mgr2.restoreState()
+
+        assert.equal(mgr2.getSession(id), null, 'not restored')
+        assert.ok(mgr2._failedRestores.has(id), 'parked for retry with history preserved')
+        assert.equal(failures.length, 1)
+        assert.equal(failures[0].errorCode, 'INVALID_DIRECTORY')
+        assert.ok(failures[0].errorMessage.includes(otherRepo), 'the error names the missing repository')
+        assert.equal(existsSync(wtPath), false, 'nothing created at the worktree path')
+
+        // Retry runs the same path: with the repository back, it succeeds.
+        renameSync(movedRepo, otherRepo)
+        const result = await mgr2.retryFailedRestore(id)
+        assert.deepEqual(result, { ok: true, sessionId: id })
+        assert.equal(mgr2._failedRestores.has(id), false)
+        assert.equal(mgr2.getSession(id).worktreePath, wtPath)
+        assert.ok(existsSync(join(wtPath, '.git')), 'Retry recreated the worktree')
+        assert.equal(mgr2._history.getHistory(id).length, 2, 'history re-seeded by the retry')
+      } finally {
+        mgr2?.destroyAll()
+        if (existsSync(movedRepo)) renameSync(movedRepo, otherRepo)
+        rmDirRobust(otherRepo)
+      }
+    })
+
+    it('recreates a worktree deleted without git at its last HEAD, keeping its detached commits referenced', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      execFileSync(GIT, ['-C', wtPath, 'commit', '--allow-empty', '-m', 'work on the detached HEAD'], { stdio: 'pipe' })
+      const sessionHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.notEqual(sessionHead, repoHead, 'precondition: the session advanced past the repo HEAD')
+      persistWithHistory(mgr, id)
+      rmSync(wtPath, { recursive: true, force: true })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      const recreatedHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(recreatedHead, sessionHead, 'checked out at the commit the session last had, not the repo HEAD')
+      mgr2.destroyAll()
+    })
+
+    // Shared setup for the "deleted without git" cases: a session that has
+    // committed past the repo HEAD on its detached HEAD, then had its dir
+    // rm -rf'd so git still holds the registration (and the only ref to it).
+    function sessionWithDetachedCommitThenRmRf() {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      execFileSync(GIT, ['-C', wtPath, 'commit', '--allow-empty', '-m', 'only on the detached HEAD'], { stdio: 'pipe' })
+      const sessionHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      persistWithHistory(mgr, id)
+      rmSync(wtPath, { recursive: true, force: true })
+      return { id, wtPath, sessionHead }
+    }
+    const registeredHeads = () => execFileSync(GIT, ['-C', gitRepo, 'worktree', 'list', '--porcelain'], { encoding: 'utf-8' })
+    const recoveryRef = (id) => {
+      try {
+        return execFileSync(GIT, ['-C', gitRepo, 'rev-parse', '--verify', '--quiet', `refs/chroxy/worktree-recovery/${id}`], { encoding: 'utf-8', stdio: 'pipe' }).trim()
+      } catch {
+        return null
+      }
+    }
+
+    it('replaces nothing when the registered HEAD cannot be read', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2._registeredWorktreeHead = () => null // the lookup is uncertain
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(mgr2._failedRestores.has(id), 'parked for retry')
+      assert.ok(registeredHeads().includes(sessionHead), 'the registration still holds the session commit')
+      mgr2.destroyAll()
+    })
+
+    it('keeps the session commit pinned when the forced recreation fails, and Retry recovers it', async () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+
+      const mgr2 = makeManager(gitRepo)
+      const realAdd = mgr2._addDetachedWorktree.bind(mgr2)
+      mgr2._addDetachedWorktree = (repoDir, dir, opts) => {
+        if (opts?.force) {
+          // Model git's own failure order: the stale registration goes first.
+          execFileSync(GIT, ['-C', repoDir, 'worktree', 'prune'], { stdio: 'pipe' })
+          throw new Error('simulated checkout failure')
+        }
+        return realAdd(repoDir, dir, opts)
+      }
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.equal(registeredHeads().includes(sessionHead), false, 'precondition: the registration is gone')
+      assert.equal(recoveryRef(id), sessionHead, 'the session commit is pinned by the recovery ref')
+
+      mgr2._addDetachedWorktree = realAdd
+      const result = await mgr2.retryFailedRestore(id)
+      assert.deepEqual(result, { ok: true, sessionId: id })
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead, 'Retry checked out the pinned commit, not the repo HEAD')
+      assert.equal(recoveryRef(id), null, 'the pin is dropped once the checkout references the commit')
+      mgr2.destroyAll()
+    })
+
+    it('refuses a stale pin that differs from a live registration', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, repoHead], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(registeredHeads().includes(sessionHead), 'the newer registered commit is not replaced')
+      mgr2.destroyAll()
+    })
+
+    it('refuses a pin when the registrations cannot be read', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, repoHead], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2._registeredWorktreeHead = () => undefined // `git worktree list` failed
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(registeredHeads().includes(sessionHead), 'the registration is not replaced')
+      mgr2.destroyAll()
+    })
+
+    it('ignores a pin that does not name a commit', () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      const tree = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf-8' }).trim()
+      execFileSync(GIT, ['-C', gitRepo, 'update-ref', `refs/chroxy/worktree-recovery/${id}`, tree], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored from the registration instead')
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead)
+      mgr2.destroyAll()
+    })
+
+    it('finds the registered HEAD when the whole worktree base was deleted', () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      rmSync(dirname(wtPath), { recursive: true, force: true })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead, 'matched the registration through the nearest existing ancestor')
+      mgr2.destroyAll()
+    })
+
+    it('does not run the repository hooks while recreating', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      persistWithHistory(mgr, id)
+      const marker = join(gitRepo, 'hook-ran')
+      const hooksDir = join(gitRepo, '.git', 'hooks')
+      writeFileSync(join(hooksDir, 'post-checkout'), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 })
+      // Pin where git looks for hooks, then prove this fixture's hook DOES run
+      // on an ordinary worktree add — otherwise "no marker" proves nothing.
+      execFileSync(GIT, ['-C', gitRepo, 'config', 'core.hooksPath', hooksDir], { stdio: 'pipe' })
+      const control = join(gitRepo, 'hook-control-wt')
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'add', '--detach', control, 'HEAD'], { stdio: 'pipe' })
+      assert.ok(existsSync(marker), 'positive control: the hook runs on a plain worktree add')
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', control], { stdio: 'pipe' })
+      rmSync(marker)
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      assert.equal(existsSync(marker), false, 'post-checkout hook did not run')
+      mgr2.destroyAll()
+    })
+
+    it('binds the canonical worktree path when the persisted spelling only resolves lexically', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      const { stateFile, persisted } = persistWithHistory(mgr, id)
+      // Built by hand: join() would normalise the '..' away.
+      const odd = `${mgr._worktreeBase}/gone/../${id}`
+      persisted.sessions[0].worktreePath = odd
+      persisted.sessions[0].cwd = odd
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      const r = mgr2.getSession(id)
+      assert.ok(r, 'restored')
+      assert.equal(r.cwd, wtPath, 'cwd is the canonical path that was recreated')
+      assert.equal(r.worktreePath, wtPath)
+      assert.ok(existsSync(r.cwd), 'the bound cwd exists on disk')
+      mgr2.destroyAll()
+    })
+
+    it('stays parked when the recorded repository is a relative path', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      const { stateFile, persisted } = persistWithHistory(mgr, id)
+      persisted.sessions[0].worktreeRepoDir = '.'
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      const failures = []
+      mgr2.on('session_restore_failed', (e) => failures.push(e))
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(failures[0].errorMessage.includes('not an absolute path'), failures[0].errorMessage)
+      assert.equal(existsSync(wtPath), false, 'nothing created from the daemon cwd')
+      mgr2.destroyAll()
+    })
+
+    it('stays parked when the state entry records no repository for the worktree', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      const { stateFile, persisted } = persistWithHistory(mgr, id)
+      delete persisted.sessions[0].worktreeRepoDir
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      const failures = []
+      mgr2.on('session_restore_failed', (e) => failures.push(e))
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(mgr2._failedRestores.has(id), 'parked for retry')
+      assert.ok(failures[0].errorMessage.includes('no repository is recorded'), failures[0].errorMessage)
+      assert.equal(existsSync(wtPath), false, 'nothing created from the daemon cwd')
+      mgr2.destroyAll()
+    })
+
+    it('never recreates at a tampered worktreePath outside the per-session dir (#5310)', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      persistWithHistory(mgr, id)
+      const elsewhere = join(mkdtempSync(join(tmpdir(), 'chroxy-tamper-')), 'not-a-worktree')
+      const stateFile = join(gitRepo, 'session-state.json')
+      const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+      persisted.sessions[0].worktreePath = elsewhere
+      persisted.sessions[0].cwd = elsewhere
+      writeFileSync(stateFile, JSON.stringify(persisted))
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(mgr2._failedRestores.has(id), 'parked exactly as before #8856')
+      assert.equal(existsSync(elsewhere), false, 'no checkout created at the tampered path')
+      mgr2.destroyAll()
+      rmSync(dirname(elsewhere), { recursive: true, force: true })
+    })
   })
 
   it('a non-worktree session restores with no worktree binding (#5310 back-compat)', () => {
