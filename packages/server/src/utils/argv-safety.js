@@ -633,7 +633,7 @@ export const AUDITED_SINKS = [
   {
     file: 'session-manager.js',
     match: 'repoDir',
-    reason: "repoDir is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form). It is the create-time cwd already gated by validateCwdAllowed() to an existing real directory, or the persisted worktreeRepoDir that create-time cwd was saved as (_recreateMissingWorktree refuses an empty one).",
+    reason: "repoDir is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form), so it cannot be read as an option whatever it holds. It is the create-time cwd (gated by validateCwdAllowed() at create), or on a #8856 restore the persisted worktreeRepoDir, which is restore-time input not re-validated against the cwd allowlist; _recreateMissingWorktree holds it to a non-empty absolute path and runs git with hooks disabled.",
   },
   {
     file: 'session-manager.js',

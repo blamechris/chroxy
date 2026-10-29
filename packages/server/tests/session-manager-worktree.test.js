@@ -410,6 +410,87 @@ describe('SessionManager worktree isolation', () => {
       }
     })
 
+    it('recreates a worktree deleted without git at its last HEAD, keeping its detached commits referenced', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      execFileSync(GIT, ['-C', wtPath, 'commit', '--allow-empty', '-m', 'work on the detached HEAD'], { stdio: 'pipe' })
+      const sessionHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      const repoHead = execFileSync(GIT, ['-C', gitRepo, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.notEqual(sessionHead, repoHead, 'precondition: the session advanced past the repo HEAD')
+      persistWithHistory(mgr, id)
+      rmSync(wtPath, { recursive: true, force: true })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      const recreatedHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(recreatedHead, sessionHead, 'checked out at the commit the session last had, not the repo HEAD')
+      mgr2.destroyAll()
+    })
+
+    it('does not run the repository hooks while recreating', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      persistWithHistory(mgr, id)
+      const marker = join(gitRepo, 'hook-ran')
+      const hook = join(gitRepo, '.git', 'hooks', 'post-checkout')
+      writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 })
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      assert.equal(existsSync(marker), false, 'post-checkout hook did not run')
+      mgr2.destroyAll()
+    })
+
+    it('binds the canonical worktree path when the persisted spelling only resolves lexically', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      const { stateFile, persisted } = persistWithHistory(mgr, id)
+      // Built by hand: join() would normalise the '..' away.
+      const odd = `${mgr._worktreeBase}/gone/../${id}`
+      persisted.sessions[0].worktreePath = odd
+      persisted.sessions[0].cwd = odd
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      const r = mgr2.getSession(id)
+      assert.ok(r, 'restored')
+      assert.equal(r.cwd, wtPath, 'cwd is the canonical path that was recreated')
+      assert.equal(r.worktreePath, wtPath)
+      assert.ok(existsSync(r.cwd), 'the bound cwd exists on disk')
+      mgr2.destroyAll()
+    })
+
+    it('stays parked when the recorded repository is a relative path', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      const { stateFile, persisted } = persistWithHistory(mgr, id)
+      persisted.sessions[0].worktreeRepoDir = '.'
+      writeFileSync(stateFile, JSON.stringify(persisted))
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
+
+      const mgr2 = makeManager(gitRepo)
+      const failures = []
+      mgr2.on('session_restore_failed', (e) => failures.push(e))
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(failures[0].errorMessage.includes('not an absolute path'), failures[0].errorMessage)
+      assert.equal(existsSync(wtPath), false, 'nothing created from the daemon cwd')
+      mgr2.destroyAll()
+    })
+
     it('stays parked when the state entry records no repository for the worktree', () => {
       const mgr = makeManager(gitRepo)
       const id = mgr.createSession({ cwd: gitRepo, worktree: true })
