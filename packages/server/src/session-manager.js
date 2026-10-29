@@ -2342,14 +2342,19 @@ export class SessionManager extends EventEmitter {
    * that `worktreeDir` is exactly this session's `<worktreeBase>/<id>` (#5310),
    * so this never creates a checkout anywhere else.
    *
-   * What is checked out depends on how the worktree went:
+   * What is checked out depends on how the worktree went, and nothing that
+   * still references the session's commits is replaced before they are pinned:
+   * - Removed with `git worktree remove`: no registration is left, so a plain
+   *   (non-force) add succeeds with a fresh detached checkout of the repo's
+   *   HEAD. Commits made only on the old detached HEAD were already
+   *   unreferenced by that removal. A plain add cannot replace anything.
    * - Deleted without git (`rm -rf`): git still has it registered, with the
-   *   HEAD it last had. Recreating at THAT commit keeps commits made on its
-   *   detached HEAD referenced; `--force` replaces the stale registration and
-   *   would otherwise drop the only ref to them.
-   * - Removed with `git worktree remove`: no registration is left, so this is
-   *   a fresh detached checkout of the repo's HEAD. Commits made only on the
-   *   old detached HEAD were already unreferenced by that removal.
+   *   HEAD it last had, so the plain add fails. That HEAD is read back, pinned
+   *   under `refs/chroxy/worktree-recovery/<id>`, and only then is the stale
+   *   registration replaced (`--force`) by a checkout of that commit. If the
+   *   HEAD cannot be read with certainty the restore fails and nothing is
+   *   replaced. If the forced add fails, the pin stays and the next attempt
+   *   (Retry) checks it out; it is dropped once a checkout references it.
    * Either way uncommitted work from the deleted worktree is gone; that is
    * logged loudly. Without the recreation the session could only ever be
    * parked as a failed restore whose Retry runs this same path and fails again.
@@ -2357,14 +2362,17 @@ export class SessionManager extends EventEmitter {
    * `repoDir` comes from the state file, so it is held to an absolute path and
    * the repository's hooks are not run. Writing that file already takes the
    * daemon user's own access, and the restored `cwd` it carries is where the
-   * agent then runs, so this adds no authority beyond that; it just keeps a
-   * recovery step from running repository code of its own.
+   * agent then runs, so this adds no authority beyond that. Disabling hooks
+   * is the cheap part of the containment, not all of it: commands the
+   * repository's own config defines (checkout filters, `core.fsmonitor`)
+   * still run, as they do for any git operation in that repository.
    *
    * @param {string} worktreeDir - The session's expected worktree dir (missing)
    * @param {string|undefined} repoDir - The persisted worktreeRepoDir
    * @param {string} sessionId - Used for log messages only
    * @throws {SessionDirectoryError} when the repo dir is unknown, relative,
-   *   missing or not a git repository — the restore then fails and is parked
+   *   missing or not a git repository, or the worktree cannot be recreated
+   *   without risking its commits — the restore then fails and is parked
    */
   _recreateMissingWorktree(worktreeDir, repoDir, sessionId) {
     const missing = (reason) => new SessionDirectoryError(
@@ -2380,40 +2388,107 @@ export class SessionManager extends EventEmitter {
     if (!isAbsolute(repoDir)) {
       throw missing(`its recorded repository ${repoDir} is not an absolute path`)
     }
-    const registeredHead = this._registeredWorktreeHead(repoDir, worktreeDir)
-    try {
-      this._addDetachedWorktree(repoDir, worktreeDir, { force: true, commit: registeredHead || 'HEAD', noHooks: true })
-    } catch (err) {
-      throw missing(err?.message || String(err))
+    const recoveryRef = `refs/chroxy/worktree-recovery/${basename(worktreeDir)}`
+    assertSafeArgvValue(recoveryRef, 'recovery ref')
+    let commit = this._readGitCommit(repoDir, recoveryRef)
+    if (!commit) {
+      try {
+        this._addDetachedWorktree(repoDir, worktreeDir, { noHooks: true })
+        log.warn(`Recreated the deleted worktree for session ${sessionId} at ${worktreeDir} as a fresh detached checkout of ${repoDir} HEAD; uncommitted work from the deleted worktree is not recoverable (#8856)`)
+        return
+      } catch (plainErr) {
+        commit = this._registeredWorktreeHead(repoDir, worktreeDir)
+        if (!commit) throw missing(plainErr?.message || String(plainErr))
+      }
+      assertSafeArgvValue(commit, 'worktree commit')
+      const pinArgs = ['-c', 'core.hooksPath=/dev/null', '-C', repoDir, 'update-ref', recoveryRef, commit]
+      try {
+        execFileSync(GIT, pinArgs, { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' })
+      } catch (err) {
+        throw missing(`could not pin its last HEAD ${commit}: ${err?.stderr?.trim() || err?.message || err}`)
+      }
     }
-    const from = registeredHead ? `its last HEAD ${registeredHead}` : `${repoDir} HEAD`
-    log.warn(`Recreated the deleted worktree for session ${sessionId} at ${worktreeDir} as a detached checkout of ${from}; uncommitted work from the deleted worktree is not recoverable (#8856)`)
+    try {
+      this._addDetachedWorktree(repoDir, worktreeDir, { force: true, commit, noHooks: true })
+    } catch (err) {
+      throw missing(`${err?.message || err}; its last HEAD stays pinned at ${recoveryRef}`)
+    }
+    const unpinArgs = ['-c', 'core.hooksPath=/dev/null', '-C', repoDir, 'update-ref', '-d', recoveryRef]
+    try {
+      execFileSync(GIT, unpinArgs, { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' })
+    } catch (err) {
+      log.warn(`Could not drop ${recoveryRef} in ${repoDir} after recreating the worktree: ${err?.stderr?.trim() || err?.message || err}`)
+    }
+    log.warn(`Recreated the deleted worktree for session ${sessionId} at ${worktreeDir} as a detached checkout of its last HEAD ${commit}; uncommitted work from the deleted worktree is not recoverable (#8856)`)
+  }
+
+  /**
+   * The commit `ref` names in `repoDir`, or null when it does not exist.
+   * @param {string} repoDir
+   * @param {string} ref
+   * @returns {string|null}
+   */
+  _readGitCommit(repoDir, ref) {
+    assertSafeArgvValue(ref, 'git ref')
+    try {
+      const out = execFileSync(GIT, ['-C', repoDir, 'rev-parse', '--verify', '--quiet', ref], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      }).trim()
+      return /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(out) ? out : null
+    } catch {
+      return null
+    }
   }
 
   /**
    * The HEAD commit git still records for `worktreeDir` as a worktree of
-   * `repoDir`, or null when it is not registered (or cannot be read). git
-   * stores the path canonicalised, so both spellings are compared.
+   * `repoDir`, or null when that cannot be established — not registered, or
+   * the registrations could not be read. Callers treat null as "do not
+   * replace anything". Read NUL-delimited so no path spelling can split a
+   * record, and compared against the path canonicalised the way git stores
+   * it, resolving through the nearest ancestor that still exists (the whole
+   * worktree base may be gone, under a symlinked prefix such as macOS /var).
    * @param {string} repoDir
    * @param {string} worktreeDir
    * @returns {string|null}
    */
   _registeredWorktreeHead(repoDir, worktreeDir) {
     const candidates = new Set([resolve(worktreeDir)])
-    try { candidates.add(join(realpathSync(dirname(worktreeDir)), basename(worktreeDir))) } catch { /* base dir gone */ }
+    let dir = resolve(worktreeDir)
+    const rest = []
+    for (;;) {
+      try {
+        candidates.add(join(realpathSync(dir), ...rest))
+        break
+      } catch {
+        const parent = dirname(dir)
+        if (parent === dir) break
+        rest.unshift(basename(dir))
+        dir = parent
+      }
+    }
     let out
     try {
-      out = execFileSync(GIT, ['-C', repoDir, 'worktree', 'list', '--porcelain'], {
+      out = execFileSync(GIT, ['-C', repoDir, 'worktree', 'list', '--porcelain', '-z'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf-8',
       })
     } catch {
       return null
     }
-    for (const block of out.split('\n\n')) {
-      const path = /^worktree (.+)$/m.exec(block)?.[1]
-      const head = /^HEAD ([0-9a-f]{40}|[0-9a-f]{64})$/m.exec(block)?.[1]
-      if (path && head && candidates.has(path)) return head
+    let path = null
+    let head = null
+    for (const field of `${out}\0`.split('\0')) {
+      if (field === '') {
+        if (path !== null && head !== null && candidates.has(path)) return head
+        path = null
+        head = null
+      } else if (field.startsWith('worktree ')) {
+        path = field.slice('worktree '.length)
+      } else if (/^HEAD ([0-9a-f]{40}|[0-9a-f]{64})$/.test(field)) {
+        head = field.slice('HEAD '.length)
+      }
     }
     return null
   }

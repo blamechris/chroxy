@@ -430,14 +430,98 @@ describe('SessionManager worktree isolation', () => {
       mgr2.destroyAll()
     })
 
+    // Shared setup for the "deleted without git" cases: a session that has
+    // committed past the repo HEAD on its detached HEAD, then had its dir
+    // rm -rf'd so git still holds the registration (and the only ref to it).
+    function sessionWithDetachedCommitThenRmRf() {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      execFileSync(GIT, ['-C', wtPath, 'commit', '--allow-empty', '-m', 'only on the detached HEAD'], { stdio: 'pipe' })
+      const sessionHead = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      persistWithHistory(mgr, id)
+      rmSync(wtPath, { recursive: true, force: true })
+      return { id, wtPath, sessionHead }
+    }
+    const registeredHeads = () => execFileSync(GIT, ['-C', gitRepo, 'worktree', 'list', '--porcelain'], { encoding: 'utf-8' })
+    const recoveryRef = (id) => {
+      try {
+        return execFileSync(GIT, ['-C', gitRepo, 'rev-parse', '--verify', '--quiet', `refs/chroxy/worktree-recovery/${id}`], { encoding: 'utf-8', stdio: 'pipe' }).trim()
+      } catch {
+        return null
+      }
+    }
+
+    it('replaces nothing when the registered HEAD cannot be read', () => {
+      const { id, sessionHead } = sessionWithDetachedCommitThenRmRf()
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2._registeredWorktreeHead = () => null // the lookup is uncertain
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.ok(mgr2._failedRestores.has(id), 'parked for retry')
+      assert.ok(registeredHeads().includes(sessionHead), 'the registration still holds the session commit')
+      mgr2.destroyAll()
+    })
+
+    it('keeps the session commit pinned when the forced recreation fails, and Retry recovers it', async () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+
+      const mgr2 = makeManager(gitRepo)
+      const realAdd = mgr2._addDetachedWorktree.bind(mgr2)
+      mgr2._addDetachedWorktree = (repoDir, dir, opts) => {
+        if (opts?.force) {
+          // Model git's own failure order: the stale registration goes first.
+          execFileSync(GIT, ['-C', repoDir, 'worktree', 'prune'], { stdio: 'pipe' })
+          throw new Error('simulated checkout failure')
+        }
+        return realAdd(repoDir, dir, opts)
+      }
+      mgr2.restoreState()
+
+      assert.equal(mgr2.getSession(id), null, 'not restored')
+      assert.equal(registeredHeads().includes(sessionHead), false, 'precondition: the registration is gone')
+      assert.equal(recoveryRef(id), sessionHead, 'the session commit is pinned by the recovery ref')
+
+      mgr2._addDetachedWorktree = realAdd
+      const result = await mgr2.retryFailedRestore(id)
+      assert.deepEqual(result, { ok: true, sessionId: id })
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead, 'Retry checked out the pinned commit, not the repo HEAD')
+      assert.equal(recoveryRef(id), null, 'the pin is dropped once the checkout references the commit')
+      mgr2.destroyAll()
+    })
+
+    it('finds the registered HEAD when the whole worktree base was deleted', () => {
+      const { id, wtPath, sessionHead } = sessionWithDetachedCommitThenRmRf()
+      rmSync(dirname(wtPath), { recursive: true, force: true })
+
+      const mgr2 = makeManager(gitRepo)
+      mgr2.restoreState()
+
+      assert.ok(mgr2.getSession(id), 'restored')
+      const head = execFileSync(GIT, ['-C', wtPath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim()
+      assert.equal(head, sessionHead, 'matched the registration through the nearest existing ancestor')
+      mgr2.destroyAll()
+    })
+
     it('does not run the repository hooks while recreating', () => {
       const mgr = makeManager(gitRepo)
       const id = mgr.createSession({ cwd: gitRepo, worktree: true })
       const wtPath = mgr.getSession(id).worktreePath
       persistWithHistory(mgr, id)
       const marker = join(gitRepo, 'hook-ran')
-      const hook = join(gitRepo, '.git', 'hooks', 'post-checkout')
-      writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 })
+      const hooksDir = join(gitRepo, '.git', 'hooks')
+      writeFileSync(join(hooksDir, 'post-checkout'), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 })
+      // Pin where git looks for hooks, then prove this fixture's hook DOES run
+      // on an ordinary worktree add — otherwise "no marker" proves nothing.
+      execFileSync(GIT, ['-C', gitRepo, 'config', 'core.hooksPath', hooksDir], { stdio: 'pipe' })
+      const control = join(gitRepo, 'hook-control-wt')
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'add', '--detach', control, 'HEAD'], { stdio: 'pipe' })
+      assert.ok(existsSync(marker), 'positive control: the hook runs on a plain worktree add')
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', control], { stdio: 'pipe' })
+      rmSync(marker)
       execFileSync(GIT, ['-C', gitRepo, 'worktree', 'remove', '--force', wtPath], { stdio: 'pipe' })
 
       const mgr2 = makeManager(gitRepo)
