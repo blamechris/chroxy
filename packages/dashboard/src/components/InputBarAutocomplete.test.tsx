@@ -1,5 +1,5 @@
 /**
- * InputBar autocomplete regressions (#8432, #8433, #8831, #8832, #8834).
+ * InputBar autocomplete regressions (#8432, #8433, #8831, #8832, #8834, #8839).
  *
  * The real InputBar is driven by an App-like parent: per-session drafts, and an
  * `onValueChange` whose identity changes when the active session changes (App's
@@ -25,11 +25,14 @@ const FILES = [
 
 type InputBarProps = ComponentProps<typeof InputBar>
 
-function AppLikeParent({ initial, onSend = vi.fn(), onSlashTrigger, onFileTrigger, onFileAttach, onEvaluate, userMessageHistory }: {
+function AppLikeParent({ initial, onSend = vi.fn(), onSlashTrigger, onFileTrigger, onFileAttach, onEvaluate, userMessageHistory, onLargePaste, voiceInput }: {
   initial: Record<string, string>
   onSend?: (t: string) => void
-} & Pick<InputBarProps, 'onSlashTrigger' | 'onFileTrigger' | 'onFileAttach' | 'onEvaluate' | 'userMessageHistory'>) {
+} & Pick<InputBarProps, 'onSlashTrigger' | 'onFileTrigger' | 'onFileAttach' | 'onEvaluate' | 'userMessageHistory' | 'onLargePaste' | 'voiceInput'>) {
   const [activeSessionId, setActiveSessionId] = useState('A')
+  // App renders the composer only outside the Control Room; the drafts live in
+  // draftsRef (App's inputDraftsRef), so they survive the unmount.
+  const [showComposer, setShowComposer] = useState(true)
   const draftsRef = useRef<Map<string, string>>(new Map(Object.entries(initial)))
   const [, bump] = useState(0)
   // Same shape as App.handleDraftChange: new identity per active session.
@@ -41,6 +44,7 @@ function AppLikeParent({ initial, onSend = vi.fn(), onSlashTrigger, onFileTrigge
     <div>
       <button data-testid="switch-A" onClick={() => setActiveSessionId('A')} />
       <button data-testid="switch-B" onClick={() => setActiveSessionId('B')} />
+      <button data-testid="toggle-composer" onClick={() => setShowComposer(v => !v)} />
       {/* The parent writing the active draft itself, as App does for a CI
           prefill, a queued-message reopen or a removed paste marker. */}
       <button data-testid="empty-active-draft" onClick={() => {
@@ -49,20 +53,24 @@ function AppLikeParent({ initial, onSend = vi.fn(), onSlashTrigger, onFileTrigge
       }} />
       <pre data-testid="draft-A">{draftsRef.current.get('A') ?? ''}</pre>
       <pre data-testid="draft-B">{draftsRef.current.get('B') ?? ''}</pre>
-      <InputBar
-        onSend={onSend}
-        onInterrupt={vi.fn()}
-        sendOnEnter
-        slashCommands={COMMANDS}
-        onSlashTrigger={onSlashTrigger}
-        filePickerFiles={FILES}
-        onFileTrigger={onFileTrigger}
-        onFileAttach={onFileAttach}
-        onEvaluate={onEvaluate}
-        userMessageHistory={userMessageHistory}
-        controlledValue={draftsRef.current.get(activeSessionId) ?? ''}
-        onValueChange={handleDraftChange}
-      />
+      {showComposer && (
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          sendOnEnter
+          slashCommands={COMMANDS}
+          onSlashTrigger={onSlashTrigger}
+          filePickerFiles={FILES}
+          onFileTrigger={onFileTrigger}
+          onFileAttach={onFileAttach}
+          onEvaluate={onEvaluate}
+          userMessageHistory={userMessageHistory}
+          onLargePaste={onLargePaste}
+          voiceInput={voiceInput}
+          controlledValue={draftsRef.current.get(activeSessionId) ?? ''}
+          onValueChange={handleDraftChange}
+        />
+      )}
     </div>
   )
 }
@@ -472,5 +480,156 @@ describe('an outside write sizes the composer to the new draft (#8834)', () => {
     fireEvent.click(screen.getByTestId('empty-active-draft'))
     expect(box().value).toBe('')
     expect(box().style.height).toBe('42px')
+  })
+})
+
+// #8839 — the composer's own programmatic writes (history recall, Apply
+// rewrite, dictation, the large-paste marker) and a remount never re-sized the
+// box: only typing and an outside write did, so a recalled three-line message
+// sat in a one-line box and a multi-line draft came back one line tall after a
+// Control Room round trip. jsdom does no layout, so getComputedStyle and
+// scrollHeight are stubbed; scrollHeight is a prototype getter (so it is
+// already in place at MOUNT) derived from the textarea's CURRENT value, so a
+// pass proves the resize measured the value that had reached the DOM.
+describe('the composer\'s own writes and mount size it (#8839)', () => {
+  const originalGetComputedStyle = window.getComputedStyle
+  beforeEach(() => {
+    window.getComputedStyle = vi.fn().mockReturnValue({
+      lineHeight: '24px',
+      paddingTop: '8px',
+      paddingBottom: '8px',
+      borderTopWidth: '1px',
+      borderBottomWidth: '1px',
+      boxSizing: 'border-box',
+    }) as unknown as typeof window.getComputedStyle
+    // A row holds 40 characters: one row is 42px (border-box), three rows 90px,
+    // four 114px, five or more cap at 138px.
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLTextAreaElement) {
+        const rows = this.value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 40)), 0)
+        return rows * 24 + 16
+      },
+    })
+  })
+  afterEach(() => {
+    window.getComputedStyle = originalGetComputedStyle
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight')
+  })
+
+  it('history recall (Up, Down, and Down past the newest) sizes the box to each recalled entry', () => {
+    render(<AppLikeParent initial={{}} userMessageHistory={['one line', 'a\nb\nc']} />)
+    fireEvent.change(box(), { target: { value: 'draft' } })
+    expect(box().style.height).toBe('42px')
+
+    box().setSelectionRange(5, 5)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('90px')
+
+    box().setSelectionRange(5, 5)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('one line')
+    expect(box().style.height).toBe('42px')
+
+    box().setSelectionRange(8, 8)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('90px')
+
+    // Down past the newest entry restores the stashed one-line draft.
+    box().setSelectionRange(5, 5)
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().value).toBe('draft')
+    expect(box().style.height).toBe('42px')
+  })
+
+  it('Escape while cycling restores the stashed draft at its own height', () => {
+    render(<AppLikeParent initial={{}} userMessageHistory={['a\nb\nc']} />)
+    fireEvent.change(box(), { target: { value: 'draft' } })
+    box().setSelectionRange(5, 5)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().style.height).toBe('90px')
+
+    fireEvent.keyDown(box(), { key: 'Escape' })
+    expect(box().value).toBe('draft')
+    expect(box().style.height).toBe('42px')
+  })
+
+  it('Apply rewrite sizes the box to the rewritten draft', async () => {
+    const onEvaluate = vi.fn().mockResolvedValue({ verdict: 'rewrite', rewritten: 'r1\nr2\nr3\nr4', reasoning: 'Clearer' })
+    render(<AppLikeParent initial={{ A: 'one line' }} onEvaluate={onEvaluate} />)
+    expect(box().style.height).toBe('42px')
+
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    const apply = await screen.findByTestId('evaluator-apply')
+    fireEvent.click(apply)
+    expect(box().value).toBe('r1\nr2\nr3\nr4')
+    expect(box().style.height).toBe('114px')
+  })
+
+  it('the large-paste marker shrinks the box to one line', () => {
+    render(<AppLikeParent initial={{}} onLargePaste={() => '[Pasted text #1]'} />)
+    fireEvent.change(box(), { target: { value: 'a\nb\nc\nd' } })
+    expect(box().style.height).toBe('114px')
+
+    // 40 lines is past the collapse threshold, so the paste becomes the marker.
+    const pasted = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n')
+    box().setSelectionRange(0, box().value.length)
+    fireEvent.paste(box(), {
+      clipboardData: { getData: (t: string) => (t === 'text/plain' ? pasted : ''), files: [] },
+    })
+    expect(box().value).toBe('[Pasted text #1]')
+    expect(box().style.height).toBe('42px')
+  })
+
+  it('dictation sizes the box to the transcript, which wraps onto three rows', () => {
+    const voice = (over: Partial<NonNullable<InputBarProps['voiceInput']>>) => ({
+      isAvailable: true, isRecording: false, transcript: '', error: null, start: vi.fn(), stop: vi.fn(), ...over,
+    })
+    const { rerender } = render(<AppLikeParent initial={{}} voiceInput={voice({})} />)
+    expect(box().style.height).toBe('42px')
+
+    const transcript = 'x'.repeat(100)
+    rerender(<AppLikeParent initial={{}} voiceInput={voice({ isRecording: true, transcript })} />)
+    expect(box().value).toBe(transcript)
+    expect(box().style.height).toBe('90px')
+  })
+
+  it('mount sizes the box to the seeded draft', () => {
+    render(<AppLikeParent initial={{ A: 'a\nb\nc' }} />)
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('90px')
+  })
+
+  it('a Control Room round trip (unmount, remount) brings the draft back at its height', () => {
+    render(<AppLikeParent initial={{}} />)
+    fireEvent.change(box(), { target: { value: 'a\nb\nc' } })
+    expect(box().style.height).toBe('90px')
+
+    fireEvent.click(screen.getByTestId('toggle-composer'))
+    expect(screen.queryByRole('textbox')).toBeNull()
+    fireEvent.click(screen.getByTestId('toggle-composer'))
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('90px')
+  })
+
+  it('Cmd+L sizes the emptied box to one line', () => {
+    render(<AppLikeParent initial={{}} />)
+    fireEvent.change(box(), { target: { value: 'a\nb\nc' } })
+    expect(box().style.height).toBe('90px')
+
+    fireEvent.keyDown(box(), { key: 'l', metaKey: true })
+    expect(box().value).toBe('')
+    expect(box().style.height).toBe('42px')
+  })
+
+  it('an unmeasurable composer (scrollHeight 0) keeps its one-row height instead of collapsing to its border', () => {
+    // jsdom's own scrollHeight is 0, as for a `display: none` ancestor.
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight')
+    render(<AppLikeParent initial={{}} />)
+    fireEvent.change(box(), { target: { value: 'a\nb\nc' } })
+    expect(box().value).toBe('a\nb\nc')
+    expect(box().style.height).toBe('auto')
   })
 })
