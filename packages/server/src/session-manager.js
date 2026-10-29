@@ -1435,7 +1435,12 @@ export class SessionManager extends EventEmitter {
     let resolvedModel = model === undefined ? this._defaultModel : model
     const resolvedPermissionMode = permissionMode || this._defaultPermissionMode
 
-    // Validate cwd exists
+    // Validate cwd exists. #8856: a restored worktree session's cwd IS its
+    // worktree, which the agent inside it can delete (`git worktree remove`).
+    // That one case is deferred to the rebind branch below, which can recreate
+    // the worktree once the session id is known; it throws this same error
+    // there whenever it cannot.
+    let missingRestoreWorktree = false
     try {
       const stat = statSync(baseCwd)
       if (!stat.isDirectory()) {
@@ -1443,9 +1448,14 @@ export class SessionManager extends EventEmitter {
       }
     } catch (err) {
       if (err.code === 'ENOENT') {
-        throw new SessionDirectoryError(`Directory does not exist: ${baseCwd}`, baseCwd)
+        if (restoreWorktreePath && resolve(baseCwd) === resolve(restoreWorktreePath)) {
+          missingRestoreWorktree = true
+        } else {
+          throw new SessionDirectoryError(`Directory does not exist: ${baseCwd}`, baseCwd)
+        }
+      } else {
+        throw err
       }
-      throw err
     }
 
     // #4983 — preserve persisted ID on restoreState so dashboard's
@@ -1573,10 +1583,13 @@ export class SessionManager extends EventEmitter {
       // entry carries worktreePath:null and never GCs the dir on destroy
       // (orphan accrual) and reports isolation:'none'. The original repo dir
       // can't be derived from the persisted cwd (which IS the worktree), so it
-      // is persisted + threaded through here for `git worktree remove`. If the
-      // worktree dir was deleted out from under us (e.g. `chroxy worktree gc`),
-      // the generic baseCwd existence check above already fails the restore
-      // cleanly and #2954 preserves it for retry.
+      // is persisted + threaded through here for `git worktree remove`.
+      //
+      // #8856: if the worktree dir was deleted out from under us (the agent
+      // removed its own cwd, or `chroxy worktree gc`), it is recreated below
+      // from worktreeRepoDir. Failing instead parked the session as a failed
+      // restore whose Retry could never succeed, because nothing put the
+      // directory back.
       //
       // SECURITY (#5310 review): restoreWorktreePath is read from the on-disk
       // state file and later becomes a recursive-deletion target in
@@ -1589,37 +1602,23 @@ export class SessionManager extends EventEmitter {
       // deletion target) and log loudly, rather than rebind an unsafe path.
       const expectedWorktreeDir = resolve(join(this._worktreeBase || defaultWorktreeBase(), sessionId))
       if (resolve(restoreWorktreePath) === expectedWorktreeDir) {
+        if (missingRestoreWorktree) {
+          this._recreateMissingWorktree(expectedWorktreeDir, restoreWorktreeRepoDir, sessionId)
+        }
         worktreePath = restoreWorktreePath
         worktreeRepoDir = restoreWorktreeRepoDir || null
         resolvedCwd = restoreWorktreePath
       } else {
+        if (missingRestoreWorktree) {
+          // Never recreate at a path the #5310 guard rejects: fail exactly as
+          // the existence check above did before #8856.
+          throw new SessionDirectoryError(`Directory does not exist: ${baseCwd}`, baseCwd)
+        }
         log.warn(`Restored worktreePath "${restoreWorktreePath}" for session ${sessionId} does not match the expected per-session worktree dir "${expectedWorktreeDir}" — ignoring the rebind (treating as non-worktree) so a corrupted state file can't make destroySession() delete an arbitrary path`)
       }
     } else if (worktree) {
-      // Verify cwd is inside a git repository
-      try {
-        execFileSync(GIT, ['-C', baseCwd, 'rev-parse', '--git-dir'], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          encoding: 'utf-8',
-        })
-      } catch {
-        throw new WorktreeError(`Not a git repository: ${baseCwd}`)
-      }
-
-      // Create worktree directory
-      const worktreeBase = this._worktreeBase || defaultWorktreeBase()
-      const worktreeDir = join(worktreeBase, sessionId)
-      mkdirSync(worktreeBase, { recursive: true })
-
-      try {
-        execFileSync(GIT, ['-C', baseCwd, 'worktree', 'add', '--detach', worktreeDir, 'HEAD'], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          encoding: 'utf-8',
-        })
-      } catch (err) {
-        const msg = err?.stderr?.trim() || err?.message || String(err)
-        throw new WorktreeError(`Failed to create worktree: ${msg}`)
-      }
+      const worktreeDir = join(this._worktreeBase || defaultWorktreeBase(), sessionId)
+      this._addDetachedWorktree(baseCwd, worktreeDir)
 
       resolvedCwd = worktreeDir
       worktreePath = worktreeDir
@@ -2289,6 +2288,80 @@ export class SessionManager extends EventEmitter {
     // Persist now so the preserved history survives an abrupt shutdown before
     // the next debounced write.
     this._flushPersist()
+  }
+
+  /**
+   * Create a detached git worktree of `repoDir`'s HEAD at `worktreeDir`.
+   * Shared by worktree session creation and #8856's restore-time recreation.
+   * @param {string} repoDir - The git repository to branch the worktree from
+   * @param {string} worktreeDir - Absolute path of the new worktree
+   * @param {{ force?: boolean }} [opts] - `force` lets git reuse a path that is
+   *   still registered as a worktree of `repoDir` but missing on disk (a dir
+   *   deleted without `git worktree remove`); without it git refuses the add.
+   * @throws {WorktreeError} when repoDir is not a git repository or the add fails
+   */
+  _addDetachedWorktree(repoDir, worktreeDir, { force = false } = {}) {
+    try {
+      execFileSync(GIT, ['-C', repoDir, 'rev-parse', '--git-dir'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      })
+    } catch {
+      throw new WorktreeError(`Not a git repository: ${repoDir}`)
+    }
+
+    mkdirSync(dirname(worktreeDir), { recursive: true })
+
+    const addArgs = ['-C', repoDir, 'worktree', 'add']
+    if (force) addArgs.push('--force')
+    addArgs.push('--detach', worktreeDir, 'HEAD')
+    try {
+      execFileSync(GIT, addArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      })
+    } catch (err) {
+      const msg = err?.stderr?.trim() || err?.message || String(err)
+      throw new WorktreeError(`Failed to create worktree: ${msg}`)
+    }
+  }
+
+  /**
+   * #8856: recreate a restored session's chroxy-managed worktree that was
+   * deleted while the daemon was down or under a live session (typically by
+   * the agent inside it removing its own cwd). The caller has already checked
+   * that `worktreeDir` is exactly this session's `<worktreeBase>/<id>` (#5310),
+   * so this never creates a checkout anywhere else.
+   *
+   * The new worktree is a fresh detached checkout of the repo's current HEAD:
+   * uncommitted work from the deleted one is gone, and commits made only on its
+   * detached HEAD are reachable solely through the repo's reflog. That is
+   * logged loudly. Without the recreation the session could only ever be parked
+   * as a failed restore whose Retry runs this same path and fails again.
+   *
+   * @param {string} worktreeDir - The session's expected worktree dir (missing)
+   * @param {string|undefined} repoDir - The persisted worktreeRepoDir
+   * @param {string} sessionId - Used for log messages only
+   * @throws {SessionDirectoryError} when the repo dir is unknown, missing or
+   *   not a git repository — the restore then fails and is parked as before
+   */
+  _recreateMissingWorktree(worktreeDir, repoDir, sessionId) {
+    const missing = (reason) => new SessionDirectoryError(
+      `Directory does not exist: ${worktreeDir} (the session's worktree was deleted and cannot be recreated: ${reason})`,
+      worktreeDir,
+    )
+    // Never let an absent repoDir reach `git -C`, which would then act on the
+    // daemon's own cwd. A missing or non-git repoDir fails the rev-parse inside
+    // _addDetachedWorktree, whose error names it.
+    if (typeof repoDir !== 'string' || repoDir.length === 0) {
+      throw missing('no repository is recorded for it')
+    }
+    try {
+      this._addDetachedWorktree(repoDir, worktreeDir, { force: true })
+    } catch (err) {
+      throw missing(err?.message || String(err))
+    }
+    log.warn(`Recreated the deleted worktree for session ${sessionId} at ${worktreeDir} as a fresh detached checkout of ${repoDir} HEAD; uncommitted work from the deleted worktree is not recoverable (#8856)`)
   }
 
   /**

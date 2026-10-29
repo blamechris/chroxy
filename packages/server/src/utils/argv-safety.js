@@ -627,18 +627,13 @@ export const AUDITED_SINKS = [
   // ── session-manager.js ──
   {
     file: 'session-manager.js',
-    match: 'baseCwd',
-    reason: "baseCwd is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form); the value itself is client cwd already gated by validateCwdAllowed() to an existing real directory.",
-  },
-  {
-    file: 'session-manager.js',
     match: 'worktreeDir',
-    reason: 'join(this._worktreeBase || defaultWorktreeBase(), sessionId) — a server-config-rooted absolute path with a hex sessionId (randomBytes or restore-validated /^[a-f0-9]{32}$/); no WS field controls it directly.',
+    reason: 'join(this._worktreeBase || defaultWorktreeBase(), sessionId) — a server-config-rooted absolute path with a hex sessionId (randomBytes or restore-validated /^[a-f0-9]{32}$/), or on a #8856 restore-time recreation the same deterministic path exact-matched before use; no WS field controls it directly.',
   },
   {
     file: 'session-manager.js',
     match: 'repoDir',
-    reason: "repoDir is always the required argument to git's -C flag (same reasoning as baseCwd above); traces to the same server-computed baseCwd or restore-validated path.",
+    reason: "repoDir is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form). It is the create-time cwd already gated by validateCwdAllowed() to an existing real directory, or the persisted worktreeRepoDir that create-time cwd was saved as (_recreateMissingWorktree refuses an empty one).",
   },
   {
     file: 'session-manager.js',
