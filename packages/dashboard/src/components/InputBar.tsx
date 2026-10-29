@@ -310,11 +310,12 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
   // #3068 — manual prompt evaluator state machine. Lives in InputBar because
   // applying a rewrite has to swap the textarea value and re-focus it.
   const [evaluatorState, setEvaluatorState] = useState<EvaluatorState>({ kind: 'idle' })
-  // #8832 — the draft's generation, bumped by resetDraftState when the draft is
-  // discarded or replaced. handleEvaluate records it before the await, so a
-  // result that resolves under a later generation is dropped instead of
-  // reopening the panel. Evaluations cannot overlap otherwise: the button is
-  // disabled while one is pending.
+  // #8832 — the draft's generation, bumped by dropEvaluation when the draft is
+  // discarded or replaced (resetDraftState, or a history recall or restore —
+  // #8837). handleEvaluate records it before the await, so a result that
+  // resolves under a later generation is dropped instead of reopening the
+  // panel. Evaluations cannot overlap otherwise: the button is disabled while
+  // one is pending.
   const draftGenRef = useRef(0)
 
   // #3698 — terminal-style Up/Down history cycling. `historyIndex === null`
@@ -358,6 +359,18 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       setEvaluatorState({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
     }
   }, [onEvaluate, value])
+
+  // Drops the evaluator panel and any result still in flight (#8832), for a
+  // draft that has been discarded or replaced: send, Cmd+L, an outside write,
+  // or a history recall or restore (#8837). Recall ends the evaluation by
+  // generation, not by comparing the result's evaluated text with the box: a
+  // recall replaces the draft as an outside write does, whereas a text compare
+  // would also fire on typing, which keeps the result (a clarify answer is
+  // typed into the draft).
+  const dropEvaluation = useCallback(() => {
+    setEvaluatorState({ kind: 'idle' })
+    draftGenRef.current++
+  }, [])
 
   const dismissEvaluator = useCallback(() => {
     setEvaluatorState({ kind: 'idle' })
@@ -554,16 +567,15 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     setFileSelectedIndex(0)
     closePicker()
     // #3068: drop any visible evaluator panel — its draft has been discarded so
-    // the result no longer applies to the current input value. The bump also
+    // the result no longer applies to the current input value. This also
     // drops a result still in flight, so it cannot reopen the panel (#8832).
-    setEvaluatorState({ kind: 'idle' })
-    draftGenRef.current++
+    dropEvaluation()
     // #3698: discarding the draft exits cycling. On a send the
     // userMessageHistory effect also resets it once the parent rebuilds the
     // array; this is the immediate reset, and the only one on Cmd+L.
     setHistoryIndex(null)
     setDraftBeforeCycle('')
-  }, [closePicker])
+  }, [closePicker, dropEvaluation])
 
   const resetComposer = useCallback(() => {
     setValue('')
@@ -653,6 +665,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
     if (entry === undefined) return
     setValue(entry)
     setHistoryIndex(depth)
+    // #8837 — the recalled entry replaces the evaluated draft.
+    dropEvaluation()
     // #8699 — recall is reachable while the palette is open but hidden (a
     // command with arguments). Close it so a recalled `/cmd` is sent by Enter
     // rather than completed, as it is when recalled with the palette closed.
@@ -667,7 +681,24 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       const end = t.value.length
       t.setSelectionRange(end, end)
     })
-  }, [userMessageHistory, setValue, closePicker])
+  }, [userMessageHistory, setValue, closePicker, dropEvaluation])
+
+  // Exit history cycling and put the stashed draft back (ArrowDown past the
+  // newest entry, Escape while cycling). #8837 — the restore replaces the
+  // recalled text, so it ends any evaluation of that text like a recall does.
+  const restoreDraftBeforeCycle = useCallback(() => {
+    setValue(draftBeforeCycle)
+    setHistoryIndex(null)
+    dropEvaluation()
+    // Mirror recallHistoryAtDepth's caret-at-end policy so the user
+    // can immediately edit the restored draft without re-positioning.
+    requestAnimationFrame(() => {
+      const t = textareaRef.current
+      if (!t) return
+      const endPos = t.value.length
+      t.setSelectionRange(endPos, endPos)
+    })
+  }, [draftBeforeCycle, setValue, dropEvaluation])
 
   // Voice keyboard shortcut. Space used to be a hold-to-talk trigger, but that
   // required suppressing and re-inserting native spaces in a controlled
@@ -1013,16 +1044,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
             recallHistoryAtDepth(historyIndex - 1)
           } else {
             // Down past the newest entry → exit cycling, restore draft.
-            setValue(draftBeforeCycle)
-            setHistoryIndex(null)
-            // Mirror recallHistoryAtDepth's caret-at-end policy so the user
-            // can immediately edit the restored draft without re-positioning.
-            requestAnimationFrame(() => {
-              const t = textareaRef.current
-              if (!t) return
-              const endPos = t.value.length
-              t.setSelectionRange(endPos, endPos)
-            })
+            restoreDraftBeforeCycle()
           }
           return
         }
@@ -1043,14 +1065,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       // Escape resumes its original behaviour (`onInterrupt`).
       if (historyIndex !== null) {
         e.preventDefault()
-        setValue(draftBeforeCycle)
-        setHistoryIndex(null)
-        requestAnimationFrame(() => {
-          const t = textareaRef.current
-          if (!t) return
-          const endPos = t.value.length
-          t.setSelectionRange(endPos, endPos)
-        })
+        restoreDraftBeforeCycle()
         return
       }
       e.preventDefault()
@@ -1064,7 +1079,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
         e.preventDefault()
       }
     }
-  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, slashPickerVisible, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, pickerItemCount, selectPickerIndex])
+  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, slashPickerVisible, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, recallHistoryAtDepth, restoreDraftBeforeCycle, pickerItemCount, selectPickerIndex])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value

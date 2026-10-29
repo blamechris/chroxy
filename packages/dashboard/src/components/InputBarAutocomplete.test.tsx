@@ -1,5 +1,5 @@
 /**
- * InputBar autocomplete regressions (#8432, #8433, #8831, #8832, #8834, #8839).
+ * InputBar autocomplete regressions (#8432, #8433, #8831, #8832, #8834, #8837, #8839).
  *
  * The real InputBar is driven by an App-like parent: per-session drafts, and an
  * `onValueChange` whose identity changes when the active session changes (App's
@@ -408,6 +408,140 @@ describe('a late evaluator result after the draft is replaced from outside (#883
 
     await act(async () => { call.resolve(REWRITE) })
     expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('data-verdict', 'rewrite')
+  })
+})
+
+// #8837 — a history recall (and the Down / Escape restore of the stashed draft)
+// replaces the whole visible text through the composer's own setValue, so the
+// outside-write reset above never sees it. A result evaluated for the text that
+// was replaced, pending or shown, must not sit over the new text, and Apply
+// rewrite must never write it there.
+describe('a history recall or restore drops the evaluation of the text it replaced (#8837)', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>(res => { resolve = res })
+    return { promise, resolve }
+  }
+  const rewriteOf = (text: string): EvaluatorResultPayload => ({ verdict: 'rewrite', rewritten: `${text}, rewritten`, reasoning: 'Clearer' })
+  const caretToEnd = () => { const ta = box(); ta.setSelectionRange(ta.value.length, ta.value.length) }
+
+  it('a recall while pending: no panel over the recalled text, and the late result is dropped', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} userMessageHistory={['prev message']} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('aria-busy', 'true')
+
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('prev message')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+
+    await act(async () => { call.resolve(rewriteOf('A draft')) })
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+    expect(screen.queryByTestId('evaluator-apply')).toBeNull()
+    expect(draft('A')).toBe('prev message')
+  })
+
+  it('a recall over a shown result: the panel goes, so Apply cannot overwrite the recalled entry', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} userMessageHistory={['prev message']} onEvaluate={() => call.promise} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await act(async () => { call.resolve(rewriteOf('A draft')) })
+    expect(screen.getByTestId('evaluator-apply')).toBeInTheDocument()
+
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('prev message')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+    expect(screen.queryByTestId('evaluator-apply')).toBeNull()
+    expect(draft('A')).toBe('prev message')
+  })
+
+  it('a deeper recall drops the result for the entry it replaced', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{}} userMessageHistory={['older', 'newest']} onEvaluate={() => call.promise} />)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('newest')
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await act(async () => { call.resolve(rewriteOf('newest')) })
+    expect(screen.getByTestId('evaluator-apply')).toBeInTheDocument()
+
+    box().setSelectionRange(0, 0)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('older')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+  })
+
+  it.each([
+    ['Escape', 'Escape'],
+    ['Down past the newest entry', 'ArrowDown'],
+  ])('%s restoring the stashed draft drops the result for the recalled entry', async (_label, key) => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} userMessageHistory={['prev message']} onEvaluate={() => call.promise} />)
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('prev message')
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await act(async () => { call.resolve(rewriteOf('prev message')) })
+    expect(screen.getByTestId('evaluator-apply')).toBeInTheDocument()
+
+    caretToEnd()
+    fireEvent.keyDown(box(), { key })
+    expect(box().value).toBe('A draft')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+    expect(draft('A')).toBe('A draft')
+  })
+
+  it('a restore while pending drops the late result for the recalled entry', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{ A: 'A draft' }} userMessageHistory={['prev message']} onEvaluate={() => call.promise} />)
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+
+    fireEvent.keyDown(box(), { key: 'Escape' })
+    expect(box().value).toBe('A draft')
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+
+    await act(async () => { call.resolve(rewriteOf('prev message')) })
+    expect(screen.queryByTestId('evaluator-panel')).toBeNull()
+    expect(draft('A')).toBe('A draft')
+  })
+
+  it('the recalled text can be evaluated while the dropped call is still in flight, and only its own result applies', async () => {
+    const first = deferred<EvaluatorResultPayload>()
+    const second = deferred<EvaluatorResultPayload>()
+    const onEvaluate = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    render(<AppLikeParent initial={{ A: 'A draft' }} userMessageHistory={['prev message']} onEvaluate={onEvaluate} />)
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    expect(onEvaluate).toHaveBeenNthCalledWith(2, 'prev message')
+
+    await act(async () => { first.resolve(rewriteOf('A draft')) })
+    expect(screen.getByTestId('evaluator-panel')).toHaveAttribute('aria-busy', 'true')
+
+    await act(async () => { second.resolve(rewriteOf('prev message')) })
+    fireEvent.click(screen.getByTestId('evaluator-apply'))
+    expect(box().value).toBe('prev message, rewritten')
+    expect(draft('A')).toBe('prev message, rewritten')
+  })
+
+  it('an Up at the oldest entry writes nothing, so the result for that entry stays', async () => {
+    const call = deferred<EvaluatorResultPayload>()
+    render(<AppLikeParent initial={{}} userMessageHistory={['only']} onEvaluate={() => call.promise} />)
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('only')
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await act(async () => { call.resolve(rewriteOf('only')) })
+
+    caretToEnd()
+    fireEvent.keyDown(box(), { key: 'ArrowUp' })
+    expect(box().value).toBe('only')
+    expect(screen.getByTestId('evaluator-apply')).toBeInTheDocument()
   })
 })
 
