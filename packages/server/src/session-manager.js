@@ -308,8 +308,9 @@ const FAILED_RESTORE_HISTORY_FIELD_CHARS = 16 * 1024
  *   no more than replay would.
  * - An entry still bigger than FAILED_RESTORE_HISTORY_ENTRY_BYTES (a long
  *   message, a large tool input or result) has `content` / `result` / `input`
- *   shortened for display, and if that is still not enough it is reduced to its
- *   type and timestamp. Nothing on disk changes.
+ *   shortened for display, and if that is still not enough it is reduced to a
+ *   bounded type, a numeric timestamp and `isError`, marked `_truncated` (the
+ *   panel shows it as too large to show). Nothing on disk changes.
  * - A non-object slot (a hand-edited state file) becomes `{ type: 'unknown' }`
  *   rather than being dropped, so page offsets keep matching history indexes.
  *
@@ -336,9 +337,12 @@ function failedRestoreHistoryWireEntry(raw, history) {
     }
   }
   if (Buffer.byteLength(JSON.stringify(entry)) <= FAILED_RESTORE_HISTORY_ENTRY_BYTES) return entry
+  // Last resort (escape-heavy text, or abnormal fields of a hand-edited file):
+  // keep only small, typed metadata so this can never itself be large.
   return {
-    type: typeof entry.type === 'string' ? entry.type : 'unknown',
-    ...(entry.timestamp !== undefined ? { timestamp: entry.timestamp } : {}),
+    type: typeof entry.type === 'string' && entry.type.length <= 64 ? entry.type : 'unknown',
+    ...(Number.isFinite(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
+    ...(typeof entry.isError === 'boolean' ? { isError: entry.isError } : {}),
     _truncated: true,
   }
 }

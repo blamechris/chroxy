@@ -27,6 +27,8 @@ import { useConnectionStore } from '../store/connection';
 import type { ServerFailedRestoreHistoryEntry } from '@chroxy/protocol';
 
 const SUMMARY_MAX = 140;
+/** What an entry the server could only send as metadata (`_truncated`) shows instead of its text. */
+const TOO_LARGE = '(too large to show)';
 
 /** A string for display, from anything the entry might carry in a field. */
 function asText(value: unknown): string {
@@ -97,7 +99,7 @@ function formatResultLine(entry: ServerFailedRestoreHistoryEntry): string {
 function HistoryEntry({ entry }: { entry: ServerFailedRestoreHistoryEntry }) {
   switch (entry.type) {
     case 'message': {
-      const text = asText(entry.content);
+      const text = asText(entry.content) || (entry._truncated === true ? TOO_LARGE : '');
       return (
         <li className="fr-hist-entry fr-hist-message" data-testid="fr-hist-message">
           <span className="fr-hist-role">{roleLabel(entry.messageType)}</span>
@@ -123,7 +125,7 @@ function HistoryEntry({ entry }: { entry: ServerFailedRestoreHistoryEntry }) {
           <details>
             <summary className="fr-hist-result-toggle">
               <span className="fr-hist-role">{failed ? 'Tool error' : 'Tool result'}</span>
-              <span className="fr-hist-summary">{oneLine(text) || '(empty)'}</span>
+              <span className="fr-hist-summary">{oneLine(text) || (entry._truncated === true ? TOO_LARGE : '(empty)')}</span>
             </summary>
             <div className="fr-hist-text">{text}</div>
           </details>
@@ -140,6 +142,7 @@ function HistoryEntry({ entry }: { entry: ServerFailedRestoreHistoryEntry }) {
       return (
         <li className="fr-hist-entry fr-hist-other" data-testid="fr-hist-other">
           <span className="fr-hist-role">{asText(entry.type) || 'entry'}</span>
+          {entry._truncated === true ? <span className="fr-hist-summary">{TOO_LARGE}</span> : null}
         </li>
       );
   }

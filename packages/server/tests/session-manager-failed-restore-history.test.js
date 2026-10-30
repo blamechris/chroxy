@@ -141,6 +141,19 @@ describe('SessionManager.getFailedRestoreHistory (#8860)', () => {
     assert.ok(r.entries[0].result.endsWith('[truncated]'))
   })
 
+  it('keeps the last-resort fallback small and keeps isError', () => {
+    park([
+      // Escape-heavy text survives char-count shortening above the entry cap.
+      { type: 'tool_result', toolUseId: 't1', timestamp: 1, isError: true, result: '\u0000'.repeat(20000) },
+      // Abnormal saved metadata (a hand-edited file).
+      { type: 'x'.repeat(2 * 1024 * 1024), timestamp: 'not-a-number', content: 'y'.repeat(200 * 1024) },
+    ])
+    const r = sm.getFailedRestoreHistory(ID)
+    assert.deepEqual(r.entries[0], { type: 'tool_result', timestamp: 1, isError: true, _truncated: true })
+    assert.deepEqual(r.entries[1], { type: 'unknown', _truncated: true })
+    assert.ok(Buffer.byteLength(JSON.stringify(r.entries)) < 1024, 'fallbacks stay tiny')
+  })
+
   it('strips the server-only fields that history replay strips', () => {
     park([{ type: 'user_question', toolUseId: 'q1', questions: [], sourceToolUseId: 'tool-1', answered: true }])
     const [entry] = sm.getFailedRestoreHistory(ID).entries

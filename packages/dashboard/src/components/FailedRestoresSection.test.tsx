@@ -230,6 +230,18 @@ describe('FailedRestoresSection — View history (#8860)', () => {
     expect(screen.getByTestId(`failed-restore-history-count-${A}`).textContent).toBe('Showing 5 of 5')
   })
 
+  it('shows a metadata-only (_truncated) entry as too large, keeping a tool error label', () => {
+    state.failedRestores = snapshot()
+    state.failedRestoreHistories = {
+      [A]: view({ total: 1, entries: [{ type: 'tool_result', isError: true, _truncated: true }] }),
+    }
+    render(<FailedRestoresSection />)
+    const row = screen.getByTestId('fr-hist-tool-result')
+    expect(row.textContent).toContain('Tool error')
+    expect(row.textContent).toContain('(too large to show)')
+    expect(row.textContent).not.toContain('(empty)')
+  })
+
   it('shows an unknown entry type as a bare label rather than dropping it', () => {
     state.failedRestores = snapshot()
     state.failedRestoreHistories = { [A]: view({ total: 1, entries: [{ type: 'permission_outcome' }] }) }
