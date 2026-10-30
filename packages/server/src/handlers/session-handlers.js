@@ -785,9 +785,11 @@ async function handleRetryFailedRestore(ws, client, msg, ctx) {
     // The id the manager actually restored, which is NOT always the one asked
     // for: createSession falls back to a random id when preserveId is malformed
     // or collides, so echoing the request would leave the client unable to find
-    // the session it just recovered (Copilot, #7630 review). Falls back to the
-    // requested id on the failure arms, where nothing was created.
-    sessionId: result.ok && result.sessionId ? result.sessionId : sessionId,
+    // the session it just recovered (Copilot, #7630 review). The same holds for
+    // a retry whose provider start() rejected (#8861): the session is re-parked
+    // under the id createSession used. Falls back to the requested id on the
+    // other failure arms, where nothing was created.
+    sessionId: typeof result.sessionId === 'string' && result.sessionId ? result.sessionId : sessionId,
     type: 'retry_failed_restore_result',
     ok: result.ok === true,
     ...(result.ok ? {} : { code: result.code, message: result.message }),

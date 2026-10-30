@@ -1,4 +1,4 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,6 +28,11 @@ import { declareUnknownCustomization } from './helpers/provider-customization.js
 // The registry is process-global and `node --test` runs files in parallel, so
 // this name must be unique to this file.
 let failNextStart = false
+// #8861: how the NEXT start() behaves when it is async. 'sync' is the default
+// (the original synchronous provider); 'reject' / 'resolve' / 'hang' return a
+// promise that settles accordingly, which is what Codex app-server and
+// claude-tui do.
+let startMode = 'sync'
 class Retry7625 extends EventEmitter {
   constructor(opts) {
     super()
@@ -41,6 +46,17 @@ class Retry7625 extends EventEmitter {
       err.code = 'ENVIRONMENT_STOPPED'
       throw err
     }
+    if (startMode === 'reject') {
+      return Promise.resolve().then(() => {
+        const err = new Error('thread/resume refused')
+        err.code = 'CODEX_NATIVE_LOCATOR_MISSING'
+        throw err
+      })
+    }
+    if (startMode === 'resolve') {
+      return Promise.resolve().then(() => { this.isRunning = true })
+    }
+    if (startMode === 'hang') return new Promise(() => {})
     this.isRunning = true
   }
   destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
@@ -89,6 +105,7 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
 
   afterEach(() => {
     failNextStart = false
+    startMode = 'sync'
     try { sm?.destroy?.() } catch { /* ignore */ }
     if (dir) rmSync(dir, { recursive: true, force: true })
     dir = null
@@ -336,5 +353,87 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
     const loser = outcomes.find((r) => !r.ok)
     assert.equal(loser.code, 'FAILED_RESTORE_NOT_FOUND', 'the loser sees the entry already claimed')
     assert.deepEqual(serializedIds(sm), [saved.id], 'a lost race still writes the id only once')
+  })
+
+  // #8861. Provider start() is async, so a start that REJECTS re-parks the
+  // session only after the sync attempt has returned. The retry used to report
+  // ok:true at that sync boundary — the log said "succeeded", the button showed
+  // success, and the sidebar listed a session that was about to vanish.
+  describe('awaits the provider start (#8861)', () => {
+    // `_awaitStartSettled`'s timer is unref()'d on purpose (a pending retry must
+    // not keep the daemon alive), so with a never-settling start() nothing else
+    // holds the test process's event loop open and node:test cancels the test
+    // ("Promise resolution is still pending"). A ref'd keepalive stands in for
+    // the server sockets a real daemon has.
+    let keepalive
+    beforeEach(() => { keepalive = setInterval(() => {}, 1000) })
+    afterEach(() => { clearInterval(keepalive) })
+
+    it('reports ok:false with the provider code when an async start() rejects', async () => {
+      makeSm()
+      const saved = park(sm, dir)
+      startMode = 'reject'
+      const events = []
+      sm.on('session_restore_failed', (e) => events.push(e))
+
+      const result = await sm.retryFailedRestore(saved.id)
+
+      assert.equal(result.ok, false)
+      assert.equal(result.code, 'CODEX_NATIVE_LOCATOR_MISSING', 'the provider error code is reported')
+      assert.equal(result.sessionId, saved.id, 'names the id the session was re-parked under')
+      assert.equal(sm._failedRestores.has(saved.id), true, 're-parked')
+      assert.ok(sm.getFailedRestores().some((r) => r.sessionId === saved.id), 'listed by getFailedRestores')
+      assert.equal(sm._sessions.has(saved.id), false, 'session is not live')
+      assert.equal(events.length, 1, 'exactly one session_restore_failed for the retry (no double announce)')
+      assert.equal(events[0].errorCode, 'CODEX_NATIVE_LOCATOR_MISSING')
+      assert.deepEqual(serializedIds(sm), [saved.id], 'the id is serialized once')
+    })
+
+    it('reports ok:true when an async start() resolves', async () => {
+      makeSm()
+      const saved = park(sm, dir)
+      startMode = 'resolve'
+
+      const result = await sm.retryFailedRestore(saved.id)
+
+      assert.equal(result.ok, true)
+      assert.equal(result.sessionId, saved.id)
+      assert.equal(sm._sessions.has(saved.id), true, 'session is live')
+      assert.equal(sm._failedRestores.has(saved.id), false)
+    })
+
+    it('reports ok:true after the settle timeout when start() never settles', async () => {
+      makeSm()
+      const saved = park(sm, dir)
+      startMode = 'hang'
+
+      const t0 = Date.now()
+      const result = await sm.retryFailedRestore(saved.id, { settleTimeoutMs: 50 })
+      const elapsed = Date.now() - t0
+
+      assert.equal(result.ok, true)
+      assert.equal(result.sessionId, saved.id)
+      assert.ok(elapsed >= 40 && elapsed < 5000, `waited about the timeout, got ${elapsed}ms`)
+      assert.equal(sm._sessions.has(saved.id), true, 'the pending session stays live')
+    })
+
+    it('does not hold the per-session lock while the start is pending', async () => {
+      makeSm()
+      const saved = park(sm, dir)
+      startMode = 'hang'
+
+      const retry = sm.retryFailedRestore(saved.id, { settleTimeoutMs: 400 })
+      // Let the sync attempt finish; the retry is now parked on the settle wait.
+      await new Promise((r) => setImmediate(r))
+      assert.equal(sm._sessions.has(saved.id), true, 'CONTROL: the session was restored and start() is pending')
+
+      let renamed = false
+      const rename = sm.renameSessionLocked(saved.id, 'Renamed While Pending').then(() => { renamed = true })
+      await Promise.race([rename, new Promise((r) => setTimeout(r, 100))])
+      assert.equal(renamed, true, 'a rename of the restored session completes while start() is still pending')
+
+      const result = await retry
+      assert.equal(result.ok, true)
+    })
   })
 })
