@@ -17,8 +17,8 @@ export declare const ServerGitStatusResultSchema: z.ZodObject<{
         status: z.ZodEnum<{
             unknown: "unknown";
             modified: "modified";
-            added: "added";
             deleted: "deleted";
+            added: "added";
             renamed: "renamed";
             copied: "copied";
         }>;
@@ -29,8 +29,8 @@ export declare const ServerGitStatusResultSchema: z.ZodObject<{
         status: z.ZodEnum<{
             unknown: "unknown";
             modified: "modified";
-            added: "added";
             deleted: "deleted";
+            added: "added";
             renamed: "renamed";
             copied: "copied";
         }>;
@@ -56,8 +56,8 @@ export declare const ServerDiffResultSchema: z.ZodObject<{
         status: z.ZodEnum<{
             untracked: "untracked";
             modified: "modified";
-            added: "added";
             deleted: "deleted";
+            added: "added";
             renamed: "renamed";
         }>;
         additions: z.ZodNumber;
