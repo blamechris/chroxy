@@ -4500,7 +4500,9 @@ export class SessionManager extends EventEmitter {
    *
    * @param {string} sessionId The parked session's id.
    * @param {{ settleTimeoutMs?: number }} [opts]
-   * @returns {Promise<{ok: true, sessionId: string} | {ok: false, code: string, message: string}>}
+   * @returns {Promise<{ok: true, sessionId: string} | {ok: false, sessionId?: string, code: string, message: string}>}
+   *   `sessionId` on an `ok: false` reply is set only when a start() rejection
+   *   re-parked the session, and names the id it was re-parked under.
    */
   async retryFailedRestore(sessionId, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
     let release = await this._locks.acquire(sessionId)
@@ -4625,7 +4627,10 @@ export class SessionManager extends EventEmitter {
     const err = outcome.error
     const message = err?.message || String(err)
     log.error(`Retry's provider start failed for session ${JSON.stringify(String(saved.name))}: ${message}`)
-    return { ok: false, code: err?.code || 'START_FAILED', message }
+    // `restoredId`, not the requested id: createSession falls back to a random
+    // id when preserveId is malformed or collides, and the re-park is keyed on
+    // the id it actually used, so that is the row the client must find.
+    return { ok: false, sessionId: restoredId, code: err?.code || 'START_FAILED', message }
   }
 
   /**

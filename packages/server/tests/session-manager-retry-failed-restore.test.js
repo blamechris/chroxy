@@ -380,6 +380,7 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
 
       assert.equal(result.ok, false)
       assert.equal(result.code, 'CODEX_NATIVE_LOCATOR_MISSING', 'the provider error code is reported')
+      assert.equal(result.sessionId, saved.id, 'names the id the session was re-parked under')
       assert.equal(sm._failedRestores.has(saved.id), true, 're-parked')
       assert.ok(sm.getFailedRestores().some((r) => r.sessionId === saved.id), 'listed by getFailedRestores')
       assert.equal(sm._sessions.has(saved.id), false, 'session is not live')

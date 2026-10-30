@@ -129,6 +129,18 @@ describe('retry_failed_restore (#7625)', () => {
     assert.equal(sent[0].message, 'still down')
   })
 
+  it('echoes the re-parked id when a retry\'s provider start fails under a different id (#8861)', async () => {
+    // createSession can mint a fresh id (malformed / colliding preserveId); the
+    // async start-failure re-park is keyed on THAT id, so the reply must name it.
+    const reparkedId = 'f'.repeat(32)
+    const { ctx, sent } = makeCtx({ retryResult: { ok: false, sessionId: reparkedId, code: 'START_FAILED', message: 'boom' } })
+    await sessionHandlers.retry_failed_restore({}, UNBOUND, { type: 'retry_failed_restore', sessionId: 'abc' }, ctx)
+
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].sessionId, reparkedId)
+    assert.doesNotThrow(() => ServerRetryFailedRestoreResultSchema.parse(sent[0]))
+  })
+
   it('rejects a missing sessionId without calling retry', async () => {
     const { ctx, sent, calls } = makeCtx()
     await sessionHandlers.retry_failed_restore({}, UNBOUND, { type: 'retry_failed_restore' }, ctx)
