@@ -750,6 +750,26 @@ describe('setupForwarding', () => {
       assert.equal(msg.originalHistoryPreserved, true)
       assert.equal(msg.historyLength, 2)
     })
+
+    // #8861 / #8092: a session re-parked after an async start failure was in the
+    // last session_list and its teardown never emits session_destroyed, so the
+    // forwarder must re-send the list or every sidebar keeps a dead entry.
+    it('refreshes the session list so a re-parked session leaves every sidebar (#8861)', () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_restore_failed', {
+        sessionId: 'sess-bad', name: 'Codex', provider: 'codex', errorCode: 'START_FAILED',
+        errorMessage: 'boom', originalHistoryPreserved: true,
+      })
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'session list re-broadcast once')
+      assert.ok(
+        ctx.broadcast.mock.calls.some((c) => c.arguments[0].type === 'session_restore_failed'),
+        'the failure itself is still broadcast',
+      )
+    })
   })
 
   describe('session_persist_failed event (#5714)', () => {

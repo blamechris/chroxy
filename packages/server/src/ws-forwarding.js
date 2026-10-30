@@ -431,6 +431,13 @@ function setupSessionForwarding(normalizer, ctx) {
   // (#2954). History stays on disk; client shows a retry affordance.
   sessionManager.on('session_restore_failed', safeForward('session_restore_failed', (payload) => {
     broadcast({ type: 'session_restore_failed', ...payload })
+    // #8861 / #8092: a session re-parked after an ASYNC start failure was already
+    // in the last `session_list` (it was live when that went out), and the
+    // restore-branch teardown in `_handleAsyncStartFailure` never emits
+    // `session_destroyed`, so without a refresh every client's sidebar keeps a
+    // clickable entry for a session that no longer exists ("Session not found").
+    // Re-sending the list is what removes it.
+    if (ctx.broadcastSessionList) ctx.broadcastSessionList()
   }))
 
   // Persist failures — surface to clients so the user knows a session-list

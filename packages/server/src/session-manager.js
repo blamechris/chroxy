@@ -287,6 +287,13 @@ const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 // #8858 — cap on the error message persisted in a parked entry's `failedRestore` marker
 const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
 /**
+ * #8861 — how long `retryFailedRestore` waits for the provider's async start()
+ * to settle before it reports `ok: true` anyway. Long enough for a Codex
+ * thread/resume refusal or a claude-tui PTY death (seconds), short enough that a
+ * provider which never settles cannot leave the operator's Retry button spinning.
+ */
+const RETRY_RESTORE_SETTLE_TIMEOUT_MS = 30 * 1000
+/**
  * #8348: the history outcome for a session's `permission_resolved` /
  * `permission_expired` event, or null when it is not a permission prompt's end
  * (an AskUserQuestion's resolution carries a `toolUseId`, not a `requestId`).
@@ -2185,8 +2192,26 @@ export class SessionManager extends EventEmitter {
       // claude-tui's start() spawns its PTY asynchronously and (as of #5316)
       // REJECTS when the PTY fails to come up, so this is the primary failure
       // signal for that provider.
-      if (result && typeof result.catch === 'function') {
-        result.catch((err) => this._handleAsyncStartFailure(sessionId, err))
+      if (result && typeof result.then === 'function') {
+        // #8861: keep a SETTLE handle on the entry. `_handleAsyncStartFailure`
+        // still runs on every rejection exactly as the bare `.catch` did (fresh
+        // AND restored sessions); the handle only lets a caller that needs to
+        // know how the start ended (retryFailedRestore) await it. It never
+        // rejects, so it adds no unhandled rejection of its own — and a throw
+        // inside `_handleAsyncStartFailure` is logged rather than escaping, the
+        // same place it would otherwise have surfaced as an unhandled one. A
+        // sync start() (sdk-session) leaves no handle.
+        entry._startSettled = result.then(
+          () => ({ ok: true }),
+          (err) => {
+            try {
+              this._handleAsyncStartFailure(sessionId, err)
+            } catch (handlerErr) {
+              log.error(`Async start() failure handler threw for session ${sessionId}: ${handlerErr?.stack || handlerErr}`)
+            }
+            return { ok: false, error: err }
+          },
+        )
       }
     } catch (err) {
       // Clean up phantom session on start() failure (Guardian FM-03)
@@ -4452,16 +4477,44 @@ export class SessionManager extends EventEmitter {
    * 3. The whole thing runs under the per-session lock, so two operators (or a
    *    double-tapped button) cannot interleave a delete against an attempt.
    *
-   * A SECOND async start() rejection needs no handling here: `_attemptRestoreOne`
-   * passes `isRestore: true`, so `_handleAsyncStartFailure` re-parks it exactly
-   * as it does on the boot path. That means `ok: true` reports a session that
-   * STARTED, not one that has proven healthy — same contract as boot restore.
+   * A SECOND async start() rejection needs no handling HERE for the re-park:
+   * `_attemptRestoreOne` passes `isRestore: true`, so `_handleAsyncStartFailure`
+   * re-parks it (and emits `session_restore_failed`) exactly as it does on the
+   * boot path. What this method adds (#8861) is that it WAITS for that outcome:
+   * provider start() is async, and returning at the sync boundary reported
+   * success for a session that was about to be re-parked, so the client had
+   * already listed it as live. The contract is now:
+   *
+   *   - `ok: true` — the provider's start() settled successfully, or is STILL
+   *     PENDING after `settleTimeoutMs` (default 30s; the session is live and
+   *     a later rejection re-parks it through the normal path). Neither means
+   *     the session has proven healthy.
+   *   - `ok: false` — the sync attempt threw, OR start() rejected within the
+   *     window. In the latter case the entry is already re-parked and
+   *     `session_restore_failed` already emitted by `_handleAsyncStartFailure`;
+   *     this method neither re-registers nor emits again.
+   *
+   * The per-session lock covers the delete → attempt → flush sequence and is
+   * RELEASED before the settle wait: provider IO must not be held under the
+   * mutation lock a concurrent rename/destroy of the restored session needs.
    *
    * @param {string} sessionId The parked session's id.
+   * @param {{ settleTimeoutMs?: number }} [opts]
    * @returns {Promise<{ok: true, sessionId: string} | {ok: false, code: string, message: string}>}
    */
-  async retryFailedRestore(sessionId) {
-    const release = await this._locks.acquire(sessionId)
+  async retryFailedRestore(sessionId, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
+    let release = await this._locks.acquire(sessionId)
+    // Idempotent: the lock is released early on the success path (before the
+    // settle wait) and by the `finally` on every other path.
+    const releaseOnce = () => {
+      if (!release) return
+      const r = release
+      release = null
+      r()
+    }
+    // Set only by the success path, which wants to await the start outside the
+    // lock. Declared out here so the `finally` can run before the await.
+    let awaitStart = null
     try {
       const parked = this._failedRestores.get(sessionId)
       if (!parked) {
@@ -4514,8 +4567,10 @@ export class SessionManager extends EventEmitter {
       try {
         const restoredId = this._attemptRestoreOne(saved, true)
         this._flushPersistOrWarn(restoredId)
-        log.info(`Retry restored session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
-        return { ok: true, sessionId: restoredId }
+        // Grab the settle promise NOW, synchronously, while the entry is still
+        // mapped: a start() that rejects re-parks the session and drops it from
+        // `_sessions`, after which there would be no handle left to look up.
+        awaitStart = { restoredId, settled: this._awaitStartSettled(restoredId, settleTimeoutMs), saved }
       } catch (err) {
         // No orphan check here on purpose. `_attemptRestoreOne` tears down any
         // half-seeded session it created before it rethrows, and it is the only
@@ -4551,8 +4606,50 @@ export class SessionManager extends EventEmitter {
         }
       }
     } finally {
-      release()
+      releaseOnce()
     }
+
+    if (!awaitStart) throw new Error('retryFailedRestore: unreachable — every non-awaiting path returns')
+    const { restoredId, settled, saved } = awaitStart
+    const outcome = await settled
+    if (outcome.ok && outcome.pending) {
+      log.warn(`Retry restored session ${JSON.stringify(String(saved.name))} but its provider start has not settled after ${settleTimeoutMs}ms; reporting ok (a later rejection re-parks it)`)
+      return { ok: true, sessionId: restoredId }
+    }
+    if (outcome.ok) {
+      log.info(`Retry restored session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
+      return { ok: true, sessionId: restoredId }
+    }
+    // `_handleAsyncStartFailure` already re-parked the entry and emitted
+    // `session_restore_failed`; doing either again would double-announce.
+    const err = outcome.error
+    const message = err?.message || String(err)
+    log.error(`Retry's provider start failed for session ${JSON.stringify(String(saved.name))}: ${message}`)
+    return { ok: false, code: err?.code || 'START_FAILED', message }
+  }
+
+  /**
+   * #8861: resolve how a session's provider start() ended, without ever
+   * rejecting. Reads the handle `createSession` left on the entry, so it must be
+   * CALLED synchronously after the session was created (the entry is dropped
+   * from `_sessions` when a rejected restore is re-parked).
+   *
+   * @param {string} sessionId
+   * @param {number} timeoutMs
+   * @returns {Promise<{ok: true} | {ok: false, error: any} | {ok: true, pending: true}>}
+   *   `{ ok: true }` for a settled start OR a sync start (no handle);
+   *   `{ ok: true, pending: true }` when it has not settled within `timeoutMs`.
+   * @private
+   */
+  _awaitStartSettled(sessionId, timeoutMs) {
+    const handle = this._sessions.get(sessionId)?._startSettled
+    if (!handle) return Promise.resolve({ ok: true })
+    let timer
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: true, pending: true }), timeoutMs)
+      timer.unref?.()
+    })
+    return Promise.race([handle, timeout]).finally(() => clearTimeout(timer))
   }
 
   /**
