@@ -282,6 +282,8 @@ const warnedUnknownCtorOptKeys = new Set()
  * came to silently override it.
  */
 const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// #8858 — cap on the error message persisted in a parked entry's `failedRestore` marker
+const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
 
 /**
  * #8348: the history outcome for a session's `permission_resolved` /
@@ -4041,7 +4043,7 @@ export class SessionManager extends EventEmitter {
   _failedRestoreMarker(err) {
     return {
       code: err?.code || 'RESTORE_FAILED',
-      message: String(err?.message || err || 'restore failed').slice(0, 500),
+      message: String(err?.message || err || 'restore failed').slice(0, FAILED_RESTORE_MARKER_MAX_MESSAGE),
     }
   }
 
@@ -4054,8 +4056,8 @@ export class SessionManager extends EventEmitter {
   _parkedMarker(saved) {
     const m = saved?.failedRestore
     if (!m || typeof m !== 'object') return null
-    if (typeof m.code !== 'string' || typeof m.message !== 'string') return null
-    return m
+    if (typeof m.code !== 'string' || m.code === '' || typeof m.message !== 'string') return null
+    return { code: m.code, message: m.message.slice(0, FAILED_RESTORE_MARKER_MAX_MESSAGE) }
   }
 
   _registerFailedRestore(saved, err) {

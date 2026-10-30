@@ -281,7 +281,7 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
       version: 1, timestamp: lastActivityAt,
       sessions: [{
         id: ID, name: 'Parked', cwd: '/tmp', environmentId: 'env-1', containerId: 'ctr-created',
-        lastActivityAt, history: [{ role: 'user', content: 'a', }, { role: 'assistant', content: 'b' }],
+        lastActivityAt, history: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }],
         ...extra,
       }],
     }))
@@ -313,8 +313,8 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
     const list = sm.getFailedRestores()
     assert.equal(list.length, 1, 'still in the Failed restores list')
     assert.equal(list[0].historyLength, 2, 'with its history')
-    assert.equal(list[0].errorCode, events[0].errorCode, 'error code carried over')
-    assert.notEqual(list[0].errorCode, 'RESTORE_FAILED', 'the ORIGINAL code, not the generic fallback')
+    assert.equal(list[0].errorCode, 'ENVIRONMENT_UNAVAILABLE', 'the ORIGINAL code, not the generic fallback')
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE')
     assert.ok(list[0].errorMessage.length > 0, 'and the original message')
     assert.equal(disk.sessions.length, 1, 'still on disk after the write')
     assert.equal(disk.sessions[0].history.length, 2)
@@ -360,19 +360,45 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
     assert.equal(disk.sessions.length, 0, 'not carried to disk either')
   })
 
-  it('a malformed marker is ignored: the entry follows the pre-existing path', () => {
-    dir = mkdtempSync(join(tmpdir(), 'chroxy-8858m-'))
-    const statePath = join(dir, 'state.json')
-    const lastActivityAt = Date.now() - 25 * HOUR
-    writeFileSync(statePath, JSON.stringify({
-      version: 1, timestamp: lastActivityAt,
-      sessions: [{
-        id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [],
-        failedRestore: 'yes',
-      }],
-    }))
-    const { events } = reboot(statePath)
-    assert.deepEqual(events, [])
-    assert.deepEqual(sm.getFailedRestores(), [])
+  it('caps the persisted message at 500 chars, on write and on read', () => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8858w-'))
+    sm = new SessionManager({ stateFilePath: join(dir, 'state.json') })
+    sm._failedRestores.set(ID, { saved: { id: ID, name: 'Long', cwd: '/tmp', history: [] }, error: new Error('x'.repeat(5000)) })
+    const written = sm.serializeState().sessions[0].failedRestore
+    assert.equal(written.message.length, 500, 'write side is capped')
+    assert.equal(sm._parkedMarker({ failedRestore: { code: 'C', message: 'y'.repeat(5000) } }).message.length, 500, 'read side is capped')
   })
+
+  it('a worktree-backed marked entry stays parked past 30 days', () => {
+    reboot(parkThenAge({ ageMs: 40 * DAY, extra: { worktreePath: '/some/wt' } }))
+    assert.equal(sm.getFailedRestores().length, 1)
+  })
+
+  it('Dismiss removes the re-registered entry from disk for good', () => {
+    const statePath = parkThenAge({ ageMs: 25 * HOUR })
+    reboot(statePath)
+    assert.equal(sm.clearFailedRestore(ID), true)
+    sm._flushPersist()
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf-8')).sessions.length, 0)
+  })
+
+  for (const [label, failedRestore] of [
+    ['non-object', 'yes'],
+    ['numeric code', { code: 1, message: 'x' }],
+    ['empty code', { code: '', message: 'x' }],
+    ['missing message', { code: 'C' }],
+  ]) {
+    it(`a malformed marker (${label}) is ignored: the entry follows the pre-existing path`, () => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-8858m-'))
+      const statePath = join(dir, 'state.json')
+      const lastActivityAt = Date.now() - 25 * HOUR
+      writeFileSync(statePath, JSON.stringify({
+        version: 1, timestamp: lastActivityAt,
+        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [], failedRestore }],
+      }))
+      const { events } = reboot(statePath)
+      assert.deepEqual(events, [])
+      assert.deepEqual(sm.getFailedRestores(), [])
+    })
+  }
 })
