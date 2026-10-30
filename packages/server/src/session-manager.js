@@ -282,6 +282,8 @@ const warnedUnknownCtorOptKeys = new Set()
  * came to silently override it.
  */
 const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// #8858 — cap on the error message persisted in a parked entry's `failedRestore` marker
+const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
 // #8860: page bounds for getFailedRestoreHistory. Mirrors the protocol's
 // `get_failed_restore_history` limit (1..100); the clamp is repeated here
 // because this is the enforcement point for any caller, not just the handler.
@@ -3308,8 +3310,14 @@ export class SessionManager extends EventEmitter {
     // user's history is permanently lost. We write them back exactly as
     // they were loaded so a retry (after the user sets the missing env var
     // and restarts) can fully re-hydrate history.
-    for (const [, { saved }] of this._failedRestores) {
-      state.sessions.push(saved)
+    // #8858 — stamp each with `failedRestore: { code, message }`. The entry is
+    // otherwise byte-identical to an ordinary session, so the next boot's 24h
+    // staleness filter could not tell a PARKED entry from one that merely aged
+    // out, and dropped it when its container binding resolved. The marker is
+    // what lets `restoreState` keep it parked until Retry, Dismiss or the
+    // failed-restore TTL. An older file has no marker and behaves as before.
+    for (const [, { saved, error }] of this._failedRestores) {
+      state.sessions.push({ ...saved, failedRestore: this._failedRestoreMarker(error) })
     }
 
     // Persist cost tracking so budget survives restarts
@@ -3921,6 +3929,32 @@ export class SessionManager extends EventEmitter {
         : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
       const pastTtl = last !== null && Number.isFinite(last) && Date.now() - last > FAILED_RESTORE_TTL_MS
       if (pastTtl && !saved?.worktreePath) continue
+      // #8858 — an entry that was ALREADY parked by an earlier boot stays parked.
+      // Its restore failed, usually for a reason this method cannot see (missing
+      // cwd, deleted worktree, no native locator), so "the container binding
+      // resolves" says nothing about whether it would restore. Re-register it
+      // with its persisted error instead of letting the clause below drop it.
+      const parked = this._parkedMarker(saved)
+      if (parked) {
+        anyFailure = true
+        const err = Object.assign(new Error(parked.message), { code: parked.code })
+        const failedId = this._registerFailedRestore(saved, err)
+        this._advanceSessionCounterPast(saved.name)
+        log.warn(`Stale session ${JSON.stringify(String(saved.name))} stays parked as a failed restore: ${err.message}`)
+        this.emit('session_restore_failed', {
+          sessionId: failedId,
+          name: saved.name,
+          provider: saved.provider || this._providerType,
+          cwd: saved.cwd,
+          model: saved.model || null,
+          permissionMode: saved.permissionMode || null,
+          errorCode: err.code,
+          errorMessage: err.message,
+          originalHistoryPreserved: true,
+          historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
+        })
+        continue
+      }
       try {
         this._resolveRestoredContainerBinding(saved)
         // It would have restored fine — it is merely stale. Unchanged: not
@@ -4058,7 +4092,33 @@ export class SessionManager extends EventEmitter {
     this._cleanupSessionMaps(sessionId)
   }
 
-    _registerFailedRestore(saved, err) {
+  /**
+   * #8858 — the durable "this entry is parked" marker `serializeState` writes.
+   * Code and message only (message capped), so the Control Room row reads the
+   * same after a restart that skipped the live attempt.
+   * @private
+   */
+  _failedRestoreMarker(err) {
+    return {
+      code: err?.code || 'RESTORE_FAILED',
+      message: String(err?.message || err || 'restore failed').slice(0, FAILED_RESTORE_MARKER_MAX_MESSAGE),
+    }
+  }
+
+  /**
+   * #8858 — read the marker back from a persisted entry. Returns null for an
+   * entry without a well-formed marker (an older state file, or one hand-edited
+   * into nonsense) so such an entry follows the pre-existing path.
+   * @private
+   */
+  _parkedMarker(saved) {
+    const m = saved?.failedRestore
+    if (!m || typeof m !== 'object') return null
+    if (typeof m.code !== 'string' || m.code === '' || typeof m.message !== 'string') return null
+    return { code: m.code, message: m.message.slice(0, FAILED_RESTORE_MARKER_MAX_MESSAGE) }
+  }
+
+  _registerFailedRestore(saved, err) {
     // Reuse the saved id when present so the client-visible identity is
     // stable across restart attempts; fall back to a random id otherwise.
     const sessionId = saved.id || randomBytes(16).toString('hex')
