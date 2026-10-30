@@ -527,6 +527,30 @@ function staleInFlightMarkers(get: () => ConnectionState): Partial<ConnectionSta
 }
 
 /**
+ * #8860 — a history page in flight when the socket drops can never be answered
+ * on the dead one. Unlike the markers above this is not emptied wholesale: the
+ * view also holds the entries already fetched (data, which the next reconnect to
+ * the SAME daemon can still show), so only the pending flag is settled, into an
+ * error the panel renders beside those entries. Returns `{}` when nothing was
+ * pending, so an idle drop writes nothing.
+ */
+function settleFailedRestoreHistoriesOnDrop(get: () => ConnectionState): Partial<ConnectionState> {
+  const views = get().failedRestoreHistories ?? {};
+  let next: typeof views | null = null;
+  for (const [id, view] of Object.entries(views)) {
+    if (!view.loading) continue;
+    next ??= { ...views };
+    next[id] = {
+      ...view,
+      loading: false,
+      pendingOffset: null,
+      error: { code: 'CONNECTION_LOST', message: 'Connection lost while loading — try again.' },
+    };
+  }
+  return next ? { failedRestoreHistories: next } : {};
+}
+
+/**
  * #7592 — the module-level, connection-scoped trackers that live OUTSIDE the
  * store (in `message-handler.ts` / store-core) and so are not reached by any
  * `set({ … })` roster spread: the outgoing message queue, the replay baseline
@@ -1141,6 +1165,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   failedRestoresLoading: false,
   retryingRestoreIds: new Set<string>(),
   retryRestoreResults: {},
+  failedRestoreHistories: {},
   pairingRefreshedCount: 0,
   // #7728 — one roster per provider (see ConnectionState.modelsByProvider).
   modelsByProvider: {},
@@ -2097,6 +2122,41 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ retryingRestoreIds: pending, retryRestoreResults: results });
     wsSend(socket, { type: 'retry_failed_restore', sessionId });
     return true;
+  },
+
+  // #8860: read-only history of a parked failed restore, 50 entries a page.
+  // The view's presence in `failedRestoreHistories` IS its open state. `more`
+  // asks for the page after what is shown; otherwise it starts over from the
+  // oldest entry. One page in flight per id: a second request while one is
+  // pending is refused, so the offset a reply is matched against is unambiguous.
+  requestFailedRestoreHistory: (sessionId: string, more = false): boolean => {
+    const { socket } = get();
+    if (!sessionId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const views = get().failedRestoreHistories ?? {};
+    const current = views[sessionId];
+    if (current?.loading) return false;
+    const offset = more && current ? current.entries.length : 0;
+    set({
+      failedRestoreHistories: {
+        ...views,
+        [sessionId]: {
+          entries: offset === 0 ? [] : current!.entries,
+          total: offset === 0 ? null : current!.total,
+          loading: true,
+          pendingOffset: offset,
+        },
+      },
+    });
+    wsSend(socket, { type: 'get_failed_restore_history', sessionId, offset, limit: 50 });
+    return true;
+  },
+
+  closeFailedRestoreHistory: (sessionId: string): void => {
+    const views = { ...(get().failedRestoreHistories ?? {}) };
+    if (!(sessionId in views)) return;
+    delete views[sessionId];
+    set({ failedRestoreHistories: views });
   },
 
   requestByokPoolStatus: (): boolean => {
@@ -3321,6 +3381,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (Object.keys(staleMarkers).length > 0) {
         set(staleMarkers);
       }
+      // #8860: a history page in flight on the dead socket settles into an error.
+      const settledHistories = settleFailedRestoreHistoriesOnDrop(get);
+      if (Object.keys(settledHistories).length > 0) {
+        set(settledHistories);
+      }
       // #8407: a transport drop clears the destroy-in-flight markers above, so
       // their safety timers have nothing left to guard.
       cancelAllEnvironmentDestroyTimers();
@@ -3535,6 +3600,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // state is read against the wrong daemon. Back to `null` (not an empty
       // snapshot) so a reconnected tab reads "not asked yet" and re-requests.
       failedRestores: null,
+      failedRestoreHistories: {},
       // #7586 (supersedes #7572's two literals) — EVERY in-flight request marker:
       // the actioning-id sets, the reindex / relay re-run / retry paths, the
       // orchestration detail + pending-action markers, the survey *Loading flags,
@@ -3779,6 +3845,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // transcript viewer is the same shape of omission: an overlay of a
       // conversation pulled from the old daemon, nulled by the other two.
       failedRestores: null,
+      failedRestoreHistories: {},
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
@@ -4010,6 +4077,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // state is read against the wrong daemon. Back to `null` (not an empty
       // snapshot) so a reconnected tab reads "not asked yet" and re-requests.
       failedRestores: null,
+      failedRestoreHistories: {},
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it
       // (~L3251); `_resetSessionMemory` did not, so an open transcript from

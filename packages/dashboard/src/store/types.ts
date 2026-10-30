@@ -18,7 +18,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -130,6 +130,27 @@ import type {
   WebFeatureStatus,
   WebTask,
 } from '@chroxy/store-core';
+
+/**
+ * #8860: the read-only history view of ONE parked failed restore, opened from
+ * Control Room -> Failed restores -> View history. Its mere presence in
+ * `failedRestoreHistories` means the row's panel is open; closing deletes it.
+ */
+export interface FailedRestoreHistoryView {
+  /** Entries fetched so far, oldest first. The next page starts at `entries.length`. */
+  entries: ServerFailedRestoreHistoryEntry[];
+  /** The daemon's total for this entry; `null` until the first reply lands. */
+  total: number | null;
+  /** A `get_failed_restore_history` is in flight for this id. */
+  loading: boolean;
+  /**
+   * The `offset` of the request in flight, or `null`. A reply is applied only if
+   * it echoes this offset, so a late reply for a superseded request is dropped.
+   */
+  pendingOffset: number | null;
+  /** The last request's failure (kept beside the entries already shown). */
+  error?: { code?: string; message?: string; refused?: boolean };
+}
 
 export interface EnvironmentInfo {
   id: string;
@@ -1851,6 +1872,13 @@ export interface ConnectionState {
   retryingRestoreIds: Set<string>;
   /** #7625: last retry outcome per sessionId, mirroring byokPoolActionResults. */
   retryRestoreResults: Record<string, { ok: boolean; code?: string; message?: string }>;
+  /**
+   * #8860: open history views, keyed by parked sessionId. Per-DAEMON like the
+   * roster (transcript content of the old daemon's sessions), so every
+   * full-reset site clears it, and a roster reply drops views whose entry is
+   * gone.
+   */
+  failedRestoreHistories: Record<string, FailedRestoreHistoryView>;
 
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
@@ -2511,6 +2539,15 @@ export interface ConnectionState {
   requestFailedRestores: () => boolean;
   /** #7625: retry one parked failed restore. */
   sendRetryFailedRestore: (sessionId: string) => boolean;
+  /**
+   * #8860: open (or, with `more`, extend) the read-only history view of a parked
+   * failed restore. Without `more` it (re)starts from the oldest entry; with it,
+   * it asks for the page after what is already shown. Returns false (and changes
+   * nothing) when the socket is closed or a page is already in flight.
+   */
+  requestFailedRestoreHistory: (sessionId: string, more?: boolean) => boolean;
+  /** #8860: close a failed restore's history view and drop what it fetched. */
+  closeFailedRestoreHistory: (sessionId: string) => void;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a
   // `host_prune_status_request`; the server replies with a single

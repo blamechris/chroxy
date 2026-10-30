@@ -794,6 +794,54 @@ async function handleRetryFailedRestore(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * #8860 — read one page of a parked failed restore's preserved history.
+ *
+ * READ-ONLY and no new authority: the native-resume contract is untouched (this
+ * resumes, rebuilds and creates nothing). It exists because a session parked
+ * for a missing native locator can never be restored and the roster publishes
+ * only a count.
+ *
+ * AUTHORITY: at least as strict as `list_failed_restores` — it REFUSES
+ * pairing-bound clients, never redacts. The history is transcript content
+ * (prompts, tool inputs, tool output) of a session the bound token is not
+ * scoped to, which is strictly more sensitive than the roster's `cwd`. The gate
+ * runs FIRST, before the sessionId is validated or any SessionManager lookup,
+ * so the refusal cannot tell a real parked id from a fabricated one. The reply
+ * is a degraded, schema-valid `failed_restore_history` (`ok: false, refused:
+ * true, code`), not a `session_error`, so the caller never waits on a reply
+ * that never comes.
+ */
+function handleGetFailedRestoreHistory(ws, client, msg, ctx) {
+  const sessionId = typeof msg?.sessionId === 'string' ? msg.sessionId : ''
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'failed_restore_history',
+      sessionId,
+      ok: false,
+      refused: true,
+      code: 'FAILED_RESTORE_HISTORY_FORBIDDEN_BOUND_CLIENT',
+      message: "Pairing-issued session tokens cannot read a failed restore's history — this requires a host-level (unbound) client, such as the primary token.",
+    })
+    return
+  }
+  if (!sessionId) {
+    ctx.transport.send(ws, {
+      type: 'failed_restore_history',
+      sessionId: '',
+      ok: false,
+      code: 'FAILED_RESTORE_HISTORY_INVALID',
+      message: 'get_failed_restore_history requires a sessionId',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const result = typeof sm.getFailedRestoreHistory === 'function'
+    ? sm.getFailedRestoreHistory(sessionId, { offset: msg.offset, limit: msg.limit })
+    : { ok: false, code: 'FAILED_RESTORE_NOT_FOUND', message: `No failed-restore entry for session ${sessionId}` }
+  ctx.transport.send(ws, { type: 'failed_restore_history', sessionId, ...result })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -810,4 +858,5 @@ export const sessionHandlers = {
   claim_primary: handleClaimPrimary,
   list_failed_restores: handleListFailedRestores,
   retry_failed_restore: handleRetryFailedRestore,
+  get_failed_restore_history: handleGetFailedRestoreHistory,
 }

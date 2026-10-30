@@ -120,6 +120,9 @@ const PLATFORM_SPECIFIC = {
   // mobile nothing at runtime (verified: app message-handler default case).
   failed_restores_list: 'dashboard',
   retry_failed_restore_result: 'dashboard',
+  // #8860: the read-only history page for a parked failed restore — same
+  // dashboard-only reasoning as the roster it hangs off.
+  failed_restore_history: 'dashboard',
   // Mobile app only
   // (pair_fail is now handled by BOTH platforms — the dashboard gained
   //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)

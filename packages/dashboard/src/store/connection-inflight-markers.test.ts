@@ -442,3 +442,25 @@ describe('#7586 the roster is the ONLY place a marker is added', () => {
     }
   })
 })
+
+describe('#8860 a history page in flight when the socket drops', () => {
+  it('settles into an error beside the entries already fetched, and an idle drop writes nothing', async () => {
+    const ws = await openConnected()
+    useConnectionStore.setState({
+      failedRestoreHistories: {
+        a: { entries: [{ type: 'message', content: 'kept' }], total: 120, loading: true, pendingOffset: 1 },
+        b: { entries: [], total: 0, loading: false, pendingOffset: null },
+      },
+    } as unknown as Partial<State>)
+    const idleBefore = useConnectionStore.getState().failedRestoreHistories.b
+
+    ws.onclose?.({ code: 1006 })
+
+    const views = useConnectionStore.getState().failedRestoreHistories
+    expect(views.a!.loading, 'the spinner can never be answered on the dead socket').toBe(false)
+    expect(views.a!.pendingOffset).toBeNull()
+    expect(views.a!.error?.code).toBe('CONNECTION_LOST')
+    expect(views.a!.entries, 'fetched entries are data, not a marker: they stay').toHaveLength(1)
+    expect(views.b, 'an idle view is untouched (same identity)').toBe(idleBefore)
+  })
+})

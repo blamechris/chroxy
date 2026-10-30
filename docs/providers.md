@@ -313,7 +313,10 @@ A missing native thread, changed ownership, unknown policy or incompatible
 settings leaves the original conversation in failed-restore attention state.
 Retry uses its original native identity; creating a replacement requires an
 explicit new-session action. Older Codex state files without a native locator
-cannot recover upstream context from their display history.
+cannot recover upstream context from their display history. A parked session's
+preserved history stays readable, read-only, from Control Room → Failed restores
+→ **View history**; viewing it resumes nothing, and a replacement still requires
+an explicit new session.
 
 A completed idle restart does not replay old prompts. Input acknowledgements
 retain their **process** deduplication scope; an unacknowledged dispatch across

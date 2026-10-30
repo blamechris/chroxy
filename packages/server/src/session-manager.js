@@ -282,6 +282,11 @@ const warnedUnknownCtorOptKeys = new Set()
  * came to silently override it.
  */
 const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// #8860: page bounds for getFailedRestoreHistory. Mirrors the protocol's
+// `get_failed_restore_history` limit (1..100); the clamp is repeated here
+// because this is the enforcement point for any caller, not just the handler.
+const FAILED_RESTORE_HISTORY_DEFAULT_LIMIT = 50
+const FAILED_RESTORE_HISTORY_MAX_LIMIT = 100
 
 /**
  * #8348: the history outcome for a session's `permission_resolved` /
@@ -4087,6 +4092,49 @@ export class SessionManager extends EventEmitter {
       })
     }
     return list
+  }
+
+  /**
+   * One page of a parked failed restore's PRESERVED history (#8860), oldest
+   * first. Read-only: it resumes, rebuilds and creates nothing, so the
+   * fail-closed native resume (docs/providers.md "Native restart continuity")
+   * is untouched. It exists because a session parked for a missing native
+   * locator can never be restored, and the roster publishes only a count.
+   *
+   * Each entry goes through the same `truncateEntry` the persistence boundary
+   * uses (one bound, not a second implementation), which also drops the
+   * server-internal `_seq`. `limit` is clamped to 1..MAX (default 50) and
+   * `offset` to >= 0, whatever the caller sent; a non-numeric value takes the
+   * default rather than propagating NaN into `slice`.
+   *
+   * Takes no lock: `retryFailedRestore` removes the entry before it attempts
+   * anything, so a read racing it sees either the whole entry or none.
+   *
+   * @param {string} sessionId
+   * @param {{ offset?: number, limit?: number }} [opts]
+   * @returns {{ok: true, total: number, offset: number, entries: object[]} | {ok: false, code: string, message: string}}
+   */
+  getFailedRestoreHistory(sessionId, { offset, limit } = {}) {
+    const parked = this._failedRestores.get(sessionId)
+    if (!parked) {
+      return {
+        ok: false,
+        code: 'FAILED_RESTORE_NOT_FOUND',
+        message: `No failed-restore entry for session ${sessionId}`,
+      }
+    }
+    const history = Array.isArray(parked.saved?.history) ? parked.saved.history : []
+    const pageSize = Number.isFinite(limit)
+      ? Math.min(FAILED_RESTORE_HISTORY_MAX_LIMIT, Math.max(1, Math.trunc(limit)))
+      : FAILED_RESTORE_HISTORY_DEFAULT_LIMIT
+    const start = Number.isFinite(offset) ? Math.max(0, Math.trunc(offset)) : 0
+    const entries = history
+      .slice(start, start + pageSize)
+      // A non-object slot (a hand-edited state file) keeps its index as an inert
+      // placeholder rather than being dropped, so `offset + entries.length`
+      // stays the next page's start.
+      .map(e => (e && typeof e === 'object' ? this._history.truncateEntry(e) : { type: 'unknown' }))
+    return { ok: true, total: history.length, offset: start, entries }
   }
 
   /**

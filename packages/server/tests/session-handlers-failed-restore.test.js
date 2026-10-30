@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { sessionHandlers } from '../src/handlers/session-handlers.js'
 import { nsCtx } from './test-helpers.js'
-import { ServerFailedRestoresListSchema, ServerRetryFailedRestoreResultSchema } from '@chroxy/protocol'
+import { ServerFailedRestoresListSchema, ServerRetryFailedRestoreResultSchema, ServerFailedRestoreHistorySchema } from '@chroxy/protocol'
 
 /**
  * #7625 — WS authority + wiring for the two failed-restore messages.
@@ -29,12 +29,21 @@ const SAMPLE = [{
 }]
 
 /** A ctx whose SessionManager RECORDS whether it was consulted. */
-function makeCtx({ restores = SAMPLE, retryResult = { ok: true, sessionId: 'x' } } = {}) {
+function makeCtx({
+  restores = SAMPLE,
+  retryResult = { ok: true, sessionId: 'x' },
+  historyResult = { ok: true, total: 1, offset: 0, entries: [{ type: 'message', content: 'secret transcript' }] },
+} = {}) {
   const sent = []
-  const calls = { getFailedRestores: 0, retryFailedRestore: 0, broadcastSessionList: 0 }
+  const calls = { getFailedRestores: 0, retryFailedRestore: 0, broadcastSessionList: 0, getFailedRestoreHistory: 0, historyArgs: null }
   const ctx = nsCtx({
     sessionManager: {
       getFailedRestores: () => { calls.getFailedRestores++; return restores },
+      getFailedRestoreHistory: (id, opts) => {
+        calls.getFailedRestoreHistory++
+        calls.historyArgs = { id, opts }
+        return historyResult
+      },
       retryFailedRestore: async (id) => { calls.retryFailedRestore++; return { ...retryResult, sessionId: retryResult.sessionId ?? id } },
     },
     transport: {
@@ -137,5 +146,74 @@ describe('retry_failed_restore (#7625)', () => {
     // exact leak #7595 fixed on the environment surface.
     assert.equal(calls.retryFailedRestore, 0, "'' must not be treated as unbound")
     assert.equal(sent[0].code, 'RETRY_FAILED_RESTORE_FORBIDDEN_BOUND_CLIENT')
+  })
+})
+
+describe('get_failed_restore_history (#8860)', () => {
+  const MSG = { type: 'get_failed_restore_history', sessionId: 'abc', offset: 50, limit: 25 }
+
+  it('returns the page to an unbound client, forwarding offset and limit', async () => {
+    const { ctx, sent, calls } = makeCtx()
+    await sessionHandlers.get_failed_restore_history({}, UNBOUND, MSG, ctx)
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'failed_restore_history')
+    assert.equal(sent[0].sessionId, 'abc')
+    assert.equal(sent[0].ok, true)
+    assert.equal(sent[0].entries[0].content, 'secret transcript')
+    assert.deepEqual(calls.historyArgs, { id: 'abc', opts: { offset: 50, limit: 25 } })
+    assert.doesNotThrow(() => ServerFailedRestoreHistorySchema.parse(sent[0]))
+  })
+
+  it('refuses a bound client WITHOUT consulting the manager, and leaks no transcript', async () => {
+    const { ctx, sent, calls } = makeCtx()
+    await sessionHandlers.get_failed_restore_history({}, BOUND, MSG, ctx)
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].refused, true)
+    assert.equal(sent[0].code, 'FAILED_RESTORE_HISTORY_FORBIDDEN_BOUND_CLIENT')
+    assert.equal(sent[0].entries, undefined, 'no transcript content in the refusal')
+    assert.equal(JSON.stringify(sent[0]).includes('secret transcript'), false)
+    // The ordering claim: a refusal after the lookup is an existence oracle.
+    assert.equal(calls.getFailedRestoreHistory, 0, 'refused before any manager lookup')
+    assert.doesNotThrow(() => ServerFailedRestoreHistorySchema.parse(sent[0]))
+  })
+
+  it('treats an empty-string boundSessionId as BOUND (fail-safe, #7595)', async () => {
+    const { ctx, sent, calls } = makeCtx()
+    await sessionHandlers.get_failed_restore_history({}, { boundSessionId: '' }, MSG, ctx)
+
+    assert.equal(calls.getFailedRestoreHistory, 0, "'' must not be treated as unbound")
+    assert.equal(sent[0].refused, true)
+  })
+
+  it('refuses a bound client even when the sessionId is missing (no validation oracle)', async () => {
+    const { ctx, sent, calls } = makeCtx()
+    await sessionHandlers.get_failed_restore_history({}, BOUND, { type: 'get_failed_restore_history' }, ctx)
+
+    assert.equal(sent[0].code, 'FAILED_RESTORE_HISTORY_FORBIDDEN_BOUND_CLIENT')
+    assert.equal(calls.getFailedRestoreHistory, 0)
+    assert.doesNotThrow(() => ServerFailedRestoreHistorySchema.parse(sent[0]))
+  })
+
+  it('rejects a missing sessionId from an unbound client without a lookup', async () => {
+    const { ctx, sent, calls } = makeCtx()
+    await sessionHandlers.get_failed_restore_history({}, UNBOUND, { type: 'get_failed_restore_history' }, ctx)
+
+    assert.equal(calls.getFailedRestoreHistory, 0)
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].code, 'FAILED_RESTORE_HISTORY_INVALID')
+    assert.doesNotThrow(() => ServerFailedRestoreHistorySchema.parse(sent[0]))
+  })
+
+  it('forwards the manager not-found result as a schema-valid reply', async () => {
+    const { ctx, sent } = makeCtx({ historyResult: { ok: false, code: 'FAILED_RESTORE_NOT_FOUND', message: 'gone' } })
+    await sessionHandlers.get_failed_restore_history({}, UNBOUND, MSG, ctx)
+
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].code, 'FAILED_RESTORE_NOT_FOUND')
+    assert.notEqual(sent[0].refused, true, 'not-found is distinguishable from a refusal')
+    assert.doesNotThrow(() => ServerFailedRestoreHistorySchema.parse(sent[0]))
   })
 })

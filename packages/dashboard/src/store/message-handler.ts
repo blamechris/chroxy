@@ -206,7 +206,7 @@ import {
   mergePermissionModesByProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
-import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage } from '@chroxy/protocol'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
@@ -7132,15 +7132,70 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // reach the renderer and throw at `.map`, blanking the whole tab rather
       // than showing one bad row.
       const snapshot = msg as unknown as ServerFailedRestoresListMessage;
+      const restores = Array.isArray(snapshot.restores) ? snapshot.restores : [];
+      // #8860: a history view whose entry is no longer parked (a retry won, or
+      // the TTL pruned it) has nothing left to show or extend, so drop it. A
+      // REFUSED reply carries an empty `restores` that says nothing about
+      // existence, so it leaves the views alone.
+      const priorViews = get().failedRestoreHistories ?? {};
+      let histories = priorViews;
+      if (snapshot.refused !== true) {
+        const live = new Set(restores.map((r) => r.sessionId));
+        const kept = Object.entries(priorViews).filter(([id]) => live.has(id));
+        if (kept.length !== Object.keys(priorViews).length) histories = Object.fromEntries(kept);
+      }
       set({
         failedRestores: {
           ...snapshot,
-          restores: Array.isArray(snapshot.restores) ? snapshot.restores : [],
+          restores,
         },
+        failedRestoreHistories: histories,
         // Cleared on EVERY reply, refusal included — a refused survey that left
         // the flag set would disable its own Refresh button for good, since
         // refreshDisabled = loading || !connected and only a request clears it.
         failedRestoresLoading: false,
+      });
+      break;
+    }
+    case 'failed_restore_history': {
+      // #8860. A reply is applied only to a view that is OPEN and WAITING, and
+      // only if it echoes the offset that view asked for: a reply for a view
+      // closed meanwhile, a superseded request, or an unsolicited frame is
+      // dropped rather than resurrecting or corrupting a panel. The view is
+      // keyed by the id the daemon echoed; an absent/empty id has no view.
+      const reply = msg as unknown as ServerFailedRestoreHistoryMessage;
+      const id = reply.sessionId;
+      if (typeof id !== 'string' || id === '') break;
+      const views = get().failedRestoreHistories ?? {};
+      const view = views[id];
+      if (!view || !view.loading || view.pendingOffset === null) break;
+      if (reply.ok === true) {
+        // The offset is optional on the wire; when present it must match.
+        if (typeof reply.offset === 'number' && reply.offset !== view.pendingOffset) break;
+        const page = Array.isArray(reply.entries) ? reply.entries : [];
+        // A zero-length page with a total still ahead would make "Load more"
+        // re-request the same offset forever; treat it as the end.
+        const base = view.pendingOffset === 0 ? [] : view.entries;
+        const entries = [...base, ...page];
+        const total = typeof reply.total === 'number' ? reply.total : entries.length;
+        set({
+          failedRestoreHistories: {
+            ...views,
+            [id]: { entries, total: page.length === 0 ? Math.min(total, entries.length) : total, loading: false, pendingOffset: null },
+          },
+        });
+        break;
+      }
+      set({
+        failedRestoreHistories: {
+          ...views,
+          [id]: {
+            ...view,
+            loading: false,
+            pendingOffset: null,
+            error: { code: reply.code, message: reply.message, refused: reply.refused === true },
+          },
+        },
       });
       break;
     }
