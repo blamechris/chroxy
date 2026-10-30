@@ -158,6 +158,7 @@ describe('FailedRestoresSection — View history (#8860)', () => {
     expect(toggle().type).toBe('button')
     expect(toggle().textContent).toBe('View history')
     expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(toggle().hasAttribute('aria-controls')).toBe(false)
     expect(screen.queryByTestId(`failed-restore-history-${A}`)).toBeNull()
 
     fireEvent.click(toggle())
@@ -173,6 +174,9 @@ describe('FailedRestoresSection — View history (#8860)', () => {
     expect(screen.getByTestId(`failed-restore-history-loading-${A}`)).toBeTruthy()
     expect(toggle().textContent).toBe('Hide history')
     expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    const controls = toggle().getAttribute('aria-controls')
+    expect(controls).toBeTruthy()
+    expect(document.getElementById(controls as string)).toBe(screen.getByTestId(`failed-restore-history-${A}`))
 
     fireEvent.click(toggle())
     expect(state.closeFailedRestoreHistory).toHaveBeenCalledWith(A)

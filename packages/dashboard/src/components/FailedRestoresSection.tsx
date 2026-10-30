@@ -40,7 +40,7 @@
  */
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
-import { FailedRestoreHistoryPanel } from './FailedRestoreHistoryPanel';
+import { FailedRestoreHistoryPanel, failedRestoreHistoryPanelId } from './FailedRestoreHistoryPanel';
 
 function relativeAge(errorCode: string): string {
   // The roster carries no timestamp — `getFailedRestores()` publishes the error
@@ -150,6 +150,8 @@ export function FailedRestoresSection() {
                     // Closing never needs the socket; only opening does.
                     disabled={!historyOpen && !connected}
                     aria-expanded={historyOpen}
+                    // Only while the panel is mounted: an id that does not exist would break the disclosure convention.
+                    aria-controls={historyOpen ? failedRestoreHistoryPanelId(r.sessionId) : undefined}
                     data-testid={`failed-restore-history-toggle-${r.sessionId}`}
                   >
                     {historyOpen ? 'Hide history' : 'View history'}

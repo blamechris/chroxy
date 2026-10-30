@@ -145,6 +145,11 @@ function HistoryEntry({ entry }: { entry: ServerFailedRestoreHistoryEntry }) {
   }
 }
 
+/** The panel's element id, which the row's View history toggle points `aria-controls` at. */
+export function failedRestoreHistoryPanelId(sessionId: string): string {
+  return `failed-restore-history-panel-${sessionId}`;
+}
+
 export function FailedRestoreHistoryPanel({ sessionId }: { sessionId: string }) {
   const view = useConnectionStore((s) => s.failedRestoreHistories[sessionId]);
   const connected = useConnectionStore((s) => s.connectionPhase === 'connected');
@@ -159,7 +164,11 @@ export function FailedRestoreHistoryPanel({ sessionId }: { sessionId: string }) 
   const firstLoad = loading && entries.length === 0;
 
   return (
-    <div className="fr-hist-panel" data-testid={`failed-restore-history-${sessionId}`}>
+    <div
+      className="fr-hist-panel"
+      id={failedRestoreHistoryPanelId(sessionId)}
+      data-testid={`failed-restore-history-${sessionId}`}
+    >
       {error ? (
         <p className="fr-result-error" data-testid={`failed-restore-history-error-${sessionId}`}>
           {error.refused
