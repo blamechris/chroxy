@@ -1453,6 +1453,39 @@ export const GetFailedRestoreHistorySchema = z.object({
     offset: z.number().int().min(0).optional(),
     limit: z.number().int().min(1).max(100).optional(),
 });
+// Provider-neutral session archive (the generalisation of #8860's failed-restore
+// reader to EVERY ended session). The history chroxy holds for a session that
+// left the live set is kept as a compressed record; these three requests list,
+// read and delete those records. READ-ONLY apart from `delete_archived_session`,
+// which removes only archive records: nothing here resumes, rebuilds or creates
+// a session.
+//
+// AUTHORITY: at least as strict as `get_failed_restore_history`. The records are
+// transcript content (prompts, tool inputs, tool output) of sessions the caller
+// is not scoped to, so pairing-bound clients are REFUSED with a degraded,
+// schema-valid reply of the matching server type (`refused: true, code`),
+// gated before the archiveId is validated or any lookup, so the refusal is not
+// an existence oracle. An `archiveId` is a server-generated random token; the
+// server accepts only a known one and never derives a path from it.
+export const ListArchivedSessionsSchema = z.object({
+    type: z.literal('list_archived_sessions'),
+});
+// Paged like `get_failed_restore_history`: `offset` is the zero-based index of
+// the first entry (oldest first), `limit` the page size (server default 50,
+// hard cap 100).
+export const GetArchivedSessionHistorySchema = z.object({
+    type: z.literal('get_archived_session_history'),
+    archiveId: z.string().min(1).max(256),
+    offset: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+});
+// Exactly one of `archiveId` (delete that record) or `all: true` (delete every
+// record). `all: false` alone, both, or neither is rejected.
+export const DeleteArchivedSessionSchema = z.object({
+    type: z.literal('delete_archived_session'),
+    archiveId: z.string().min(1).max(256).optional(),
+    all: z.boolean().optional(),
+}).refine((m) => (m.archiveId !== undefined) !== (m.all === true), { message: 'delete_archived_session requires exactly one of archiveId or all: true' });
 export const DestroyEnvironmentSchema = z.object({
     type: z.literal('destroy_environment'),
     environmentId: z.string().max(256),
@@ -2003,6 +2036,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListFailedRestoresSchema,
     RetryFailedRestoreSchema,
     GetFailedRestoreHistorySchema,
+    ListArchivedSessionsSchema,
+    GetArchivedSessionHistorySchema,
+    DeleteArchivedSessionSchema,
     GetEnvironmentSchema,
     EvaluateDraftSchema,
     HostStatusRequestSchema,

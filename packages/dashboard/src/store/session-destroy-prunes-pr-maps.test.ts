@@ -1222,6 +1222,12 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // full-reset sites now, which the `connection lifecycle` describe below
     // holds for this field and for every other member of this bucket.
     sessionPresetSnapshots: 'keyed by cwd (#5553); cleared at the two full-reset sites (#7488)',
+    // Session archive: keyed by the server-generated archiveId of an ENDED
+    // session's record. Not a live session id, so `removedIds` has nothing to
+    // diff against it; its lifetime is the archive list's (a list reply drops a
+    // view whose record is gone) and both full-reset sites clear the views.
+    archivedSessionHistories: 'keyed by archiveId (an archived record, not a live session); list reply prunes, full-reset sites clear',
+    deletingArchiveIds: 'archiveIds with a delete in flight; transport drop clears (in-flight marker roster)',
     reindexingRepoPaths: 'keyed by the repoPath the dashboard sent',
     reindexResults: 'per repo path',
     relayRerunningRepoPaths: 'repo paths with an in-flight relay re-run',

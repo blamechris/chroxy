@@ -497,6 +497,103 @@ export const ServerFailedRestoreHistorySchema = z.object({
     message: z.string().optional(),
 });
 /**
+ * Provider-neutral session archive: the roster row for one archived session.
+ * Built by the server from a fixed list of typed fields (never the saved entry
+ * itself), so it carries no transcript content — only enough to pick a record.
+ * `archiveId` is the server-generated token every other archive message keys on.
+ * `reason` says why the session left the live set: `closed`, `idle_timeout`,
+ * `respawn_exhausted`, `stale`, `failed_restore_expired`,
+ * `failed_restore_dismissed`. Timestamps are epoch milliseconds, `null` when
+ * the saved entry did not carry one.
+ */
+export const ServerArchivedSessionMetaSchema = z.object({
+    archiveId: z.string(),
+    sessionId: z.string(),
+    name: z.string().nullable(),
+    provider: z.string().nullable(),
+    cwd: z.string().nullable(),
+    model: z.string().nullable(),
+    reason: z.string(),
+    archivedAt: z.number().nullable(),
+    lastActivityAt: z.number().nullable(),
+    createdAt: z.number().nullable(),
+    /** Entries kept in the record (the page total). */
+    historyLength: z.number().int().min(0),
+    /**
+     * How many of the session's OLDEST history entries were left out because the
+     * whole record would have exceeded the archive's size bound. Absent or 0 when
+     * nothing was omitted.
+     */
+    omittedOldest: z.number().int().min(0).optional(),
+    bytes: z.number().min(0),
+});
+/**
+ * Reply to `list_archived_sessions`. `policy` is the retention policy in force
+ * (`enabled: false` means no NEW sessions are archived; existing records still
+ * age out). `sessions` is newest first. `refused: true` + `code` is the
+ * pairing-bound client's degraded reply (`sessions` empty) — distinguishable
+ * from a genuinely empty archive by the flag, not the array.
+ */
+export const ServerArchivedSessionsListSchema = z.object({
+    type: z.literal('archived_sessions_list'),
+    generatedAt: z.string(),
+    policy: z.object({
+        enabled: z.boolean(),
+        maxEntries: z.number(),
+        maxAgeDays: z.number(),
+        maxMegabytes: z.number(),
+    }),
+    sessions: z.array(ServerArchivedSessionMetaSchema),
+    /**
+     * Set when the roster was cut to fit one frame: `sessions` holds the NEWEST
+     * archived sessions that fit, and older ones exist but are not listed.
+     */
+    truncated: z.boolean().optional(),
+    refused: z.boolean().optional(),
+    code: z.string().optional(),
+});
+/**
+ * Reply to `get_archived_session_history`: one page of an archived session's
+ * preserved history, oldest first. `entries` use the SAME loosely modelled
+ * entry shape as `failed_restore_history` (the server owns the union of history
+ * entry shapes; a client must render defensively), and the page obeys the same
+ * bounds (<= 100 entries, ~256 KiB). `ok: false` carries `code`:
+ * `ARCHIVED_SESSION_NOT_FOUND` (unknown id, or the record was deleted / aged
+ * out) or, with `refused: true`, `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`;
+ * `ARCHIVED_SESSION_INVALID` for a missing archiveId. `offset` echoes the page
+ * start actually served (after clamping).
+ */
+export const ServerArchivedSessionHistorySchema = z.object({
+    type: z.literal('archived_session_history'),
+    archiveId: z.string(),
+    ok: z.boolean(),
+    total: z.number().int().min(0).optional(),
+    offset: z.number().int().min(0).optional(),
+    entries: z.array(ServerFailedRestoreHistoryEntrySchema).optional(),
+    refused: z.boolean().optional(),
+    code: z.string().optional(),
+    message: z.string().optional(),
+});
+/**
+ * Reply to `delete_archived_session`. `deleted` is how many records were
+ * removed (0 or 1 for an `archiveId`; any count for `all: true`). `archiveId`
+ * echoes the request's id (absent for `all: true`). `ok: false` carries `code`:
+ * `ARCHIVED_SESSION_NOT_FOUND` (no such record), `ARCHIVED_SESSION_DELETE_FAILED`
+ * (the record exists but could not be removed — it is still on disk),
+ * `ARCHIVED_SESSIONS_DELETE_PARTIAL` (`all: true`: `deleted` records went, others
+ * could not be removed), `ARCHIVED_SESSION_INVALID`, or, with `refused: true`,
+ * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
+ */
+export const ServerDeleteArchivedSessionResultSchema = z.object({
+    type: z.literal('delete_archived_session_result'),
+    ok: z.boolean(),
+    deleted: z.number().int().min(0),
+    archiveId: z.string().optional(),
+    refused: z.boolean().optional(),
+    code: z.string().optional(),
+    message: z.string().optional(),
+});
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

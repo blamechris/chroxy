@@ -842,6 +842,172 @@ function handleGetFailedRestoreHistory(ws, client, msg, ctx) {
   ctx.transport.send(ws, { type: 'failed_restore_history', sessionId, ...result })
 }
 
+const ARCHIVE_FORBIDDEN_MESSAGE = 'Pairing-issued session tokens cannot read or delete archived sessions — this requires a host-level (unbound) client, such as the primary token.'
+// Matches the protocol's archiveId bound (client.ts); the manager's own check
+// (32 lowercase hex AND present in the index) is the real gate.
+const ARCHIVE_ID_MAX_CHARS = 256
+// JSON budget for the rows of one archived_sessions_list frame.
+const ARCHIVE_LIST_MAX_BYTES = 512 * 1024
+
+/**
+ * Provider-neutral session archive — the roster of archived sessions.
+ *
+ * READ-ONLY. AUTHORITY: at least as strict as `get_failed_restore_history`: the
+ * rows name sessions (cwd, provider, name) the bound token is not scoped to, so
+ * pairing-bound clients are REFUSED, never redacted, with a degraded
+ * schema-valid `archived_sessions_list` (`refused: true, code`) so the caller
+ * never waits on a reply that never comes. The gate runs FIRST.
+ */
+function handleListArchivedSessions(ws, client, _msg, ctx) {
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'archived_sessions_list',
+      generatedAt: new Date().toISOString(),
+      policy: { enabled: false, maxEntries: 0, maxAgeDays: 0, maxMegabytes: 0 },
+      sessions: [],
+      refused: true,
+      code: 'ARCHIVED_SESSIONS_LIST_FORBIDDEN_BOUND_CLIENT',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const { policy, sessions } = typeof sm.listArchivedSessions === 'function'
+    ? sm.listArchivedSessions()
+    : { policy: { enabled: false, maxEntries: 0, maxAgeDays: 0, maxMegabytes: 0 }, sessions: [] }
+  // The roster is ONE frame: send the newest rows that fit a byte budget (the
+  // rows arrive newest-first) and say so when the rest were cut.
+  const kept = []
+  let bytes = 0
+  let truncated = false
+  for (const row of sessions) {
+    const size = Buffer.byteLength(JSON.stringify(row)) + 1
+    if (bytes + size > ARCHIVE_LIST_MAX_BYTES && kept.length > 0) { truncated = true; break }
+    kept.push(row)
+    bytes += size
+  }
+  ctx.transport.send(ws, {
+    type: 'archived_sessions_list',
+    generatedAt: new Date().toISOString(),
+    policy,
+    sessions: kept,
+    ...(truncated ? { truncated: true } : {}),
+  })
+}
+
+/**
+ * Provider-neutral session archive — read one page of an archived session's
+ * history. READ-ONLY. Refuses pairing-bound clients FIRST, before the archiveId
+ * is validated or looked up (no existence oracle), with a degraded schema-valid
+ * `archived_session_history` (`ok: false, refused: true, code`).
+ */
+async function handleGetArchivedSessionHistory(ws, client, msg, ctx) {
+  const archiveId = typeof msg?.archiveId === 'string' ? msg.archiveId.slice(0, ARCHIVE_ID_MAX_CHARS) : ''
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'archived_session_history',
+      archiveId,
+      ok: false,
+      refused: true,
+      code: 'ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT',
+      message: ARCHIVE_FORBIDDEN_MESSAGE,
+    })
+    return
+  }
+  if (!archiveId) {
+    ctx.transport.send(ws, {
+      type: 'archived_session_history',
+      archiveId: '',
+      ok: false,
+      code: 'ARCHIVED_SESSION_INVALID',
+      message: 'get_archived_session_history requires an archiveId',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const result = typeof sm.getArchivedSessionHistory === 'function'
+    ? await sm.getArchivedSessionHistory(archiveId, { offset: msg.offset, limit: msg.limit })
+    : { ok: false, code: 'ARCHIVED_SESSION_NOT_FOUND', message: 'No archived session with that id' }
+  ctx.transport.send(ws, { type: 'archived_session_history', archiveId, ...result })
+}
+
+/**
+ * Provider-neutral session archive — delete one archive record (`archiveId`) or
+ * all of them (`all: true`). Removes only archive records: it touches no live
+ * session and no failed restore. Refuses pairing-bound clients FIRST with a
+ * degraded schema-valid `delete_archived_session_result`. Exactly one of
+ * `archiveId` / `all: true` is required (the protocol schema enforces it; this
+ * re-checks because the handler is the enforcement point for a message that
+ * bypassed schema validation).
+ */
+function handleDeleteArchivedSession(ws, client, msg, ctx) {
+  const archiveId = typeof msg?.archiveId === 'string' ? msg.archiveId.slice(0, ARCHIVE_ID_MAX_CHARS) : ''
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'delete_archived_session_result',
+      ok: false,
+      deleted: 0,
+      ...(archiveId ? { archiveId } : {}),
+      refused: true,
+      code: 'ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT',
+      message: ARCHIVE_FORBIDDEN_MESSAGE,
+    })
+    return
+  }
+  const all = msg?.all === true
+  if ((archiveId !== '') === all) {
+    ctx.transport.send(ws, {
+      type: 'delete_archived_session_result',
+      ok: false,
+      deleted: 0,
+      code: 'ARCHIVED_SESSION_INVALID',
+      message: 'delete_archived_session requires exactly one of archiveId or all: true',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  if (all) {
+    const { deleted, failed } = typeof sm.deleteAllArchivedSessions === 'function'
+      ? sm.deleteAllArchivedSessions()
+      : { deleted: 0, failed: 0 }
+    log.info(`Deleted ${deleted} archived session(s)${failed > 0 ? ` (${failed} could not be removed)` : ''}`)
+    // A partial delete is NOT a success: some transcripts are still on disk, and
+    // the reply says so (with the count that did go) rather than claiming ok.
+    ctx.transport.send(ws, failed > 0
+      ? {
+          type: 'delete_archived_session_result',
+          ok: false,
+          deleted,
+          code: 'ARCHIVED_SESSIONS_DELETE_PARTIAL',
+          message: `Deleted ${deleted} archived session(s), but ${failed} could not be removed and are still on disk`,
+        }
+      : { type: 'delete_archived_session_result', ok: true, deleted })
+    return
+  }
+  const outcome = typeof sm.deleteArchivedSession === 'function' ? sm.deleteArchivedSession(archiveId) : 'not_found'
+  if (outcome === 'deleted') {
+    log.info('Deleted an archived session')
+    ctx.transport.send(ws, { type: 'delete_archived_session_result', ok: true, deleted: 1, archiveId })
+    return
+  }
+  ctx.transport.send(ws, outcome === 'failed'
+    ? {
+        type: 'delete_archived_session_result',
+        ok: false,
+        deleted: 0,
+        archiveId,
+        code: 'ARCHIVED_SESSION_DELETE_FAILED',
+        message: 'The archived session could not be removed and is still on disk',
+      }
+    : {
+        type: 'delete_archived_session_result',
+        ok: false,
+        deleted: 0,
+        archiveId,
+        code: 'ARCHIVED_SESSION_NOT_FOUND',
+        message: 'No archived session with that id',
+      })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -859,4 +1025,7 @@ export const sessionHandlers = {
   list_failed_restores: handleListFailedRestores,
   retry_failed_restore: handleRetryFailedRestore,
   get_failed_restore_history: handleGetFailedRestoreHistory,
+  list_archived_sessions: handleListArchivedSessions,
+  get_archived_session_history: handleGetArchivedSessionHistory,
+  delete_archived_session: handleDeleteArchivedSession,
 }

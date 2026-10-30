@@ -14727,7 +14727,10 @@ a.session-ci-chip__pr:focus-visible {
 .fr-refresh-btn,
 .fr-retry-btn,
 .fr-history-btn,
-.fr-hist-more-btn {
+.fr-hist-more-btn,
+.aa-delete-btn,
+.aa-confirm-btn,
+.aa-cancel-btn {
   min-height: 44px;
   min-width: 44px;
   padding: 0 16px;
@@ -14741,7 +14744,10 @@ a.session-ci-chip__pr:focus-visible {
 .fr-refresh-btn:disabled,
 .fr-retry-btn:disabled,
 .fr-history-btn:disabled,
-.fr-hist-more-btn:disabled {
+.fr-hist-more-btn:disabled,
+.aa-delete-btn:disabled,
+.aa-confirm-btn:disabled,
+.aa-cancel-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -14749,7 +14755,10 @@ a.session-ci-chip__pr:focus-visible {
 .fr-refresh-btn:not(:disabled):hover,
 .fr-retry-btn:not(:disabled):hover,
 .fr-history-btn:not(:disabled):hover,
-.fr-hist-more-btn:not(:disabled):hover {
+.fr-hist-more-btn:not(:disabled):hover,
+.aa-delete-btn:not(:disabled):hover,
+.aa-confirm-btn:not(:disabled):hover,
+.aa-cancel-btn:not(:disabled):hover {
   background: var(--bg-secondary);
 }
 
@@ -14907,6 +14916,55 @@ a.session-ci-chip__pr:focus-visible {
   margin: 0;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Archived sessions tab: reuses the .fr-* chrome above; these are only what it
+   adds. Delete / Confirm delete / Cancel are in the 44x44 button group above.
+   The destructive pair is marked by a token border, not a raw colour. */
+.aa-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.aa-delete-btn,
+.aa-confirm-btn {
+  border-color: var(--text-error);
+}
+
+.aa-confirm-btn {
+  color: var(--text-error);
+  font-weight: 600;
+}
+
+.aa-policy {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.aa-policy code {
+  font-family: var(--font-mono);
+}
+
+.aa-reason {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* A host path: one truncated line (the full value is in the title attribute). */
+.aa-cwd {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 /* #8268 — "Chroxy was updated — Reload". Persistent (no dismiss): the page is running

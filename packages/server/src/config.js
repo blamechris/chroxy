@@ -29,6 +29,7 @@ import { validateAcpProviders } from './acp-config.js'
 // lightweight.
 import { DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 import { configPath } from './config-dir.js'
+import { SESSION_ARCHIVE_MAX_ENTRIES } from './session-archive-limits.js'
 import { validateAgentConnections } from './agent-connections.js'
 
 const log = createLogger('config')
@@ -196,6 +197,13 @@ const CONFIG_SCHEMA = {
   // root — work a dead session left behind. `enabled` defaults ON; sweeps
   // every `sweepIntervalMs` (default 5 min). POSIX only.
   orphanReap: 'object',
+  // Session archive: the chroxy-held history of a session that leaves the live
+  // set (closed, idle-timed-out, stale at boot, dismissed/expired failed
+  // restore) is kept as a compressed, read-only record so a Codex / Gemini /
+  // BYOK session's content is not lost. `{ enabled?: boolean, maxEntries?:
+  // number, maxAgeDays?: number, maxMegabytes?: number }` — defaults ON, 100
+  // entries, 30 days, 256 MiB; the oldest records are deleted first.
+  sessionArchive: 'object',
   // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
   // boolean, intervalMs?: number, discoveryIntervalMs?: number,
   // maxSurveysPerTick?: number }` (#7436 added the per-tick cap). `watch`
@@ -558,6 +566,9 @@ export const WORKTREE_GC_SUPPORTED_KEYS = new Set([
 ])
 export const ORPHAN_REAP_SUPPORTED_KEYS = new Set([
   'enabled', 'sweepIntervalMs', 'minAgeMs',
+])
+export const SESSION_ARCHIVE_SUPPORTED_KEYS = new Set([
+  'enabled', 'maxEntries', 'maxAgeDays', 'maxMegabytes',
 ])
 export const SESSION_CI_SUPPORTED_KEYS = new Set([
   'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick',
@@ -1519,6 +1530,40 @@ export function validateConfig(config, verbose = false) {
         }
       }
       warnUnknownKeys(config.orphanReap, ORPHAN_REAP_SUPPORTED_KEYS, 'orphanReap', warnings)
+    }
+  }
+
+  // Session archive block. `enabled` boolean; `maxEntries` a positive integer;
+  // `maxAgeDays` / `maxMegabytes` positive numbers. A bad value warns and the
+  // archive falls back to its built-in default for that knob (SessionArchive
+  // re-validates, so a typo can never widen retention past the defaults).
+  if (config.sessionArchive !== undefined) {
+    if (typeof config.sessionArchive !== 'object' || config.sessionArchive === null || Array.isArray(config.sessionArchive)) {
+      warnings.push(`Invalid type for 'sessionArchive': expected object, got ${Array.isArray(config.sessionArchive) ? 'array' : typeof config.sessionArchive}`)
+    } else {
+      if (
+        Object.prototype.hasOwnProperty.call(config.sessionArchive, 'enabled') &&
+        typeof config.sessionArchive.enabled !== 'boolean'
+      ) {
+        warnings.push(`Invalid type for 'sessionArchive.enabled': expected boolean, got ${typeof config.sessionArchive.enabled}`)
+      }
+      if (Object.prototype.hasOwnProperty.call(config.sessionArchive, 'maxEntries')) {
+        const v = config.sessionArchive.maxEntries
+        if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+          warnings.push(`Invalid value for 'sessionArchive.maxEntries': expected a positive integer, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+        else if (v > SESSION_ARCHIVE_MAX_ENTRIES) {
+          warnings.push(`Invalid value for 'sessionArchive.maxEntries': ${v} is above the maximum of ${SESSION_ARCHIVE_MAX_ENTRIES} and is clamped to it`)
+        }
+      }
+      for (const key of ['maxAgeDays', 'maxMegabytes']) {
+        if (!Object.prototype.hasOwnProperty.call(config.sessionArchive, key)) continue
+        const v = config.sessionArchive[key]
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          warnings.push(`Invalid value for 'sessionArchive.${key}': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
+      warnUnknownKeys(config.sessionArchive, SESSION_ARCHIVE_SUPPORTED_KEYS, 'sessionArchive', warnings)
     }
   }
 

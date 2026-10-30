@@ -44,6 +44,7 @@ import { RunnerStatusSection } from './RunnerStatusSection'
 import { ContainersStatusSection } from './ContainersStatusSection'
 import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
 import { FailedRestoresSection } from './FailedRestoresSection'
+import { ArchivedSessionsSection } from './ArchivedSessionsSection'
 import { ByokPoolSection } from './ByokPoolSection'
 import { HostPruneSection } from './HostPruneSection'
 import { DeviceRuntimesSection } from './DeviceRuntimesSection'
@@ -188,6 +189,18 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'failedRestores',
     loadingKey: 'failedRestoresLoading',
     requestKey: 'requestFailedRestores',
+  },
+  // Provider-neutral session archive: ended sessions kept for reading, with
+  // delete. Placed beside Failed restores (it also absorbs expired/dismissed
+  // ones). Same survey:true request/snapshot flow as its neighbours.
+  {
+    key: 'archived-sessions',
+    label: 'Archived',
+    survey: true,
+    requestType: 'list_archived_sessions',
+    snapshotKey: 'archivedSessions',
+    loadingKey: 'archivedSessionsLoading',
+    requestKey: 'requestArchivedSessions',
   },
   // #6140 (epic #5530): the Host prune tab — reclaimable, chroxy-scoped,
   // orphan-only docker pressure (stopped chroxy containers + chroxy snapshot
@@ -808,6 +821,8 @@ export function ControlRoomView({
         <RepoRuntimeConfigSection />
       ) : tab === 'failed-restores' ? (
         <FailedRestoresSection />
+      ) : tab === 'archived-sessions' ? (
+        <ArchivedSessionsSection />
       ) : tab === 'byok-pool' ? (
         <ByokPoolSection />
       ) : tab === 'host-prune' ? (

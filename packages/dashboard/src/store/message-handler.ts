@@ -206,7 +206,8 @@ import {
   mergePermissionModesByProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
-import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage } from '@chroxy/protocol'
+import { applyHistoryReply, pruneHistoryViews } from './history-views'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
@@ -7138,12 +7139,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // REFUSED reply carries an empty `restores` that says nothing about
       // existence, so it leaves the views alone.
       const priorViews = get().failedRestoreHistories ?? {};
-      let histories = priorViews;
-      if (snapshot.refused !== true) {
-        const live = new Set(restores.map((r) => r.sessionId));
-        const kept = Object.entries(priorViews).filter(([id]) => live.has(id));
-        if (kept.length !== Object.keys(priorViews).length) histories = Object.fromEntries(kept);
-      }
+      const histories =
+        snapshot.refused === true
+          ? priorViews
+          : pruneHistoryViews(priorViews, new Set(restores.map((r) => r.sessionId)));
       set({
         failedRestores: {
           ...snapshot,
@@ -7158,45 +7157,84 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       break;
     }
     case 'failed_restore_history': {
-      // #8860. A reply is applied only to a view that is OPEN and WAITING, and
-      // only if it echoes the offset that view asked for: a reply for a view
-      // closed meanwhile, a superseded request, or an unsolicited frame is
-      // dropped rather than resurrecting or corrupting a panel. The view is
-      // keyed by the id the daemon echoed; an absent/empty id has no view.
+      // #8860. The rule (open + waiting view, echoed offset, zero-length page =
+      // end, error capture) is the shared `applyHistoryReply`, also used by
+      // `archived_session_history`. The view is keyed by the id the daemon echoed.
       const reply = msg as unknown as ServerFailedRestoreHistoryMessage;
-      const id = reply.sessionId;
-      if (typeof id !== 'string' || id === '') break;
-      const views = get().failedRestoreHistories ?? {};
-      const view = views[id];
-      if (!view || !view.loading || view.pendingOffset === null) break;
-      if (reply.ok === true) {
-        // The offset is optional on the wire; when present it must match.
-        if (typeof reply.offset === 'number' && reply.offset !== view.pendingOffset) break;
-        const page = Array.isArray(reply.entries) ? reply.entries : [];
-        // A zero-length page with a total still ahead would make "Load more"
-        // re-request the same offset forever; treat it as the end.
-        const base = view.pendingOffset === 0 ? [] : view.entries;
-        const entries = [...base, ...page];
-        const total = typeof reply.total === 'number' ? reply.total : entries.length;
-        set({
-          failedRestoreHistories: {
-            ...views,
-            [id]: { entries, total: page.length === 0 ? Math.min(total, entries.length) : total, loading: false, pendingOffset: null },
-          },
-        });
-        break;
-      }
+      const next = applyHistoryReply(get().failedRestoreHistories ?? {}, reply.sessionId, reply);
+      if (next) set({ failedRestoreHistories: next });
+      break;
+    }
+    case 'archived_sessions_list': {
+      // Stored as the WHOLE message like failed_restores_list (`generatedAt`
+      // drives survey staleness; `refused` and `policy` ride inside). `sessions`
+      // is normalised to an array so a malformed frame cannot throw at `.map`.
+      const snapshot = msg as unknown as ServerArchivedSessionsListMessage;
+      const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+      // A view whose record is gone (deleted, aged out) has nothing left to
+      // show; a REFUSED reply's empty list says nothing about existence.
+      const priorViews = get().archivedSessionHistories ?? {};
+      const histories =
+        snapshot.refused === true
+          ? priorViews
+          : pruneHistoryViews(priorViews, new Set(sessions.map((r) => r.archiveId)));
       set({
-        failedRestoreHistories: {
-          ...views,
-          [id]: {
-            ...view,
-            loading: false,
-            pendingOffset: null,
-            error: { code: reply.code, message: reply.message, refused: reply.refused === true },
-          },
-        },
+        archivedSessions: { ...snapshot, sessions },
+        archivedSessionHistories: histories,
+        // Cleared on EVERY reply, refusal included, or a refused survey would
+        // disable its own Refresh button for good.
+        archivedSessionsLoading: false,
       });
+      break;
+    }
+    case 'archived_session_history': {
+      const reply = msg as unknown as ServerArchivedSessionHistoryMessage;
+      const next = applyHistoryReply(get().archivedSessionHistories ?? {}, reply.archiveId, reply);
+      if (next) set({ archivedSessionHistories: next });
+      break;
+    }
+    case 'delete_archived_session_result': {
+      const reply = msg as unknown as ServerDeleteArchivedSessionResultMessage;
+      const id = typeof reply.archiveId === 'string' && reply.archiveId !== '' ? reply.archiveId : null;
+      const pending = new Set(get().deletingArchiveIds);
+      let views = get().archivedSessionHistories ?? {};
+      const patch: Partial<ConnectionState> = {};
+      if (id) {
+        pending.delete(id);
+        patch.deletingArchiveIds = pending;
+      } else {
+        // No id to correlate: this is the reply to a delete-all (a single delete's
+        // reply always echoes its id). It settles the marker IT owns and no other:
+        // a per-row delete still in flight keeps its "Deleting…" until its own
+        // reply (or a socket drop, which clears them all) arrives.
+        patch.deletingAllArchives = false;
+      }
+      // Success, or a record that is already gone: either way the view has
+      // nothing left to show. A delete-all success empties every view.
+      const gone = reply.ok === true || reply.code === 'ARCHIVED_SESSION_NOT_FOUND';
+      if (gone) {
+        if (id) {
+          if (id in views) {
+            views = { ...views };
+            delete views[id];
+            patch.archivedSessionHistories = views;
+          }
+        } else if (Object.keys(views).length > 0) {
+          patch.archivedSessionHistories = {};
+        }
+      }
+      patch.archiveDeleteError =
+        reply.ok === true
+          ? null
+          : { archiveId: id ?? undefined, code: reply.code, message: reply.message, refused: reply.refused === true };
+      set(patch);
+      // The list is server truth: re-ask rather than splice rows out locally.
+      // That includes a FAILED or PARTIAL delete (ok:false, e.g. the file could
+      // not be unlinked): the views above were kept because the record may still
+      // exist, and the fresh list is what shows which records actually remain
+      // (and drops the views of the ones that did go). Only a refusal skips it:
+      // the list would be refused too.
+      if (reply.refused !== true) get().requestArchivedSessions();
       break;
     }
     case 'retry_failed_restore_result': {

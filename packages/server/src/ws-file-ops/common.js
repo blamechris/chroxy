@@ -325,6 +325,9 @@ export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is
 
 const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
 
+// The one config-root subtree that is protected as a whole (the session archive).
+export const CONFIG_ARCHIVE_SUBTREE = 'archive'
+
 /**
  * The daemon's config directory as a real path (a missing one by its deepest
  * existing ancestor), read per call — never cached, so a relocated
@@ -346,7 +349,13 @@ export function resolveConfigRoot() {
  * @returns {boolean}
  */
 export function isConfigRootOrDirectChild(resolvedTarget, resolvedRoot) {
-  return sameDir(resolvedTarget, resolvedRoot) || sameDir(dirname(resolvedTarget), resolvedRoot)
+  if (sameDir(resolvedTarget, resolvedRoot) || sameDir(dirname(resolvedTarget), resolvedRoot)) return true
+  // The session archive (`<root>/archive`: the index/roster and every gzip record)
+  // is the one subtree protected beyond the direct children. It is daemon-managed
+  // state, not a session file: its records are other sessions' TRANSCRIPTS, read
+  // only through the archive messages (which refuse a pairing-bound client).
+  // Worktrees and orchestration stay open — see isConfigDirOrDirectChild.
+  return isPathWithin(resolvedTarget, join(resolvedRoot, CONFIG_ARCHIVE_SUBTREE))
 }
 
 /**
@@ -384,6 +393,10 @@ export async function makeConfigDirFilter() {
  * readable on purpose: chroxy's own session worktrees live at
  * `<configDir>/worktrees/<id>` and orchestration worktrees at
  * `<configDir>/orchestration/worktrees`, and ordinary editing inside them must work.
+ * The ONE exception is the session archive, `<configDir>/archive` and everything
+ * under it (the roster index and the gzip transcript records): those are other
+ * sessions' transcripts, not session files, and are served only through the
+ * archive messages that refuse a pairing-bound client.
  *
  * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
  * `realpath`, a new one by its deepest existing ancestor), so the answer is the same
