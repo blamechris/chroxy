@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A parked failed restore is no longer deleted 24 hours after its last activity (#8858).** A session whose restore failed keeps its `lastActivityAt` frozen, so the 24h staleness filter set it aside on the first boot after a day, and it was dropped from `session-state.json` (history included) whenever its container binding resolved, which says nothing about why it was parked. Parked entries are now written with a `failedRestore: { code, message }` marker; a stale entry carrying it is re-registered in Control Room → Failed restores with the original error and stays until Retry, Dismiss or the 30-day failed-restore TTL (worktree-backed entries keep their exemption). A state file written before this change has no marker and behaves as before.
+
 ## [0.11.7] - 2026-10-24
 
 ### Changed
