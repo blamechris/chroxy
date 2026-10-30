@@ -1430,6 +1430,29 @@ export const RetryFailedRestoreSchema = z.object({
     type: z.literal('retry_failed_restore'),
     sessionId: z.string().min(1).max(256),
 });
+// #8860: read-only access to a parked failed restore's PRESERVED history. A
+// session parked because it has no native resume locator (a Codex app-server
+// session in `auto` mode) can never be resumed, and `list_failed_restores`
+// publishes only `historyLength` — so without this its transcript, still on
+// disk, was unreachable. This is a READ: it neither resumes, rebuilds nor
+// creates anything, so the native-resume contract (docs/providers.md "Native
+// restart continuity") is untouched.
+//
+// AUTHORITY: at least as strict as `list_failed_restores`. The history is
+// transcript content (prompts, tool inputs, tool output) of a session the
+// caller is not scoped to, so pairing-bound clients are REFUSED with a
+// degraded, schema-valid `failed_restore_history` reply (`ok: false,
+// refused: true, code`), gated before any `_failedRestores` lookup so the
+// refusal is not an existence oracle.
+//
+// Paged: `offset` is the zero-based index of the first entry (oldest first)
+// and `limit` the page size (server default 50, hard cap 100).
+export const GetFailedRestoreHistorySchema = z.object({
+    type: z.literal('get_failed_restore_history'),
+    sessionId: z.string().min(1).max(256),
+    offset: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+});
 export const DestroyEnvironmentSchema = z.object({
     type: z.literal('destroy_environment'),
     environmentId: z.string().max(256),
@@ -1979,6 +2002,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     DestroyEnvironmentSchema,
     ListFailedRestoresSchema,
     RetryFailedRestoreSchema,
+    GetFailedRestoreHistorySchema,
     GetEnvironmentSchema,
     EvaluateDraftSchema,
     HostStatusRequestSchema,

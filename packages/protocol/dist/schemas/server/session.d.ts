@@ -808,6 +808,50 @@ export declare const ServerRetryFailedRestoreResultSchema: z.ZodObject<{
     message: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
+ * #8860: one page of a parked failed restore's preserved history, in reply to
+ * `get_failed_restore_history`.
+ *
+ * READ-ONLY. It exists because a session parked with
+ * `CODEX_NATIVE_LOCATOR_MISSING` can never be resumed (the fail-closed native
+ * resume, docs/providers.md "Native restart continuity"), and the roster
+ * publishes only `historyLength`; this is how the operator reads what is
+ * preserved. It does not and cannot resume the session.
+ *
+ * `entries` are the saved history entries OLDEST FIRST, each already run
+ * through the persistence truncation and stripped of server bookkeeping
+ * (`_seq`). They are modelled loosely on purpose: a history entry is a union
+ * of shapes (`message`, `tool_start`, `tool_result`, `result`, ...) that the
+ * server writes and this schema does not own, so only `type` is required and
+ * every other field passes through. A client must render defensively.
+ *
+ * `ok: false` replies carry `code`: `FAILED_RESTORE_NOT_FOUND` (the entry is
+ * gone: a retry won or the 30-day TTL pruned it) or, with `refused: true`,
+ * `FAILED_RESTORE_HISTORY_FORBIDDEN_BOUND_CLIENT` (a pairing-bound token). The
+ * refusal is a degraded, schema-valid reply of this type rather than an error
+ * so the caller never waits on a reply that never comes.
+ *
+ * `offset` echoes the page start the server actually served (after clamping),
+ * so a client can drop a reply that no longer matches its request.
+ */
+export declare const ServerFailedRestoreHistoryEntrySchema: z.ZodObject<{
+    type: z.ZodString;
+    timestamp: z.ZodOptional<z.ZodNumber>;
+}, z.core.$loose>;
+export declare const ServerFailedRestoreHistorySchema: z.ZodObject<{
+    type: z.ZodLiteral<"failed_restore_history">;
+    sessionId: z.ZodString;
+    ok: z.ZodBoolean;
+    total: z.ZodOptional<z.ZodNumber>;
+    offset: z.ZodOptional<z.ZodNumber>;
+    entries: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        timestamp: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>>>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

@@ -1398,6 +1398,11 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'and from session_list, so removedIds can never name it and a session-death prune could ' +
       'only ever be a no-op. The outcome must also outlive the attempt itself: a failed retry ' +
       'leaves the row on screen and this record is what that row renders. #7625',
+    failedRestoreHistories:
+      'Record<sessionId, history view> keyed by a PARKED session id — one absent from _sessions ' +
+      'and from session_list, so removedIds can never name it and a session-death prune could ' +
+      'only ever be a no-op. Its lifetime is the roster\'s: a failed_restores_list reply drops a ' +
+      'view whose entry is gone, and both full-reset sites clear it (#8860). #8860',
     environments:
       'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`, and the element carries `sessions: ' +
       'string[]`, a LIVE attachment list of real session ids (#7552 wired ' +

@@ -1176,6 +1176,12 @@ export declare const RetryFailedRestoreSchema: z.ZodObject<{
     type: z.ZodLiteral<"retry_failed_restore">;
     sessionId: z.ZodString;
 }, z.core.$strip>;
+export declare const GetFailedRestoreHistorySchema: z.ZodObject<{
+    type: z.ZodLiteral<"get_failed_restore_history">;
+    sessionId: z.ZodString;
+    offset: z.ZodOptional<z.ZodNumber>;
+    limit: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
 export declare const DestroyEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_environment">;
     environmentId: z.ZodString;
@@ -2050,6 +2056,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"retry_failed_restore">;
     sessionId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"get_failed_restore_history">;
+    sessionId: z.ZodString;
+    offset: z.ZodOptional<z.ZodNumber>;
+    limit: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;

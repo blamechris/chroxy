@@ -16,19 +16,31 @@
  * environment that was down at boot and is back now (a host reboot; the
  * `docker run` args carry no `--restart` policy), so the operator wants the
  * session back. Retry is also non-destructive — a failed attempt re-parks the
- * entry untouched — which matters because the server publishes `historyLength`
- * but never the history, so a discard button here would destroy data the
- * operator was never shown.
+ * entry untouched. There is still no discard button: the roster publishes only
+ * `historyLength`, and a destructive control beside a count is a control over
+ * data the operator has not seen.
+ *
+ * VIEW HISTORY (#8860). Some entries can NEVER be retried: a Codex app-server
+ * session in `auto` mode has no native resume locator, so every Retry re-parks
+ * it (`CODEX_NATIVE_LOCATOR_MISSING`; fail-closed by design, docs/providers.md
+ * "Native restart continuity"). Their preserved transcript is reachable through
+ * a per-row "View history" toggle that opens a read-only, paged panel
+ * (FailedRestoreHistoryPanel). The roster still carries only the count; the
+ * history rides on its own request, so listing the roster never ships
+ * transcript content. Viewing resumes nothing: a replacement is an explicit
+ * new session.
  *
  * STYLING follows MemoryPanel: class names only, zero inline `style`, rules in
  * theme/components.css using `var(--token)`. EnvironmentPanel and
  * ByokPoolSection are NOT the models to copy — both carry grandfathered raw
  * hex literals in scripts/no-raw-color-literals-baseline.txt. The Retry button
  * also does NOT inherit bare `.cr-action` (padding: 3px 8px), which is far
- * under the repo's 44x44 floor; `.fr-retry-btn` sets it explicitly.
+ * under the repo's 44x44 floor; `.fr-retry-btn` and `.fr-history-btn` set it
+ * explicitly.
  */
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
+import { FailedRestoreHistoryPanel, failedRestoreHistoryPanelId } from './FailedRestoreHistoryPanel';
 
 function relativeAge(errorCode: string): string {
   // The roster carries no timestamp — `getFailedRestores()` publishes the error
@@ -38,13 +50,14 @@ function relativeAge(errorCode: string): string {
 }
 
 export function FailedRestoresSection() {
-  const { snapshot, loading, connected, retrying, results } = useConnectionStore(
+  const { snapshot, loading, connected, retrying, results, histories } = useConnectionStore(
     useShallow((s) => ({
       snapshot: s.failedRestores,
       loading: s.failedRestoresLoading,
       connected: s.connectionPhase === 'connected',
       retrying: s.retryingRestoreIds,
       results: s.retryRestoreResults,
+      histories: s.failedRestoreHistories,
     })),
   );
   // `null` is "not asked yet" — deliberately distinct from a snapshot whose
@@ -53,6 +66,8 @@ export function FailedRestoresSection() {
   const refused = snapshot?.refused === true;
   const requestFailedRestores = useConnectionStore((s) => s.requestFailedRestores);
   const sendRetryFailedRestore = useConnectionStore((s) => s.sendRetryFailedRestore);
+  const requestFailedRestoreHistory = useConnectionStore((s) => s.requestFailedRestoreHistory);
+  const closeFailedRestoreHistory = useConnectionStore((s) => s.closeFailedRestoreHistory);
 
   const refreshDisabled = loading || !connected;
 
@@ -90,6 +105,7 @@ export function FailedRestoresSection() {
           {rows.map((r) => {
             const busy = retrying.has(r.sessionId);
             const result = results[r.sessionId];
+            const historyOpen = histories?.[r.sessionId] !== undefined;
             return (
               <li className="fr-row" key={r.sessionId} data-testid={`failed-restore-${r.sessionId}`}>
                 <div className="fr-row-main">
@@ -113,15 +129,35 @@ export function FailedRestoresSection() {
                       : (result.message ?? 'Retry failed.')}
                   </p>
                 ) : null}
-                <button
-                  type="button"
-                  className="fr-retry-btn"
-                  onClick={() => sendRetryFailedRestore(r.sessionId)}
-                  disabled={busy || !connected}
-                  data-testid={`failed-restore-retry-${r.sessionId}`}
-                >
-                  {busy ? 'Retrying…' : 'Retry'}
-                </button>
+                <div className="fr-row-actions">
+                  <button
+                    type="button"
+                    className="fr-retry-btn"
+                    onClick={() => sendRetryFailedRestore(r.sessionId)}
+                    disabled={busy || !connected}
+                    data-testid={`failed-restore-retry-${r.sessionId}`}
+                  >
+                    {busy ? 'Retrying…' : 'Retry'}
+                  </button>
+                  <button
+                    type="button"
+                    className="fr-history-btn"
+                    onClick={() =>
+                      historyOpen
+                        ? closeFailedRestoreHistory(r.sessionId)
+                        : requestFailedRestoreHistory(r.sessionId)
+                    }
+                    // Closing never needs the socket; only opening does.
+                    disabled={!historyOpen && !connected}
+                    aria-expanded={historyOpen}
+                    // Only while the panel is mounted: an id that does not exist would break the disclosure convention.
+                    aria-controls={historyOpen ? failedRestoreHistoryPanelId(r.sessionId) : undefined}
+                    data-testid={`failed-restore-history-toggle-${r.sessionId}`}
+                  >
+                    {historyOpen ? 'Hide history' : 'View history'}
+                  </button>
+                </div>
+                {historyOpen ? <FailedRestoreHistoryPanel sessionId={r.sessionId} /> : null}
               </li>
             );
           })}

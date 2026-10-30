@@ -14725,7 +14725,9 @@ a.session-ci-chip__pr:focus-visible {
    `padding: 3px 8px` leaves every Control Room action button well under the
    floor — see #3751 / #3914 / #4876 / #4893 / #5634. */
 .fr-refresh-btn,
-.fr-retry-btn {
+.fr-retry-btn,
+.fr-history-btn,
+.fr-hist-more-btn {
   min-height: 44px;
   min-width: 44px;
   padding: 0 16px;
@@ -14737,13 +14739,17 @@ a.session-ci-chip__pr:focus-visible {
 }
 
 .fr-refresh-btn:disabled,
-.fr-retry-btn:disabled {
+.fr-retry-btn:disabled,
+.fr-history-btn:disabled,
+.fr-hist-more-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
 .fr-refresh-btn:not(:disabled):hover,
-.fr-retry-btn:not(:disabled):hover {
+.fr-retry-btn:not(:disabled):hover,
+.fr-history-btn:not(:disabled):hover,
+.fr-hist-more-btn:not(:disabled):hover {
   background: var(--bg-secondary);
 }
 
@@ -14816,6 +14822,91 @@ a.session-ci-chip__pr:focus-visible {
   margin: 0;
   font-size: 12px;
   color: var(--text-error);
+}
+
+/* #8860 — Retry + View history side by side, each at the 44px floor above. */
+.fr-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* #8860 — the read-only transcript panel under a row. Plain text only: every
+   value is a text node, so `pre-wrap` + `overflow-wrap` is all the layout it
+   needs; a 50KB tool result must wrap, not force the row to scroll sideways. */
+.fr-hist-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.fr-hist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.fr-hist-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.fr-hist-tool,
+.fr-hist-other {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.fr-hist-role {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.fr-hist-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fr-hist-summary {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A native <summary> is the tap target for expanding a tool result, so it
+   carries the 44px floor itself. */
+.fr-hist-result-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.fr-hist-result {
+  color: var(--text-secondary);
+}
+
+.fr-hist-count {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 /* #8268 — "Chroxy was updated — Reload". Persistent (no dismiss): the page is running

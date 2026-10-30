@@ -284,6 +284,68 @@ const warnedUnknownCtorOptKeys = new Set()
 const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 // #8858 — cap on the error message persisted in a parked entry's `failedRestore` marker
 const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
+// #8860: page bounds for getFailedRestoreHistory. Mirrors the protocol's
+// `get_failed_restore_history` limit (1..100); the clamp is repeated here
+// because this is the enforcement point for any caller, not just the handler.
+const FAILED_RESTORE_HISTORY_DEFAULT_LIMIT = 50
+const FAILED_RESTORE_HISTORY_MAX_LIMIT = 100
+// A page is also bounded by its serialized size. It goes out as ONE WebSocket
+// frame, and ws-client-sender evicts a client whose post-send bufferedAmount
+// passes 1 MiB; with permessage-deflate the buffered size has been measured at
+// ~1.34x the JSON. 256 KiB of JSON keeps a page well under that. An entry that
+// is alone bigger than the per-entry cap has its large fields shortened for
+// display, so a single entry can never blow the page either.
+const FAILED_RESTORE_HISTORY_PAGE_BYTES = 256 * 1024
+const FAILED_RESTORE_HISTORY_ENTRY_BYTES = 64 * 1024
+const FAILED_RESTORE_HISTORY_FIELD_CHARS = 16 * 1024
+
+/**
+ * #8860: one preserved-history entry as `failed_restore_history` sends it.
+ *
+ * - The same `truncateEntry` the persistence boundary uses (it also drops
+ *   `_seq`), and the same server-only fields normal history replay strips
+ *   (`sourceToolUseId`, `answered`; see ws-history.js), so this read path shows
+ *   no more than replay would.
+ * - An entry still bigger than FAILED_RESTORE_HISTORY_ENTRY_BYTES (a long
+ *   message, a large tool input or result) has `content` / `result` / `input`
+ *   shortened for display, and if that is still not enough it is reduced to a
+ *   bounded type, a numeric timestamp and `isError`, marked `_truncated` (the
+ *   panel shows it as too large to show). Nothing on disk changes.
+ * - A non-object slot (a hand-edited state file) becomes `{ type: 'unknown' }`
+ *   rather than being dropped, so page offsets keep matching history indexes.
+ *
+ * @param {unknown} raw
+ * @param {{ truncateEntry: (entry: object) => object }} history
+ * @returns {object}
+ */
+function failedRestoreHistoryWireEntry(raw, history) {
+  if (!raw || typeof raw !== 'object') return { type: 'unknown' }
+  const { sourceToolUseId: _sourceToolUseId, answered: _answered, ...entry } = history.truncateEntry(raw)
+  if (Buffer.byteLength(JSON.stringify(entry)) <= FAILED_RESTORE_HISTORY_ENTRY_BYTES) return entry
+  const max = FAILED_RESTORE_HISTORY_FIELD_CHARS
+  const shorten = (text) => (text.length > max ? `${text.slice(0, max)}[truncated]` : text)
+  for (const key of ['content', 'result', 'input']) {
+    const value = entry[key]
+    if (typeof value === 'string') {
+      entry[key] = shorten(value)
+    } else if (value && typeof value === 'object') {
+      let serialized
+      try { serialized = JSON.stringify(value) } catch { serialized = '[unserializable]' }
+      if (typeof serialized === 'string' && serialized.length > max) {
+        entry[key] = { _truncated: true, summary: shorten(serialized) }
+      }
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(entry)) <= FAILED_RESTORE_HISTORY_ENTRY_BYTES) return entry
+  // Last resort (escape-heavy text, or abnormal fields of a hand-edited file):
+  // keep only small, typed metadata so this can never itself be large.
+  return {
+    type: typeof entry.type === 'string' && entry.type.length <= 64 ? entry.type : 'unknown',
+    ...(Number.isFinite(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
+    ...(typeof entry.isError === 'boolean' ? { isError: entry.isError } : {}),
+    _truncated: true,
+  }
+}
 
 /**
  * #8348: the history outcome for a session's `permission_resolved` /
@@ -4147,6 +4209,57 @@ export class SessionManager extends EventEmitter {
       })
     }
     return list
+  }
+
+  /**
+   * One page of a parked failed restore's PRESERVED history (#8860), oldest
+   * first. Read-only: it resumes, rebuilds and creates nothing, so the
+   * fail-closed native resume (docs/providers.md "Native restart continuity")
+   * is untouched. It exists because a session parked for a missing native
+   * locator can never be restored, and the roster publishes only a count.
+   *
+   * Each entry is shaped by `failedRestoreHistoryWireEntry` (the persistence
+   * boundary's `truncateEntry`, replay's server-only field strip, and a display
+   * cap for an oversized entry), and the page stops early once its serialized
+   * size would pass FAILED_RESTORE_HISTORY_PAGE_BYTES, so `entries` can be
+   * shorter than `limit`. `limit` is clamped to 1..MAX (default 50) and
+   * `offset` to >= 0, whatever the caller sent; a non-numeric value takes the
+   * default rather than propagating NaN into `slice`.
+   *
+   * Takes no lock: `retryFailedRestore` removes the entry before it attempts
+   * anything, so a read racing it sees either the whole entry or none.
+   *
+   * @param {string} sessionId
+   * @param {{ offset?: number, limit?: number }} [opts]
+   * @returns {{ok: true, total: number, offset: number, entries: object[]} | {ok: false, code: string, message: string}}
+   */
+  getFailedRestoreHistory(sessionId, { offset, limit } = {}) {
+    const parked = this._failedRestores.get(sessionId)
+    if (!parked) {
+      return {
+        ok: false,
+        code: 'FAILED_RESTORE_NOT_FOUND',
+        message: `No failed-restore entry for session ${sessionId}`,
+      }
+    }
+    const history = Array.isArray(parked.saved?.history) ? parked.saved.history : []
+    const pageSize = Number.isFinite(limit)
+      ? Math.min(FAILED_RESTORE_HISTORY_MAX_LIMIT, Math.max(1, Math.trunc(limit)))
+      : FAILED_RESTORE_HISTORY_DEFAULT_LIMIT
+    const start = Number.isFinite(offset) ? Math.max(0, Math.trunc(offset)) : 0
+    const entries = []
+    let bytes = 0
+    for (const raw of history.slice(start, start + pageSize)) {
+      const entry = failedRestoreHistoryWireEntry(raw, this._history)
+      const size = Buffer.byteLength(JSON.stringify(entry))
+      // Always at least one entry, so paging (the next offset is
+      // `offset + entries.length`) can never stall. The per-entry cap already
+      // keeps any one entry under the page budget; this holds it if they drift.
+      if (entries.length > 0 && bytes + size > FAILED_RESTORE_HISTORY_PAGE_BYTES) break
+      entries.push(entry)
+      bytes += size
+    }
+    return { ok: true, total: history.length, offset: start, entries }
   }
 
   /**
