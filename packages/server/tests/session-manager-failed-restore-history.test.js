@@ -108,6 +108,47 @@ describe('SessionManager.getFailedRestoreHistory (#8860)', () => {
     assert.equal(saved.history[0]._seq, 7)
   })
 
+  // Codex review: a page goes out as ONE frame, and a page of large-but-valid
+  // entries (50 x 50 KiB) buffered past ws-client-sender's 1 MiB eviction
+  // threshold under permessage-deflate, closing the reader's own socket (4008).
+  it('bounds a page by serialized size and still pages through every entry', () => {
+    const big = 'y'.repeat(50 * 1024 - 64)
+    park(Array.from({ length: 50 }, (_, i) => ({ type: 'message', messageType: 'response', content: `${i}:${big}` })))
+
+    const first = sm.getFailedRestoreHistory(ID, { limit: 50 })
+    assert.ok(first.entries.length >= 1 && first.entries.length < 50, `page stopped early (${first.entries.length})`)
+    const pageBytes = Buffer.byteLength(JSON.stringify(first.entries))
+    assert.ok(pageBytes <= 256 * 1024 + 1024, `page stays within the byte budget (${pageBytes})`)
+
+    // Paging on `offset + entries.length`, as the dashboard does, reaches every entry once.
+    const seen = []
+    let offset = 0
+    for (let guard = 0; guard < 100 && offset < 50; guard++) {
+      const page = sm.getFailedRestoreHistory(ID, { offset, limit: 50 })
+      assert.ok(page.entries.length >= 1, 'a page never comes back empty before the end')
+      seen.push(...page.entries.map((e) => Number(e.content.split(':')[0])))
+      offset += page.entries.length
+    }
+    assert.deepEqual(seen, Array.from({ length: 50 }, (_, i) => i))
+  })
+
+  it('shortens a single entry that is alone too big, and never returns an empty page for it', () => {
+    // truncateEntry caps content and input, not a tool_result's `result`.
+    park([{ type: 'tool_result', toolUseId: 't1', result: 'z'.repeat(2 * 1024 * 1024) }])
+    const r = sm.getFailedRestoreHistory(ID)
+    assert.equal(r.entries.length, 1)
+    assert.ok(Buffer.byteLength(JSON.stringify(r.entries[0])) <= 64 * 1024, 'entry within the per-entry cap')
+    assert.ok(r.entries[0].result.endsWith('[truncated]'))
+  })
+
+  it('strips the server-only fields that history replay strips', () => {
+    park([{ type: 'user_question', toolUseId: 'q1', questions: [], sourceToolUseId: 'tool-1', answered: true }])
+    const [entry] = sm.getFailedRestoreHistory(ID).entries
+    assert.equal(entry.type, 'user_question')
+    assert.equal('sourceToolUseId' in entry, false)
+    assert.equal('answered' in entry, false)
+  })
+
   it('keeps index alignment for a non-object slot instead of dropping it', () => {
     park([{ type: 'message', content: 'a' }, null, 'junk', { type: 'message', content: 'b' }])
     const r = sm.getFailedRestoreHistory(ID)
