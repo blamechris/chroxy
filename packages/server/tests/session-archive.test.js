@@ -1,12 +1,14 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync, existsSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync, existsSync, chmodSync, mkdirSync, symlinkSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import { randomBytes } from 'node:crypto'
 
 import { SessionArchive } from '../src/session-archive.js'
+import { writeFileRestricted } from '../src/platform.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { ServerArchivedSessionHistorySchema, ServerArchivedSessionMetaSchema } from '@chroxy/protocol'
 
 /**
@@ -146,9 +148,11 @@ describe('SessionArchive', () => {
     assert.equal(recordFiles(join(root, 'archive')).length, 1, 'the duplicate wrote no second file')
 
     assert.ok(archive.archive(saved('s1', { lastActivityAt: 11, n: 3 })), 'later activity is a different snapshot')
-    assert.ok(archive.archive(saved('s1', { lastActivityAt: 10, n: 4 })), 'a longer history is a different snapshot')
+    assert.ok(archive.archive(saved('s3', { lastActivityAt: 10, n: 3 })))
+    assert.ok(archive.archive(saved('s3', { lastActivityAt: 10, n: 4 })), 'the SAME activity time with MORE history is a different snapshot')
+    assert.equal(archive.archive(saved('s3', { lastActivityAt: 10, n: 2 })), null, '...but with LESS is superseded')
     assert.ok(archive.archive(saved('s2', { lastActivityAt: 10, n: 3 })), 'another session is different')
-    assert.equal(archive.list().length, 4)
+    assert.equal(archive.list().length, 5)
 
     // The dedupe survives a reload (the stale-entry-seen-on-two-boots case).
     assert.equal(make().archive(saved('s1', { lastActivityAt: 10, n: 3 })), null)
@@ -438,16 +442,18 @@ describe('SessionArchive', () => {
       assert.equal(archive.enqueue(cyc).status, 'failed')
     })
 
-    it('reports FAILED on an unwritable directory (POSIX, not root)', { skip: !posix || process.getuid?.() === 0 }, () => {
-      const archive = make()
-      assert.equal(archive.archiveOutcome(saved('a')).status, 'archived')
-      const dir = join(root, 'archive')
-      chmodSync(dir, 0o500)
-      try {
-        assert.equal(archive.archiveOutcome(saved('b')).status, 'failed')
-      } finally {
-        chmodSync(dir, 0o700)
-      }
+    it('reports FAILED when the file write itself fails (injected), and leaves no temp behind', () => {
+      let calls = 0
+      const archive = make({
+        writeFile: (path, data, opts) => {
+          calls++
+          writeFileSync(`${path}${opts.tmpSuffix}`, 'partial')
+          throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+        },
+      })
+      assert.equal(archive.archiveOutcome(saved('a')).status, 'failed')
+      assert.equal(calls, 1)
+      assert.deepEqual(files(join(root, 'archive')), [], 'the failed write\'s temp file was removed')
     })
   })
 
@@ -704,6 +710,329 @@ describe('SessionArchive', () => {
       await assert.doesNotReject(() => archive.whenIdle())
       assert.deepEqual(archive.list(), [])
       assert.doesNotThrow(() => archive.drainSync())
+    })
+  })
+
+  // -- round 3 -----------------------------------------------------------------
+
+  const rootOnly = process.getuid?.() === 0
+
+  describe('B: a SUPERSEDED snapshot is a duplicate (a backup at an older point of the same session)', () => {
+    it('archive S@10/3 -> delete -> offer S@9/2 is a duplicate; S@11 is archived', () => {
+      const archive = make()
+      const a = archive.archive(saved('S', { lastActivityAt: 10, n: 3 }))
+      assert.equal(archive.delete(a.archiveId), 'deleted')
+      assert.equal(archive.archiveOutcome(saved('S', { lastActivityAt: 9, n: 2 })).status, 'duplicate', 'older and shorter')
+      assert.equal(archive.archiveOutcome(saved('S', { lastActivityAt: 9, n: 7 })).status, 'duplicate', 'an OLDER timestamp is superseded even with more history')
+      assert.equal(archive.archiveOutcome(saved('S', { lastActivityAt: 11, n: 3 })).status, 'archived', 'control: a newer snapshot is new')
+    })
+
+    it('also against a live row and a queued job', async () => {
+      const archive = make()
+      archive.archive(saved('S', { lastActivityAt: 10, n: 3 }))
+      assert.equal(archive.archiveOutcome(saved('S', { lastActivityAt: 5, n: 1 })).status, 'duplicate', 'row')
+      archive.enqueue(saved('Q', { lastActivityAt: 20, n: 3 }))
+      assert.equal(archive.archiveOutcome(saved('Q', { lastActivityAt: 19, n: 2 })).status, 'duplicate', 'queued')
+      await archive.whenIdle()
+    })
+
+    it('when a timestamp is unknown only an exact (timestamp, length) match counts', () => {
+      const archive = make()
+      assert.equal(archive.archiveOutcome({ ...saved('N', { n: 3 }), lastActivityAt: undefined }).status, 'archived')
+      assert.equal(archive.archiveOutcome({ ...saved('N', { n: 3 }), lastActivityAt: undefined }).status, 'duplicate', 'exact')
+      assert.equal(archive.archiveOutcome({ ...saved('N', { n: 2 }), lastActivityAt: undefined }).status, 'archived', 'a different length is not covered')
+      assert.equal(archive.archiveOutcome(saved('N', { lastActivityAt: 1, n: 3 })).status, 'archived', 'null vs a number is not covered either way')
+    })
+  })
+
+  describe('C: removals are durable (tombstone written FIRST, record unlinked after)', () => {
+    /** A writeFile seam that can be told to fail index writes, and records what existed when each index write ran. */
+    function seam() {
+      const state = { failIndex: false, indexWrites: [] }
+      state.writeFile = (path, data, opts) => {
+        if (path.endsWith('index.json')) {
+          const dir = join(path, '..')
+          state.indexWrites.push({ files: readdirSync(dir).filter((f) => f.endsWith('.json.gz')).length, tombstones: JSON.parse(data).tombstones.length })
+          if (state.failIndex) throw new Error('EIO: injected index write failure')
+        }
+        return writeFileRestricted(path, data, opts)
+      }
+      return state
+    }
+
+    it('delete() writes the index WITH the tombstone while the record file still exists', () => {
+      const st = seam()
+      const archive = make({ writeFile: st.writeFile })
+      const a = archive.archive(saved('a', { lastActivityAt: 1 }))
+      st.indexWrites.length = 0
+      assert.equal(archive.delete(a.archiveId), 'deleted')
+      assert.deepEqual(st.indexWrites[0], { files: 1, tombstones: 1 }, 'tombstoned index written while the file was still on disk')
+      assert.equal(recordFiles(join(root, 'archive')).length, 0, 'unlinked afterwards')
+    })
+
+    it('an index-write failure makes delete() FAIL, keeps the record, and the snapshot is still a duplicate on a new instance', () => {
+      const st = seam()
+      const archive = make({ writeFile: st.writeFile })
+      const a = archive.archive(saved('a', { lastActivityAt: 1 }))
+      st.failIndex = true
+      assert.equal(archive.delete(a.archiveId), 'failed')
+      assert.equal(archive.list().length, 1, 'still listed')
+      assert.equal(recordFiles(join(root, 'archive')).length, 1, 'file kept')
+      assert.deepEqual(archive.deleteAll(), { deleted: 0, failed: 1 })
+      assert.equal(make().archiveOutcome(saved('a', { lastActivityAt: 1 })).status, 'duplicate', 'a fresh instance still knows it')
+    })
+
+    it('crash between the tombstoned index and the unlink: the orphan record is unlinked on load, not adopted', () => {
+      const archive = make()
+      const a = archive.archive(saved('a', { lastActivityAt: 1 }))
+      const dir = join(root, 'archive')
+      const copy = join(root, 'copy.json.gz')
+      copyFileSync(join(dir, `${a.archiveId}.json.gz`), copy)
+      assert.equal(archive.delete(a.archiveId), 'deleted')
+      copyFileSync(copy, join(dir, `${a.archiveId}.json.gz`)) // the unlink "never ran"
+
+      const reloaded = make()
+      assert.deepEqual(reloaded.list(), [])
+      assert.equal(existsSync(join(dir, `${a.archiveId}.json.gz`)), false, 'unlinked by the load')
+    })
+
+    it('retention keeps the row (for the next pass) when its index write fails', () => {
+      const st = seam()
+      const archive = make({ writeFile: st.writeFile, maxEntries: 1 })
+      archive.archive(saved('a', { lastActivityAt: 1 }))
+      clock.t += 10
+      st.failIndex = true
+      archive.archive(saved('b', { lastActivityAt: 2 })) // would evict a
+      assert.equal(archive.list().length, 2, 'a was NOT evicted: its tombstone could not be persisted')
+      st.failIndex = false
+      archive.prune()
+      assert.deepEqual(archive.list().map((r) => r.sessionId), ['b'], 'the next pass evicts it')
+      assert.equal(archive.archiveOutcome(saved('a', { lastActivityAt: 1 })).status, 'duplicate')
+    })
+  })
+
+  describe('D: deleteAll covers queued snapshots', () => {
+    it('enqueue -> deleteAll -> whenIdle leaves nothing, counts the queued one, and tombstones it', async () => {
+      const archive = make()
+      archive.archive(saved('old', { lastActivityAt: 1 }))
+      archive.enqueue(saved('new', { lastActivityAt: 2 }))
+      assert.deepEqual(archive.deleteAll(), { deleted: 2, failed: 0 })
+      await archive.whenIdle()
+      assert.deepEqual(archive.list(), [])
+      assert.deepEqual(recordFiles(join(root, 'archive')), [])
+      assert.equal(archive.archiveOutcome(saved('new', { lastActivityAt: 2 })).status, 'duplicate')
+    })
+
+    it('with no rows at all, the cancellation still reaches disk', async () => {
+      const archive = make()
+      archive.enqueue(saved('only', { lastActivityAt: 2 }))
+      assert.deepEqual(archive.deleteAll(), { deleted: 1, failed: 0 })
+      await archive.whenIdle()
+      assert.deepEqual(archive.list(), [])
+      assert.equal(make().archiveOutcome(saved('only', { lastActivityAt: 2 })).status, 'duplicate', 'tombstone persisted')
+    })
+
+    it('drainSync() does not resurrect a cancelled job', () => {
+      const archive = make()
+      archive.enqueue(saved('x', { lastActivityAt: 2 }))
+      archive.deleteAll()
+      archive.drainSync()
+      assert.deepEqual(archive.list(), [])
+    })
+  })
+
+  describe('E: a record larger than the user\'s byte cap is skipped and evicts NOTHING', () => {
+    const noise = () => randomBytes(40_000).toString('base64')
+
+    it('skipped, no file, existing records untouched', () => {
+      const archive = make({ maxMegabytes: 0.02 }) // ~21 KB
+      archive.archive(saved('a', { lastActivityAt: 1 }))
+      archive.archive(saved('b', { lastActivityAt: 2 }))
+      const before = recordFiles(join(root, 'archive')).sort()
+      const out = archive.archiveOutcome(saved('big', { n: 1, content: noise(), lastActivityAt: 3 }))
+      assert.equal(out.status, 'skipped')
+      assert.deepEqual(recordFiles(join(root, 'archive')).sort(), before, 'nothing evicted, nothing written')
+      assert.equal(archive.list().length, 2)
+    })
+
+    it('retention never evicts the record being committed, even if it sorts oldest', () => {
+      const archive = make({ maxEntries: 1 })
+      archive.archive(saved('x', { lastActivityAt: 1 }))
+      clock.t -= 1000 // the new record gets an OLDER archivedAt
+      const out = archive.archiveOutcome(saved('y', { lastActivityAt: 2 }))
+      assert.equal(out.status, 'archived')
+      assert.deepEqual(archive.list().map((r) => r.sessionId), ['y'], 'x went, y (being committed) stayed')
+    })
+  })
+
+  describe('F: temp files', () => {
+    it('a failed write removes its own temp (record and index)', () => {
+      const failing = (match) => (path, data, opts) => {
+        if (path.endsWith(match)) {
+          writeFileSync(`${path}${opts.tmpSuffix}`, 'partial transcript bytes')
+          throw new Error('ENOSPC')
+        }
+        return writeFileRestricted(path, data, opts)
+      }
+      const archive = make({ writeFile: failing('index.json') })
+      archive.archive(saved('a', { lastActivityAt: 1 })) // record fine, index write fails (swallowed)
+      assert.deepEqual(files(join(root, 'archive')).filter((f) => f.includes('.tmp')), [], 'no index temp left')
+    })
+
+    it('load removes record/index temps left by a dead process, and only those', () => {
+      const archive = make()
+      const a = archive.archive(saved('a'))
+      const dir = join(root, 'archive')
+      writeFileSync(join(dir, `${a.archiveId}.json.gz.tmp-99999`), 'partial transcript')
+      writeFileSync(join(dir, `${'b'.repeat(32)}.json.gz.tmp-1`), 'partial transcript')
+      writeFileSync(join(dir, 'index.json.tmp-7'), '{}')
+      writeFileSync(join(dir, 'notes.tmp-1'), 'not ours')
+      assert.equal(make().list().length, 1)
+      assert.deepEqual(files(dir).filter((f) => f.includes('.tmp')).sort(), ['notes.tmp-1'])
+    })
+  })
+
+  describe('G: only a missing archive means empty', () => {
+    it('an unreadable directory is NOT cached as empty: the op fails, a later call retries', { skip: !posix || rootOnly }, () => {
+      const seed = make()
+      seed.archive(saved('a', { lastActivityAt: 1 }))
+      seed.archive(saved('b', { lastActivityAt: 2 }))
+      const dir = join(root, 'archive')
+      const archive = make()
+      chmodSync(dir, 0o300) // writable + searchable, not listable
+      try {
+        assert.deepEqual(archive.list(), [], 'list reports nothing while it cannot look')
+        assert.equal(archive.archiveOutcome(saved('c', { lastActivityAt: 3 })).status, 'failed', 'and an archive attempt FAILS rather than writing over an unseen index')
+      } finally {
+        chmodSync(dir, 0o700)
+      }
+      assert.deepEqual(archive.list().map((r) => r.sessionId).sort(), ['a', 'b'], 'the same instance retried and found the real records')
+      assert.equal(JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8')).entries.length, 2, 'the real index was never replaced by an empty one')
+    })
+
+    it('an unreadable INDEX file is not treated as corrupt/empty either', { skip: !posix || rootOnly }, () => {
+      const seed = make()
+      seed.archive(saved('a'))
+      const index = join(root, 'archive', 'index.json')
+      chmodSync(index, 0o000)
+      const archive = make()
+      try {
+        assert.equal(archive.archiveOutcome(saved('z', { lastActivityAt: 9 })).status, 'failed')
+      } finally {
+        chmodSync(index, 0o600)
+      }
+      assert.equal(archive.list().length, 1)
+    })
+
+    it('a missing directory is simply empty (and not an error)', () => {
+      const archive = make()
+      assert.deepEqual(archive.list(), [])
+      assert.deepEqual(archive.deleteAll(), { deleted: 0, failed: 0 })
+    })
+  })
+
+  describe('H: the synchronous (boot-path) writes are durable; the queued path is not', () => {
+    it('archiveOutcome fsyncs the record and the index; enqueue does not', async () => {
+      const calls = []
+      const spy = (path, data, opts) => { calls.push([path.endsWith('index.json') ? 'index' : 'record', opts.durable === true]); return writeFileRestricted(path, data, opts) }
+      const archive = make({ writeFile: spy })
+      archive.archiveOutcome(saved('a', { lastActivityAt: 1 }))
+      assert.deepEqual(calls, [['record', true], ['index', true]])
+      calls.length = 0
+      archive.enqueue(saved('b', { lastActivityAt: 2 }))
+      await archive.whenIdle()
+      assert.deepEqual(calls, [['record', false], ['index', false]])
+    })
+  })
+
+  describe('J: bounds and hardening', () => {
+    it('clamps maxEntries to 1000', () => {
+      assert.equal(make({ maxEntries: 5000 }).retentionPolicy().maxEntries, 1000)
+      assert.equal(make({ maxEntries: 1000 }).retentionPolicy().maxEntries, 1000)
+      assert.equal(make({ maxEntries: 999 }).retentionPolicy().maxEntries, 999)
+    })
+
+    it('makes a pre-existing loose directory 0700', { skip: !posix }, () => {
+      root = mkdtempSync(join(tmpdir(), 'chroxy-archive-'))
+      const dir = join(root, 'archive')
+      mkdirSync(dir, { mode: 0o755 })
+      chmodSync(dir, 0o755)
+      new SessionArchive({ dir }).archive(saved('a'))
+      assert.equal(statSync(dir).mode & 0o777, 0o700)
+    })
+
+    it('does not follow a symlinked index.json (rebuilds from the records, leaves the target alone)', { skip: !posix }, () => {
+      const seed = make()
+      const a = seed.archive(saved('a'))
+      const dir = join(root, 'archive')
+      const decoy = join(root, 'decoy-index.json')
+      writeFileSync(decoy, JSON.stringify({ version: 1, entries: [{ archiveId: 'c'.repeat(32), sessionId: 'PLANTED', historyLength: 1, bytes: 1, reason: 'closed', archivedAt: 1 }], tombstones: [] }))
+      rmSync(join(dir, 'index.json'))
+      symlinkSync(decoy, join(dir, 'index.json'))
+      const reloaded = make()
+      assert.deepEqual(reloaded.list().map((r) => r.sessionId), ['a'], 'the planted roster was not read')
+      assert.equal(JSON.parse(readFileSync(decoy, 'utf8')).entries[0].sessionId, 'PLANTED', 'and the symlink target was not overwritten')
+      assert.equal(a.archiveId, reloaded.list()[0].archiveId)
+    })
+
+    it('does not follow a symlinked record', { skip: !posix }, async () => {
+      const archive = make()
+      const a = archive.archive(saved('a'))
+      const b = archive.archive(saved('b', { lastActivityAt: 2 }))
+      const dir = join(root, 'archive')
+      rmSync(join(dir, `${a.archiveId}.json.gz`))
+      symlinkSync(join(dir, `${b.archiveId}.json.gz`), join(dir, `${a.archiveId}.json.gz`))
+      assert.equal((await make().getHistoryPage(a.archiveId)).ok, false)
+      assert.equal((await make().getHistoryPage(b.archiveId)).ok, true)
+    })
+
+    it('a FIFO planted where the index is does not hang the load (it is rebuilt around)', { skip: !posix, timeout: 10_000 }, async () => {
+      const { spawnSync } = await import('node:child_process')
+      const seed = make()
+      seed.archive(saved('a'))
+      const index = join(root, 'archive', 'index.json')
+      rmSync(index)
+      assert.equal(spawnSync('mkfifo', [index]).status, 0)
+      const reloaded = make()
+      assert.deepEqual(reloaded.list().map((r) => r.sessionId), ['a'])
+    })
+
+    it('a parse error is logged by class, never with the file\'s content', () => {
+      const seed = make()
+      seed.archive(saved('a'))
+      writeFileSync(join(root, 'archive', 'index.json'), 'TOPSECRET-TRANSCRIPT-BYTES is not json at all')
+      const lines = []
+      const listener = (entry) => lines.push(entry.message)
+      addLogListener(listener)
+      try {
+        make().list()
+      } finally {
+        removeLogListener(listener)
+      }
+      assert.ok(lines.some((l) => l.includes('index unreadable')), 'control: the unreadable-index line was logged')
+      assert.equal(lines.some((l) => l.includes('TOPSECRET')), false)
+    })
+  })
+
+  describe('K: cached read race and the exact-fit boundary', () => {
+    it('a cache-hit read that overlaps a delete is NOT served', async () => {
+      const archive = make()
+      const a = archive.archive(saved('a'))
+      assert.equal((await archive.getHistoryPage(a.archiveId)).ok, true) // warm the cache
+      const pending = archive.getHistoryPage(a.archiveId)
+      assert.equal(archive.delete(a.archiveId), 'deleted')
+      assert.equal((await pending).ok, false)
+    })
+
+    it('a cap exactly the size of the full record keeps every entry', () => {
+      const full = make({ maxRecordBytes: 10_000_000 })
+      const { meta: fm } = full.archiveOutcome({ ...saved('s', { n: 0 }), history: Array.from({ length: 10 }, (_, i) => ({ type: 'message', content: `${i}`.padEnd(40, 'x') })) })
+      const fullLen = gunzipSync(readFileSync(join(root, 'archive', `${fm.archiveId}.json.gz`))).length
+      rmSync(root, { recursive: true, force: true })
+      root = null
+      const archive = make({ maxRecordBytes: fullLen })
+      const { meta } = archive.archiveOutcome({ ...saved('s', { n: 0 }), history: Array.from({ length: 10 }, (_, i) => ({ type: 'message', content: `${i}`.padEnd(40, 'x') })) })
+      assert.equal(meta.omittedOldest, 0, 'nothing is discarded on an over-estimate')
     })
   })
 })

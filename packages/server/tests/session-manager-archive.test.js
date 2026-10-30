@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 
-import { SessionManager } from '../src/session-manager.js'
+import { SessionManager as RealSessionManager } from '../src/session-manager.js'
 import { SessionArchive } from '../src/session-archive.js'
 import { registerProvider } from '../src/providers.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
@@ -49,6 +49,16 @@ declareUnknownCustomization(ArchProvider, ShellLikeProvider, DeadStartProvider)
 registerProvider('test-archive-sm', ArchProvider)
 registerProvider('test-archive-dead-start', DeadStartProvider)
 
+// Every manager a test builds is remembered and disposed with destroyAll() (which
+// also clears its archive retention timer) — including ones a test replaces.
+const instances = []
+class SessionManager extends RealSessionManager {
+  constructor(opts) {
+    super(opts)
+    instances.push(this)
+  }
+}
+
 const DAY = 24 * 60 * 60 * 1000
 const HOUR = 60 * 60 * 1000
 const tick = () => new Promise((r) => setImmediate(r))
@@ -58,7 +68,9 @@ describe('SessionManager + SessionArchive', () => {
   let dir
 
   afterEach(() => {
-    try { sm?.destroy?.() } catch { /* ignore */ }
+    for (const instance of instances.splice(0)) {
+      try { instance.destroyAll() } catch { /* ignore */ }
+    }
     if (dir) { rmSync(dir, { recursive: true, force: true }); dir = null }
     sm = null
   })
@@ -279,7 +291,7 @@ describe('SessionManager + SessionArchive', () => {
       })
       // Simulate the crash window: the entry was archived but the state flush that
       // would have dropped it never landed, so the next boot sees it again.
-      sm.destroy?.()
+      sm.destroyAll()
       writeFileSync(statePath, stateBody)
       sm = new SessionManager({ stateFilePath: statePath, skipPreflight: true })
       sm.restoreState()
@@ -293,7 +305,7 @@ describe('SessionManager + SessionArchive', () => {
       const onDisk = JSON.parse(readFileSync(statePath, 'utf8'))
       assert.deepEqual(onDisk.sessions, [], 'the stale entry left the state file at boot')
       assert.equal(sm.deleteArchivedSession(row.archiveId), 'deleted')
-      sm.destroy?.()
+      sm.destroyAll()
       sm = new SessionManager({ stateFilePath: statePath, skipPreflight: true })
       sm.restoreState()
       assert.deepEqual(sm.listArchivedSessions().sessions, [], 'the deleted copy was not re-archived')
@@ -518,17 +530,75 @@ describe('SessionManager + SessionArchive', () => {
       return { statePath, body }
     }
 
-    for (const [label, ageMs] of [['a stale (25h) entry', 25 * HOUR], ['an entry past the failed-restore TTL', 40 * DAY]]) {
-      it(`the all-stale-boot flush does NOT run when the archive of ${label} failed (the drop waits for the next write)`, () => {
-        const { statePath, body } = staleBoot({ ageMs, brokenArchive: true })
-        assert.equal(readFileSync(statePath, 'utf8'), body, 'the state file still carries the only copy')
-        assert.equal(sm.listArchivedSessions().sessions.length, 0)
-      })
+    const diskIds = (statePath) => JSON.parse(readFileSync(statePath, 'utf8')).sessions.map((e) => e.id)
+    const STALE_ID = 'd'.repeat(32)
 
+    it('A: an all-stale boot whose archive FAILED keeps the only copy in the state file, after the boot flush AND after a later write', () => {
+      const { statePath } = staleBoot({ ageMs: 25 * HOUR, brokenArchive: true })
+      assert.deepEqual(diskIds(statePath), [STALE_ID], 'still there after the boot flush')
+      assert.equal(sm.getFailedRestores().length, 0, 'it is NOT surfaced as a failed restore')
+      assert.equal(sm._sessions.size, 0, 'and never restored')
+      sm._flushPersist() // any later state write
+      sm.serializeState()
+      assert.deepEqual(diskIds(statePath), [STALE_ID], 'and after later writes')
+      const onDisk = JSON.parse(readFileSync(statePath, 'utf8')).sessions[0]
+      assert.equal(onDisk.failedRestore, undefined, 'written verbatim, not stamped as a parked entry')
+      assert.equal(onDisk.history[0].content, 'only copy')
+    })
+
+    it('A: a MIXED boot (one fresh session restores) with a failed stale archive keeps it too', () => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-sm-archive-mixed-'))
+      const statePath = join(dir, 'state.json')
+      const stale = Date.now() - 25 * HOUR
+      writeFileSync(statePath, JSON.stringify({
+        version: 1,
+        timestamp: Date.now(),
+        sessions: [
+          { id: 'f'.repeat(32), name: 'Fresh', cwd: '/tmp', lastActivityAt: Date.now() - HOUR, history: [{ type: 'message', content: 'live' }] },
+          { id: STALE_ID, name: 'Stale', cwd: '/tmp', provider: 'codex', lastActivityAt: stale, history: [{ type: 'message', content: 'only copy' }] },
+        ],
+      }))
+      breakArchive()
+      sm = new SessionManager({ stateFilePath: statePath, skipPreflight: true, providerType: 'test-archive-sm' })
+      sm.restoreState()
+      assert.equal(sm._sessions.size, 1, 'control: the fresh session restored')
+      const ids = diskIds(statePath)
+      assert.equal(ids.length, 2, 'the boot\'s own final flush wrote the restored session AND the retained stale snapshot')
+      assert.ok(ids.includes(STALE_ID))
+    })
+
+    it('A: the NEXT boot, with a working archive, archives the retained snapshot and it leaves the state file', () => {
+      const { statePath } = staleBoot({ ageMs: 25 * HOUR, brokenArchive: true })
+      sm.destroyAll()
+      repairArchive()
+      sm = new SessionManager({ stateFilePath: statePath, skipPreflight: true })
+      sm.restoreState()
+      assert.deepEqual(sm.listArchivedSessions().sessions.map((r) => [r.sessionId, r.reason]), [[STALE_ID, 'stale']])
+      assert.deepEqual(diskIds(statePath), [], 'gone from the state file once archived')
+    })
+
+    it('A: the retention timer retries a retained snapshot in-process, and it leaves the state file once archived', () => {
+      const { statePath } = staleBoot({ ageMs: 25 * HOUR, brokenArchive: true })
+      assert.equal(sm._unarchivedStale.size, 1)
+      repairArchive()
+      sm._retryUnarchivedStale()
+      assert.equal(sm._unarchivedStale.size, 0)
+      assert.equal(sm.listArchivedSessions().sessions.length, 1)
+      assert.deepEqual(diskIds(statePath), [])
+    })
+
+    it('A: an entry past the failed-restore TTL whose archive failed is dropped (bounded), not retained', () => {
+      const { statePath } = staleBoot({ ageMs: 40 * DAY, brokenArchive: true })
+      assert.equal(sm._unarchivedStale.size, 0)
+      assert.deepEqual(diskIds(statePath), [])
+    })
+
+    for (const [label, ageMs] of [['a stale (25h) entry', 25 * HOUR], ['an entry past the failed-restore TTL', 40 * DAY]]) {
       it(`control: with a working archive the same boot of ${label} archives and flushes the drop`, () => {
         const { statePath } = staleBoot({ ageMs, brokenArchive: false })
         assert.equal(sm.listArchivedSessions().sessions.length, 1)
         assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')).sessions, [])
+        assert.equal(sm._unarchivedStale.size, 0)
       })
     }
 

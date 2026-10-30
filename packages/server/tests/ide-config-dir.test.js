@@ -181,6 +181,34 @@ describe('makeConfigDirFilter (the once-per-walk form of isConfigDirOrDirectChil
     }
   })
 
+  it('protects the session ARCHIVE subtree (index + records) in all three forms, and nothing else under a subtree', async () => {
+    const id = 'a'.repeat(32)
+    mkdirSync(join(root, 'cfg', 'archive'), { recursive: true })
+    const archived = {
+      index: join(root, 'cfg', 'archive', 'index.json'),
+      record: join(root, 'cfg', 'archive', `${id}.json.gz`),
+      dir: join(root, 'cfg', 'archive'),
+    }
+    const open = {
+      worktree: join(root, 'cfg', 'worktrees', 'w1', 'file'),
+      orchestration: join(root, 'cfg', 'orchestration', 'worktrees', 'r1', 'file'),
+      archiveNamedSibling: join(root, 'cfg', 'archive-notes', 'file'),
+    }
+    mkdirSync(join(root, 'cfg', 'orchestration', 'worktrees', 'r1'), { recursive: true })
+    mkdirSync(join(root, 'cfg', 'archive-notes'), { recursive: true })
+    for (const f of [archived.index, archived.record, open.worktree, open.orchestration, open.archiveNamedSibling]) writeFileSync(f, '')
+    const filter = await makeConfigDirFilter()
+    for (const f of Object.values(archived)) {
+      assert.equal(filter(f), true, `filter: ${f}`)
+      assert.equal(isConfigRootOrDirectChild(f, join(root, 'cfg')), true, `predicate: ${f}`)
+      assert.equal(await isConfigDirOrDirectChild(f), true, `helper: ${f}`)
+    }
+    for (const f of [open.worktree, open.orchestration, open.archiveNamedSibling]) {
+      assert.equal(filter(f), false, `filter: ${f}`)
+      assert.equal(await isConfigDirOrDirectChild(f), false, `helper: ${f}`)
+    }
+  })
+
   it('resolves the config root when it is created, not per file: a later relocation does not change a filter already in hand', async () => {
     const filter = await makeConfigDirFilter()
     process.env.CHROXY_CONFIG_DIR = join(root, 'cfg-other')

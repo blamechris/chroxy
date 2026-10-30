@@ -29,6 +29,7 @@ import { validateAcpProviders } from './acp-config.js'
 // lightweight.
 import { DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 import { configPath } from './config-dir.js'
+import { SESSION_ARCHIVE_MAX_ENTRIES } from './session-archive-limits.js'
 import { validateAgentConnections } from './agent-connections.js'
 
 const log = createLogger('config')
@@ -1550,6 +1551,9 @@ export function validateConfig(config, verbose = false) {
         const v = config.sessionArchive.maxEntries
         if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
           warnings.push(`Invalid value for 'sessionArchive.maxEntries': expected a positive integer, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+        else if (v > SESSION_ARCHIVE_MAX_ENTRIES) {
+          warnings.push(`Invalid value for 'sessionArchive.maxEntries': ${v} is above the maximum of ${SESSION_ARCHIVE_MAX_ENTRIES} and is clamped to it`)
         }
       }
       for (const key of ['maxAgeDays', 'maxMegabytes']) {

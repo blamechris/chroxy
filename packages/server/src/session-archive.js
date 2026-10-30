@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { gunzip, gunzipSync, gzip, gzipSync } from 'node:zlib'
 import { createLogger } from './logger.js'
-import { writeFileRestricted } from './platform.js'
+import { isWindows, writeFileRestricted } from './platform.js'
 import { pageHistory } from './history-page.js'
 import { SessionMessageHistory } from './session-message-history.js'
+import { SESSION_ARCHIVE_MAX_ENTRIES } from './session-archive-limits.js'
 
 const log = createLogger('session-archive')
 
@@ -61,6 +62,17 @@ const gunzipAsync = promisify(gunzip)
  * SIZE. A record's JSON is bounded by MAX_RECORD_BYTES on write AND read (one
  * constant): when a history would not fit, the OLDEST entries are omitted and
  * counted in `omittedOldest`, rather than writing a record the reader refuses.
+ *
+ * DURABILITY. A removal (delete, delete-all, retention) writes the index WITH
+ * the tombstone first and unlinks the record only after that write succeeded;
+ * the synchronous boot-path writes are fsync'd (`durable`) so a record is on
+ * disk before the state flush that drops its source.
+ *
+ * DOCUMENTED LIMITS. The boot paths (stale entries, the failed-restore TTL
+ * prune) and `clearFailedRestore` archive SYNCHRONOUSLY, because they need the
+ * outcome before they may drop the source, so a very large history stalls the
+ * event loop once there. A read still `JSON.parse`s a whole record
+ * synchronously after the (asynchronous) read and inflate.
  */
 
 const ARCHIVE_ID_RE = /^[0-9a-f]{32}$/
@@ -78,6 +90,45 @@ const MAX_TOMBSTONES = 1000
 // Level 1: the archive is about not losing text, not about density, and the
 // default level costs several times the CPU.
 const GZIP_OPTS = Object.freeze({ level: 1 })
+
+export { SESSION_ARCHIVE_MAX_ENTRIES }
+
+// Opening with O_NOFOLLOW means a symlink planted where the index or a record
+// should be is refused (ELOOP) rather than followed. Absent on win32. O_NONBLOCK
+// keeps a FIFO planted at the path from blocking the open forever (a synchronous
+// open blocks the whole event loop); a regular file is unaffected, and the
+// opened handle is checked to BE a regular file before anything is read.
+const O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0
+const O_NONBLOCK = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+const OPEN_FLAGS = fsConstants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK
+const TMP_FILE_RE = /^(?:[0-9a-f]{32}\.json\.gz|index\.json)\.tmp-.+$/
+
+const notRegular = (path) => Object.assign(new Error(`not a regular file: ${path}`), { code: 'ENOTREG' })
+
+function readFileNoFollowSync(path) {
+  const fd = openSync(path, OPEN_FLAGS)
+  try {
+    if (!fstatSync(fd).isFile()) throw notRegular(path)
+    return readFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+async function readFileNoFollow(path) {
+  const handle = await open(path, OPEN_FLAGS)
+  try {
+    if (!(await handle.stat()).isFile()) throw notRegular(path)
+    return await handle.readFile()
+  } finally {
+    await handle.close()
+  }
+}
+
+/** A log-safe tag for a read/parse error: never its message, which can quote file content. */
+function errTag(err) {
+  return err?.code || err?.name || 'error'
+}
 
 export const SESSION_ARCHIVE_DEFAULTS = Object.freeze({
   enabled: true,
@@ -106,9 +157,13 @@ function finiteOrNull(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-function positiveNumber(value, fallback, name, { integer = false } = {}) {
+function positiveNumber(value, fallback, name, { integer = false, max = Infinity } = {}) {
   if (value === undefined) return fallback
   const ok = typeof value === 'number' && Number.isFinite(value) && value > 0 && (!integer || Number.isInteger(value))
+  if (ok && value > max) {
+    log.warn(`sessionArchive.${name}: ${value} is above the maximum — clamped to ${max}`)
+    return max
+  }
   if (ok) return value
   log.warn(`sessionArchive.${name}: expected a positive ${integer ? 'integer' : 'number'}, got ${JSON.stringify(value)} — using the default (${fallback})`)
   return fallback
@@ -174,15 +229,33 @@ function tombstoneFromIndexRow(row) {
   }
 }
 
-/** The identity of one session snapshot: what the dedupe and tombstones compare. */
-function fingerprint(sessionId, lastActivityAt, sourceLength) {
-  return `${sessionId}\u0000${lastActivityAt === null ? 'null' : lastActivityAt}\u0000${sourceLength}`
-}
-
 /** Source history length of an indexed row (kept entries plus omitted-for-size ones). */
 function rowSourceLength(row) {
   return row.historyLength + (row.omittedOldest || 0)
 }
+
+/**
+ * Does `existing` already account for the candidate snapshot? Same session and
+ * an equal-or-NEWER state: a later `lastActivityAt`, or the same one with at
+ * least as much history. That covers a source that outlives its (deleted or
+ * evicted) record in a state backup at an OLDER point of the same session —
+ * the backup is superseded, not new. When either timestamp is unknown only an
+ * exact (timestamp, length) match counts.
+ * @param {{sessionId: string, lastActivityAt: number|null, length: number}} existing
+ * @param {{sessionId: string, lastActivityAt: number|null, length: number}} candidate
+ */
+function snapshotCovers(existing, candidate) {
+  if (existing.sessionId !== candidate.sessionId) return false
+  const a = existing.lastActivityAt
+  const b = candidate.lastActivityAt
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (a !== b) return a > b
+    return existing.length >= candidate.length
+  }
+  return a === b && existing.length === candidate.length
+}
+
+const tombstoneAsSnapshot = (t) => ({ sessionId: t.sessionId, lastActivityAt: t.lastActivityAt, length: t.historyLength })
 
 /**
  * Serialise one record's JSON, omitting the OLDEST history entries until it
@@ -199,13 +272,14 @@ function buildRecordJson(saved, { archivedAt, reason }, maxBytes) {
   const sep = restJson === '{}' ? '' : ','
   const historyOpen = `${sep}"history":[`
   const prefix = (omitted) => `{"version":${FORMAT_VERSION},"archivedAt":${JSON.stringify(archivedAt)},"reason":${JSON.stringify(reason)},"omittedOldest":${omitted},"saved":`
-  // Overhead is measured with the widest possible `omittedOldest`, so the
-  // assembled record can only be at or under the estimate.
-  const overhead = Buffer.byteLength(prefix(parts.length)) + Buffer.byteLength(restJson) - 1 + Buffer.byteLength(historyOpen) + 3
-  let total = overhead + sizes.reduce((sum, n) => sum + n, 0) + Math.max(0, parts.length - 1)
+  const fixed = Buffer.byteLength(restJson) - 1 + Buffer.byteLength(historyOpen) + 3
+  let keptBytes = sizes.reduce((sum, n) => sum + n, 0)
+  // The EXACT size for each candidate start (the digit width of `omittedOldest`
+  // included), so an entry is never discarded on an over-estimate.
+  const totalFor = (from) => Buffer.byteLength(prefix(from)) + fixed + keptBytes + Math.max(0, parts.length - from - 1)
   let start = 0
-  while (start < parts.length && total > maxBytes) {
-    total -= sizes[start] + 1
+  while (start < parts.length && totalFor(start) > maxBytes) {
+    keptBytes -= sizes[start]
     start++
   }
   if (start >= parts.length) return null
@@ -220,7 +294,7 @@ export class SessionArchive {
    * @param {string} options.dir - archive directory (created lazily on first write)
    * @param {boolean} [options.enabled=true] - off switch: stops NEW writes only;
    *   retention still runs so old data keeps ageing out
-   * @param {number} [options.maxEntries=100]
+   * @param {number} [options.maxEntries=100] - clamped to SESSION_ARCHIVE_MAX_ENTRIES
    * @param {number} [options.maxAgeDays=30]
    * @param {number} [options.maxMegabytes=256]
    * @param {() => number} [options.now] - clock seam for tests
@@ -228,8 +302,10 @@ export class SessionArchive {
    *   the history truncator the pager uses; defaults to a private one
    * @param {number} [options.maxRecordBytes] - test seam for MAX_RECORD_BYTES
    *   (NOT a config key)
+   * @param {typeof writeFileRestricted} [options.writeFile] - test seam for the
+   *   atomic file write (NOT a config key)
    */
-  constructor({ dir, enabled, maxEntries, maxAgeDays, maxMegabytes, now = () => Date.now(), historyHelper, maxRecordBytes } = {}) {
+  constructor({ dir, enabled, maxEntries, maxAgeDays, maxMegabytes, now = () => Date.now(), historyHelper, maxRecordBytes, writeFile = writeFileRestricted } = {}) {
     this._dirValid = typeof dir === 'string' && dir.length > 0
     if (!this._dirValid) log.warn('SessionArchive: no archive directory given — archiving is disabled')
     this._dir = this._dirValid ? dir : null
@@ -237,14 +313,15 @@ export class SessionArchive {
       log.warn(`sessionArchive.enabled: expected a boolean, got ${JSON.stringify(enabled)} — using the default (${SESSION_ARCHIVE_DEFAULTS.enabled})`)
     }
     this._enabled = this._dirValid && (typeof enabled === 'boolean' ? enabled : SESSION_ARCHIVE_DEFAULTS.enabled)
-    this._maxEntries = positiveNumber(maxEntries, SESSION_ARCHIVE_DEFAULTS.maxEntries, 'maxEntries', { integer: true })
+    this._maxEntries = positiveNumber(maxEntries, SESSION_ARCHIVE_DEFAULTS.maxEntries, 'maxEntries', { integer: true, max: SESSION_ARCHIVE_MAX_ENTRIES })
     this._maxAgeDays = positiveNumber(maxAgeDays, SESSION_ARCHIVE_DEFAULTS.maxAgeDays, 'maxAgeDays')
     this._maxMegabytes = positiveNumber(maxMegabytes, SESSION_ARCHIVE_DEFAULTS.maxMegabytes, 'maxMegabytes')
     this._maxRecordBytes = typeof maxRecordBytes === 'number' && Number.isFinite(maxRecordBytes) && maxRecordBytes > 0 ? maxRecordBytes : MAX_RECORD_BYTES
     this._now = typeof now === 'function' ? now : () => Date.now()
     this._historyHelper = historyHelper || new SessionMessageHistory({})
+    this._writeFile = typeof writeFile === 'function' ? writeFile : writeFileRestricted
     this._tmpSuffix = `.tmp-${process.pid}`
-    /** @type {object[]|null} null until the first use */
+    /** @type {object[]|null} null until a load SUCCEEDS (a failed load is retried) */
     this._index = null
     /** @type {object[]} bounded FIFO of removed records' fingerprints */
     this._tombstones = []
@@ -270,12 +347,18 @@ export class SessionArchive {
    * throws: archiving must not be able to break a teardown.
    *
    *   archived   a record was written (`meta` is its roster row)
-   *   duplicate  this exact snapshot is already archived, was archived and
-   *              since removed (tombstone), or is queued — nothing to do
+   *   duplicate  this snapshot (or a newer one of the same session) is already
+   *              archived, was archived and since removed (tombstone), or is
+   *              queued — nothing to do
    *   skipped    nothing to keep: archiving is off, the history is empty, or
-   *              the user's own retention evicted the record on write
-   *   failed     the write (or the serialisation) threw — the caller must NOT
-   *              drop the only copy of the session if it has a choice
+   *              the record alone is larger than the user's own byte cap (it is
+   *              not written and NOTHING is evicted to make room)
+   *   failed     the write (or the serialisation, or loading the archive)
+   *              threw — the caller must NOT drop the only copy of the session
+   *              if it has a choice
+   *
+   * The write is fsync'd: this is the path the boot-time callers use, and they
+   * drop the source right after.
    *
    * @param {object} saved - a serialized session entry (SessionManager._serializeSessionEntry)
    * @param {string} [reason='closed']
@@ -288,7 +371,7 @@ export class SessionArchive {
       const job = prepared.job
       const gz = gzipSync(job.json, GZIP_OPTS)
       job.done = true
-      const meta = this._commit(job, gz)
+      const meta = this._commit(job, gz, { durable: true })
       return meta ? { status: 'archived', meta } : { status: 'skipped' }
     } catch (err) {
       log.warn(`Failed to archive session: ${err?.message || err}`)
@@ -341,7 +424,7 @@ export class SessionArchive {
       try {
         const gz = gzipSync(job.json, GZIP_OPTS)
         job.done = true
-        this._commit(job, gz)
+        this._commit(job, gz, { durable: true })
       } catch (err) {
         job.done = true
         log.warn(`Failed to archive a queued session at shutdown: ${err?.message || err}`)
@@ -396,7 +479,9 @@ export class SessionArchive {
       this._sweep() // an expired record is never served
       if (!this._knows(archiveId)) return notFound
       const record = await this._readRecord(archiveId)
-      if (!record) return notFound
+      // Re-checked AFTER the await on every path, a cache hit included: the
+      // record may have been deleted or aged out while this read was in flight.
+      if (!record || !this._knows(archiveId)) return notFound
       return { ok: true, ...pageHistory(record.saved?.history, { offset, limit }, this._historyHelper) }
     } catch (err) {
       log.warn(`Failed to read archived session: ${err?.message || err}`)
@@ -406,8 +491,9 @@ export class SessionArchive {
 
   /**
    * @param {string} archiveId
-   * @returns {'deleted'|'not_found'|'failed'} `failed` means the record file
-   *   could not be unlinked (anything but ENOENT): it is still there
+   * @returns {'deleted'|'not_found'|'failed'} `failed` means the record could
+   *   not be removed durably (its tombstone could not be written, or its file
+   *   could not be unlinked): it is still listed
    */
   delete(archiveId) {
     try {
@@ -415,12 +501,8 @@ export class SessionArchive {
       this._sweep()
       if (!this._knows(archiveId)) return 'not_found'
       const row = this._index.find((r) => r.archiveId === archiveId)
-      if (!this._unlinkRecord(archiveId)) return 'failed'
-      this._index = this._index.filter((r) => r.archiveId !== archiveId)
-      this._tombstone(row)
-      this._invalidate(archiveId)
-      this._writeIndex()
-      return 'deleted'
+      const { removed } = this._removeRows([row])
+      return removed.length > 0 ? 'deleted' : 'failed'
     } catch (err) {
       log.warn(`Failed to delete archived session: ${err?.message || err}`)
       return 'failed'
@@ -428,8 +510,10 @@ export class SessionArchive {
   }
 
   /**
+   * Delete every record, AND cancel every snapshot still queued (a session
+   * closed just before the request must not reappear after it).
    * @returns {{ deleted: number, failed: number }} `failed` counts records that
-   *   are still on disk because their unlink failed
+   *   are still on disk
    */
   deleteAll() {
     let deleted = 0
@@ -437,19 +521,14 @@ export class SessionArchive {
     try {
       this._ensureLoaded()
       this._sweep()
-      const remaining = []
-      for (const row of this._index) {
-        if (this._unlinkRecord(row.archiveId)) {
-          deleted++
-          this._tombstone(row)
-          this._invalidate(row.archiveId)
-        } else {
-          failed++
-          remaining.push(row)
-        }
-      }
-      this._index = remaining
-      this._writeIndex()
+      const cancelled = this._cancelPending()
+      const rows = [...this._index]
+      const { removed, failed: stuck } = this._removeRows(rows)
+      // Rows were written with the cancelled snapshots' tombstones; with no rows
+      // the tombstones still need to reach disk.
+      if (cancelled > 0 && rows.length === 0) this._writeIndex({ durable: true, create: true })
+      deleted = cancelled + removed.length
+      failed = stuck.length
     } catch (err) {
       log.warn(`Failed to delete archived sessions: ${err?.message || err}`)
       failed++
@@ -472,11 +551,12 @@ export class SessionArchive {
     const archivedAt = this._now()
     const probe = metaFrom(saved, { archiveId: '0'.repeat(32), reason, archivedAt, bytes: 0 })
     if (!probe) return { status: 'skipped' }
-    // The SAME snapshot again: a crash between archive and the state flush, a
-    // stale entry seen on two boots, a backup that still carries a source whose
-    // archive was since deleted (tombstone), or one still being compressed.
-    const key = fingerprint(probe.sessionId, probe.lastActivityAt, probe.historyLength)
-    if (this._isKnownSnapshot(key)) return { status: 'duplicate' }
+    // The same snapshot — or an older one of the same session — again: a crash
+    // between archive and the state flush, a stale entry seen on two boots, a
+    // backup that still carries a source whose archive was since deleted
+    // (tombstone), or one still being compressed.
+    const candidate = { sessionId: probe.sessionId, lastActivityAt: probe.lastActivityAt, length: probe.historyLength }
+    if (this._isKnownSnapshot(candidate)) return { status: 'duplicate' }
 
     const built = buildRecordJson(saved, { archivedAt, reason: probe.reason }, this._maxRecordBytes)
     if (!built) throw new Error(`no history entry fits the ${this._maxRecordBytes}-byte record bound`)
@@ -488,28 +568,48 @@ export class SessionArchive {
       job: {
         archiveId,
         json: built.json,
-        fingerprint: key,
+        candidate,
         done: false,
         meta: { ...probe, archiveId, historyLength: built.kept, omittedOldest: built.omittedOldest },
       },
     }
   }
 
-  _isKnownSnapshot(key) {
-    return this._index.some((row) => fingerprint(row.sessionId, row.lastActivityAt, rowSourceLength(row)) === key)
-      || this._tombstones.some((t) => fingerprint(t.sessionId, t.lastActivityAt, t.historyLength) === key)
-      || this._pending.some((job) => job.fingerprint === key)
+  _isKnownSnapshot(candidate) {
+    return this._index.some((row) => snapshotCovers({ sessionId: row.sessionId, lastActivityAt: row.lastActivityAt, length: rowSourceLength(row) }, candidate))
+      || this._tombstones.some((t) => snapshotCovers(tombstoneAsSnapshot(t), candidate))
+      || this._pending.some((job) => snapshotCovers(job.candidate, candidate))
   }
 
-  /** Write a prepared job's compressed record and index it. THROWS on a failed write. */
-  _commit(job, gz) {
+  /**
+   * Write a prepared job's compressed record and index it. THROWS on a failed
+   * write (after removing the temp file the failed write may have left).
+   * @returns {object|null} the roster row; null (nothing written, NOTHING
+   *   evicted) when the record alone exceeds the user's byte cap
+   */
+  _commit(job, gz, { durable = false } = {}) {
+    if (gz.length > this._maxMegabytes * MIB) {
+      log.warn(`Not archiving session ${job.meta.sessionId}: its ${gz.length}-byte record alone exceeds the sessionArchive.maxMegabytes cap (${this._maxMegabytes})`)
+      return null
+    }
     mkdirSync(this._dir, { recursive: true, mode: 0o700 })
-    writeFileRestricted(this._recordPath(job.archiveId), gz, { tmpSuffix: this._tmpSuffix })
+    // mkdir's mode only applies to a directory it creates, and is masked by the
+    // umask; make the guarantee explicit for one that already existed.
+    if (!isWindows) {
+      try { chmodSync(this._dir, 0o700) } catch { /* best effort */ }
+    }
+    const path = this._recordPath(job.archiveId)
+    try {
+      this._writeFile(path, gz, { tmpSuffix: this._tmpSuffix, durable })
+    } catch (err) {
+      this._unlinkTemp(path)
+      throw err
+    }
     const meta = { ...job.meta, bytes: gz.length }
     this._index.push(meta)
-    this._enforceRetention()
-    this._writeIndex()
-    return this._index.includes(meta) ? { ...meta } : null
+    this._enforceRetention(job.archiveId)
+    this._writeIndex({ durable })
+    return { ...meta }
   }
 
   _schedule() {
@@ -530,7 +630,7 @@ export class SessionArchive {
   async _runJob(job) {
     try {
       const gz = await gzipAsync(job.json, GZIP_OPTS)
-      if (job.done) return // drainSync() finished it while we compressed
+      if (job.done) return // drainSync() finished it, or deleteAll() cancelled it, while we compressed
       job.done = true
       this._commit(job, gz)
     } catch (err) {
@@ -541,19 +641,71 @@ export class SessionArchive {
     }
   }
 
-  /** Apply retention now and persist the index if it dropped anything. */
-  _sweep() {
-    if (this._enforceRetention() > 0) this._writeIndex()
+  /** Cancel every queued snapshot and tombstone it. @returns {number} how many */
+  _cancelPending() {
+    let cancelled = 0
+    for (const job of this._pending) {
+      if (job.done) continue
+      job.done = true
+      this._addTombstone(job.candidate.sessionId, job.candidate.lastActivityAt, job.candidate.length)
+      cancelled++
+    }
+    this._pending = []
+    return cancelled
   }
 
-  _tombstone(row) {
-    this._tombstones.push({
-      sessionId: row.sessionId,
-      lastActivityAt: row.lastActivityAt,
-      historyLength: rowSourceLength(row),
-      at: this._now(),
-    })
+  /** Apply retention now (it persists the index itself when it drops anything). */
+  _sweep() {
+    this._enforceRetention()
+  }
+
+  _addTombstone(sessionId, lastActivityAt, length) {
+    const tombstone = { sessionId, lastActivityAt, historyLength: length, at: this._now() }
+    this._tombstones.push(tombstone)
     if (this._tombstones.length > MAX_TOMBSTONES) this._tombstones.splice(0, this._tombstones.length - MAX_TOMBSTONES)
+    return tombstone
+  }
+
+  /**
+   * Remove rows DURABLY: the index (without the rows, with their tombstones) is
+   * written FIRST and the record files are unlinked only after that succeeded,
+   * so a crash or a failed write can never leave a deleted record without its
+   * tombstone. A row whose file could not be unlinked is put back (and its
+   * tombstone dropped) so it stays visible and is retried.
+   * @param {object[]} rows
+   * @returns {{ removed: object[], failed: object[] }}
+   */
+  _removeRows(rows) {
+    if (rows.length === 0) return { removed: [], failed: [] }
+    const ids = new Set(rows.map((row) => row.archiveId))
+    const prevIndex = this._index
+    const prevTombstones = this._tombstones
+    this._index = prevIndex.filter((row) => !ids.has(row.archiveId))
+    this._tombstones = [...prevTombstones]
+    const added = new Map()
+    for (const row of rows) added.set(row.archiveId, this._addTombstone(row.sessionId, row.lastActivityAt, rowSourceLength(row)))
+    if (!this._writeIndex({ durable: true })) {
+      this._index = prevIndex
+      this._tombstones = prevTombstones
+      return { removed: [], failed: rows }
+    }
+    const removed = []
+    const failed = []
+    for (const row of rows) {
+      if (this._unlinkRecord(row.archiveId)) {
+        removed.push(row)
+        this._invalidate(row.archiveId)
+      } else {
+        failed.push(row)
+      }
+    }
+    if (failed.length > 0) {
+      const stuck = new Set(failed.map((row) => added.get(row.archiveId)))
+      this._index = [...this._index, ...failed]
+      this._tombstones = this._tombstones.filter((t) => !stuck.has(t))
+      this._writeIndex({ durable: true })
+    }
+    return { removed, failed }
   }
 
   /** A client-supplied id is only ever used after BOTH checks. */
@@ -572,6 +724,10 @@ export class SessionArchive {
     if (this._cache?.archiveId === archiveId) this._cache = null
   }
 
+  _unlinkTemp(path) {
+    try { unlinkSync(`${path}${this._tmpSuffix}`) } catch { /* nothing left to remove */ }
+  }
+
   /** @returns {boolean} true when the file is gone afterwards */
   _unlinkRecord(archiveId) {
     try {
@@ -588,10 +744,10 @@ export class SessionArchive {
     if (this._cache?.archiveId === archiveId) return this._cache.record
     let record
     try {
-      const raw = await gunzipAsync(await readFile(this._recordPath(archiveId)), { maxOutputLength: this._maxRecordBytes })
+      const raw = await gunzipAsync(await readFileNoFollow(this._recordPath(archiveId)), { maxOutputLength: this._maxRecordBytes })
       record = JSON.parse(raw.toString('utf8'))
     } catch (err) {
-      log.warn(`Unreadable archive record ${archiveId}: ${err?.message || err}`)
+      log.warn(`Unreadable archive record ${archiveId}: ${errTag(err)}`)
       return null
     }
     if (!record || typeof record !== 'object') return null
@@ -601,43 +757,73 @@ export class SessionArchive {
     return record
   }
 
-  _writeIndex() {
-    if (!existsSync(this._dir)) return
+  /**
+   * Persist the index and tombstones. The record files are the authority for
+   * rows (a lost index is rebuilt), but TOMBSTONES exist nowhere else, so
+   * callers that depend on one check the result.
+   * @returns {boolean} false when the write failed (its temp file is removed)
+   */
+  _writeIndex({ durable = false, create = false } = {}) {
+    if (!existsSync(this._dir)) {
+      if (!create) return true
+      try { mkdirSync(this._dir, { recursive: true, mode: 0o700 }) } catch (err) {
+        log.warn(`Failed to create the session archive directory: ${err?.message || err}`)
+        return false
+      }
+    }
+    const path = join(this._dir, INDEX_FILE)
     try {
-      writeFileRestricted(
-        join(this._dir, INDEX_FILE),
-        JSON.stringify({ version: FORMAT_VERSION, entries: this._index, tombstones: this._tombstones }),
-        { tmpSuffix: this._tmpSuffix },
-      )
+      this._writeFile(path, JSON.stringify({ version: FORMAT_VERSION, entries: this._index, tombstones: this._tombstones }), { tmpSuffix: this._tmpSuffix, durable })
+      return true
     } catch (err) {
-      // The record files are the authority; a lost index is rebuilt at load.
+      this._unlinkTemp(path)
       log.warn(`Failed to write the session archive index: ${err?.message || err}`)
+      return false
     }
   }
 
-  /** Read the index, reconcile it with the record files, then apply retention. */
+  /**
+   * Read the index, reconcile it with the record files, then apply retention.
+   * Only a MISSING directory (or index) means "empty": any other read error
+   * THROWS, leaving the archive unloaded so the next call retries, instead of
+   * caching an empty index that the next write would persist over real data.
+   */
   _ensureLoaded() {
     if (this._index) return
-    this._index = []
-    this._tombstones = []
-    if (!this._dirValid) return
+    if (!this._dirValid) {
+      this._index = []
+      return
+    }
     let names
     try {
       names = readdirSync(this._dir)
-    } catch {
-      return // no directory yet (or not a directory): nothing archived
+    } catch (err) {
+      // ENOTDIR: a path component is a file, so there is no archive here either.
+      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+        this._index = []
+        this._tombstones = []
+        return
+      }
+      throw err
     }
     const onDisk = new Set()
     for (const name of names) {
       const m = RECORD_FILE_RE.exec(name)
-      if (m) onDisk.add(m[1])
+      if (m) {
+        onDisk.add(m[1])
+      } else if (TMP_FILE_RE.test(name)) {
+        // A temp left by a write that died mid-way. Load precedes this process's
+        // own writes, so it cannot be ours in flight; it can hold transcript bytes.
+        try { unlinkSync(join(this._dir, name)) } catch { /* best effort */ }
+      }
     }
 
     let indexed = []
+    let tombstones = []
     let dirty = false
     let indexExisted = true
     try {
-      const parsed = JSON.parse(readFileSync(join(this._dir, INDEX_FILE), 'utf8'))
+      const parsed = JSON.parse(readFileNoFollowSync(join(this._dir, INDEX_FILE)).toString('utf8'))
       if (!parsed || !Array.isArray(parsed.entries)) throw new Error('malformed index')
       const seen = new Set()
       for (const row of parsed.entries) {
@@ -649,31 +835,44 @@ export class SessionArchive {
       if (Array.isArray(parsed.tombstones)) {
         const valid = parsed.tombstones.map(tombstoneFromIndexRow).filter(Boolean)
         if (valid.length !== parsed.tombstones.length) dirty = true
-        this._tombstones = valid.slice(-MAX_TOMBSTONES)
+        tombstones = valid.slice(-MAX_TOMBSTONES)
       }
     } catch (err) {
-      if (err?.code === 'ENOENT') indexExisted = false
-      else log.warn(`Session archive index unreadable (${err?.message || err}) — rebuilding from the record files`)
+      if (err?.code === 'ENOENT') {
+        indexExisted = false
+      } else if (err?.name === 'SyntaxError' || err?.code === 'ELOOP' || err?.code === 'ENOTREG' || err?.message === 'malformed index') {
+        // Corrupt (or a planted symlink): rebuild from the record files. Log the
+        // class of error only — a parse message can quote the file's content.
+        log.warn(`Session archive index unreadable (${errTag(err)}) — rebuilding from the record files`)
+      } else {
+        throw err // EACCES, EIO, ...: not "empty" — do not overwrite what we cannot read
+      }
       indexed = []
-      this._tombstones = []
+      tombstones = []
       dirty = true
     }
 
     // Drop rows whose file is gone.
     const reconciled = indexed.filter((meta) => onDisk.has(meta.archiveId))
     if (reconciled.length !== indexed.length) dirty = true
-    // Adopt record files the index does not know.
+    // Adopt record files the index does not know — unless a tombstone says the
+    // record was deleted (its unlink never ran: a crash between the two).
     const known = new Set(reconciled.map((meta) => meta.archiveId))
     for (const archiveId of onDisk) {
       if (known.has(archiveId)) continue
       const adopted = this._deriveMeta(archiveId)
-      if (adopted) {
-        reconciled.push(adopted)
-        dirty = true
+      if (!adopted) continue
+      const candidate = { sessionId: adopted.sessionId, lastActivityAt: adopted.lastActivityAt, length: rowSourceLength(adopted) }
+      if (tombstones.some((t) => snapshotCovers(tombstoneAsSnapshot(t), candidate))) {
+        this._unlinkRecord(archiveId)
+        continue
       }
+      reconciled.push(adopted)
+      dirty = true
     }
     this._index = reconciled
-    if (this._enforceRetention() > 0) dirty = true
+    this._tombstones = tombstones
+    this._enforceRetention()
     // An empty directory with no index is simply empty: do not create a file.
     if (dirty && (indexExisted || this._index.length > 0)) this._writeIndex()
   }
@@ -681,31 +880,34 @@ export class SessionArchive {
   /** Derive a roster row from a record file the index does not know. */
   _deriveMeta(archiveId) {
     try {
-      const path = this._recordPath(archiveId)
-      const raw = gunzipSync(readFileSync(path), { maxOutputLength: this._maxRecordBytes })
+      const compressed = readFileNoFollowSync(this._recordPath(archiveId))
+      const raw = gunzipSync(compressed, { maxOutputLength: this._maxRecordBytes })
       const record = JSON.parse(raw.toString('utf8'))
       if (!record || typeof record !== 'object' || !record.saved || typeof record.saved !== 'object') return null
       return metaFrom(record.saved, {
         archiveId,
         reason: record.reason,
         archivedAt: record.archivedAt,
-        bytes: statSync(path).size,
+        bytes: compressed.length,
         omittedOldest: record.omittedOldest,
       })
     } catch (err) {
-      log.warn(`Skipping unreadable archive record ${archiveId}: ${err?.message || err}`)
+      log.warn(`Skipping unreadable archive record ${archiveId}: ${errTag(err)}`)
       return null
     }
   }
 
   /**
-   * Age, then count, then total bytes — oldest first each time. A dropped row's
-   * file is UNLINKED, not just hidden, and a tombstone is left in its place; a
-   * row whose unlink failed stays so the next pass retries it. The CALLER
-   * persists the index.
+   * Age, then count, then total bytes — oldest first each time — through
+   * `_removeRows`, so each dropped row's tombstone is on disk before its file is
+   * unlinked. Only as many rows as needed are dropped, and `protectId` (the
+   * record being committed) is never evicted to satisfy the COUNT or BYTE cap
+   * (a record that is itself past maxAge ages out at the next sweep as usual). A pass whose index write
+   * failed drops nothing and is retried by the next one.
+   * @param {string} [protectId]
    * @returns {number} how many rows were dropped
    */
-  _enforceRetention() {
+  _enforceRetention(protectId) {
     if (!this._index || this._index.length === 0) return 0
     const now = this._now()
     const maxAgeMs = this._maxAgeDays * DAY_MS
@@ -715,25 +917,23 @@ export class SessionArchive {
     for (const row of oldestFirst) {
       if (typeof row.archivedAt === 'number' && now - row.archivedAt > maxAgeMs) drop.add(row.archiveId)
     }
-    let kept = oldestFirst.filter((row) => !drop.has(row.archiveId))
-    while (kept.length > this._maxEntries) drop.add(kept.shift().archiveId)
+    const kept = oldestFirst.filter((row) => !drop.has(row.archiveId))
+    const evictable = () => kept.find((row) => row.archiveId !== protectId)
+    while (kept.length > this._maxEntries) {
+      const victim = evictable()
+      if (!victim) break
+      drop.add(victim.archiveId)
+      kept.splice(kept.indexOf(victim), 1)
+    }
     let total = kept.reduce((sum, row) => sum + (row.bytes || 0), 0)
-    while (kept.length > 0 && total > maxBytes) {
-      const oldest = kept.shift()
-      drop.add(oldest.archiveId)
-      total -= oldest.bytes || 0
+    while (total > maxBytes) {
+      const victim = evictable()
+      if (!victim) break
+      drop.add(victim.archiveId)
+      kept.splice(kept.indexOf(victim), 1)
+      total -= victim.bytes || 0
     }
     if (drop.size === 0) return 0
-    const removed = new Set()
-    for (const row of oldestFirst) {
-      if (!drop.has(row.archiveId)) continue
-      if (this._unlinkRecord(row.archiveId)) {
-        removed.add(row.archiveId)
-        this._tombstone(row)
-        this._invalidate(row.archiveId)
-      }
-    }
-    if (removed.size > 0) this._index = this._index.filter((row) => !removed.has(row.archiveId))
-    return removed.size
+    return this._removeRows(oldestFirst.filter((row) => drop.has(row.archiveId))).removed.length
   }
 }

@@ -575,6 +575,11 @@ export const ServerArchivedSessionsListSchema = z.object({
     maxMegabytes: z.number(),
   }),
   sessions: z.array(ServerArchivedSessionMetaSchema),
+  /**
+   * Set when the roster was cut to fit one frame: `sessions` holds the NEWEST
+   * archived sessions that fit, and older ones exist but are not listed.
+   */
+  truncated: z.boolean().optional(),
   refused: z.boolean().optional(),
   code: z.string().optional(),
 })

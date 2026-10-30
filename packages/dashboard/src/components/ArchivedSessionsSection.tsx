@@ -21,7 +21,7 @@
  * with `var(--token)`. It reuses the Failed restores `fr-*` rules (same chrome,
  * same 44px floor) and adds only the `aa-*` rules it needs.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
 import { ArchivedSessionHistoryPanel, archivedSessionHistoryPanelId } from './ArchivedSessionHistoryPanel';
@@ -75,6 +75,24 @@ export function ArchivedSessionsSection() {
   const policy = snapshot?.policy;
   const refreshDisabled = loading || !connected;
   const sectionError = deleteError && deleteError.archiveId === undefined ? deleteError : null;
+  const rowCount = rows?.length ?? 0;
+  const truncated = snapshot?.truncated === true;
+
+  // An armed confirmation is bound to the list it was armed against. A refreshed
+  // list (new generatedAt) may hold different rows than the ones the operator
+  // looked at, and an empty one leaves nothing to confirm: either way "Confirm
+  // delete all" must not stay armed for a click that now means something else.
+  const generatedAt = snapshot?.generatedAt;
+  useEffect(() => {
+    setConfirmAll(false);
+    setConfirmId(null);
+  }, [generatedAt]);
+  useEffect(() => {
+    if (rowCount === 0) {
+      setConfirmAll(false);
+      setConfirmId(null);
+    }
+  }, [rowCount]);
 
   return (
     <div className="fr-section" data-testid="archived-sessions-section">
@@ -94,7 +112,7 @@ export function ArchivedSessionsSection() {
                   disabled={deletingAll || !connected}
                   data-testid="archived-sessions-delete-all-confirm"
                 >
-                  Confirm delete all
+                  Confirm delete all ({rowCount})
                 </button>
                 <button
                   type="button"
@@ -142,6 +160,12 @@ export function ArchivedSessionsSection() {
         </p>
       ) : null}
 
+      {truncated && !refused ? (
+        <p className="aa-policy" data-testid="archived-sessions-truncated">
+          Showing the newest {rowCount} archived sessions. Older ones are kept but not listed here; delete some to see them.
+        </p>
+      ) : null}
+
       {sectionError ? (
         <p className="fr-result-error" data-testid="archived-sessions-delete-error">
           {sectionError.refused
@@ -167,7 +191,8 @@ export function ArchivedSessionsSection() {
           {rows.map((r) => {
             const id = r.archiveId;
             const historyOpen = histories?.[id] !== undefined;
-            const pending = deleting.has(id);
+            const pending = deleting.has(id) || deletingAll;
+            const label = r.name || r.sessionId;
             const armed = confirmId === id;
             const rowError = deleteError && deleteError.archiveId === id ? deleteError : null;
             return (
@@ -209,6 +234,7 @@ export function ArchivedSessionsSection() {
                     onClick={() => (historyOpen ? closeArchivedSessionHistory(id) : requestArchivedSessionHistory(id))}
                     // Closing never needs the socket; only opening does.
                     disabled={!historyOpen && !connected}
+                    aria-label={`${historyOpen ? 'Hide history for' : 'View history for'} ${label}`}
                     aria-expanded={historyOpen}
                     // Only while the panel is mounted: an id that does not exist would break the disclosure convention.
                     aria-controls={historyOpen ? archivedSessionHistoryPanelId(id) : undefined}
@@ -226,6 +252,7 @@ export function ArchivedSessionsSection() {
                           deleteArchivedSession(id);
                         }}
                         disabled={pending || !connected}
+                        aria-label={`Confirm delete archived session ${label}`}
                         data-testid={`archived-session-delete-confirm-${id}`}
                       >
                         Confirm delete
@@ -234,6 +261,7 @@ export function ArchivedSessionsSection() {
                         type="button"
                         className="aa-cancel-btn"
                         onClick={() => setConfirmId(null)}
+                        aria-label={`Cancel deleting archived session ${label}`}
                         data-testid={`archived-session-delete-cancel-${id}`}
                       >
                         Cancel
@@ -245,6 +273,7 @@ export function ArchivedSessionsSection() {
                       className="aa-delete-btn"
                       onClick={() => setConfirmId(id)}
                       disabled={pending || !connected}
+                      aria-label={`Delete archived session ${label}`}
                       data-testid={`archived-session-delete-${id}`}
                     >
                       {pending ? 'Deleting…' : 'Delete'}

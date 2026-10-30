@@ -164,6 +164,19 @@ describe('generic file writes refuse the config directory and its direct childre
     assert.equal(await isConfigDirOrDirectChild(cfg), true, 'the root')
   })
 
+  it('the session ARCHIVE subtree is protected (roster and transcripts); worktrees next to it still are not', async () => {
+    await mkdir(join(cfg, 'archive'), { recursive: true })
+    await mkdir(join(cfg, 'worktrees', 'x'), { recursive: true })
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'archive', 'index.json')), true)
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'archive', `${'a'.repeat(32)}.json.gz`)), true, 'a record, even one that does not exist yet')
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'archive', 'nested', 'deeper.json')), true)
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'worktrees', 'x', 'file')), false)
+    out.length = 0
+    await fileOps.writeFile(ws, '.chroxy/archive/index.json', '{}', home)
+    assert.equal(out[0].error, CONFIG_DIR_REFUSAL, 'and a generic write is refused')
+    assert.equal(existsSync(join(cfg, 'archive', 'index.json')), false)
+  })
+
   it('FAILS CLOSED: a path that cannot be resolved (a symlink loop) counts as inside', async () => {
     await symlink(join(home, 'loop'), join(home, 'loop'))
     assert.equal(await isConfigDirOrDirectChild(join(home, 'loop', 'x.json')), true)

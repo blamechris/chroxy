@@ -862,7 +862,10 @@ export class SessionManager extends EventEmitter {
     // past the retention it advertises. unref'd so it never holds the process.
     this._archivePruneTimer = null
     if (Number.isFinite(sessionArchivePruneIntervalMs) && sessionArchivePruneIntervalMs > 0) {
-      this._archivePruneTimer = setInterval(() => this._sessionArchive.prune?.(), sessionArchivePruneIntervalMs)
+      this._archivePruneTimer = setInterval(() => {
+        this._sessionArchive.prune?.()
+        this._retryUnarchivedStale()
+      }, sessionArchivePruneIntervalMs)
       if (typeof this._archivePruneTimer.unref === 'function') this._archivePruneTimer.unref()
     }
 
@@ -993,6 +996,12 @@ export class SessionManager extends EventEmitter {
     // back to disk unchanged — the user's history must not be dropped just
     // because the provider happened to be misconfigured at boot.
     this._failedRestores = new Map() // sessionId -> { saved, error }
+    // Stale snapshots (the 24h filter's drops that would have restored fine)
+    // whose ARCHIVE write failed. They are not failed restores and are never
+    // restored: they are written back verbatim by serializeState() so every later
+    // state write keeps them, the next boot sees them stale again and retries the
+    // archive, and an entry leaves this map the moment its archive is satisfied.
+    this._unarchivedStale = new Map() // key -> saved
 
     // Set to true by destroyAll() so any subsequent persist call is a no-op
     // — prevents a duplicate shutdown pass writing 0 sessions over the good
@@ -3316,6 +3325,12 @@ export class SessionManager extends EventEmitter {
       state.sessions.push({ ...saved, failedRestore: this._failedRestoreMarker(error) })
     }
 
+    // Stale snapshots whose archive failed: written back verbatim (NOT stamped
+    // as failed restores) so the next boot sees them stale and retries.
+    for (const saved of this._unarchivedStale.values()) {
+      state.sessions.push(saved)
+    }
+
     // Persist cost tracking so budget survives restarts
     const budgetState = this._costBudget.serialize()
     state.costs = budgetState.costs
@@ -3922,10 +3937,6 @@ export class SessionManager extends EventEmitter {
     // the ordinary "daemon was down overnight" case. Resolving the binding is
     // cheap and constructs nothing, so ask, and register the refusals.
     let droppedStale = 0
-    // A stale entry whose archive write FAILED must not be flushed away below:
-    // its drop then waits for the next ordinary write (as before the archive
-    // existed) and the archive is retried on the next boot.
-    let archiveFailed = false
     for (const saved of Array.isArray(state.staleSessions) ? state.staleSessions : []) {
       // Bounded by the failed-restore TTL, not resurrected forever: past that
       // horizon the entry is dropped exactly as before. The worktree exemption
@@ -3939,8 +3950,12 @@ export class SessionManager extends EventEmitter {
         : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
       const pastTtl = last !== null && Number.isFinite(last) && Date.now() - last > FAILED_RESTORE_TTL_MS
       if (pastTtl && !saved?.worktreePath) {
-        // Dropped for good past the failed-restore TTL: keep what chroxy held.
-        if (this._archiveSaved(saved, 'stale') === 'failed') archiveFailed = true
+        // Dropped for good past the failed-restore TTL: keep what chroxy held. If
+        // the archive write FAILED the entry is dropped anyway (bounded, as
+        // before the archive existed), loudly.
+        if (this._archiveSaved(saved, 'stale') === 'failed') {
+          log.warn(`Stale session ${JSON.stringify(String(saved?.name))} is past the failed-restore TTL and could not be archived; dropping it`)
+        }
         droppedStale++
         continue
       }
@@ -3975,7 +3990,12 @@ export class SessionManager extends EventEmitter {
         // It would have restored fine — it is merely stale. Not restored and
         // not parked, and dropped from disk on the next write — but its history
         // is archived first, so it stays readable (archive-before-flush).
-        if (this._archiveSaved(saved, 'stale') === 'failed') archiveFailed = true
+        // If the archive write FAILED, the snapshot is retained (see
+        // `_unarchivedStale`) so no later state write can drop the only copy.
+        if (this._archiveSaved(saved, 'stale') === 'failed') {
+          this._unarchivedStale.set(this._unarchivedStaleKey(saved), saved)
+          log.warn(`Stale session ${JSON.stringify(String(saved?.name))} could not be archived; keeping it in the state file and retrying`)
+        }
         droppedStale++
       } catch (err) {
         anyFailure = true
@@ -4021,7 +4041,7 @@ export class SessionManager extends EventEmitter {
     // next session mutation would make: no sessions, and a cost map without the
     // dead entries (the collection described above, done now).
     if (!firstId && !anyFailure) {
-      if (droppedStale > 0 && !archiveFailed && this._sessionArchive.retentionPolicy().enabled) this._flushPersist()
+      if (droppedStale > 0 && this._sessionArchive.retentionPolicy().enabled) this._flushPersist()
       return null
     }
 
@@ -4207,7 +4227,7 @@ export class SessionManager extends EventEmitter {
         // archive write FAILED the entry stays: #2954 promises its history is
         // preserved, and this is the only copy. It is retried on the next boot.
         if (this._archiveSaved(saved, 'failed_restore_expired') === 'failed') {
-          log.warn(`Kept stale failed-restore "${saved?.name || sessionId}": it could not be archived first (retried next boot)`)
+          log.warn(`Kept stale failed-restore ${JSON.stringify(String(saved?.name || sessionId))}: it could not be archived first (retried next boot)`)
           continue
         }
         this._failedRestores.delete(sessionId)
@@ -4261,6 +4281,26 @@ export class SessionManager extends EventEmitter {
       log.warn(`Session archive failed (${reason}): ${getErrorMessage(err, 'unknown error')}`)
       return 'failed'
     }
+  }
+
+  _unarchivedStaleKey(saved) {
+    return typeof saved?.id === 'string' && saved.id ? saved.id : `unarchived-${this._unarchivedStale.size}-${Date.now()}`
+  }
+
+  /**
+   * Retry the archive of the retained stale snapshots; each one whose archive is
+   * now satisfied (archived, duplicate or skipped) leaves the map and the state
+   * file. Runs on the retention timer.
+   */
+  _retryUnarchivedStale() {
+    if (this._unarchivedStale.size === 0) return
+    let changed = false
+    for (const [key, saved] of [...this._unarchivedStale]) {
+      if (this._archiveSaved(saved, 'stale') === 'failed') continue
+      this._unarchivedStale.delete(key)
+      changed = true
+    }
+    if (changed) this._flushPersist()
   }
 
   /**

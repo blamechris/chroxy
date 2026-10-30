@@ -288,6 +288,14 @@ describe('delete', () => {
     expect(get().archiveDeleteError).toBeNull()
   })
 
+  it('an id-less (delete-all) reply settles ONLY the delete-all marker, not a per-row delete still in flight', () => {
+    get().deleteArchivedSession(B)
+    get().deleteAllArchivedSessions()
+    receive({ type: 'delete_archived_session_result', ok: true, deleted: 1 })
+    expect(get().deletingAllArchives).toBe(false)
+    expect([...get().deletingArchiveIds]).toEqual([B])
+  })
+
   it('delete-all success clears the flag, drops every view, re-asks', () => {
     get().requestArchivedSessionHistory(A)
     get().deleteAllArchivedSessions()
@@ -364,6 +372,17 @@ describe('daemon lifetime', () => {
   it('forgetSession (a different daemon) clears the archive state', () => {
     populate()
     get().forgetSession()
+    expect(get().archivedSessions).toBeNull()
+    expect(views()).toEqual({})
+    expect(get().archiveDeleteError).toBeNull()
+  })
+
+  it('_resetSessionMemory (the server switch from an already-disconnected tab) clears the archive state', () => {
+    // A failed connect rests at `disconnected`, so a server switch reaches
+    // `_resetSessionMemory()` ALONE: without these lines daemon A's archived
+    // sessions (absolute cwds, session names, open transcripts) show as daemon B's.
+    populate()
+    get()._resetSessionMemory()
     expect(get().archivedSessions).toBeNull()
     expect(views()).toEqual({})
     expect(get().archiveDeleteError).toBeNull()

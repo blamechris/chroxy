@@ -321,3 +321,74 @@ describe('ArchivedSessionsSection — delete all (two-step)', () => {
     expect(screen.getByTestId('archived-sessions-delete-error').textContent).toBe('nope')
   })
 })
+
+describe('ArchivedSessionsSection — armed confirmations are bound to the list they were armed against', () => {
+  it('the confirm label carries the count of rows it will delete', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    render(<ArchivedSessionsSection />)
+    fireEvent.click(screen.getByTestId('archived-sessions-delete-all'))
+    expect((screen.getByTestId('archived-sessions-delete-all-confirm').textContent ?? '').includes('Confirm delete all (2)')).toBe(true)
+  })
+
+  it('a refreshed list (new generatedAt) DISARMS "Confirm delete all" and any armed row', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    const { rerender } = render(<ArchivedSessionsSection />)
+    fireEvent.click(screen.getByTestId('archived-sessions-delete-all'))
+    fireEvent.click(screen.getByTestId(`archived-session-delete-${A}`))
+    expect(screen.getByTestId('archived-sessions-delete-all-confirm')).toBeTruthy()
+    expect(screen.getByTestId(`archived-session-delete-confirm-${A}`)).toBeTruthy()
+
+    state.archivedSessions = snapshot({ generatedAt: '2026-10-01T00:05:00.000Z', sessions: [row(A), row(B), row('arch-cccc')] })
+    rerender(<ArchivedSessionsSection />)
+
+    expect(screen.queryByTestId('archived-sessions-delete-all-confirm')).toBeNull()
+    expect(screen.queryByTestId(`archived-session-delete-confirm-${A}`)).toBeNull()
+    expect(screen.getByTestId('archived-sessions-delete-all')).toBeTruthy()
+    expect(state.deleteAllArchivedSessions).not.toHaveBeenCalled()
+  })
+
+  it('a list that goes to zero rows disarms it', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A)] })
+    const { rerender } = render(<ArchivedSessionsSection />)
+    fireEvent.click(screen.getByTestId('archived-sessions-delete-all'))
+    expect(screen.getByTestId('archived-sessions-delete-all-confirm')).toBeTruthy()
+    state.archivedSessions = snapshot({ sessions: [] }) // same generatedAt: only the row count changed
+    rerender(<ArchivedSessionsSection />)
+    state.archivedSessions = snapshot({ sessions: [row(A)] })
+    rerender(<ArchivedSessionsSection />)
+    expect(screen.queryByTestId('archived-sessions-delete-all-confirm')).toBeNull()
+  })
+})
+
+describe('ArchivedSessionsSection — delete-all pending, labels and truncation', () => {
+  it('per-row Delete is disabled while a delete-all is pending', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    state.deletingAllArchives = true
+    render(<ArchivedSessionsSection />)
+    expect((screen.getByTestId(`archived-session-delete-${A}`) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId(`archived-session-delete-${B}`) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('row buttons are labelled with the session name', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A, { name: 'Nightly agent' })] })
+    render(<ArchivedSessionsSection />)
+    expect(screen.getByTestId(`archived-session-history-toggle-${A}`).getAttribute('aria-label')).toBe('View history for Nightly agent')
+    expect(screen.getByTestId(`archived-session-delete-${A}`).getAttribute('aria-label')).toBe('Delete archived session Nightly agent')
+    fireEvent.click(screen.getByTestId(`archived-session-delete-${A}`))
+    expect(screen.getByTestId(`archived-session-delete-confirm-${A}`).getAttribute('aria-label')).toBe('Confirm delete archived session Nightly agent')
+    state.archivedSessionHistories = { [A]: view() }
+    cleanup()
+    render(<ArchivedSessionsSection />)
+    expect(screen.getByTestId(`archived-session-history-toggle-${A}`).getAttribute('aria-label')).toBe('Hide history for Nightly agent')
+  })
+
+  it('says the list is cut when the daemon truncated it, and not otherwise', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)], truncated: true })
+    render(<ArchivedSessionsSection />)
+    expect((screen.getByTestId('archived-sessions-truncated').textContent ?? '').includes('Showing the newest 2 archived sessions')).toBe(true)
+    cleanup()
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    render(<ArchivedSessionsSection />)
+    expect(screen.queryByTestId('archived-sessions-truncated')).toBeNull()
+  })
+})

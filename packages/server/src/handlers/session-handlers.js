@@ -846,6 +846,8 @@ const ARCHIVE_FORBIDDEN_MESSAGE = 'Pairing-issued session tokens cannot read or 
 // Matches the protocol's archiveId bound (client.ts); the manager's own check
 // (32 lowercase hex AND present in the index) is the real gate.
 const ARCHIVE_ID_MAX_CHARS = 256
+// JSON budget for the rows of one archived_sessions_list frame.
+const ARCHIVE_LIST_MAX_BYTES = 512 * 1024
 
 /**
  * Provider-neutral session archive — the roster of archived sessions.
@@ -872,7 +874,24 @@ function handleListArchivedSessions(ws, client, _msg, ctx) {
   const { policy, sessions } = typeof sm.listArchivedSessions === 'function'
     ? sm.listArchivedSessions()
     : { policy: { enabled: false, maxEntries: 0, maxAgeDays: 0, maxMegabytes: 0 }, sessions: [] }
-  ctx.transport.send(ws, { type: 'archived_sessions_list', generatedAt: new Date().toISOString(), policy, sessions })
+  // The roster is ONE frame: send the newest rows that fit a byte budget (the
+  // rows arrive newest-first) and say so when the rest were cut.
+  const kept = []
+  let bytes = 0
+  let truncated = false
+  for (const row of sessions) {
+    const size = Buffer.byteLength(JSON.stringify(row)) + 1
+    if (bytes + size > ARCHIVE_LIST_MAX_BYTES && kept.length > 0) { truncated = true; break }
+    kept.push(row)
+    bytes += size
+  }
+  ctx.transport.send(ws, {
+    type: 'archived_sessions_list',
+    generatedAt: new Date().toISOString(),
+    policy,
+    sessions: kept,
+    ...(truncated ? { truncated: true } : {}),
+  })
 }
 
 /**

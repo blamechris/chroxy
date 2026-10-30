@@ -907,6 +907,7 @@ export declare const ServerArchivedSessionsListSchema: z.ZodObject<{
         omittedOldest: z.ZodOptional<z.ZodNumber>;
         bytes: z.ZodNumber;
     }, z.core.$strip>>;
+    truncated: z.ZodOptional<z.ZodBoolean>;
     refused: z.ZodOptional<z.ZodBoolean>;
     code: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;

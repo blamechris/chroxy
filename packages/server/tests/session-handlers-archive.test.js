@@ -92,6 +92,36 @@ describe('list_archived_sessions', () => {
   })
 })
 
+describe('list_archived_sessions: one frame, bounded', () => {
+  const fat = (i) => ({ ...ROW, archiveId: i.toString(16).padStart(32, '0'), sessionId: `s${i}`, cwd: 'c'.repeat(4096), name: 'n'.repeat(256), archivedAt: 1000 - i })
+
+  it('sends the NEWEST rows that fit a 512 KiB budget and says it truncated', () => {
+    const rows = Array.from({ length: 300 }, (_, i) => fat(i)) // newest first, ~1.4 MB of JSON
+    const { ctx, sent } = makeCtx()
+    ctx.sessions.sessionManager.listArchivedSessions = () => ({ policy: POLICY, sessions: rows })
+    sessionHandlers.list_archived_sessions({}, UNBOUND, { type: 'list_archived_sessions' }, ctx)
+
+    assert.equal(sent[0].truncated, true)
+    assert.ok(sent[0].sessions.length > 50 && sent[0].sessions.length < 300, `kept ${sent[0].sessions.length}`)
+    assert.ok(Buffer.byteLength(JSON.stringify(sent[0].sessions)) <= 512 * 1024 + 4096)
+    assert.deepEqual(sent[0].sessions.map((r) => r.sessionId), rows.slice(0, sent[0].sessions.length).map((r) => r.sessionId), 'a prefix of the newest-first list')
+    assert.doesNotThrow(() => ServerArchivedSessionsListSchema.parse(sent[0]))
+  })
+
+  it('does not set truncated when everything fits', () => {
+    const { ctx, sent } = makeCtx()
+    sessionHandlers.list_archived_sessions({}, UNBOUND, { type: 'list_archived_sessions' }, ctx)
+    assert.equal('truncated' in sent[0], false)
+  })
+
+  it('always sends at least one row, however large', () => {
+    const { ctx, sent } = makeCtx()
+    ctx.sessions.sessionManager.listArchivedSessions = () => ({ policy: POLICY, sessions: [{ ...ROW, cwd: 'c'.repeat(600_000) }] })
+    sessionHandlers.list_archived_sessions({}, UNBOUND, { type: 'list_archived_sessions' }, ctx)
+    assert.equal(sent[0].sessions.length, 1)
+  })
+})
+
 describe('get_archived_session_history', () => {
   const MSG = { type: 'get_archived_session_history', archiveId: ID, offset: 50, limit: 25 }
 

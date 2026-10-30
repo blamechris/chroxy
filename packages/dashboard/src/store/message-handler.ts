@@ -7203,10 +7203,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         pending.delete(id);
         patch.deletingArchiveIds = pending;
       } else {
-        // No id to correlate (a delete-all, or a reply that did not echo one):
-        // settle every marker so no button is left latched on "Deleting…".
+        // No id to correlate: this is the reply to a delete-all (a single delete's
+        // reply always echoes its id). It settles the marker IT owns and no other:
+        // a per-row delete still in flight keeps its "Deleting…" until its own
+        // reply (or a socket drop, which clears them all) arrives.
         patch.deletingAllArchives = false;
-        patch.deletingArchiveIds = new Set<string>();
       }
       // Success, or a record that is already gone: either way the view has
       // nothing left to show. A delete-all success empties every view.
