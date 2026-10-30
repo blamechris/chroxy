@@ -241,3 +241,164 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
     assert.deepEqual(sm.getFailedRestores(), [], 'and is not turned into a needs-attention entry either')
   })
 })
+
+/**
+ * #8858 — a PARKED failed restore must survive the 24h staleness filter.
+ *
+ * #7627 keeps a stale entry only when `_resolveRestoredContainerBinding` throws.
+ * A parked entry is parked for any reason (missing cwd, deleted worktree, a Codex
+ * session with no native locator), so when that check resolves the entry was
+ * dropped from disk on the next write — its history gone on the first boot more
+ * than 24h after last activity, contradicting #2954 (kept until Retry, Dismiss or
+ * the 30-day TTL). `serializeState` now stamps `failedRestore: { code, message }`
+ * on every parked entry and `restoreState` re-registers a stale entry carrying it.
+ *
+ * Drives the REAL park -> serialize -> reboot cycle over one state file.
+ */
+describe('#8858 a parked failed restore survives the 24h staleness filter', () => {
+  let sm
+  let dir
+  const HOUR = 60 * 60 * 1000
+  const DAY = 24 * HOUR
+  const ID = 'e'.repeat(32)
+
+  afterEach(() => {
+    try { sm?.destroy?.() } catch { /* ignore */ }
+    if (dir) { rmSync(dir, { recursive: true, force: true }); dir = null }
+  })
+
+  const envReporting = (containerId) => ({
+    getContainerInfo: () => ({ containerId }),
+    addSession() {}, removeSession() {},
+  })
+
+  // Park a real restore on boot 1 (container mismatch), then age the file.
+  function parkThenAge({ ageMs, extra = {} }) {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8858-'))
+    const statePath = join(dir, 'state.json')
+    const lastActivityAt = Date.now() - 1 * HOUR
+    writeFileSync(statePath, JSON.stringify({
+      version: 1, timestamp: lastActivityAt,
+      sessions: [{
+        id: ID, name: 'Parked', cwd: '/tmp', environmentId: 'env-1', containerId: 'ctr-created',
+        lastActivityAt, history: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }],
+        ...extra,
+      }],
+    }))
+    const first = new SessionManager({ stateFilePath: statePath, environmentManager: envReporting('ctr-REBUILT') })
+    first.restoreState()
+    assert.equal(first.getFailedRestores().length, 1, 'control: boot 1 parked it')
+    first._flushPersist()
+    first.destroy?.()
+    const disk = JSON.parse(readFileSync(statePath, 'utf-8'))
+    disk.sessions[0].lastActivityAt = Date.now() - ageMs
+    writeFileSync(statePath, JSON.stringify(disk))
+    return statePath
+  }
+
+  // Boot 2: the container now matches, so the #7627 binding check RESOLVES —
+  // the exact shape that used to drop the entry.
+  function reboot(statePath) {
+    sm = new SessionManager({ stateFilePath: statePath, environmentManager: envReporting('ctr-created') })
+    const events = []
+    sm.on('session_restore_failed', (e) => events.push(e))
+    sm.restoreState()
+    sm._flushPersist()
+    return { events, disk: JSON.parse(readFileSync(statePath, 'utf-8')) }
+  }
+
+  it('stays parked with its history 25h after last activity, even though its binding now resolves', () => {
+    const { events, disk } = reboot(parkThenAge({ ageMs: 25 * HOUR }))
+    assert.equal(events.length, 1, 'reported again')
+    const list = sm.getFailedRestores()
+    assert.equal(list.length, 1, 'still in the Failed restores list')
+    assert.equal(list[0].historyLength, 2, 'with its history')
+    assert.equal(list[0].errorCode, 'ENVIRONMENT_UNAVAILABLE', 'the ORIGINAL code, not the generic fallback')
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE')
+    assert.ok(list[0].errorMessage.length > 0, 'and the original message')
+    assert.equal(disk.sessions.length, 1, 'still on disk after the write')
+    assert.equal(disk.sessions[0].history.length, 2)
+    assert.equal(typeof disk.sessions[0].failedRestore?.code, 'string', 'marker survives the round trip')
+  })
+
+  it('the persisted marker records the original error code and message', () => {
+    const statePath = parkThenAge({ ageMs: 25 * HOUR })
+    const marker = JSON.parse(readFileSync(statePath, 'utf-8')).sessions[0].failedRestore
+    assert.equal(typeof marker.code, 'string')
+    assert.ok(marker.message.length > 0)
+    assert.ok(marker.message.length <= 500)
+  })
+
+  it('survives repeated reboots (marker is re-stamped each write)', () => {
+    const statePath = parkThenAge({ ageMs: 25 * HOUR })
+    reboot(statePath)
+    sm.destroy?.()
+    const { disk } = reboot(statePath)
+    assert.equal(sm.getFailedRestores().length, 1)
+    assert.equal(disk.sessions.length, 1)
+  })
+
+  it('is still bounded by the 30-day TTL when not worktree-backed', () => {
+    reboot(parkThenAge({ ageMs: 40 * DAY }))
+    assert.equal(sm.getFailedRestores().length, 0)
+  })
+
+  it('CONTROL: a stale session that was never parked is still dropped', () => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8858c-'))
+    const statePath = join(dir, 'state.json')
+    const lastActivityAt = Date.now() - 25 * HOUR
+    writeFileSync(statePath, JSON.stringify({
+      version: 1, timestamp: lastActivityAt,
+      sessions: [{
+        id: ID, name: 'Never parked', cwd: '/tmp', environmentId: 'env-1', containerId: 'ctr-created',
+        lastActivityAt, history: [{ role: 'user', content: 'a' }],
+      }],
+    }))
+    const { events, disk } = reboot(statePath)
+    assert.deepEqual(events, [])
+    assert.deepEqual(sm.getFailedRestores(), [])
+    assert.equal(disk.sessions.length, 0, 'not carried to disk either')
+  })
+
+  it('caps the persisted message at 500 chars, on write and on read', () => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8858w-'))
+    sm = new SessionManager({ stateFilePath: join(dir, 'state.json') })
+    sm._failedRestores.set(ID, { saved: { id: ID, name: 'Long', cwd: '/tmp', history: [] }, error: new Error('x'.repeat(5000)) })
+    const written = sm.serializeState().sessions[0].failedRestore
+    assert.equal(written.message.length, 500, 'write side is capped')
+    assert.equal(sm._parkedMarker({ failedRestore: { code: 'C', message: 'y'.repeat(5000) } }).message.length, 500, 'read side is capped')
+  })
+
+  it('a worktree-backed marked entry stays parked past 30 days', () => {
+    reboot(parkThenAge({ ageMs: 40 * DAY, extra: { worktreePath: '/some/wt' } }))
+    assert.equal(sm.getFailedRestores().length, 1)
+  })
+
+  it('Dismiss removes the re-registered entry from disk for good', () => {
+    const statePath = parkThenAge({ ageMs: 25 * HOUR })
+    reboot(statePath)
+    assert.equal(sm.clearFailedRestore(ID), true)
+    sm._flushPersist()
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf-8')).sessions.length, 0)
+  })
+
+  for (const [label, failedRestore] of [
+    ['non-object', 'yes'],
+    ['numeric code', { code: 1, message: 'x' }],
+    ['empty code', { code: '', message: 'x' }],
+    ['missing message', { code: 'C' }],
+  ]) {
+    it(`a malformed marker (${label}) is ignored: the entry follows the pre-existing path`, () => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-8858m-'))
+      const statePath = join(dir, 'state.json')
+      const lastActivityAt = Date.now() - 25 * HOUR
+      writeFileSync(statePath, JSON.stringify({
+        version: 1, timestamp: lastActivityAt,
+        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [], failedRestore }],
+      }))
+      const { events } = reboot(statePath)
+      assert.deepEqual(events, [])
+      assert.deepEqual(sm.getFailedRestores(), [])
+    })
+  }
+})
