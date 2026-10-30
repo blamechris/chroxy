@@ -1182,6 +1182,20 @@ export declare const GetFailedRestoreHistorySchema: z.ZodObject<{
     offset: z.ZodOptional<z.ZodNumber>;
     limit: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+export declare const ListArchivedSessionsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"list_archived_sessions">;
+}, z.core.$strip>;
+export declare const GetArchivedSessionHistorySchema: z.ZodObject<{
+    type: z.ZodLiteral<"get_archived_session_history">;
+    archiveId: z.ZodString;
+    offset: z.ZodOptional<z.ZodNumber>;
+    limit: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const DeleteArchivedSessionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"delete_archived_session">;
+    archiveId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
 export declare const DestroyEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_environment">;
     environmentId: z.ZodString;
@@ -1312,9 +1326,9 @@ export declare const ByokPoolActionSchema: z.ZodObject<{
 export declare const HostPruneActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"host_prune_action">;
     kind: z.ZodEnum<{
+        all: "all";
         containers: "containers";
         images: "images";
-        all: "all";
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
@@ -2062,6 +2076,17 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     offset: z.ZodOptional<z.ZodNumber>;
     limit: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"list_archived_sessions">;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"get_archived_session_history">;
+    archiveId: z.ZodString;
+    offset: z.ZodOptional<z.ZodNumber>;
+    limit: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"delete_archived_session">;
+    archiveId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
@@ -2162,9 +2187,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"host_prune_action">;
     kind: z.ZodEnum<{
+        all: "all";
         containers: "containers";
         images: "images";
-        all: "all";
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{

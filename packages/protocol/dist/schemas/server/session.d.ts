@@ -852,6 +852,104 @@ export declare const ServerFailedRestoreHistorySchema: z.ZodObject<{
     message: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
+ * Provider-neutral session archive: the roster row for one archived session.
+ * Built by the server from a fixed list of typed fields (never the saved entry
+ * itself), so it carries no transcript content — only enough to pick a record.
+ * `archiveId` is the server-generated token every other archive message keys on.
+ * `reason` says why the session left the live set: `closed`, `idle_timeout`,
+ * `respawn_exhausted`, `stale`, `failed_restore_expired`,
+ * `failed_restore_dismissed`. Timestamps are epoch milliseconds, `null` when
+ * the saved entry did not carry one.
+ */
+export declare const ServerArchivedSessionMetaSchema: z.ZodObject<{
+    archiveId: z.ZodString;
+    sessionId: z.ZodString;
+    name: z.ZodNullable<z.ZodString>;
+    provider: z.ZodNullable<z.ZodString>;
+    cwd: z.ZodNullable<z.ZodString>;
+    model: z.ZodNullable<z.ZodString>;
+    reason: z.ZodString;
+    archivedAt: z.ZodNullable<z.ZodNumber>;
+    lastActivityAt: z.ZodNullable<z.ZodNumber>;
+    createdAt: z.ZodNullable<z.ZodNumber>;
+    historyLength: z.ZodNumber;
+    bytes: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * Reply to `list_archived_sessions`. `policy` is the retention policy in force
+ * (`enabled: false` means no NEW sessions are archived; existing records still
+ * age out). `sessions` is newest first. `refused: true` + `code` is the
+ * pairing-bound client's degraded reply (`sessions` empty) — distinguishable
+ * from a genuinely empty archive by the flag, not the array.
+ */
+export declare const ServerArchivedSessionsListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"archived_sessions_list">;
+    generatedAt: z.ZodString;
+    policy: z.ZodObject<{
+        enabled: z.ZodBoolean;
+        maxEntries: z.ZodNumber;
+        maxAgeDays: z.ZodNumber;
+        maxMegabytes: z.ZodNumber;
+    }, z.core.$strip>;
+    sessions: z.ZodArray<z.ZodObject<{
+        archiveId: z.ZodString;
+        sessionId: z.ZodString;
+        name: z.ZodNullable<z.ZodString>;
+        provider: z.ZodNullable<z.ZodString>;
+        cwd: z.ZodNullable<z.ZodString>;
+        model: z.ZodNullable<z.ZodString>;
+        reason: z.ZodString;
+        archivedAt: z.ZodNullable<z.ZodNumber>;
+        lastActivityAt: z.ZodNullable<z.ZodNumber>;
+        createdAt: z.ZodNullable<z.ZodNumber>;
+        historyLength: z.ZodNumber;
+        bytes: z.ZodNumber;
+    }, z.core.$strip>>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * Reply to `get_archived_session_history`: one page of an archived session's
+ * preserved history, oldest first. `entries` use the SAME loosely modelled
+ * entry shape as `failed_restore_history` (the server owns the union of history
+ * entry shapes; a client must render defensively), and the page obeys the same
+ * bounds (<= 100 entries, ~256 KiB). `ok: false` carries `code`:
+ * `ARCHIVED_SESSION_NOT_FOUND` (unknown id, or the record was deleted / aged
+ * out) or, with `refused: true`, `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`;
+ * `ARCHIVED_SESSION_INVALID` for a missing archiveId. `offset` echoes the page
+ * start actually served (after clamping).
+ */
+export declare const ServerArchivedSessionHistorySchema: z.ZodObject<{
+    type: z.ZodLiteral<"archived_session_history">;
+    archiveId: z.ZodString;
+    ok: z.ZodBoolean;
+    total: z.ZodOptional<z.ZodNumber>;
+    offset: z.ZodOptional<z.ZodNumber>;
+    entries: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        timestamp: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>>>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * Reply to `delete_archived_session`. `deleted` is how many records were
+ * removed (0 or 1 for an `archiveId`; any count for `all: true`). `archiveId`
+ * echoes the request's id (absent for `all: true`). `ok: false` carries `code`:
+ * `ARCHIVED_SESSION_NOT_FOUND`, `ARCHIVED_SESSION_INVALID`, or, with
+ * `refused: true`, `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
+ */
+export declare const ServerDeleteArchivedSessionResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"delete_archived_session_result">;
+    ok: z.ZodBoolean;
+    deleted: z.ZodNumber;
+    archiveId: z.ZodOptional<z.ZodString>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

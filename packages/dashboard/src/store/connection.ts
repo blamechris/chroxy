@@ -217,6 +217,7 @@ import {
   clearTransientSessionState as clearSharedTransientStreamAndPlanState,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
+import { beginHistoryRequest, settleHistoryViewsOnDrop, HISTORY_PAGE_SIZE } from './history-views';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
 // a plain `lib/` module (no React dependency) so the store layer doesn't
 // import a `.tsx` component; the type, the rehydrate validation, and the
@@ -528,26 +529,17 @@ function staleInFlightMarkers(get: () => ConnectionState): Partial<ConnectionSta
 
 /**
  * #8860 — a history page in flight when the socket drops can never be answered
- * on the dead one. Unlike the markers above this is not emptied wholesale: the
- * view also holds the entries already fetched (data, which the next reconnect to
- * the SAME daemon can still show), so only the pending flag is settled, into an
- * error the panel renders beside those entries. Returns `{}` when nothing was
- * pending, so an idle drop writes nothing.
+ * on the dead one (both the failed-restore and the archive maps). The rule lives
+ * in `settleHistoryViewsOnDrop`; this only applies it to each map. Returns `{}`
+ * when nothing was pending, so an idle drop writes nothing.
  */
-function settleFailedRestoreHistoriesOnDrop(get: () => ConnectionState): Partial<ConnectionState> {
-  const views = get().failedRestoreHistories ?? {};
-  let next: typeof views | null = null;
-  for (const [id, view] of Object.entries(views)) {
-    if (!view.loading) continue;
-    next ??= { ...views };
-    next[id] = {
-      ...view,
-      loading: false,
-      pendingOffset: null,
-      error: { code: 'CONNECTION_LOST', message: 'Connection lost while loading — try again.' },
-    };
-  }
-  return next ? { failedRestoreHistories: next } : {};
+function settleHistoryViewsOnDropPatch(get: () => ConnectionState): Partial<ConnectionState> {
+  const patch: Partial<ConnectionState> = {};
+  const failed = settleHistoryViewsOnDrop(get().failedRestoreHistories ?? {});
+  if (failed) patch.failedRestoreHistories = failed;
+  const archived = settleHistoryViewsOnDrop(get().archivedSessionHistories ?? {});
+  if (archived) patch.archivedSessionHistories = archived;
+  return patch;
 }
 
 /**
@@ -1166,6 +1158,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   retryingRestoreIds: new Set<string>(),
   retryRestoreResults: {},
   failedRestoreHistories: {},
+  // Provider-neutral session archive; null = never asked.
+  archivedSessions: null,
+  archivedSessionsLoading: false,
+  archivedSessionHistories: {},
+  deletingArchiveIds: new Set<string>(),
+  deletingAllArchives: false,
+  archiveDeleteError: null,
   pairingRefreshedCount: 0,
   // #7728 — one roster per provider (see ConnectionState.modelsByProvider).
   modelsByProvider: {},
@@ -2125,30 +2124,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   // #8860: read-only history of a parked failed restore, 50 entries a page.
-  // The view's presence in `failedRestoreHistories` IS its open state. `more`
-  // asks for the page after what is shown; otherwise it starts over from the
-  // oldest entry. One page in flight per id: a second request while one is
-  // pending is refused, so the offset a reply is matched against is unambiguous.
+  // The view's presence in `failedRestoreHistories` IS its open state. The
+  // request rule (one page in flight per id; offset from entries.length) is the
+  // shared `beginHistoryRequest`, also used by the archive path below.
   requestFailedRestoreHistory: (sessionId: string, more = false): boolean => {
     const { socket } = get();
     if (!sessionId) return false;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    const views = get().failedRestoreHistories ?? {};
-    const current = views[sessionId];
-    if (current?.loading) return false;
-    const offset = more && current ? current.entries.length : 0;
-    set({
-      failedRestoreHistories: {
-        ...views,
-        [sessionId]: {
-          entries: offset === 0 ? [] : current!.entries,
-          total: offset === 0 ? null : current!.total,
-          loading: true,
-          pendingOffset: offset,
-        },
-      },
-    });
-    wsSend(socket, { type: 'get_failed_restore_history', sessionId, offset, limit: 50 });
+    const begun = beginHistoryRequest(get().failedRestoreHistories ?? {}, sessionId, more);
+    if (!begun) return false;
+    set({ failedRestoreHistories: begun.views });
+    wsSend(socket, { type: 'get_failed_restore_history', sessionId, offset: begun.offset, limit: HISTORY_PAGE_SIZE });
     return true;
   },
 
@@ -2157,6 +2143,59 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!(sessionId in views)) return;
     delete views[sessionId];
     set({ failedRestoreHistories: views });
+  },
+
+  // Provider-neutral session archive. Same survey shape as requestFailedRestores.
+  requestArchivedSessions: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ archivedSessionsLoading: true });
+      wsSend(socket, { type: 'list_archived_sessions' });
+      return true;
+    }
+    return false;
+  },
+
+  requestArchivedSessionHistory: (archiveId: string, more = false): boolean => {
+    const { socket } = get();
+    if (!archiveId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const begun = beginHistoryRequest(get().archivedSessionHistories ?? {}, archiveId, more);
+    if (!begun) return false;
+    set({ archivedSessionHistories: begun.views });
+    wsSend(socket, { type: 'get_archived_session_history', archiveId, offset: begun.offset, limit: HISTORY_PAGE_SIZE });
+    return true;
+  },
+
+  closeArchivedSessionHistory: (archiveId: string): void => {
+    const views = { ...(get().archivedSessionHistories ?? {}) };
+    if (!(archiveId in views)) return;
+    delete views[archiveId];
+    set({ archivedSessionHistories: views });
+  },
+
+  // Delete one record. Marks it pending and drops the previous error so a stale
+  // failure cannot sit next to the attempt now in flight. A second delete of the
+  // same id while one is pending is refused (nothing is sent twice).
+  deleteArchivedSession: (archiveId: string): boolean => {
+    const { socket } = get();
+    if (!archiveId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (get().deletingArchiveIds.has(archiveId)) return false;
+    const pending = new Set(get().deletingArchiveIds);
+    pending.add(archiveId);
+    set({ deletingArchiveIds: pending, archiveDeleteError: null });
+    wsSend(socket, { type: 'delete_archived_session', archiveId });
+    return true;
+  },
+
+  deleteAllArchivedSessions: (): boolean => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (get().deletingAllArchives) return false;
+    set({ deletingAllArchives: true, archiveDeleteError: null });
+    wsSend(socket, { type: 'delete_archived_session', all: true });
+    return true;
   },
 
   requestByokPoolStatus: (): boolean => {
@@ -3382,7 +3421,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         set(staleMarkers);
       }
       // #8860: a history page in flight on the dead socket settles into an error.
-      const settledHistories = settleFailedRestoreHistoriesOnDrop(get);
+      const settledHistories = settleHistoryViewsOnDropPatch(get);
       if (Object.keys(settledHistories).length > 0) {
         set(settledHistories);
       }
@@ -3601,6 +3640,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // snapshot) so a reconnected tab reads "not asked yet" and re-requests.
       failedRestores: null,
       failedRestoreHistories: {},
+      archivedSessions: null,
+      archivedSessionHistories: {},
+      archiveDeleteError: null,
       // #7586 (supersedes #7572's two literals) — EVERY in-flight request marker:
       // the actioning-id sets, the reindex / relay re-run / retry paths, the
       // orchestration detail + pending-action markers, the survey *Loading flags,
@@ -3846,6 +3888,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // conversation pulled from the old daemon, nulled by the other two.
       failedRestores: null,
       failedRestoreHistories: {},
+      archivedSessions: null,
+      archivedSessionHistories: {},
+      archiveDeleteError: null,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
@@ -4078,6 +4123,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // snapshot) so a reconnected tab reads "not asked yet" and re-requests.
       failedRestores: null,
       failedRestoreHistories: {},
+      archivedSessions: null,
+      archivedSessionHistories: {},
+      archiveDeleteError: null,
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it
       // (~L3251); `_resetSessionMemory` did not, so an open transcript from

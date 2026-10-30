@@ -123,6 +123,11 @@ const PLATFORM_SPECIFIC = {
   // #8860: the read-only history page for a parked failed restore — same
   // dashboard-only reasoning as the roster it hangs off.
   failed_restore_history: 'dashboard',
+  // Provider-neutral session archive (generalises #8860): the roster, a history
+  // page and the delete ack — same dashboard-only reasoning as failed_restore_history.
+  archived_sessions_list: 'dashboard',
+  archived_session_history: 'dashboard',
+  delete_archived_session_result: 'dashboard',
   // Mobile app only
   // (pair_fail is now handled by BOTH platforms — the dashboard gained
   //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)

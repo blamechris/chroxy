@@ -517,6 +517,10 @@ export function createEmptyInFlightMarkers() {
     // #5277: an in-flight cancel_activity's ack/failure is socket-scoped. The
     // tree re-seeds from activity_snapshot on resubscribe.
     cancellingActivityIds: new Set<string>(),
+    // Session archive: deletes in flight are socket-scoped (the ack can never
+    // arrive on a dead socket); the next list refresh shows what actually went.
+    deletingArchiveIds: new Set<string>(),
+    deletingAllArchives: false,
     // #5500 / #5502: in-flight reindex / relay re-run requests. The server-side
     // work keeps running; the next survey refresh shows its effect.
     reindexingRepoPaths: new Set<string>(),
@@ -583,6 +587,7 @@ export function createEmptyInFlightMarkers() {
     githubWebhookConfigLoading: false,
     orchestrationRunsLoading: false,
     failedRestoresLoading: false,
+    archivedSessionsLoading: false,
   } satisfies Partial<ConnectionState>;
 }
 

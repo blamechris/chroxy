@@ -1194,6 +1194,9 @@ export async function startCliServer(config) {
     costBudget: config.costBudget || null,
     // #5665: monthly programmatic-credit budget meter config.
     billing: config.billing || null,
+    // Session archive retention (`sessionArchive` config block); the archive
+    // directory itself sits next to the session-state file.
+    sessionArchive: config.sessionArchive || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
     // #6764: opt-in semantic session titles. Off unless the operator set
     // features.semanticTitles:true (or CHROXY_SEMANTIC_TITLES=1). The title model

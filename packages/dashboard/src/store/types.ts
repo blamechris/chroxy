@@ -18,7 +18,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -132,16 +132,18 @@ import type {
 } from '@chroxy/store-core';
 
 /**
- * #8860: the read-only history view of ONE parked failed restore, opened from
- * Control Room -> Failed restores -> View history. Its mere presence in
- * `failedRestoreHistories` means the row's panel is open; closing deletes it.
+ * The read-only, paged history view of ONE saved transcript: a parked failed
+ * restore (#8860, keyed by sessionId) or an archived session (keyed by
+ * archiveId). Its mere presence in the owning map (`failedRestoreHistories` /
+ * `archivedSessionHistories`) means the row's panel is open; closing deletes it.
+ * One shape, one set of reply/request/drop helpers (store/history-views.ts).
  */
-export interface FailedRestoreHistoryView {
+export interface HistoryPageView {
   /** Entries fetched so far, oldest first. The next page starts at `entries.length`. */
   entries: ServerFailedRestoreHistoryEntry[];
   /** The daemon's total for this entry; `null` until the first reply lands. */
   total: number | null;
-  /** A `get_failed_restore_history` is in flight for this id. */
+  /** A history-page request is in flight for this id. */
   loading: boolean;
   /**
    * The `offset` of the request in flight, or `null`. A reply is applied only if
@@ -151,6 +153,9 @@ export interface FailedRestoreHistoryView {
   /** The last request's failure (kept beside the entries already shown). */
   error?: { code?: string; message?: string; refused?: boolean };
 }
+
+/** #8860 name for the same view; kept so existing imports keep resolving. */
+export type FailedRestoreHistoryView = HistoryPageView;
 
 export interface EnvironmentInfo {
   id: string;
@@ -1879,6 +1884,25 @@ export interface ConnectionState {
    * gone.
    */
   failedRestoreHistories: Record<string, FailedRestoreHistoryView>;
+  /**
+   * Provider-neutral session archive: the whole `archived_sessions_list` reply
+   * (`generatedAt` drives the survey staleness refetch; `refused` and `policy`
+   * ride inside so they cannot disagree with the rows). `null` = not asked yet.
+   */
+  archivedSessions: ServerArchivedSessionsListMessage | null;
+  /** A `list_archived_sessions` is in flight (survey-tab loading flag). */
+  archivedSessionsLoading: boolean;
+  /**
+   * Open history views, keyed by archiveId. Per-DAEMON like the list, so every
+   * full-reset site clears it; a list reply drops views whose record is gone.
+   */
+  archivedSessionHistories: Record<string, HistoryPageView>;
+  /** archiveIds with a `delete_archived_session` in flight. */
+  deletingArchiveIds: Set<string>;
+  /** A `delete_archived_session { all: true }` is in flight. */
+  deletingAllArchives: boolean;
+  /** The last delete's failure (`archiveId` absent for a delete-all). Cleared by the next delete. */
+  archiveDeleteError: { archiveId?: string; code?: string; message?: string; refused?: boolean } | null;
 
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
@@ -2548,6 +2572,19 @@ export interface ConnectionState {
   requestFailedRestoreHistory: (sessionId: string, more?: boolean) => boolean;
   /** #8860: close a failed restore's history view and drop what it fetched. */
   closeFailedRestoreHistory: (sessionId: string) => void;
+  /** Ask the daemon for the archived-session list. Returns false when the socket is closed. */
+  requestArchivedSessions: () => boolean;
+  /**
+   * Open (or, with `more`, extend) the read-only history view of an archived
+   * session. Same contract as `requestFailedRestoreHistory`.
+   */
+  requestArchivedSessionHistory: (archiveId: string, more?: boolean) => boolean;
+  /** Close an archived session's history view and drop what it fetched. */
+  closeArchivedSessionHistory: (archiveId: string) => void;
+  /** Delete one archive record. Returns false (nothing sent) when the socket is closed or one is already pending. */
+  deleteArchivedSession: (archiveId: string) => boolean;
+  /** Delete every archive record. */
+  deleteAllArchivedSessions: () => boolean;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a
   // `host_prune_status_request`; the server replies with a single
