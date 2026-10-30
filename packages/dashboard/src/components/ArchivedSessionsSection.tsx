@@ -112,7 +112,9 @@ export function ArchivedSessionsSection() {
                   disabled={deletingAll || !connected}
                   data-testid="archived-sessions-delete-all-confirm"
                 >
-                  Confirm delete all ({rowCount})
+                  {/* A truncated roster lists only the newest rows, and delete-all
+                      removes every record, so the count would understate it. */}
+                  {truncated ? 'Confirm delete all (more than listed)' : `Confirm delete all (${rowCount})`}
                 </button>
                 <button
                   type="button"

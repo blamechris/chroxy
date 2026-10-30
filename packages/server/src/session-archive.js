@@ -28,11 +28,14 @@ const gunzipAsync = promisify(gunzip)
  *
  * Storage under `dir`:
  *   - `<archiveId>.json.gz`  gzip(JSON { version: 1, archivedAt, reason, saved })
- *   - `index.json`           { version: 1, entries: [meta...] }
- * The index is a cache of the record files, never the authority: a missing or
- * corrupt index is rebuilt from the files, an index row whose file is gone is
- * dropped, and a file the index does not know (an index write lost to a crash)
- * is adopted.
+ *   - `index.json`           { version: 1, entries: [meta...], tombstones: [...] }
+ * For the ROWS the index is a cache of the record files: a missing or corrupt
+ * index is rebuilt from the files, a row whose file is gone is dropped, and a
+ * file the index does not know (an index write lost to a crash) is adopted
+ * unless a tombstone covers it. The TOMBSTONES (what was deleted or aged out)
+ * exist only in the index, so a corrupt or lost index rebuilds with none; a
+ * deleted snapshot still present in an older session-state backup could then
+ * be archived again. That is a known limit.
  *
  * SECURITY: the archive directory holds transcript content, so files are 0600
  * and the directory 0700. An `archiveId` is a random 128-bit token that this

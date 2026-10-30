@@ -330,6 +330,15 @@ describe('ArchivedSessionsSection — armed confirmations are bound to the list 
     expect((screen.getByTestId('archived-sessions-delete-all-confirm').textContent ?? '').includes('Confirm delete all (2)')).toBe(true)
   })
 
+  it('a truncated list does not claim a count, since delete-all removes unlisted records too', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)], truncated: true })
+    render(<ArchivedSessionsSection />)
+    fireEvent.click(screen.getByTestId('archived-sessions-delete-all'))
+    const label = screen.getByTestId('archived-sessions-delete-all-confirm').textContent ?? ''
+    expect(label.includes('(2)')).toBe(false)
+    expect(label.includes('more than listed')).toBe(true)
+  })
+
   it('a refreshed list (new generatedAt) DISARMS "Confirm delete all" and any armed row', () => {
     state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
     const { rerender } = render(<ArchivedSessionsSection />)
