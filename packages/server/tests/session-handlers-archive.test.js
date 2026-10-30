@@ -39,8 +39,8 @@ const POLICY = { enabled: true, maxEntries: 100, maxAgeDays: 30, maxMegabytes: 2
 
 function makeCtx({
   historyResult = { ok: true, total: 1, offset: 0, entries: [{ type: 'message', content: 'secret transcript' }] },
-  deleteResult = true,
-  deleteAllResult = 3,
+  deleteResult = 'deleted',
+  deleteAllResult = { deleted: 3, failed: 0 },
 } = {}) {
   const sent = []
   const calls = { list: 0, history: 0, historyArgs: null, delete: 0, deleteArgs: null, deleteAll: 0 }
@@ -63,7 +63,7 @@ const EMPTY_STRING_BOUND = { boundSessionId: '' }
 const consulted = (calls) => calls.list + calls.history + calls.delete + calls.deleteAll
 
 describe('list_archived_sessions', () => {
-  it('returns the roster and policy to an unbound client', () => {
+  it('returns the roster and policy to an unbound client', async () => {
     const { ctx, sent, calls } = makeCtx()
     sessionHandlers.list_archived_sessions({}, UNBOUND, { type: 'list_archived_sessions' }, ctx)
 
@@ -76,7 +76,7 @@ describe('list_archived_sessions', () => {
     assert.doesNotThrow(() => ServerArchivedSessionsListSchema.parse(sent[0]))
   })
 
-  it('refuses a bound client WITHOUT consulting the manager, and leaks no host metadata', () => {
+  it('refuses a bound client WITHOUT consulting the manager, and leaks no host metadata', async () => {
     for (const client of [BOUND, EMPTY_STRING_BOUND]) {
       const { ctx, sent, calls } = makeCtx()
       sessionHandlers.list_archived_sessions({}, client, { type: 'list_archived_sessions' }, ctx)
@@ -95,9 +95,9 @@ describe('list_archived_sessions', () => {
 describe('get_archived_session_history', () => {
   const MSG = { type: 'get_archived_session_history', archiveId: ID, offset: 50, limit: 25 }
 
-  it('returns the page to an unbound client, forwarding offset and limit', () => {
+  it('returns the page to an unbound client, forwarding offset and limit', async () => {
     const { ctx, sent, calls } = makeCtx()
-    sessionHandlers.get_archived_session_history({}, UNBOUND, MSG, ctx)
+    await sessionHandlers.get_archived_session_history({}, UNBOUND, MSG, ctx)
 
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'archived_session_history')
@@ -108,10 +108,10 @@ describe('get_archived_session_history', () => {
     assert.doesNotThrow(() => ServerArchivedSessionHistorySchema.parse(sent[0]))
   })
 
-  it('refuses a bound client WITHOUT consulting the manager, and leaks no transcript', () => {
+  it('refuses a bound client WITHOUT consulting the manager, and leaks no transcript', async () => {
     for (const client of [BOUND, EMPTY_STRING_BOUND]) {
       const { ctx, sent, calls } = makeCtx()
-      sessionHandlers.get_archived_session_history({}, client, MSG, ctx)
+      await sessionHandlers.get_archived_session_history({}, client, MSG, ctx)
 
       assert.equal(sent[0].ok, false)
       assert.equal(sent[0].refused, true)
@@ -123,18 +123,18 @@ describe('get_archived_session_history', () => {
     }
   })
 
-  it('refuses a bound client even when the archiveId is missing (no validation oracle)', () => {
+  it('refuses a bound client even when the archiveId is missing (no validation oracle)', async () => {
     const { ctx, sent, calls } = makeCtx()
-    sessionHandlers.get_archived_session_history({}, BOUND, { type: 'get_archived_session_history' }, ctx)
+    await sessionHandlers.get_archived_session_history({}, BOUND, { type: 'get_archived_session_history' }, ctx)
     assert.equal(sent[0].code, 'ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT')
     assert.equal(consulted(calls), 0)
     assert.doesNotThrow(() => ServerArchivedSessionHistorySchema.parse(sent[0]))
   })
 
-  it('rejects a missing archiveId from an unbound client without a lookup', () => {
+  it('rejects a missing archiveId from an unbound client without a lookup', async () => {
     for (const msg of [{ type: 'get_archived_session_history' }, { type: 'get_archived_session_history', archiveId: 42 }, { type: 'get_archived_session_history', archiveId: '' }]) {
       const { ctx, sent, calls } = makeCtx()
-      sessionHandlers.get_archived_session_history({}, UNBOUND, msg, ctx)
+      await sessionHandlers.get_archived_session_history({}, UNBOUND, msg, ctx)
       assert.equal(sent[0].ok, false)
       assert.equal(sent[0].code, 'ARCHIVED_SESSION_INVALID')
       assert.equal(consulted(calls), 0)
@@ -142,9 +142,9 @@ describe('get_archived_session_history', () => {
     }
   })
 
-  it('forwards the manager not-found result as a schema-valid reply', () => {
+  it('forwards the manager not-found result as a schema-valid reply', async () => {
     const { ctx, sent } = makeCtx({ historyResult: { ok: false, code: 'ARCHIVED_SESSION_NOT_FOUND', message: 'gone' } })
-    sessionHandlers.get_archived_session_history({}, UNBOUND, MSG, ctx)
+    await sessionHandlers.get_archived_session_history({}, UNBOUND, MSG, ctx)
     assert.equal(sent[0].ok, false)
     assert.equal(sent[0].code, 'ARCHIVED_SESSION_NOT_FOUND')
     assert.doesNotThrow(() => ServerArchivedSessionHistorySchema.parse(sent[0]))
@@ -152,7 +152,7 @@ describe('get_archived_session_history', () => {
 })
 
 describe('delete_archived_session', () => {
-  it('deletes one record for an unbound client', () => {
+  it('deletes one record for an unbound client', async () => {
     const { ctx, sent, calls } = makeCtx()
     sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', archiveId: ID }, ctx)
 
@@ -163,7 +163,7 @@ describe('delete_archived_session', () => {
     assert.doesNotThrow(() => ServerDeleteArchivedSessionResultSchema.parse(sent[0]))
   })
 
-  it('deletes everything for all: true and reports the count', () => {
+  it('deletes everything for all: true and reports the count', async () => {
     const { ctx, sent, calls } = makeCtx()
     sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', all: true }, ctx)
 
@@ -173,8 +173,8 @@ describe('delete_archived_session', () => {
     assert.doesNotThrow(() => ServerDeleteArchivedSessionResultSchema.parse(sent[0]))
   })
 
-  it('reports NOT_FOUND (ok: false, deleted: 0) for an unknown id', () => {
-    const { ctx, sent } = makeCtx({ deleteResult: false })
+  it('reports NOT_FOUND (ok: false, deleted: 0) for an unknown id', async () => {
+    const { ctx, sent } = makeCtx({ deleteResult: 'not_found' })
     sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', archiveId: ID }, ctx)
     assert.equal(sent[0].ok, false)
     assert.equal(sent[0].deleted, 0)
@@ -182,7 +182,35 @@ describe('delete_archived_session', () => {
     assert.doesNotThrow(() => ServerDeleteArchivedSessionResultSchema.parse(sent[0]))
   })
 
-  it('refuses a bound client WITHOUT consulting the manager — for an id AND for all: true', () => {
+  it('reports a FAILED single delete as ARCHIVED_SESSION_DELETE_FAILED, not NOT_FOUND', async () => {
+    const { ctx, sent } = makeCtx({ deleteResult: 'failed' })
+    sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', archiveId: ID }, ctx)
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].deleted, 0)
+    assert.equal(sent[0].archiveId, ID)
+    assert.equal(sent[0].code, 'ARCHIVED_SESSION_DELETE_FAILED')
+    assert.doesNotThrow(() => ServerDeleteArchivedSessionResultSchema.parse(sent[0]))
+  })
+
+  it('reports a PARTIAL delete-all as ok:false with the count that did go', async () => {
+    const { ctx, sent } = makeCtx({ deleteAllResult: { deleted: 2, failed: 1 } })
+    sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', all: true }, ctx)
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].deleted, 2)
+    assert.equal(sent[0].code, 'ARCHIVED_SESSIONS_DELETE_PARTIAL')
+    assert.ok(/1 could not be removed/.test(sent[0].message))
+    assert.doesNotThrow(() => ServerDeleteArchivedSessionResultSchema.parse(sent[0]))
+  })
+
+  it('a delete-all where EVERY unlink failed is ok:false too (deleted: 0)', async () => {
+    const { ctx, sent } = makeCtx({ deleteAllResult: { deleted: 0, failed: 4 } })
+    sessionHandlers.delete_archived_session({}, UNBOUND, { type: 'delete_archived_session', all: true }, ctx)
+    assert.equal(sent[0].ok, false)
+    assert.equal(sent[0].deleted, 0)
+    assert.equal(sent[0].code, 'ARCHIVED_SESSIONS_DELETE_PARTIAL')
+  })
+
+  it('refuses a bound client WITHOUT consulting the manager — for an id AND for all: true', async () => {
     for (const client of [BOUND, EMPTY_STRING_BOUND]) {
       for (const msg of [{ type: 'delete_archived_session', archiveId: ID }, { type: 'delete_archived_session', all: true }, { type: 'delete_archived_session' }]) {
         const { ctx, sent, calls } = makeCtx()
@@ -199,7 +227,7 @@ describe('delete_archived_session', () => {
     }
   })
 
-  it('requires exactly one of archiveId / all: true, and deletes nothing otherwise', () => {
+  it('requires exactly one of archiveId / all: true, and deletes nothing otherwise', async () => {
     for (const msg of [
       { type: 'delete_archived_session' },
       { type: 'delete_archived_session', all: false },
@@ -218,7 +246,7 @@ describe('delete_archived_session', () => {
 })
 
 describe('archive client message schemas', () => {
-  it('accepts the three requests and bounds offset/limit like the failed-restore read', () => {
+  it('accepts the three requests and bounds offset/limit like the failed-restore read', async () => {
     const ok = (m) => ClientMessageSchema.safeParse(m).success
     assert.ok(ok({ type: 'list_archived_sessions' }))
     assert.ok(ok({ type: 'get_archived_session_history', archiveId: ID }))

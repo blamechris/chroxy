@@ -881,7 +881,7 @@ function handleListArchivedSessions(ws, client, _msg, ctx) {
  * is validated or looked up (no existence oracle), with a degraded schema-valid
  * `archived_session_history` (`ok: false, refused: true, code`).
  */
-function handleGetArchivedSessionHistory(ws, client, msg, ctx) {
+async function handleGetArchivedSessionHistory(ws, client, msg, ctx) {
   const archiveId = typeof msg?.archiveId === 'string' ? msg.archiveId.slice(0, ARCHIVE_ID_MAX_CHARS) : ''
   if (isBoundClient(client)) {
     ctx.transport.send(ws, {
@@ -906,7 +906,7 @@ function handleGetArchivedSessionHistory(ws, client, msg, ctx) {
   }
   const sm = ctx.sessions.sessionManager
   const result = typeof sm.getArchivedSessionHistory === 'function'
-    ? sm.getArchivedSessionHistory(archiveId, { offset: msg.offset, limit: msg.limit })
+    ? await sm.getArchivedSessionHistory(archiveId, { offset: msg.offset, limit: msg.limit })
     : { ok: false, code: 'ARCHIVED_SESSION_NOT_FOUND', message: 'No archived session with that id' }
   ctx.transport.send(ws, { type: 'archived_session_history', archiveId, ...result })
 }
@@ -947,15 +947,38 @@ function handleDeleteArchivedSession(ws, client, msg, ctx) {
   }
   const sm = ctx.sessions.sessionManager
   if (all) {
-    const deleted = typeof sm.deleteAllArchivedSessions === 'function' ? sm.deleteAllArchivedSessions() : 0
-    log.info(`Deleted ${deleted} archived session(s)`)
-    ctx.transport.send(ws, { type: 'delete_archived_session_result', ok: true, deleted })
+    const { deleted, failed } = typeof sm.deleteAllArchivedSessions === 'function'
+      ? sm.deleteAllArchivedSessions()
+      : { deleted: 0, failed: 0 }
+    log.info(`Deleted ${deleted} archived session(s)${failed > 0 ? ` (${failed} could not be removed)` : ''}`)
+    // A partial delete is NOT a success: some transcripts are still on disk, and
+    // the reply says so (with the count that did go) rather than claiming ok.
+    ctx.transport.send(ws, failed > 0
+      ? {
+          type: 'delete_archived_session_result',
+          ok: false,
+          deleted,
+          code: 'ARCHIVED_SESSIONS_DELETE_PARTIAL',
+          message: `Deleted ${deleted} archived session(s), but ${failed} could not be removed and are still on disk`,
+        }
+      : { type: 'delete_archived_session_result', ok: true, deleted })
     return
   }
-  const removed = typeof sm.deleteArchivedSession === 'function' ? sm.deleteArchivedSession(archiveId) : false
-  if (removed) log.info('Deleted an archived session')
-  ctx.transport.send(ws, removed
-    ? { type: 'delete_archived_session_result', ok: true, deleted: 1, archiveId }
+  const outcome = typeof sm.deleteArchivedSession === 'function' ? sm.deleteArchivedSession(archiveId) : 'not_found'
+  if (outcome === 'deleted') {
+    log.info('Deleted an archived session')
+    ctx.transport.send(ws, { type: 'delete_archived_session_result', ok: true, deleted: 1, archiveId })
+    return
+  }
+  ctx.transport.send(ws, outcome === 'failed'
+    ? {
+        type: 'delete_archived_session_result',
+        ok: false,
+        deleted: 0,
+        archiveId,
+        code: 'ARCHIVED_SESSION_DELETE_FAILED',
+        message: 'The archived session could not be removed and is still on disk',
+      }
     : {
         type: 'delete_archived_session_result',
         ok: false,

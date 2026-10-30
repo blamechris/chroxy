@@ -873,6 +873,7 @@ export declare const ServerArchivedSessionMetaSchema: z.ZodObject<{
     lastActivityAt: z.ZodNullable<z.ZodNumber>;
     createdAt: z.ZodNullable<z.ZodNumber>;
     historyLength: z.ZodNumber;
+    omittedOldest: z.ZodOptional<z.ZodNumber>;
     bytes: z.ZodNumber;
 }, z.core.$strip>;
 /**
@@ -903,6 +904,7 @@ export declare const ServerArchivedSessionsListSchema: z.ZodObject<{
         lastActivityAt: z.ZodNullable<z.ZodNumber>;
         createdAt: z.ZodNullable<z.ZodNumber>;
         historyLength: z.ZodNumber;
+        omittedOldest: z.ZodOptional<z.ZodNumber>;
         bytes: z.ZodNumber;
     }, z.core.$strip>>;
     refused: z.ZodOptional<z.ZodBoolean>;
@@ -937,8 +939,11 @@ export declare const ServerArchivedSessionHistorySchema: z.ZodObject<{
  * Reply to `delete_archived_session`. `deleted` is how many records were
  * removed (0 or 1 for an `archiveId`; any count for `all: true`). `archiveId`
  * echoes the request's id (absent for `all: true`). `ok: false` carries `code`:
- * `ARCHIVED_SESSION_NOT_FOUND`, `ARCHIVED_SESSION_INVALID`, or, with
- * `refused: true`, `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
+ * `ARCHIVED_SESSION_NOT_FOUND` (no such record), `ARCHIVED_SESSION_DELETE_FAILED`
+ * (the record exists but could not be removed — it is still on disk),
+ * `ARCHIVED_SESSIONS_DELETE_PARTIAL` (`all: true`: `deleted` records went, others
+ * could not be removed), `ARCHIVED_SESSION_INVALID`, or, with `refused: true`,
+ * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
  */
 export declare const ServerDeleteArchivedSessionResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"delete_archived_session_result">;

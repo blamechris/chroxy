@@ -274,6 +274,18 @@ describe('ArchivedSessionsSection — delete (two-step)', () => {
     expect((screen.getByTestId(`archived-session-delete-${A}`) as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('says how many earliest messages were too large to keep, only when some were', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A, { omittedOldest: 3 }), row(B, { omittedOldest: 1 })] })
+    render(<ArchivedSessionsSection />)
+    expect((screen.getByTestId(`archived-session-omitted-${A}`).textContent ?? '').includes('3 earliest messages were too large to keep')).toBe(true)
+    expect((screen.getByTestId(`archived-session-omitted-${B}`).textContent ?? '').includes('1 earliest message was too large to keep')).toBe(true)
+    cleanup()
+    state.archivedSessions = snapshot({ sessions: [row(A, { omittedOldest: 0 }), row(B)] })
+    render(<ArchivedSessionsSection />)
+    expect(screen.queryByTestId(`archived-session-omitted-${A}`)).toBeNull()
+    expect(screen.queryByTestId(`archived-session-omitted-${B}`)).toBeNull()
+  })
+
   it('renders a per-row delete error and a not-found as a stale row', () => {
     state.archivedSessions = snapshot()
     state.archiveDeleteError = { archiveId: A, code: 'BOOM', message: 'disk full' }

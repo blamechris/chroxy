@@ -528,6 +528,9 @@ export class SessionManager extends EventEmitter {
     // it out of the real ~/.chroxy. Tests may inject `sessionArchiveStore`.
     sessionArchive,
     sessionArchiveStore,
+    // Interval (ms) of the background archive retention sweep. Default 6h; a
+    // test seam, not a config key. Non-positive / non-finite disables it.
+    sessionArchivePruneIntervalMs = 6 * 60 * 60 * 1000,
 
     // #5554: per-skill usage recorder. Records which skills activate in each
     // session, powering the Control Room Skills tab's "previously used" surface.
@@ -854,6 +857,14 @@ export class SessionManager extends EventEmitter {
       maxAgeDays: archiveConfig.maxAgeDays,
       maxMegabytes: archiveConfig.maxMegabytes,
     })
+    // Age retention must not depend on a new session ending or on a restart: a
+    // long-lived idle daemon would otherwise serve (and keep on disk) records
+    // past the retention it advertises. unref'd so it never holds the process.
+    this._archivePruneTimer = null
+    if (Number.isFinite(sessionArchivePruneIntervalMs) && sessionArchivePruneIntervalMs > 0) {
+      this._archivePruneTimer = setInterval(() => this._sessionArchive.prune?.(), sessionArchivePruneIntervalMs)
+      if (typeof this._archivePruneTimer.unref === 'function') this._archivePruneTimer.unref()
+    }
 
     // #5554: usage recorder. Use the caller-supplied one (tests pin a temp
     // path), else default to a file alongside the session-state file so a temp
@@ -3061,7 +3072,7 @@ export class SessionManager extends EventEmitter {
       return false
     }
     if (archive !== false && entry.session?.constructor?.isUserShell !== true) {
-      this._archiveLiveEntry(sessionId, entry, archiveReason)
+      this._queueLiveEntryForArchive(sessionId, entry, archiveReason)
     }
     // Mark as destroying immediately — getSession() will return null from here on
     entry._destroying = true
@@ -3219,6 +3230,10 @@ export class SessionManager extends EventEmitter {
     this._sessions.clear()
     this._timeoutManager.destroy()
     this._containerLivenessMonitor?.destroy()
+    // Finish any just-closed session still compressing, so a clean exit does not
+    // lose its archive, then stop the retention sweep.
+    try { this._sessionArchive.drainSync?.() } catch (err) { log.warn(`session archive drain failed (non-fatal): ${getErrorMessage(err, 'unknown error')}`) }
+    if (this._archivePruneTimer) { clearInterval(this._archivePruneTimer); this._archivePruneTimer = null }
     this._history.clear()
     this._costBudget.clear()
     this._userStopped.clear()
@@ -3907,6 +3922,10 @@ export class SessionManager extends EventEmitter {
     // the ordinary "daemon was down overnight" case. Resolving the binding is
     // cheap and constructs nothing, so ask, and register the refusals.
     let droppedStale = 0
+    // A stale entry whose archive write FAILED must not be flushed away below:
+    // its drop then waits for the next ordinary write (as before the archive
+    // existed) and the archive is retried on the next boot.
+    let archiveFailed = false
     for (const saved of Array.isArray(state.staleSessions) ? state.staleSessions : []) {
       // Bounded by the failed-restore TTL, not resurrected forever: past that
       // horizon the entry is dropped exactly as before. The worktree exemption
@@ -3921,7 +3940,7 @@ export class SessionManager extends EventEmitter {
       const pastTtl = last !== null && Number.isFinite(last) && Date.now() - last > FAILED_RESTORE_TTL_MS
       if (pastTtl && !saved?.worktreePath) {
         // Dropped for good past the failed-restore TTL: keep what chroxy held.
-        this._archiveSaved(saved, 'stale')
+        if (this._archiveSaved(saved, 'stale') === 'failed') archiveFailed = true
         droppedStale++
         continue
       }
@@ -3956,7 +3975,7 @@ export class SessionManager extends EventEmitter {
         // It would have restored fine — it is merely stale. Not restored and
         // not parked, and dropped from disk on the next write — but its history
         // is archived first, so it stays readable (archive-before-flush).
-        this._archiveSaved(saved, 'stale')
+        if (this._archiveSaved(saved, 'stale') === 'failed') archiveFailed = true
         droppedStale++
       } catch (err) {
         anyFailure = true
@@ -4002,7 +4021,7 @@ export class SessionManager extends EventEmitter {
     // next session mutation would make: no sessions, and a cost map without the
     // dead entries (the collection described above, done now).
     if (!firstId && !anyFailure) {
-      if (droppedStale > 0 && this._sessionArchive.retentionPolicy().enabled) this._flushPersist()
+      if (droppedStale > 0 && !archiveFailed && this._sessionArchive.retentionPolicy().enabled) this._flushPersist()
       return null
     }
 
@@ -4184,8 +4203,13 @@ export class SessionManager extends EventEmitter {
         : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
       if (last !== null && Number.isFinite(last) && now - last > TTL_MS) {
         // Archive BEFORE the entry is dropped (and before the flush that removes
-        // it from disk), so a crash leaves a duplicate the archive dedupes.
-        this._archiveSaved(saved, 'failed_restore_expired')
+        // it from disk), so a crash leaves a duplicate the archive dedupes. If the
+        // archive write FAILED the entry stays: #2954 promises its history is
+        // preserved, and this is the only copy. It is retried on the next boot.
+        if (this._archiveSaved(saved, 'failed_restore_expired') === 'failed') {
+          log.warn(`Kept stale failed-restore "${saved?.name || sessionId}": it could not be archived first (retried next boot)`)
+          continue
+        }
         this._failedRestores.delete(sessionId)
         pruned++
         log.info(`Pruned stale failed-restore "${saved?.name || sessionId}" (inactive since ${new Date(last).toISOString()})`)
@@ -4221,34 +4245,48 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Write a saved session entry to the session archive. NEVER throws: archiving
-   * must not be able to break the teardown / restore / prune it is called from.
+   * Archive a saved session entry SYNCHRONOUSLY and report the outcome. NEVER
+   * throws. The callers that are about to DROP the only copy of a session (the
+   * failed-restore TTL prune, a dismissed failed restore, a stale boot entry)
+   * use the status: on 'failed' they keep the source where they have a choice.
    * @param {object} saved - a serialized session entry
    * @param {string} reason
-   * @returns {object|null} the archive row, or null when nothing was archived
+   * @returns {'archived'|'duplicate'|'skipped'|'failed'}
    */
   _archiveSaved(saved, reason) {
     try {
-      return this._sessionArchive.archive(saved, reason)
+      const status = this._sessionArchive.archiveOutcome(saved, reason)?.status
+      return status === 'archived' || status === 'duplicate' || status === 'skipped' ? status : 'failed'
     } catch (err) {
       log.warn(`Session archive failed (${reason}): ${getErrorMessage(err, 'unknown error')}`)
-      return null
+      return 'failed'
     }
   }
 
   /**
-   * Snapshot a LIVE entry (before its history is dropped) and archive it. A
-   * serialization throw is swallowed here for the same reason as above.
+   * Snapshot a LIVE entry (before its history is dropped) and hand it to the
+   * archive's off-event-loop queue. The snapshot and its JSON are taken
+   * synchronously here (the cost the state persist already pays); compression
+   * and the write happen later, so closing a session never stalls the daemon.
+   * A failure is logged and never blocks the teardown, which proceeds exactly as
+   * it did before the archive existed.
    */
-  _archiveLiveEntry(sessionId, entry, reason) {
+  _queueLiveEntryForArchive(sessionId, entry, reason) {
     try {
       const saved = this._serializeSessionEntry(sessionId, entry)
       if (saved && saved.createdAt == null && typeof entry.createdAt === 'number') saved.createdAt = entry.createdAt
-      return this._archiveSaved(saved, reason)
+      const status = this._sessionArchive.enqueue(saved, reason)?.status
+      if (status === 'failed') log.warn(`Session ${sessionId} was closed but could not be archived`)
+      return status
     } catch (err) {
       log.warn(`Could not snapshot session ${sessionId} for the archive: ${getErrorMessage(err, 'unknown error')}`)
-      return null
+      return 'failed'
     }
+  }
+
+  /** Resolves once every just-closed session has been written to the archive. */
+  async whenArchiveIdle() {
+    await this._sessionArchive.whenIdle?.()
   }
 
   /**
@@ -4263,17 +4301,18 @@ export class SessionManager extends EventEmitter {
    * One page of an archived session's history (oldest first).
    * @param {string} archiveId
    * @param {{ offset?: number, limit?: number }} [opts]
+   * @returns {Promise<object>}
    */
-  getArchivedSessionHistory(archiveId, opts) {
+  async getArchivedSessionHistory(archiveId, opts) {
     return this._sessionArchive.getHistoryPage(archiveId, opts)
   }
 
-  /** @returns {boolean} true when an archived session was removed */
+  /** @returns {'deleted'|'not_found'|'failed'} */
   deleteArchivedSession(archiveId) {
     return this._sessionArchive.delete(archiveId)
   }
 
-  /** @returns {number} how many archived sessions were removed */
+  /** @returns {{ deleted: number, failed: number }} */
   deleteAllArchivedSessions() {
     return this._sessionArchive.deleteAll()
   }
@@ -4322,8 +4361,12 @@ export class SessionManager extends EventEmitter {
    */
   clearFailedRestore(sessionId) {
     if (!this._failedRestores.has(sessionId)) return false
-    // Dismissing a failed restore drops its preserved history; archive it first.
-    this._archiveSaved(this._failedRestores.get(sessionId)?.saved, 'failed_restore_dismissed')
+    // Dismissing a failed restore drops its preserved history; archive it first,
+    // and keep the entry if that failed — dismissing must not destroy the only copy.
+    if (this._archiveSaved(this._failedRestores.get(sessionId)?.saved, 'failed_restore_dismissed') === 'failed') {
+      log.warn(`Failed restore ${sessionId} was NOT dismissed: its history could not be archived first`)
+      return false
+    }
     this._failedRestores.delete(sessionId)
     this._flushPersist()
     return true

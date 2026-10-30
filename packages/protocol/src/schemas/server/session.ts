@@ -547,7 +547,14 @@ export const ServerArchivedSessionMetaSchema = z.object({
   archivedAt: z.number().nullable(),
   lastActivityAt: z.number().nullable(),
   createdAt: z.number().nullable(),
+  /** Entries kept in the record (the page total). */
   historyLength: z.number().int().min(0),
+  /**
+   * How many of the session's OLDEST history entries were left out because the
+   * whole record would have exceeded the archive's size bound. Absent or 0 when
+   * nothing was omitted.
+   */
+  omittedOldest: z.number().int().min(0).optional(),
   bytes: z.number().min(0),
 })
 
@@ -599,8 +606,11 @@ export const ServerArchivedSessionHistorySchema = z.object({
  * Reply to `delete_archived_session`. `deleted` is how many records were
  * removed (0 or 1 for an `archiveId`; any count for `all: true`). `archiveId`
  * echoes the request's id (absent for `all: true`). `ok: false` carries `code`:
- * `ARCHIVED_SESSION_NOT_FOUND`, `ARCHIVED_SESSION_INVALID`, or, with
- * `refused: true`, `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
+ * `ARCHIVED_SESSION_NOT_FOUND` (no such record), `ARCHIVED_SESSION_DELETE_FAILED`
+ * (the record exists but could not be removed — it is still on disk),
+ * `ARCHIVED_SESSIONS_DELETE_PARTIAL` (`all: true`: `deleted` records went, others
+ * could not be removed), `ARCHIVED_SESSION_INVALID`, or, with `refused: true`,
+ * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`.
  */
 export const ServerDeleteArchivedSessionResultSchema = z.object({
   type: z.literal('delete_archived_session_result'),

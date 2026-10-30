@@ -187,6 +187,11 @@ export function ArchivedSessionsSection() {
                   <span className="fr-history">
                     {r.historyLength} message{r.historyLength === 1 ? '' : 's'}
                   </span>
+                  {typeof r.omittedOldest === 'number' && r.omittedOldest > 0 ? (
+                    <span className="fr-history" data-testid={`archived-session-omitted-${id}`}>
+                      ({r.omittedOldest} earliest message{r.omittedOldest === 1 ? ' was' : 's were'} too large to keep)
+                    </span>
+                  ) : null}
                 </div>
                 {rowError ? (
                   <p className="fr-result-error" data-testid={`archived-session-delete-error-${id}`}>

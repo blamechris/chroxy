@@ -7228,7 +7228,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           : { archiveId: id ?? undefined, code: reply.code, message: reply.message, refused: reply.refused === true };
       set(patch);
       // The list is server truth: re-ask rather than splice rows out locally.
-      if (gone) get().requestArchivedSessions();
+      // That includes a FAILED or PARTIAL delete (ok:false, e.g. the file could
+      // not be unlinked): the views above were kept because the record may still
+      // exist, and the fresh list is what shows which records actually remain
+      // (and drops the views of the ones that did go). Only a refusal skips it:
+      // the list would be refused too.
+      if (reply.refused !== true) get().requestArchivedSessions();
       break;
     }
     case 'retry_failed_restore_result': {

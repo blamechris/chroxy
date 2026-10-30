@@ -298,15 +298,35 @@ describe('delete', () => {
     expect(sent).toEqual([{ type: 'list_archived_sessions' }])
   })
 
-  it('a failure keeps the view and the row, records the error, and does not re-ask', () => {
+  it('a failure keeps the view and the row, records the error, and re-asks for the list', () => {
     get().requestArchivedSessionHistory(A)
     get().deleteArchivedSession(A)
     sent.length = 0
-    receive({ type: 'delete_archived_session_result', ok: false, deleted: 0, archiveId: A, code: 'BOOM', message: 'disk' })
+    receive({ type: 'delete_archived_session_result', ok: false, deleted: 0, archiveId: A, code: 'ARCHIVED_SESSION_DELETE_FAILED', message: 'disk' })
     expect(get().deletingArchiveIds.size).toBe(0)
     expect(views()[A]).toBeDefined()
-    expect(get().archiveDeleteError).toEqual({ archiveId: A, code: 'BOOM', message: 'disk', refused: false })
-    expect(sent).toEqual([])
+    expect(get().archiveDeleteError).toEqual({ archiveId: A, code: 'ARCHIVED_SESSION_DELETE_FAILED', message: 'disk', refused: false })
+    // The record may still exist: the fresh list is what shows what is left.
+    expect(sent).toEqual([{ type: 'list_archived_sessions' }])
+  })
+
+  it('a PARTIAL delete-all keeps every view, shows a section-level error, then the list reply prunes only the records that went', () => {
+    get().requestArchivedSessionHistory(A)
+    get().requestArchivedSessionHistory(B)
+    get().deleteAllArchivedSessions()
+    sent.length = 0
+    receive({ type: 'delete_archived_session_result', ok: false, deleted: 1, code: 'ARCHIVED_SESSIONS_DELETE_PARTIAL', message: '1 could not be removed' })
+
+    expect(get().deletingAllArchives).toBe(false)
+    // No view is dropped on a failure: either record may remain.
+    expect(Object.keys(views()).sort()).toEqual([A, B])
+    expect(get().archiveDeleteError).toEqual({ archiveId: undefined, code: 'ARCHIVED_SESSIONS_DELETE_PARTIAL', message: '1 could not be removed', refused: false })
+    expect(sent).toEqual([{ type: 'list_archived_sessions' }])
+
+    // The server says only B is left.
+    list([B])
+    expect(Object.keys(views())).toEqual([B])
+    expect(get().archiveDeleteError).not.toBeNull()
   })
 
   it('not-found means the record is gone: drop the view and re-ask', () => {
@@ -323,6 +343,7 @@ describe('delete', () => {
     receive({ type: 'delete_archived_session_result', ok: false, deleted: 0, refused: true, code: 'ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT' })
     expect(get().deletingAllArchives).toBe(false)
     expect(get().archiveDeleteError).toMatchObject({ refused: true })
+    expect(sent.some((m) => m.type === 'list_archived_sessions')).toBe(false)
   })
 
   it('the next delete clears the previous error', () => {
