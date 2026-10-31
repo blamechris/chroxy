@@ -8,7 +8,7 @@ import { createLogger } from './logger.js'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { pageHistory } from './history-page.js'
 import { SessionMessageHistory } from './session-message-history.js'
-import { SESSION_ARCHIVE_MAX_ENTRIES } from './session-archive-limits.js'
+import { SESSION_ARCHIVE_MAX_ENTRIES, savedHasHistory } from './session-archive-limits.js'
 
 const log = createLogger('session-archive')
 
@@ -550,7 +550,7 @@ export class SessionArchive {
     this._ensureLoaded()
     this._sweep() // the off switch stops new writes; it must not stop old data ageing out
     if (!this._enabled) return { status: 'skipped' }
-    if (!saved || typeof saved !== 'object' || !Array.isArray(saved.history) || saved.history.length === 0) return { status: 'skipped' }
+    if (!savedHasHistory(saved)) return { status: 'skipped' }
     const archivedAt = this._now()
     const probe = metaFrom(saved, { archiveId: '0'.repeat(32), reason, archivedAt, bytes: 0 })
     if (!probe) return { status: 'skipped' }

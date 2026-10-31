@@ -157,7 +157,7 @@ describe('SessionStatePersistence.restoreState', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: staleTimestamp,
-      sessions: [{ name: 'test', cwd: '/tmp' }],
+      sessions: [{ name: 'test', cwd: '/tmp', history: [{ role: 'user', content: 'x' }] }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     // #7627: still not RESTORED (the guard), but no longer deleted unseen — the
@@ -187,7 +187,7 @@ describe('SessionStatePersistence.restoreState', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: staleTimestamp,
-      sessions: [{ name: 'test', cwd: '/tmp' }],
+      sessions: [{ name: 'test', cwd: '/tmp', history: [{ role: 'user', content: 'x' }] }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
     const out = p.restoreState()
@@ -203,7 +203,7 @@ describe('SessionStatePersistence.restoreState', () => {
       // would have discarded EVERYTHING.
       timestamp: now - 25 * 60 * 60 * 1000,
       sessions: [
-        { id: 'stale', name: 'Stale', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
+        { id: 'stale', name: 'Stale', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000, history: [{ role: 'user', content: 'x' }] },
         { id: 'fresh', name: 'Fresh', cwd: '/tmp', lastActivityAt: now - 60 * 1000 },
       ],
     }))
@@ -220,8 +220,8 @@ describe('SessionStatePersistence.restoreState', () => {
       version: 1,
       timestamp: now,
       sessions: [
-        { id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
-        { id: 'b', name: 'B', cwd: '/tmp', lastActivityAt: now - 26 * 60 * 60 * 1000 },
+        { id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000, history: [{ role: 'user', content: 'x' }] },
+        { id: 'b', name: 'B', cwd: '/tmp', lastActivityAt: now - 26 * 60 * 60 * 1000, history: [{ role: 'user', content: 'x' }] },
       ],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
@@ -245,13 +245,31 @@ describe('SessionStatePersistence.restoreState', () => {
     const stale = Date.now() - 25 * 60 * 60 * 1000
     writeFileSync(stateFile, JSON.stringify({
       version: 1, timestamp: stale,
-      sessions: [{ id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: stale }],
+      sessions: [{ id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: stale, history: [{ role: 'user', content: 'x' }] }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     const out = p.restoreState()
     assert.notEqual(out, null, 'the all-stale case is a result now, not an absence')
     assert.deepEqual(out.sessions, [])
     assert.deepEqual(out.staleSessions.map(x => x.id), ['a'])
+  })
+
+  it('restores a stale session that has NO history instead of setting it aside (#8870)', () => {
+    // Setting it aside ends in the archive skipping it (nothing to read), so it
+    // left the list with no record — the startup "Default" vanished overnight.
+    const stale = Date.now() - 25 * 60 * 60 * 1000
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1, timestamp: stale,
+      sessions: [
+        { id: 'empty', name: 'Default', cwd: '/tmp', lastActivityAt: stale, history: [] },
+        { id: 'legacy', name: 'No field', cwd: '/tmp', lastActivityAt: stale },
+        { id: 'full', name: 'Work', cwd: '/tmp', lastActivityAt: stale, history: [{ role: 'user', content: 'x' }] },
+      ],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions.map(x => x.id), ['empty', 'legacy'], 'both history-less entries are offered for restore')
+    assert.deepEqual(out.staleSessions.map(x => x.id), ['full'], 'only the one with history is set aside, for the archive')
   })
 
   it('returns parsed state for valid file', () => {

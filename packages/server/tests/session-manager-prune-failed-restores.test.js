@@ -181,7 +181,7 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
       version: 1,
       timestamp: stale,
       // No environmentId — it would have restored fine, so it is merely stale.
-      sessions: [{ id: DEAD, name: 'Session 1', cwd: '/tmp', lastActivityAt: stale, history: [] }],
+      sessions: [{ id: DEAD, name: 'Session 1', cwd: '/tmp', lastActivityAt: stale, history: [{ role: 'user', content: 'x' }] }],
       costs: { [DEAD]: 4.25 },
       budgetPaused: [DEAD],
     }))
@@ -231,7 +231,7 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
       version: 1,
       timestamp: lastActivityAt,
       // No environmentId: this one would RESTORE fine, so the 24h policy applies.
-      sessions: [{ id: 'b'.repeat(32), name: 'Ordinary', cwd: '/tmp', lastActivityAt, history: [] }],
+      sessions: [{ id: 'b'.repeat(32), name: 'Ordinary', cwd: '/tmp', lastActivityAt, history: [{ role: 'user', content: 'x' }] }],
     }))
     sm = new SessionManager({ stateFilePath: statePath })
     let created = 0
@@ -394,7 +394,7 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
       const lastActivityAt = Date.now() - 25 * HOUR
       writeFileSync(statePath, JSON.stringify({
         version: 1, timestamp: lastActivityAt,
-        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [], failedRestore }],
+        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [{ role: 'user', content: 'x' }], failedRestore }],
       }))
       const { events } = reboot(statePath)
       assert.deepEqual(events, [])
