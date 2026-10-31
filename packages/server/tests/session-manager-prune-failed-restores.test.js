@@ -343,17 +343,19 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
     assert.equal(sm.getFailedRestores().length, 0)
   })
 
-  it('a parked entry with NO history is retried like a fresh one, and stays parked when it fails again (#8870)', () => {
+  it('a parked entry with NO history is never dropped: whichever path it takes, a refusal parks it again (#8870)', () => {
     // #8870 keeps a history-less stale entry out of the set-aside list, so the
     // marker branch above never sees it: it takes the ordinary restore path, as
-    // a parked entry under 24h always has. It is retried, and never dropped.
+    // a parked entry under 24h always has. This pins only "never dropped", which
+    // holds on both paths; the RETRIED test below is the one that needs the fix.
     const statePath = parkThenAge({ ageMs: 25 * HOUR, extra: { history: [] } })
     sm = new SessionManager({ stateFilePath: statePath, environmentManager: envReporting('ctr-REBUILT') })
     const events = []
     sm.on('session_restore_failed', (e) => events.push(e))
     sm.restoreState()
     sm._flushPersist()
-    assert.equal(events.length, 1, 'the retry failed and was reported')
+    assert.equal(events.length, 1, 'the refusal was reported')
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE', 'refused by the container binding, deterministically')
     assert.deepEqual(sm.getFailedRestores().map(f => f.name), ['Parked'], 'still in the Failed restores list')
     const disk = JSON.parse(readFileSync(statePath, 'utf-8'))
     assert.equal(disk.sessions.length, 1, 'still on disk after the write')
