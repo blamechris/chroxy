@@ -57,6 +57,20 @@ export function withJitter(delayMs: number): number {
   return delayMs + Math.floor(Math.random() * delayMs * 0.5);
 }
 
+/**
+ * #8875 — is this session LISTED and still starting (its provider `start()` has
+ * not settled; `SessionInfo.starting`, #8874)? False for an absent id and for an
+ * ordinary row. One predicate shared by both clients' `switchSession` doors and
+ * by every render gate that draws a "jump to session" affordance, so "looks
+ * clickable" and "will work" read the same array the same way.
+ */
+export function isSessionStarting(
+  sessions: readonly { sessionId: string; starting?: boolean }[],
+  sessionId: string,
+): boolean {
+  return sessions.some((s) => s.sessionId === sessionId && s.starting === true);
+}
+
 /** Filter out thinking placeholder messages (any message array with an id field) */
 export function filterThinking<T extends { id: string }>(messages: T[]): T[] {
   return messages.filter((m) => m.id !== 'thinking');

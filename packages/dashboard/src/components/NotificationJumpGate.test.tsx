@@ -121,6 +121,7 @@ function renderBanners(
       onSwitchSession={onSwitchSession}
       permissionStatus={() => 'actionable'}
       isSessionListed={isSessionListed}
+      isSessionStarting={() => false}
     />,
   )
   return { onSwitchSession }
@@ -184,6 +185,7 @@ describe('#7516 banner — an ABSENT session presents no jump affordance', () =>
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={listedOnly('sess-live')}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.getByRole('button', { name: 'Chroxy' })).toBeInTheDocument()
@@ -198,6 +200,7 @@ describe('#7516 banner — an ABSENT session presents no jump affordance', () =>
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={listedOnly()}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.queryByRole('button', { name: 'Chroxy' })).toBeNull()
@@ -236,6 +239,7 @@ function renderWidget(
       onMarkAllRead={vi.fn()}
       onDismiss={vi.fn()}
       isSessionListed={isSessionListed}
+      isSessionStarting={() => false}
     />,
   )
   fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
@@ -385,6 +389,7 @@ describe('#7516 — a re-listed session gets its jump BACK (the revive direction
         onSwitchSession={onSwitchSession}
         permissionStatus={() => 'actionable'}
         isSessionListed={isSessionListed}
+        isSessionStarting={() => false}
       />
     )
     const { rerender } = render(banners(listedOnly()))
@@ -411,6 +416,7 @@ describe('#7516 — a re-listed session gets its jump BACK (the revive direction
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
         isSessionListed={isSessionListed}
+        isSessionStarting={() => false}
       />
     )
     const { rerender } = render(widget(listedOnly()))

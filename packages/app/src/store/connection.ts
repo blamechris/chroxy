@@ -1,4 +1,4 @@
-import { reconnectConnectionIdentity, captureConnectionIdentity, type ConnectionIdentityTarget } from '@chroxy/store-core';
+import { reconnectConnectionIdentity, captureConnectionIdentity, isSessionStarting, type ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Connection store — Zustand store managing WebSocket connection,
  * session state, and all server communication.
@@ -2142,7 +2142,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const notifMatch = sessionNotifications.find((n) => n.requestId === requestId);
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
-    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { haptic: false });
+    // #8875 — `allowStarting`: a session asking for permission is live; the
+    // operator is answering it, so the starting refusal must not strand the answer.
+    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { haptic: false, allowStarting: true });
     // For allowSession: send set_permission_rules to register auto-approval for this tool.
     // Skip tools that the server won't accept as auto-allow rules (code execution, network).
     // Also skip if the active provider doesn't support session rules (#3072) — the
@@ -2609,12 +2611,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => {
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean; allowStarting?: boolean }) => {
     const { activeSessionId } = get();
     const serverNotify = options?.serverNotify ?? true;
     const haptic = options?.haptic ?? true;
 
     if (sessionId === activeSessionId) return;
+    // #8875 — a listed session whose provider `start()` has not settled
+    // (`starting: true` on its `session_list` row, #8874) is not ready to open.
+    // Every operator door (pills, overview cards, notification tap, deep link,
+    // background progress) funnels through here, so the refusal lives in this
+    // ONE door. Machine callers opt out by name — `grep allowStarting` lists
+    // them. Placed before the haptic so a refused tap does not buzz.
+    if (!options?.allowStarting && isSessionStarting(get().sessions, sessionId)) return;
     if (haptic) hapticLight();
 
     // Optimistically switch active session + dismiss notifications for target session

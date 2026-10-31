@@ -45,6 +45,10 @@ export interface SessionTabData {
   name: string
   isBusy: boolean
   isActive: boolean
+  // #8875: the provider's start has not settled (`SessionInfo.starting`,
+  // #8874). The tab renders dimmed + aria-disabled and does not call onSwitch —
+  // the same "not openable" treatment as the sidebar row (#8872).
+  starting?: boolean
   cwd?: string
   // #7328: the original repo directory for a worktree-isolated session
   // (mirrors `SessionInfo.repoCwd` in @chroxy/store-core — see there for the
@@ -403,6 +407,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             key={session.sessionId}
             className={
               `session-tab${isActive ? ' active' : ''}` +
+              `${session.starting ? ' starting' : ''}` +
               `${isDragging ? ' dragging' : ''}` +
               `${isDragOver ? ' drag-over' : ''}` +
               `${isLifted ? ' lifted' : ''}`
@@ -410,6 +415,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             data-testid={`session-tab-${session.sessionId}`}
             role="tab"
             aria-selected={isActive}
+            aria-disabled={session.starting ? true : undefined}
             // #4951 — aria-grabbed (and aria-dropeffect) were removed in
             // WAI-ARIA 1.1; the lift state is conveyed via the `lifted`
             // CSS class (visual) + the live-region announcement (SR).
@@ -501,7 +507,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // Use the CR-aware `isActive`: while the Control Room is the
               // focused view, even the underlying-active session should fire
               // onSwitch so clicking it returns from the CR to that session.
-              if (!isActive) onSwitch(session.sessionId)
+              // #8875 — a starting tab is not a way INTO its session, but the
+              // underlying-active one (the creating client lands on its own
+              // starting session) is still the way back out of the CR, so the
+              // starting guard only applies to a session that is not active.
+              if (!isActive && (session.isActive || !session.starting)) onSwitch(session.sessionId)
             }}
             onKeyDown={e => {
               if (renamingId === session.sessionId) return
@@ -581,7 +591,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               }
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
-                if (!isActive) onSwitch(session.sessionId)
+                if (!isActive && (session.isActive || !session.starting)) onSwitch(session.sessionId)
               } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                 e.preventDefault()
                 const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>('[role="tab"]')
@@ -606,12 +616,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // tab would make the chat unusable on a screen reader.
               // aria-label keeps the dot discoverable on focus/hover
               // without flooding the SR queue.
+              // #8875 — a starting tab reuses the sidebar's wording (#8872).
+              const dotStatus = session.starting ? 'starting' : effectiveStatus
+              const dotLabel = session.starting
+                ? 'Session starting — not ready to open yet'
+                : STATUS_LABELS[effectiveStatus]
               return (
                 <span
-                  className={`tab-status-dot status-${effectiveStatus}`}
+                  className={`tab-status-dot status-${dotStatus}`}
                   data-testid="status-dot"
-                  title={STATUS_LABELS[effectiveStatus]}
-                  aria-label={STATUS_LABELS[effectiveStatus]}
+                  title={dotLabel}
+                  aria-label={dotLabel}
                 />
               )
             })()}

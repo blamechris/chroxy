@@ -175,6 +175,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.getByLabelText('Allow')).toBeInTheDocument()
@@ -193,6 +194,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={vi.fn()}
         permissionStatus={() => 'not-pending'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.queryByLabelText('Allow')).not.toBeInTheDocument()
@@ -218,6 +220,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={onMarkRead}
         permissionStatus={() => 'not-pending'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     // Still says what was asked, and by whom.
@@ -246,6 +249,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={onMarkRead}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     fireEvent.click(screen.getByLabelText('Dismiss'))
@@ -267,6 +271,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={vi.fn()}
         permissionStatus={(n) => (n.requestId === 'req-live' ? 'actionable' : 'not-pending')}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.getAllByLabelText('Allow')).toHaveLength(1)
@@ -294,6 +299,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={vi.fn()}
         permissionStatus={() => (live ? 'actionable' : 'not-pending')}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     // Rendered live: the buttons exist.
@@ -335,6 +341,7 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     fireEvent.click(screen.getByLabelText('Allow'))
@@ -364,6 +371,7 @@ describe('#7466 — a permission banner over a dead socket is VISIBLY inert', ()
         onMarkRead={(handlers.onMarkRead ?? vi.fn()) as () => void}
         permissionStatus={() => 'disconnected'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
   }
@@ -424,6 +432,7 @@ describe('#7466 — a permission banner over a dead socket is VISIBLY inert', ()
         onMarkRead={vi.fn()}
         permissionStatus={() => (connected ? 'actionable' : 'disconnected')}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.getByLabelText('Allow')).toBeEnabled()

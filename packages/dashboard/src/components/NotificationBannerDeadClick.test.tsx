@@ -70,6 +70,7 @@ function renderFlippable(initial: PermissionBannerStatus = 'actionable') {
       onSwitchSession={vi.fn()}
       permissionStatus={() => status}
       isSessionListed={() => true}
+      isSessionStarting={() => false}
     />,
   )
   return {
@@ -191,6 +192,7 @@ describe('#7474 — the re-render is scoped to a REFUSAL', () => {
           n.requestId === 'req-dead' && deadIsDead ? 'not-pending' : 'actionable'
         }
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     expect(screen.getAllByLabelText('Allow')).toHaveLength(2)

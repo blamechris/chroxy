@@ -41,6 +41,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -57,6 +58,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('My Session')).toBeInTheDocument()
@@ -74,6 +76,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByRole('button', { name: /allow/i })).toBeInTheDocument()
@@ -92,6 +95,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /allow/i }))
@@ -110,6 +114,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /deny/i }))
@@ -127,6 +132,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.queryByRole('button', { name: /allow/i })).not.toBeInTheDocument()
@@ -145,6 +151,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
@@ -163,6 +170,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByText('My Session'))
@@ -187,6 +195,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     // Should show 3 banners + overflow indicator
@@ -208,6 +217,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText(/Session crashed/)).toBeInTheDocument()
@@ -224,6 +234,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByRole('log')).toBeInTheDocument()
@@ -250,6 +261,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -269,6 +281,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('Unread Session')).toBeInTheDocument()
@@ -296,6 +309,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('Session 1')).toBeInTheDocument()
@@ -315,5 +329,50 @@ describe('NotificationBanners source analysis', () => {
 
   it('SessionNotification type includes requestId field', () => {
     expect(typesSource).toMatch(/requestId\??\s*:\s*string/)
+  })
+})
+
+describe('#8875 — a LISTED but starting session offers no jump', () => {
+  const props = () => ({
+    onApprove: vi.fn(),
+    onDeny: vi.fn(),
+    onDismiss: vi.fn(),
+    onMarkRead: vi.fn(),
+    permissionStatus: () => 'actionable' as const,
+    isSessionListed: () => true,
+  })
+
+  it('renders the name non-interactively with a Starting marker, and never switches', () => {
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationBanners
+        {...props()}
+        notifications={[makeNotification()]}
+        onSwitchSession={onSwitchSession}
+        isSessionStarting={() => true}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'My Session' })).toBeNull()
+    fireEvent.click(screen.getByTestId('notification-banner-session-name'))
+    expect(onSwitchSession).not.toHaveBeenCalled()
+    const marker = screen.getByTestId('notification-banner-session-starting')
+    expect(marker.textContent).toBe('Starting…')
+    expect(marker.getAttribute('role')).toBe('status')
+    expect(screen.queryByTestId('notification-banner-session-gone')).toBeNull()
+  })
+
+  it('CONTROL: an ordinary listed session keeps its button and switches', () => {
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationBanners
+        {...props()}
+        notifications={[makeNotification()]}
+        onSwitchSession={onSwitchSession}
+        isSessionStarting={() => false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'My Session' }))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-1')
+    expect(screen.queryByTestId('notification-banner-session-starting')).toBeNull()
   })
 })

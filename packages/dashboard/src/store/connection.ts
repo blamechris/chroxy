@@ -86,6 +86,7 @@ import {
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptySessionPanels, createEmptyConnectionReadings, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { isSessionStarting } from '@chroxy/store-core';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -4683,7 +4684,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // and the one that drifts is always the copy. The behaviour is unchanged and
     // is still pinned, by `permission-response-dead-session.test.ts` and by
     // cell 1 of `switch-session-membership.test.ts`.
-    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid);
+    // #8875 — `allowStarting`: a session that is asking for permission is live; the
+    // operator is answering it, so the starting refusal must not strand the answer.
+    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { allowStarting: true });
     // For allowSession: send a follow-up set_permission_rules to register
     // auto-approval for this tool. Skip tools the server won't accept as
     // auto-allow rules (execution/network tools). Mirrors the mobile app
@@ -5727,7 +5730,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean }): boolean => {
+  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean; allowStarting?: boolean }): boolean => {
     const { socket, activeSessionId, sessionStates, sessions } = get();
 
     if (sessionId === activeSessionId) return true;
@@ -5763,6 +5766,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Not a warning: this is reachable through ordinary use (a stale
       // orchestration node, a peer focusing a session we have already closed),
       // and the honest UI response is to do nothing rather than to log noise.
+      return false;
+    }
+
+    // #8875 — a session whose provider `start()` has not settled (`starting: true`
+    // on its `session_list` row, #8874) is listed but not ready: opening it lands
+    // the operator on a session that cannot take input yet. The operator doors
+    // (tabs, Cmd+N / tab-cycle, notifications, palette, orchestration) all funnel
+    // through here, so the refusal lives in this ONE door rather than in each
+    // caller (#7262). The opt-outs are named like `allowUnlisted`, so
+    // `grep allowStarting` lists every decision to open one anyway: follow-mode
+    // (a peer already focused it) and the permission auto-switch (a session that
+    // is asking for permission is live; the operator is answering it).
+    // `allowUnlisted` (checkpoint restore) bypasses the whole roster reading,
+    // `starting` included — the restored session is not on the roster yet.
+    if (!options?.allowUnlisted && !options?.allowStarting && isSessionStarting(sessions, sessionId)) {
       return false;
     }
 

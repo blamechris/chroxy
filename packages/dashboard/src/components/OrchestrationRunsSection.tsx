@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { isSessionListed } from '../store/utils'
+import { isSessionStarting } from '@chroxy/store-core'
 import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsage } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { renderMarkdown } from '../lib/markdown'
@@ -163,12 +164,16 @@ function RunRow({ run, selected, onSelect }: { run: RunSummary; selected: boolea
  * marker: "no longer open" would be a false claim about it, and the two
  * absences are different facts.
  */
-function NodeRow({ node, onOpenSession, isSessionListed: sessionIsListed }: {
+function NodeRow({ node, onOpenSession, isSessionListed: sessionIsListed, isSessionStarting: sessionIsStarting }: {
   node: RunNode
   onOpenSession: (sessionId: string) => void
   isSessionListed: (sessionId: string) => boolean
+  isSessionStarting: (sessionId: string) => boolean
 }) {
-  const openable = !!node.sessionId && sessionIsListed(node.sessionId)
+  // #8875 — listed but its provider start has not settled: `switchSession`
+  // refuses it, so no "Open session" button (#7516) and a "Starting…" marker.
+  const starting = !!node.sessionId && sessionIsListed(node.sessionId) && sessionIsStarting(node.sessionId)
+  const openable = !!node.sessionId && sessionIsListed(node.sessionId) && !starting
   return (
     <li className="cr-orch-node" data-testid="orch-node-row">
       <span className="cr-orch-node-title">{node.title || node.nodeId}</span>
@@ -182,7 +187,10 @@ function NodeRow({ node, onOpenSession, isSessionListed: sessionIsListed }: {
           Open session
         </button>
       )}
-      {!!node.sessionId && !openable && (
+      {starting && (
+        <span className="cr-dim" data-testid="orch-node-session-starting" role="status">Starting…</span>
+      )}
+      {!!node.sessionId && !openable && !starting && (
         <span className="cr-dim" data-testid="orch-node-session-gone" role="status">No longer open</span>
       )}
     </li>
@@ -284,7 +292,7 @@ function TimelineRow({ entry }: { entry: RunTimelineEntry }) {
   )
 }
 
-function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed }: {
+function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed, isSessionStarting: sessionIsStarting }: {
   runId: string
   onOpenSession: (sessionId: string) => void
   /**
@@ -294,6 +302,8 @@ function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed }:
    * `NotificationsWidget` prop's reasoning, same shape).
    */
   isSessionListed: (sessionId: string) => boolean
+  /** #8875 — the starting reading of the same roster; see NodeRow. */
+  isSessionStarting: (sessionId: string) => boolean
 }) {
   const held = useConnectionStore((s) => s.orchestrationRunDetails[runId] ?? null)
   const loading = useConnectionStore((s) => s.orchestrationRunDetailLoading.has(runId))
@@ -332,7 +342,7 @@ function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed }:
       <h5>Subtasks</h5>
       {run.nodes.length === 0
         ? <p className="cr-dim" data-testid="orch-nodes-empty">No subtasks yet (planning).</p>
-        : <ul className="cr-orch-nodes">{run.nodes.map((n) => <NodeRow key={n.nodeId} node={n} onOpenSession={onOpenSession} isSessionListed={sessionIsListed} />)}</ul>}
+        : <ul className="cr-orch-nodes">{run.nodes.map((n) => <NodeRow key={n.nodeId} node={n} onOpenSession={onOpenSession} isSessionListed={sessionIsListed} isSessionStarting={sessionIsStarting} />)}</ul>}
 
       {run.timeline.length > 0 && (
         <>
@@ -572,6 +582,11 @@ export function OrchestrationRunsSection({ now = Date.now, onSwitchSession }: Or
     (sessionId: string) => isSessionListed(sessions, sessionId),
     [sessions],
   )
+  // #8875 — the starting reading of the same roster, for the same reason.
+  const sessionIsStarting = useCallback(
+    (sessionId: string) => isSessionStarting(sessions, sessionId),
+    [sessions],
+  )
   const [showNewRun, setShowNewRun] = useState(false)
 
   // Pull the selected run's detail when it isn't held yet (selection persists
@@ -632,7 +647,7 @@ export function OrchestrationRunsSection({ now = Date.now, onSwitchSession }: Or
               <RunRow key={r.runId} run={r} selected={r.runId === selectedRunId} onSelect={(id) => selectRun(id)} />
             ))}
           </ul>
-          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => { (onSwitchSession ?? switchSession)(sessionId) }} isSessionListed={sessionIsListed} />}
+          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => { (onSwitchSession ?? switchSession)(sessionId) }} isSessionListed={sessionIsListed} isSessionStarting={sessionIsStarting} />}
         </div>
       )}
     </section>

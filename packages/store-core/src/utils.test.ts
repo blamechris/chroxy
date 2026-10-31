@@ -8,6 +8,7 @@ import {
   ACTIVITY_EVENT_TYPES,
   clearTransientSessionState,
   TRANSIENT_SESSION_SWEEP_FIELDS,
+  isSessionStarting,
 } from './utils'
 import type { BaseSessionState } from './types'
 
@@ -184,5 +185,23 @@ describe('TRANSIENT_SESSION_SWEEP_FIELDS (#7411)', () => {
     for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
       expect(Object.prototype.hasOwnProperty.call(ss, field)).toBe(true)
     }
+  })
+})
+
+describe('isSessionStarting (#8875)', () => {
+  const sessions = [
+    { sessionId: 'a', starting: true },
+    { sessionId: 'b' },
+    { sessionId: 'c', starting: false },
+  ]
+  it('is true for a listed row that is starting', () => {
+    expect(isSessionStarting(sessions, 'a')).toBe(true)
+  })
+  it('is false for a listed ordinary row', () => {
+    expect(isSessionStarting(sessions, 'b')).toBe(false)
+    expect(isSessionStarting(sessions, 'c')).toBe(false)
+  })
+  it('is false for an absent id', () => {
+    expect(isSessionStarting(sessions, 'zzz')).toBe(false)
   })
 })

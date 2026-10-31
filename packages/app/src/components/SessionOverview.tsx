@@ -153,12 +153,16 @@ function SessionCard({ session, sessionState, isActive, hasNotification, notific
 
   return (
     <TouchableOpacity
-      style={[styles.card, isActive && styles.cardActive]}
-      onPress={onPress}
+      style={[styles.card, isActive && styles.cardActive, session.starting && styles.cardStarting]}
+      // #8875 — a starting session is listed but not openable yet, so the press
+      // is dropped (and the overview stays open). Not `disabled`: that would
+      // also drop the long-press, which is how a stuck session is closed.
+      onPress={session.starting ? undefined : onPress}
       onLongPress={onLongPress}
       activeOpacity={0.7}
       accessibilityRole="button"
-      accessibilityLabel={`Session ${session.name}, ${STATUS_LABELS[status]}${isActive ? ', active' : ''}`}
+      accessibilityLabel={`Session ${session.name}, ${STATUS_LABELS[status]}${isActive ? ', active' : ''}${session.starting ? ', starting' : ''}`}
+      accessibilityState={{ disabled: session.starting === true }}
     >
       {/* Header: name + status badge */}
       <View style={styles.cardHeader}>
@@ -446,6 +450,10 @@ const styles = StyleSheet.create({
     padding: 12,
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
+  },
+  // #8875 — a starting session is listed but not openable yet.
+  cardStarting: {
+    opacity: 0.5,
   },
   cardActive: {
     borderColor: COLORS.accentBlueBorder,

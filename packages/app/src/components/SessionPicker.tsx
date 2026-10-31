@@ -106,14 +106,18 @@ function SessionPill({ session, isActive, health, notificationCount, pendingShel
         isActive && styles.pillActive,
         isCrashed && styles.pillCrashed,
         hasNotification && styles.pillAttention,
+        // #8875 — not ready to open: dimmed, and the press is dropped below.
+        session.starting && styles.pillStarting,
       ]}
-      onPress={onPress}
+      // #8875 — not `disabled`: that would also drop the long-press, which is
+      // how a stuck starting session is renamed or closed.
+      onPress={session.starting ? undefined : onPress}
       onLongPress={onLongPress}
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingPermission ? ', waiting for your permission' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}`}
-      accessibilityState={{ selected: isActive }}
+      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingPermission ? ', waiting for your permission' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}${session.starting ? ', starting' : ''}`}
+      accessibilityState={{ selected: isActive, disabled: session.starting === true }}
       accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showPendingPermission ? 'Session is waiting for you to allow or deny a permission request' : showBusy ? 'Session is currently processing' : showPendingShells ? 'Session is idle but waiting on a backgrounded shell' : undefined}
     >
       {hasIndicators && (
@@ -447,6 +451,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderTransparent,
     maxWidth: 140,
+  },
+  // #8875 — a starting session is listed but not openable yet.
+  pillStarting: {
+    opacity: 0.5,
   },
   pillActive: {
     backgroundColor: COLORS.accentBlueLight,

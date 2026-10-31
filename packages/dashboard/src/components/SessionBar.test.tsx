@@ -160,6 +160,70 @@ describe('SessionBar', () => {
     expect(onSwitch).not.toHaveBeenCalled()
   })
 
+  it('#8875: a starting tab is dimmed, aria-disabled, labelled, and never calls onSwitch', () => {
+    const onSwitch = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions([{}, { starting: true }])}
+        onSwitch={onSwitch}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    const tab = screen.getByTestId('session-tab-s2')
+    expect(tab).toHaveClass('starting')
+    expect(tab).toHaveAttribute('aria-disabled', 'true')
+    const dot = within(tab).getByTestId('status-dot')
+    expect(dot).toHaveClass('status-starting')
+    expect(dot).toHaveAttribute('aria-label', 'Session starting — not ready to open yet')
+    fireEvent.click(tab)
+    fireEvent.keyDown(tab, { key: 'Enter' })
+    fireEvent.keyDown(tab, { key: ' ' })
+    expect(onSwitch).not.toHaveBeenCalled()
+  })
+
+  it('#8875: the underlying-active tab still returns from the Control Room while its session is starting', () => {
+    // The creating client is auto-switched onto its own session before the
+    // provider start settles, so its active tab must stay the way back (#5204).
+    const onSwitch = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions([{ starting: true }])}
+        onSwitch={onSwitch}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+        controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+      />
+    )
+    const tab = screen.getByTestId('session-tab-s1')
+    fireEvent.click(tab)
+    fireEvent.keyDown(tab, { key: 'Enter' })
+    expect(onSwitch).toHaveBeenCalledTimes(2)
+    expect(onSwitch).toHaveBeenCalledWith('s1')
+  })
+
+  it('#8875 CONTROL: an ordinary inactive tab has no starting treatment and switches on click, Enter and Space', () => {
+    const onSwitch = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={onSwitch}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    const tab = screen.getByTestId('session-tab-s2')
+    expect(tab).not.toHaveClass('starting')
+    expect(tab).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(tab)
+    fireEvent.keyDown(tab, { key: 'Enter' })
+    fireEvent.keyDown(tab, { key: ' ' })
+    expect(onSwitch).toHaveBeenCalledTimes(3)
+  })
+
   it('calls onClose when close button clicked', () => {
     const onClose = vi.fn()
     render(

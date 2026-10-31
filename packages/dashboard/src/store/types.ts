@@ -2212,8 +2212,11 @@ export interface ConnectionState {
    * legitimately switches ahead of the roster — checkpoint restore, where the
    * server creates the session and re-homes the client before `session_list`
    * reports it. Every opt-out is greppable by that name.
+   * #8875 — a LISTED session that is still `starting` is refused too;
+   * `allowStarting` is the opt-out for machine callers (follow-mode, permission
+   * auto-switch).
    */
-  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean }) => boolean;
+  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean; allowStarting?: boolean }) => boolean;
   /**
    * #5589 / #5281 — request primary (driver) ownership of a shared session.
    * `force` overrides the current owner (operator-driven take-over). The

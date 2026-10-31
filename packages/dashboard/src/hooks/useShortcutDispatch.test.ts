@@ -254,6 +254,35 @@ describe('useShortcutDispatch', () => {
     expect(props.handleSwitchSession).toHaveBeenCalledWith('s1')
   })
 
+  it('#8875: session.next and session.prev step past a starting neighbour', () => {
+    const props = makeProps({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1' } as never,
+        { sessionId: 's2', starting: true } as never,
+        { sessionId: 's3' } as never,
+        { sessionId: 's4', starting: true } as never,
+      ],
+    })
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: ']', metaKey: true, shiftKey: true })
+    expect(props.handleSwitchSession).toHaveBeenLastCalledWith('s3')
+    fireKey({ key: '[', metaKey: true, shiftKey: true })
+    expect(props.handleSwitchSession).toHaveBeenLastCalledWith('s3')
+    expect(props.handleSwitchSession).not.toHaveBeenCalledWith('s2')
+    expect(props.handleSwitchSession).not.toHaveBeenCalledWith('s4')
+  })
+
+  it('#8875: the cycle is a no-op when every other session is starting', () => {
+    const props = makeProps({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1' } as never, { sessionId: 's2', starting: true } as never],
+    })
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: ']', metaKey: true, shiftKey: true })
+    expect(props.handleSwitchSession).not.toHaveBeenCalled()
+  })
+
   it('view.toggleChatTerminal switches chat <-> terminal based on current mode', () => {
     const props = makeProps({ viewMode: 'chat' })
     renderHook(() => useShortcutDispatch(props))
