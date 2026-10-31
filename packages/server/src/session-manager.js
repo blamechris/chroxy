@@ -303,7 +303,10 @@ const RETRY_RESTORE_SETTLE_TIMEOUT_MS = 30 * 1000
  * warmup wait is itself capped at `SPAWN_WARMUP_MAX_MS` (15 s) and then
  * proceeds. Codex app-server cold start was 0.2-0.9 s over 3 runs; it has no
  * internal startup timeout, which is the wedge this covers. 60 s is ~4x the
- * slowest healthy start observed.
+ * slowest healthy start observed. The measured starts were mostly one at a
+ * time; a boot restore starts every session at once, but claude-tui's start is
+ * bounded by its own caps (auth probe 5 s, hook-dir fs ops 2 s each, warmup
+ * 15 s), so a loaded boot still fits well inside the deadline.
  *
  * A provider class may override via `static get startDeadlineMs()` (a positive
  * number, or `null` for no deadline). Interaction: `retryFailedRestore` reports
@@ -2246,9 +2249,9 @@ export class SessionManager extends EventEmitter {
         // app-server has no startup timeout of its own) is rejected with
         // START_TIMEOUT after `providerStartDeadlineMs`, so it runs the same
         // `_handleAsyncStartFailure` path as any other rejection. A late
-        // settlement of the underlying start is ignored (the first outcome
-        // wins), so it can neither double-announce nor surface as an unhandled
-        // rejection.
+        // settlement of the underlying start finds its entry gone and does
+        // nothing, so it can neither double-announce nor surface as an
+        // unhandled rejection.
         entry._starting = true
         const deadlineMs = providerStartDeadlineMs(session)
         const onOk = () => {
@@ -2277,14 +2280,13 @@ export class SessionManager extends EventEmitter {
           return { ok: false, error: err }
         }
         // The handlers run DIRECTLY off the provider's promise (one microtask
-        // hop, as before the deadline existed); `done` makes the first of
-        // {settlement, deadline} win, so a late settlement is ignored.
+        // hop, as before the deadline existed). Whichever of {settlement,
+        // deadline} comes first decides the outcome; a later one still reaches
+        // its handler, which finds the entry no longer live (destroyed,
+        // re-parked or replaced) and does nothing.
         entry._startSettled = new Promise((resolve) => {
-          let done = false
           let timer = null
           const finish = (handler) => (arg) => {
-            if (done) return
-            done = true
             if (timer) clearTimeout(timer)
             resolve(handler(arg))
           }

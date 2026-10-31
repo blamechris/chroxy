@@ -20,7 +20,6 @@ import { declareUnknownCustomization } from './helpers/provider-customization.js
 // this name must be unique to this file.
 let startMode = 'sync'
 let pendingStart = null
-const allStarts = []
 class Starting8872 extends EventEmitter {
   constructor(opts) {
     super()
@@ -32,10 +31,7 @@ class Starting8872 extends EventEmitter {
     if (startMode === 'sync') return
     // A start the test settles by hand, the way Codex app-server and claude-tui
     // settle theirs some time after createSession returned.
-    return new Promise((resolve, reject) => {
-      pendingStart = { resolve, reject }
-      allStarts.push(pendingStart)
-    })
+    return new Promise((resolve, reject) => { pendingStart = { resolve, reject } })
   }
   destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
 }
@@ -170,7 +166,6 @@ describe('provider start deadline (#8876)', () => {
     mock.timers.reset()
     startMode = 'sync'
     pendingStart = null
-    allStarts.length = 0
     try { sm?.destroy?.() } catch { /* ignore */ }
     if (dir) rmSync(dir, { recursive: true, force: true })
     dir = null
@@ -271,6 +266,24 @@ describe('provider start deadline (#8876)', () => {
     assert.equal(settled.length, 0, 'a late resolution announces nothing')
     assert.equal(rowOf(sm, saved.id), undefined, 'and does not re-list the session')
     assert.equal(restoreFailed.length, 1)
+  })
+
+  it('ignores a late rejection after the deadline failed a fresh session', async () => {
+    makeSm()
+    const failed = collect('session_create_failed')
+    const sessionId = sm.createSession({ cwd: dir, name: 'late-reject' })
+    const late = pendingStart
+    assert.ok(late, 'the start is pending')
+
+    await tick(PROVIDER_START_DEADLINE_MS)
+    assert.equal(rowOf(sm, sessionId), undefined, 'failed at the deadline')
+    assert.equal(failed.length, 1)
+    assert.equal(failed[0].errorCode, 'START_TIMEOUT')
+
+    late.reject(Object.assign(new Error('PTY died'), { code: 'PTY_EXIT' }))
+    await flush()
+    assert.equal(failed.length, 1, 'the late rejection reports nothing more')
+    assert.equal(failed[0].errorCode, 'START_TIMEOUT', 'and does not replace the timeout as the reason')
   })
 
   it('does not bound a provider that opts out with startDeadlineMs = null', async () => {
