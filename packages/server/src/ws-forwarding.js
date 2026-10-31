@@ -197,6 +197,29 @@ function setupSessionForwarding(normalizer, ctx) {
     })
   }
 
+  // #8873: the `session_list` a provider start's outcome refreshes
+  // (`session_restore_failed`, `session_start_settled`), coalesced so a burst of
+  // outcomes costs one `listSessions()` and one send per client rather than one
+  // each. Restored sessions start together at boot, so their failures (and the
+  // #8876 deadline timers) arrive together. They arrive as separate timer or I/O
+  // callbacks, and Node drains microtasks between callbacks, so a microtask
+  // would coalesce only outcomes emitted in one call stack. `setImmediate` runs
+  // once per event-loop turn, after every callback of that turn. The list is
+  // built when it fires, so it reflects every outcome in the burst.
+  let startOutcomeListQueued = false
+  const queueStartOutcomeSessionList = () => {
+    if (!ctx.broadcastSessionList || startOutcomeListQueued) return
+    startOutcomeListQueued = true
+    setImmediate(() => {
+      startOutcomeListQueued = false
+      try {
+        ctx.broadcastSessionList()
+      } catch (err) {
+        log.error(`deferred session_list after a provider start outcome threw: ${err?.message || err}`)
+      }
+    })
+  }
+
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // #5313 (WP-1.3): this listener runs synchronously inside the
     // SessionManager EventEmitter's emit(). A throw here unwinds emit() and
@@ -437,14 +460,14 @@ function setupSessionForwarding(normalizer, ctx) {
     // `session_destroyed`, so without a refresh every client's sidebar keeps a
     // clickable entry for a session that no longer exists ("Session not found").
     // Re-sending the list is what removes it.
-    if (ctx.broadcastSessionList) ctx.broadcastSessionList()
+    queueStartOutcomeSessionList()
   }))
 
   // #8872: a session whose async start() was still settling went out in
   // `session_list` as `starting`; once the start resolves, re-send the list so
   // every client can open it.
   sessionManager.on('session_start_settled', safeForward('session_start_settled', () => {
-    if (ctx.broadcastSessionList) ctx.broadcastSessionList()
+    queueStartOutcomeSessionList()
   }))
 
   // Persist failures — surface to clients so the user knows a session-list

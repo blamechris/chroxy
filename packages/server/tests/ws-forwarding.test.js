@@ -47,6 +47,17 @@ function findBroadcastFor(broadcastMock, client) {
   })
 }
 
+// #8873: the forwarder's start-outcome session_list goes out on setImmediate.
+// An immediate queued here runs after every immediate queued before it.
+const nextLoopTurn = () => new Promise((resolve) => setImmediate(resolve))
+
+function restoreFailure(sessionId) {
+  return {
+    sessionId, name: 'Codex', provider: 'codex', errorCode: 'START_FAILED',
+    errorMessage: 'boom', originalHistoryPreserved: true,
+  }
+}
+
 function makeCtx(overrides = {}) {
   const sm = new EventEmitter()
   sm.getSession = mock.fn(() => null)
@@ -754,31 +765,110 @@ describe('setupForwarding', () => {
     // #8861 / #8092: a session re-parked after an async start failure was in the
     // last session_list and its teardown never emits session_destroyed, so the
     // forwarder must re-send the list or every sidebar keeps a dead entry.
-    it('refreshes the session list so a re-parked session leaves every sidebar (#8861)', () => {
+    it('refreshes the session list so a re-parked session leaves every sidebar (#8861)', async () => {
       const broadcastSessionList = mock.fn()
       const ctx = makeCtx({ broadcastSessionList })
       setupForwarding(ctx)
 
-      ctx.sessionManager.emit('session_restore_failed', {
-        sessionId: 'sess-bad', name: 'Codex', provider: 'codex', errorCode: 'START_FAILED',
-        errorMessage: 'boom', originalHistoryPreserved: true,
-      })
+      ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-bad'))
 
-      assert.equal(broadcastSessionList.mock.callCount(), 1, 'session list re-broadcast once')
       assert.ok(
         ctx.broadcast.mock.calls.some((c) => c.arguments[0].type === 'session_restore_failed'),
-        'the failure itself is still broadcast',
+        'the failure itself is broadcast at once',
       )
+      await nextLoopTurn()
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'a single failure still refreshes within one loop turn')
+    })
+
+    // #8873: restored sessions start together at boot, so their failures arrive
+    // together; each one used to cost a full list build and a send per client.
+    it('coalesces a burst of failures in one call stack into one session_list (#8873)', async () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      for (let i = 0; i < 5; i++) ctx.sessionManager.emit('session_restore_failed', restoreFailure(`sess-${i}`))
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'five failures, one list')
+      const failures = ctx.broadcast.mock.calls.filter((c) => c.arguments[0].type === 'session_restore_failed')
+      assert.equal(failures.length, 5, 'every failure is still announced on its own')
+    })
+
+    // Timer and I/O callbacks each get a microtask drain of their own, so this is
+    // the case a microtask-scoped coalescer would miss: the #8876 deadline
+    // timers of sessions restored together expire as separate callbacks.
+    it('coalesces failures emitted from separate callbacks of one loop turn (#8873)', async () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      for (let i = 0; i < 3; i++) {
+        setImmediate(() => ctx.sessionManager.emit('session_restore_failed', restoreFailure(`sess-${i}`)))
+      }
+      await nextLoopTurn()
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'three callbacks, one list')
+    })
+
+    it('shares one refresh between a failure and a settled start in the same turn (#8873)', async () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-bad'))
+      ctx.sessionManager.emit('session_start_settled', { sessionId: 'sess-ok' })
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1)
+    })
+
+    it('refreshes again for a failure after the previous refresh went out (#8873)', async () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-a'))
+      await nextLoopTurn()
+      ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-b'))
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 2, 'a later failure is not swallowed by the earlier one')
+    })
+
+    it('logs a refresh that throws and still refreshes for the next failure (#8873)', async () => {
+      let throwOnce = true
+      const broadcastSessionList = mock.fn(() => {
+        if (throwOnce) { throwOnce = false; throw new Error('transport closed') }
+      })
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+      const errors = []
+      const listener = (entry) => { if (entry.level === 'error') errors.push(entry.message) }
+      addLogListener(listener)
+      try {
+        ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-a'))
+        await nextLoopTurn()
+        ctx.sessionManager.emit('session_restore_failed', restoreFailure('sess-b'))
+        await nextLoopTurn()
+      } finally {
+        removeLogListener(listener)
+      }
+
+      assert.equal(broadcastSessionList.mock.callCount(), 2)
+      assert.ok(errors.some((m) => m.includes('transport closed')), 'the throw is logged')
     })
   })
 
   describe('session_start_settled event (#8872)', () => {
-    it('refreshes the session list so a session listed as starting becomes openable', () => {
+    it('refreshes the session list so a session listed as starting becomes openable', async () => {
       const broadcastSessionList = mock.fn()
       const ctx = makeCtx({ broadcastSessionList })
       setupForwarding(ctx)
 
       ctx.sessionManager.emit('session_start_settled', { sessionId: 'sess-1' })
+      await nextLoopTurn()
 
       assert.equal(broadcastSessionList.mock.callCount(), 1, 'session list re-broadcast once')
     })
