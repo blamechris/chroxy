@@ -1421,7 +1421,8 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 — checkpoint_restored auto-switches with the app's no-notify/no-haptic
   // options (the server already re-homed this client; an auto-switch shouldn't buzz).
   switchToRestoredSession: (sessionId) =>
-    getStore().getState().switchSession(sessionId, { serverNotify: false, haptic: false }),
+    // #8875 — `allowStarting`: the server just re-homed us onto the restored session.
+    getStore().getState().switchSession(sessionId, { serverNotify: false, haptic: false, allowStarting: true }),
   // #5618 — conversations_list clears the app-only conversationHistoryError flag and
   // mirrors the list into the secondary conversation store (the dashboard omits this).
   applyConversationsListExtras: (conversations) => {
@@ -1505,7 +1506,8 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // that divergence so the three cases are fully shared.
   getMyClientId: () => useMultiClientStore.getState().myClientId,
   getFollowMode: () => useMultiClientStore.getState().followMode,
-  switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #8875 — `allowStarting`: a peer already focused it, so follow-mode mirrors that.
+  switchSession: (sessionId) => getStore().getState().switchSession(sessionId, { allowStarting: true }),
   setPrimaryClientId: (clientId) => useMultiClientStore.getState().setPrimaryClientId(clientId),
   // #5618 Batch 5a — cost_update's app-only mirror: flat totalCost/costBudget +
   // the useCostStore dual-write. (The shared per-session sessionCost patch is

@@ -183,6 +183,13 @@ export interface NotificationBannersProps {
    * removed.
    */
   isSessionListed: (sessionId: string) => boolean
+  /**
+   * #8875 — OPTIONAL (defaults to "never starting"): a LISTED session whose
+   * provider start has not settled is refused by `switchSession`, so the row
+   * must not offer the jump either (#7516: looks clickable ⟺ will work). Supply
+   * `isSessionStarting` from `@chroxy/store-core` over the same `sessions` array.
+   */
+  isSessionStarting?: (sessionId: string) => boolean
 }
 
 export function NotificationBanners({
@@ -194,6 +201,7 @@ export function NotificationBanners({
   onSwitchSession,
   permissionStatus,
   isSessionListed,
+  isSessionStarting = () => false,
 }: NotificationBannersProps) {
   // #7474 — a refused click must be VISIBLE, not merely harmless.
   //
@@ -295,7 +303,7 @@ export function NotificationBanners({
             <span className="notification-banner-type">
               {EVENT_LABELS[n.eventType]}
             </span>
-            {isSessionListed(n.sessionId) ? (
+            {isSessionListed(n.sessionId) && !isSessionStarting(n.sessionId) ? (
               <button
                 type="button"
                 className="notification-banner-session"
@@ -325,13 +333,25 @@ export function NotificationBanners({
                     removes the session re-renders the row under the cursor —
                     and without it a screen-reader user gets the silent
                     disappearance instead of the dead click. */}
-                <span
-                  className="notification-banner-session-gone"
-                  data-testid="notification-banner-session-gone"
-                  role="status"
-                >
-                  No longer open
-                </span>
+                {isSessionListed(n.sessionId) ? (
+                  // #8875 — listed but its provider start has not settled: the
+                  // door refuses it, so the row says so instead of "gone".
+                  <span
+                    className="notification-banner-session-gone"
+                    data-testid="notification-banner-session-starting"
+                    role="status"
+                  >
+                    Starting…
+                  </span>
+                ) : (
+                  <span
+                    className="notification-banner-session-gone"
+                    data-testid="notification-banner-session-gone"
+                    role="status"
+                  >
+                    No longer open
+                  </span>
+                )}
               </>
             )}
             <span className="notification-banner-message">{n.message}</span>

@@ -337,6 +337,7 @@ export {
   nextMessageId,
   withJitter,
   filterThinking,
+  isSessionStarting,
   createEmptyBaseSessionState,
   ACTIVITY_EVENT_TYPES,
   isActivityEvent,

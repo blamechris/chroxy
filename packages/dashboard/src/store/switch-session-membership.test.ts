@@ -497,3 +497,102 @@ describe('#7475 cells 4 & 5 — the server-driven callers', () => {
     clearDeltaBuffers()
   })
 })
+
+// ---------------------------------------------------------------------------
+// #8875 — a LISTED session whose provider start has not settled is refused too
+// ---------------------------------------------------------------------------
+
+describe('#8875 — switchSession refuses a starting session by default', () => {
+  const starting = (id: string) => ({ ...makeSession(id), starting: true }) as SessionInfo
+
+  async function seed(extra: Partial<ConnectionState> = {}) {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      socket: liveSocket([]),
+      activeSessionId: 'sess-a',
+      sessions: [makeSession('sess-a'), starting('sess-s'), makeSession('sess-ok')],
+      sessionStates: {
+        'sess-a': createEmptySessionState(),
+        'sess-s': createEmptySessionState(),
+        'sess-ok': createEmptySessionState(),
+      },
+      ...extra,
+    } as unknown as Partial<ConnectionState>)
+    return useConnectionStore
+  }
+
+  it('refuses a starting id: returns false and activeSessionId does not move', async () => {
+    const store = await seed()
+    expect(store.getState().switchSession('sess-s')).toBe(false)
+    expect(store.getState().activeSessionId).toBe('sess-a')
+  })
+
+  it('CONTROL: the same roster still switches to an ordinary session', async () => {
+    const store = await seed()
+    expect(store.getState().switchSession('sess-ok')).toBe(true)
+    expect(store.getState().activeSessionId).toBe('sess-ok')
+  })
+
+  it('allowStarting switches to a starting id', async () => {
+    const store = await seed()
+    expect(store.getState().switchSession('sess-s', { allowStarting: true })).toBe(true)
+    expect(store.getState().activeSessionId).toBe('sess-s')
+  })
+
+  it('allowUnlisted bypasses the whole roster reading, starting included', async () => {
+    const store = await seed()
+    expect(store.getState().switchSession('sess-s', { allowUnlisted: true })).toBe(true)
+    expect(store.getState().activeSessionId).toBe('sess-s')
+  })
+
+  it('an already-active starting id still returns true (re-click is not a refusal)', async () => {
+    const store = await seed({ activeSessionId: 'sess-s' } as Partial<ConnectionState>)
+    expect(store.getState().switchSession('sess-s')).toBe(true)
+    expect(store.getState().activeSessionId).toBe('sess-s')
+  })
+
+  it('permission auto-switch still lands on a starting session that is asking', async () => {
+    const store = await seed({
+      sessionNotifications: [
+        {
+          id: 'n-1',
+          sessionId: 'sess-s',
+          sessionName: 's',
+          eventType: 'permission',
+          message: 'Bash: ls',
+          timestamp: 1,
+          requestId: 'req-1',
+        },
+      ],
+    } as unknown as Partial<ConnectionState>)
+    store.getState().sendPermissionResponse('req-1', 'allow')
+    expect(store.getState().activeSessionId).toBe('sess-s')
+  })
+
+  it('follow-mode still follows onto a starting session; ordinary control also follows', async () => {
+    const connection = await import('./connection')
+    const mh = await import('./message-handler')
+    mh.setStore(connection.useConnectionStore as never)
+    const socket = liveSocket([])
+    const ctx = { url: 'wss://t', token: 'tok', socket, isReconnect: false, silent: false } as never
+    for (const target of ['sess-s', 'sess-ok']) {
+      connection.useConnectionStore.setState({
+        socket,
+        connectionPhase: 'connected',
+        activeSessionId: 'sess-a',
+        myClientId: 'me',
+        followMode: true,
+        sessions: [makeSession('sess-a'), starting('sess-s'), makeSession('sess-ok')],
+        sessionStates: {
+          'sess-a': connection.createEmptySessionState(),
+          'sess-s': connection.createEmptySessionState(),
+          'sess-ok': connection.createEmptySessionState(),
+        },
+      } as unknown as Partial<ConnectionState>)
+      mh.handleMessage({ type: 'client_focus_changed', clientId: 'other', sessionId: target }, ctx)
+      expect(connection.useConnectionStore.getState().activeSessionId).toBe(target)
+    }
+    mh.stopHeartbeat()
+    mh.clearDeltaBuffers()
+  })
+})

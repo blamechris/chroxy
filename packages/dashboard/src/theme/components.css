@@ -2599,6 +2599,19 @@ button.sidebar-token-view-session-row:hover {
   animation: none;
 }
 
+.tab-status-dot.status-starting {
+  background: transparent;
+  border: 1px solid var(--text-muted);
+  animation: none;
+}
+
+/* #8875 — a starting tab is not openable (mirrors .sidebar-session-item.starting).
+   Dimmed only: no size change, so the 44px tap target is untouched. */
+.session-tab.starting {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .tab-cwd {
   color: var(--text-dim);
   font-size: var(--text-xs);

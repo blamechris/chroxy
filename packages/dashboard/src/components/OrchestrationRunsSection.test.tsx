@@ -466,6 +466,24 @@ describe('#7536 — the orchestration node session-jump is gated on roster membe
     expect(screen.queryByTestId('orch-node-session-gone')).toBeNull()
   })
 
+  it('#8875 — a LISTED but starting session shows Starting… and no button', () => {
+    renderWithNodes([node()], [{ sessionId: 'sess_9', starting: true }])
+    expect(screen.queryByTestId('orch-node-open-session')).toBeNull()
+    expect(screen.queryByTestId('orch-node-session-gone')).toBeNull()
+    const marker = screen.getByTestId('orch-node-session-starting')
+    expect(marker.textContent).toBe('Starting…')
+    expect(marker.getAttribute('role')).toBe('status')
+    screen.getByTestId('orch-node-row').querySelectorAll('button').forEach((b) => fireEvent.click(b))
+    expect(switchSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('#8875 CONTROL: a listed non-starting session keeps its button and no Starting marker', () => {
+    renderWithNodes([node()], [{ sessionId: 'sess_9', starting: false }])
+    expect(screen.queryByTestId('orch-node-session-starting')).toBeNull()
+    fireEvent.click(screen.getByTestId('orch-node-open-session'))
+    expect(switchSessionMock).toHaveBeenCalledWith('sess_9')
+  })
+
   it('gates PER NODE: a live sibling keeps its button', () => {
     // The predicate is asked per node. A single run-level "something is gone"
     // flag would disarm every row in a run whose first node finished — which is

@@ -38,6 +38,7 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
+import { isSessionStarting } from '@chroxy/store-core'
 import type { SessionNotification } from './store/types'
 import { isSessionListed } from './store/utils'
 
@@ -1171,6 +1172,9 @@ export function App() {
     // only part of the surface. If a later change makes a refusal worth SAYING, say it here off
     // the boolean; nothing structural is in the way.
     //
+    // #8875 — the door now also refuses a LISTED session that is still `starting`;
+    // those surfaces read "Starting…" instead of "No longer open", and a refusal
+    // here is just as inert (the `false` return below).
     // ONE membership implementation, and it stays the store's (#7475/#7511).
     // The handler does not re-ask `isSessionListed`: a second reading here is
     // the copy that drifts from the door it mirrors.
@@ -1213,6 +1217,13 @@ export function App() {
   // all that is available to it.
   const sessionIsListed = useCallback(
     (sessionId: string) => isSessionListed(sessions, sessionId),
+    [sessions],
+  )
+  // #8875 — the render gates' reading of "listed but its provider start has not
+  // settled", over the same `sessions` array `switchSession` refuses on, so a
+  // row never offers a jump the door will decline (#7516).
+  const sessionIsStarting = useCallback(
+    (sessionId: string) => isSessionStarting(sessions, sessionId),
     [sessions],
   )
 
@@ -1712,6 +1723,8 @@ export function App() {
         name: s.name,
         isBusy: s.isBusy,
         isActive: s.sessionId === activeSessionId,
+        // #8875: a tab whose provider start has not settled is not openable.
+        starting: s.starting === true ? true : undefined,
         cwd: s.cwd,
         // #7328: the original repo dir for a worktree-isolated session, so
         // the tab-cwd badge can show the repo name instead of the opaque
@@ -1759,7 +1772,8 @@ export function App() {
   })
 
   const handleJumpToPending = useCallback(() => {
-    const orderedIds = sessionTabs.map(t => t.sessionId)
+    // #8875: skip starting tabs — the door would refuse them, leaving the button inert.
+    const orderedIds = sessionTabs.filter(t => !t.starting).map(t => t.sessionId)
     const next = selectNextPendingSession(orderedIds, pendingPermissionCounts, activeSessionId)
     if (next) handleSwitchSession(next)
   }, [sessionTabs, pendingPermissionCounts, activeSessionId, handleSwitchSession])
@@ -2918,6 +2932,7 @@ export function App() {
         sessionNotifications={sessionNotifications}
         onSwitchSession={handleSwitchSession}
         isNotificationSessionListed={sessionIsListed}
+        isNotificationSessionStarting={sessionIsStarting}
         onMarkNotificationRead={markSessionNotificationRead}
         onMarkAllNotificationsRead={markAllSessionNotificationsRead}
         onDismissNotification={dismissSessionNotification}
@@ -3165,6 +3180,7 @@ export function App() {
           onMarkRead={markSessionNotificationRead}
           onSwitchSession={handleSwitchSession}
           isSessionListed={sessionIsListed}
+          isSessionStarting={sessionIsStarting}
           permissionStatus={permissionStatus}
         />
 

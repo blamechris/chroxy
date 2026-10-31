@@ -317,3 +317,48 @@ describe('NotificationBanners source analysis', () => {
     expect(typesSource).toMatch(/requestId\??\s*:\s*string/)
   })
 })
+
+describe('#8875 — a LISTED but starting session offers no jump', () => {
+  const props = () => ({
+    onApprove: vi.fn(),
+    onDeny: vi.fn(),
+    onDismiss: vi.fn(),
+    onMarkRead: vi.fn(),
+    permissionStatus: () => 'actionable' as const,
+    isSessionListed: () => true,
+  })
+
+  it('renders the name non-interactively with a Starting marker, and never switches', () => {
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationBanners
+        {...props()}
+        notifications={[makeNotification()]}
+        onSwitchSession={onSwitchSession}
+        isSessionStarting={() => true}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'My Session' })).toBeNull()
+    fireEvent.click(screen.getByTestId('notification-banner-session-name'))
+    expect(onSwitchSession).not.toHaveBeenCalled()
+    const marker = screen.getByTestId('notification-banner-session-starting')
+    expect(marker.textContent).toBe('Starting…')
+    expect(marker.getAttribute('role')).toBe('status')
+    expect(screen.queryByTestId('notification-banner-session-gone')).toBeNull()
+  })
+
+  it('CONTROL: an ordinary listed session keeps its button and switches', () => {
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationBanners
+        {...props()}
+        notifications={[makeNotification()]}
+        onSwitchSession={onSwitchSession}
+        isSessionStarting={() => false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'My Session' }))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-1')
+    expect(screen.queryByTestId('notification-banner-session-starting')).toBeNull()
+  })
+})

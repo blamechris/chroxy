@@ -2036,7 +2036,7 @@ describe('checkpoint_restored handler', () => {
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 's2' });
 
-    expect(switchSession).toHaveBeenCalledWith('s2', { serverNotify: false, haptic: false });
+    expect(switchSession).toHaveBeenCalledWith('s2', { serverNotify: false, haptic: false, allowStarting: true });
   });
 
   it('does not call switchSession when newSessionId is missing', () => {
@@ -2330,7 +2330,7 @@ describe('client_focus_changed follow mode', () => {
       timestamp: Date.now(),
     });
 
-    expect(store.getState().switchSession).toHaveBeenCalledWith('s2');
+    expect(store.getState().switchSession).toHaveBeenCalledWith('s2', { allowStarting: true });
   });
 
   it('does NOT auto-switch when followMode is false', () => {
@@ -7518,7 +7518,7 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
       name: 'Rewind: Before refactor',
       ...restored,
     });
-    expect(switchSession).toHaveBeenCalledWith(newSid, { serverNotify: false, haptic: false });
+    expect(switchSession).toHaveBeenCalledWith(newSid, { serverNotify: false, haptic: false, allowStarting: true });
     // The switch round trip: session_switched, then a forced-full replay.
     _testMessageHandler.handle({ type: 'session_switched', sessionId: newSid, name: 'Rewind: Before refactor' });
     _testMessageHandler.handle({ type: 'claude_ready', sessionId: newSid });

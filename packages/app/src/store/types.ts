@@ -570,7 +570,12 @@ export interface CreateSessionOptions {
  * convenience accessor for the active session's state.
  */
 export interface MultiClientSessionActions {
-  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
+  /**
+   * #8875 — refuses (returns without switching) a LISTED session that is still
+   * `starting`. `allowStarting` is the opt-out for machine callers (checkpoint
+   * restore, follow-mode, permission auto-switch); greppable by that name.
+   */
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean; allowStarting?: boolean }) => void;
   /**
    * #5589 / #5281 — request primary (driver) ownership of a shared session.
    * `force` overrides the current owner (operator-driven take-over). The

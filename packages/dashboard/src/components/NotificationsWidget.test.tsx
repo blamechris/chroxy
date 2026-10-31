@@ -706,3 +706,41 @@ describe('NotificationsWidget — end-to-end: viewing decrements unread', () => 
     expect(screen.getByTestId('notifications-widget-badge')).toHaveTextContent('1')
   })
 })
+
+describe('#8875 — a LISTED but starting session offers no jump', () => {
+  function renderWidget(starting: boolean) {
+    const onSwitchSession = vi.fn()
+    const onMarkRead = vi.fn()
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1' })]}
+        onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
+        isSessionStarting={() => starting}
+        onMarkRead={onMarkRead}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    return { onSwitchSession, onMarkRead }
+  }
+
+  it('starting: shows the Starting marker, marks read, never switches', () => {
+    const { onSwitchSession, onMarkRead } = renderWidget(true)
+    const marker = screen.getByTestId('notifications-widget-item-starting-n-1')
+    expect(marker.textContent).toBe('Starting…')
+    expect(marker.getAttribute('role')).toBe('status')
+    expect(screen.queryByTestId('notifications-widget-item-gone-n-1')).toBeNull()
+    fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
+    expect(onMarkRead).toHaveBeenCalledWith('n-1')
+    expect(onSwitchSession).not.toHaveBeenCalled()
+  })
+
+  it('CONTROL: an ordinary listed session switches and shows no marker', () => {
+    const { onSwitchSession } = renderWidget(false)
+    expect(screen.queryByTestId('notifications-widget-item-starting-n-1')).toBeNull()
+    fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-1')
+  })
+})

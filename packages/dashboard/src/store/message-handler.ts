@@ -1774,7 +1774,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // client backs with `sessionStates` — a map that outlives the session — so
   // follow-mode looked guarded while still being able to walk onto a session
   // this client no longer has a tab for.
-  switchSession: (sessionId) => void getStore().getState().switchSession(sessionId),
+  // #8875 — `allowStarting`: a peer already focused it, so follow-mode mirrors
+  // that rather than being refused by the operator-door starting check.
+  switchSession: (sessionId) => void getStore().getState().switchSession(sessionId, { allowStarting: true }),
   // #7728 — the dashboard-only `extendModelsPatch` hook is gone: the provider
   // tag is now part of the SHARED `modelsByProvider` write, so both clients key
   // rosters by provider instead of one of them tracking a tag the other ignored.

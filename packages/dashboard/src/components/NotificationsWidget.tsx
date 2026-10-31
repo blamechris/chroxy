@@ -105,6 +105,13 @@ export interface NotificationsWidgetProps {
    * a second `.some()` written at the call site (#7475).
    */
   isSessionListed: (sessionId: string) => boolean
+  /**
+   * #8875 — OPTIONAL (defaults to "never starting"): a listed session whose
+   * provider start has not settled is refused by `switchSession`, so the row
+   * must not offer the jump (#7516). Supply `isSessionStarting` from
+   * `@chroxy/store-core` over the same `sessions` array.
+   */
+  isSessionStarting?: (sessionId: string) => boolean
   onMarkRead: (notificationId: string) => void
   onMarkAllRead: () => void
   onDismiss: (notificationId: string) => void
@@ -175,6 +182,7 @@ export function NotificationsWidget({
   notifications,
   onSwitchSession,
   isSessionListed,
+  isSessionStarting = () => false,
   onMarkRead,
   onMarkAllRead,
   onDismiss,
@@ -385,7 +393,11 @@ export function NotificationsWidget({
                 // gate cannot be applied to one and forgotten on the other.
                 // That split is how a guard ends up "correct for every input it
                 // sees and never reached by the rest" (#7262).
-                const listed = isSessionListed(n.sessionId)
+                const exists = isSessionListed(n.sessionId)
+                // #8875 — listed-but-starting is not openable either: same
+                // non-interactive treatment, different marker.
+                const starting = exists && isSessionStarting(n.sessionId)
+                const listed = exists && !starting
                 const activate = () => {
                   onMarkRead(n.id)
                   // The jump is what the gate drops — NOT the acknowledgement
@@ -485,7 +497,16 @@ export function NotificationsWidget({
                       <span className="notifications-widget-item-message">
                         {n.message}
                       </span>
-                      {!listed && (
+                      {starting && (
+                        <span
+                          className="notifications-widget-item-gone"
+                          data-testid={`notifications-widget-item-starting-${n.id}`}
+                          role="status"
+                        >
+                          Starting…
+                        </span>
+                      )}
+                      {!exists && (
                         // INSIDE the button on purpose: it becomes part of the
                         // row's accessible name, so a screen-reader user is told
                         // the jump is gone at the moment they land on the row

@@ -78,6 +78,8 @@ export interface AppHeaderProps {
   // Named for the surface rather than the prop so it reads unambiguously beside
   // the header's other session props.
   isNotificationSessionListed: ComponentProps<typeof NotificationsWidget>['isSessionListed']
+  /** #8875 — optional; see NotificationsWidget's `isSessionStarting`. */
+  isNotificationSessionStarting?: ComponentProps<typeof NotificationsWidget>['isSessionStarting']
   onMarkNotificationRead: ComponentProps<typeof NotificationsWidget>['onMarkRead']
   onMarkAllNotificationsRead: ComponentProps<typeof NotificationsWidget>['onMarkAllRead']
   onDismissNotification: ComponentProps<typeof NotificationsWidget>['onDismiss']
@@ -288,6 +290,7 @@ export function AppHeader(props: AppHeaderProps) {
           notifications={props.sessionNotifications}
           onSwitchSession={props.onSwitchSession}
           isSessionListed={props.isNotificationSessionListed}
+          isSessionStarting={props.isNotificationSessionStarting}
           onMarkRead={props.onMarkNotificationRead}
           onMarkAllRead={props.onMarkAllNotificationsRead}
           onDismiss={props.onDismissNotification}
