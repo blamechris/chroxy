@@ -772,6 +772,18 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('session_start_settled event (#8872)', () => {
+    it('refreshes the session list so a session listed as starting becomes openable', () => {
+      const broadcastSessionList = mock.fn()
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_start_settled', { sessionId: 'sess-1' })
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'session list re-broadcast once')
+    })
+  })
+
   describe('session_persist_failed event (#5714)', () => {
     it('broadcasts a persist failure to all clients', () => {
       const ctx = makeCtx()

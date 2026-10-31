@@ -136,6 +136,46 @@ describe('Sidebar', () => {
     expect(onSessionClick).toHaveBeenCalledWith('s2')
   })
 
+  // #8872: a session whose provider start has not settled is listed but not
+  // openable — a restore whose start rejects is re-parked, and opening it in
+  // the meantime landed on "Session not found".
+  describe('starting session (#8872)', () => {
+    function renderWithStarting(onSessionClick: (id: string) => void) {
+      const repos = makeRepos([{
+        activeSessions: [
+          { sessionId: 's1', name: 'Backend', isBusy: false },
+          { sessionId: 's2', name: 'Restoring', isBusy: false, starting: true },
+        ],
+      }])
+      return renderSidebar({ repos, onSessionClick })
+    }
+
+    it('renders the row as disabled with a starting dot', () => {
+      renderWithStarting(vi.fn())
+      const row = screen.getByTestId('session-item-s2')
+      expect(row).toHaveAttribute('aria-disabled', 'true')
+      expect(row).toHaveClass('starting')
+      expect(row.querySelector('.sidebar-session-dot.status-starting')).toBeInTheDocument()
+      // CONTROL: an ordinary row carries none of it.
+      expect(screen.getByTestId('session-item-s1')).not.toHaveAttribute('aria-disabled')
+    })
+
+    it('does not open on click or Enter, while an ordinary row still does', () => {
+      const onSessionClick = vi.fn()
+      renderWithStarting(onSessionClick)
+      const row = screen.getByTestId('session-item-s2')
+      fireEvent.click(row)
+      row.focus()
+      fireEvent.keyDown(screen.getByRole('tree'), { key: 'Enter' })
+      expect(onSessionClick).not.toHaveBeenCalled()
+
+      // CONTROL: the same handler fires for the openable row, so the silence
+      // above is the gate and not a dead handler.
+      fireEvent.click(screen.getByTestId('session-item-s1'))
+      expect(onSessionClick).toHaveBeenCalledWith('s1')
+    })
+  })
+
   it('calls onResumeSession when resumable session clicked', () => {
     const onResumeSession = vi.fn()
     renderSidebar({ onResumeSession })

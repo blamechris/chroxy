@@ -1232,6 +1232,18 @@ a.dev-preview-chip__link:focus-visible {
   background: var(--warning-fg, #fbbf24);
 }
 
+/* #8872 — the provider's start has not settled: a hollow dot and a dimmed,
+   non-interactive row, so it reads as "not ready" rather than idle. */
+.sidebar-session-dot.status-starting {
+  background: transparent;
+  border: 1px solid var(--text-muted);
+}
+
+.sidebar-session-item.starting {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .sidebar-resumable-dot {
   width: 6px;
   height: 6px;

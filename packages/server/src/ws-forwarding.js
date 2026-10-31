@@ -440,6 +440,13 @@ function setupSessionForwarding(normalizer, ctx) {
     if (ctx.broadcastSessionList) ctx.broadcastSessionList()
   }))
 
+  // #8872: a session whose async start() was still settling went out in
+  // `session_list` as `starting`; once the start resolves, re-send the list so
+  // every client can open it.
+  sessionManager.on('session_start_settled', safeForward('session_start_settled', () => {
+    if (ctx.broadcastSessionList) ctx.broadcastSessionList()
+  }))
+
   // Persist failures — surface to clients so the user knows a session-list
   // mutation (create/rename/destroy) did NOT make it to disk and will be lost on
   // restart, instead of silently believing it was saved (#5714 / #5701). The

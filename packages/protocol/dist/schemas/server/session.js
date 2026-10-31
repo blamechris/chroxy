@@ -174,6 +174,11 @@ export const ServerSessionListEntrySchema = z.object({
     cwd: z.string().optional(),
     model: z.string().nullable().optional(),
     permissionMode: z.string().optional(),
+    // #8872: the provider's async start() has not settled, so the session is not
+    // yet openable — and a restore whose start rejects is re-parked and leaves
+    // the list. A list refresh follows when the start resolves. Optional because
+    // older servers omit it; consumers treat `undefined` as `false`.
+    starting: z.boolean().optional(),
     isBusy: z.boolean().optional(),
     // #8302: WHY the session is busy, beside the unchanged `isBusy`. `isBusy`
     // merges "the model is mid-turn" with "the model is idle but a background

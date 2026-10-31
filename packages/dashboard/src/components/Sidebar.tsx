@@ -31,6 +31,10 @@ export interface ActiveSessionNode {
   name: string
   isBusy: boolean
   status?: SessionVisualStatus
+  // #8872: the provider's start has not settled, so the row is shown but cannot
+  // be opened yet — a restore whose start rejects is re-parked and leaves the
+  // list instead of becoming a "Session not found".
+  starting?: boolean
   provider?: string
   worktree?: boolean
   // #3567: latched stdin-forwarding-disabled flag from session_list
@@ -1026,14 +1030,16 @@ export function Sidebar({
                       {/* Active sessions */}
                       {repo.activeSessions.map(session => {
                         const status = session.status ?? (session.isBusy ? 'working' : 'idle')
-                        const statusTitle = status === 'working'
+                        const statusTitle = session.starting
+                          ? 'Session starting — not ready to open yet'
+                          : status === 'working'
                           ? 'Session working — response, tool, or agent active'
                           : status === 'stale'
                             ? 'Session stale — idle for 1 hour or more'
                             : 'Session idle — ready for input'
                         const isDraggingThis = dragSession?.sessionId === session.sessionId
                         const sessionDragOver = dragOverSession?.sessionId === session.sessionId ? dragOverSession.position : null
-                        const sessionItemClass = `sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}${isDraggingThis ? ' dragging' : ''}${sessionDragOver ? ` drop-${sessionDragOver}` : ''}`
+                        const sessionItemClass = `sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}${isDraggingThis ? ' dragging' : ''}${sessionDragOver ? ` drop-${sessionDragOver}` : ''}${session.starting ? ' starting' : ''}`
                         return (
                           <div
                             key={session.sessionId}
@@ -1042,6 +1048,7 @@ export function Sidebar({
                             tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
                             className={sessionItemClass}
                             data-testid={`session-item-${session.sessionId}`}
+                            aria-disabled={session.starting ? true : undefined}
                             // #4832: same filter guard as repo rows — order
                             // changes during a filter would persist a
                             // confusing partial ordering.
@@ -1052,7 +1059,10 @@ export function Sidebar({
                             // assistive tech, only set when the shortcut
                             // is functionally wired on this row).
                             aria-keyshortcuts={!!onReorderSessions && !filter ? reorderAriaKeyshortcuts : undefined}
-                            onClick={() => onSessionClick(session.sessionId)}
+                            // #8872: a starting row is not openable. Enter on the
+                            // focused row also lands here (the tree's keydown
+                            // calls `.click()`), so this is the one gate.
+                            onClick={() => { if (!session.starting) onSessionClick(session.sessionId) }}
                             onContextMenu={e => {
                               // #4372: stopPropagation so the right-click
                               // does not bubble to the outer .sidebar-repo
@@ -1088,7 +1098,7 @@ export function Sidebar({
                             onDrop={handleSessionDrop(repo.path, session.sessionId)}
                             onDragEnd={handleSessionDragEnd}
                           >
-                            <span className={`sidebar-session-dot status-${status}`} title={statusTitle} />
+                            <span className={`sidebar-session-dot status-${session.starting ? 'starting' : status}`} title={statusTitle} />
                             <span className="sidebar-session-name">{session.name}</span>
                             {session.worktree && (
                               <span className="sidebar-worktree-badge" title="Isolated git worktree">

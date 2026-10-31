@@ -82,6 +82,7 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     cwd: z.ZodOptional<z.ZodString>;
     model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     permissionMode: z.ZodOptional<z.ZodString>;
+    starting: z.ZodOptional<z.ZodBoolean>;
     isBusy: z.ZodOptional<z.ZodBoolean>;
     busyReason: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
         turn: "turn";
@@ -213,6 +214,7 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         cwd: z.ZodOptional<z.ZodString>;
         model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         permissionMode: z.ZodOptional<z.ZodString>;
+        starting: z.ZodOptional<z.ZodBoolean>;
         isBusy: z.ZodOptional<z.ZodBoolean>;
         busyReason: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
             turn: "turn";

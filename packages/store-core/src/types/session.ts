@@ -96,6 +96,12 @@ export interface SessionInfo {
   hasTerminal: boolean;
   model: string | null;
   permissionMode: string | null;
+  /**
+   * #8872: the provider's start() has not settled, so the session is not yet
+   * openable (a restore may still be re-parked). `undefined` from a server that
+   * predates the field — treat it as `false`.
+   */
+  starting?: boolean;
   isBusy: boolean;
   createdAt: number;
   /**
