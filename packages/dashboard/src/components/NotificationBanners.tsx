@@ -184,12 +184,12 @@ export interface NotificationBannersProps {
    */
   isSessionListed: (sessionId: string) => boolean
   /**
-   * #8875 — OPTIONAL (defaults to "never starting"): a LISTED session whose
+   * #8875 — REQUIRED, like `isSessionListed`, so a mount cannot forget it (#7262): a LISTED session whose
    * provider start has not settled is refused by `switchSession`, so the row
    * must not offer the jump either (#7516: looks clickable ⟺ will work). Supply
    * `isSessionStarting` from `@chroxy/store-core` over the same `sessions` array.
    */
-  isSessionStarting?: (sessionId: string) => boolean
+  isSessionStarting: (sessionId: string) => boolean
 }
 
 export function NotificationBanners({
@@ -201,7 +201,7 @@ export function NotificationBanners({
   onSwitchSession,
   permissionStatus,
   isSessionListed,
-  isSessionStarting = () => false,
+  isSessionStarting,
 }: NotificationBannersProps) {
   // #7474 — a refused click must be VISIBLE, not merely harmless.
   //

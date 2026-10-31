@@ -79,7 +79,7 @@ export interface AppHeaderProps {
   // the header's other session props.
   isNotificationSessionListed: ComponentProps<typeof NotificationsWidget>['isSessionListed']
   /** #8875 — optional; see NotificationsWidget's `isSessionStarting`. */
-  isNotificationSessionStarting?: ComponentProps<typeof NotificationsWidget>['isSessionStarting']
+  isNotificationSessionStarting: ComponentProps<typeof NotificationsWidget>['isSessionStarting']
   onMarkNotificationRead: ComponentProps<typeof NotificationsWidget>['onMarkRead']
   onMarkAllNotificationsRead: ComponentProps<typeof NotificationsWidget>['onMarkAllRead']
   onDismissNotification: ComponentProps<typeof NotificationsWidget>['onDismiss']

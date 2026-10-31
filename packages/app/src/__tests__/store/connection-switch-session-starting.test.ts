@@ -63,6 +63,21 @@ describe('mobile switchSession and a starting session (#8875)', () => {
     expect(switches(send)).toHaveLength(1);
   });
 
+  it('the permission auto-switch still lands on a starting session that is asking', () => {
+    const { send } = seed();
+    useConnectionStore.setState({
+      sessionNotifications: [
+        { id: 'n1', sessionId: 's', sessionName: 's', eventType: 'permission', message: 'm', timestamp: 1, requestId: 'r1' },
+      ],
+    } as never);
+    // Precondition: the plain door refuses this id, so the landing below is the opt-out.
+    useConnectionStore.getState().switchSession('s');
+    expect(useConnectionStore.getState().activeSessionId).toBe('a');
+    useConnectionStore.getState().sendPermissionResponse('r1', 'allow');
+    expect(useConnectionStore.getState().activeSessionId).toBe('s');
+    expect(switches(send)).toHaveLength(1);
+  });
+
   it('the already-active id is a no-op even when it is starting', () => {
     seed();
     useConnectionStore.setState({ activeSessionId: 's' } as never);

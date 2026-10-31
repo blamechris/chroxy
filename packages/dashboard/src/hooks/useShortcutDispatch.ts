@@ -308,10 +308,16 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
           case 'session.next': {
             const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
             if (currentIdx < 0) break
-            const nextIdx = matchedId === 'session.prev'
-              ? (currentIdx - 1 + sessions.length) % sessions.length
-              : (currentIdx + 1) % sessions.length
-            handleSwitchSession(sessions[nextIdx]!.sessionId)
+            // #8875 — step PAST a starting neighbour: the door refuses it, so
+            // landing on it would leave the cycle stuck in that direction.
+            const step = matchedId === 'session.prev' ? -1 : 1
+            for (let i = 1; i < sessions.length; i++) {
+              const candidate = sessions[(currentIdx + step * i + sessions.length * i) % sessions.length]!
+              if (!candidate.starting) {
+                handleSwitchSession(candidate.sessionId)
+                break
+              }
+            }
             break
           }
           case 'session.togglePlanMode': {

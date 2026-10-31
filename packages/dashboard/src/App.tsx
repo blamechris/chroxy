@@ -34,11 +34,11 @@ import {
   recoverRejectedComposer,
   ComposerRecoveryQueue,
   nextMessageId,
+  isSessionStarting,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
-import { isSessionStarting } from '@chroxy/store-core'
 import type { SessionNotification } from './store/types'
 import { isSessionListed } from './store/utils'
 
@@ -1172,9 +1172,11 @@ export function App() {
     // only part of the surface. If a later change makes a refusal worth SAYING, say it here off
     // the boolean; nothing structural is in the way.
     //
-    // #8875 — the door now also refuses a LISTED session that is still `starting`;
-    // those surfaces read "Starting…" instead of "No longer open", and a refusal
-    // here is just as inert (the `false` return below).
+    // #8875 — the store door also refuses a LISTED session that is still
+    // `starting`. The notification surfaces read "Starting…" for it instead of
+    // "No longer open", and that refusal is just as inert here (the `false`
+    // return below).
+    //
     // ONE membership implementation, and it stays the store's (#7475/#7511).
     // The handler does not re-ask `isSessionListed`: a second reading here is
     // the copy that drifts from the door it mirrors.

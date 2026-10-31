@@ -62,6 +62,7 @@ function ui(notifications: SessionNotification[]) {
       onSwitchSession={vi.fn()}
       permissionStatus={() => 'actionable'}
       isSessionListed={() => true}
+      isSessionStarting={() => false}
     />
   )
 }

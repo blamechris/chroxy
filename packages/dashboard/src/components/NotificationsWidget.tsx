@@ -106,12 +106,12 @@ export interface NotificationsWidgetProps {
    */
   isSessionListed: (sessionId: string) => boolean
   /**
-   * #8875 — OPTIONAL (defaults to "never starting"): a listed session whose
+   * #8875 — REQUIRED, like `isSessionListed`, so a mount cannot forget it (#7262): a listed session whose
    * provider start has not settled is refused by `switchSession`, so the row
    * must not offer the jump (#7516). Supply `isSessionStarting` from
    * `@chroxy/store-core` over the same `sessions` array.
    */
-  isSessionStarting?: (sessionId: string) => boolean
+  isSessionStarting: (sessionId: string) => boolean
   onMarkRead: (notificationId: string) => void
   onMarkAllRead: () => void
   onDismiss: (notificationId: string) => void
@@ -182,7 +182,7 @@ export function NotificationsWidget({
   notifications,
   onSwitchSession,
   isSessionListed,
-  isSessionStarting = () => false,
+  isSessionStarting,
   onMarkRead,
   onMarkAllRead,
   onDismiss,

@@ -126,6 +126,7 @@ describe('#7473 — the measurement itself', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const label = document.querySelector('.notification-banner-type')!
@@ -147,6 +148,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const buttons = bannerButtons()
@@ -176,6 +178,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'disconnected'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const buttons = bannerButtons()
@@ -199,6 +202,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'not-pending'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const buttons = bannerButtons()
@@ -220,6 +224,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const buttons = bannerButtons()
@@ -249,6 +254,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => false}
+        isSessionStarting={() => false}
       />,
     )
     const buttons = bannerButtons()
@@ -276,6 +282,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />,
     )
     const row = document.querySelector('.notification-banner')!

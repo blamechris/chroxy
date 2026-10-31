@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
+import { isSessionStarting } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import type { SessionNotification } from '../store/connection';
@@ -31,6 +32,9 @@ function NotificationRow({ notification }: { notification: SessionNotification }
   // connection, like the in-bubble buttons. The server expires the pending
   // request on disconnect, so answering from a cached banner can't land.
   const connected = useConnectionLifecycleStore((s) => s.connectionPhase === 'connected');
+  // #8875 — `switchSession` refuses a starting session, so the row must not
+  // offer that jump (#7516: looks tappable ⟺ will work).
+  const starting = useConnectionStore((s) => isSessionStarting(s.sessions, notification.sessionId));
 
   const dotColor =
     notification.eventType === 'error' ? COLORS.accentRed :
@@ -130,10 +134,11 @@ function NotificationRow({ notification }: { notification: SessionNotification }
     <View style={styles.row}>
       <TouchableOpacity
         style={styles.rowContent}
-        onPress={() => switchSession(notification.sessionId)}
+        onPress={starting ? undefined : () => switchSession(notification.sessionId)}
         activeOpacity={0.7}
         accessibilityRole="button"
-        accessibilityLabel={`Switch to ${notification.sessionName}`}
+        accessibilityLabel={starting ? `${notification.sessionName}, starting` : `Switch to ${notification.sessionName}`}
+        accessibilityState={{ disabled: starting }}
       >
         <View style={[styles.dot, { backgroundColor: dotColor }]} />
         <Text style={styles.sessionName} numberOfLines={1}>

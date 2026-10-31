@@ -75,9 +75,10 @@ export function BackgroundSessionProgress() {
       const label = getActivityLabel(activity.state, activity.detail);
       if (!label) return null;
       const color = getActivityColor(activity.state);
-      return { sessionId: s.sessionId, name: s.name, label, color, startedAt: activity.startedAt };
+      // #8875 — a starting session is listed but `switchSession` refuses it.
+      return { sessionId: s.sessionId, name: s.name, label, color, startedAt: activity.startedAt, starting: s.starting === true };
     })
-    .filter(Boolean) as { sessionId: string; name: string; label: string; color: string; startedAt: number }[];
+    .filter(Boolean) as { sessionId: string; name: string; label: string; color: string; startedAt: number; starting: boolean }[];
 
   if (busySessions.length === 0) return null;
 
@@ -87,10 +88,11 @@ export function BackgroundSessionProgress() {
         <TouchableOpacity
           key={s.sessionId}
           style={styles.row}
-          onPress={() => switchSession(s.sessionId)}
+          onPress={s.starting ? undefined : () => switchSession(s.sessionId)}
           activeOpacity={0.7}
           accessibilityRole="button"
-          accessibilityLabel={`${s.name}: ${s.label}. Tap to switch.`}
+          accessibilityLabel={s.starting ? `${s.name}: ${s.label}. Starting.` : `${s.name}: ${s.label}. Tap to switch.`}
+          accessibilityState={{ disabled: s.starting }}
         >
           <View style={[styles.dot, { backgroundColor: s.color }]} />
           <Text style={styles.name} numberOfLines={1}>{s.name}</Text>

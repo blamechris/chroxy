@@ -68,3 +68,55 @@ describe.each([
     act(() => tree.unmount());
   });
 });
+
+jest.mock('../../store/connection-lifecycle', () => ({
+  useConnectionLifecycleStore: (selector: (s: StoreState) => unknown) => selector({ connectionPhase: 'connected' }),
+}));
+
+import { SessionNotificationBanner } from '../SessionNotificationBanner';
+import { BackgroundSessionProgress } from '../BackgroundSessionProgress';
+
+describe('cross-session rows and a starting session (#8875)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('SessionNotificationBanner: a starting session row drops the jump; an ordinary row switches', () => {
+    const switchSession = jest.fn();
+    seed(switchSession);
+    mockState.sessionNotifications = [
+      { id: 'n1', sessionId: 's', sessionName: 'Booting', eventType: 'completed', message: 'm', timestamp: 1 },
+      { id: 'n2', sessionId: 'ok', sessionName: 'Ordinary', eventType: 'completed', message: 'm', timestamp: 2 },
+    ];
+    mockState.dismissSessionNotification = () => {};
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(<SessionNotificationBanner />); });
+    const starting = find(tree, 'Booting');
+    expect(starting.props.onPress).toBeUndefined();
+    expect(starting.props.accessibilityState.disabled).toBe(true);
+    expect(starting.props.accessibilityLabel).toContain('starting');
+    const ordinary = find(tree, 'Switch to Ordinary');
+    expect(ordinary.props.accessibilityState.disabled).toBe(false);
+    act(() => { ordinary.props.onPress(); });
+    expect(switchSession).toHaveBeenCalledWith('ok');
+    expect(switchSession).not.toHaveBeenCalledWith('s');
+    act(() => tree.unmount());
+  });
+
+  it('BackgroundSessionProgress: a starting session row drops the jump; an ordinary row switches', () => {
+    const switchSession = jest.fn();
+    seed(switchSession);
+    const busy = { activityState: { state: 'busy', startedAt: 1 } };
+    mockState.sessionStates = { s: busy, ok: busy };
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(<BackgroundSessionProgress />); });
+    const starting = find(tree, 'Booting');
+    expect(starting.props.onPress).toBeUndefined();
+    expect(starting.props.accessibilityState.disabled).toBe(true);
+    const ordinary = find(tree, 'Ordinary');
+    expect(ordinary.props.accessibilityState.disabled).toBe(false);
+    act(() => { ordinary.props.onPress(); });
+    expect(switchSession).toHaveBeenCalledWith('ok');
+    expect(switchSession).not.toHaveBeenCalledWith('s');
+    act(() => tree.unmount());
+  });
+});

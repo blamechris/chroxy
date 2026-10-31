@@ -507,7 +507,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // Use the CR-aware `isActive`: while the Control Room is the
               // focused view, even the underlying-active session should fire
               // onSwitch so clicking it returns from the CR to that session.
-              if (!isActive && !session.starting) onSwitch(session.sessionId)
+              // #8875 — a starting tab is not a way INTO its session, but the
+              // underlying-active one (the creating client lands on its own
+              // starting session) is still the way back out of the CR, so the
+              // starting guard only applies to a session that is not active.
+              if (!isActive && (session.isActive || !session.starting)) onSwitch(session.sessionId)
             }}
             onKeyDown={e => {
               if (renamingId === session.sessionId) return
@@ -587,7 +591,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               }
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
-                if (!isActive && !session.starting) onSwitch(session.sessionId)
+                if (!isActive && (session.isActive || !session.starting)) onSwitch(session.sessionId)
               } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                 e.preventDefault()
                 const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>('[role="tab"]')

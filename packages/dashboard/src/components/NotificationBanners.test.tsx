@@ -41,6 +41,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -57,6 +58,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('My Session')).toBeInTheDocument()
@@ -74,6 +76,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByRole('button', { name: /allow/i })).toBeInTheDocument()
@@ -92,6 +95,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /allow/i }))
@@ -110,6 +114,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /deny/i }))
@@ -127,6 +132,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.queryByRole('button', { name: /allow/i })).not.toBeInTheDocument()
@@ -145,6 +151,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
@@ -163,6 +170,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     fireEvent.click(screen.getByText('My Session'))
@@ -187,6 +195,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     // Should show 3 banners + overflow indicator
@@ -208,6 +217,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText(/Session crashed/)).toBeInTheDocument()
@@ -224,6 +234,7 @@ describe('NotificationBanners', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByRole('log')).toBeInTheDocument()
@@ -250,6 +261,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -269,6 +281,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('Unread Session')).toBeInTheDocument()
@@ -296,6 +309,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onMarkRead={vi.fn()}
         permissionStatus={() => 'actionable' as const}
         isSessionListed={() => true}
+        isSessionStarting={() => false}
       />
     )
     expect(screen.getByText('Session 1')).toBeInTheDocument()
