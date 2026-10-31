@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import fs, { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -21,6 +22,26 @@ import {
 const CWD = '/work/project'
 const floored = (tool, file_path) => isFlooredTarget(tool, { file_path }, CWD)
 const time = (fn) => { const t0 = Date.now(); const value = fn(); return { value, ms: Date.now() - t0 } }
+
+// The filesystem calls the floor makes while `fn` runs, by function. The floor
+// imports these by name, so the counting wrappers reach it through
+// syncBuiltinESMExports. A count, unlike a duration, is the same on every runner.
+const FS_CALLS = ['realpathSync', 'lstatSync', 'readlinkSync']
+const countFsCalls = (fn) => {
+  const calls = Object.fromEntries(FS_CALLS.map((name) => [name, 0]))
+  const originals = FS_CALLS.map((name) => fs[name])
+  FS_CALLS.forEach((name, k) => {
+    fs[name] = function (...args) { calls[name]++; return originals[k].apply(this, args) }
+  })
+  syncBuiltinESMExports()
+  try {
+    const value = fn()
+    return { value, calls, total: FS_CALLS.reduce((sum, name) => sum + calls[name], 0) }
+  } finally {
+    FS_CALLS.forEach((name, k) => { fs[name] = originals[k] })
+    syncBuiltinESMExports()
+  }
+}
 
 // Under the component bound but over the byte bound: 250-byte names.
 const longNames = (count) => 'zz/' + ('n'.repeat(250) + '/').repeat(count) + 'f'
@@ -202,12 +223,18 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     if (root) rmSync(root, { recursive: true, force: true })
   })
 
-  it('many targets under a deep, missing cwd are decided quickly', () => {
-    const cwd = join(root, ...Array.from({ length: 255 }, () => 'm'))
+  it('many targets under a deep, missing cwd resolve the cwd once', () => {
+    // Resolving the missing cwd costs a realpath per component up to `root`.
+    // Done once per call, the targets add a few calls each; done per target,
+    // FLOOR_MAX_CALL_TARGETS times as many.
+    const depth = 255
+    const cwd = join(root, ...Array.from({ length: depth }, () => 'm'))
     const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `f${i}.js`, kind: 'update' }))
-    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
+    const { value, calls, total } = countFsCalls(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
     assert.equal(value, false)
-    assert.ok(ms < 1000, `took ${ms} ms`)
+    // One realpath per missing component, and one for `root`, which exists.
+    assert.equal(calls.realpathSync, depth + 1, 'the cwd is resolved once per call')
+    assert.ok(total <= depth + 1 + 4 * FLOOR_MAX_CALL_TARGETS, `${total} filesystem calls for ${FLOOR_MAX_CALL_TARGETS} targets`)
   })
 
   it('one component walked past FLOOR_MAX_CALL_WALK floors', () => {
@@ -226,9 +253,11 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     mkdirSync(join(root, ...Array.from({ length: each - 1 }, () => 'd')), { recursive: true })
     const count = Math.floor(FLOOR_MAX_CALL_COMPONENTS / each) + 1
     const changes = Array.from({ length: count }, (_, i) => ({ path: 'd/'.repeat(each - 1) + `f${i}`, kind: 'update' }))
-    const { value, ms } = time(() => isFlooredTarget('apply_patch', { changes }, root))
+    const { value, calls, total } = countFsCalls(() => isFlooredTarget('apply_patch', { changes }, root))
     assert.equal(value, true)
-    assert.ok(ms < 20, `took ${ms} ms`)
+    assert.equal(total, 0, `filesystem calls: ${JSON.stringify(calls)}`)
+    // Control: one of the same targets, within the budget, is walked.
+    assert.ok(countFsCalls(() => isFlooredTarget('apply_patch', { changes: changes.slice(0, 1) }, root)).total > 0, 'premise: a walked target is counted')
   })
 
   it('many targets resolving through one long real directory are decided quickly', { skip: SKIP_NO_SYMLINK || SKIP_WIN32_TIMING }, () => {
