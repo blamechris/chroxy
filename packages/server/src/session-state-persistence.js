@@ -2,6 +2,7 @@ import fs from 'fs'
 import { dirname } from 'path'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { savedHasHistory } from './session-archive-limits.js'
 
 const log = createLogger('session-state-persistence')
 
@@ -221,7 +222,12 @@ export class SessionStatePersistence {
       const activityAt = (typeof saved.lastActivityAt === 'number' && saved.lastActivityAt > 0)
         ? saved.lastActivityAt
         : state.timestamp
-      if (activityAt && now - activityAt > this._stateTtlMs) {
+      // #8870 — a session with no history is restored at any age. Setting it
+      // aside would end in the archive skipping it (nothing to read), so it
+      // left the list with no record: the startup "Default" vanished after a
+      // restart. It holds only its name, cwd, provider and settings, so it is
+      // restored like a recent session and leaves the way any live one does.
+      if (activityAt && now - activityAt > this._stateTtlMs && savedHasHistory(saved)) {
         dropped.push(saved.name || saved.id || '<unknown>')
         stale.push(saved)
       } else {

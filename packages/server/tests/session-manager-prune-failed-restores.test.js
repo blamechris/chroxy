@@ -181,7 +181,7 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
       version: 1,
       timestamp: stale,
       // No environmentId — it would have restored fine, so it is merely stale.
-      sessions: [{ id: DEAD, name: 'Session 1', cwd: '/tmp', lastActivityAt: stale, history: [] }],
+      sessions: [{ id: DEAD, name: 'Session 1', cwd: '/tmp', lastActivityAt: stale, history: [{ role: 'user', content: 'x' }] }],
       costs: { [DEAD]: 4.25 },
       budgetPaused: [DEAD],
     }))
@@ -231,7 +231,7 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
       version: 1,
       timestamp: lastActivityAt,
       // No environmentId: this one would RESTORE fine, so the 24h policy applies.
-      sessions: [{ id: 'b'.repeat(32), name: 'Ordinary', cwd: '/tmp', lastActivityAt, history: [] }],
+      sessions: [{ id: 'b'.repeat(32), name: 'Ordinary', cwd: '/tmp', lastActivityAt, history: [{ role: 'user', content: 'x' }] }],
     }))
     sm = new SessionManager({ stateFilePath: statePath })
     let created = 0
@@ -343,6 +343,37 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
     assert.equal(sm.getFailedRestores().length, 0)
   })
 
+  it('a parked entry with NO history is never dropped: whichever path it takes, a refusal parks it again (#8870)', () => {
+    // #8870 keeps a history-less stale entry out of the set-aside list, so the
+    // marker branch above never sees it: it takes the ordinary restore path, as
+    // a parked entry under 24h always has. This pins only "never dropped", which
+    // holds on both paths; the RETRIED test below is the one that needs the fix.
+    const statePath = parkThenAge({ ageMs: 25 * HOUR, extra: { history: [] } })
+    sm = new SessionManager({ stateFilePath: statePath, environmentManager: envReporting('ctr-REBUILT') })
+    const events = []
+    sm.on('session_restore_failed', (e) => events.push(e))
+    sm.restoreState()
+    sm._flushPersist()
+    assert.equal(events.length, 1, 'the refusal was reported')
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE', 'refused by the container binding, deterministically')
+    assert.deepEqual(sm.getFailedRestores().map(f => f.name), ['Parked'], 'still in the Failed restores list')
+    const disk = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(disk.sessions.length, 1, 'still on disk after the write')
+    assert.equal(typeof disk.sessions[0].failedRestore?.code, 'string', 'and stamped parked again')
+  })
+
+  it('a parked entry with NO history is RETRIED at boot once its cause clears (#8870)', () => {
+    // The guard for the test above: under the 24h set-aside path a marker kept
+    // it parked with no attempt at all; on the ordinary path it is attempted.
+    const statePath = parkThenAge({ ageMs: 25 * HOUR, extra: { history: [] } })
+    sm = new SessionManager({ stateFilePath: statePath, environmentManager: envReporting('ctr-created') })
+    const attempted = []
+    sm.createSession = (opts) => { attempted.push(opts.name); throw Object.assign(new Error('stub'), { code: 'STUB' }) }
+    sm.restoreState()
+    assert.deepEqual(attempted, ['Parked'], 'the restore was attempted, not skipped as parked')
+    assert.deepEqual(sm.getFailedRestores().map(f => f.name), ['Parked'], 'and a failed attempt parks it again')
+  })
+
   it('CONTROL: a stale session that was never parked is still dropped', () => {
     dir = mkdtempSync(join(tmpdir(), 'chroxy-8858c-'))
     const statePath = join(dir, 'state.json')
@@ -394,7 +425,7 @@ describe('#8858 a parked failed restore survives the 24h staleness filter', () =
       const lastActivityAt = Date.now() - 25 * HOUR
       writeFileSync(statePath, JSON.stringify({
         version: 1, timestamp: lastActivityAt,
-        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [], failedRestore }],
+        sessions: [{ id: ID, name: 'Junk marker', cwd: '/tmp', lastActivityAt, history: [{ role: 'user', content: 'x' }], failedRestore }],
       }))
       const { events } = reboot(statePath)
       assert.deepEqual(events, [])

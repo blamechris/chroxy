@@ -511,10 +511,27 @@ describe('SessionManager.restoreState', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: staleTimestamp,
-      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ role: 'user', content: 'x' }] }],
     }))
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     assert.equal(mgr.restoreState(), null, 'State older than 24h should be rejected')
+  })
+
+  it('keeps an EMPTY session older than TTL, so "Default" survives a night off (#8870)', () => {
+    const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000 // 25 hours
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: staleTimestamp,
+      sessions: [{ name: 'Default', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: staleTimestamp, history: [] }],
+    }))
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId, 'an empty stale session is restored, not dropped unseen')
+    assert.deepEqual(mgr.listSessions().map(s => s.name), ['Default'])
+    mgr._flushPersist()
+    const disk = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.deepEqual(disk.sessions.map(s => s.name), ['Default'], 'and it stays on disk for the next boot')
+    mgr.destroyAll()
   })
 
   it('accepts state within TTL (23h old)', () => {
@@ -535,7 +552,7 @@ describe('SessionManager.restoreState', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: staleTimestamp,
-      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ role: 'user', content: 'x' }] }],
     }))
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
     assert.equal(mgr.restoreState(), null, 'State older than custom 5min TTL should be rejected')
