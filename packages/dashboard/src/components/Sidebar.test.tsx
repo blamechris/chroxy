@@ -136,6 +136,18 @@ describe('Sidebar', () => {
     expect(onSessionClick).toHaveBeenCalledWith('s2')
   })
 
+  // #8867: the Archived section sits below the project tree, outside it.
+  it('renders the Archived section after the project tree when open, and not when collapsed', () => {
+    const { container, unmount } = renderSidebar()
+    const tree = container.querySelector('.sidebar-tree') as HTMLElement
+    const toggle = screen.getByTestId('sidebar-archived-toggle')
+    expect(tree.contains(toggle)).toBe(false)
+    expect(Boolean(tree.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    unmount()
+    renderSidebar({ isOpen: false })
+    expect(screen.queryByTestId('sidebar-archived-toggle')).toBeNull()
+  })
+
   // #8872: a session whose provider start has not settled is listed but not
   // openable — a restore whose start rejects is re-parked, and opening it in
   // the meantime landed on "Session not found".

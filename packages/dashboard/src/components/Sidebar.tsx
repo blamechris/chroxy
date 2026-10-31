@@ -13,6 +13,7 @@ import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import { ViewersIndicator } from './ViewersIndicator'
 import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } from './SidebarPanelSlot'
+import { SidebarArchivedSection } from './SidebarArchivedSection'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
 import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
 import type { SearchResult, ConnectedClient, MonthlyBudgetState } from '../store/types'
@@ -1210,6 +1211,9 @@ export function Sidebar({
               )
             })}
           </div>
+
+          {/* #8867 — read-only Archived section; outside the role=tree keyboard navigation. */}
+          <SidebarArchivedSection />
 
           {/* #4303 — pluggable sidebar panel slot. SERVERS section
               stays BELOW the slot for v1 (rationale: ServerPicker has its

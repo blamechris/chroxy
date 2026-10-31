@@ -40,9 +40,37 @@ export function archiveReasonLabel(reason: string): string {
   return REASON_LABELS[reason] ?? reason;
 }
 
-function archivedAtLabel(archivedAt: number | null): string {
+/** When a record was archived, in the viewer's locale; a missing/invalid stamp is shown as unknown. */
+export function archivedAtLabel(archivedAt: number | null): string {
   if (typeof archivedAt !== 'number' || !Number.isFinite(archivedAt)) return 'Unknown time';
   return new Date(archivedAt).toLocaleString();
+}
+
+/** Shown when a pairing-bound device asks for the host's archive. */
+export const ARCHIVE_REFUSED_TEXT =
+  "This device is paired to a single session, so it cannot view the host's archived sessions. Open the dashboard with the primary token to manage them."
+
+export interface ArchivePolicy {
+  enabled: boolean
+  maxAgeDays: number
+  maxEntries: number
+  maxMegabytes: number
+}
+
+/** The retention-policy sentence, shared by the Control Room tab and the sidebar section. */
+export function ArchivePolicyNote({ policy, testId, className = 'aa-policy' }: { policy: ArchivePolicy; testId: string; className?: string }) {
+  return (
+    <p className={className} data-testid={testId}>
+      {policy.enabled ? (
+        <>
+          Ended sessions are kept here for up to {policy.maxAgeDays} days ({policy.maxEntries} sessions,{' '}
+          {policy.maxMegabytes} MB). Change or turn off with <code>sessionArchive</code> in the chroxy config.
+        </>
+      ) : (
+        <>Archiving is off — ended sessions are not kept. Existing archives stay until deleted or aged out.</>
+      )}
+    </p>
+  )
 }
 
 export function ArchivedSessionsSection() {
@@ -149,18 +177,7 @@ export function ArchivedSessionsSection() {
         </div>
       </div>
 
-      {policy && !refused ? (
-        <p className="aa-policy" data-testid="archived-sessions-policy">
-          {policy.enabled ? (
-            <>
-              Ended sessions are kept here for up to {policy.maxAgeDays} days ({policy.maxEntries} sessions,{' '}
-              {policy.maxMegabytes} MB). Change or turn off with <code>sessionArchive</code> in the chroxy config.
-            </>
-          ) : (
-            <>Archiving is off — ended sessions are not kept. Existing archives stay until deleted or aged out.</>
-          )}
-        </p>
-      ) : null}
+      {policy && !refused ? <ArchivePolicyNote policy={policy} testId="archived-sessions-policy" /> : null}
 
       {truncated && !refused ? (
         <p className="aa-policy" data-testid="archived-sessions-truncated">
@@ -178,8 +195,7 @@ export function ArchivedSessionsSection() {
 
       {refused ? (
         <p className="fr-empty" data-testid="archived-sessions-refused">
-          This device is paired to a single session, so it cannot view the host&apos;s archived
-          sessions. Open the dashboard with the primary token to manage them.
+          {ARCHIVE_REFUSED_TEXT}
         </p>
       ) : rows === null ? (
         // Not asked yet — never render "nothing archived" without a request behind it.

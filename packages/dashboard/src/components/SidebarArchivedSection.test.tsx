@@ -1,0 +1,286 @@
+/**
+ * SidebarArchivedSection — renderer tests (mocked store, like
+ * ArchivedSessionsSection.test.tsx). null → not asked yet · [] → nothing
+ * archived · refused → may not see: three different claims.
+ */
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import * as fs from 'fs'
+import * as path from 'path'
+import type { ServerArchivedSessionsListMessage } from '@chroxy/protocol'
+import type { HistoryPageView } from '../store/types'
+
+const state = {
+  archivedSessions: null as ServerArchivedSessionsListMessage | null,
+  archivedSessionsLoading: false,
+  connectionPhase: 'connected' as string,
+  archivedSessionHistories: {} as Record<string, HistoryPageView>,
+  requestArchivedSessions: vi.fn(() => true),
+  requestArchivedSessionHistory: vi.fn(() => true),
+  closeArchivedSessionHistory: vi.fn(),
+}
+
+vi.mock('../store/connection', () => ({
+  useConnectionStore: (selector: (s: unknown) => unknown) => selector(state),
+}))
+vi.mock('zustand/react/shallow', () => ({ useShallow: (fn: unknown) => fn }))
+
+import { SidebarArchivedSection } from './SidebarArchivedSection'
+
+// This repo's RTL has no auto-cleanup — a leaked tree fails the NEXT file.
+afterEach(() => {
+  cleanup()
+  state.archivedSessions = null
+  state.archivedSessionsLoading = false
+  state.connectionPhase = 'connected'
+  state.archivedSessionHistories = {}
+  vi.clearAllMocks()
+})
+
+const A = 'arch-aaaa'
+const B = 'arch-bbbb'
+const policy = { enabled: true, maxEntries: 200, maxAgeDays: 30, maxMegabytes: 256 }
+
+function row(archiveId: string, over: Record<string, unknown> = {}) {
+  return {
+    archiveId, sessionId: `sid-${archiveId}`, name: `Name ${archiveId}`, provider: 'claude', cwd: '/srv/work/chroxy',
+    model: null, reason: 'idle_timeout', archivedAt: Date.UTC(2026, 9, 1, 12, 0, 0), lastActivityAt: null,
+    createdAt: null, historyLength: 4, bytes: 100, ...over,
+  }
+}
+function snapshot(over: Partial<ServerArchivedSessionsListMessage> = {}): ServerArchivedSessionsListMessage {
+  return {
+    type: 'archived_sessions_list', generatedAt: '2026-10-01T00:00:00.000Z', policy, sessions: [row(A)], ...over,
+  } as ServerArchivedSessionsListMessage
+}
+const view = (over: Partial<HistoryPageView> = {}): HistoryPageView => ({
+  entries: [], total: 0, loading: false, pendingOffset: null, ...over,
+})
+const expand = () => fireEvent.click(screen.getByTestId('sidebar-archived-toggle'))
+
+describe('SidebarArchivedSection — collapse + fetch', () => {
+  it('is collapsed by default and sends nothing', () => {
+    render(<SidebarArchivedSection />)
+    expect(screen.getByTestId('sidebar-archived-toggle').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByTestId('sidebar-archived-section')).toBeNull()
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+  })
+
+  it('expanding while connected with no snapshot requests exactly once', () => {
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(screen.getByTestId('sidebar-archived-toggle').getAttribute('aria-expanded')).toBe('true')
+    expect(state.requestArchivedSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not request when a snapshot is already loaded', () => {
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not request while disconnected, and does when the connection returns', () => {
+    state.connectionPhase = 'disconnected'
+    const { rerender } = render(<SidebarArchivedSection />)
+    expand()
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+    state.connectionPhase = 'connected'
+    rerender(<SidebarArchivedSection />)
+    expect(state.requestArchivedSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-requests after the store resets the snapshot to null', () => {
+    state.archivedSessions = snapshot()
+    const { rerender } = render(<SidebarArchivedSection />)
+    expand()
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+    state.archivedSessions = null
+    state.connectionPhase = 'disconnected'
+    rerender(<SidebarArchivedSection />)
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+    state.connectionPhase = 'connected'
+    rerender(<SidebarArchivedSection />)
+    expect(state.requestArchivedSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not request while a request is already in flight', () => {
+    state.archivedSessionsLoading = true
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(state.requestArchivedSessions).not.toHaveBeenCalled()
+  })
+})
+
+describe('SidebarArchivedSection — states', () => {
+  it('shows Loading, never empty, before the first reply', () => {
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(screen.getByTestId('sidebar-archived-loading')).toBeTruthy()
+    expect(screen.queryByTestId('sidebar-archived-empty')).toBeNull()
+    expect(screen.getByTestId('sidebar-archived-toggle').textContent).toBe('▾Archived')
+  })
+
+  it('says so for a genuinely empty archive', () => {
+    state.archivedSessions = snapshot({ sessions: [] })
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(screen.getByTestId('sidebar-archived-empty')).toBeTruthy()
+    expect(screen.queryByTestId('sidebar-archived-loading')).toBeNull()
+    expect(screen.getByTestId('sidebar-archived-toggle').textContent).toContain('Archived (0)')
+  })
+
+  it('explains a refusal: no list, no policy, no count, not "empty"', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A)], refused: true })
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(screen.getByTestId('sidebar-archived-refused')).toBeTruthy()
+    expect(screen.queryByTestId('sidebar-archived-empty')).toBeNull()
+    expect(screen.queryByTestId('sidebar-archived-loading')).toBeNull()
+    expect(screen.queryByTestId('sidebar-archived-policy')).toBeNull()
+    expect(screen.queryByTestId(`sidebar-archived-row-${A}`)).toBeNull()
+    expect(screen.getByTestId('sidebar-archived-toggle').textContent).toBe('▾Archived')
+  })
+
+  it('renders the shared policy line (enabled and off)', () => {
+    state.archivedSessions = snapshot()
+    const { unmount } = render(<SidebarArchivedSection />)
+    expand()
+    const text = screen.getByTestId('sidebar-archived-policy').textContent ?? ''
+    expect(text.includes('Ended sessions are kept here for up to 30 days (200 sessions, 256 MB).')).toBe(true)
+    unmount()
+    state.archivedSessions = snapshot({ policy: { ...policy, enabled: false } })
+    render(<SidebarArchivedSection />)
+    expand()
+    expect((screen.getByTestId('sidebar-archived-policy').textContent ?? '').includes('Archiving is off')).toBe(true)
+  })
+
+  it('notes a truncated list', () => {
+    state.archivedSessions = snapshot({ truncated: true })
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(screen.getByTestId('sidebar-archived-truncated')).toBeTruthy()
+  })
+})
+
+describe('SidebarArchivedSection — rows', () => {
+  it('renders rows in server order with name, project, reason and time', () => {
+    state.archivedSessions = snapshot({ sessions: [row(B, { name: null }), row(A)] })
+    render(<SidebarArchivedSection />)
+    expand()
+    const ids = screen.getAllByTestId(/^sidebar-archived-row-/).map((e) => e.getAttribute('data-testid'))
+    expect(ids).toEqual([`sidebar-archived-row-${B}`, `sidebar-archived-row-${A}`])
+    expect(screen.getByText(`sid-${B}`)).toBeTruthy()
+    expect(screen.getAllByText('chroxy')[0]?.getAttribute('title')).toBe('/srv/work/chroxy')
+    expect(screen.getAllByText(/Idle timeout/).length).toBe(2)
+    expect(screen.getAllByText(new RegExp(new Date(Date.UTC(2026, 9, 1, 12, 0, 0)).toLocaleString().replace(/[()]/g, '\\$&'))).length).toBe(2)
+    expect(screen.getByTestId('sidebar-archived-toggle').textContent).toContain('Archived (2)')
+  })
+
+  it('has no delete controls', () => {
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    expand()
+    const names = screen.getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent ?? '')
+    expect(names.some((n) => /delete/i.test(n))).toBe(false)
+  })
+
+  it('clicking a closed row requests its history; no panel yet', () => {
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    expand()
+    const btn = screen.getByTestId(`sidebar-archived-row-${A}`)
+    expect(btn.getAttribute('aria-expanded')).toBe('false')
+    expect(btn.getAttribute('aria-controls')).toBeNull()
+    fireEvent.click(btn)
+    expect(state.requestArchivedSessionHistory).toHaveBeenCalledWith(A)
+    expect(state.closeArchivedSessionHistory).not.toHaveBeenCalled()
+  })
+
+  it('with a history view it renders the shared panel and clicking again closes', () => {
+    state.archivedSessions = snapshot()
+    state.archivedSessionHistories = { [A]: view() }
+    render(<SidebarArchivedSection />)
+    expand()
+    const btn = screen.getByTestId(`sidebar-archived-row-${A}`)
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+    // Sidebar-scoped ids: the Control Room tab can show the same archive at the same time.
+    expect(btn.getAttribute('aria-controls')).toBe(`sidebar-archived-session-history-panel-${A}`)
+    expect(document.getElementById(`sidebar-archived-session-history-panel-${A}`)).not.toBeNull()
+    expect(document.getElementById(`archived-session-history-panel-${A}`)).toBeNull()
+    fireEvent.click(btn)
+    expect(state.closeArchivedSessionHistory).toHaveBeenCalledWith(A)
+    expect(state.requestArchivedSessionHistory).not.toHaveBeenCalled()
+  })
+
+  it('disconnected: refresh and opening are disabled, closing is not', () => {
+    state.connectionPhase = 'disconnected'
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    state.archivedSessionHistories = { [B]: view() }
+    render(<SidebarArchivedSection />)
+    expand()
+    expect((screen.getByTestId('sidebar-archived-refresh') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId(`sidebar-archived-row-${A}`) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId(`sidebar-archived-row-${B}`) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('refresh requests the list and is disabled while loading', () => {
+    state.archivedSessions = snapshot()
+    const { rerender } = render(<SidebarArchivedSection />)
+    expand()
+    fireEvent.click(screen.getByTestId('sidebar-archived-refresh'))
+    expect(state.requestArchivedSessions).toHaveBeenCalledTimes(1)
+    state.archivedSessionsLoading = true
+    rerender(<SidebarArchivedSection />)
+    expect((screen.getByTestId('sidebar-archived-refresh') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+/**
+ * Same method as SessionContextMenuTapTarget.test.tsx: jsdom does no layout, so
+ * read the floor each control resolves to through the REAL components.css
+ * cascade. A later, more specific rule that lowers the floor goes red here,
+ * where a regex over the stylesheet text would not see it. The section body's
+ * own `min-height: 0` is the negative control proving the sheet is attached.
+ */
+describe('SidebarArchivedSection — tap targets resolve to the 44px floor (#8867)', () => {
+  const FLOOR_PX = 44
+  let style: HTMLStyleElement
+  beforeAll(() => {
+    style = document.createElement('style')
+    style.textContent = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    document.head.appendChild(style)
+  })
+  afterAll(() => style.remove())
+
+  function px(value: string): number {
+    const m = /^(-?[\d.]+)px$/.exec((value ?? '').trim())
+    return m ? Number.parseFloat(m[1]!) : Number.NaN
+  }
+
+  it('negative control: the section body resolves min-height 0 (stylesheet is attached)', () => {
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(px(getComputedStyle(screen.getByTestId('sidebar-archived-section')).minHeight)).toBe(0)
+  })
+
+  it('toggle, refresh and every row resolve min-height and min-width >= 44px', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    render(<SidebarArchivedSection />)
+    expand()
+    const controls = screen.getAllByRole('button')
+    // Enumerate the roster so a control that fails to render cannot pass vacuously.
+    expect(controls.map((b) => b.getAttribute('data-testid'))).toEqual([
+      'sidebar-archived-toggle',
+      'sidebar-archived-refresh',
+      `sidebar-archived-row-${A}`,
+      `sidebar-archived-row-${B}`,
+    ])
+    for (const b of controls) {
+      const cs = getComputedStyle(b)
+      const ok = px(cs.minHeight) >= FLOOR_PX && px(cs.minWidth) >= FLOOR_PX
+      expect(ok, `${b.getAttribute('data-testid')}: min-height ${cs.minHeight}, min-width ${cs.minWidth}`).toBe(true)
+    }
+  })
+})
