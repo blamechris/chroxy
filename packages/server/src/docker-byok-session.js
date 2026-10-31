@@ -406,6 +406,13 @@ export function normalizePostCreateCommand(value) {
 }
 
 export class DockerByokSession extends ClaudeByokSession {
+  // #8876: opt out of the manager's provider start deadline. Its async start()
+  // builds/pulls an image and runs a postCreateCommand, each phase separately
+  // bounded (docker build 600 s, docker run 120 s, postCreateCommand 5 min by
+  // default and configurable), so a healthy start can exceed the default
+  // deadline; do not kill a legitimate container start.
+  static get startDeadlineMs() { return null }
+
   static get customizationDescriptor() {
     return {
       ...BYOK_CUSTOMIZATION,

@@ -294,6 +294,38 @@ const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
  */
 const RETRY_RESTORE_SETTLE_TIMEOUT_MS = 30 * 1000
 /**
+ * #8876 — how long a provider's async start() may stay unsettled before
+ * `createSession` treats it as failed. Without a bound, a start() that never
+ * settles leaves the session listed `starting` forever.
+ *
+ * Measured 2026-10-31: claude-tui's whole start (createSession -> warmup done)
+ * over 96 real daemon starts was median 1.1 s, p90 15.1 s, max 15.5 s — its
+ * warmup wait is itself capped at `SPAWN_WARMUP_MAX_MS` (15 s) and then
+ * proceeds. Codex app-server cold start was 0.2-0.9 s over 3 runs; it has no
+ * internal startup timeout, which is the wedge this covers. 60 s is ~4x the
+ * slowest healthy start observed.
+ *
+ * A provider class may override via `static get startDeadlineMs()` (a positive
+ * number, or `null` for no deadline). Interaction: `retryFailedRestore` reports
+ * `pending` after its own 30 s settle wait (`RETRY_RESTORE_SETTLE_TIMEOUT_MS`),
+ * and a deadline failure then arrives as `session_restore_failed` like any
+ * other rejection.
+ */
+export const PROVIDER_START_DEADLINE_MS = 60 * 1000
+
+/**
+ * #8876 — resolve the start deadline for a provider instance. `undefined` ->
+ * the default; `null` -> no deadline; a finite number > 0 -> that value;
+ * anything else -> the default.
+ */
+function providerStartDeadlineMs(session) {
+  const declared = session?.constructor?.startDeadlineMs
+  if (declared === undefined) return PROVIDER_START_DEADLINE_MS
+  if (declared === null) return null
+  if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) return declared
+  return PROVIDER_START_DEADLINE_MS
+}
+/**
  * #8348: the history outcome for a session's `permission_resolved` /
  * `permission_expired` event, or null when it is not a permission prompt's end
  * (an AskUserQuestion's resolution carries a `toolUseId`, not a `requestId`).
@@ -2209,28 +2241,62 @@ export class SessionManager extends EventEmitter {
         // The rejection branch needs no announcement of its own: the fresh path
         // destroys the session and the restore path emits
         // `session_restore_failed`, and each already refreshes the list.
+        //
+        // #8876: the wait is bounded. A start() that never settles (Codex
+        // app-server has no startup timeout of its own) is rejected with
+        // START_TIMEOUT after `providerStartDeadlineMs`, so it runs the same
+        // `_handleAsyncStartFailure` path as any other rejection. A late
+        // settlement of the underlying start is ignored (the first outcome
+        // wins), so it can neither double-announce nor surface as an unhandled
+        // rejection.
         entry._starting = true
-        entry._startSettled = result.then(
-          () => {
-            entry._starting = false
-            // Only for the entry that is still live: a session destroyed (or
-            // re-created under the same id) before its start resolved has
-            // nothing to announce.
-            if (this._sessions.get(sessionId) === entry && !entry._destroying) {
-              this.emit('session_start_settled', { sessionId })
-            }
-            return { ok: true }
-          },
-          (err) => {
-            entry._starting = false
+        const deadlineMs = providerStartDeadlineMs(session)
+        const onOk = () => {
+          entry._starting = false
+          // Only for the entry that is still live: a session destroyed (or
+          // re-created under the same id) before its start resolved has
+          // nothing to announce.
+          if (this._sessions.get(sessionId) === entry && !entry._destroying) {
+            this.emit('session_start_settled', { sessionId })
+          }
+          return { ok: true }
+        }
+        const onErr = (err) => {
+          entry._starting = false
+          // Only for the entry that is still live: with a deadline, a timer
+          // from a session that was destroyed and re-created under the same
+          // id (a failed-restore retry reuses the id) would otherwise tear
+          // down the NEW entry.
+          if (this._sessions.get(sessionId) === entry) {
             try {
               this._handleAsyncStartFailure(sessionId, err)
             } catch (handlerErr) {
               log.error(`Async start() failure handler threw for session ${sessionId}: ${handlerErr?.stack || handlerErr}`)
             }
-            return { ok: false, error: err }
-          },
-        )
+          }
+          return { ok: false, error: err }
+        }
+        // The handlers run DIRECTLY off the provider's promise (one microtask
+        // hop, as before the deadline existed); `done` makes the first of
+        // {settlement, deadline} win, so a late settlement is ignored.
+        entry._startSettled = new Promise((resolve) => {
+          let done = false
+          let timer = null
+          const finish = (handler) => (arg) => {
+            if (done) return
+            done = true
+            if (timer) clearTimeout(timer)
+            resolve(handler(arg))
+          }
+          if (deadlineMs !== null) {
+            timer = setTimeout(() => finish(onErr)(Object.assign(
+              new Error(`Provider did not finish starting within ${Math.round(deadlineMs / 1000)}s`),
+              { code: 'START_TIMEOUT' },
+            )), deadlineMs)
+            timer.unref?.()
+          }
+          result.then(finish(onOk), finish(onErr))
+        })
       }
     } catch (err) {
       // Clean up phantom session on start() failure (Guardian FM-03)
