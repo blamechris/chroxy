@@ -2249,9 +2249,8 @@ export class SessionManager extends EventEmitter {
         // app-server has no startup timeout of its own) is rejected with
         // START_TIMEOUT after `providerStartDeadlineMs`, so it runs the same
         // `_handleAsyncStartFailure` path as any other rejection. A late
-        // settlement of the underlying start finds its entry gone and does
-        // nothing, so it can neither double-announce nor surface as an
-        // unhandled rejection.
+        // settlement of the underlying start is ignored, so it can neither
+        // double-announce nor surface as an unhandled rejection.
         entry._starting = true
         const deadlineMs = providerStartDeadlineMs(session)
         const onOk = () => {
@@ -2280,13 +2279,18 @@ export class SessionManager extends EventEmitter {
           return { ok: false, error: err }
         }
         // The handlers run DIRECTLY off the provider's promise (one microtask
-        // hop, as before the deadline existed). Whichever of {settlement,
-        // deadline} comes first decides the outcome; a later one still reaches
-        // its handler, which finds the entry no longer live (destroyed,
-        // re-parked or replaced) and does nothing.
+        // hop, as before the deadline existed). `done` makes the first of
+        // {settlement, deadline} the only one handled. Usually a late one would
+        // find its entry gone anyway, but not when the failure path threw
+        // before the entry left `_sessions` (a throwing listener): without the
+        // flag a late resolve would then announce a timed-out session as
+        // settled.
         entry._startSettled = new Promise((resolve) => {
+          let done = false
           let timer = null
           const finish = (handler) => (arg) => {
+            if (done) return
+            done = true
             if (timer) clearTimeout(timer)
             resolve(handler(arg))
           }

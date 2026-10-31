@@ -286,6 +286,25 @@ describe('provider start deadline (#8876)', () => {
     assert.equal(failed[0].errorCode, 'START_TIMEOUT', 'and does not replace the timeout as the reason')
   })
 
+  it('ignores a late resolution even when the failure path threw before teardown', async () => {
+    makeSm()
+    const settled = collect('session_start_settled')
+    // A listener that throws stops `_handleAsyncStartFailure` before it destroys
+    // the session, so the timed-out entry is still in `_sessions`.
+    sm.on('session_create_failed', () => { throw new Error('listener failed') })
+    const sessionId = sm.createSession({ cwd: dir, name: 'throwing-listener' })
+    const late = pendingStart
+
+    await tick(PROVIDER_START_DEADLINE_MS)
+    // CONTROL: the entry really survived the failure path; without this the
+    // assertion below would also pass because the entry was simply gone.
+    assert.ok(sm._sessions.has(sessionId), 'the failure path left the entry in place')
+
+    late.resolve()
+    await flush()
+    assert.equal(settled.length, 0, 'a timed-out start is never announced as settled')
+  })
+
   it('does not bound a provider that opts out with startDeadlineMs = null', async () => {
     makeSm('test-starting-8876-nodeadline')
     const failed = collect('session_create_failed')
