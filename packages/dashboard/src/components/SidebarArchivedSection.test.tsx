@@ -3,7 +3,7 @@
  * ArchivedSessionsSection.test.tsx). null → not asked yet · [] → nothing
  * archived · refused → may not see: three different claims.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -181,7 +181,8 @@ describe('SidebarArchivedSection — rows', () => {
     state.archivedSessions = snapshot()
     render(<SidebarArchivedSection />)
     expand()
-    expect(screen.queryByText(/delete/i)).toBeNull()
+    const names = screen.getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent ?? '')
+    expect(names.some((n) => /delete/i.test(n))).toBe(false)
   })
 
   it('clicking a closed row requests its history; no panel yet', () => {
@@ -203,8 +204,10 @@ describe('SidebarArchivedSection — rows', () => {
     expand()
     const btn = screen.getByTestId(`sidebar-archived-row-${A}`)
     expect(btn.getAttribute('aria-expanded')).toBe('true')
-    expect(btn.getAttribute('aria-controls')).toBe(`archived-session-history-panel-${A}`)
-    expect(document.getElementById(`archived-session-history-panel-${A}`)).not.toBeNull()
+    // Sidebar-scoped ids: the Control Room tab can show the same archive at the same time.
+    expect(btn.getAttribute('aria-controls')).toBe(`sidebar-archived-session-history-panel-${A}`)
+    expect(document.getElementById(`sidebar-archived-session-history-panel-${A}`)).not.toBeNull()
+    expect(document.getElementById(`archived-session-history-panel-${A}`)).toBeNull()
     fireEvent.click(btn)
     expect(state.closeArchivedSessionHistory).toHaveBeenCalledWith(A)
     expect(state.requestArchivedSessionHistory).not.toHaveBeenCalled()
@@ -233,11 +236,51 @@ describe('SidebarArchivedSection — rows', () => {
   })
 })
 
-describe('SidebarArchivedSection — CSS tap targets (#8867)', () => {
-  const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
-  it('toggle, refresh and row share a 44px min-height rule', () => {
-    const m = css.match(/\.sidebar-archived-toggle,\s*\.sidebar-archived-refresh,\s*\.sidebar-archived-row\s*\{([^}]*)\}/)
-    expect(m !== null).toBe(true)
-    expect(/min-height:\s*44px/.test(m?.[1] ?? '')).toBe(true)
+/**
+ * Same method as SessionContextMenuTapTarget.test.tsx: jsdom does no layout, so
+ * read the floor each control resolves to through the REAL components.css
+ * cascade. A later, more specific rule that lowers the floor goes red here,
+ * where a regex over the stylesheet text would not see it. The section body's
+ * own `min-height: 0` is the negative control proving the sheet is attached.
+ */
+describe('SidebarArchivedSection — tap targets resolve to the 44px floor (#8867)', () => {
+  const FLOOR_PX = 44
+  let style: HTMLStyleElement
+  beforeAll(() => {
+    style = document.createElement('style')
+    style.textContent = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    document.head.appendChild(style)
+  })
+  afterAll(() => style.remove())
+
+  function px(value: string): number {
+    const m = /^(-?[\d.]+)px$/.exec((value ?? '').trim())
+    return m ? Number.parseFloat(m[1]!) : Number.NaN
+  }
+
+  it('negative control: the section body resolves min-height 0 (stylesheet is attached)', () => {
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    expand()
+    expect(px(getComputedStyle(screen.getByTestId('sidebar-archived-section')).minHeight)).toBe(0)
+  })
+
+  it('toggle, refresh and every row resolve min-height and min-width >= 44px', () => {
+    state.archivedSessions = snapshot({ sessions: [row(A), row(B)] })
+    render(<SidebarArchivedSection />)
+    expand()
+    const controls = screen.getAllByRole('button')
+    // Enumerate the roster so a control that fails to render cannot pass vacuously.
+    expect(controls.map((b) => b.getAttribute('data-testid'))).toEqual([
+      'sidebar-archived-toggle',
+      'sidebar-archived-refresh',
+      `sidebar-archived-row-${A}`,
+      `sidebar-archived-row-${B}`,
+    ])
+    for (const b of controls) {
+      const cs = getComputedStyle(b)
+      const ok = px(cs.minHeight) >= FLOOR_PX && px(cs.minWidth) >= FLOOR_PX
+      expect(ok, `${b.getAttribute('data-testid')}: min-height ${cs.minHeight}, min-width ${cs.minWidth}`).toBe(true)
+    }
   })
 })

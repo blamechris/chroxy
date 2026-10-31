@@ -880,6 +880,8 @@ a.dev-preview-chip__link:focus-visible {
 
 .sidebar-tree {
   flex: 1;
+  /* #8867 — the Archived section below must not crush the tree to nothing. */
+  min-height: 96px;
   overflow-y: auto;
   padding: 0 0 8px;
 }
@@ -15055,7 +15057,9 @@ a.session-ci-chip__pr:focus-visible {
 .sidebar-archived {
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  /* Shrinks on a short window (down to its 44px toggle) so the project tree
+     keeps the room .sidebar-tree's min-height reserves for it. */
+  min-height: 44px;
   border-top: 1px solid var(--border-primary);
 }
 
@@ -15092,8 +15096,14 @@ a.session-ci-chip__pr:focus-visible {
   padding: 0 8px 8px;
   /* The sidebar is overflow:hidden, so a long roster must scroll inside the
      section rather than crush the project tree or push the footer away. */
-  max-height: 45vh;
+  max-height: min(40vh, 360px);
+  min-height: 0;
   overflow-y: auto;
+}
+
+/* One scroller in the sidebar: the section scrolls, the transcript list does not. */
+.sidebar-archived-section .fr-hist-list {
+  max-height: none;
 }
 
 .sidebar-archived-refresh {
@@ -15147,7 +15157,6 @@ a.session-ci-chip__pr:focus-visible {
   border-radius: 6px;
   background: transparent;
   text-align: left;
-  min-width: 0;
 }
 
 .sidebar-archived-name,

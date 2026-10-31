@@ -116,7 +116,7 @@ export function SidebarArchivedSection() {
                       disabled={!historyOpen && !connected}
                       aria-expanded={historyOpen}
                       // Only while the panel is mounted: an id that does not exist would break the disclosure convention.
-                      aria-controls={historyOpen ? archivedSessionHistoryPanelId(id) : undefined}
+                      aria-controls={historyOpen ? archivedSessionHistoryPanelId(id, 'sidebar') : undefined}
                       data-testid={`sidebar-archived-row-${id}`}
                     >
                       <span className="sidebar-archived-name">{r.name || r.sessionId}</span>
@@ -127,7 +127,7 @@ export function SidebarArchivedSection() {
                         {archiveReasonLabel(r.reason)} · {archivedAtLabel(r.archivedAt)}
                       </span>
                     </button>
-                    {historyOpen ? <ArchivedSessionHistoryPanel archiveId={id} /> : null}
+                    {historyOpen ? <ArchivedSessionHistoryPanel archiveId={id} surface="sidebar" /> : null}
                   </li>
                 )
               })}
