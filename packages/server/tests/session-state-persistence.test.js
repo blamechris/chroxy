@@ -262,6 +262,8 @@ describe('SessionStatePersistence.restoreState', () => {
       version: 1, timestamp: stale,
       sessions: [
         { id: 'empty', name: 'Default', cwd: '/tmp', lastActivityAt: stale, history: [] },
+        // No `history` field at all: unknown content falls on the keep side,
+        // because the archive would skip it too.
         { id: 'legacy', name: 'No field', cwd: '/tmp', lastActivityAt: stale },
         { id: 'full', name: 'Work', cwd: '/tmp', lastActivityAt: stale, history: [{ role: 'user', content: 'x' }] },
       ],

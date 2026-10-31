@@ -225,8 +225,8 @@ export class SessionStatePersistence {
       // #8870 — a session with no history is restored at any age. Setting it
       // aside would end in the archive skipping it (nothing to read), so it
       // left the list with no record: the startup "Default" vanished after a
-      // restart. It holds only its name, cwd, provider and settings, so keep it
-      // as a live session would be kept; closing it is how it goes away.
+      // restart. It holds only its name, cwd, provider and settings, so it is
+      // restored like a recent session and leaves the way any live one does.
       if (activityAt && now - activityAt > this._stateTtlMs && savedHasHistory(saved)) {
         dropped.push(saved.name || saved.id || '<unknown>')
         stale.push(saved)
