@@ -2201,9 +2201,28 @@ export class SessionManager extends EventEmitter {
         // inside `_handleAsyncStartFailure` is logged rather than escaping, the
         // same place it would otherwise have surfaced as an unhandled one. A
         // sync start() (sdk-session) leaves no handle.
+        //
+        // #8872: until the start settles the session is in `_sessions` but not
+        // yet usable — and, for a restore, may still be re-parked. `listSessions`
+        // reports it as `starting` so no client offers it as openable, and the
+        // success branch announces the change so every client's list refreshes.
+        // The rejection branch needs no announcement of its own: the fresh path
+        // destroys the session and the restore path emits
+        // `session_restore_failed`, and each already refreshes the list.
+        entry._starting = true
         entry._startSettled = result.then(
-          () => ({ ok: true }),
+          () => {
+            entry._starting = false
+            // Only for the entry that is still live: a session destroyed (or
+            // re-created under the same id) before its start resolved has
+            // nothing to announce.
+            if (this._sessions.get(sessionId) === entry && !entry._destroying) {
+              this.emit('session_start_settled', { sessionId })
+            }
+            return { ok: true }
+          },
           (err) => {
+            entry._starting = false
             try {
               this._handleAsyncStartFailure(sessionId, err)
             } catch (handlerErr) {
@@ -2767,6 +2786,10 @@ export class SessionManager extends EventEmitter {
         // CLI default") across restarts.
         model: entry.session.model || entry.session.bootedModel || null,
         permissionMode: entry.session.permissionMode || 'approve',
+        // #8872: the provider's async start() has not settled yet, so the
+        // session is not openable — and a restore may still be re-parked. A
+        // strict boolean so every row carries the same shape.
+        starting: entry._starting === true,
         isBusy: entry.session.isRunning,
         // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
         // "mid-turn" with "idle but a background shell is still tracked"; a

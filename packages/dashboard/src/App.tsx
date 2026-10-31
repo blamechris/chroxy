@@ -1826,6 +1826,8 @@ export function App() {
         sessionId: s.sessionId,
         name: s.name,
         isBusy: s.isBusy,
+        // #8872: listed but not openable until the provider's start settles.
+        starting: s.starting,
         provider: s.provider,
         worktree: s.worktree,
         status: getSessionVisualStatus(s),
