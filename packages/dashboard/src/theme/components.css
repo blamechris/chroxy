@@ -15063,6 +15063,16 @@ a.session-ci-chip__pr:focus-visible {
   border-top: 1px solid var(--border-primary);
 }
 
+/* Expanded, it keeps room for Refresh and a line of content: toggle 44 +
+   Refresh 44 + gap 8 + one note line ~18 + bottom padding 8 = 122, rounded up
+   to 160 for a second line. Shrinking to the toggle alone left an expanded
+   section that showed nothing on an 800px-tall window. The trade-off is
+   deliberate: the panel slot below does not shrink and the sidebar does not
+   scroll, so expanding clips more of what sits under it until collapsed. */
+.sidebar-archived--expanded {
+  min-height: 160px;
+}
+
 .sidebar-archived-toggle,
 .sidebar-archived-refresh,
 .sidebar-archived-row {

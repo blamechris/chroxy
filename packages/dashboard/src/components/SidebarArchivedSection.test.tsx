@@ -258,6 +258,18 @@ describe('SidebarArchivedSection — tap targets resolve to the 44px floor (#886
     return m ? Number.parseFloat(m[1]!) : Number.NaN
   }
 
+  it('expanded, the section keeps room for its content; collapsed, only the toggle', () => {
+    // On an 800px window the sidebar is over-full and the panel slot below does
+    // not shrink, so an expanded section that may shrink to its toggle shows nothing.
+    state.archivedSessions = snapshot()
+    render(<SidebarArchivedSection />)
+    const container = screen.getByTestId('sidebar-archived')
+    expect(px(getComputedStyle(container).minHeight)).toBe(FLOOR_PX)
+    expand()
+    const room = px(getComputedStyle(container).minHeight)
+    expect(room >= FLOOR_PX * 3, `expanded min-height ${getComputedStyle(container).minHeight}`).toBe(true)
+  })
+
   it('negative control: the section body resolves min-height 0 (stylesheet is attached)', () => {
     state.archivedSessions = snapshot()
     render(<SidebarArchivedSection />)
