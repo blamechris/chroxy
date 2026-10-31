@@ -29,7 +29,8 @@ describe('SessionPicker accessibility (#1927)', () => {
   })
 
   test('session pill has accessibilityState for selected', () => {
-    expect(sessionPicker).toMatch(/accessibilityState\s*=\s*\{\s*\{\s*selected\s*:\s*isActive\s*\}\s*\}/)
+    // #8875 added `disabled` for a starting pill; `selected` must still lead.
+    expect(sessionPicker).toMatch(/accessibilityState\s*=\s*\{\s*\{\s*selected\s*:\s*isActive\s*[,}]/)
   })
 
   test('rename modal TextInput has accessibilityLabel', () => {
