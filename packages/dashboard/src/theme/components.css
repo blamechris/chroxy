@@ -15063,6 +15063,13 @@ a.session-ci-chip__pr:focus-visible {
   border-top: 1px solid var(--border-primary);
 }
 
+/* Expanded, it keeps room for Refresh and a line of content. Shrinking to the
+   toggle alone left an expanded section that showed nothing on an 800px-tall
+   window, where the panel slot below does not shrink. */
+.sidebar-archived--expanded {
+  min-height: 160px;
+}
+
 .sidebar-archived-toggle,
 .sidebar-archived-refresh,
 .sidebar-archived-row {

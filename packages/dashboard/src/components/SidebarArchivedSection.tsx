@@ -67,7 +67,7 @@ export function SidebarArchivedSection() {
   const count = rows && !refused ? rows.length : null
 
   return (
-    <div className="sidebar-archived" data-testid="sidebar-archived">
+    <div className={expanded ? 'sidebar-archived sidebar-archived--expanded' : 'sidebar-archived'} data-testid="sidebar-archived">
       <button
         type="button"
         className="sidebar-archived-toggle"
