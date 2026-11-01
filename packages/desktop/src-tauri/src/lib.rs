@@ -2171,17 +2171,28 @@ fn wait_for_service(service: tray_state::ServiceDetection) -> tray_state::Servic
 }
 
 /// [`poll_for_daemon`] against a monotonic deadline, for the wait for an
-/// installed service: a stalled holder cannot stretch it past `budget`.
-fn poll_for_daemon_within(port: u16, budget: std::time::Duration) -> PortState {
+/// installed service: a stalled holder or a credential prompt cannot stretch it
+/// past `budget` (#8892).
+fn poll_for_daemon_within(
+    port: u16,
+    budget: std::time::Duration,
+) -> Result<PortState, tray_state::CredentialTimedOut> {
     let start = std::time::Instant::now();
     tray_state::poll_until_chroxy_within(
         budget,
         tray_state::SERVICE_WAIT_INTERVAL,
         tray_state::SERVICE_PROBE_CAP,
         || start.elapsed(),
-        |attempt, timeout| {
-            let held = tray_state::probe_port(port, timeout);
-            eprintln!("[service-wait] attempt #{} port {} -> {:?}", attempt + 1, port, held);
+        |attempt, time| {
+            let held = tray_state::probe_port_within(port, time);
+            match &held {
+                Ok(Some(state)) => eprintln!("[service-wait] attempt #{} port {} -> {:?}", attempt + 1, port, state),
+                Ok(None) => eprintln!("[service-wait] attempt #{} port {} -> cut short by the deadline", attempt + 1, port),
+                Err(_) => eprintln!(
+                    "[service-wait] attempt #{} port {} -> the credential store did not hand over the token in time; giving up",
+                    attempt + 1, port
+                ),
+            }
             held
         },
         std::thread::sleep,
@@ -2196,7 +2207,9 @@ fn await_installed_service(app: &tauri::AppHandle, title: &str, proceed: impl Fn
     match wait_for_service(tray_state::chroxy_service_detection()) {
         tray_state::ServiceWait::Adopt(port) => adopt_external_daemon(app, port),
         tray_state::ServiceWait::Refuse(last, msg) => {
-            update_port_state(app, last);
+            if let Some(last) = last {
+                update_port_state(app, last);
+            }
             send_notification(app, title, &msg);
         }
         tray_state::ServiceWait::NotInstalled => proceed(),
@@ -2614,7 +2627,9 @@ fn restart_own_server(app: &tauri::AppHandle) {
         match wait_for_service(service) {
             tray_state::ServiceWait::Adopt(port) => adopt_external_daemon(app, port),
             tray_state::ServiceWait::Refuse(last, msg) => {
-                update_port_state(app, last);
+                if let Some(last) = last {
+                    update_port_state(app, last);
+                }
                 window::emit_server_stopped(app);
                 send_notification(app, "Restart Failed", &msg);
             }

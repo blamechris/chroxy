@@ -315,35 +315,72 @@ pub const SERVICE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from
 /// The longest one probe of the wait may take; also capped to the time left.
 pub const SERVICE_PROBE_CAP: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The time one probe of the service wait may use (#8892), read live so every
+/// stage sees what the stages before it spent.
+pub struct ProbeTime<'a> {
+    left: &'a dyn Fn() -> Duration,
+    cap: Duration,
+}
+
+impl<'a> ProbeTime<'a> {
+    pub fn new(left: &'a dyn Fn() -> Duration, cap: Duration) -> Self {
+        Self { left, cap }
+    }
+
+    /// The time left in the whole wait: what a credential lookup may take.
+    pub fn left(&self) -> Duration {
+        (self.left)()
+    }
+
+    /// What the next network stage (an HTTP request, a TCP connect) may take: the
+    /// cap, and never more than the time left.
+    pub fn stage(&self) -> Duration {
+        self.left().min(self.cap)
+    }
+}
+
+/// The credential store did not hand over the access token before the wait's
+/// deadline (#8892), so no probe could check a proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialTimedOut;
+
 /// [`poll_until_chroxy`] against a real deadline instead of an attempt count: it
 /// gives up once `budget` has elapsed by `elapsed()`, however slow the probes
-/// are. Each probe is told how long it may take (`probe_cap`, and never more than
-/// the time left) and each sleep is capped to the time left, so the total stays
-/// within `budget` plus one probe's own overhead. Always probes at least once.
-/// Returns the verified daemon, or the last state seen.
+/// are. Each probe gets a [`ProbeTime`] that caps its network stages to
+/// `probe_cap` and every stage to the time left, and each sleep is capped to the
+/// time left, so the total stays within `budget` plus a stage's own overhead.
+/// Always probes at least once.
+///
+/// A probe returns `Ok(None)` when the deadline cut it short before it could
+/// read the port; the last reading then stands. A credential lookup that did not
+/// return in time ends the wait at once with [`CredentialTimedOut`]. Otherwise
+/// returns the verified daemon, or the last state seen.
 pub fn poll_until_chroxy_within(
-    budget: std::time::Duration,
-    interval: std::time::Duration,
-    probe_cap: std::time::Duration,
-    mut elapsed: impl FnMut() -> std::time::Duration,
-    mut probe: impl FnMut(u32, std::time::Duration) -> PortState,
-    mut sleep: impl FnMut(std::time::Duration),
-) -> PortState {
+    budget: Duration,
+    interval: Duration,
+    probe_cap: Duration,
+    elapsed: impl Fn() -> Duration,
+    mut probe: impl FnMut(u32, &ProbeTime) -> Result<Option<PortState>, CredentialTimedOut>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<PortState, CredentialTimedOut> {
+    let left = || budget.saturating_sub(elapsed());
+    let time = ProbeTime::new(&left, probe_cap);
     let mut last = PortState::Free;
     let mut attempt = 0u32;
     loop {
-        let left = budget.saturating_sub(elapsed());
-        if attempt > 0 && left.is_zero() {
-            return last;
+        if attempt > 0 && left().is_zero() {
+            return Ok(last);
         }
-        last = probe(attempt, left.min(probe_cap));
-        if last.is_external_chroxy() {
-            return last;
+        if let Some(seen) = probe(attempt, &time)? {
+            last = seen;
+            if last.is_external_chroxy() {
+                return Ok(last);
+            }
         }
         attempt += 1;
-        let left = budget.saturating_sub(elapsed());
+        let left = left();
         if left.is_zero() {
-            return last;
+            return Ok(last);
         }
         sleep(interval.min(left));
     }
@@ -357,6 +394,16 @@ pub fn service_wait_result(last: PortState, detection: &ServiceDetection) -> Res
     }
 }
 
+/// Why the wait for the service ended when the credential store did not answer
+/// in time (#8892). The app cannot tell whether the service is up without the
+/// token, so it starts nothing.
+pub fn credential_wait_refusal() -> String {
+    format!(
+        "The app waited for the chroxy service but could not check it: the credential store did not hand over the access token within {} s (it may be waiting for you to unlock it). The app did not start a second server. Answer the credential prompt, then try again.",
+        SERVICE_WAIT_BUDGET.as_secs()
+    )
+}
+
 /// What the app does about an installed chroxy service before it would start a
 /// server (#8890).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,8 +412,9 @@ pub enum ServiceWait {
     NotInstalled,
     /// The service's daemon answered: adopt it.
     Adopt(u16),
-    /// It did not: start nothing and say why (the last state seen, the message).
-    Refuse(PortState, String),
+    /// It did not: start nothing and say why (the last state seen, or `None` when
+    /// the wait ended without a reading to report, and the message).
+    Refuse(Option<PortState>, String),
 }
 
 /// The one wait for a chroxy service. `poll` (the ~30 s unlocked poll) runs only
@@ -375,15 +423,18 @@ pub enum ServiceWait {
 /// tray.
 pub fn wait_for_installed_service(
     detection: &ServiceDetection,
-    poll: impl FnOnce() -> PortState,
+    poll: impl FnOnce() -> Result<PortState, CredentialTimedOut>,
 ) -> ServiceWait {
     if !detection.blocks_spawn() {
         return ServiceWait::NotInstalled;
     }
-    let last = poll();
+    let last = match poll() {
+        Ok(last) => last,
+        Err(CredentialTimedOut) => return ServiceWait::Refuse(None, credential_wait_refusal()),
+    };
     match service_wait_result(last, detection) {
         Ok(p) => ServiceWait::Adopt(p),
-        Err(msg) => ServiceWait::Refuse(last, msg),
+        Err(msg) => ServiceWait::Refuse(Some(last), msg),
     }
 }
 
@@ -749,19 +800,95 @@ pub fn probe_with_retry(
     fresh: impl FnOnce() -> Option<String>,
     probe: impl Fn(u16, Duration, Option<&str>) -> ProbeResult,
 ) -> (PortState, Option<String>) {
-    let (state, proof_failed) = probe(port, timeout, first.as_deref());
+    let read = probe_with_retry_within::<std::convert::Infallible>(
+        port,
+        || Ok(first),
+        || Ok(fresh()),
+        |p, token| Some(probe(p, timeout, token)),
+    );
+    match read {
+        Ok(Some(found)) => found,
+        // Unreachable: every probe above reads. Fail safe: not adoptable, and
+        // Start stays disabled.
+        Ok(None) => (PortState::Foreign(port), None),
+        Err(never) => match never {},
+    }
+}
+
+/// [`probe_with_retry`] where reading a token can fail (`E`) and a probe can be
+/// cut short before it reads the port (`None`, #8892). A first probe cut short
+/// returns `Ok(None)`; a retry cut short leaves the first reading standing.
+pub fn probe_with_retry_within<E>(
+    port: u16,
+    first: impl FnOnce() -> Result<Option<String>, E>,
+    fresh: impl FnOnce() -> Result<Option<String>, E>,
+    probe: impl Fn(u16, Option<&str>) -> Option<ProbeResult>,
+) -> Result<Option<(PortState, Option<String>)>, E> {
+    let first = first()?;
+    let Some((state, proof_failed)) = probe(port, first.as_deref()) else {
+        return Ok(None);
+    };
     if !matches!(state, PortState::Foreign(_)) {
-        return (state, first);
+        return Ok(Some((state, first)));
     }
     if proof_failed {
-        if let Some(retry) = fresh().filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
-            let (second, _) = probe(port, timeout, Some(&retry));
-            if second == PortState::Chroxy(port) {
-                return (second, Some(retry));
+        if let Some(retry) = fresh()?.filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
+            if probe(port, Some(&retry)).map(|(second, _)| second) == Some(PortState::Chroxy(port)) {
+                return Ok(Some((PortState::Chroxy(port), Some(retry))));
             }
         }
     }
-    (state, None)
+    Ok(Some((state, None)))
+}
+
+/// [`probe_port`] for the wait for an installed service (#8892): the whole probe
+/// (reading the token, the HTTP request, the TCP fallback, the retry with a fresh
+/// token) fits in the time `time` has left. `Ok(None)` when the deadline cut it
+/// short before it read the port.
+pub fn probe_port_within(port: u16, time: &ProbeTime) -> Result<Option<PortState>, CredentialTimedOut> {
+    probe_within(port, time, &REAL_TOKEN_SOURCES, probe_port_outcome_within).map(|read| read.map(|(state, _)| state))
+}
+
+/// [`probe_port_within`] over `sources` and `probe`. Each token read may take the
+/// time left in the wait (a credential tool can be slow to start); each network
+/// stage gets [`ProbeTime::stage`], recomputed as it starts.
+pub fn probe_within(
+    port: u16,
+    time: &ProbeTime,
+    sources: &TokenSources,
+    probe: impl Fn(u16, &dyn Fn() -> Duration, Option<&str>) -> Option<ProbeResult>,
+) -> Result<Option<(PortState, Option<String>)>, CredentialTimedOut> {
+    let stage = || time.stage();
+    probe_with_retry_within(
+        port,
+        || read_token_within(sources.first, time.left()),
+        || read_token_within(sources.fresh, time.left()),
+        |p, token| probe(p, &stage, token),
+    )
+}
+
+/// Run `read` on a helper thread and wait at most `limit` for it (#8892). The
+/// credential tool can wait on the user (a keychain unlock prompt) for as long as
+/// they take; a read that outlives `limit` is left to finish on its own, and
+/// fills the token cache when it does.
+pub fn read_token_within(read: fn() -> Option<String>, limit: Duration) -> Result<Option<String>, CredentialTimedOut> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("token-read".into())
+        .spawn(move || {
+            let _ = tx.send(read());
+        });
+    if spawned.is_err() {
+        // No thread to bound it with: read it here, as every other probe does.
+        return Ok(read());
+    }
+    match rx.recv_timeout(limit) {
+        Ok(token) => Ok(token),
+        Err(RecvTimeoutError::Timeout) => Err(CredentialTimedOut),
+        // The read panicked: it produced no token.
+        Err(RecvTimeoutError::Disconnected) => Ok(None),
+    }
 }
 
 /// [`probe_port`] with the token passed in and no retry. With no token, or if the
@@ -773,12 +900,20 @@ pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) 
 /// [`probe_port_with_token`], also saying whether the holder gave a chroxy-shaped
 /// body whose `proof` did not verify.
 pub fn probe_port_outcome(port: u16, timeout: Duration, token: Option<&str>) -> ProbeResult {
+    // Unreachable fallback: a fixed timeout is never used up between stages.
+    // Fail safe: not adoptable, and Start stays disabled.
+    probe_port_outcome_within(port, &|| timeout, token).unwrap_or((PortState::Foreign(port), false))
+}
+
+/// [`probe_port_outcome`] with each network stage given `stage()`, read as it
+/// starts. `None` when a stage found no time left, so the port was not read.
+pub fn probe_port_outcome_within(port: u16, stage: &dyn Fn() -> Duration, token: Option<&str>) -> Option<ProbeResult> {
     let nonce = health_proof::fresh_nonce();
     let path = match &nonce {
         Some(n) => health_proof::challenge_path(n),
         None => "/health".to_string(),
     };
-    let outcome = request_health(port, &path, timeout);
+    let outcome = request_health(port, &path, stage)?;
     let mut proof_failed = false;
     let state = classify_probe(port, &outcome, |body| {
         let proved = match (token, nonce.as_deref()) {
@@ -788,14 +923,18 @@ pub fn probe_port_outcome(port: u16, timeout: Duration, token: Option<&str>) -> 
         proof_failed = !proved && health_proof::proof_field(body).is_some();
         proved
     });
-    (state, proof_failed)
+    Some((state, proof_failed))
 }
 
-fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
+/// GET `path` on loopback `port`, falling back to a plain TCP connect when no HTTP
+/// answer comes. Each stage takes `stage()`, read as it starts; `None` when a
+/// stage found no time left (a zero timeout would read as "nothing listening").
+fn request_health(port: u16, path: &str, stage: &dyn Fn() -> Duration) -> Option<HealthOutcome> {
+    let time_left = || Some(stage()).filter(|t| !t.is_zero());
     let url = format!("http://127.0.0.1:{}{}", port, path);
     // No redirects: the answer has to come from the port that was asked.
     let agent = ureq::AgentBuilder::new().redirects(0).build();
-    match agent.get(&url).timeout(timeout).call() {
+    Some(match agent.get(&url).timeout(time_left()?).call() {
         Ok(resp) if resp.status() == 200 => {
             // Bounded read: the port may belong to something that streams forever.
             let mut body = String::new();
@@ -805,9 +944,9 @@ fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
         Ok(resp) => HealthOutcome::BadStatus(resp.status()),
         Err(ureq::Error::Status(code, _)) => HealthOutcome::BadStatus(code),
         Err(ureq::Error::Transport(_)) => HealthOutcome::NoHttp {
-            tcp_open: tcp_connects(port, timeout),
+            tcp_open: tcp_connects(port, time_left()?),
         },
-    }
+    })
 }
 
 /// True if something accepts a TCP connection on loopback `port`.
@@ -1249,15 +1388,16 @@ mod tests {
             D::from_secs(1),
             D::from_secs(2),
             || clock.now(),
-            |_, timeout| {
+            |_, t| {
                 probes += 1;
+                let timeout = t.stage();
                 assert!(timeout <= D::from_secs(2), "a probe is capped");
                 clock.advance(timeout); // stalls for everything it is given
-                PortState::Foreign(9)
+                Ok(Some(PortState::Foreign(9)))
             },
             |d| clock.advance(d),
         );
-        assert_eq!(got, PortState::Foreign(9));
+        assert_eq!(got, Ok(PortState::Foreign(9)));
         assert!(clock.now() <= D::from_secs(30), "took {:?}", clock.now());
         assert!(probes >= 10 && probes < 30, "{}", probes);
     }
@@ -1267,12 +1407,12 @@ mod tests {
         use std::time::Duration as D;
         let clock = Clock(std::cell::Cell::new(D::ZERO));
         let mut timeouts = Vec::new();
-        poll_until_chroxy_within(
+        let _ = poll_until_chroxy_within(
             D::from_millis(2500),
             D::from_secs(1),
             D::from_secs(2),
             || clock.now(),
-            |_, t| { timeouts.push(t); clock.advance(t); PortState::Free },
+            |_, t| { let t = t.stage(); timeouts.push(t); clock.advance(t); Ok(Some(PortState::Free)) },
             |d| { assert!(d <= D::from_secs(1)); clock.advance(d) },
         );
         assert!(timeouts.iter().all(|t| *t <= D::from_secs(2)));
@@ -1287,10 +1427,10 @@ mod tests {
         // at t=29, past the budget.
         let clock = Clock(std::cell::Cell::new(D::ZERO));
         let mut told = Vec::new();
-        poll_until_chroxy_within(
+        let _ = poll_until_chroxy_within(
             D::from_secs(28), D::from_secs(1), D::from_secs(4),
             || clock.now(),
-            |_, t| { told.push(t); clock.advance(t); PortState::Foreign(1) },
+            |_, t| { let t = t.stage(); told.push(t); clock.advance(t); Ok(Some(PortState::Foreign(1))) },
             |d| clock.advance(d),
         );
         assert_eq!(told.last(), Some(&D::from_secs(3)));
@@ -1305,13 +1445,13 @@ mod tests {
         let got = poll_until_chroxy_within(
             D::from_secs(30), D::from_secs(1), D::from_secs(2),
             || clock.now(),
-            |_, _| { n += 1; if n == 3 { PortState::Chroxy(7) } else { PortState::Free } },
+            |_, _| { n += 1; Ok(Some(if n == 3 { PortState::Chroxy(7) } else { PortState::Free })) },
             |d| clock.advance(d),
         );
-        assert_eq!((got, n), (PortState::Chroxy(7), 3));
+        assert_eq!((got, n), (Ok(PortState::Chroxy(7)), 3));
         // A zero budget still probes once.
         let mut probes = 0;
-        poll_until_chroxy_within(D::ZERO, D::from_secs(1), D::from_secs(2), || D::ZERO, |_, _| { probes += 1; PortState::Free }, |_| {});
+        let _ = poll_until_chroxy_within(D::ZERO, D::from_secs(1), D::from_secs(2), || D::ZERO, |_, _| { probes += 1; Ok(Some(PortState::Free)) }, |_| {});
         assert_eq!(probes, 1);
     }
 
@@ -1331,12 +1471,163 @@ mod tests {
         assert_eq!(w, ServiceWait::NotInstalled);
     }
 
+    // --- #8892: the whole probe fits in the wait's deadline -----------------
+
+    /// The service-wait probe over `sources` and `probe`, as the poll calls it.
+    fn wait_probe<'a>(
+        port: u16,
+        sources: &'a TokenSources,
+        probe: impl Fn(u16, &dyn Fn() -> Duration, Option<&str>) -> Option<ProbeResult> + 'a,
+    ) -> impl FnMut(u32, &ProbeTime) -> Result<Option<PortState>, CredentialTimedOut> + 'a {
+        move |_, t| probe_within(port, t, sources, &probe).map(|read| read.map(|(state, _)| state))
+    }
+
+    /// Run the real-clock wait on its own thread, so a stage that blocks it fails
+    /// the test after `budget` plus a margin instead of hanging the run.
+    fn timed_wait(
+        budget: Duration,
+        cap: Duration,
+        run: impl FnOnce(Duration, Duration) -> Result<PortState, CredentialTimedOut> + Send + 'static,
+    ) -> (Result<PortState, CredentialTimedOut>, Duration) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let got = run(budget, cap);
+            let _ = tx.send((got, start.elapsed()));
+        });
+        rx.recv_timeout(budget + Duration::from_secs(5))
+            .expect("the wait did not end: a stage blocked it past its deadline")
+    }
+
+    /// Slack for thread wake-ups on a loaded runner; far below what an unbounded
+    /// stage overshoots by in these tests.
+    const WAIT_TOLERANCE: Duration = Duration::from_millis(250);
+
+    fn slow_old() -> Option<String> {
+        thread::sleep(Duration::from_millis(150));
+        Some("old".into())
+    }
+    fn slow_new() -> Option<String> {
+        thread::sleep(Duration::from_millis(150));
+        Some("new".into())
+    }
+    fn instant_token() -> Option<String> {
+        Some("t".into())
+    }
+    fn never_returns() -> Option<String> {
+        loop {
+            thread::park();
+        }
+    }
+
+    /// Stands in for the real network stages, which honour the timeout they are
+    /// given: an HTTP request and then a TCP fallback that each use all of it,
+    /// ending in a chroxy-shaped body whose proof failed, so a retry follows.
+    fn stalls(port: u16, stage: &dyn Fn() -> Duration, _: Option<&str>) -> Option<ProbeResult> {
+        for _ in 0..2 {
+            thread::sleep(Some(stage()).filter(|t| !t.is_zero())?);
+        }
+        Some((PortState::Foreign(port), true))
+    }
+
+    #[test]
+    fn every_stage_of_the_service_wait_probe_fits_in_the_deadline() {
+        // A slow token read, a stalled HTTP request, a stalled TCP fallback, a
+        // slow fresh-token read and a stalled retry: 150 + 400 + 400 + 150 + 400
+        // + 400 ms in one probe, against a 1.2 s budget. Each stage may take only
+        // what is left, so the wait still ends on time.
+        let (got, took) = timed_wait(Duration::from_millis(1200), Duration::from_millis(400), |budget, cap| {
+            let start = std::time::Instant::now();
+            let sources = TokenSources { first: slow_old, fresh: slow_new };
+            poll_until_chroxy_within(budget, Duration::from_millis(20), cap, || start.elapsed(), wait_probe(9, &sources, stalls), thread::sleep)
+        });
+        assert_eq!(got, Ok(PortState::Foreign(9)), "a retry cut short leaves the first reading standing");
+        assert!(took < Duration::from_millis(1200) + WAIT_TOLERANCE, "the wait took {:?}", took);
+    }
+
+    #[test]
+    fn a_credential_read_that_does_not_return_ends_the_wait_in_time_and_says_so() {
+        let budget = Duration::from_millis(700);
+        // The first token read never returns (a keychain prompt nobody answers).
+        let (got, took) = timed_wait(budget, Duration::from_millis(200), |budget, cap| {
+            let start = std::time::Instant::now();
+            let sources = TokenSources { first: never_returns, fresh: instant_token };
+            poll_until_chroxy_within(budget, Duration::from_millis(20), cap, || start.elapsed(), wait_probe(9, &sources, stalls), thread::sleep)
+        });
+        assert_eq!(got, Err(CredentialTimedOut));
+        assert!(took < budget + WAIT_TOLERANCE, "the wait took {:?}", took);
+        // The read is given the whole wait, not one network stage's cap: a prompt
+        // the user answers within the window still succeeds.
+        assert!(took + Duration::from_millis(50) >= budget, "gave up after only {:?}", took);
+
+        // The fresh read for the retry never returns either.
+        let (got, took) = timed_wait(budget, Duration::from_millis(200), |budget, cap| {
+            let start = std::time::Instant::now();
+            let sources = TokenSources { first: instant_token, fresh: never_returns };
+            poll_until_chroxy_within(budget, Duration::from_millis(20), cap, || start.elapsed(), wait_probe(9, &sources, stalls), thread::sleep)
+        });
+        assert_eq!(got, Err(CredentialTimedOut));
+        assert!(took < budget + WAIT_TOLERANCE, "the wait took {:?}", took);
+
+        // And the wait refuses with a message that names the credential store.
+        match wait_for_installed_service(&ServiceDetection::Installed, || Err(CredentialTimedOut)) {
+            ServiceWait::Refuse(None, msg) => {
+                assert!(msg.contains("credential store") && msg.contains("did not start a second server"), "{}", msg)
+            }
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_real_holder_that_never_answers_cannot_stretch_the_wait() {
+        // Accepts every connection and never writes a byte: the HTTP request uses
+        // its whole timeout each time, the last one up to the deadline.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in listener.incoming().flatten() {
+                held.push(s);
+            }
+        });
+        let budget = Duration::from_millis(1500);
+        let (got, took) = timed_wait(budget, Duration::from_millis(600), move |budget, cap| {
+            let start = std::time::Instant::now();
+            let sources = TokenSources { first: instant_token, fresh: instant_token };
+            poll_until_chroxy_within(budget, Duration::from_millis(50), cap, || start.elapsed(), wait_probe(port, &sources, probe_port_outcome_within), thread::sleep)
+        });
+        // The probe the deadline cut short does not turn the holder into "free".
+        assert_eq!(got, Ok(PortState::Foreign(port)));
+        assert!(took < budget + WAIT_TOLERANCE, "the wait took {:?}", took);
+    }
+
+    #[test]
+    fn a_stage_with_no_time_left_reads_nothing_rather_than_a_free_port() {
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe_port_outcome_within(port, &|| Duration::ZERO, Some(TOKEN)), None);
+        assert_eq!(probe_port_outcome_within(port, &|| T, Some(TOKEN)), Some((PortState::Chroxy(port), false)));
+    }
+
+    #[test]
+    fn a_probe_cut_short_reads_nothing_and_a_retry_cut_short_keeps_the_first_reading() {
+        let ok = || Ok::<_, CredentialTimedOut>(Some("old".to_string()));
+        let new = || Ok(Some("new".to_string()));
+        assert_eq!(probe_with_retry_within(9, ok, new, |_, _| None), Ok(None));
+        let first_only = |p: u16, token: Option<&str>| (token == Some("old")).then_some((PortState::Foreign(p), true));
+        assert_eq!(probe_with_retry_within(9, ok, new, first_only), Ok(Some((PortState::Foreign(9), None))));
+        // A fresh read that times out ends the probe.
+        assert_eq!(
+            probe_with_retry_within(9, ok, || Err(CredentialTimedOut), |p, _| Some((PortState::Foreign(p), true))),
+            Err(CredentialTimedOut)
+        );
+    }
+
     #[test]
     fn the_wait_for_a_service_adopts_or_refuses_and_never_starts() {
-        assert_eq!(wait_for_installed_service(&ServiceDetection::Installed, || PortState::Chroxy(8765)), ServiceWait::Adopt(8765));
+        assert_eq!(wait_for_installed_service(&ServiceDetection::Installed, || Ok(PortState::Chroxy(8765))), ServiceWait::Adopt(8765));
         for last in [PortState::Free, PortState::Foreign(8765)] {
-            match wait_for_installed_service(&ServiceDetection::Indeterminate("/d".into()), || last) {
-                ServiceWait::Refuse(seen, msg) => assert!(seen == last && !msg.is_empty()),
+            match wait_for_installed_service(&ServiceDetection::Indeterminate("/d".into()), || Ok(last)) {
+                ServiceWait::Refuse(seen, msg) => assert!(seen == Some(last) && !msg.is_empty()),
                 other => panic!("{:?}", other),
             }
         }
