@@ -1664,8 +1664,8 @@ export const DeleteArchivedSessionSchema = z.object({
 // policy, so all four fields are required. `purge: true` is the explicit "turn
 // off and also delete all archives" choice and is only valid with
 // `enabled: false` (the server enforces that and the value ranges: they are the
-// config validator's, not restated here). PRIMARY-ONLY: a pairing-bound client
-// is refused with a degraded `session_archive_policy_result`.
+// config validator's, not restated here). UNBOUND-ONLY (the delete_archived_session
+// bar): a pairing-bound client is refused with a degraded `session_archive_policy_result`.
 export const SetSessionArchivePolicySchema = z.object({
   type: z.literal('set_session_archive_policy'),
   enabled: z.boolean(),

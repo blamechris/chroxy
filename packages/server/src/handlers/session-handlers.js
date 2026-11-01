@@ -1013,8 +1013,9 @@ function handleDeleteArchivedSession(ws, client, msg, ctx) {
 
 /**
  * Dashboard Settings → Session archive (#8869): replace the retention policy of
- * the running daemon and persist it to config. PRIMARY-ONLY: a pairing-bound
- * client is refused FIRST (before validation, so the refusal says nothing about
+ * the running daemon and persist it to config. UNBOUND-ONLY, the same bar as
+ * `delete_archived_session` (which can already delete every record): a
+ * pairing-bound client is refused FIRST (before validation, so the refusal says nothing about
  * the policy) with a degraded schema-valid `session_archive_policy_result`.
  *
  * Order: validate (the config validator's rules; an over-max `maxEntries` is

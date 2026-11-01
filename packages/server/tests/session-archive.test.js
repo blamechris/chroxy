@@ -427,6 +427,21 @@ describe('SessionArchive', () => {
       assert.equal(archive.retentionPolicy().enabled, false)
     })
 
+    it('the Settings "off + delete" sequence leaves nothing, even with a write still queued', async () => {
+      const archive = make()
+      archive.archive(saved('old', { lastActivityAt: 1 }), 'closed')
+      assert.equal(archive.enqueue(saved('queued', { lastActivityAt: 2 })).status, 'queued')
+      // The handler's order: apply the off switch, then purge.
+      archive.setRetentionPolicy({ enabled: false, maxEntries: 100, maxAgeDays: 30, maxMegabytes: 256 })
+      assert.deepEqual(archive.deleteAll(), { deleted: 2, failed: 0 })
+      await archive.whenIdle()
+      assert.deepEqual(archive.list(), [])
+      assert.deepEqual(recordFiles(join(root, 'archive')), [])
+      assert.equal(archive.enqueue(saved('later', { lastActivityAt: 3 })).status, 'skipped', 'off: nothing new is queued')
+      await archive.whenIdle()
+      assert.deepEqual(archive.list(), [])
+    })
+
     it('turning it back on resumes archiving, but never past an invalid directory', () => {
       const archive = make({ enabled: false })
       archive.setRetentionPolicy({ enabled: true, maxEntries: 5, maxAgeDays: 30, maxMegabytes: 256 })

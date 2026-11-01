@@ -143,6 +143,33 @@ describe('SessionArchiveSettingsSection', () => {
     expect(state.setSessionArchivePolicy).toHaveBeenLastCalledWith({ ...policy, enabled: false }, { purge: true })
   })
 
+  it('a purge-only save (archiving already off) unticks the delete box once it settles, so a second click cannot re-send it', () => {
+    state.archivedSessions = snap({ policy: { ...policy, enabled: false } }, 2)
+    const { rerender } = render(<SessionArchiveSettingsSection />)
+    fireEvent.click(input('session-archive-purge'))
+    fireEvent.click(save())
+    expect(state.setSessionArchivePolicy).toHaveBeenLastCalledWith({ ...policy, enabled: false }, { purge: true })
+    state.sessionArchivePolicySaving = true
+    rerender(<SessionArchiveSettingsSection />)
+    // The reply: ok, and the policy values are unchanged (nothing re-keys the form).
+    state.sessionArchivePolicySaving = false
+    rerender(<SessionArchiveSettingsSection />)
+    expect(input('session-archive-purge').checked).toBe(false)
+    expect(save().disabled).toBe(true)
+  })
+
+  it('a FAILED purge keeps the box ticked so the operator can retry deliberately', () => {
+    state.archivedSessions = snap({ policy: { ...policy, enabled: false } }, 2)
+    const { rerender } = render(<SessionArchiveSettingsSection />)
+    fireEvent.click(input('session-archive-purge'))
+    state.sessionArchivePolicySaving = true
+    rerender(<SessionArchiveSettingsSection />)
+    state.sessionArchivePolicySaving = false
+    state.sessionArchivePolicyError = { code: 'SESSION_ARCHIVE_PURGE_PARTIAL', message: 'x' }
+    rerender(<SessionArchiveSettingsSection />)
+    expect(input('session-archive-purge').checked).toBe(true)
+  })
+
   it('turning it back on hides the delete choice and forgets a ticked box', () => {
     state.archivedSessions = snap()
     render(<SessionArchiveSettingsSection />)

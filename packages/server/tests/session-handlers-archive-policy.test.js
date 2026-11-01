@@ -9,7 +9,7 @@ import { nsCtx } from './test-helpers.js'
 import { ServerSessionArchivePolicyResultSchema, ClientMessageSchema } from '@chroxy/protocol'
 
 /**
- * set_session_archive_policy (#8869): primary-only, validated, persisted THEN
+ * set_session_archive_policy (#8869): unbound-only, validated, persisted THEN
  * applied. Config persistence is isolated through CHROXY_CONFIG_DIR (read live
  * by configDir()), so nothing here can touch the real ~/.chroxy.
  */
@@ -68,6 +68,17 @@ describe('set_session_archive_policy', () => {
       assert.equal(calls.set.length + calls.deleteAll, 0)
       assert.equal(existsSync(cfgPath()), false, 'nothing persisted')
       assert.doesNotThrow(() => ServerSessionArchivePolicyResultSchema.parse(sent[0]))
+    }
+  })
+
+  it('admits the primary token AND an unbound non-primary client: the delete_archived_session bar, not strict primary', () => {
+    for (const client of [{ boundSessionId: null, isPrimaryToken: true }, { boundSessionId: null, isPrimaryToken: false }]) {
+      const archive = run(client, { ...GOOD, enabled: false, purge: true })
+      assert.equal(archive.sent[0].ok, true, JSON.stringify(client))
+      assert.equal(archive.calls.deleteAll, 1)
+      const del = makeCtx()
+      sessionHandlers.delete_archived_session({}, client, { type: 'delete_archived_session', all: true }, del.ctx)
+      assert.equal(del.calls.deleteAll, 1, 'both archive deletions hold the same bar')
     }
   })
 

@@ -17,7 +17,7 @@
  * STYLING: class names only (theme/components.css), 44px floors via the shared
  * `.settings-field-checkbox` rule and the rules added beside it.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
 import { ARCHIVE_REFUSED_TEXT } from './ArchivedSessionsSection'
@@ -97,6 +97,16 @@ export function SessionArchiveSettingsSection() {
     setPurge(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the policy VALUES
   }, [policyKey])
+
+  // A purge is a one-shot: once a save settles without an error, untick it. The
+  // policy-keyed reset above does not fire for a purge-only save (archiving was
+  // already off, so no value changed), and a still-ticked box would let a second
+  // click send the permanent delete again.
+  const wasSaving = useRef(saving)
+  useEffect(() => {
+    if (wasSaving.current && !saving && !error) setPurge(false)
+    wasSaving.current = saving
+  }, [saving, error])
 
   const fieldErrors = useMemo(() => (draft ? validateArchivePolicyDraft(draft) : {}), [draft])
   const valid = Object.keys(fieldErrors).length === 0
