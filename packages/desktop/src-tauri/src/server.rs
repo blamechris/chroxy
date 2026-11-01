@@ -115,6 +115,62 @@ fn parse_ps_line(line: &str) -> Option<(u32, String)> {
     Some((pid, cmd))
 }
 
+/// Parse one line of `ps -eo pid=,pgid=,command=` output into
+/// (pid, process_group_id, full_command). Returns `None` for malformed lines.
+/// Separate from [`parse_ps_line`] so the by-port reap's format is untouched (#8893).
+#[cfg(any(unix, test))]
+fn parse_ps_pgid_line(line: &str) -> Option<(u32, u32, String)> {
+    // `ps` pads its numeric columns, so trim between fields rather than split once.
+    let (pid_str, rest) = line.trim_start().split_once(char::is_whitespace)?;
+    let (pgid_str, cmd) = rest.trim_start().split_once(char::is_whitespace)?;
+    let cmd = cmd.trim_start();
+    if cmd.is_empty() {
+        return None;
+    }
+    Some((pid_str.parse().ok()?, pgid_str.parse().ok()?, cmd.to_string()))
+}
+
+/// The cloudflared processes on `port` that the app can PROVE its own server
+/// started (#8893). `procs` is `(pid, owner_id, command)` where `owner_id` is
+/// the process group (Unix) or the parent pid (Windows) of that process;
+/// `owner_id` is the identity the app holds for its own crashed server.
+///
+/// A candidate must pass the same command-line filter as the by-port reap
+/// ([`cloudflared_pids_to_kill`]) AND carry the app's identity, so a tunnel on
+/// the same port that a service started (a different group / parent) is never
+/// returned. An `owner_id` of 0 or 1 is refused outright: it names no real
+/// server (0 is "unset", 1 is init/launchd, whose group the service would
+/// share), so matching on it could reap the service's tunnel.
+#[cfg(any(unix, windows, test))]
+pub(crate) fn own_cloudflared_pids(
+    procs: &[(u32, u32, String)],
+    port: u16,
+    owner_id: u32,
+) -> Vec<u32> {
+    if owner_id <= 1 {
+        return Vec::new();
+    }
+    let ours: Vec<(u32, String)> = procs
+        .iter()
+        .filter(|(_, owner, _)| *owner == owner_id)
+        .map(|(pid, _, cmd)| (*pid, cmd.clone()))
+        .collect();
+    cloudflared_pids_to_kill(&ours, port)
+}
+
+/// PowerShell that lists the children of `server_pid` as
+/// `ProcessId,ParentProcessId,CommandLine` JSON, but only when no process with
+/// that pid is alive. Windows does not reparent, so an orphaned cloudflared keeps naming
+/// the dead server as its parent; a live process at that pid is a reused pid
+/// (possibly the service) and must yield nothing (#8893). Pure for testing.
+#[cfg(any(windows, test))]
+fn orphaned_children_script(server_pid: u32) -> String {
+    format!(
+        "if (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}') {{ }} else {{ Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress }}",
+        pid = server_pid
+    )
+}
+
 /// Parse `wmic process get ProcessId,CommandLine /format:csv` stdout into
 /// (pid, full_command) pairs. Pure: exposed for unit testing.
 ///
@@ -151,6 +207,27 @@ pub(crate) fn parse_wmic_csv(stdout: &str) -> Vec<(u32, String)> {
 /// they can't match the cloudflared filter anyway.
 #[cfg(any(windows, test))]
 pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
+    parse_powershell_rows(stdout)
+        .into_iter()
+        .map(|(pid, _, cmd)| (pid, cmd))
+        .collect()
+}
+
+/// Like [`parse_powershell_json`], but keeps each row's `ParentProcessId`, as
+/// (pid, parent_pid, full_command). A row without a parent pid is skipped: it
+/// cannot prove whose child it is (#8893).
+#[cfg(any(windows, test))]
+fn parse_powershell_children_json(stdout: &str) -> Vec<(u32, u32, String)> {
+    parse_powershell_rows(stdout)
+        .into_iter()
+        .filter_map(|(pid, parent, cmd)| Some((pid, parent?, cmd)))
+        .collect()
+}
+
+/// The shared reader behind the two PowerShell parsers: (pid, parent pid if
+/// present, command line), skipping rows with no pid or no command line.
+#[cfg(any(windows, test))]
+fn parse_powershell_rows(stdout: &str) -> Vec<(u32, Option<u32>, String)> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -175,7 +252,11 @@ pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
         if cmd.is_empty() {
             continue;
         }
-        out.push((pid as u32, cmd.to_string()));
+        let parent = item
+            .get("ParentProcessId")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u32);
+        out.push((pid as u32, parent, cmd.to_string()));
     }
     out
 }
@@ -802,6 +883,143 @@ impl ServerManager {
         thread::sleep(Duration::from_millis(500));
     }
 
+    /// Reap the cloudflared the app's own (crashed) server started, and nothing
+    /// else (#8893). Unlike [`Self::kill_orphan_cloudflared`] this never matches by
+    /// port alone, so it is safe when an installed service may be tunnelling the
+    /// same port. Identity: on Unix the server and its tunnel inherit the app's
+    /// process group, and the tunnel keeps that group when reparented; launchd
+    /// and systemd start a service in a group of its own, so its tunnel never
+    /// matches. The proof is the app's group, not this server alone: a cloudflared
+    /// for the same port started by something else in the app's group (a dev
+    /// script that also runs a daemon) would count as the app's. On Windows the
+    /// orphan's parent pid still names the dead server.
+    #[cfg(unix)]
+    fn reap_own_orphaned_cloudflared(
+        port: u16,
+        _server_pid: u32,
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+    ) {
+        // SAFETY: getpgrp has no preconditions and cannot fail.
+        let own_pgid = unsafe { libc::getpgrp() } as u32;
+        Self::reap_own_cloudflared_in_group_with(port, own_pgid, log_buf, &|| {
+            Command::new("ps").args(["-eo", "pid=,pgid=,command="]).output()
+        });
+    }
+
+    /// Testable core of the Unix own-tunnel reap: enumerate through `runner`,
+    /// keep only cloudflared on `port` in process group `pgid`, SIGTERM them.
+    /// A failed enumeration is logged and reaps nothing.
+    #[cfg(any(unix, test))]
+    fn reap_own_cloudflared_in_group_with(
+        port: u16,
+        pgid: u32,
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+        runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+    ) -> Vec<u32> {
+        let output = match runner() {
+            Ok(out) => out,
+            Err(err) => {
+                let msg = format!(
+                    "[cloudflared-cleanup] ps spawn failed: {} — not reaping the crashed server's tunnel on port {}",
+                    err, port
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(log_buf, msg);
+                return Vec::new();
+            }
+        };
+        if !output.status.success() {
+            let msg = format!(
+                "[cloudflared-cleanup] ps exited {} — not reaping the crashed server's tunnel on port {}: {}",
+                output.status,
+                port,
+                Self::stderr_snippet(&output.stderr)
+            );
+            eprintln!("{}", msg);
+            Self::push_log_line(log_buf, msg);
+            return Vec::new();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let procs: Vec<(u32, u32, String)> =
+            stdout.lines().filter_map(parse_ps_pgid_line).collect();
+        let pids = own_cloudflared_pids(&procs, port, pgid);
+        if pids.is_empty() {
+            return pids;
+        }
+        Self::log_own_reap(port, &pids, log_buf);
+        #[cfg(unix)]
+        for pid in &pids {
+            // SAFETY: the pid was just listed in the app's own process group with
+            // a cloudflared command line for this port; the PID-reuse window is
+            // the same one `kill_orphan_cloudflared` accepts.
+            unsafe {
+                libc::kill(*pid as i32, libc::SIGTERM);
+            }
+        }
+        pids
+    }
+
+    #[cfg(windows)]
+    fn reap_own_orphaned_cloudflared(
+        port: u16,
+        server_pid: u32,
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+    ) {
+        let script = orphaned_children_script(server_pid);
+        let output = match Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(out) if out.status.success() => out,
+            Ok(out) => {
+                let msg = format!(
+                    "[cloudflared-cleanup] powershell exited {} — not reaping the crashed server's tunnel on port {}: {}",
+                    out.status,
+                    port,
+                    Self::stderr_snippet(&out.stderr)
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(log_buf, msg);
+                return;
+            }
+            Err(err) => {
+                let msg = format!(
+                    "[cloudflared-cleanup] powershell spawn failed: {} — not reaping the crashed server's tunnel on port {}",
+                    err, port
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(log_buf, msg);
+                return;
+            }
+        };
+        // The script already filters by parent; the parent pid is read back and
+        // matched here as well, so the proof does not rest on the query text.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let procs = parse_powershell_children_json(&stdout);
+        let pids = own_cloudflared_pids(&procs, port, server_pid);
+        if pids.is_empty() {
+            return;
+        }
+        Self::log_own_reap(port, &pids, log_buf);
+        for pid in &pids {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output();
+        }
+    }
+
+    #[cfg(any(unix, windows, test))]
+    fn log_own_reap(port: u16, pids: &[u32], log_buf: &Arc<Mutex<VecDeque<String>>>) {
+        let msg = format!(
+            "[tray] Reaping {} orphaned cloudflared process(es) of the crashed server on port {}: {:?}",
+            pids.len(),
+            port,
+            pids
+        );
+        eprintln!("{}", msg);
+        Self::push_log_line(log_buf, msg);
+    }
+
     /// Testable unix enumerator. Runs the injected process-listing command
     /// via `runner`, logs any failure to `log_buf`, and returns the parsed
     /// (pid, command_line) pairs (empty on failure).
@@ -1380,10 +1598,28 @@ impl ServerManager {
     /// health monitor (its generation is advanced, so a late successful probe, such
     /// as the service's own answer, can no longer write `Running`), and end and
     /// forget the owned child and its pid record. Unlike [`Self::stop`] this does
-    /// NOT reap cloudflared: the tunnel on this port may be the service's. Does not
-    /// change the status; callers decide it.
+    /// NOT reap cloudflared by port: the tunnel on this port may be the service's.
+    /// It reaps only the tunnel the app can prove its own server started (#8893):
+    /// on Unix a cloudflared on this port still in the app's process group, on
+    /// Windows one whose parent pid is the dead server's (see
+    /// [`Self::reap_own_orphaned_cloudflared`]). With no owned child nothing is
+    /// reaped. Does not change the status; callers decide it.
     pub fn release_for_service(&mut self) {
+        self.release_for_service_with(Self::reap_own_orphaned_cloudflared);
+    }
+
+    /// [`Self::release_for_service`] with the own-tunnel reap injected; `reap`
+    /// receives `(port, server pid, log buffer)` and runs only if there was a child.
+    fn release_for_service_with(
+        &mut self,
+        reap: impl FnOnce(u16, u32, &Arc<Mutex<VecDeque<String>>>),
+    ) {
+        // Captured before `kill_child` drops the handle.
+        let server_pid = self.child.as_ref().map(|c| c.id());
         self.kill_child();
+        if let Some(pid) = server_pid {
+            reap(self.config.port, pid, &self.log_buffer);
+        }
     }
 
     /// A crash restart found an installed chroxy service serving the port and the
@@ -1412,7 +1648,8 @@ impl ServerManager {
         reap: impl FnOnce(u16, &Arc<Mutex<VecDeque<String>>>),
     ) {
         let had_child = self.child.is_some();
-        self.release_for_service();
+        // The by-port reap below subsumes the proven-own one, so skip the latter.
+        self.release_for_service_with(|_, _, _| {});
         *lock_or_recover(&self.status) = ServerStatus::Stopped;
         self.auto_restart_pending.store(false, Ordering::Relaxed);
         if had_child {
@@ -1975,7 +2212,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn releasing_for_the_service_forgets_the_child_and_its_pid_record_without_reaping_tunnels() {
+    fn a_restart_handoff_forgets_the_child_its_pid_record_and_the_monitor() {
         let dir = tempfile::TempDir::new().unwrap();
         let (mut mgr, path) = manager_recording_in(dir.path());
         let script = dir.path().join("cli.js");
@@ -1990,6 +2227,199 @@ mod tests {
         assert!(!mgr.is_auto_restart_pending());
         // With no child, a later stop() has no tunnel cleanup to run.
         assert!(mgr.child.is_none());
+    }
+
+    fn procs_in(rows: &[(u32, u32, &str)]) -> Vec<(u32, u32, String)> {
+        rows.iter().map(|(p, g, c)| (*p, *g, c.to_string())).collect()
+    }
+
+    #[test]
+    fn own_cloudflared_is_reaped_and_the_services_on_the_same_port_is_kept() {
+        let procs = procs_in(&[
+            (100, 500, "cloudflared tunnel --url http://localhost:8765"), // the app's orphan
+            (200, 900, "cloudflared tunnel --url http://localhost:8765"), // the service's
+        ]);
+        assert_eq!(own_cloudflared_pids(&procs, 8765, 500), vec![100]);
+    }
+
+    #[test]
+    fn own_cloudflared_on_another_port_or_a_longer_port_is_kept() {
+        let procs = procs_in(&[
+            (100, 500, "cloudflared tunnel --url http://localhost:9000"),
+            (101, 500, "cloudflared tunnel --url http://localhost:8765"),
+        ]);
+        assert_eq!(own_cloudflared_pids(&procs, 876, 500), Vec::<u32>::new());
+        assert_eq!(own_cloudflared_pids(&procs, 8765, 500), vec![101]);
+    }
+
+    #[test]
+    fn a_non_cloudflared_process_in_the_owner_group_is_kept() {
+        let procs = procs_in(&[(100, 500, "node cli.js start --url http://localhost:8765")]);
+        assert!(own_cloudflared_pids(&procs, 8765, 500).is_empty());
+    }
+
+    #[test]
+    fn an_owner_id_of_zero_or_one_reaps_nothing() {
+        let procs = procs_in(&[
+            (100, 0, "cloudflared tunnel --url http://localhost:8765"),
+            (101, 1, "cloudflared tunnel --url http://localhost:8765"),
+        ]);
+        assert!(own_cloudflared_pids(&procs, 8765, 0).is_empty());
+        assert!(own_cloudflared_pids(&procs, 8765, 1).is_empty());
+    }
+
+    #[test]
+    fn parse_ps_pgid_line_reads_pid_group_and_command_and_skips_malformed() {
+        assert_eq!(
+            parse_ps_pgid_line("  123   456 cloudflared tunnel --url http://localhost:1"),
+            Some((123, 456, "cloudflared tunnel --url http://localhost:1".to_string()))
+        );
+        assert_eq!(parse_ps_pgid_line(""), None);
+        assert_eq!(parse_ps_pgid_line("abc 456 cmd"), None);
+        assert_eq!(parse_ps_pgid_line("123 xyz cmd"), None);
+        assert_eq!(parse_ps_pgid_line("123 456"), None);
+        assert_eq!(parse_ps_pgid_line("123"), None);
+    }
+
+    #[test]
+    fn the_windows_orphan_script_targets_the_server_pid_and_refuses_a_live_one() {
+        let script = orphaned_children_script(4242);
+        assert!(script.contains("-Filter 'ProcessId=4242') { }"), "{}", script);
+        assert!(script.contains("-Filter 'ParentProcessId=4242'"), "{}", script);
+        assert!(script.contains("ProcessId,ParentProcessId,CommandLine"), "{}", script);
+        assert!(script.contains("ConvertTo-Json -Compress"), "{}", script);
+    }
+
+    #[test]
+    fn a_windows_child_of_the_dead_server_is_reaped_and_anothers_on_the_port_is_kept() {
+        // What the orphan query returns, parsed and matched as the Windows reap
+        // does: only a cloudflared whose parent is the dead server qualifies.
+        let stdout = r#"[
+            {"ProcessId":10,"ParentProcessId":4242,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":11,"ParentProcessId":777,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":12,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":13,"ParentProcessId":4242,"CommandLine":"node.exe cli.js start"}
+        ]"#;
+        let procs = parse_powershell_children_json(stdout);
+        assert_eq!(procs.iter().map(|p| p.0).collect::<Vec<_>>(), vec![10, 11, 13]);
+        assert_eq!(own_cloudflared_pids(&procs, 8765, 4242), vec![10]);
+    }
+
+    #[test]
+    fn a_single_windows_child_object_parses_with_its_parent() {
+        let stdout = r#"{"ProcessId":10,"ParentProcessId":4242,"CommandLine":"cloudflared tunnel --url http://127.0.0.1:8765"}"#;
+        assert_eq!(
+            parse_powershell_children_json(stdout),
+            vec![(10, 4242, "cloudflared tunnel --url http://127.0.0.1:8765".to_string())]
+        );
+        assert!(parse_powershell_children_json("").is_empty());
+    }
+
+    #[test]
+    fn a_failed_ps_enumeration_is_logged_and_reaps_nothing() {
+        let log = Arc::new(Mutex::new(VecDeque::new()));
+        let reaped = ServerManager::reap_own_cloudflared_in_group_with(8765, 500, &log, &|| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no ps"))
+        });
+        assert!(reaped.is_empty());
+        assert!(lock_or_recover(&log).iter().any(|l| l.contains("not reaping")));
+    }
+
+    #[cfg(unix)]
+    struct KillOnDrop(Vec<std::process::Child>);
+    #[cfg(unix)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            for c in &mut self.0 {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_exit(child: &mut std::process::Child, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn reap_real_orphans_with_pgid(port: u16, pgid_for: impl Fn(u32) -> u32) -> (bool, bool) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        // Callers pass distinct ports (never 8765: a real daemon's tunnel may be
+        // running) because tests run in parallel in one process group.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("cloudflared");
+        std::fs::write(&bin, "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let url = format!("http://localhost:{}", port);
+        let own = Command::new(&bin).args(["tunnel", "--url", &url]).spawn().unwrap();
+        let foreign = Command::new(&bin)
+            .args(["tunnel", "--url", &url])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut guard = KillOnDrop(vec![own, foreign]);
+        // Let the shells exec their script so `ps` shows the cloudflared command.
+        thread::sleep(Duration::from_millis(400));
+
+        // SAFETY: getpgrp has no preconditions.
+        let own_pgid = unsafe { libc::getpgrp() } as u32;
+        let log = Arc::new(Mutex::new(VecDeque::new()));
+        ServerManager::reap_own_cloudflared_in_group_with(port, pgid_for(own_pgid), &log, &|| {
+            Command::new("ps").args(["-eo", "pid=,pgid=,command="]).output()
+        });
+        let own_gone = wait_exit(&mut guard.0[0], 5);
+        let foreign_gone = wait_exit(&mut guard.0[1], 1);
+        (own_gone, foreign_gone)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_real_own_orphan_is_reaped_and_a_same_port_tunnel_in_another_group_survives() {
+        let (own_gone, foreign_gone) = reap_real_orphans_with_pgid(38917, |pgid| pgid);
+        assert!(own_gone, "the app's own cloudflared was not reaped");
+        assert!(!foreign_gone, "a tunnel the app did not start was reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_real_reap_with_the_wrong_group_touches_neither_tunnel() {
+        let (own_gone, foreign_gone) = reap_real_orphans_with_pgid(38918, |pgid| pgid + 7919);
+        assert!(!own_gone && !foreign_gone);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn releasing_for_the_service_reaps_the_own_tunnel_for_the_port_and_server_pid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, _path) = manager_recording_in(dir.path());
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), &script), Ok(StartOutcome::Spawned));
+        let pid = mgr.child.as_ref().unwrap().id();
+        let port = mgr.config.port;
+        let mut seen = Vec::new();
+        mgr.release_for_service_with(|p, server, _| seen.push((p, server)));
+        assert_eq!(seen, vec![(port, pid)]);
+        assert!(mgr.child.is_none());
+    }
+
+    #[test]
+    fn releasing_with_no_child_reaps_nothing_and_leaves_the_status_alone() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Error("crashed".into());
+        let mut called = false;
+        mgr.release_for_service_with(|_, _, _| called = true);
+        assert!(!called);
+        assert_eq!(mgr.status(), ServerStatus::Error("crashed".into()));
     }
 
     #[test]
