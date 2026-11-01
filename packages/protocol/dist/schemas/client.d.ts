@@ -1196,6 +1196,15 @@ export declare const DeleteArchivedSessionSchema: z.ZodObject<{
     archiveId: z.ZodOptional<z.ZodString>;
     all: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
+export declare const SetSessionArchivePolicySchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_session_archive_policy">;
+    enabled: z.ZodBoolean;
+    maxEntries: z.ZodNumber;
+    maxAgeDays: z.ZodNumber;
+    maxMegabytes: z.ZodNumber;
+    purge: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const DestroyEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_environment">;
     environmentId: z.ZodString;
@@ -2086,6 +2095,14 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"delete_archived_session">;
     archiveId: z.ZodOptional<z.ZodString>;
     all: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_session_archive_policy">;
+    enabled: z.ZodBoolean;
+    maxEntries: z.ZodNumber;
+    maxAgeDays: z.ZodNumber;
+    maxMegabytes: z.ZodNumber;
+    purge: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;

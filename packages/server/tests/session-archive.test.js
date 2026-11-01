@@ -407,6 +407,35 @@ describe('SessionArchive', () => {
     assert.deepEqual(make({ maxEntries: 7, maxAgeDays: 1.5, maxMegabytes: 2 }).retentionPolicy(), { enabled: true, maxEntries: 7, maxAgeDays: 1.5, maxMegabytes: 2 })
   })
 
+  describe('setRetentionPolicy (#8869)', () => {
+    it('lowering maxEntries prunes the excess records NOW and reports the applied policy', () => {
+      const archive = make()
+      for (const id of ['a', 'b', 'c']) { clock.t += 1000; archive.archive(saved(id, { lastActivityAt: clock.t }), 'closed') }
+      assert.equal(archive.list().length, 3)
+      const applied = archive.setRetentionPolicy({ enabled: true, maxEntries: 1, maxAgeDays: 30, maxMegabytes: 256 })
+      assert.deepEqual(applied, { enabled: true, maxEntries: 1, maxAgeDays: 30, maxMegabytes: 256 })
+      assert.equal(recordFiles(join(root, 'archive')).length, 1, 'the excess record files are unlinked immediately')
+      assert.deepEqual(archive.list().map((r) => r.sessionId), ['c'], 'the newest survives')
+    })
+
+    it('enabled:false stops new writes, and existing records stay', () => {
+      const archive = make()
+      archive.archive(saved('a'), 'closed')
+      archive.setRetentionPolicy({ enabled: false, maxEntries: 100, maxAgeDays: 30, maxMegabytes: 256 })
+      assert.equal(archive.archive(saved('b')), null)
+      assert.deepEqual(archive.list().map((r) => r.sessionId), ['a'])
+      assert.equal(archive.retentionPolicy().enabled, false)
+    })
+
+    it('turning it back on resumes archiving, but never past an invalid directory', () => {
+      const archive = make({ enabled: false })
+      archive.setRetentionPolicy({ enabled: true, maxEntries: 5, maxAgeDays: 30, maxMegabytes: 256 })
+      assert.ok(archive.archive(saved('a')))
+      const noDir = new SessionArchive({})
+      assert.equal(noDir.setRetentionPolicy({ enabled: true, maxEntries: 5, maxAgeDays: 30, maxMegabytes: 256 }).enabled, false)
+    })
+  })
+
   describe('outcomes (a caller about to drop the only copy needs to know)', () => {
     it('reports archived / duplicate / skipped / failed', () => {
       const archive = make()

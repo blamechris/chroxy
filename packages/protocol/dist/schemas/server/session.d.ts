@@ -958,6 +958,30 @@ export declare const ServerDeleteArchivedSessionResultSchema: z.ZodObject<{
     message: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
+ * Reply to `set_session_archive_policy`. `policy` is the policy now in force on
+ * the daemon (read back from the archive, not echoed from the request).
+ * `deleted` is how many records `purge: true` removed. `ok: false` carries
+ * `code`: `SESSION_ARCHIVE_POLICY_INVALID`, `SESSION_ARCHIVE_POLICY_PERSIST_FAILED`
+ * (nothing was applied), `SESSION_ARCHIVE_PURGE_PARTIAL` (the policy change DID
+ * apply and `policy` is present; some records could not be removed), or, with
+ * `refused: true`, `SESSION_ARCHIVE_POLICY_FORBIDDEN_BOUND_CLIENT`.
+ */
+export declare const ServerSessionArchivePolicyResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_archive_policy_result">;
+    ok: z.ZodBoolean;
+    policy: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodBoolean;
+        maxEntries: z.ZodNumber;
+        maxAgeDays: z.ZodNumber;
+        maxMegabytes: z.ZodNumber;
+    }, z.core.$strip>>;
+    deleted: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

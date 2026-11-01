@@ -4472,6 +4472,16 @@ export class SessionManager extends EventEmitter {
     return this._sessionArchive.delete(archiveId)
   }
 
+  /**
+   * Apply a validated retention policy to the running archive and prune now.
+   * @returns {object|null} the applied policy, or null if the store cannot
+   */
+  setArchiveRetentionPolicy(policy) {
+    return typeof this._sessionArchive.setRetentionPolicy === 'function'
+      ? this._sessionArchive.setRetentionPolicy(policy)
+      : null
+  }
+
   /** @returns {{ deleted: number, failed: number }} */
   deleteAllArchivedSessions() {
     return this._sessionArchive.deleteAll()

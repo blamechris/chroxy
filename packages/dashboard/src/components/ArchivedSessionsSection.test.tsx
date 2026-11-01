@@ -89,7 +89,8 @@ describe('ArchivedSessionsSection — states', () => {
     render(<ArchivedSessionsSection />)
     const text = screen.getByTestId('archived-sessions-policy').textContent ?? ''
     expect(text.includes('Ended sessions are kept here for up to 30 days (200 sessions, 256 MB).')).toBe(true)
-    expect(text.includes('sessionArchive')).toBe(true)
+    expect(text.includes('Settings → Session archive')).toBe(true)
+    expect(text.includes('sessionArchive')).toBe(false)
   })
 
   it('renders the disabled policy line', () => {

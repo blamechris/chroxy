@@ -9318,6 +9318,40 @@ button.sidebar-token-view-session-row:hover {
   font-size: 14px;
 }
 
+.settings-field input[type='number'] {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.settings-field input[type='number']:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.settings-field input[type='number'][aria-invalid='true'] {
+  border-color: var(--accent-red, var(--border-primary));
+}
+
+.settings-field .settings-field-error {
+  color: var(--accent-red, var(--text-primary));
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+/* Settings -> Session archive Save: 44px floor (AGENTS.md tap targets). */
+.settings-secondary-button.session-archive-save {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+}
+
 .settings-field select:focus {
   outline: none;
   border-color: var(--accent-blue);
