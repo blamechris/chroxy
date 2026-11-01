@@ -1486,6 +1486,22 @@ export const DeleteArchivedSessionSchema = z.object({
     archiveId: z.string().min(1).max(256).optional(),
     all: z.boolean().optional(),
 }).refine((m) => (m.archiveId !== undefined) !== (m.all === true), { message: 'delete_archived_session requires exactly one of archiveId or all: true' });
+// Dashboard Settings → Session archive (#8869): replace the retention policy of
+// the running daemon and persist it to config. The UI always sends the WHOLE
+// policy, so all four fields are required. `purge: true` is the explicit "turn
+// off and also delete all archives" choice and is only valid with
+// `enabled: false` (the server enforces that and the value ranges: they are the
+// config validator's, not restated here). UNBOUND-ONLY (the delete_archived_session
+// bar): a pairing-bound client is refused with a degraded `session_archive_policy_result`.
+export const SetSessionArchivePolicySchema = z.object({
+    type: z.literal('set_session_archive_policy'),
+    enabled: z.boolean(),
+    maxEntries: z.number(),
+    maxAgeDays: z.number(),
+    maxMegabytes: z.number(),
+    purge: z.boolean().optional(),
+    requestId: z.string().max(128).optional(),
+});
 export const DestroyEnvironmentSchema = z.object({
     type: z.literal('destroy_environment'),
     environmentId: z.string().max(256),
@@ -2039,6 +2055,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListArchivedSessionsSchema,
     GetArchivedSessionHistorySchema,
     DeleteArchivedSessionSchema,
+    SetSessionArchivePolicySchema,
     GetEnvironmentSchema,
     EvaluateDraftSchema,
     HostStatusRequestSchema,

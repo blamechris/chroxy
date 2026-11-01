@@ -1059,6 +1059,20 @@ describe('SettingsPanel', () => {
     })
   })
 
+  describe('Session archive section (#8869)', () => {
+    it('is part of Settings, with the retention controls (the section itself is covered in SessionArchiveSettingsSection.test.tsx)', () => {
+      setMockState({
+        archivedSessions: {
+          type: 'archived_sessions_list', generatedAt: 'x', sessions: [],
+          policy: { enabled: true, maxEntries: 100, maxAgeDays: 30, maxMegabytes: 256 },
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('session-archive-section')).toBeInTheDocument()
+      expect(screen.getByTestId('session-archive-max-entries')).toBeInTheDocument()
+    })
+  })
+
   describe('BYOK credentials (#4052)', () => {
     it('renders Missing status when no key configured', () => {
       setMockState({ byokCredentialsStatus: { status: 'missing', source: 'none', reason: 'not configured' } })

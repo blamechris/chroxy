@@ -64,7 +64,7 @@ export function ArchivePolicyNote({ policy, testId, className = 'aa-policy' }: {
       {policy.enabled ? (
         <>
           Ended sessions are kept here for up to {policy.maxAgeDays} days ({policy.maxEntries} sessions,{' '}
-          {policy.maxMegabytes} MB). Change or turn off with <code>sessionArchive</code> in the chroxy config.
+          {policy.maxMegabytes} MB). Change or turn off in Settings → Session archive.
         </>
       ) : (
         <>Archiving is off — ended sessions are not kept. Existing archives stay until deleted or aged out.</>

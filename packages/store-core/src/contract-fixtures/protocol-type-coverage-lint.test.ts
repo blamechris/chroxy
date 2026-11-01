@@ -154,6 +154,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'archived_sessions_list',     // provider-neutral session archive roster — a host-level operator console surface, like the failed-restore roster above; no per-session surface can host it and the mobile app has no equivalent list
   'archived_session_history',   // read-only page of an archived session's preserved history — rides with the roster above
   'delete_archived_session_result', // delete ack for an archive record — rides with the roster above
+  'session_archive_policy_result', // ack for the dashboard's archive-retention setter (#8869) — rides with the roster above
   'git_create_pr_result',       // #6876 in-app PR creation reply — GitPanel "Create PR" flow is dashboard-only for v1; mobile PR-creation UI is a tracked follow-up
   'session_pr_threads',         // #7430 unresolved review-thread count for the CI prefill line — dashboard-only because its only consumer (the CI chip's prefill action) is; mobile parity rides with #7425
   'shell_pending_approval',     // #6277 host-local user-shell approval — "waiting for host approval" banner; dashboard-only for v1, mobile parity deferred

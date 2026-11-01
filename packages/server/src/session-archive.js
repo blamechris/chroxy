@@ -346,6 +346,22 @@ export class SessionArchive {
   }
 
   /**
+   * Replace the retention policy at runtime and re-run retention so lowered
+   * limits take effect now. The caller validates (config.js
+   * validateSessionArchivePolicy); `enabled` is still ANDed with the directory.
+   * @param {{ enabled: boolean, maxEntries: number, maxAgeDays: number, maxMegabytes: number }} policy
+   * @returns {ReturnType<SessionArchive['retentionPolicy']>} the applied policy
+   */
+  setRetentionPolicy({ enabled, maxEntries, maxAgeDays, maxMegabytes }) {
+    this._enabled = this._dirValid && enabled === true
+    this._maxEntries = maxEntries
+    this._maxAgeDays = maxAgeDays
+    this._maxMegabytes = maxMegabytes
+    this.prune()
+    return this.retentionPolicy()
+  }
+
+  /**
    * Archive one ended session SYNCHRONOUSLY and say what happened. NEVER
    * throws: archiving must not be able to break a teardown.
    *

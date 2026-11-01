@@ -8,6 +8,7 @@ import {
   writeReposToConfig,
   writeSessionPresetOverrideToConfig,
   writeSchedulerEnabledToConfig,
+  writeSessionArchiveToConfig,
   writeControlRoomRootToConfig,
 } from '../src/config.js'
 
@@ -54,6 +55,11 @@ const WRITERS = [
     name: 'writeSchedulerEnabledToConfig',
     write: (p) => writeSchedulerEnabledToConfig(true, p),
     assertApplied: (cfg) => assert.equal(cfg.features.scheduler, true),
+  },
+  {
+    name: 'writeSessionArchiveToConfig',
+    write: (p) => writeSessionArchiveToConfig({ enabled: false, maxEntries: 5, maxAgeDays: 2, maxMegabytes: 3 }, p),
+    assertApplied: (cfg) => assert.deepEqual(cfg.sessionArchive, { enabled: false, maxEntries: 5, maxAgeDays: 2, maxMegabytes: 3 }),
   },
   {
     name: 'writeControlRoomRootToConfig',

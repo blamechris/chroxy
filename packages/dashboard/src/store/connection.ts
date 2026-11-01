@@ -150,7 +150,7 @@ import {
   armEnvironmentDestroyTimer,
   cancelAllEnvironmentDestroyTimers,
 } from './message-handler';
-import type { EvaluatorResultPayload } from './types';
+import type { EvaluatorResultPayload, ArchivePolicy } from './types';
 // #6871: the scheduled-task create/update payload shape (wire contract).
 import type { ScheduledTaskInput } from '@chroxy/protocol';
 import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
@@ -1166,6 +1166,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   deletingArchiveIds: new Set<string>(),
   deletingAllArchives: false,
   archiveDeleteError: null,
+  sessionArchivePolicySaving: false,
+  sessionArchivePolicyError: null,
   pairingRefreshedCount: 0,
   // #7728 — one roster per provider (see ConnectionState.modelsByProvider).
   modelsByProvider: {},
@@ -2197,6 +2199,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ deletingAllArchives: true, archiveDeleteError: null });
     wsSend(socket, { type: 'delete_archived_session', all: true });
     return true;
+  },
+
+  // Dashboard Settings → Session archive (#8869). Always sends the WHOLE policy
+  // (the server requires all four fields). `purge` is the explicit "turn off and
+  // also delete all archives" choice. Returns the requestId, or null (nothing
+  // sent, no state change) when the socket is closed or a save is in flight.
+  setSessionArchivePolicy: (policy: ArchivePolicy, opts: { purge?: boolean } = {}): string | null => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    if (get().sessionArchivePolicySaving) return null;
+    const requestId = `archive-policy-${nextMessageId()}`;
+    const msg: Record<string, unknown> = {
+      type: 'set_session_archive_policy',
+      enabled: policy.enabled,
+      maxEntries: policy.maxEntries,
+      maxAgeDays: policy.maxAgeDays,
+      maxMegabytes: policy.maxMegabytes,
+      requestId,
+    };
+    if (opts.purge === true) msg.purge = true;
+    if (!wsSend(socket, msg)) return null;
+    set({ sessionArchivePolicySaving: true, sessionArchivePolicyError: null });
+    return requestId;
   },
 
   requestByokPoolStatus: (): boolean => {
@@ -3644,6 +3669,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      sessionArchivePolicyError: null,
       // #7586 (supersedes #7572's two literals) — EVERY in-flight request marker:
       // the actioning-id sets, the reindex / relay re-run / retry paths, the
       // orchestration detail + pending-action markers, the survey *Loading flags,
@@ -3892,6 +3918,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      sessionArchivePolicyError: null,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
@@ -4127,6 +4154,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      sessionArchivePolicyError: null,
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it
       // (~L3251); `_resetSessionMemory` did not, so an open transcript from

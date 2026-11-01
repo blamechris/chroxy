@@ -10,6 +10,7 @@ import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
+import { SessionArchiveSettingsSection } from './SessionArchiveSettingsSection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -2041,6 +2042,10 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               </>
             )}
           </section>
+
+          {/* #8869: archive retention (on/off, size, age, count) and the explicit
+              turn-off-and-delete choice. Primary-only; a bound device sees why not. */}
+          <SessionArchiveSettingsSection />
 
           {(onToggleConsoleTab || onToggleInterventionPing || onToggleTurnCompleteNotification || notificationPermission) && (
             <section className="settings-section" data-testid="dashboard-section">

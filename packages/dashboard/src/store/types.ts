@@ -975,6 +975,9 @@ export interface WslActionResult {
   at: number;
 }
 
+/** The archive retention policy as the daemon reports and accepts it. */
+export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -1903,6 +1906,10 @@ export interface ConnectionState {
   deletingAllArchives: boolean;
   /** The last delete's failure (`archiveId` absent for a delete-all). Cleared by the next delete. */
   archiveDeleteError: { archiveId?: string; code?: string; message?: string; refused?: boolean } | null;
+  /** A `set_session_archive_policy` is in flight (Settings → Session archive). Socket-scoped: cleared with the in-flight markers. */
+  sessionArchivePolicySaving: boolean;
+  /** The last policy save's failure; cleared by the next save and on reset. */
+  sessionArchivePolicyError: { code?: string; message?: string; refused?: boolean } | null;
 
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
@@ -2588,6 +2595,12 @@ export interface ConnectionState {
   deleteArchivedSession: (archiveId: string) => boolean;
   /** Delete every archive record. */
   deleteAllArchivedSessions: () => boolean;
+  /**
+   * Save the archive retention policy (always the whole policy) and, with
+   * `purge`, delete every existing archive. Returns the requestId, or null
+   * (nothing sent) when the socket is closed or a save is already in flight.
+   */
+  setSessionArchivePolicy: (policy: ArchivePolicy, opts?: { purge?: boolean }) => string | null;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a
   // `host_prune_status_request`; the server replies with a single

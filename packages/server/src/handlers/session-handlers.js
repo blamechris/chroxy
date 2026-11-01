@@ -11,7 +11,8 @@ import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, b
 import { getRegistryForProvider, resolveRosterProvider } from '../models.js'
 import { resolveDaemonDefaultProvider } from '../providers.js'
 import { CODEX_SANDBOX_MODES } from '../codex-session.js'
-import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
+import { isUserShellEnabled, isUserShellApprovalRequired, validateSessionArchivePolicy, writeSessionArchiveToConfig } from '../config.js'
+import { getErrorMessage } from '../utils/error-message.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
@@ -1010,6 +1011,87 @@ function handleDeleteArchivedSession(ws, client, msg, ctx) {
       })
 }
 
+/**
+ * Dashboard Settings → Session archive (#8869): replace the retention policy of
+ * the running daemon and persist it to config. UNBOUND-ONLY, the same bar as
+ * `delete_archived_session` (which can already delete every record): a
+ * pairing-bound client is refused FIRST (before validation, so the refusal says nothing about
+ * the policy) with a degraded schema-valid `session_archive_policy_result`.
+ *
+ * Order: validate (the config validator's rules; an over-max `maxEntries` is
+ * rejected, not clamped; `purge` needs `enabled: false`) -> persist -> apply to
+ * the running archive (retention re-runs) and the in-memory config -> optional
+ * purge. A persist failure applies NOTHING. A partial purge is ok:false but the
+ * policy change stood, so the reply still carries `policy`.
+ */
+function handleSetSessionArchivePolicy(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? { requestId: msg.requestId } : {}
+  const reply = (body) => ctx.transport.send(ws, { type: 'session_archive_policy_result', ...body, ...requestId })
+  if (isBoundClient(client)) {
+    reply({
+      ok: false,
+      refused: true,
+      code: 'SESSION_ARCHIVE_POLICY_FORBIDDEN_BOUND_CLIENT',
+      message: 'Pairing-issued session tokens cannot change the session archive policy — this requires a host-level (unbound) client, such as the primary token.',
+    })
+    return
+  }
+  const policy = {
+    enabled: msg?.enabled,
+    maxEntries: msg?.maxEntries,
+    maxAgeDays: msg?.maxAgeDays,
+    maxMegabytes: msg?.maxMegabytes,
+  }
+  const problem = validateSessionArchivePolicy(policy)
+  if (problem) {
+    reply({ ok: false, code: 'SESSION_ARCHIVE_POLICY_INVALID', message: problem.message })
+    return
+  }
+  const purge = msg?.purge === true
+  if (msg?.purge !== undefined && typeof msg.purge !== 'boolean') {
+    reply({ ok: false, code: 'SESSION_ARCHIVE_POLICY_INVALID', message: 'purge: expected boolean' })
+    return
+  }
+  if (purge && policy.enabled !== false) {
+    reply({ ok: false, code: 'SESSION_ARCHIVE_POLICY_INVALID', message: 'purge: deleting all archives is only valid when archiving is turned off (enabled: false)' })
+    return
+  }
+  try {
+    writeSessionArchiveToConfig(policy)
+  } catch (err) {
+    log.error(`Failed to persist sessionArchive policy: ${getErrorMessage(err)}`)
+    reply({ ok: false, code: 'SESSION_ARCHIVE_POLICY_PERSIST_FAILED', message: `Could not save the archive policy to config, so nothing was changed: ${getErrorMessage(err)}` })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const applied = (typeof sm.setArchiveRetentionPolicy === 'function' ? sm.setArchiveRetentionPolicy(policy) : null) || policy
+  const config = ctx?.services?.config
+  if (config && typeof config === 'object') {
+    const existing = config.sessionArchive && typeof config.sessionArchive === 'object' && !Array.isArray(config.sessionArchive) ? config.sessionArchive : {}
+    config.sessionArchive = { ...existing, ...policy }
+  }
+  log.info(`Session archive policy set by the primary client: enabled=${applied.enabled} maxEntries=${applied.maxEntries} maxAgeDays=${applied.maxAgeDays} maxMegabytes=${applied.maxMegabytes}${purge ? ' (purging existing archives)' : ''}`)
+  if (!purge) {
+    reply({ ok: true, policy: applied })
+    return
+  }
+  const { deleted, failed } = typeof sm.deleteAllArchivedSessions === 'function'
+    ? sm.deleteAllArchivedSessions()
+    : { deleted: 0, failed: 0 }
+  log.info(`Deleted ${deleted} archived session(s) while turning archiving off${failed > 0 ? ` (${failed} could not be removed)` : ''}`)
+  if (failed > 0) {
+    reply({
+      ok: false,
+      policy: applied,
+      deleted,
+      code: 'SESSION_ARCHIVE_PURGE_PARTIAL',
+      message: `Archiving is turned off, but only ${deleted} archived session(s) were deleted; ${failed} could not be removed and are still on disk`,
+    })
+    return
+  }
+  reply({ ok: true, policy: applied, deleted })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -1030,4 +1112,5 @@ export const sessionHandlers = {
   list_archived_sessions: handleListArchivedSessions,
   get_archived_session_history: handleGetArchivedSessionHistory,
   delete_archived_session: handleDeleteArchivedSession,
+  set_session_archive_policy: handleSetSessionArchivePolicy,
 }

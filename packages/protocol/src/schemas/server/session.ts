@@ -633,6 +633,31 @@ export const ServerDeleteArchivedSessionResultSchema = z.object({
 })
 
 /**
+ * Reply to `set_session_archive_policy`. `policy` is the policy now in force on
+ * the daemon (read back from the archive, not echoed from the request).
+ * `deleted` is how many records `purge: true` removed. `ok: false` carries
+ * `code`: `SESSION_ARCHIVE_POLICY_INVALID`, `SESSION_ARCHIVE_POLICY_PERSIST_FAILED`
+ * (nothing was applied), `SESSION_ARCHIVE_PURGE_PARTIAL` (the policy change DID
+ * apply and `policy` is present; some records could not be removed), or, with
+ * `refused: true`, `SESSION_ARCHIVE_POLICY_FORBIDDEN_BOUND_CLIENT`.
+ */
+export const ServerSessionArchivePolicyResultSchema = z.object({
+  type: z.literal('session_archive_policy_result'),
+  ok: z.boolean(),
+  policy: z.object({
+    enabled: z.boolean(),
+    maxEntries: z.number(),
+    maxAgeDays: z.number(),
+    maxMegabytes: z.number(),
+  }).optional(),
+  deleted: z.number().int().min(0).optional(),
+  requestId: z.string().optional(),
+  refused: z.boolean().optional(),
+  code: z.string().optional(),
+  message: z.string().optional(),
+})
+
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

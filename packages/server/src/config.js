@@ -1541,26 +1541,16 @@ export function validateConfig(config, verbose = false) {
     if (typeof config.sessionArchive !== 'object' || config.sessionArchive === null || Array.isArray(config.sessionArchive)) {
       warnings.push(`Invalid type for 'sessionArchive': expected object, got ${Array.isArray(config.sessionArchive) ? 'array' : typeof config.sessionArchive}`)
     } else {
-      if (
-        Object.prototype.hasOwnProperty.call(config.sessionArchive, 'enabled') &&
-        typeof config.sessionArchive.enabled !== 'boolean'
-      ) {
-        warnings.push(`Invalid type for 'sessionArchive.enabled': expected boolean, got ${typeof config.sessionArchive.enabled}`)
-      }
-      if (Object.prototype.hasOwnProperty.call(config.sessionArchive, 'maxEntries')) {
-        const v = config.sessionArchive.maxEntries
-        if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
-          warnings.push(`Invalid value for 'sessionArchive.maxEntries': expected a positive integer, got ${typeof v === 'number' ? v : typeof v}`)
-        }
-        else if (v > SESSION_ARCHIVE_MAX_ENTRIES) {
-          warnings.push(`Invalid value for 'sessionArchive.maxEntries': ${v} is above the maximum of ${SESSION_ARCHIVE_MAX_ENTRIES} and is clamped to it`)
-        }
-      }
-      for (const key of ['maxAgeDays', 'maxMegabytes']) {
+      for (const key of SESSION_ARCHIVE_POLICY_KEYS) {
         if (!Object.prototype.hasOwnProperty.call(config.sessionArchive, key)) continue
-        const v = config.sessionArchive[key]
-        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
-          warnings.push(`Invalid value for 'sessionArchive.${key}': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
+        const problem = sessionArchiveFieldProblem(key, config.sessionArchive[key])
+        if (!problem) continue
+        if (problem.kind === 'type') {
+          warnings.push(`Invalid type for 'sessionArchive.${key}': ${problem.detail}`)
+        } else if (problem.kind === 'above_max') {
+          warnings.push(`Invalid value for 'sessionArchive.${key}': ${config.sessionArchive[key]} is above the maximum of ${SESSION_ARCHIVE_MAX_ENTRIES} and is clamped to it`)
+        } else {
+          warnings.push(`Invalid value for 'sessionArchive.${key}': ${problem.detail}`)
         }
       }
       warnUnknownKeys(config.sessionArchive, SESSION_ARCHIVE_SUPPORTED_KEYS, 'sessionArchive', warnings)
@@ -2104,6 +2094,70 @@ export async function buildEnvironmentBackend(config, { _execFile, _loadBackends
 
   const backend = new mods.DockerBackend({ _execFile })
   return { backend, type }
+}
+
+/** The four `sessionArchive` retention knobs, in display order. */
+export const SESSION_ARCHIVE_POLICY_KEYS = ['enabled', 'maxEntries', 'maxAgeDays', 'maxMegabytes']
+
+/**
+ * The ONE rule for a single `sessionArchive` retention value, shared by the
+ * config validator (which warns) and the dashboard setter (which rejects).
+ * `enabled` is a boolean; `maxEntries` a positive integer no larger than
+ * SESSION_ARCHIVE_MAX_ENTRIES; `maxAgeDays` / `maxMegabytes` positive finite
+ * numbers.
+ * @returns {null | { kind: 'type'|'value'|'above_max', detail: string }}
+ */
+export function sessionArchiveFieldProblem(key, v) {
+  const got = typeof v === 'number' ? String(v) : typeof v
+  if (key === 'enabled') {
+    return typeof v === 'boolean' ? null : { kind: 'type', detail: `expected boolean, got ${typeof v}` }
+  }
+  if (key === 'maxEntries') {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+      return { kind: 'value', detail: `expected a positive integer, got ${got}` }
+    }
+    if (v > SESSION_ARCHIVE_MAX_ENTRIES) {
+      return { kind: 'above_max', detail: `${v} is above the maximum of ${SESSION_ARCHIVE_MAX_ENTRIES}` }
+    }
+    return null
+  }
+  if (key === 'maxAgeDays' || key === 'maxMegabytes') {
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? null : { kind: 'value', detail: `expected a positive number, got ${got}` }
+  }
+  return { kind: 'value', detail: 'unknown key' }
+}
+
+/**
+ * Validate a whole retention policy (all four fields required, exactly as the
+ * dashboard setter sends them). Unlike config loading, an over-max
+ * `maxEntries` is REJECTED, not clamped.
+ * @returns {{ field: string, message: string } | null} the first problem, or null
+ */
+export function validateSessionArchivePolicy(policy) {
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+    return { field: 'policy', message: 'expected a retention policy object' }
+  }
+  for (const key of SESSION_ARCHIVE_POLICY_KEYS) {
+    const problem = sessionArchiveFieldProblem(key, policy[key])
+    if (problem) return { field: key, message: `sessionArchive.${key}: ${problem.detail}` }
+  }
+  return null
+}
+
+/**
+ * Persist the four session-archive retention knobs to a config file,
+ * preserving every other field (including unknown keys inside `sessionArchive`).
+ * Throws on an unreadable/malformed existing config (readConfigForMerge).
+ * Does NOT validate; callers run validateSessionArchivePolicy first.
+ */
+export function writeSessionArchiveToConfig(policy, configPath = defaultConfigPath()) {
+  const existing = readConfigForMerge(configPath)
+  if (!existing.sessionArchive || typeof existing.sessionArchive !== 'object' || Array.isArray(existing.sessionArchive)) {
+    existing.sessionArchive = {}
+  }
+  for (const key of SESSION_ARCHIVE_POLICY_KEYS) existing.sessionArchive[key] = policy[key]
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
 }
 
 function defaultConfigPath() {

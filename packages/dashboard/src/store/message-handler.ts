@@ -206,7 +206,7 @@ import {
   mergePermissionModesByProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
-import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage } from '@chroxy/protocol'
 import { applyHistoryReply, pruneHistoryViews } from './history-views'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
@@ -7237,6 +7237,29 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // (and drops the views of the ones that did go). Only a refusal skips it:
       // the list would be refused too.
       if (reply.refused !== true) get().requestArchivedSessions();
+      break;
+    }
+    case 'session_archive_policy_result': {
+      // #8869. Settles the save marker on EVERY reply (a refusal included, or the
+      // Save button would stay disabled for good). An ok reply, and a PARTIAL
+      // purge (the policy change stood and `policy` is present), write the policy
+      // the daemon reports into the snapshot, so every policy line follows; then
+      // the list is re-asked because retention just ran (and a purge removed
+      // rows) and the roster is server truth.
+      const reply = msg as unknown as ServerSessionArchivePolicyResultMessage;
+      const applied = reply.ok === true || reply.code === 'SESSION_ARCHIVE_PURGE_PARTIAL';
+      const patch: Partial<ConnectionState> = {
+        sessionArchivePolicySaving: false,
+        sessionArchivePolicyError: reply.ok === true
+          ? null
+          : { code: reply.code, message: reply.message, refused: reply.refused === true },
+      };
+      const snapshot = get().archivedSessions;
+      if (applied && reply.policy && snapshot && snapshot.refused !== true) {
+        patch.archivedSessions = { ...snapshot, policy: reply.policy };
+      }
+      set(patch);
+      if (applied) get().requestArchivedSessions();
       break;
     }
     case 'retry_failed_restore_result': {
