@@ -259,7 +259,7 @@ fn every_adopt_route_classifies_the_holder_through_a_challenge() {
         "probe_port and prove_daemon must both challenge through the real token sources"
     );
     assert!(
-        tray.contains("let (state, proof_failed) = probe(port, timeout, first.as_deref());") && tray.contains("if proof_failed {"),
+        tray.contains("let Some((state, proof_failed)) = probe(port, first.as_deref()) else {") && tray.contains("if proof_failed {"),
         "the fresh token is read only after a chroxy-shaped body's proof failed"
     );
     assert!(
@@ -467,7 +467,16 @@ fn the_service_wait_runs_before_any_lock_and_never_under_one() {
     assert!(fn_body(&lib, "await_installed_service").contains("wait_for_service(tray_state::chroxy_service_detection())"));
     assert!(fn_body(&lib, "wait_for_service").contains("poll_for_daemon_within("));
     let within = fn_body(&lib, "poll_for_daemon_within");
-    assert!(within.contains("poll_until_chroxy_within(") && within.contains("tray_state::probe_port(port, timeout)"), "the deadline poll must challenge through probe_port with the capped timeout");
+    assert!(within.contains("poll_until_chroxy_within(") && within.contains("tray_state::probe_port_within(port, time)"), "the deadline poll must challenge through probe_port_within, bounded by the wait's time");
+    // #8892: and that probe reads the app's real token sources through the bounded reader.
+    let tray = squash(&read("src/tray_state.rs"));
+    assert!(
+        tray.contains("probe_within(port, time, &REAL_TOKEN_SOURCES, probe_port_outcome_within)")
+            && tray.contains("let limit = time.left(); read_token_within(source, limit)")
+            && tray.contains("probe_with_retry_within(port, || read(sources.first), read_fresh,")
+            && tray.contains("let read_fresh = || match read(sources.fresh) {"),
+        "the service-wait probe must read the real token sources, each bounded by the time left"
+    );
 }
 
 #[test]
