@@ -5584,9 +5584,12 @@ export class SessionManager extends EventEmitter {
    * live, its durability unproven), so a bare durable flush can "succeed"
    * without proving anything. A caller about to drop its only other copy of the
    * data must use this and treat `false` as "keep the copy".
+   * Once `destroyAll()` has run, `serializeState` writes nothing and the flush
+   * still reports success, so that state is never "confirmed".
    * @returns {boolean} true only when the write succeeded AND its durability is confirmed
    */
   _flushPersistConfirmedDurable(sessionId, name = null) {
+    if (this._destroying) return false
     if (!this._flushPersistOrWarn(sessionId, name, { durable: true })) return false
     const unconfirmed = this._persistence.lastDurabilityUnconfirmed
     if (unconfirmed) {

@@ -340,6 +340,17 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
       assert.equal(sm.listArchivedSessions().sessions.length, 1, 'but the archive copy stays: durability was not confirmed')
     })
 
+    it('never reports a write as confirmed durable once destroyAll() has run (serializeState writes nothing then)', () => {
+      makeSm()
+      assert.equal(sm._flushPersistConfirmedDurable('x'), true, 'control: a normal durable flush is confirmed')
+      sm._destroying = true
+      try {
+        assert.equal(sm._flushPersistConfirmedDurable('x'), false)
+      } finally {
+        sm._destroying = false
+      }
+    })
+
     it('refuses a second native resume of a conversation that is already live (ARCHIVE_RESTORE_ALREADY_LIVE with the owner)', async () => {
       makeSm()
       const { row } = await archived()
