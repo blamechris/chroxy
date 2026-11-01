@@ -69,7 +69,6 @@ class SessionManager extends RealSessionManager {
     instances.push(this)
   }
 }
-const tick = () => new Promise((r) => setImmediate(r))
 
 describe('SessionManager.restoreArchivedSession (#8866)', () => {
   let sm
@@ -296,8 +295,17 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
       makeSm()
       const { id, row } = await archived({ provider: 'test-restore-dead-start' })
       const pending = sm.restoreArchivedSession(row.archiveId, 'native')
-      // The record is read and inflated off the event loop first.
-      for (let i = 0; i < 200 && !sm._sessions.has(id); i++) await tick()
+      // The record is read and inflated off the event loop first. Wait by TIME,
+      // not by turns: an idle setImmediate turn takes microseconds, so 200 of them
+      // end before one file read does on a loaded CI runner. A restore that settles
+      // without ever mapping the session is reported, not dereferenced.
+      let settled = null
+      pending.then((res) => { settled = res })
+      const deadline = Date.now() + 10_000
+      while (!sm._sessions.has(id) && settled === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5))
+      }
+      assert.ok(sm._sessions.has(id), `the restored session was never mapped (restore result: ${JSON.stringify(settled)})`)
       sm._sessions.get(id).session._reject(Object.assign(new Error('pty died'), { code: 'PTY_DEAD' }))
       const r = await pending
       assert.equal(r.ok, false)
