@@ -159,14 +159,14 @@ pub(crate) fn own_cloudflared_pids(
 }
 
 /// PowerShell that lists the children of `server_pid` as
-/// `ProcessId,CommandLine` JSON, but only when no process with that pid is
-/// alive. Windows does not reparent, so an orphaned cloudflared keeps naming
+/// `ProcessId,ParentProcessId,CommandLine` JSON, but only when no process with
+/// that pid is alive. Windows does not reparent, so an orphaned cloudflared keeps naming
 /// the dead server as its parent; a live process at that pid is a reused pid
 /// (possibly the service) and must yield nothing (#8893). Pure for testing.
 #[cfg(any(windows, test))]
 fn orphaned_children_script(server_pid: u32) -> String {
     format!(
-        "if (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}') {{ }} else {{ Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress }}",
+        "if (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}') {{ }} else {{ Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress }}",
         pid = server_pid
     )
 }
@@ -207,6 +207,27 @@ pub(crate) fn parse_wmic_csv(stdout: &str) -> Vec<(u32, String)> {
 /// they can't match the cloudflared filter anyway.
 #[cfg(any(windows, test))]
 pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
+    parse_powershell_rows(stdout)
+        .into_iter()
+        .map(|(pid, _, cmd)| (pid, cmd))
+        .collect()
+}
+
+/// Like [`parse_powershell_json`], but keeps each row's `ParentProcessId`, as
+/// (pid, parent_pid, full_command). A row without a parent pid is skipped: it
+/// cannot prove whose child it is (#8893).
+#[cfg(any(windows, test))]
+fn parse_powershell_children_json(stdout: &str) -> Vec<(u32, u32, String)> {
+    parse_powershell_rows(stdout)
+        .into_iter()
+        .filter_map(|(pid, parent, cmd)| Some((pid, parent?, cmd)))
+        .collect()
+}
+
+/// The shared reader behind the two PowerShell parsers: (pid, parent pid if
+/// present, command line), skipping rows with no pid or no command line.
+#[cfg(any(windows, test))]
+fn parse_powershell_rows(stdout: &str) -> Vec<(u32, Option<u32>, String)> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -231,7 +252,11 @@ pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
         if cmd.is_empty() {
             continue;
         }
-        out.push((pid as u32, cmd.to_string()));
+        let parent = item
+            .get("ParentProcessId")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u32);
+        out.push((pid as u32, parent, cmd.to_string()));
     }
     out
 }
@@ -862,9 +887,12 @@ impl ServerManager {
     /// else (#8893). Unlike [`Self::kill_orphan_cloudflared`] this never matches by
     /// port alone, so it is safe when an installed service may be tunnelling the
     /// same port. Identity: on Unix the server and its tunnel inherit the app's
-    /// process group (services run in their own), and the tunnel keeps that group
-    /// when reparented; on Windows the orphan's parent pid still names the dead
-    /// server.
+    /// process group, and the tunnel keeps that group when reparented; launchd
+    /// and systemd start a service in a group of its own, so its tunnel never
+    /// matches. The proof is the app's group, not this server alone: a cloudflared
+    /// for the same port started by something else in the app's group (a dev
+    /// script that also runs a daemon) would count as the app's. On Windows the
+    /// orphan's parent pid still names the dead server.
     #[cfg(unix)]
     fn reap_own_orphaned_cloudflared(
         port: u16,
@@ -964,14 +992,10 @@ impl ServerManager {
                 return;
             }
         };
-        // The parent-pid proof is the script's WMI filter: every row it returns
-        // is a child of `server_pid`, so the owner id is attached here rather
-        // than read back, and `own_cloudflared_pids` applies the command filter.
+        // The script already filters by parent; the parent pid is read back and
+        // matched here as well, so the proof does not rest on the query text.
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let procs: Vec<(u32, u32, String)> = parse_powershell_json(&stdout)
-            .into_iter()
-            .map(|(pid, cmd)| (pid, server_pid, cmd))
-            .collect();
+        let procs = parse_powershell_children_json(&stdout);
         let pids = own_cloudflared_pids(&procs, port, server_pid);
         if pids.is_empty() {
             return;
@@ -2262,7 +2286,33 @@ mod tests {
         let script = orphaned_children_script(4242);
         assert!(script.contains("-Filter 'ProcessId=4242') { }"), "{}", script);
         assert!(script.contains("-Filter 'ParentProcessId=4242'"), "{}", script);
+        assert!(script.contains("ProcessId,ParentProcessId,CommandLine"), "{}", script);
         assert!(script.contains("ConvertTo-Json -Compress"), "{}", script);
+    }
+
+    #[test]
+    fn a_windows_child_of_the_dead_server_is_reaped_and_anothers_on_the_port_is_kept() {
+        // What the orphan query returns, parsed and matched as the Windows reap
+        // does: only a cloudflared whose parent is the dead server qualifies.
+        let stdout = r#"[
+            {"ProcessId":10,"ParentProcessId":4242,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":11,"ParentProcessId":777,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":12,"CommandLine":"cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":13,"ParentProcessId":4242,"CommandLine":"node.exe cli.js start"}
+        ]"#;
+        let procs = parse_powershell_children_json(stdout);
+        assert_eq!(procs.iter().map(|p| p.0).collect::<Vec<_>>(), vec![10, 11, 13]);
+        assert_eq!(own_cloudflared_pids(&procs, 8765, 4242), vec![10]);
+    }
+
+    #[test]
+    fn a_single_windows_child_object_parses_with_its_parent() {
+        let stdout = r#"{"ProcessId":10,"ParentProcessId":4242,"CommandLine":"cloudflared tunnel --url http://127.0.0.1:8765"}"#;
+        assert_eq!(
+            parse_powershell_children_json(stdout),
+            vec![(10, 4242, "cloudflared tunnel --url http://127.0.0.1:8765".to_string())]
+        );
+        assert!(parse_powershell_children_json("").is_empty());
     }
 
     #[test]
