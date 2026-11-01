@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{self, ChroxyConfig};
+use crate::launch_env::{self, EnvAction};
 use crate::lock_or_recover;
 use crate::node;
 use crate::owned_server;
@@ -359,6 +360,12 @@ trait PortOps {
     fn own_holder_pids(&self, port: u16) -> Vec<u32>;
     fn terminate(&self, pids: &[u32]);
     fn kill_tunnels(&self, port: u16);
+    /// Is a chroxy service (launchd / systemd / Task Scheduler) installed?
+    fn service_installed(&self) -> bool;
+    /// ONE probe of `port` for the installed service's daemon. Never waits or
+    /// sleeps: it runs with the manager lock held, and the real wait for the
+    /// service is done by the caller before the lock is taken (#8890).
+    fn probe_service_daemon(&self, port: u16) -> PortState;
 }
 
 /// What `prepare_port_with` decided.
@@ -377,7 +384,7 @@ enum PortPrep {
 ///   tunnel this would otherwise kill. A user *restart* of the app's own server
 ///   still reaps its orphaned tunnel, because `kill_child` has just ended the
 ///   only process that held the port.
-/// - **Launch:** probes first and follows [`tray_state::launch_start_decision`].
+/// - **Launch:** probes first and follows [`tray_state::launch_start_decision_with_service`].
 ///   The only thing it can stop is a listener [`PortOps::own_holder_pids`] proved
 ///   to be the app's own; an adopted daemon's tunnel is left alone too.
 fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Result<PortPrep, String> {
@@ -391,7 +398,15 @@ fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Resul
         StartOrigin::Launch => {
             let held = ops.probe(port);
             let own = if held.is_occupied() { ops.own_holder_pids(port) } else { Vec::new() };
-            match tray_state::launch_start_decision(held, !own.is_empty()) {
+            let service = !held.is_occupied() && ops.service_installed();
+            match tray_state::launch_start_decision_with_service(held, !own.is_empty(), service) {
+                // #8890: backstop only. The callers wait for an installed service
+                // BEFORE taking the manager lock, so this is reached only when the
+                // service appeared in between. One probe, no waiting (the lock is
+                // held): adopt a daemon that answers, otherwise refuse; never spawn.
+                LaunchDecision::AwaitService => {
+                    tray_state::service_wait_result(ops.probe_service_daemon(port)).map(PortPrep::Adopt)
+                }
                 LaunchDecision::Spawn => {
                     ops.kill_tunnels(port);
                     Ok(PortPrep::Ready)
@@ -430,6 +445,24 @@ impl PortOps for RealPortOps<'_> {
     }
     fn kill_tunnels(&self, port: u16) {
         ServerManager::kill_orphan_cloudflared(port, self.log_buffer)
+    }
+    fn service_installed(&self) -> bool {
+        tray_state::chroxy_service_installed()
+    }
+    fn probe_service_daemon(&self, port: u16) -> PortState {
+        tray_state::probe_port(port, Duration::from_secs(2))
+    }
+}
+
+/// Apply one [`EnvAction`] to the command that will spawn the server.
+fn apply_env_action(cmd: &mut Command, name: &str, action: &EnvAction) {
+    match action {
+        EnvAction::Set(v) => {
+            cmd.env(name, v);
+        }
+        EnvAction::Clear => {
+            cmd.env_remove(name);
+        }
     }
 }
 
@@ -516,15 +549,16 @@ impl ServerManager {
         self.expose_on_lan = expose;
     }
 
-    /// #5356 — the bind host to hand the embedded server via `CHROXY_HOST`.
-    /// `None` when exposing on LAN (let the server keep its `0.0.0.0` default);
-    /// `Some("127.0.0.1")` otherwise so the control socket is loopback-only.
-    fn bind_host_env(&self) -> Option<&'static str> {
-        if self.expose_on_lan {
-            None
-        } else {
-            Some("127.0.0.1")
-        }
+    /// What the spawned server is told about its tunnel mode and bind host:
+    /// `config.json` wins over the app's own settings (#8890); the app's values
+    /// apply only where it is silent. #5356 — with no `host` in config the
+    /// embedded server is pinned to loopback unless the user opted into LAN
+    /// exposure.
+    fn launch_resolutions(&self) -> (launch_env::Resolution, launch_env::Resolution) {
+        (
+            launch_env::resolve_tunnel(self.config.tunnel.as_deref(), &self.tunnel_mode),
+            launch_env::resolve_host(self.config.host.as_deref(), self.expose_on_lan),
+        )
     }
 
     /// Set a custom Node binary path from settings.
@@ -1084,24 +1118,20 @@ impl ServerManager {
         if let Some(ref model) = self.config.model {
             cmd.env("CHROXY_MODEL", model);
         }
-        // Tunnel mode: "quick", "named", or "none"
-        cmd.env("CHROXY_TUNNEL", &self.tunnel_mode);
-        // #5356 — loopback by default. Unless the user opted into LAN exposure,
-        // pin the embedded server to 127.0.0.1 so the control socket (which
-        // drives a billed claude PTY and takes a token over the wire) is not
-        // reachable from the LAN. CHROXY_HOST maps to config.host in the server,
-        // which binds that interface with auth still on. When exposed, we
-        // explicitly clear the var (rather than just omitting it) so an inherited
-        // CHROXY_HOST from the desktop app's own environment can't silently pin
-        // the server to a different interface and make the toggle ineffective —
-        // the server then keeps its 0.0.0.0 default (LAN QR-scan flow).
-        match self.bind_host_env() {
-            Some(host) => {
-                cmd.env("CHROXY_HOST", host);
-            }
-            None => {
-                cmd.env_remove("CHROXY_HOST");
-            }
+        // Tunnel mode and bind host (#8890, #5356). `config.json` wins: when it
+        // sets `tunnel` / `host` the variable is REMOVED (not merely left unset,
+        // so an inherited value cannot shadow the file either) and the server
+        // reads the file itself, from the same config dir. Otherwise the app's
+        // tunnel mode is passed as `CHROXY_TUNNEL`, and the host is pinned to
+        // 127.0.0.1 unless the user exposed the app on the LAN, in which case the
+        // variable is cleared so the server keeps its 0.0.0.0 default. The
+        // control socket drives a billed claude PTY and takes a token over the
+        // wire, which is why loopback is the default.
+        let (tunnel, host) = self.launch_resolutions();
+        apply_env_action(&mut cmd, "CHROXY_TUNNEL", &tunnel.env);
+        apply_env_action(&mut cmd, "CHROXY_HOST", &host.env);
+        for conflict in [&tunnel.conflict, &host.conflict].into_iter().flatten() {
+            Self::push_log_line(&self.log_buffer, conflict.clone());
         }
         // Mark this as a bundled .app launch so the doctor Dependencies check
         // downgrades to `warn` instead of `fail` — end users can't run
@@ -1314,6 +1344,13 @@ impl ServerManager {
                 Err(e)
             }
         }
+    }
+
+    /// A crash restart found an installed chroxy service serving the port and the
+    /// app adopted it (#8890): nothing of ours is left to restart.
+    pub fn adopt_service_after_crash(&mut self) {
+        *lock_or_recover(&self.status) = ServerStatus::Stopped;
+        self.auto_restart_pending.store(false, Ordering::Relaxed);
     }
 
     /// Sleep in short increments, checking the generation counter between each.
@@ -1610,11 +1647,26 @@ mod tests {
         held: PortState,
         own: Vec<u32>,
         log: RefCell<Vec<String>>,
+        service: bool,
+        service_probe: PortState,
     }
 
     impl Rec {
         fn new(held: PortState, own: &[u32]) -> Self {
-            Self { held, own: own.to_vec(), log: RefCell::new(Vec::new()) }
+            Self {
+                held,
+                own: own.to_vec(),
+                log: RefCell::new(Vec::new()),
+                service: false,
+                service_probe: PortState::Free,
+            }
+        }
+        /// A chroxy service is installed; `service_probe` is what the single
+        /// backstop probe sees.
+        fn with_service(mut self, service_probe: PortState) -> Self {
+            self.service = true;
+            self.service_probe = service_probe;
+            self
         }
         fn log(&self) -> Vec<String> {
             self.log.borrow().clone()
@@ -1640,6 +1692,79 @@ mod tests {
         fn kill_tunnels(&self, _: u16) {
             self.log.borrow_mut().push("kill_tunnels".into());
         }
+        fn service_installed(&self) -> bool {
+            self.service
+        }
+        fn probe_service_daemon(&self, _: u16) -> PortState {
+            self.log.borrow_mut().push("probe_service_daemon".into());
+            self.service_probe
+        }
+    }
+
+    // --- the service restart gap (#8890) ---
+
+    #[test]
+    fn launch_with_a_service_and_a_free_port_never_spawns() {
+        // Wait ends with the service up: adopt it, spawn nothing, reap nothing.
+        let rec = Rec::new(PortState::Free, &[]).with_service(PortState::Chroxy(8765));
+        assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Adopt(8765)));
+        assert_eq!(rec.log(), vec!["probe".to_string(), "probe_service_daemon".to_string()]);
+    }
+
+    #[test]
+    fn launch_with_a_service_that_never_answers_refuses_instead_of_spawning() {
+        for after in [PortState::Free, PortState::Foreign(8765)] {
+            let rec = Rec::new(PortState::Free, &[]).with_service(after);
+            let err = prepare_port_with(StartOrigin::Launch, 8765, &rec).unwrap_err();
+            assert!(err.contains("chroxy service") && !err.is_empty(), "{}", err);
+            assert!(!rec.log().iter().any(|l| l == "kill_tunnels"), "a refusal reaps nothing: {:?}", rec.log());
+        }
+        let rec = Rec::new(PortState::Free, &[]).with_service(PortState::Free);
+        assert!(prepare_port_with(StartOrigin::Launch, 8765, &rec).unwrap_err().contains("chroxy service start"));
+    }
+
+    #[test]
+    fn the_backstop_probes_once_and_never_waits() {
+        // Held under the manager lock: exactly one probe_service_daemon, and no
+        // other effect (nothing reaped, nothing terminated, no second probe).
+        for seen in [PortState::Free, PortState::Foreign(8765), PortState::Chroxy(8765)] {
+            let rec = Rec::new(PortState::Free, &[]).with_service(seen);
+            let _ = prepare_port_with(StartOrigin::Launch, 8765, &rec);
+            assert_eq!(
+                rec.log(),
+                vec!["probe".to_string(), "probe_service_daemon".to_string()],
+                "{:?}",
+                seen
+            );
+        }
+    }
+
+    #[test]
+    fn a_crash_restart_that_gives_up_for_the_service_leaves_nothing_pending() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Error("crashed".into());
+        mgr.auto_restart_pending.store(true, Ordering::Relaxed);
+        mgr.adopt_service_after_crash();
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+        assert!(!mgr.is_auto_restart_pending());
+    }
+
+    #[test]
+    fn launch_without_a_service_still_spawns_on_a_free_port() {
+        let rec = Rec::new(PortState::Free, &[]);
+        assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Ready));
+        assert!(!rec.log().iter().any(|l| l == "probe_service_daemon"), "{:?}", rec.log());
+    }
+
+    #[test]
+    fn a_held_port_is_decided_as_before_even_with_a_service_installed() {
+        // The service flag matters only on a FREE port: an adopted or refused
+        // holder takes the same path it always did and nothing waits.
+        let rec = Rec::new(PortState::Chroxy(8765), &[]).with_service(PortState::Free);
+        assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Adopt(8765)));
+        let rec = Rec::new(PortState::Foreign(8765), &[]).with_service(PortState::Free);
+        assert!(prepare_port_with(StartOrigin::Launch, 8765, &rec).unwrap_err().contains("another program"));
+        assert!(!rec.log().iter().any(|l| l == "probe_service_daemon"));
     }
 
     fn killed(log: &[String]) -> bool {
@@ -1774,6 +1899,30 @@ mod tests {
         assert!(msg.contains("another program"), "{}", msg);
         assert_eq!(mgr.status(), ServerStatus::Error(msg));
         assert!(!killed(&rec.log()), "{:?}", rec.log());
+    }
+
+    #[test]
+    fn a_crash_restart_with_a_service_installed_adopts_it_and_never_spawns() {
+        let mut mgr = manager_on(8765);
+        let rec = Rec::new(PortState::Free, &[]).with_service(PortState::Chroxy(8765));
+        let r = mgr.auto_restart_with(StartOrigin::Launch, |m, o| {
+            Ok(m.settle_port(o, &rec)?.expect("adopted, so no spawn"))
+        });
+        assert_eq!(r, Ok(StartOutcome::Adopted(8765)));
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn a_crash_restart_with_a_service_that_does_not_answer_fails_without_spawning() {
+        let mut mgr = manager_on(8765);
+        let rec = Rec::new(PortState::Free, &[]).with_service(PortState::Free);
+        let r = mgr.auto_restart_with(StartOrigin::Launch, |m, o| {
+            m.settle_port(o, &rec)?;
+            panic!("must not reach the spawn")
+        });
+        let msg = r.unwrap_err();
+        assert!(msg.contains("chroxy service start"), "{}", msg);
+        assert_eq!(mgr.status(), ServerStatus::Error(msg));
     }
 
     #[test]
@@ -2077,17 +2226,21 @@ mod tests {
         );
     }
 
-    // -- bind_host_env (#5356) --
+    // -- bind host (#5356) and config.json precedence (#8890) --
     //
-    // Loopback by default: the spawn must pin CHROXY_HOST=127.0.0.1 unless the
-    // user explicitly opted into LAN exposure, in which case the var is omitted
-    // and the server keeps its 0.0.0.0 default.
+    // Loopback by default: with no `host` in config.json the spawn must pin
+    // CHROXY_HOST=127.0.0.1 unless the user explicitly opted into LAN exposure,
+    // in which case the var is cleared and the server keeps its 0.0.0.0 default.
+
+    fn host_env(mgr: &ServerManager) -> EnvAction {
+        mgr.launch_resolutions().1.env
+    }
 
     #[test]
     fn bind_host_env_defaults_to_loopback() {
         let mgr = ServerManager::new();
         assert!(!mgr.expose_on_lan());
-        assert_eq!(mgr.bind_host_env(), Some("127.0.0.1"));
+        assert_eq!(host_env(&mgr), EnvAction::Set("127.0.0.1".into()));
     }
 
     #[test]
@@ -2095,7 +2248,7 @@ mod tests {
         let mut mgr = ServerManager::new();
         mgr.set_expose_on_lan(true);
         assert!(mgr.expose_on_lan());
-        assert_eq!(mgr.bind_host_env(), None);
+        assert_eq!(host_env(&mgr), EnvAction::Clear);
     }
 
     #[test]
@@ -2103,7 +2256,42 @@ mod tests {
         let mut mgr = ServerManager::new();
         mgr.set_expose_on_lan(true);
         mgr.set_expose_on_lan(false);
-        assert_eq!(mgr.bind_host_env(), Some("127.0.0.1"));
+        assert_eq!(host_env(&mgr), EnvAction::Set("127.0.0.1".into()));
+    }
+
+    #[test]
+    fn config_tunnel_and_host_beat_the_app_settings_at_spawn() {
+        let mut mgr = ServerManager::new();
+        mgr.set_tunnel_mode("quick");
+        mgr.set_expose_on_lan(true);
+        mgr.config.tunnel = Some("named".into());
+        mgr.config.host = Some("127.0.0.1".into());
+        let (tunnel, host) = mgr.launch_resolutions();
+        assert_eq!((tunnel.effective.as_str(), tunnel.env), ("named", EnvAction::Clear));
+        assert_eq!((host.effective.as_str(), host.env), ("127.0.0.1", EnvAction::Clear));
+    }
+
+    #[test]
+    fn unset_config_leaves_the_app_tunnel_and_host_unchanged() {
+        let mut mgr = ServerManager::new();
+        mgr.set_tunnel_mode("quick");
+        let (tunnel, host) = mgr.launch_resolutions();
+        assert_eq!(tunnel.env, EnvAction::Set("quick".into()));
+        assert_eq!(host.env, EnvAction::Set("127.0.0.1".into()));
+    }
+
+    #[test]
+    fn apply_env_action_sets_or_removes_the_variable() {
+        let mut cmd = Command::new("true");
+        apply_env_action(&mut cmd, "CHROXY_TUNNEL", &EnvAction::Set("quick".into()));
+        apply_env_action(&mut cmd, "CHROXY_HOST", &EnvAction::Clear);
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        assert_eq!(env["CHROXY_TUNNEL"], Some("quick".to_string()));
+        // `None` is an explicit removal: it also beats an inherited value.
+        assert_eq!(env["CHROXY_HOST"], None);
     }
 
     // -- build_enriched_path --

@@ -107,16 +107,32 @@ fn every_handle_start_call_names_its_origin_and_only_launch_and_the_user_path_ex
         origins.iter().any(|a| a == "handle_start(&app, StartOrigin::User)"),
         "the guarded user start must start as User"
     );
-    assert!(origins.len() == 2, "an unexpected handle_start call site appeared: {:?}", origins);
+    // The launch-time auto-start has two spellings: inline, and on its own thread
+    // when a chroxy service is installed, where the start may wait for the service
+    // (#8890). Anything else is a new call site that has to be looked at.
+    assert!(
+        origins.iter().any(|a| a == "handle_start(&app_handle, StartOrigin::Launch)"),
+        "the launch-time auto-start with a service installed must start as Launch"
+    );
+    assert!(origins.len() == 3, "an unexpected handle_start call site appeared: {:?}", origins);
+    assert!(
+        origins.iter().filter(|a| a.contains("StartOrigin::User")).count() == 1,
+        "exactly one handle_start call may start as User: {:?}",
+        origins
+    );
 }
 
 #[test]
 fn the_launch_time_auto_start_is_a_launch_start() {
     let lib = squash(&read("src/lib.rs"));
+    let arm = &lib[lib.find("StartupAction::StartOwn => {").expect("the StartOwn arm")..];
+    let arm = &arm[..arm.find("StartupAction::AdoptExternal").expect("the arm after StartOwn")];
     assert!(
-        lib.contains("StartupAction::StartOwn => handle_start(app.handle(), StartOrigin::Launch),"),
-        "auto-start on launch must start as Launch"
+        arm.contains("handle_start(app.handle(), StartOrigin::Launch)")
+            && arm.contains("handle_start(&app_handle, StartOrigin::Launch)"),
+        "auto-start on launch must start as Launch, on either spelling"
     );
+    assert!(!arm.contains("StartOrigin::User"), "auto-start on launch must never start as User");
 }
 
 #[test]
@@ -187,7 +203,11 @@ fn every_adopt_route_classifies_the_holder_through_a_challenge() {
     // becomes an adoptable daemon: it sends a fresh challenge and checks the proof.
     // A route with its own `/health` request would adopt without that check.
     let lib = read("src/lib.rs");
-    let client_mode = fn_body(&lib, "probe_external_health");
+    // `probe_external_health` delegates to `poll_for_daemon`, which owns the probe.
+    let delegate = fn_body(&lib, "probe_external_health");
+    assert!(delegate.contains("poll_for_daemon("), "the client-mode adopt must go through the shared poll");
+    assert!(!delegate.contains("ureq"), "the client-mode adopt must not make its own request");
+    let client_mode = fn_body(&lib, "poll_for_daemon");
     assert!(client_mode.contains("tray_state::probe_port("), "the client-mode adopt must challenge the daemon");
     assert!(!client_mode.contains("ureq"), "the client-mode adopt must not make its own request");
 
@@ -359,4 +379,72 @@ fn the_two_token_reads_use_their_own_age_limits() {
         config.contains("pub fn fresh_token() -> Option<String> { read_token(TokenRead::Fresh) }"),
         "the retry's token read must bypass the long cache"
     );
+}
+
+#[test]
+fn every_path_that_could_spawn_knows_whether_a_service_is_installed() {
+    // #8890: the service flag reaches the decision on every route that can spawn.
+    // A caller of the flag-less spelling would spawn into the service's restart gap.
+    let lib = read("src/lib.rs");
+    for name in ["handle_start_checked", "handle_restart"] {
+        let body = fn_body(&lib, name);
+        assert!(
+            body.contains("run_guarded_user_start_with_service(") && body.contains("chroxy_service_installed()"),
+            "{} must pass whether a service is installed",
+            name
+        );
+        assert!(!body.contains("run_guarded_user_start("), "{} must not use the service-blind spelling", name);
+        assert!(body.contains("await_installed_service("), "{} must wait for the service, not proceed", name);
+    }
+    let server = squash(&read("src/server.rs"));
+    assert!(
+        server.contains("tray_state::launch_start_decision_with_service(held,")
+            && !server.contains("tray_state::launch_start_decision(held"),
+        "the automatic start (launch and crash restart) must use the service-aware decision"
+    );
+    assert!(
+        server.contains("LaunchDecision::AwaitService => {"),
+        "the automatic start must handle AwaitService, not spawn"
+    );
+}
+
+#[test]
+fn the_service_wait_runs_before_any_lock_and_never_under_one() {
+    // #8890: the ~30 s wait for an installed service must run with the
+    // ServerManager mutex FREE (tray handlers lock it on the main thread).
+    let lib = read("src/lib.rs");
+    let body = fn_body(&lib, "handle_start");
+
+    // Launch-time start: the wait precedes the first lock in the function.
+    let wait = body.find("wait_for_service(").expect("the launch-time start must wait for a service");
+    let first_lock = body.find("lock_or_recover(").expect("handle_start locks the manager");
+    assert!(wait < first_lock, "the launch-time wait must come before any lock_or_recover");
+
+    // Crash auto-restart: after the backoff sleep, a wait with no lock before it,
+    // and all of it before the restart that takes the lock.
+    let sleep = body.find("std::thread::sleep(backoff)").expect("backoff sleep");
+    let crash_wait = body[sleep..].find("wait_for_service(").map(|i| i + sleep).expect("the crash restart must wait for a service");
+    assert!(!body[sleep..crash_wait].contains("lock_or_recover("), "no lock may be taken before the crash-restart wait");
+    let restart = body.find("mgr.try_auto_restart(").expect("the crash restart");
+    assert!(crash_wait < restart, "the crash-restart wait must precede try_auto_restart");
+
+    // The wait is one implementation, shared with the user path.
+    assert!(fn_body(&lib, "await_installed_service").contains("wait_for_service(true)"));
+    assert!(fn_body(&lib, "wait_for_service").contains("poll_for_daemon("));
+}
+
+#[test]
+fn the_under_lock_backstop_probes_once_and_cannot_sleep() {
+    let server = read("src/server.rs");
+    let slice = |start: &str, end: &str| {
+        let from = server.find(start).unwrap_or_else(|| panic!("{} not found", start));
+        let rest = &server[from..];
+        squash(&rest[..rest.find(end).unwrap_or_else(|| panic!("no end after {}", start))])
+    };
+    let prep = slice("fn prepare_port_with(", "\n}\n");
+    assert!(prep.contains("probe_service_daemon("), "the backstop must use the single-probe method");
+    assert!(!prep.contains("await_service") && !prep.contains("sleep") && !prep.contains("poll_until_chroxy"), "the backstop must not wait");
+    let real = slice("    fn probe_service_daemon(&self, port: u16) -> PortState {\n        tray_state", "\n    }\n");
+    assert!(real.contains("tray_state::probe_port("), "the real probe challenges through probe_port");
+    assert!(!real.contains("sleep") && !real.contains("poll_until_chroxy") && !real.contains("SERVICE_WAIT"), "the real probe must not wait");
 }

@@ -12,7 +12,10 @@ interface ServerInfo {
   port: number
   token: string | null
   status: string
+  /** The tunnel mode the server actually uses (config.json wins over the app setting, #8890). */
   tunnelMode: string
+  /** Where `tunnelMode` came from: `config` (config.json) or `app` (the desktop setting). */
+  tunnelModeSource?: 'config' | 'app'
   isRunning: boolean
 }
 

@@ -2805,6 +2805,28 @@ describe('SettingsPanel', () => {
       await waitFor(() => expect(input.value).toBe('CmdOrCtrl+Shift+K'))
     })
 
+    // #8890 — config.json's tunnel wins over the app's picker; say so.
+    it('notes that config.json sets the tunnel when the server reports it as the source', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_server_info'
+          ? Promise.resolve({ tunnelMode: 'named', tunnelModeSource: 'config' })
+          : baseImpl(cmd))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const note = await screen.findByTestId('tunnel-mode-config-note')
+      expect(note.textContent).toContain('Set by config.json (tunnel: named)')
+    })
+
+    it('shows no config note when the app setting is the source', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_server_info'
+          ? Promise.resolve({ tunnelMode: 'quick', tunnelModeSource: 'app' })
+          : baseImpl(cmd))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      await screen.findByTestId('summon-hotkey-input')
+      await waitFor(() => expect(tauriInvoke).toHaveBeenCalledWith('get_server_info', undefined))
+      expect(screen.queryByTestId('tunnel-mode-config-note')).toBeNull()
+    })
+
     it('Save invokes set_summon_hotkey with the trimmed accelerator', async () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const input = await screen.findByTestId('summon-hotkey-input')
