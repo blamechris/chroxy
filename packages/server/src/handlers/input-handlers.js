@@ -836,9 +836,36 @@ async function handleInput(ws, client, msg, ctx) {
   // `message_queued` mirror carries the id the sender's optimistic copy uses —
   // letting that client reconcile its queued bubble. Providers that send
   // immediately ignore the extra option.
-  const dispatchText = preparedContext
-    ? prepareInputContext(textToSend, attachmentsWithoutContext, preparedContext.context).text
-    : textToSend
+  //
+  // #8866: a session continued from the archive as a NEW thread owes the model
+  // the archived transcript with its first message. It is claimed here, after
+  // every rejection path above, merged into the text through the same
+  // `prepareInputContext` envelope a client-selected context takes, and kept OUT
+  // of `contextCount` (history shows what the user typed) and of the
+  // `sendOptions.context` below (that stays "what the user selected"; an adapter
+  // that refuses selected context, like BYOK with attachments, is unaffected).
+  // It is consumed only when the provider ADMITS the input; a rejection, a
+  // throw or an uncertain admission returns it to pending for the next send.
+  const sm = ctx.sessions.sessionManager
+  const seedClaim = sm.claimContinuationSeed?.(targetSessionId) ?? null
+  let seedSettled = !seedClaim
+  const settleSeed = (accepted) => {
+    if (seedSettled) return
+    seedSettled = true
+    sm.settleContinuationSeed?.(targetSessionId, accepted)
+  }
+  let dispatchText
+  try {
+    const dispatchContext = seedClaim
+      ? { version: 1, items: [seedClaim.item, ...(preparedContext?.context.items || [])] }
+      : preparedContext?.context
+    dispatchText = dispatchContext
+      ? prepareInputContext(textToSend, attachmentsWithoutContext, dispatchContext).text
+      : textToSend
+  } catch (err) {
+    settleSeed(false)
+    throw err
+  }
   let sendResult
   let admissionFinal = false
   let forwardedEffectsCommitted = false
@@ -869,10 +896,12 @@ async function handleInput(ws, client, msg, ctx) {
       inputRecord.acceptedAt = typeof ctx.now === 'function' ? ctx.now() : Date.now()
       sendInputAck(ws, ctx, inputRecord)
       commitForwardedEffects()
+      settleSeed(true)
       return
     }
 
     if (uncertain) {
+      settleSeed(false)
       // A lost native acknowledgement is terminal uncertainty, not definite
       // dispatch. Retain the reservation so the same id cannot be retried.
       sendInputAck(ws, ctx, inputRecord, {
@@ -885,6 +914,7 @@ async function handleInput(ws, client, msg, ctx) {
       return
     }
 
+    settleSeed(false)
     sendInputAck(ws, ctx, inputRecord, {
       status: 'rejected',
       delivery: 'not_dispatched',
@@ -904,6 +934,7 @@ async function handleInput(ws, client, msg, ctx) {
       ...(preparedContext?.context ? { context: preparedContext.context } : {}),
     })
   } catch (err) {
+    if (!admissionFinal) settleSeed(false)
     if (inputRecord && !admissionFinal) {
       inputRecord.status = 'uncertain'
       inputRecord.delivery = 'unknown'
@@ -932,7 +963,16 @@ async function handleInput(ws, client, msg, ctx) {
 
   // Older clients have no correlated admission contract. Preserve their
   // established fire-and-forget history, primary, and peer-echo behavior.
-  if (!inputRecord) commitForwardedEffects()
+  //
+  // RESIDUAL (#8866): with no admission contract there is no signal that the
+  // provider took the input, so the seed is consumed once `sendMessage` returned
+  // without throwing. A provider that then rejects asynchronously loses the
+  // transcript for that one send; a client that negotiates input_context_v1 (the
+  // dashboard) has the exact signal and never takes this branch.
+  if (!inputRecord) {
+    commitForwardedEffects()
+    settleSeed(true)
+  }
 }
 
 function handleInterrupt(ws, client, msg, ctx) {

@@ -1012,6 +1012,62 @@ function handleDeleteArchivedSession(ws, client, msg, ctx) {
 }
 
 /**
+ * #8866 — continue an archived session, because the user asked to: `mode:
+ * 'native'` resumes the same conversation (the boot / retry recipe) and the
+ * record leaves the archive; `mode: 'new_thread'` starts a NEW session in the
+ * archived directory that carries the archived transcript with its first
+ * message, and the record stays. Nothing restores unless this message arrives;
+ * viewing an archived session stays read-only.
+ *
+ * AUTHORITY: the UNBOUND bar, the same as `retry_failed_restore` and the other
+ * archive messages, and for the same reason: the caller supplies only an
+ * archiveId and a mode, and every spawn input (provider, cwd, model, container
+ * binding) comes from the record the daemon wrote itself. A bound client is
+ * refused FIRST, before the archiveId is validated or looked up (no existence
+ * oracle), with a degraded schema-valid `restore_archived_session_result`
+ * (`refused: true`).
+ */
+async function handleRestoreArchivedSession(ws, client, msg, ctx) {
+  const archiveId = typeof msg?.archiveId === 'string' ? msg.archiveId.slice(0, ARCHIVE_ID_MAX_CHARS) : ''
+  const mode = msg?.mode === 'native' || msg?.mode === 'new_thread' ? msg.mode : undefined
+  const reply = (body) => ctx.transport.send(ws, {
+    type: 'restore_archived_session_result',
+    archiveId,
+    ...(mode ? { mode } : {}),
+    ...body,
+  })
+  if (isBoundClient(client)) {
+    reply({
+      ok: false,
+      refused: true,
+      code: 'ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT',
+      message: 'Pairing-issued session tokens cannot restore archived sessions — this requires a host-level (unbound) client, such as the primary token.',
+    })
+    return
+  }
+  if (!archiveId || !mode) {
+    reply({
+      ok: false,
+      code: 'ARCHIVED_SESSION_INVALID',
+      message: 'restore_archived_session requires an archiveId and a mode of "native" or "new_thread"',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const result = typeof sm.restoreArchivedSession === 'function'
+    ? await sm.restoreArchivedSession(archiveId, mode)
+    : { ok: false, mode, code: 'ARCHIVED_SESSION_NOT_FOUND', message: 'No archived session with that id' }
+  if (result.ok || result.sessionId) {
+    // A live session (or a re-parked one) now exists that no client has been
+    // told about: createSession does not announce itself.
+    ctx.transport.broadcastSessionList()
+  }
+  log.info(`Restore of an archived session (${mode}) ${result.ok ? 'succeeded' : `refused (${result.code})`}`)
+  const { mode: _mode, ...rest } = result
+  reply(rest)
+}
+
+/**
  * Dashboard Settings → Session archive (#8869): replace the retention policy of
  * the running daemon and persist it to config. UNBOUND-ONLY, the same bar as
  * `delete_archived_session` (which can already delete every record): a
@@ -1112,5 +1168,6 @@ export const sessionHandlers = {
   list_archived_sessions: handleListArchivedSessions,
   get_archived_session_history: handleGetArchivedSessionHistory,
   delete_archived_session: handleDeleteArchivedSession,
+  restore_archived_session: handleRestoreArchivedSession,
   set_session_archive_policy: handleSetSessionArchivePolicy,
 }

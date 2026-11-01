@@ -14804,7 +14804,8 @@ a.session-ci-chip__pr:focus-visible {
 .fr-hist-more-btn,
 .aa-delete-btn,
 .aa-confirm-btn,
-.aa-cancel-btn {
+.aa-cancel-btn,
+.aa-restore-btn {
   min-height: 44px;
   min-width: 44px;
   padding: 0 16px;
@@ -14821,7 +14822,8 @@ a.session-ci-chip__pr:focus-visible {
 .fr-hist-more-btn:disabled,
 .aa-delete-btn:disabled,
 .aa-confirm-btn:disabled,
-.aa-cancel-btn:disabled {
+.aa-cancel-btn:disabled,
+.aa-restore-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -14832,7 +14834,8 @@ a.session-ci-chip__pr:focus-visible {
 .fr-hist-more-btn:not(:disabled):hover,
 .aa-delete-btn:not(:disabled):hover,
 .aa-confirm-btn:not(:disabled):hover,
-.aa-cancel-btn:not(:disabled):hover {
+.aa-cancel-btn:not(:disabled):hover,
+.aa-restore-btn:not(:disabled):hover {
   background: var(--bg-secondary);
 }
 
@@ -15011,6 +15014,31 @@ a.session-ci-chip__pr:focus-visible {
 .aa-confirm-btn {
   color: var(--text-error);
   font-weight: 600;
+}
+
+/* #8866 — Resume / Continue as new thread. Buttons are in the 44x44 group above. */
+.aa-restore {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 14px 8px;
+}
+
+.aa-restore-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aa-restore-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.sidebar-archived-item .aa-restore {
+  padding: 0 0 4px;
 }
 
 .aa-policy {

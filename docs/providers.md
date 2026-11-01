@@ -318,6 +318,24 @@ preserved history stays readable, read-only, from Control Room → Failed restor
 → **View history**; viewing it resumes nothing, and a replacement still requires
 an explicit new session.
 
+An ended session in the session archive (sidebar **Archived**, Control Room →
+Archived) can be continued only by an explicit click, and the two actions are
+different things. **Resume** restores the *same* conversation through the boot
+and retry recipe: it needs a provider with `capabilities.resume`, a recorded
+locator that still exists (a Claude transcript on disk, or a Codex native
+thread), and the original directory. Every native check above still applies, so
+a Codex app-server session recorded without a native locator (for example one
+run in unattended Auto mode) cannot be resumed. A resumed record leaves the
+archive; closing the session later archives it afresh. **Continue as new
+thread** is always available when the provider is registered and the directory
+exists: it starts a *new* session (new id, the provider's default permission
+mode, no sandbox, locator or worktree carried over; a container session keeps
+its environment or is refused) and sends a bounded text transcript (newest
+messages, 32 KiB) of the archived conversation with the first message you type.
+The model has not seen that conversation natively; the new session's first line
+and the row say so, with how many messages were included. The archive record
+stays, because the old thread is not live again.
+
 A completed idle restart does not replay old prompts. Input acknowledgements
 retain their **process** deduplication scope; an unacknowledged dispatch across
 an arbitrary crash is not automatically retried or described as exactly once.

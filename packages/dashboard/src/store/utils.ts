@@ -521,6 +521,8 @@ export function createEmptyInFlightMarkers() {
     // arrive on a dead socket); the next list refresh shows what actually went.
     deletingArchiveIds: new Set<string>(),
     deletingAllArchives: false,
+    // #8866: a restore_archived_session in flight is socket-scoped too.
+    restoringArchiveIds: new Set<string>(),
     // Settings → Session archive: a save in flight is socket-scoped.
     sessionArchivePolicySaving: false,
     // #5500 / #5502: in-flight reindex / relay re-run requests. The server-side

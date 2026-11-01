@@ -206,7 +206,7 @@ import {
   mergePermissionModesByProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
-import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerRestoreArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage } from '@chroxy/protocol'
 import { applyHistoryReply, pruneHistoryViews } from './history-views'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
@@ -7237,6 +7237,41 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // (and drops the views of the ones that did go). Only a refusal skips it:
       // the list would be refused too.
       if (reply.refused !== true) get().requestArchivedSessions();
+      break;
+    }
+    case 'restore_archived_session_result': {
+      // #8866. Settles the row's pending marker on EVERY reply (a refusal
+      // included, or its buttons would stay disabled for good) and records the
+      // outcome the row renders. The roster is server truth: a native restore
+      // removed the record and a refused or stale one may mean it changed, so the
+      // list is re-asked (a refusal excepted: it would be refused too). On
+      // success the operator asked for this session, so switch to it; the
+      // session list broadcast ran before this reply, and the named options are
+      // the checkpoint-restore door for a session that may not be listed yet.
+      const reply = msg as unknown as ServerRestoreArchivedSessionResultMessage;
+      const id = typeof reply.archiveId === 'string' && reply.archiveId !== '' ? reply.archiveId : null;
+      if (!id) break;
+      const pending = new Set(get().restoringArchiveIds);
+      pending.delete(id);
+      set({
+        restoringArchiveIds: pending,
+        archiveRestoreResults: {
+          ...get().archiveRestoreResults,
+          [id]: {
+            ok: reply.ok === true,
+            mode: reply.mode,
+            code: reply.code,
+            message: reply.message,
+            sessionId: reply.sessionId,
+            seed: reply.seed,
+            refused: reply.refused === true,
+          },
+        },
+      });
+      if (reply.refused !== true) get().requestArchivedSessions();
+      if (reply.ok === true && typeof reply.sessionId === 'string' && reply.sessionId !== '') {
+        get().switchSession(reply.sessionId, { allowUnlisted: true, allowStarting: true });
+      }
       break;
     }
     case 'session_archive_policy_result': {

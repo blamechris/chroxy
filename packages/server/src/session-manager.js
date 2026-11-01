@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
-import { statSync, mkdirSync, rmSync, realpathSync } from 'fs'
+import { statSync, mkdirSync, rmSync, realpathSync, existsSync } from 'fs'
 import { join, resolve, dirname, basename, isAbsolute } from 'path'
 import { execFileSync } from 'child_process'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
@@ -13,6 +13,7 @@ import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
+import { buildContinuationSeed, coerceContinuationSeed, continuationSeedItem } from './archive-continuation.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
@@ -293,6 +294,8 @@ const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
  * provider which never settles cannot leave the operator's Retry button spinning.
  */
 const RETRY_RESTORE_SETTLE_TIMEOUT_MS = 30 * 1000
+// #8866: how long an unsettled claim on a new-thread seed excludes a second input.
+const CONTINUATION_CLAIM_TTL_MS = 2 * 60 * 1000
 /**
  * #8876 — how long a provider's async start() may stay unsettled before
  * `createSession` treats it as failed. Without a bound, a start() that never
@@ -1029,6 +1032,9 @@ export class SessionManager extends EventEmitter {
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     // #8301: sessions whose user pressed Stop and has not typed since — daemon turns are refused (see daemonTurnRefusal).
     this._userStopped = new Set()
+    // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
+    // continued as a NEW thread, held until the first accepted user input carries it.
+    this._continuationSeeds = new Map()
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
@@ -1138,6 +1144,7 @@ export class SessionManager extends EventEmitter {
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
     this._userStopped.delete(sessionId)
+    this._continuationSeeds.delete(sessionId)
     for (const [requestId, pending] of this._permissionRequests) {
       if (pending.sessionId === sessionId) this._permissionRequests.delete(requestId)
     }
@@ -3546,6 +3553,10 @@ export class SessionManager extends EventEmitter {
         agentCommId: entry.agentCommId || null,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
+        // #8866: a session continued as a NEW thread from the archive that has not
+        // had its first message yet still owes the model its transcript seed; it
+        // must survive a daemon restart in that window. Absent otherwise.
+        ...(this._continuationSeeds.has(id) ? { continuationSeed: this._continuationSeeds.get(id).seed } : {}),
         // #8336: the highest history seq this run handed out. The ring buffer's
         // `_seq` stamps are server-internal and stripped from `history` above,
         // but a reconnecting client keeps its cursor across a restart; restore
@@ -3951,6 +3962,9 @@ export class SessionManager extends EventEmitter {
       if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
         this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
       }
+      // #8866: an unconsumed new-thread seed (state file: untrusted, re-bounded).
+      const continuationSeed = coerceContinuationSeed(saved.continuationSeed)
+      if (continuationSeed) this._continuationSeeds.set(sessionId, { seed: continuationSeed, claimed: false, claimedAt: 0 })
     } catch (err) {
       // The TAIL threw, after createSession() already returned — so a live but
       // half-seeded session exists and must not be left behind.
@@ -4454,7 +4468,283 @@ export class SessionManager extends EventEmitter {
    * @returns {{ policy: object, sessions: object[] }}
    */
   listArchivedSessions() {
-    return { policy: this._sessionArchive.retentionPolicy(), sessions: this._sessionArchive.list() }
+    const sessions = this._sessionArchive.list().map((row) => {
+      const { locator, ...wire } = row
+      return { ...wire, restore: this._archiveRestoreOptions(row, locator) }
+    })
+    return { policy: this._sessionArchive.retentionPolicy(), sessions }
+  }
+
+  /**
+   * #8866: what "continue" can mean for one archived session, from CHEAP checks
+   * only (provider registered, a locator was recorded, the directory exists), so
+   * the roster can enable or grey the two actions. It is advisory: the click
+   * re-checks authoritatively (`restoreArchivedSession`), including that the
+   * provider transcript is still on disk.
+   *
+   *   native    resume the SAME conversation (the boot / retry recipe)
+   *   newThread a brand-new session in the archived directory, seeded with the
+   *             archived transcript on its first message
+   *
+   * @param {{ provider: string|null, cwd: string|null }} meta
+   * @param {boolean|null} locator - whether a provider conversation was recorded (`null` = unknown)
+   * @returns {{ native: boolean, nativeReason?: string, newThread: boolean, newThreadReason?: string }}
+   * @private
+   */
+  _archiveRestoreOptions(meta, locator) {
+    const providerName = meta.provider || this._providerType
+    let ProviderClass = null
+    try { ProviderClass = getProvider(providerName) } catch { /* unregistered: reported below */ }
+    const common = this._archiveCommonRefusal(ProviderClass, providerName, meta.cwd)
+    const out = { native: false, newThread: false }
+    if (common) {
+      out.nativeReason = common.message
+      out.newThreadReason = common.message
+      return out
+    }
+    out.newThread = true
+    const nativeRefusal = this._archiveNativeRefusal(ProviderClass, providerName, locator)
+    if (nativeRefusal) out.nativeReason = nativeRefusal.message
+    else out.native = true
+    return out
+  }
+
+  /** Refusals that apply to BOTH modes. @returns {{code: string, message: string}|null} @private */
+  _archiveCommonRefusal(ProviderClass, providerName, cwd) {
+    if (!ProviderClass) {
+      return { code: 'ARCHIVE_RESTORE_PROVIDER_UNAVAILABLE', message: `The "${providerName}" provider is not available on this server.` }
+    }
+    if (ProviderClass.isUserShell === true || providerName === USER_SHELL_PROVIDER) {
+      return { code: 'ARCHIVE_RESTORE_FORBIDDEN_USER_SHELL', message: 'A user-shell session has no conversation to continue.' }
+    }
+    if (typeof cwd !== 'string' || cwd.length === 0 || !this._isDirectory(cwd)) {
+      return { code: 'ARCHIVE_RESTORE_CWD_MISSING', message: 'The directory this session ran in no longer exists.' }
+    }
+    return null
+  }
+
+  /** @returns {{code: string, message: string}|null} @private */
+  _archiveNativeRefusal(ProviderClass, providerName, locator) {
+    const resumable = ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER || ProviderClass.capabilities?.resume === true
+    if (!resumable) {
+      return { code: 'ARCHIVE_RESTORE_NATIVE_UNSUPPORTED', message: `The ${ProviderClass.displayLabel || providerName} provider cannot resume a conversation; continue it as a new thread instead.` }
+    }
+    if (locator === false) {
+      return { code: 'ARCHIVE_RESTORE_LOCATOR_MISSING', message: 'This session recorded no provider conversation to resume; continue it as a new thread instead.' }
+    }
+    // A worktree session's cwd IS its worktree (destroySession removes it), so
+    // the directory check in _archiveCommonRefusal already covers that case.
+    return null
+  }
+
+  /** @private */
+  _isDirectory(path) {
+    try { return statSync(path).isDirectory() } catch { return false }
+  }
+
+  /** Does the provider transcript a Claude-family locator names still exist? (test seam) @private */
+  _claudeTranscriptExists(cwd, conversationId) {
+    return existsSync(resolveJsonlPath(cwd, conversationId))
+  }
+
+  /**
+   * #8866 — bring an archived session back, because the user asked to.
+   *
+   * `mode: 'native'` resumes the SAME conversation through exactly the recipe
+   * boot and `retryFailedRestore` use (`_attemptRestoreOne(saved, true)`, so an
+   * ASYNC start failure re-parks it in the failed restores with its history).
+   * It needs a recorded locator whose provider transcript / thread still exists
+   * and a directory that still exists. When it works the record LEAVES the
+   * archive (`release`, no tombstone): the session is live again, closing it
+   * later re-archives it, and a tombstone would make that archive (or a dismissed
+   * failed restore of the same snapshot) dedupe to `duplicate` and lose the only
+   * copy. The release happens synchronously right after the sync attempt and
+   * the state flush, under a lock keyed on the archiveId, so a double click gets
+   * `ARCHIVED_SESSION_NOT_FOUND` rather than a second live copy.
+   *
+   * `mode: 'new_thread'` starts a NEW session (new id, `isRestore` false) in the
+   * archived directory with the archived provider and model, and keeps the
+   * container binding or refuses (never a silent move to the host). It carries
+   * NO authority from the old session: not permissionMode (the provider default
+   * applies), not codexSandbox, not the native locator, not a worktree. The
+   * record STAYS in the archive, because the old thread is not live again. The
+   * model gets the archived transcript with the first message the user sends
+   * (see `claimContinuationSeed`); the new session's history opens with a system
+   * line saying so.
+   *
+   * @param {string} archiveId
+   * @param {'native'|'new_thread'} mode
+   * @param {{ settleTimeoutMs?: number }} [opts]
+   * @returns {Promise<{ok: true, mode: string, sessionId: string, seed?: {messagesIncluded: number, messagesTotal: number, bytes: number}} | {ok: false, mode: string, code: string, message: string, sessionId?: string}>}
+   */
+  async restoreArchivedSession(archiveId, mode, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
+    const fail = (code, message, extra = {}) => ({ ok: false, mode, code, message, ...extra })
+    if (mode !== 'native' && mode !== 'new_thread') {
+      return fail('ARCHIVE_RESTORE_INVALID', 'mode must be "native" or "new_thread"')
+    }
+    let release = await this._locks.acquire(`archive-restore:${archiveId}`)
+    const releaseOnce = () => {
+      if (!release) return
+      const r = release
+      release = null
+      r()
+    }
+    let awaitStart = null
+    try {
+      const read = await this._sessionArchive.getSaved?.(archiveId)
+      if (!read) return fail('ARCHIVED_SESSION_NOT_FOUND', 'No archived session with that id')
+      if (!read.ok) return fail(read.code, read.message)
+      const { saved, meta } = read
+
+      const providerName = saved.provider || this._providerType
+      let ProviderClass = null
+      try { ProviderClass = getProvider(providerName) } catch { /* reported by the refusal */ }
+      const refusal = this._archiveCommonRefusal(ProviderClass, providerName, saved.cwd)
+      if (refusal) return fail(refusal.code, refusal.message)
+
+      if (mode === 'native') {
+        const nativeRefusal = this._archiveNativeRefusal(ProviderClass, providerName, meta.locator)
+        if (nativeRefusal) return fail(nativeRefusal.code, nativeRefusal.message)
+        if (ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER) {
+          if (!saved.nativeResume || typeof saved.nativeResume !== 'object') {
+            return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'This session recorded no native Codex thread to resume; continue it as a new thread instead.')
+          }
+        } else if (typeof saved.sdkSessionId !== 'string' || saved.sdkSessionId.length === 0 || saved.conversationPersisted === false) {
+          return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'This session recorded no provider conversation to resume; continue it as a new thread instead.')
+        } else if (!this._claudeTranscriptExists(saved.cwd, saved.sdkSessionId)) {
+          return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'The provider transcript for this session is no longer on disk; continue it as a new thread instead.')
+        }
+        try {
+          const restoredId = this._attemptRestoreOne(saved, true)
+          const flushed = this._flushPersistOrWarn(restoredId)
+          // Grab the settle handle NOW, while the entry is still mapped (see
+          // retryFailedRestore): a rejected start re-parks it and drops the entry.
+          awaitStart = { restoredId, settled: this._awaitStartSettled(restoredId, settleTimeoutMs), saved }
+          // Only a session that is on disk may take the archive copy with it.
+          // Synchronous with the attempt: no await between them.
+          if (flushed) {
+            const released = this._sessionArchive.release(archiveId)
+            if (released !== 'released') log.warn(`Restored archived session ${restoredId} but its archive record was not released (${released})`)
+          } else {
+            log.warn(`Restored archived session ${restoredId} but state could not be saved; keeping its archive record`)
+          }
+        } catch (err) {
+          log.error(`Archive restore failed for ${JSON.stringify(String(saved.name))}: ${err?.message || err}`)
+          return fail(err?.code || 'ARCHIVE_RESTORE_FAILED', err?.message || String(err))
+        }
+      } else {
+        let containerBinding
+        try {
+          containerBinding = this._resolveRestoredContainerBinding(saved)
+        } catch (err) {
+          return fail(err?.code || 'ENVIRONMENT_UNAVAILABLE', err?.message || String(err))
+        }
+        const seed = buildContinuationSeed(saved.history, { omittedOldest: meta.omittedOldest })
+        const baseName = typeof saved.name === 'string' && saved.name.trim() ? saved.name.trim() : 'Archived session'
+        let newId
+        try {
+          newId = this.createSession({
+            name: `${baseName} (continued)`,
+            cwd: saved.cwd,
+            model: saved.model || undefined,
+            provider: saved.provider || undefined,
+            connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
+              ? saved.agentConnection.id
+              : undefined,
+            restoredAgentConnection: saved.agentConnection?.provenance?.source === 'configured'
+              ? saved.agentConnection
+              : undefined,
+            ...containerBinding,
+            // One flush below, after the seed and the opening line exist.
+            skipPersist: true,
+          })
+          if (seed) {
+            this._continuationSeeds.set(newId, {
+              seed: { ...seed, name: baseName, archivedAt: typeof meta.archivedAt === 'number' ? meta.archivedAt : null },
+              claimed: false,
+              claimedAt: 0,
+            })
+          }
+          const omitted = seed ? seed.messagesTotal - seed.messagesIncluded : 0
+          this._recordHistory(newId, 'message', {
+            type: 'system',
+            content: seed
+              ? `Continued as a NEW thread from the archived session "${baseName}". The model does not have that conversation natively: ` +
+                `a transcript of ${seed.messagesIncluded} of ${seed.messagesTotal} messages${omitted > 0 ? ` (the ${omitted} oldest left out)` : ''} ` +
+                'will be sent with your first message. Tool calls, file contents and approvals from it are not included.'
+              : `Continued as a NEW thread from the archived session "${baseName}". It had no conversation text to carry over, so the model starts with no earlier context.`,
+            timestamp: Date.now(),
+          })
+          this._flushPersistOrWarn(newId)
+          awaitStart = {
+            restoredId: newId,
+            settled: this._awaitStartSettled(newId, settleTimeoutMs),
+            saved,
+            seed: seed ? { messagesIncluded: seed.messagesIncluded, messagesTotal: seed.messagesTotal, bytes: seed.bytes } : null,
+          }
+        } catch (err) {
+          if (newId && this._sessions.has(newId)) this.destroySession(newId, { archive: false })
+          log.error(`Continue-as-new-thread failed for ${JSON.stringify(String(saved.name))}: ${err?.message || err}`)
+          return fail(err?.code || 'ARCHIVE_RESTORE_FAILED', err?.message || String(err))
+        }
+      }
+    } finally {
+      releaseOnce()
+    }
+
+    if (!awaitStart) throw new Error('restoreArchivedSession: unreachable — every non-awaiting path returns')
+    const { restoredId, settled, saved } = awaitStart
+    const outcome = await settled
+    if (!outcome.ok) {
+      const err = outcome.error
+      const message = err?.message || String(err)
+      log.error(`Archive restore's provider start failed for ${JSON.stringify(String(saved.name))}: ${message}`)
+      return fail(err?.code || 'START_FAILED', message, mode === 'native' ? { sessionId: restoredId } : {})
+    }
+    log.info(`Archive ${mode === 'native' ? 'restored' : 'continued as a new thread'}: ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
+    return { ok: true, mode, sessionId: restoredId, ...(awaitStart.seed ? { seed: awaitStart.seed } : {}) }
+  }
+
+  /**
+   * #8866: take the pending archived-transcript seed of a session continued as a
+   * NEW thread, as the one_turn text context item `prepareInputContext` merges
+   * into the first message. The seed stays pending until the caller settles it:
+   *
+   *   const claim = sm.claimContinuationSeed(id)   // { item } or null
+   *   ... dispatch ...
+   *   sm.settleContinuationSeed(id, accepted)      // true = consumed, false = keep it
+   *
+   * A claim is exclusive, so two inputs racing in before the first is admitted
+   * do not both carry the transcript.
+   * @param {string} sessionId
+   * @returns {{ item: object }|null}
+   */
+  claimContinuationSeed(sessionId) {
+    const held = this._continuationSeeds.get(sessionId)
+    if (!held) return null
+    const now = Date.now()
+    // A claim whose input never reported an outcome (a provider that never calls
+    // back) is abandoned after a while rather than pinning the seed forever.
+    if (held.claimed && now - held.claimedAt < CONTINUATION_CLAIM_TTL_MS) return null
+    held.claimed = true
+    held.claimedAt = now
+    return { item: continuationSeedItem(held.seed) }
+  }
+
+  /**
+   * @param {string} sessionId
+   * @param {boolean} consumed - true once the provider ACCEPTED the input that
+   *   carried the seed (it is then gone for good); false returns it to pending
+   */
+  settleContinuationSeed(sessionId, consumed) {
+    const held = this._continuationSeeds.get(sessionId)
+    if (!held || !held.claimed) return
+    if (consumed) {
+      this._continuationSeeds.delete(sessionId)
+      this._schedulePersist()
+    } else {
+      held.claimed = false
+    }
   }
 
   /**
