@@ -1440,15 +1440,29 @@ impl ServerManager {
     /// then monitor continuously. Signals auto-restart on crash detection.
     /// Uses a generation counter to ensure old threads exit when a new poll starts.
     fn start_health_poll(&self) {
-        self.start_health_poll_with(Arc::new(|port| {
-            tray_state::probe_port(port, Duration::from_secs(2))
-        }));
+        self.start_health_poll_with(
+            Arc::new(|port| tray_state::probe_port(port, Duration::from_secs(2))),
+            // Read when a crash is flagged, so a service installed since the
+            // server started still counts (#8890).
+            Arc::new(tray_state::chroxy_service_installed),
+        );
     }
 
     /// [`Self::start_health_poll`] with the probe passed in: what a challenge to
     /// `port` found. The real one ([`tray_state::probe_port`]) reads the token fresh
     /// on every call and retries once with a freshly loaded token.
-    fn start_health_poll_with(&self, probe: Arc<dyn Fn(u16) -> PortState + Send + Sync>) {
+    ///
+    /// `service_blocks_spawn` says whether a chroxy service is installed (or not
+    /// ruled out) at the moment a crash is flagged. With one, the monitor stops
+    /// there for good: a different daemon, the service, may take the port and
+    /// answer, and must never write `Running` over the crash (#8890). Without
+    /// one it keeps probing, so a later answer from this server recovers the
+    /// status, as it always did (a Restart runs no supervisor to consume the flag).
+    fn start_health_poll_with(
+        &self,
+        probe: Arc<dyn Fn(u16) -> PortState + Send + Sync>,
+        service_blocks_spawn: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
         let status = self.status.clone();
         let port = self.config.port;
         let generation = self.health_generation.clone();
@@ -1573,12 +1587,14 @@ impl ServerManager {
                             if !user_stopped.load(Ordering::Relaxed) {
                                 auto_restart_pending.store(true, Ordering::Relaxed);
                             }
-                            // The crash transition is TERMINAL for this monitor
-                            // (#8890): it must not keep probing and write `Running`
-                            // again if a different daemon (an installed service)
-                            // takes the port. Recovery goes through the restart,
-                            // which starts a new monitor under a new generation.
-                            return;
+                            // With a service installed the crash is TERMINAL for this
+                            // monitor (#8890): it must not keep probing and write
+                            // `Running` again if the service takes the port. Recovery
+                            // goes through the restart, which starts a new monitor
+                            // under a new generation. With none, keep probing.
+                            if service_blocks_spawn() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -1853,6 +1869,14 @@ mod tests {
         assert_eq!(rec.log(), vec!["is_held".to_string(), "kill_tunnels".to_string()]);
     }
 
+    /// The injected "is a service installed" answer; no real filesystem is read.
+    fn no_service() -> Arc<dyn Fn() -> bool + Send + Sync> {
+        Arc::new(|| false)
+    }
+    fn with_service() -> Arc<dyn Fn() -> bool + Send + Sync> {
+        Arc::new(|| true)
+    }
+
     /// A probe whose answer the test flips, standing in for the service taking
     /// the port over after the app's server crashed.
     fn switchable_probe(mode: std::sync::Arc<std::sync::atomic::AtomicU8>) -> Arc<dyn Fn(u16) -> PortState + Send + Sync> {
@@ -1871,7 +1895,7 @@ mod tests {
         // write `Running` (it did: the monitor kept going after flagging the crash).
         let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let mut mgr = polling_manager(8765);
-        mgr.start_health_poll_with(switchable_probe(mode.clone()));
+        mgr.start_health_poll_with(switchable_probe(mode.clone()), with_service());
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
         mode.store(1, Ordering::SeqCst); // crash: nothing answers
         assert!(wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12), "{:?}", mgr.status());
@@ -1896,7 +1920,7 @@ mod tests {
         // between the crash and the supervisor accepting it).
         let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let mgr = polling_manager(8765);
-        mgr.start_health_poll_with(switchable_probe(mode.clone()));
+        mgr.start_health_poll_with(switchable_probe(mode.clone()), with_service());
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
         mode.store(1, Ordering::SeqCst);
         assert!(wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12), "{:?}", mgr.status());
@@ -1907,6 +1931,27 @@ mod tests {
             mgr.status()
         );
         assert!(mgr.is_auto_restart_pending(), "the crash stays pending for the supervisor");
+    }
+
+    #[test]
+    fn without_a_service_the_monitor_keeps_probing_and_a_later_answer_recovers_running() {
+        // Pre-round-3 behaviour, which a user Restart relies on (it runs no
+        // supervisor to consume the crash flag): one failed probe must not leave
+        // the status Error for good.
+        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mgr = polling_manager(8765);
+        mgr.start_health_poll_with(switchable_probe(mode.clone()), no_service());
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        mode.store(1, Ordering::SeqCst);
+        assert!(wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12), "{:?}", mgr.status());
+        mode.store(2, Ordering::SeqCst); // this server answers again
+        assert!(
+            wait_for(&mgr, |s| *s == ServerStatus::Running, 12),
+            "the monitor gave up for good with no service: {:?}",
+            mgr.status()
+        );
+        let mut mgr = mgr;
+        mgr.kill_child();
     }
 
     #[cfg(unix)]
@@ -2298,7 +2343,7 @@ mod tests {
     #[test]
     fn a_responder_that_proves_itself_makes_the_server_running() {
         let mgr = polling_manager(serve_switchable(shared("tok"), flag(true)));
-        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")), no_service());
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10), "status {:?}", mgr.status());
         let mut mgr = mgr;
         mgr.kill_child(); // stops the poll
@@ -2307,7 +2352,7 @@ mod tests {
     #[test]
     fn a_responder_that_answers_200_without_a_proof_does_not_make_the_server_running() {
         let mut mgr = polling_manager(serve_switchable(shared("tok"), flag(false)));
-        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")), no_service());
         assert!(
             !wait_for(&mgr, |s| *s == ServerStatus::Running, 3),
             "a bare 200 must not start the server"
@@ -2319,7 +2364,7 @@ mod tests {
     #[test]
     fn a_proof_made_with_another_token_does_not_make_the_server_running() {
         let mut mgr = polling_manager(serve_switchable(shared("someone-elses-token"), flag(true)));
-        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")), no_service());
         assert!(!wait_for(&mgr, |s| *s == ServerStatus::Running, 3));
         mgr.kill_child();
     }
@@ -2328,7 +2373,7 @@ mod tests {
     fn a_running_server_whose_port_is_taken_by_a_responder_without_a_proof_is_an_error() {
         let proving = flag(true);
         let mut mgr = polling_manager(serve_switchable(shared("tok"), proving.clone()));
-        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")), no_service());
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
         // The proving server is replaced: the same port now answers without a proof.
         proving.store(false, Ordering::SeqCst);
@@ -2345,7 +2390,7 @@ mod tests {
         let daemon_token = shared("before");
         let view = app_view("before", "before");
         let mut mgr = polling_manager(serve_switchable(daemon_token.clone(), flag(true)));
-        mgr.start_health_poll_with(probe_from(view.clone()));
+        mgr.start_health_poll_with(probe_from(view.clone()), no_service());
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
         // Scheduled rotation: the daemon proves with the new token, the app's cache
         // still holds the old one, and a fresh load returns the new one.

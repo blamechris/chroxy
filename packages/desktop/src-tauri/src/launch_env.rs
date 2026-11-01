@@ -107,7 +107,10 @@ pub fn resolve_tunnel(config_tunnel: Option<&str>, app_mode: &str) -> Result<Res
 /// (#8890). Accurate about what actually happens: the app's own fallback to
 /// local-only applies only when `config.json` is silent about the tunnel; when it
 /// sets one, the server uses that and will try `cloudflared` anyway.
-pub fn cloudflared_missing_notice(config_tunnel: Option<&str>, app_mode: &str, install_hint: &str) -> Option<String> {
+pub fn cloudflared_missing_notice(config_tunnel: Result<Option<&str>, ()>, app_mode: &str, install_hint: &str) -> Option<String> {
+    // An unreadable config.json refuses the start with its own error; a notice
+    // about falling back to local-only would be wrong right before it.
+    let Ok(config_tunnel) = config_tunnel else { return None };
     match config_tunnel.filter(|v| !v.is_empty()) {
         Some(raw) => match canonical_tunnel_mode(raw) {
             // No tunnel wanted, so nothing needs cloudflared. (An unrecognised
@@ -269,18 +272,21 @@ mod tests {
     fn the_cloudflared_notice_is_accurate_about_who_chose_the_tunnel() {
         let hint = "brew install cloudflared";
         // config.json silent: the app's fallback to local-only is what happens.
-        let n = cloudflared_missing_notice(None, "quick", hint).unwrap();
+        let n = cloudflared_missing_notice(Ok(None), "quick", hint).unwrap();
         assert!(n.contains("local-only") && n.contains(hint), "{}", n);
-        assert_eq!(cloudflared_missing_notice(None, "none", hint), None);
-        assert_eq!(cloudflared_missing_notice(Some(""), "none", hint), None);
+        assert_eq!(cloudflared_missing_notice(Ok(None), "none", hint), None);
+        assert_eq!(cloudflared_missing_notice(Ok(Some("")), "none", hint), None);
         // config.json sets one: it is used regardless, so do not claim a fallback.
-        let n = cloudflared_missing_notice(Some("named"), "quick", hint).unwrap();
+        let n = cloudflared_missing_notice(Ok(Some("named")), "quick", hint).unwrap();
         assert!(n.contains("tunnel=named") && !n.contains("local-only"), "{}", n);
-        let n = cloudflared_missing_notice(Some("cloudflare:quick"), "none", hint).unwrap();
+        let n = cloudflared_missing_notice(Ok(Some("cloudflare:quick")), "none", hint).unwrap();
         assert!(n.contains("tunnel=quick"), "{}", n);
+        // config.json unreadable: the start is refused with that error, so no notice.
+        assert_eq!(cloudflared_missing_notice(Err(()), "quick", hint), None);
+        assert_eq!(cloudflared_missing_notice(Err(()), "none", hint), None);
         // config.json says none (any spelling): nothing needs cloudflared.
-        assert_eq!(cloudflared_missing_notice(Some("none"), "quick", hint), None);
-        assert_eq!(cloudflared_missing_notice(Some("cloudflare:none"), "quick", hint), None);
+        assert_eq!(cloudflared_missing_notice(Ok(Some("none")), "quick", hint), None);
+        assert_eq!(cloudflared_missing_notice(Ok(Some("cloudflare:none")), "quick", hint), None);
     }
 
     #[test]

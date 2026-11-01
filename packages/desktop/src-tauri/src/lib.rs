@@ -2301,9 +2301,9 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
     // silent (#8890). An unreadable config.json refuses the start with its own
     // error, so no notice here.
     if !ServerManager::check_cloudflared() {
-        let config_tunnel = config::load_launch_overrides().ok().and_then(|o| o.tunnel);
+        let config_tunnel = config::load_launch_overrides().map(|o| o.tunnel).map_err(|_| ());
         if let Some(notice) = launch_env::cloudflared_missing_notice(
-            config_tunnel.as_deref(),
+            config_tunnel.as_ref().map(|t| t.as_deref()).map_err(|_| ()),
             &tunnel_mode,
             cloudflared_install_hint(),
         ) {

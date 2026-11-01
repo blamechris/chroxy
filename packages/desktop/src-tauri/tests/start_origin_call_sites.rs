@@ -244,8 +244,12 @@ fn every_adopt_route_classifies_the_holder_through_a_challenge() {
         "the automatic start must probe the holder with probe_port"
     );
     assert!(
-        server.contains("self.start_health_poll_with(Arc::new(|port| { tray_state::probe_port(port, Duration::from_secs(2)) }));"),
+        server.contains("self.start_health_poll_with( Arc::new(|port| tray_state::probe_port(port, Duration::from_secs(2))),"),
         "the spawned server's readiness must challenge the responder with probe_port"
+    );
+    assert!(
+        server.contains("Arc::new(tray_state::chroxy_service_installed), );"),
+        "the monitor must be given the real service detector, not a constant"
     );
 
     let tray = squash(&read("src/tray_state.rs"));
