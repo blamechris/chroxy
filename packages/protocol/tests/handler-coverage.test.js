@@ -128,6 +128,8 @@ const PLATFORM_SPECIFIC = {
   archived_sessions_list: 'dashboard',
   archived_session_history: 'dashboard',
   delete_archived_session_result: 'dashboard',
+  // #8866: the ack for restore_archived_session (continue an archived session).
+  restore_archived_session_result: 'dashboard',
   // Dashboard Settings → Session archive (#8869): the set_session_archive_policy ack.
   session_archive_policy_result: 'dashboard',
   // Mobile app only

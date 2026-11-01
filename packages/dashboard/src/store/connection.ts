@@ -1165,6 +1165,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   archivedSessionHistories: {},
   deletingArchiveIds: new Set<string>(),
   deletingAllArchives: false,
+  restoringArchiveIds: new Set<string>(),
+  archiveRestoreResults: {},
   archiveDeleteError: null,
   sessionArchivePolicySaving: false,
   sessionArchivePolicyError: null,
@@ -2190,6 +2192,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ deletingArchiveIds: pending, archiveDeleteError: null });
     wsSend(socket, { type: 'delete_archived_session', archiveId });
     return true;
+  },
+
+  // #8866. Marks the record pending and drops its previous outcome so a stale
+  // result cannot sit beside the attempt now in flight. A second restore of the
+  // same record while one is pending is refused (nothing is sent twice).
+  restoreArchivedSession: (archiveId: string, mode: 'native' | 'new_thread'): boolean => {
+    const { socket } = get();
+    if (!archiveId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (get().restoringArchiveIds.has(archiveId)) return false;
+    if (!wsSend(socket, { type: 'restore_archived_session', archiveId, mode })) return false;
+    const pending = new Set(get().restoringArchiveIds);
+    pending.add(archiveId);
+    const results = { ...get().archiveRestoreResults };
+    delete results[archiveId];
+    set({ restoringArchiveIds: pending, archiveRestoreResults: results });
+    return true;
+  },
+
+  dismissArchiveRestoreResult: (archiveId: string): void => {
+    const results = get().archiveRestoreResults ?? {};
+    if (!(archiveId in results)) return;
+    const next = { ...results };
+    delete next[archiveId];
+    set({ archiveRestoreResults: next });
   },
 
   deleteAllArchivedSessions: (): boolean => {
@@ -3669,6 +3696,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      archiveRestoreResults: {},
       sessionArchivePolicyError: null,
       // #7586 (supersedes #7572's two literals) — EVERY in-flight request marker:
       // the actioning-id sets, the reindex / relay re-run / retry paths, the
@@ -3918,6 +3946,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      archiveRestoreResults: {},
       sessionArchivePolicyError: null,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
@@ -4154,6 +4183,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       archivedSessions: null,
       archivedSessionHistories: {},
       archiveDeleteError: null,
+      archiveRestoreResults: {},
       sessionArchivePolicyError: null,
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it

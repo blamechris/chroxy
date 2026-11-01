@@ -6,8 +6,9 @@
  * door onto the same store state: history views are keyed by archiveId, so one
  * viewer state serves both.
  *
- * READ-ONLY. Nothing here resumes, continues, re-sends, creates or deletes a
- * session; deleting stays in the Control Room tab.
+ * Viewing is READ-ONLY and deleting stays in the Control Room tab. A session
+ * only comes back on an explicit click on Resume / Continue as new thread (#8866),
+ * shown once a row is opened.
  *
  * STATES are three different claims and render distinctly: `null` is "not asked
  * yet" (Loading…), an empty list is "asked, nothing archived", and `refused` is
@@ -29,6 +30,7 @@ import { useEffect, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
 import { ArchivedSessionHistoryPanel, archivedSessionHistoryPanelId } from './ArchivedSessionHistoryPanel'
+import { ArchivedRestoreStatus, ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions'
 import { ARCHIVE_REFUSED_TEXT, ArchivePolicyNote, archiveReasonLabel, archivedAtLabel } from './ArchivedSessionsSection'
 
 const BODY_ID = 'sidebar-archived-body'
@@ -92,6 +94,8 @@ export function SidebarArchivedSection() {
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
 
+          <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} loaded={rows !== null && !refused} surface="sidebar" />
+
           {refused ? (
             <p className="sidebar-archived-note" data-testid="sidebar-archived-refused">
               {ARCHIVE_REFUSED_TEXT}
@@ -127,6 +131,7 @@ export function SidebarArchivedSection() {
                         {archiveReasonLabel(r.reason)} · {archivedAtLabel(r.archivedAt)}
                       </span>
                     </button>
+                    {historyOpen ? <ArchivedSessionRestoreActions row={r} surface="sidebar" /> : null}
                     {historyOpen ? <ArchivedSessionHistoryPanel archiveId={id} surface="sidebar" /> : null}
                   </li>
                 )

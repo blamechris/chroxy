@@ -836,9 +836,70 @@ async function handleInput(ws, client, msg, ctx) {
   // `message_queued` mirror carries the id the sender's optimistic copy uses —
   // letting that client reconcile its queued bubble. Providers that send
   // immediately ignore the extra option.
-  const dispatchText = preparedContext
-    ? prepareInputContext(textToSend, attachmentsWithoutContext, preparedContext.context).text
-    : textToSend
+  //
+  // #8866: a session continued from the archive as a NEW thread owes the model
+  // the archived transcript with its first message. It is claimed here, after
+  // every rejection path above, merged into the text through the same
+  // `prepareInputContext` envelope a client-selected context takes, and kept OUT
+  // of `contextCount` (history shows what the user typed) and of the
+  // `sendOptions.context` below (that stays "what the user selected"; an adapter
+  // that refuses selected context, like BYOK with attachments, is unaffected).
+  // It is consumed when the provider ADMITS the input, and also when admission
+  // is UNCERTAIN (re-sending the transcript twice is worse than losing it once);
+  // a definite rejection or a throw returns it to pending. While a claim is
+  // unresolved a second input is REFUSED, so nothing can become the first
+  // delivered input without the transcript. The claim is observed through an
+  // admission callback passed whenever a seed is claimed, separately from the
+  // client-ack bookkeeping, so a client without input acks is covered too.
+  const sm = ctx.sessions.sessionManager
+  const seedClaim = sm.claimContinuationSeed?.(targetSessionId) ?? null
+  if (seedClaim?.busy || seedClaim?.unpersisted) {
+    const [reason, message] = seedClaim.busy
+      ? ['continuation_seed_pending', 'The first message of this continued session is still being delivered. Wait for it to be accepted, then send again.']
+      : ['continuation_seed_unpersisted', 'Could not safely record the start of this continued session (the state file was not written), so nothing was sent. Check disk space and try again.']
+    // The dashboard restores the draft from a retry-safe rejection but does not
+    // render the ack's message, so the refusal is ALSO a session error (the same
+    // pairing the budget-paused rejection uses) for the user to read.
+    sendSessionError(ws, ctx, message)
+    if (inputRecord) {
+      sendInputAck(ws, ctx, inputRecord, {
+        status: 'rejected',
+        delivery: 'not_dispatched',
+        retrySafe: true,
+        reason,
+        message,
+      })
+      releaseInputRequest(ctx, inputRecord)
+    }
+    return
+  }
+  let seedSettled = !seedClaim
+  const settleSeed = (consumed) => {
+    if (seedSettled) return
+    seedSettled = true
+    sm.settleContinuationSeed?.(targetSessionId, seedClaim.token, consumed)
+  }
+  const observeSeedAdmission = (admission) => {
+    if (seedSettled || !admission || typeof admission !== 'object') return
+    if (admission.status === 'rejected' && admission.delivery === 'not_dispatched') settleSeed(false)
+    else if (
+      (admission.status === 'accepted' && admission.delivery === 'dispatch_started') ||
+      (admission.status === 'queued' && admission.delivery === 'queued') ||
+      (admission.status === 'uncertain' && admission.delivery === 'unknown')
+    ) settleSeed(true)
+  }
+  let dispatchText
+  try {
+    const dispatchContext = seedClaim
+      ? { version: 1, items: [seedClaim.item, ...(preparedContext?.context.items || [])] }
+      : preparedContext?.context
+    dispatchText = dispatchContext
+      ? prepareInputContext(textToSend, attachmentsWithoutContext, dispatchContext).text
+      : textToSend
+  } catch (err) {
+    settleSeed(false)
+    throw err
+  }
   let sendResult
   let admissionFinal = false
   let forwardedEffectsCommitted = false
@@ -853,6 +914,7 @@ async function handleInput(ws, client, msg, ctx) {
     )
   }
   const onInputAdmission = (admission) => {
+    observeSeedAdmission(admission)
     if (!inputRecord || admissionFinal || !admission || typeof admission !== 'object') return
     const status = admission.status
     const delivery = admission.delivery
@@ -900,10 +962,11 @@ async function handleInput(ws, client, msg, ctx) {
     sendResult = entry.session.sendMessage(dispatchText, attachments, {
       isVoice: !!msg.isVoice,
       clientMessageId: messageId,
-      ...(inputRecord ? { onInputAdmission } : {}),
+      ...(inputRecord || seedClaim ? { onInputAdmission } : {}),
       ...(preparedContext?.context ? { context: preparedContext.context } : {}),
     })
   } catch (err) {
+    settleSeed(false)
     if (inputRecord && !admissionFinal) {
       inputRecord.status = 'uncertain'
       inputRecord.delivery = 'unknown'
@@ -932,7 +995,22 @@ async function handleInput(ws, client, msg, ctx) {
 
   // Older clients have no correlated admission contract. Preserve their
   // established fire-and-forget history, primary, and peer-echo behavior.
+  //
   if (!inputRecord) commitForwardedEffects()
+
+  // #8866: a claimed seed whose provider reported no admission by the time
+  // sendMessage returned. Every in-tree provider reports it (base/sdk/cli/
+  // claude-tui/jsonl-subprocess incl. codex-exec and gemini, byok, acp, codex
+  // app-server); one that does not is treated as having taken the input once its
+  // call settles (a rejected call included: no signal means uncertain, and
+  // uncertain counts as consumed). A synchronous return settles it now.
+  if (!seedSettled) {
+    if (sendResult && typeof sendResult.then === 'function') {
+      sendResult.then(() => settleSeed(true), () => settleSeed(true))
+    } else {
+      settleSeed(true)
+    }
+  }
 }
 
 function handleInterrupt(ws, client, msg, ctx) {

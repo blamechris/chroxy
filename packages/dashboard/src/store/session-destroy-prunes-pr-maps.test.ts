@@ -1228,6 +1228,8 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // view whose record is gone) and both full-reset sites clear the views.
     archivedSessionHistories: 'keyed by archiveId (an archived record, not a live session); list reply prunes, full-reset sites clear',
     deletingArchiveIds: 'archiveIds with a delete in flight; transport drop clears (in-flight marker roster)',
+    restoringArchiveIds: 'archiveIds with a restore in flight (#8866); transport drop clears (in-flight marker roster)',
+    archiveRestoreResults: 'keyed by archiveId (an archived record, not a live session); the next attempt overwrites it, and a restored record leaves the list',
     reindexingRepoPaths: 'keyed by the repoPath the dashboard sent',
     reindexResults: 'per repo path',
     relayRerunningRepoPaths: 'repo paths with an in-flight relay re-run',

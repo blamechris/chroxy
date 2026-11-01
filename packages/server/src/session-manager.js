@@ -11,8 +11,9 @@ import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
-import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { resolveJsonlPath, hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
+import { buildContinuationSeed, coerceContinuationSeed, continuationSeedItem, sanitizeSeedText } from './archive-continuation.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
@@ -293,6 +294,8 @@ const FAILED_RESTORE_MARKER_MAX_MESSAGE = 500
  * provider which never settles cannot leave the operator's Retry button spinning.
  */
 const RETRY_RESTORE_SETTLE_TIMEOUT_MS = 30 * 1000
+// #8866: how long an unsettled claim on a new-thread seed excludes a second input.
+const CONTINUATION_CLAIM_TTL_MS = 2 * 60 * 1000
 /**
  * #8876 — how long a provider's async start() may stay unsettled before
  * `createSession` treats it as failed. Without a bound, a start() that never
@@ -1029,6 +1032,9 @@ export class SessionManager extends EventEmitter {
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     // #8301: sessions whose user pressed Stop and has not typed since — daemon turns are refused (see daemonTurnRefusal).
     this._userStopped = new Set()
+    // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
+    // continued as a NEW thread, held until the first accepted user input carries it.
+    this._continuationSeeds = new Map()
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
@@ -1138,6 +1144,7 @@ export class SessionManager extends EventEmitter {
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
     this._userStopped.delete(sessionId)
+    this._continuationSeeds.delete(sessionId)
     for (const [requestId, pending] of this._permissionRequests) {
       if (pending.sessionId === sessionId) this._permissionRequests.delete(requestId)
     }
@@ -3414,7 +3421,7 @@ export class SessionManager extends EventEmitter {
    *   has already run — late callers (duplicate shutdown handler, stray
    *   session event) cannot overwrite the on-disk state (#3697).
    */
-  serializeState() {
+  serializeState({ durable = false } = {}) {
     // After destroyAll() has cleared the in-memory Map, any further write
     // would persist 0 sessions and overwrite the good state already on disk.
     // Skip silently — the destroyAll() call did the final write itself
@@ -3458,7 +3465,7 @@ export class SessionManager extends EventEmitter {
     state.budgetExceeded = budgetState.budgetExceeded
     state.budgetPaused = budgetState.budgetPaused
 
-    return this._persistence.serializeState(state)
+    return this._persistence.serializeState(state, { durable })
   }
 
   /**
@@ -3546,6 +3553,14 @@ export class SessionManager extends EventEmitter {
         agentCommId: entry.agentCommId || null,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
+        // #8866: a session continued as a NEW thread from the archive that has not
+        // had its first message yet still owes the model its transcript seed; it
+        // must survive a daemon restart in that window. Absent otherwise.
+        // `claimed` records that the first input is IN FLIGHT: after a crash that
+        // seed is dropped, not re-sent (see coerceContinuationSeed).
+        ...(this._continuationSeeds.has(id)
+          ? { continuationSeed: { ...this._continuationSeeds.get(id).seed, ...(this._continuationSeeds.get(id).claimed ? { claimed: true } : {}) } }
+          : {}),
         // #8336: the highest history seq this run handed out. The ring buffer's
         // `_seq` stamps are server-internal and stripped from `history` above,
         // but a reconnecting client keeps its cursor across a restart; restore
@@ -3951,6 +3966,9 @@ export class SessionManager extends EventEmitter {
       if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
         this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
       }
+      // #8866: an unconsumed new-thread seed (state file: untrusted, re-bounded).
+      const continuationSeed = coerceContinuationSeed(saved.continuationSeed)
+      if (continuationSeed) this._continuationSeeds.set(sessionId, { seed: continuationSeed, claimed: false, claimedAt: 0, token: null })
     } catch (err) {
       // The TAIL threw, after createSession() already returned — so a live but
       // half-seeded session exists and must not be left behind.
@@ -4454,7 +4472,363 @@ export class SessionManager extends EventEmitter {
    * @returns {{ policy: object, sessions: object[] }}
    */
   listArchivedSessions() {
-    return { policy: this._sessionArchive.retentionPolicy(), sessions: this._sessionArchive.list() }
+    const sessions = this._sessionArchive.list().map((row) => {
+      const { locator, ...wire } = row
+      return { ...wire, restore: this._archiveRestoreOptions(row, locator) }
+    })
+    return { policy: this._sessionArchive.retentionPolicy(), sessions }
+  }
+
+  /**
+   * #8866: what "continue" can mean for one archived session, from CHEAP checks
+   * only (provider registered, a locator was recorded, the directory exists), so
+   * the roster can enable or grey the two actions. It is advisory: the click
+   * re-checks authoritatively (`restoreArchivedSession`), including that the
+   * provider transcript is still on disk.
+   *
+   *   native    resume the SAME conversation (the boot / retry recipe)
+   *   newThread a brand-new session in the archived directory, seeded with the
+   *             archived transcript on its first message
+   *
+   * @param {{ provider: string|null, cwd: string|null }} meta
+   * @param {boolean|null} locator - whether a provider conversation was recorded (`null` = unknown)
+   * @returns {{ native: boolean, nativeReason?: string, newThread: boolean, newThreadReason?: string }}
+   * @private
+   */
+  _archiveRestoreOptions(meta, locator) {
+    const providerName = meta.provider || this._providerType
+    let ProviderClass = null
+    try { ProviderClass = getProvider(providerName) } catch { /* unregistered: reported below */ }
+    const common = this._archiveCommonRefusal(ProviderClass, providerName, meta.cwd)
+    const out = { native: false, newThread: false }
+    if (common) {
+      out.nativeReason = common.message
+      out.newThreadReason = common.message
+      return out
+    }
+    out.newThread = true
+    const nativeRefusal = this._archiveNativeRefusal(ProviderClass, providerName, locator)
+    if (nativeRefusal) out.nativeReason = nativeRefusal.message
+    else out.native = true
+    return out
+  }
+
+  /** Refusals that apply to BOTH modes. @returns {{code: string, message: string}|null} @private */
+  _archiveCommonRefusal(ProviderClass, providerName, cwd) {
+    if (!ProviderClass) {
+      return { code: 'ARCHIVE_RESTORE_PROVIDER_UNAVAILABLE', message: `The "${providerName}" provider is not available on this server.` }
+    }
+    if (ProviderClass.isUserShell === true || providerName === USER_SHELL_PROVIDER) {
+      return { code: 'ARCHIVE_RESTORE_FORBIDDEN_USER_SHELL', message: 'A user-shell session has no conversation to continue.' }
+    }
+    if (typeof cwd !== 'string' || cwd.length === 0 || !this._isDirectory(cwd)) {
+      return { code: 'ARCHIVE_RESTORE_CWD_MISSING', message: 'The directory this session ran in no longer exists.' }
+    }
+    return null
+  }
+
+  /** @returns {{code: string, message: string}|null} @private */
+  _archiveNativeRefusal(ProviderClass, providerName, locator) {
+    const resumable = ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER || ProviderClass.capabilities?.resume === true
+    if (!resumable) {
+      return { code: 'ARCHIVE_RESTORE_NATIVE_UNSUPPORTED', message: `The ${ProviderClass.displayLabel || providerName} provider cannot resume a conversation; continue it as a new thread instead.` }
+    }
+    if (locator === false) {
+      return { code: 'ARCHIVE_RESTORE_LOCATOR_MISSING', message: 'This session recorded no provider conversation to resume; continue it as a new thread instead.' }
+    }
+    // A worktree session's cwd IS its worktree (destroySession removes it), so
+    // the directory check in _archiveCommonRefusal already covers that case.
+    return null
+  }
+
+  /** @private */
+  _isDirectory(path) {
+    try { return statSync(path).isDirectory() } catch { return false }
+  }
+
+  /** Does the provider transcript a Claude-family locator names still exist? (test seam) @private */
+  _claudeTranscriptExists(cwd, conversationId) {
+    // Honours CLAUDE_CONFIG_DIR and answers true when it cannot check (S2).
+    return hasPersistedTranscript(cwd, conversationId)
+  }
+
+  /**
+   * #8866: is the conversation `saved` names already held by a live session or a
+   * parked failed restore? Matches the saved session id, the Claude conversation
+   * id, or the Codex native thread id.
+   * @returns {{ sessionId: string, name: string|null, parked: boolean }|null}
+   * @private
+   */
+  _findConversationOwner(saved) {
+    const str = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+    const savedId = str(saved?.id)
+    const conversationId = str(saved?.sdkSessionId)
+    const threadId = str(saved?.nativeResume?.threadId)
+    const matches = (id, conv, thread) =>
+      (savedId && id === savedId) || (conversationId && conv === conversationId) || (threadId && thread === threadId)
+    for (const [id, entry] of this._sessions) {
+      const s = entry.session
+      if (matches(id, str(s?.resumeSessionId), str(s?.nativeResumeState?.threadId))) {
+        return { sessionId: id, name: entry.name ?? null, parked: false }
+      }
+    }
+    for (const [id, parked] of this._failedRestores) {
+      const p = parked?.saved
+      if (matches(id, str(p?.sdkSessionId), str(p?.nativeResume?.threadId))) {
+        return { sessionId: id, name: str(p?.name), parked: true }
+      }
+    }
+    return null
+  }
+
+  /**
+   * #8866 — bring an archived session back, because the user asked to.
+   *
+   * `mode: 'native'` resumes the SAME conversation through exactly the recipe
+   * boot and `retryFailedRestore` use (`_attemptRestoreOne(saved, true)`, so an
+   * ASYNC start failure re-parks it in the failed restores with its history).
+   * It needs a recorded locator whose provider transcript / thread still exists
+   * and a directory that still exists. When it works the record LEAVES the
+   * archive (`release`, no tombstone): the session is live again, closing it
+   * later re-archives it, and a tombstone would make that archive (or a dismissed
+   * failed restore of the same snapshot) dedupe to `duplicate` and lose the only
+   * copy. The release happens synchronously right after the sync attempt and
+   * the state flush, under a lock keyed on the archiveId, so a double click gets
+   * `ARCHIVED_SESSION_NOT_FOUND` rather than a second live copy.
+   *
+   * `mode: 'new_thread'` starts a NEW session (new id, `isRestore` false) in the
+   * archived directory with the archived provider and model, and keeps the
+   * container binding or refuses (never a silent move to the host). It carries
+   * NO authority from the old session: not permissionMode (the provider default
+   * applies), not codexSandbox, not the native locator, not a worktree. The
+   * record STAYS in the archive, because the old thread is not live again. The
+   * model gets the archived transcript with the first message the user sends
+   * (see `claimContinuationSeed`); the new session's history opens with a system
+   * line saying so.
+   *
+   * @param {string} archiveId
+   * @param {'native'|'new_thread'} mode
+   * @param {{ settleTimeoutMs?: number }} [opts]
+   * @returns {Promise<{ok: true, mode: string, sessionId: string, seed?: {messagesIncluded: number, messagesTotal: number, bytes: number}} | {ok: false, mode: string, code: string, message: string, sessionId?: string}>}
+   */
+  async restoreArchivedSession(archiveId, mode, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
+    const fail = (code, message, extra = {}) => ({ ok: false, mode, code, message, ...extra })
+    if (mode !== 'native' && mode !== 'new_thread') {
+      return fail('ARCHIVE_RESTORE_INVALID', 'mode must be "native" or "new_thread"')
+    }
+    let release = await this._locks.acquire(`archive-restore:${archiveId}`)
+    const releaseOnce = () => {
+      if (!release) return
+      const r = release
+      release = null
+      r()
+    }
+    let awaitStart = null
+    try {
+      const read = await this._sessionArchive.getSaved?.(archiveId)
+      if (!read) return fail('ARCHIVED_SESSION_NOT_FOUND', 'No archived session with that id')
+      if (!read.ok) return fail(read.code, read.message)
+      const { saved, meta } = read
+
+      const providerName = saved.provider || this._providerType
+      let ProviderClass = null
+      try { ProviderClass = getProvider(providerName) } catch { /* reported by the refusal */ }
+      const refusal = this._archiveCommonRefusal(ProviderClass, providerName, saved.cwd)
+      if (refusal) return fail(refusal.code, refusal.message)
+
+      if (mode === 'native') {
+        const nativeRefusal = this._archiveNativeRefusal(ProviderClass, providerName, meta.locator)
+        if (nativeRefusal) return fail(nativeRefusal.code, nativeRefusal.message)
+        // The same conversation must never be live twice (two writers on one
+        // transcript / native thread). Also covers "resumed elsewhere first" and a
+        // restore whose archive record was kept because the state flush failed.
+        const owner = this._findConversationOwner(saved)
+        if (owner) {
+          return fail(
+            'ARCHIVE_RESTORE_ALREADY_LIVE',
+            owner.parked
+              ? 'This conversation is already restored and parked in Failed restores; use Retry there.'
+              : `This conversation is already live as "${owner.name}"; switch to it instead of resuming it again.`,
+            { sessionId: owner.sessionId },
+          )
+        }
+        if (ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER) {
+          if (!saved.nativeResume || typeof saved.nativeResume !== 'object') {
+            return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'This session recorded no native Codex thread to resume; continue it as a new thread instead.')
+          }
+        } else if (typeof saved.sdkSessionId !== 'string' || saved.sdkSessionId.length === 0 || saved.conversationPersisted === false) {
+          return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'This session recorded no provider conversation to resume; continue it as a new thread instead.')
+        } else if (!this._claudeTranscriptExists(saved.cwd, saved.sdkSessionId)) {
+          return fail('ARCHIVE_RESTORE_LOCATOR_MISSING', 'The provider transcript for this session is no longer on disk; continue it as a new thread instead.')
+        }
+        try {
+          const restoredId = this._attemptRestoreOne(saved, true)
+          // CONFIRMED durable (file AND directory entry fsync'd): the archive copy is
+          // released next, so the state file must really hold the restored session
+          // before the record goes.
+          const flushed = this._flushPersistConfirmedDurable(restoredId)
+          // Grab the settle handle NOW, while the entry is still mapped (see
+          // retryFailedRestore): a rejected start re-parks it and drops the entry.
+          awaitStart = { restoredId, settled: this._awaitStartSettled(restoredId, settleTimeoutMs), saved }
+          // Only a session that is on disk may take the archive copy with it.
+          // Synchronous with the attempt: no await between them.
+          if (flushed) {
+            const released = this._sessionArchive.release(archiveId)
+            if (released !== 'released') log.warn(`Restored archived session ${restoredId} but its archive record was not released (${released})`)
+          } else {
+            log.warn(`Restored archived session ${restoredId} but state could not be saved; keeping its archive record`)
+          }
+        } catch (err) {
+          log.error(`Archive restore failed for ${JSON.stringify(String(saved.name))}: ${err?.message || err}`)
+          return fail(err?.code || 'ARCHIVE_RESTORE_FAILED', err?.message || String(err))
+        }
+      } else {
+        let containerBinding
+        try {
+          containerBinding = this._resolveRestoredContainerBinding(saved)
+        } catch (err) {
+          return fail(err?.code || 'ENVIRONMENT_UNAVAILABLE', err?.message || String(err))
+        }
+        const seed = buildContinuationSeed(saved.history, { omittedOldest: meta.omittedOldest })
+        const baseName = typeof saved.name === 'string' && saved.name.trim() ? saved.name.trim() : 'Archived session'
+        let newId
+        try {
+          newId = this.createSession({
+            name: `${baseName} (continued)`,
+            cwd: saved.cwd,
+            model: saved.model || undefined,
+            provider: saved.provider || undefined,
+            connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
+              ? saved.agentConnection.id
+              : undefined,
+            restoredAgentConnection: saved.agentConnection?.provenance?.source === 'configured'
+              ? saved.agentConnection
+              : undefined,
+            ...containerBinding,
+            // One flush below, after the seed and the opening line exist.
+            skipPersist: true,
+          })
+          if (seed) {
+            this._continuationSeeds.set(newId, {
+              seed: { ...seed, name: sanitizeSeedText(baseName).slice(0, 256), archivedAt: typeof meta.archivedAt === 'number' ? meta.archivedAt : null },
+              claimed: false,
+              claimedAt: 0,
+              token: null,
+            })
+          }
+          const omitted = seed ? seed.messagesTotal - seed.messagesIncluded : 0
+          this._recordHistory(newId, 'message', {
+            type: 'system',
+            content: seed
+              ? `Continued as a NEW thread from the archived session "${baseName}". The model does not have that conversation natively: ` +
+                `a transcript of ${seed.messagesIncluded} of ${seed.messagesTotal} messages${omitted > 0 ? ` (the ${omitted} oldest left out)` : ''} ` +
+                'will be sent with your first message. Tool calls, file contents and approvals from it are not included.'
+              : `Continued as a NEW thread from the archived session "${baseName}". It had no conversation text to carry over, so the model starts with no earlier context.`,
+            timestamp: Date.now(),
+          })
+          this._flushPersistOrWarn(newId)
+          awaitStart = {
+            restoredId: newId,
+            settled: this._awaitStartSettled(newId, settleTimeoutMs),
+            saved,
+            seed: seed ? { messagesIncluded: seed.messagesIncluded, messagesTotal: seed.messagesTotal, bytes: seed.bytes } : null,
+          }
+        } catch (err) {
+          if (newId && this._sessions.has(newId)) this.destroySession(newId, { archive: false })
+          log.error(`Continue-as-new-thread failed for ${JSON.stringify(String(saved.name))}: ${err?.message || err}`)
+          return fail(err?.code || 'ARCHIVE_RESTORE_FAILED', err?.message || String(err))
+        }
+      }
+    } finally {
+      releaseOnce()
+    }
+
+    if (!awaitStart) throw new Error('restoreArchivedSession: unreachable — every non-awaiting path returns')
+    const { restoredId, settled, saved } = awaitStart
+    const outcome = await settled
+    if (!outcome.ok) {
+      const err = outcome.error
+      const message = err?.message || String(err)
+      log.error(`Archive restore's provider start failed for ${JSON.stringify(String(saved.name))}: ${message}`)
+      return fail(err?.code || 'START_FAILED', message, mode === 'native' ? { sessionId: restoredId } : {})
+    }
+    log.info(`Archive ${mode === 'native' ? 'restored' : 'continued as a new thread'}: ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
+    return { ok: true, mode, sessionId: restoredId, ...(awaitStart.seed ? { seed: awaitStart.seed } : {}) }
+  }
+
+  /**
+   * #8866: take the pending archived-transcript seed of a session continued as a
+   * NEW thread, as the one_turn text context item `prepareInputContext` merges
+   * into the first message.
+   *
+   *   const claim = sm.claimContinuationSeed(id)
+   *   // null                       no seed (nothing owed)
+   *   // { busy: true }             another input holds the claim and has not been
+   *   //                            settled: the caller must REFUSE this input, or it
+   *   //                            could become the first delivered input without
+   *   //                            the transcript
+   *   // { unpersisted: true }      the claim could not be confirmed durable; the
+   *   //                            caller must REFUSE this input (retry-safe)
+   *   // { token, item }            claimed; settle with the token
+   *   sm.settleContinuationSeed(id, token, consumed)
+   *
+   * The claim is persisted (fsync'd) BEFORE the caller dispatches, so a crash
+   * mid-dispatch records the seed as in flight and restore drops it rather than
+   * re-sending it. A claim older than CONTINUATION_CLAIM_TTL_MS that was never
+   * settled counts as CONSUMED (never reclaimable: re-injecting the transcript
+   * twice is worse than losing it once), and says so in the log.
+   * @param {string} sessionId
+   * @returns {null | { busy: true } | { unpersisted: true } | { token: string, item: object }}
+   */
+  claimContinuationSeed(sessionId) {
+    const held = this._continuationSeeds.get(sessionId)
+    if (!held) return null
+    const now = Date.now()
+    if (held.claimed) {
+      if (now - held.claimedAt < CONTINUATION_CLAIM_TTL_MS) return { busy: true }
+      log.warn(`Continuation seed for session ${sessionId} was claimed ${now - held.claimedAt}ms ago and never settled; counting it as consumed`)
+      this._continuationSeeds.delete(sessionId)
+      this._flushPersistOrWarn(sessionId, null, { durable: true })
+      return null
+    }
+    held.claimed = true
+    held.claimedAt = now
+    held.token = randomBytes(8).toString('hex')
+    if (!this._flushPersistConfirmedDurable(sessionId)) {
+      // Disk may still say "unclaimed": dispatching now could replay the
+      // transcript after a crash. Back out, leave the seed pending, and tell the
+      // caller to refuse the input (retry-safe).
+      held.claimed = false
+      held.token = null
+      log.warn(`Continuation seed claim for session ${sessionId} could not be confirmed durable; refusing the input rather than risk a replay`)
+      this._flushPersistOrWarn(sessionId) // best effort: put the unclaimed state back on disk
+      return { unpersisted: true }
+    }
+    return { token: held.token, item: continuationSeedItem(held.seed) }
+  }
+
+  /**
+   * @param {string} sessionId
+   * @param {string} token - the claim's token; a stale or foreign one is ignored
+   * @param {boolean} consumed - true once the provider ADMITTED the input (or its
+   *   admission is uncertain, which counts as consumed); false returns the seed
+   *   to pending after a definite rejection
+   */
+  settleContinuationSeed(sessionId, token, consumed) {
+    const held = this._continuationSeeds.get(sessionId)
+    if (!held || !held.claimed || held.token !== token) return
+    if (consumed) {
+      this._continuationSeeds.delete(sessionId)
+      // Immediately, not on the debounce: a crash right after delivery must not
+      // bring the transcript back.
+      this._flushPersistOrWarn(sessionId, null, { durable: true })
+    } else {
+      held.claimed = false
+      held.token = null
+      // Immediately: the file says claimed:true, and a crash before the debounce
+      // would drop a seed that was never sent.
+      this._flushPersistOrWarn(sessionId)
+    }
   }
 
   /**
@@ -5200,8 +5574,29 @@ export class SessionManager extends EventEmitter {
    * shutdown erases a user's session. History/budget updates should keep
    * using the debounced path to avoid write amplification.
    */
-  _flushPersist() {
-    return this._persistence.flushPersist(() => this.serializeState())
+  _flushPersist({ durable = false } = {}) {
+    return this._persistence.flushPersist(() => this.serializeState({ durable }))
+  }
+
+  /**
+   * #8866: a durable flush whose verdict is CONFIRMED. `writeFileRestricted`
+   * does not throw when only the post-rename directory fsync fails (the file is
+   * live, its durability unproven), so a bare durable flush can "succeed"
+   * without proving anything. A caller about to drop its only other copy of the
+   * data must use this and treat `false` as "keep the copy".
+   * Once `destroyAll()` has run, `serializeState` writes nothing and the flush
+   * still reports success, so that state is never "confirmed".
+   * @returns {boolean} true only when the write succeeded AND its durability is confirmed
+   */
+  _flushPersistConfirmedDurable(sessionId, name = null) {
+    if (this._destroying) return false
+    if (!this._flushPersistOrWarn(sessionId, name, { durable: true })) return false
+    const unconfirmed = this._persistence.lastDurabilityUnconfirmed
+    if (unconfirmed) {
+      log.error(`Session state for ${sessionId} was written but its durability is unconfirmed (${unconfirmed})`)
+      return false
+    }
+    return true
   }
 
   /**
@@ -5220,8 +5615,8 @@ export class SessionManager extends EventEmitter {
    *   be nameless). Omit to look it up from `_sessions`.
    * @returns {boolean} true if the write succeeded.
    */
-  _flushPersistOrWarn(sessionId, name = null) {
-    if (this._flushPersist()) return true
+  _flushPersistOrWarn(sessionId, name = null, { durable = false } = {}) {
+    if (this._flushPersist({ durable })) return true
     const resolvedName = name || this._sessions.get(sessionId)?.name || null
     log.error(`Session state for ${sessionId}${resolvedName ? ` ("${resolvedName}")` : ''} was NOT persisted — it may be lost on restart. Check disk space and write permissions for ${this._stateFilePath}.`)
     this.emit('session_persist_failed', { sessionId, name: resolvedName })

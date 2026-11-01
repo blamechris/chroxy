@@ -18,7 +18,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerRestoreArchivedSessionResultMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -975,6 +975,12 @@ export interface WslActionResult {
   at: number;
 }
 
+/** The outcome of one `restore_archived_session`, as the row renders it (#8866). */
+export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessage, 'ok' | 'mode' | 'code' | 'message' | 'sessionId' | 'seed' | 'refused'> & {
+  /** The record's name when the reply arrived, so a status line can still name it after the row has left the list. */
+  name?: string;
+};
+
 /** The archive retention policy as the daemon reports and accepts it. */
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
 
@@ -1904,6 +1910,14 @@ export interface ConnectionState {
   deletingArchiveIds: Set<string>;
   /** A `delete_archived_session { all: true }` is in flight. */
   deletingAllArchives: boolean;
+  /** archiveIds with a `restore_archived_session` in flight (#8866). Socket-scoped: cleared with the in-flight markers. */
+  restoringArchiveIds: Set<string>;
+  /**
+   * The last `restore_archived_session_result` per archiveId (#8866): what the row says happened
+   * ("Resumed", "Started a new thread", or why not). The outcome of an action that already
+   * finished, so it is NOT cleared with the in-flight markers; the next attempt overwrites it.
+   */
+  archiveRestoreResults: Record<string, ArchiveRestoreResult>;
   /** The last delete's failure (`archiveId` absent for a delete-all). Cleared by the next delete. */
   archiveDeleteError: { archiveId?: string; code?: string; message?: string; refused?: boolean } | null;
   /** A `set_session_archive_policy` is in flight (Settings → Session archive). Socket-scoped: cleared with the in-flight markers. */
@@ -2593,6 +2607,15 @@ export interface ConnectionState {
   closeArchivedSessionHistory: (archiveId: string) => void;
   /** Delete one archive record. Returns false (nothing sent) when the socket is closed or one is already pending. */
   deleteArchivedSession: (archiveId: string) => boolean;
+  /**
+   * Continue an archived session on an explicit click (#8866): `native` resumes the same
+   * conversation (the record leaves the archive), `new_thread` starts a NEW session seeded
+   * with the archived transcript (the record stays). Returns false (nothing sent) when the
+   * socket is closed or a restore of that record is already pending.
+   */
+  restoreArchivedSession: (archiveId: string, mode: 'native' | 'new_thread') => boolean;
+  /** Clear one restore outcome line (the × on a row or status line). */
+  dismissArchiveRestoreResult: (archiveId: string) => void;
   /** Delete every archive record. */
   deleteAllArchivedSessions: () => boolean;
   /**

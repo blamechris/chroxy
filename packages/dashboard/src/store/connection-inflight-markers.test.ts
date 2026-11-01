@@ -102,7 +102,7 @@ const ROSTER_EXPECTED = [
   'externalSessionsLoading', 'repoEventsLoading', 'githubWebhookConfigLoading',
   'orchestrationRunsLoading', 'failedRestoresLoading',
   // Session archive: the list spinner and the delete-in-flight markers.
-  'archivedSessionsLoading', 'deletingArchiveIds', 'deletingAllArchives', 'sessionArchivePolicySaving',
+  'archivedSessionsLoading', 'deletingArchiveIds', 'deletingAllArchives', 'restoringArchiveIds', 'sessionArchivePolicySaving',
   'sessionPrStatusLoading', 'sessionPrThreadsLoading', 'sessionPrStatusRequestedAt',
   'orchestrationRunDetailLoading', 'orchestrationPendingActions',
   'cancellingActivityIds', 'retryingRestoreIds', 'symbolsLoading',

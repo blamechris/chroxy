@@ -160,6 +160,19 @@ function finiteOrNull(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+/**
+ * Does the saved entry still name a provider-side conversation it could resume
+ * from (#8866)? A Claude-family entry carries `sdkSessionId` (a claude-tui id
+ * that was minted but never written to disk is `conversationPersisted: false`);
+ * a Codex app-server entry carries `nativeResume`. This only says a locator was
+ * RECORDED: whether the transcript / thread still exists is checked when a
+ * restore is attempted.
+ */
+function savedHasLocator(saved) {
+  if (saved?.nativeResume && typeof saved.nativeResume === 'object') return true
+  return typeof saved?.sdkSessionId === 'string' && saved.sdkSessionId.length > 0 && saved.conversationPersisted !== false
+}
+
 function positiveNumber(value, fallback, name, { integer = false, max = Infinity } = {}) {
   if (value === undefined) return fallback
   const ok = typeof value === 'number' && Number.isFinite(value) && value > 0 && (!integer || Number.isInteger(value))
@@ -193,6 +206,9 @@ function metaFrom(saved, { archiveId, reason, archivedAt, bytes, omittedOldest =
     historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
     omittedOldest: Number.isInteger(omittedOldest) && omittedOldest > 0 ? omittedOldest : 0,
     bytes: finiteOrNull(bytes) ?? 0,
+    // Internal restore hints (#8866); SessionManager folds them into the wire
+    // `restore` field and strips them, so the roster never carries these keys.
+    locator: savedHasLocator(saved),
   }
 }
 
@@ -215,6 +231,9 @@ function metaFromIndexRow(row) {
   )
   if (!meta) return null
   meta.historyLength = historyLength
+  // A row written before #8866 has no hints: `null` = unknown, decided when a
+  // restore is attempted, rather than a false "no locator".
+  meta.locator = typeof row.locator === 'boolean' ? row.locator : null
   return meta
 }
 
@@ -505,6 +524,58 @@ export class SessionArchive {
     } catch (err) {
       log.warn(`Failed to read archived session: ${err?.message || err}`)
       return notFound
+    }
+  }
+
+  /**
+   * The saved session entry of one record, for a restore (#8866). The returned
+   * object belongs to the caller (the one-record cache is dropped), because a
+   * restore seeds history onto it and must not leave the cached copy mutated.
+   * @param {string} archiveId
+   * @returns {Promise<{ok: true, saved: object, meta: object} | {ok: false, code: string, message: string}>}
+   */
+  async getSaved(archiveId) {
+    const notFound = { ok: false, code: ARCHIVE_NOT_FOUND_CODE, message: 'No archived session with that id' }
+    try {
+      this._ensureLoaded()
+      this._sweep()
+      if (!this._knows(archiveId)) return notFound
+      const record = await this._readRecord(archiveId)
+      if (!record || !this._knows(archiveId) || !record.saved || typeof record.saved !== 'object') return notFound
+      this._invalidate(archiveId)
+      const row = this._index.find((r) => r.archiveId === archiveId)
+      return { ok: true, saved: record.saved, meta: { ...row } }
+    } catch (err) {
+      log.warn(`Failed to read archived session for restore: ${err?.message || err}`)
+      return notFound
+    }
+  }
+
+  /**
+   * Remove a record WITHOUT a tombstone: the session it held is live again
+   * (#8866), so a later close must be free to archive it afresh. A tombstone
+   * would make that archive (and a dismissed failed restore of the same
+   * snapshot) dedupe to `duplicate` and drop the only copy.
+   *
+   * The file goes first: if the index write then fails the row is orphaned and
+   * dropped at the next load (its file is gone); the other order would leave a
+   * file the next load re-adopts.
+   * @param {string} archiveId
+   * @returns {'released'|'not_found'|'failed'}
+   */
+  release(archiveId) {
+    try {
+      this._ensureLoaded()
+      this._sweep()
+      if (!this._knows(archiveId)) return 'not_found'
+      if (!this._unlinkRecord(archiveId)) return 'failed'
+      this._invalidate(archiveId)
+      this._index = this._index.filter((row) => row.archiveId !== archiveId)
+      this._writeIndex({ durable: true })
+      return 'released'
+    } catch (err) {
+      log.warn(`Failed to release archived session: ${err?.message || err}`)
+      return 'failed'
     }
   }
 

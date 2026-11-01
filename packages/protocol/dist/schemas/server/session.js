@@ -531,6 +531,20 @@ export const ServerArchivedSessionMetaSchema = z.object({
      */
     omittedOldest: z.number().int().min(0).optional(),
     bytes: z.number().min(0),
+    /**
+     * #8866: what continuing this session can mean, from cheap server-side checks
+     * (provider registered, a conversation was recorded, the directory exists).
+     * Advisory: `restore_archived_session` re-checks authoritatively. Absent from
+     * an older server, which offers neither action.
+     */
+    restore: z.object({
+        /** Resume the SAME conversation; the record leaves the archive. */
+        native: z.boolean(),
+        nativeReason: z.string().optional(),
+        /** Start a NEW session seeded with the archived transcript; the record stays. */
+        newThread: z.boolean(),
+        newThreadReason: z.string().optional(),
+    }).optional(),
 });
 /**
  * Reply to `list_archived_sessions`. `policy` is the retention policy in force
@@ -594,6 +608,37 @@ export const ServerDeleteArchivedSessionResultSchema = z.object({
     ok: z.boolean(),
     deleted: z.number().int().min(0),
     archiveId: z.string().optional(),
+    refused: z.boolean().optional(),
+    code: z.string().optional(),
+    message: z.string().optional(),
+});
+/**
+ * Reply to `restore_archived_session`. `sessionId` is the live session on
+ * success (for `native`, the id the manager actually restored under, which can
+ * differ from the archived one) and, for a native restore whose provider start
+ * then failed, the id it was re-parked under in the failed restores. `seed`
+ * (new_thread only) says how much of the archived transcript will ride with the
+ * first message: `messagesIncluded` of `messagesTotal` conversation messages,
+ * `bytes` of text. `ok: false` carries `code`: `ARCHIVED_SESSION_NOT_FOUND`,
+ * `ARCHIVED_SESSION_INVALID`, `ARCHIVE_RESTORE_PROVIDER_UNAVAILABLE`,
+ * `ARCHIVE_RESTORE_FORBIDDEN_USER_SHELL`, `ARCHIVE_RESTORE_CWD_MISSING`,
+ * `ARCHIVE_RESTORE_NATIVE_UNSUPPORTED`, `ARCHIVE_RESTORE_LOCATOR_MISSING`,
+ * `ARCHIVE_RESTORE_ALREADY_LIVE` (`sessionId` is the live or parked owner),
+ * `ENVIRONMENT_UNAVAILABLE`, a provider start code, or, with `refused: true`,
+ * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`. `mode` echoes the request's mode
+ * (absent when it was not a valid one).
+ */
+export const ServerRestoreArchivedSessionResultSchema = z.object({
+    type: z.literal('restore_archived_session_result'),
+    archiveId: z.string(),
+    mode: z.enum(['native', 'new_thread']).optional(),
+    ok: z.boolean(),
+    sessionId: z.string().optional(),
+    seed: z.object({
+        messagesIncluded: z.number().int().min(0),
+        messagesTotal: z.number().int().min(0),
+        bytes: z.number().int().min(0),
+    }).optional(),
     refused: z.boolean().optional(),
     code: z.string().optional(),
     message: z.string().optional(),

@@ -1196,6 +1196,14 @@ export declare const DeleteArchivedSessionSchema: z.ZodObject<{
     archiveId: z.ZodOptional<z.ZodString>;
     all: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
+export declare const RestoreArchivedSessionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"restore_archived_session">;
+    archiveId: z.ZodString;
+    mode: z.ZodEnum<{
+        native: "native";
+        new_thread: "new_thread";
+    }>;
+}, z.core.$strip>;
 export declare const SetSessionArchivePolicySchema: z.ZodObject<{
     type: z.ZodLiteral<"set_session_archive_policy">;
     enabled: z.ZodBoolean;
@@ -2095,6 +2103,13 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"delete_archived_session">;
     archiveId: z.ZodOptional<z.ZodString>;
     all: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"restore_archived_session">;
+    archiveId: z.ZodString;
+    mode: z.ZodEnum<{
+        native: "native";
+        new_thread: "new_thread";
+    }>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_session_archive_policy">;
     enabled: z.ZodBoolean;

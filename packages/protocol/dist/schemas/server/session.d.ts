@@ -877,6 +877,12 @@ export declare const ServerArchivedSessionMetaSchema: z.ZodObject<{
     historyLength: z.ZodNumber;
     omittedOldest: z.ZodOptional<z.ZodNumber>;
     bytes: z.ZodNumber;
+    restore: z.ZodOptional<z.ZodObject<{
+        native: z.ZodBoolean;
+        nativeReason: z.ZodOptional<z.ZodString>;
+        newThread: z.ZodBoolean;
+        newThreadReason: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 /**
  * Reply to `list_archived_sessions`. `policy` is the retention policy in force
@@ -908,6 +914,12 @@ export declare const ServerArchivedSessionsListSchema: z.ZodObject<{
         historyLength: z.ZodNumber;
         omittedOldest: z.ZodOptional<z.ZodNumber>;
         bytes: z.ZodNumber;
+        restore: z.ZodOptional<z.ZodObject<{
+            native: z.ZodBoolean;
+            nativeReason: z.ZodOptional<z.ZodString>;
+            newThread: z.ZodBoolean;
+            newThreadReason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
     truncated: z.ZodOptional<z.ZodBoolean>;
     refused: z.ZodOptional<z.ZodBoolean>;
@@ -953,6 +965,40 @@ export declare const ServerDeleteArchivedSessionResultSchema: z.ZodObject<{
     ok: z.ZodBoolean;
     deleted: z.ZodNumber;
     archiveId: z.ZodOptional<z.ZodString>;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * Reply to `restore_archived_session`. `sessionId` is the live session on
+ * success (for `native`, the id the manager actually restored under, which can
+ * differ from the archived one) and, for a native restore whose provider start
+ * then failed, the id it was re-parked under in the failed restores. `seed`
+ * (new_thread only) says how much of the archived transcript will ride with the
+ * first message: `messagesIncluded` of `messagesTotal` conversation messages,
+ * `bytes` of text. `ok: false` carries `code`: `ARCHIVED_SESSION_NOT_FOUND`,
+ * `ARCHIVED_SESSION_INVALID`, `ARCHIVE_RESTORE_PROVIDER_UNAVAILABLE`,
+ * `ARCHIVE_RESTORE_FORBIDDEN_USER_SHELL`, `ARCHIVE_RESTORE_CWD_MISSING`,
+ * `ARCHIVE_RESTORE_NATIVE_UNSUPPORTED`, `ARCHIVE_RESTORE_LOCATOR_MISSING`,
+ * `ARCHIVE_RESTORE_ALREADY_LIVE` (`sessionId` is the live or parked owner),
+ * `ENVIRONMENT_UNAVAILABLE`, a provider start code, or, with `refused: true`,
+ * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`. `mode` echoes the request's mode
+ * (absent when it was not a valid one).
+ */
+export declare const ServerRestoreArchivedSessionResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"restore_archived_session_result">;
+    archiveId: z.ZodString;
+    mode: z.ZodOptional<z.ZodEnum<{
+        native: "native";
+        new_thread: "new_thread";
+    }>>;
+    ok: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+    seed: z.ZodOptional<z.ZodObject<{
+        messagesIncluded: z.ZodNumber;
+        messagesTotal: z.ZodNumber;
+        bytes: z.ZodNumber;
+    }, z.core.$strip>>;
     refused: z.ZodOptional<z.ZodBoolean>;
     code: z.ZodOptional<z.ZodString>;
     message: z.ZodOptional<z.ZodString>;

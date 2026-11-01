@@ -1659,6 +1659,19 @@ export const DeleteArchivedSessionSchema = z.object({
   { message: 'delete_archived_session requires exactly one of archiveId or all: true' },
 )
 
+// #8866: continue an archived session, on an explicit request only (viewing stays
+// read-only). `native` resumes the SAME conversation through the boot / retry
+// recipe and the record leaves the archive; `new_thread` starts a NEW session in
+// the archived directory that carries the archived transcript with its first
+// message, and the record stays. UNBOUND-ONLY like the other archive messages
+// (refused with a degraded `restore_archived_session_result`): the caller supplies
+// only an archiveId and a mode, every spawn input comes from the daemon's own record.
+export const RestoreArchivedSessionSchema = z.object({
+  type: z.literal('restore_archived_session'),
+  archiveId: z.string().min(1).max(256),
+  mode: z.enum(['native', 'new_thread']),
+})
+
 // Dashboard Settings → Session archive (#8869): replace the retention policy of
 // the running daemon and persist it to config. The UI always sends the WHOLE
 // policy, so all four fields are required. `purge: true` is the explicit "turn
@@ -2269,6 +2282,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListArchivedSessionsSchema,
   GetArchivedSessionHistorySchema,
   DeleteArchivedSessionSchema,
+  RestoreArchivedSessionSchema,
   SetSessionArchivePolicySchema,
   GetEnvironmentSchema,
   EvaluateDraftSchema,

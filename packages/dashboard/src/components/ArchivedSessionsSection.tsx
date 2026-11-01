@@ -5,12 +5,13 @@
  * idle-timed-out, stopped after repeated crashes, dropped as stale at restart,
  * or a failed restore that expired / was dismissed), bounded by the
  * `sessionArchive` config policy. This tab lists those records and lets the
- * operator READ a transcript or DELETE a record.
+ * operator READ a transcript, CONTINUE it, or DELETE a record.
  *
- * READ-ONLY. Nothing here resumes, continues, re-sends or creates a session; the
- * only mutation is deleting an archive record, which is two-step (a first click
- * only arms "Confirm delete", it never sends). A replacement session is always
- * an explicit new session elsewhere in the dashboard.
+ * Viewing is READ-ONLY. A session only comes back on an explicit click on
+ * Resume (same conversation, #8866) or Continue as new thread (a new session
+ * seeded with the transcript); see ArchivedSessionRestoreActions. Deleting an
+ * archive record is two-step (a first click only arms "Confirm delete", it never
+ * sends).
  *
  * RENDERING. Plain text only: every value is a React text node (no markdown, no
  * `dangerouslySetInnerHTML`, no links), because name/cwd/transcript content is
@@ -25,6 +26,7 @@ import { useEffect, useState } from 'react';
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
 import { ArchivedSessionHistoryPanel, archivedSessionHistoryPanelId } from './ArchivedSessionHistoryPanel';
+import { ArchivedRestoreStatus, ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions';
 
 const REASON_LABELS: Record<string, string> = {
   closed: 'Closed',
@@ -179,6 +181,8 @@ export function ArchivedSessionsSection() {
 
       {policy && !refused ? <ArchivePolicyNote policy={policy} testId="archived-sessions-policy" /> : null}
 
+      <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} loaded={rows !== null && !refused} />
+
       {truncated && !refused ? (
         <p className="aa-policy" data-testid="archived-sessions-truncated">
           Showing the newest {rowCount} archived sessions. Older ones are kept but not listed here; delete some to see them.
@@ -298,6 +302,7 @@ export function ArchivedSessionsSection() {
                     </button>
                   )}
                 </div>
+                <ArchivedSessionRestoreActions row={r} />
                 {historyOpen ? <ArchivedSessionHistoryPanel archiveId={id} /> : null}
               </li>
             );
