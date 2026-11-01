@@ -878,6 +878,19 @@ a.dev-preview-chip__link:focus-visible {
   letter-spacing: normal;
 }
 
+/* #8886 — the Projects header, tree, Archived section, panel slot and server
+   list share one scroll column between the pinned filter/search and the pinned
+   footer. On a short window the sections keep their minimums and the column
+   scrolls, where the sidebar's overflow:hidden used to clip the server list
+   and footer out of reach. */
+.sidebar-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .sidebar-tree {
   flex: 1;
   /* #8867 — the Archived section below must not crush the tree to nothing. */
@@ -15066,9 +15079,8 @@ a.session-ci-chip__pr:focus-visible {
 /* Expanded, it keeps room for Refresh and a line of content: toggle 44 +
    Refresh 44 + gap 8 + one note line ~18 + bottom padding 8 = 122, rounded up
    to 160 for a second line. Shrinking to the toggle alone left an expanded
-   section that showed nothing on an 800px-tall window. The trade-off is
-   deliberate: the panel slot below does not shrink and the sidebar does not
-   scroll, so expanding clips more of what sits under it until collapsed. */
+   section that showed nothing on an 800px-tall window. What sits under it
+   stays reachable because .sidebar-scroll scrolls (#8886). */
 .sidebar-archived--expanded {
   min-height: 160px;
 }

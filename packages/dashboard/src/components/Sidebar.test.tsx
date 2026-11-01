@@ -2,8 +2,10 @@
  * Sidebar component tests (#1102)
  */
 import type React from 'react'
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import * as fs from 'fs'
+import * as path from 'path'
 import { Sidebar, overlayLiveUsage, type SidebarProps, type RepoNode } from './Sidebar'
 import type { ConnectedClient } from '../store/types'
 import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
@@ -861,5 +863,65 @@ describe('Sidebar — Tokens panel reads live session_usage, not just the snapsh
     const sessions = [makeSessionInfo({ sessionId: 's1', provider: 'codex', cumulativeUsage: LIVE_USAGE })]
     renderSidebar({ sessions, activeSessionId: 's1' })
     expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('15.2K tokens')
+  })
+})
+
+/**
+ * #8886 — on a short window the sidebar's overflow:hidden clipped the server
+ * list and footer out of reach. jsdom does no layout, so pin the layout through
+ * the REAL components.css cascade (as SidebarArchivedSection.test.tsx does):
+ * one scroll column holds every section between the pinned filter and the
+ * pinned footer. The live check at 1280x800 and 1280x640 is the geometry proof.
+ */
+describe('Sidebar — short window: one scroll column, footer pinned (#8886)', () => {
+  let style: HTMLStyleElement
+  beforeAll(() => {
+    style = document.createElement('style')
+    style.textContent = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    document.head.appendChild(style)
+  })
+  afterAll(() => style.remove())
+
+  function px(value: string): number {
+    const m = /^(-?[\d.]+)px$/.exec((value ?? '').trim())
+    return m ? Number.parseFloat(m[1]!) : Number.NaN
+  }
+
+  it('every section from the Projects header to the server list is inside the scroll column', () => {
+    const { container } = renderSidebar()
+    const scroll = screen.getByTestId('sidebar-scroll')
+    const sections = ['[data-testid="sidebar-projects-header"]', '.sidebar-tree', '[data-testid="sidebar-archived"]', '.sidebar-panel-slot', '.server-picker']
+    // Enumerate the roster so a section that fails to render cannot pass vacuously.
+    const found = sections.map((sel) => container.querySelector(sel))
+    expect(found.map((el, i) => (el ? sections[i] : `missing ${sections[i]}`))).toEqual(sections)
+    expect(found.every((el) => scroll.contains(el))).toBe(true)
+  })
+
+  it('the filter and footer are pinned outside the scroll column', () => {
+    const { container } = renderSidebar()
+    const scroll = screen.getByTestId('sidebar-scroll')
+    const sidebar = screen.getByTestId('sidebar')
+    const footer = screen.getByTestId('sidebar-footer')
+    expect(scroll.contains(footer)).toBe(false)
+    expect(scroll.contains(container.querySelector('.sidebar-filter'))).toBe(false)
+    expect(footer.parentElement === sidebar && scroll.parentElement === sidebar).toBe(true)
+    expect(getComputedStyle(footer).flexShrink).toBe('0')
+  })
+
+  it('the column scrolls and may shrink below its content; the tree keeps its floor', () => {
+    const { container } = renderSidebar()
+    const cs = getComputedStyle(screen.getByTestId('sidebar-scroll'))
+    expect(cs.overflowY).toBe('auto')
+    expect(px(cs.minHeight)).toBe(0)
+    expect(cs.display).toBe('flex')
+    expect(cs.flexDirection).toBe('column')
+    const tree = container.querySelector('.sidebar-tree') as HTMLElement
+    expect(px(getComputedStyle(tree).minHeight) >= 96).toBe(true)
+  })
+
+  it('the sidebar itself still clips, so the column is the only thing that scrolls', () => {
+    renderSidebar()
+    // jsdom does not expand the `overflow` shorthand into overflow-y.
+    expect(getComputedStyle(screen.getByTestId('sidebar')).overflow).toBe('hidden')
   })
 })
