@@ -2381,7 +2381,9 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                             // act on the port while the service takes it. Only if
                             // the crash is still pending under the lock, so a user
                             // Start/Restart that already recovered the server is not
-                            // undone.
+                            // undone. The release also reaps the cloudflared the
+                            // app can prove its own server started (#8893), never
+                            // one on the same port it did not.
                             let service = tray_state::chroxy_service_detection();
                             if service.blocks_spawn() {
                                 let state = app_handle.state::<Mutex<ServerManager>>();
