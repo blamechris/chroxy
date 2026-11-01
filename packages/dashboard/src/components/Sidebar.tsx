@@ -879,360 +879,366 @@ export function Sidebar({
             />
           )}
 
-          {/* #5183 — Projects/explorer header. Surfaces the daemon Running
-              state (reusing the same `serverStatus` signal the footer uses)
-              at the top of the left explorer where the user looks first,
-              not just buried in the footer. */}
-          <div className="sidebar-projects-header" data-testid="sidebar-projects-header">
-            <span className="sidebar-projects-title">Projects</span>
-            <span
-              className={`sidebar-status-dot ${serverStatus}`}
-              data-activity={serverStatus === 'connected' ? chatActivityState : undefined}
-              data-testid="sidebar-projects-status-dot"
-              // Decorative — the adjacent status label already announces the
-              // state, so hide the dot from screen readers to avoid a
-              // redundant/ambiguous announcement (Copilot review).
-              aria-hidden="true"
-              // Reuse the SAME tooltip wording as the footer dot so the two
-              // indicators don't disagree when both are visible (Copilot
-              // review).
-              title={
-                serverStatus === 'connected' ? 'Server connected'
-                  : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
-                    : 'Server disconnected'
-              }
-            />
-            <span className="sidebar-projects-status-label">{statusLabel}</span>
-          </div>
+          {/* #8886 — one scroll column from the Projects header to the server
+              list, so a short window scrolls it instead of clipping the server
+              list and footer under the sidebar's overflow:hidden. The filter,
+              search and footer stay pinned outside it. */}
+          <div className="sidebar-scroll" data-testid="sidebar-scroll">
+            {/* #5183 — Projects/explorer header. Surfaces the daemon Running
+                state (reusing the same `serverStatus` signal the footer uses)
+                at the top of the left explorer where the user looks first,
+                not just buried in the footer. */}
+            <div className="sidebar-projects-header" data-testid="sidebar-projects-header">
+              <span className="sidebar-projects-title">Projects</span>
+              <span
+                className={`sidebar-status-dot ${serverStatus}`}
+                data-activity={serverStatus === 'connected' ? chatActivityState : undefined}
+                data-testid="sidebar-projects-status-dot"
+                // Decorative — the adjacent status label already announces the
+                // state, so hide the dot from screen readers to avoid a
+                // redundant/ambiguous announcement (Copilot review).
+                aria-hidden="true"
+                // Reuse the SAME tooltip wording as the footer dot so the two
+                // indicators don't disagree when both are visible (Copilot
+                // review).
+                title={
+                  serverStatus === 'connected' ? 'Server connected'
+                    : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
+                      : 'Server disconnected'
+                }
+              />
+              <span className="sidebar-projects-status-label">{statusLabel}</span>
+            </div>
 
-          {/* Repo tree */}
-          <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
-            {filteredRepos.map(repo => {
-              const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
-              const repoDragOver = dragOverRepo?.path === repo.path ? dragOverRepo.position : null
-              const repoClass = `sidebar-repo${dragRepo === repo.path ? ' dragging' : ''}${repoDragOver ? ` drop-${repoDragOver}` : ''}`
-              return (
-                <div
-                  key={repo.path}
-                  className={repoClass}
-                  role="treeitem"
-                  aria-expanded={!isCollapsed}
-                  // #4832: only enable drag when reorder is wired AND no
-                  // filter is applied. Reordering during an active filter is
-                  // ambiguous (the on-screen list is a subset of the real
-                  // order) and would persist a confusing order; gate it off.
-                  draggable={!!onReorderRepos && !filter && renamingRepo !== repo.path}
-                  data-testid={`sidebar-repo-${repo.path}`}
-                  data-drop-position={repoDragOver ?? undefined}
-                  tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
-                  // #4941: surface the Alt+ArrowUp/Down keyboard reorder
-                  // shortcut for screen readers and assistive tech. Only
-                  // set when reorder is actually wired (callback present
-                  // AND no filter active) so the announced shortcut
-                  // doesn't lie when the row isn't actually reorderable.
-                  // The space-separated multi-combo format follows the
-                  // WAI-ARIA spec.
-                  //
-                  // #4972: built from the registry's effective binding so a
-                  // user rebind in Settings flows through to the SR
-                  // announcement, not just the cheat sheet.
-                  aria-keyshortcuts={!!onReorderRepos && !filter ? reorderAriaKeyshortcuts : undefined}
-                  // #4372: bind onContextMenu on the outer treeitem (not the
-                  // inner .sidebar-repo-header) so that App's handler can
-                  // call `event.currentTarget.focus()` on a focusable element.
-                  // The header is a bare <div> without tabIndex/role, so a
-                  // focus() call on it would be a no-op and leave
-                  // document.activeElement on <body>.
-                  onContextMenu={e => {
-                    e.preventDefault()
-                    onContextMenu({ type: 'repo', path: repo.path }, e)
-                  }}
-                  // #4392: keyboard invocation of the context menu via the
-                  // ContextMenu key or Shift+F10. invokeContextMenuFromKey
-                  // is a no-op for any other key, so this does not
-                  // interfere with the tree-level arrow nav.
-                  // #4832: Alt+ArrowUp/Down keyboard reorder is checked
-                  // first; when handled it stops propagation so the
-                  // tree-level arrow-nav handler doesn't ALSO move focus.
-                  onKeyDown={e => {
-                    if (handleRepoReorderKey(repo.path)(e)) {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      return
-                    }
-                    invokeContextMenuFromKey(e, { type: 'repo', path: repo.path })
-                  }}
-                  onDragStart={handleRepoDragStart(repo.path)}
-                  onDragOver={handleRepoDragOver(repo.path)}
-                  onDragLeave={handleRepoDragLeave(repo.path)}
-                  onDrop={handleRepoDrop(repo.path)}
-                  onDragEnd={handleRepoDragEnd}
-                >
+            {/* Repo tree */}
+            <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
+              {filteredRepos.map(repo => {
+                const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
+                const repoDragOver = dragOverRepo?.path === repo.path ? dragOverRepo.position : null
+                const repoClass = `sidebar-repo${dragRepo === repo.path ? ' dragging' : ''}${repoDragOver ? ` drop-${repoDragOver}` : ''}`
+                return (
                   <div
-                    className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
-                    data-testid={`repo-header-${repo.path}`}
-                    onClick={() => toggleRepo(repo.path)}
-                  >
-                    <span className="sidebar-chevron">{isCollapsed ? '\u25B6' : '\u25BC'}</span>
-                    {renamingRepo === repo.path ? (
-                      <input
-                        ref={repoRenameInputRef}
-                        className="sidebar-repo-rename-input"
-                        data-testid={`repo-rename-input-${repo.path}`}
-                        data-unsaved-ignore
-                        type="text"
-                        aria-label={`Rename ${repo.name}`}
-                        maxLength={80}
-                        value={repoDraft}
-                        onChange={e => setRepoDraft(e.target.value)}
-                        onKeyDown={e => {
-                          // The input sits inside the treeitem: keep its keys
-                          // away from the tree's arrow/Space/Enter handling,
-                          // the reorder ladder and the context-menu shortcut.
-                          e.stopPropagation()
-                          // Don't let an IME composition's commit key (usually
-                          // Enter) read as "commit the rename" (#8064).
-                          if (isImeComposing(e)) return
-                          if (e.key === 'Enter') {
-                            e.preventDefault()
-                            finishRepoRename(repo, 'commit', true)
-                          } else if (e.key === 'Escape') {
-                            e.preventDefault()
-                            finishRepoRename(repo, 'cancel', true)
-                          }
-                        }}
-                        onBlur={() => finishRepoRename(repo, 'commit', false)}
-                        onClick={e => e.stopPropagation()}
-                        // Keep the native text menu (cut/copy/paste) here, not the repo menu.
-                        onContextMenu={e => e.stopPropagation()}
-                      />
-                    ) : (
-                      <span className="sidebar-repo-name">{repo.name}</span>
-                    )}
-                    {repo.source === 'manual' && (
-                      <span className="sidebar-repo-badge">pinned</span>
-                    )}
-                    <button
-                      className="sidebar-repo-new-session"
-                      data-testid={`sidebar-new-session-${repo.path}`}
-                      onClick={e => {
+                    key={repo.path}
+                    className={repoClass}
+                    role="treeitem"
+                    aria-expanded={!isCollapsed}
+                    // #4832: only enable drag when reorder is wired AND no
+                    // filter is applied. Reordering during an active filter is
+                    // ambiguous (the on-screen list is a subset of the real
+                    // order) and would persist a confusing order; gate it off.
+                    draggable={!!onReorderRepos && !filter && renamingRepo !== repo.path}
+                    data-testid={`sidebar-repo-${repo.path}`}
+                    data-drop-position={repoDragOver ?? undefined}
+                    tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
+                    // #4941: surface the Alt+ArrowUp/Down keyboard reorder
+                    // shortcut for screen readers and assistive tech. Only
+                    // set when reorder is actually wired (callback present
+                    // AND no filter active) so the announced shortcut
+                    // doesn't lie when the row isn't actually reorderable.
+                    // The space-separated multi-combo format follows the
+                    // WAI-ARIA spec.
+                    //
+                    // #4972: built from the registry's effective binding so a
+                    // user rebind in Settings flows through to the SR
+                    // announcement, not just the cheat sheet.
+                    aria-keyshortcuts={!!onReorderRepos && !filter ? reorderAriaKeyshortcuts : undefined}
+                    // #4372: bind onContextMenu on the outer treeitem (not the
+                    // inner .sidebar-repo-header) so that App's handler can
+                    // call `event.currentTarget.focus()` on a focusable element.
+                    // The header is a bare <div> without tabIndex/role, so a
+                    // focus() call on it would be a no-op and leave
+                    // document.activeElement on <body>.
+                    onContextMenu={e => {
+                      e.preventDefault()
+                      onContextMenu({ type: 'repo', path: repo.path }, e)
+                    }}
+                    // #4392: keyboard invocation of the context menu via the
+                    // ContextMenu key or Shift+F10. invokeContextMenuFromKey
+                    // is a no-op for any other key, so this does not
+                    // interfere with the tree-level arrow nav.
+                    // #4832: Alt+ArrowUp/Down keyboard reorder is checked
+                    // first; when handled it stops propagation so the
+                    // tree-level arrow-nav handler doesn't ALSO move focus.
+                    onKeyDown={e => {
+                      if (handleRepoReorderKey(repo.path)(e)) {
+                        e.preventDefault()
                         e.stopPropagation()
-                        onNewSession(repo.path)
-                      }}
-                      aria-label={`New session in ${repo.name}`}
-                      type="button"
+                        return
+                      }
+                      invokeContextMenuFromKey(e, { type: 'repo', path: repo.path })
+                    }}
+                    onDragStart={handleRepoDragStart(repo.path)}
+                    onDragOver={handleRepoDragOver(repo.path)}
+                    onDragLeave={handleRepoDragLeave(repo.path)}
+                    onDrop={handleRepoDrop(repo.path)}
+                    onDragEnd={handleRepoDragEnd}
+                  >
+                    <div
+                      className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
+                      data-testid={`repo-header-${repo.path}`}
+                      onClick={() => toggleRepo(repo.path)}
                     >
-                      +
-                    </button>
-                  </div>
-
-                  {!isCollapsed && (
-                    <div className="sidebar-repo-children" role="group">
-                      {/* Active sessions */}
-                      {repo.activeSessions.map(session => {
-                        const status = session.status ?? (session.isBusy ? 'working' : 'idle')
-                        const statusTitle = session.starting
-                          ? 'Session starting — not ready to open yet'
-                          : status === 'working'
-                          ? 'Session working — response, tool, or agent active'
-                          : status === 'stale'
-                            ? 'Session stale — idle for 1 hour or more'
-                            : 'Session idle — ready for input'
-                        const isDraggingThis = dragSession?.sessionId === session.sessionId
-                        const sessionDragOver = dragOverSession?.sessionId === session.sessionId ? dragOverSession.position : null
-                        const sessionItemClass = `sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}${isDraggingThis ? ' dragging' : ''}${sessionDragOver ? ` drop-${sessionDragOver}` : ''}${session.starting ? ' starting' : ''}`
-                        return (
-                          <div
-                            key={session.sessionId}
-                            role="treeitem"
-                            aria-selected={activeSessionId === session.sessionId}
-                            tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
-                            className={sessionItemClass}
-                            data-testid={`session-item-${session.sessionId}`}
-                            aria-disabled={session.starting ? true : undefined}
-                            // #4832: same filter guard as repo rows — order
-                            // changes during a filter would persist a
-                            // confusing partial ordering.
-                            draggable={!!onReorderSessions && !filter}
-                            data-drop-position={sessionDragOver ?? undefined}
-                            // #4941: see the matching repo-row attribute
-                            // above — same rationale (discoverability for
-                            // assistive tech, only set when the shortcut
-                            // is functionally wired on this row).
-                            aria-keyshortcuts={!!onReorderSessions && !filter ? reorderAriaKeyshortcuts : undefined}
-                            // #8872: a starting row is not openable. Enter on the
-                            // focused row also lands here (the tree's keydown
-                            // calls `.click()`), so this is the one gate.
-                            onClick={() => { if (!session.starting) onSessionClick(session.sessionId) }}
-                            onContextMenu={e => {
-                              // #4372: stopPropagation so the right-click
-                              // does not bubble to the outer .sidebar-repo
-                              // treeitem (which also listens since the fix).
-                              // Without this the App handler fires twice and
-                              // the *outer* listener wins for focus(),
-                              // landing focus on the repo wrapper instead of
-                              // the session row.
+                      <span className="sidebar-chevron">{isCollapsed ? '\u25B6' : '\u25BC'}</span>
+                      {renamingRepo === repo.path ? (
+                        <input
+                          ref={repoRenameInputRef}
+                          className="sidebar-repo-rename-input"
+                          data-testid={`repo-rename-input-${repo.path}`}
+                          data-unsaved-ignore
+                          type="text"
+                          aria-label={`Rename ${repo.name}`}
+                          maxLength={80}
+                          value={repoDraft}
+                          onChange={e => setRepoDraft(e.target.value)}
+                          onKeyDown={e => {
+                            // The input sits inside the treeitem: keep its keys
+                            // away from the tree's arrow/Space/Enter handling,
+                            // the reorder ladder and the context-menu shortcut.
+                            e.stopPropagation()
+                            // Don't let an IME composition's commit key (usually
+                            // Enter) read as "commit the rename" (#8064).
+                            if (isImeComposing(e)) return
+                            if (e.key === 'Enter') {
                               e.preventDefault()
-                              e.stopPropagation()
-                              onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
-                            }}
-                            // #4392: keyboard invocation (ContextMenu /
-                            // Shift+F10). stopPropagation inside the helper
-                            // keeps the event from also reaching the outer
-                            // repo treeitem's onKeyDown.
-                            // #4832: Alt+ArrowUp/Down keyboard reorder runs
-                            // first; when handled, stopPropagation +
-                            // preventDefault block both the parent repo
-                            // treeitem's reorder handler AND the
-                            // tree-level focus traversal.
-                            onKeyDown={e => {
-                              if (handleSessionReorderKey(repo.path, session.sessionId)(e)) {
+                              finishRepoRename(repo, 'commit', true)
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault()
+                              finishRepoRename(repo, 'cancel', true)
+                            }
+                          }}
+                          onBlur={() => finishRepoRename(repo, 'commit', false)}
+                          onClick={e => e.stopPropagation()}
+                          // Keep the native text menu (cut/copy/paste) here, not the repo menu.
+                          onContextMenu={e => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="sidebar-repo-name">{repo.name}</span>
+                      )}
+                      {repo.source === 'manual' && (
+                        <span className="sidebar-repo-badge">pinned</span>
+                      )}
+                      <button
+                        className="sidebar-repo-new-session"
+                        data-testid={`sidebar-new-session-${repo.path}`}
+                        onClick={e => {
+                          e.stopPropagation()
+                          onNewSession(repo.path)
+                        }}
+                        aria-label={`New session in ${repo.name}`}
+                        type="button"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {!isCollapsed && (
+                      <div className="sidebar-repo-children" role="group">
+                        {/* Active sessions */}
+                        {repo.activeSessions.map(session => {
+                          const status = session.status ?? (session.isBusy ? 'working' : 'idle')
+                          const statusTitle = session.starting
+                            ? 'Session starting — not ready to open yet'
+                            : status === 'working'
+                            ? 'Session working — response, tool, or agent active'
+                            : status === 'stale'
+                              ? 'Session stale — idle for 1 hour or more'
+                              : 'Session idle — ready for input'
+                          const isDraggingThis = dragSession?.sessionId === session.sessionId
+                          const sessionDragOver = dragOverSession?.sessionId === session.sessionId ? dragOverSession.position : null
+                          const sessionItemClass = `sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}${isDraggingThis ? ' dragging' : ''}${sessionDragOver ? ` drop-${sessionDragOver}` : ''}${session.starting ? ' starting' : ''}`
+                          return (
+                            <div
+                              key={session.sessionId}
+                              role="treeitem"
+                              aria-selected={activeSessionId === session.sessionId}
+                              tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
+                              className={sessionItemClass}
+                              data-testid={`session-item-${session.sessionId}`}
+                              aria-disabled={session.starting ? true : undefined}
+                              // #4832: same filter guard as repo rows — order
+                              // changes during a filter would persist a
+                              // confusing partial ordering.
+                              draggable={!!onReorderSessions && !filter}
+                              data-drop-position={sessionDragOver ?? undefined}
+                              // #4941: see the matching repo-row attribute
+                              // above — same rationale (discoverability for
+                              // assistive tech, only set when the shortcut
+                              // is functionally wired on this row).
+                              aria-keyshortcuts={!!onReorderSessions && !filter ? reorderAriaKeyshortcuts : undefined}
+                              // #8872: a starting row is not openable. Enter on the
+                              // focused row also lands here (the tree's keydown
+                              // calls `.click()`), so this is the one gate.
+                              onClick={() => { if (!session.starting) onSessionClick(session.sessionId) }}
+                              onContextMenu={e => {
+                                // #4372: stopPropagation so the right-click
+                                // does not bubble to the outer .sidebar-repo
+                                // treeitem (which also listens since the fix).
+                                // Without this the App handler fires twice and
+                                // the *outer* listener wins for focus(),
+                                // landing focus on the repo wrapper instead of
+                                // the session row.
                                 e.preventDefault()
                                 e.stopPropagation()
-                                return
-                              }
-                              invokeContextMenuFromKey(e, { type: 'session', sessionId: session.sessionId })
+                                onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
+                              }}
+                              // #4392: keyboard invocation (ContextMenu /
+                              // Shift+F10). stopPropagation inside the helper
+                              // keeps the event from also reaching the outer
+                              // repo treeitem's onKeyDown.
+                              // #4832: Alt+ArrowUp/Down keyboard reorder runs
+                              // first; when handled, stopPropagation +
+                              // preventDefault block both the parent repo
+                              // treeitem's reorder handler AND the
+                              // tree-level focus traversal.
+                              onKeyDown={e => {
+                                if (handleSessionReorderKey(repo.path, session.sessionId)(e)) {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  return
+                                }
+                                invokeContextMenuFromKey(e, { type: 'session', sessionId: session.sessionId })
+                              }}
+                              onDragStart={handleSessionDragStart(repo.path, session.sessionId)}
+                              onDragOver={handleSessionDragOver(repo.path, session.sessionId)}
+                              onDragLeave={handleSessionDragLeave(session.sessionId)}
+                              onDrop={handleSessionDrop(repo.path, session.sessionId)}
+                              onDragEnd={handleSessionDragEnd}
+                            >
+                              <span className={`sidebar-session-dot status-${session.starting ? 'starting' : status}`} title={statusTitle} />
+                              <span className="sidebar-session-name">{session.name}</span>
+                              {session.worktree && (
+                                <span className="sidebar-worktree-badge" title="Isolated git worktree">
+                                  W
+                                </span>
+                              )}
+                              {session.provider && (
+                                // #7334 — shown for EVERY provider, the default
+                                // included: a claude-tui row used to sit
+                                // unbadged next to a claude-cli row's `CLI`
+                                // badge, indistinguishable from a session whose
+                                // provider was simply unknown. The tab
+                                // (SessionBar) never suppressed this way; this
+                                // now matches it, and routes the label through
+                                // the same shared `getProviderInfo` helper so
+                                // the two surfaces can't drift apart again.
+                                <span
+                                  className="sidebar-provider-badge"
+                                  data-provider={getProviderInfo(session.provider).type}
+                                  title={getProviderInfo(session.provider).tooltip}
+                                  aria-label={getProviderInfo(session.provider).tooltip}
+                                >
+                                  {getProviderInfo(session.provider).short}
+                                </span>
+                              )}
+                              {session.stdinForwardingDisabled && (
+                                // role="img" + aria-label is the dashboard
+                                // convention for icon-only badges (see
+                                // SkillsPanel.tsx). A bare span carrying
+                                // aria-label is not consistently announced
+                                // by screen readers.
+                                <span
+                                  className="sidebar-stdin-disabled-badge"
+                                  data-testid={`sidebar-stdin-disabled-${session.sessionId}`}
+                                  role="img"
+                                  title="Stdin forwarding lost — restart this session"
+                                  aria-label="Stdin forwarding disabled"
+                                >
+                                  !
+                                </span>
+                              )}
+                              {session.cumulativeUsage && session.cumulativeUsage.costUsd > 0 && (
+                                // #4073: cost badge. Only render when
+                                // costUsd > 0 — subscription-billed sessions
+                                // (claude-tui) leave it at 0 and shouldn't
+                                // get decoration. Hover shows the full
+                                // breakdown via the dashboard's standard
+                                // native-title popover pattern.
+                                <span
+                                  className="sidebar-cost-badge"
+                                  data-testid={`sidebar-cost-badge-${session.sessionId}`}
+                                  title={formatCostBreakdown(session.cumulativeUsage)}
+                                  aria-label={`Session cost ${formatCostBadge(session.cumulativeUsage.costUsd)}`}
+                                >
+                                  {formatCostBadge(session.cumulativeUsage.costUsd)}
+                                </span>
+                              )}
+                            </div>
+                          )
+                        })}
+
+                        {/* Resumable sessions */}
+                        {repo.resumableSessions.map(conv => (
+                          <div
+                            key={conv.conversationId}
+                            role="treeitem"
+                            aria-selected={false}
+                            tabIndex={visibleIds.indexOf(`resumable:${conv.conversationId}`) === focusedIndex ? 0 : -1}
+                            className="sidebar-resumable-item"
+                            data-testid={`resumable-item-${conv.conversationId}`}
+                            // #4939: resumable rows sit inside the outer
+                            // .sidebar-repo treeitem which becomes
+                            // draggable=true once onReorderRepos is wired.
+                            // HTML5 drag-and-drop bubbles, so without an
+                            // explicit guard here a click-and-drag on this
+                            // row would start the PARENT repo's drag
+                            // (visual + reorder side-effect both wrong).
+                            // draggable=false marks this child as a drag
+                            // source no-op, and stopPropagation on
+                            // dragstart prevents the event reaching the
+                            // outer repo's handleRepoDragStart.
+                            draggable={false}
+                            onDragStart={e => e.stopPropagation()}
+                            onClick={() => onResumeSession(conv.conversationId)}
+                            onContextMenu={e => {
+                              // #4372: stopPropagation so the right-click does
+                              // not bubble to the outer .sidebar-repo
+                              // treeitem (see matching comment on session
+                              // rows above).
+                              e.preventDefault()
+                              e.stopPropagation()
+                              onContextMenu({ type: 'resumable', conversationId: conv.conversationId }, e)
                             }}
-                            onDragStart={handleSessionDragStart(repo.path, session.sessionId)}
-                            onDragOver={handleSessionDragOver(repo.path, session.sessionId)}
-                            onDragLeave={handleSessionDragLeave(session.sessionId)}
-                            onDrop={handleSessionDrop(repo.path, session.sessionId)}
-                            onDragEnd={handleSessionDragEnd}
+                            // #4392: keyboard invocation (ContextMenu /
+                            // Shift+F10), see matching binding on session
+                            // rows above.
+                            onKeyDown={e => invokeContextMenuFromKey(e, { type: 'resumable', conversationId: conv.conversationId })}
                           >
-                            <span className={`sidebar-session-dot status-${session.starting ? 'starting' : status}`} title={statusTitle} />
-                            <span className="sidebar-session-name">{session.name}</span>
-                            {session.worktree && (
-                              <span className="sidebar-worktree-badge" title="Isolated git worktree">
-                                W
-                              </span>
-                            )}
-                            {session.provider && (
-                              // #7334 — shown for EVERY provider, the default
-                              // included: a claude-tui row used to sit
-                              // unbadged next to a claude-cli row's `CLI`
-                              // badge, indistinguishable from a session whose
-                              // provider was simply unknown. The tab
-                              // (SessionBar) never suppressed this way; this
-                              // now matches it, and routes the label through
-                              // the same shared `getProviderInfo` helper so
-                              // the two surfaces can't drift apart again.
-                              <span
-                                className="sidebar-provider-badge"
-                                data-provider={getProviderInfo(session.provider).type}
-                                title={getProviderInfo(session.provider).tooltip}
-                                aria-label={getProviderInfo(session.provider).tooltip}
-                              >
-                                {getProviderInfo(session.provider).short}
-                              </span>
-                            )}
-                            {session.stdinForwardingDisabled && (
-                              // role="img" + aria-label is the dashboard
-                              // convention for icon-only badges (see
-                              // SkillsPanel.tsx). A bare span carrying
-                              // aria-label is not consistently announced
-                              // by screen readers.
-                              <span
-                                className="sidebar-stdin-disabled-badge"
-                                data-testid={`sidebar-stdin-disabled-${session.sessionId}`}
-                                role="img"
-                                title="Stdin forwarding lost — restart this session"
-                                aria-label="Stdin forwarding disabled"
-                              >
-                                !
-                              </span>
-                            )}
-                            {session.cumulativeUsage && session.cumulativeUsage.costUsd > 0 && (
-                              // #4073: cost badge. Only render when
-                              // costUsd > 0 — subscription-billed sessions
-                              // (claude-tui) leave it at 0 and shouldn't
-                              // get decoration. Hover shows the full
-                              // breakdown via the dashboard's standard
-                              // native-title popover pattern.
-                              <span
-                                className="sidebar-cost-badge"
-                                data-testid={`sidebar-cost-badge-${session.sessionId}`}
-                                title={formatCostBreakdown(session.cumulativeUsage)}
-                                aria-label={`Session cost ${formatCostBadge(session.cumulativeUsage.costUsd)}`}
-                              >
-                                {formatCostBadge(session.cumulativeUsage.costUsd)}
-                              </span>
-                            )}
+                            <span className="sidebar-resumable-dot" title="Resumable conversation" />
+                            <span className="sidebar-session-name">
+                              {conv.preview || 'Untitled conversation'}
+                            </span>
                           </div>
-                        )
-                      })}
+                        ))}
 
-                      {/* Resumable sessions */}
-                      {repo.resumableSessions.map(conv => (
-                        <div
-                          key={conv.conversationId}
-                          role="treeitem"
-                          aria-selected={false}
-                          tabIndex={visibleIds.indexOf(`resumable:${conv.conversationId}`) === focusedIndex ? 0 : -1}
-                          className="sidebar-resumable-item"
-                          data-testid={`resumable-item-${conv.conversationId}`}
-                          // #4939: resumable rows sit inside the outer
-                          // .sidebar-repo treeitem which becomes
-                          // draggable=true once onReorderRepos is wired.
-                          // HTML5 drag-and-drop bubbles, so without an
-                          // explicit guard here a click-and-drag on this
-                          // row would start the PARENT repo's drag
-                          // (visual + reorder side-effect both wrong).
-                          // draggable=false marks this child as a drag
-                          // source no-op, and stopPropagation on
-                          // dragstart prevents the event reaching the
-                          // outer repo's handleRepoDragStart.
-                          draggable={false}
-                          onDragStart={e => e.stopPropagation()}
-                          onClick={() => onResumeSession(conv.conversationId)}
-                          onContextMenu={e => {
-                            // #4372: stopPropagation so the right-click does
-                            // not bubble to the outer .sidebar-repo
-                            // treeitem (see matching comment on session
-                            // rows above).
-                            e.preventDefault()
-                            e.stopPropagation()
-                            onContextMenu({ type: 'resumable', conversationId: conv.conversationId }, e)
-                          }}
-                          // #4392: keyboard invocation (ContextMenu /
-                          // Shift+F10), see matching binding on session
-                          // rows above.
-                          onKeyDown={e => invokeContextMenuFromKey(e, { type: 'resumable', conversationId: conv.conversationId })}
-                        >
-                          <span className="sidebar-resumable-dot" title="Resumable conversation" />
-                          <span className="sidebar-session-name">
-                            {conv.preview || 'Untitled conversation'}
-                          </span>
-                        </div>
-                      ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
 
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+            {/* #8867 — read-only Archived section; outside the role=tree keyboard navigation. */}
+            <SidebarArchivedSection />
+
+            {/* #4303 — pluggable sidebar panel slot. SERVERS section
+                stays BELOW the slot for v1 (rationale: ServerPicker has its
+                own always-visible add button + status; forcing it into the
+                slot's one-view-at-a-time model loses functionality you'd
+                want simultaneously with whatever lives in the slot). */}
+            <SidebarPanelSlot
+              views={panelViews}
+              launchers={panelLaunchers}
+              selectedViewId={panelView}
+              onSelectView={handlePanelViewChange}
+              collapsed={panelCollapsed}
+              onCollapsedChange={handlePanelCollapsedChange}
+              height={panelHeight}
+              onHeightChange={handlePanelHeightChange}
+            />
+
+            {/* Server picker (multi-machine) */}
+            <ServerPicker />
           </div>
-
-          {/* #8867 — read-only Archived section; outside the role=tree keyboard navigation. */}
-          <SidebarArchivedSection />
-
-          {/* #4303 — pluggable sidebar panel slot. SERVERS section
-              stays BELOW the slot for v1 (rationale: ServerPicker has its
-              own always-visible add button + status; forcing it into the
-              slot's one-view-at-a-time model loses functionality you'd
-              want simultaneously with whatever lives in the slot). */}
-          <SidebarPanelSlot
-            views={panelViews}
-            launchers={panelLaunchers}
-            selectedViewId={panelView}
-            onSelectView={handlePanelViewChange}
-            collapsed={panelCollapsed}
-            onCollapsedChange={handlePanelCollapsedChange}
-            height={panelHeight}
-            onHeightChange={handlePanelHeightChange}
-          />
-
-          {/* Server picker (multi-machine) */}
-          <ServerPicker />
 
           {/* Footer */}
           <div className="sidebar-footer" data-testid="sidebar-footer">
