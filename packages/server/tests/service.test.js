@@ -421,6 +421,73 @@ describe('service', () => {
       )
     })
 
+    it('a failed first install rolls back the wrapper it wrote (#8890)', () => {
+      const stateDir = join(tmpDir, 'state-rollback')
+      const wrapperPath = join(stateDir, 'w.cmd')
+      const failingExec = () => { throw new Error('boom') }
+      assert.throws(() => installService({
+        nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+        _platform: 'win32', _stateDir: stateDir, _logDir: join(tmpDir, 'l-rb'),
+        _wrapperPath: wrapperPath, _exec: failingExec,
+      }), /schtasks could not register/)
+      assert.equal(existsSync(wrapperPath), false, 'the half-written wrapper is removed')
+      assert.equal(loadServiceState(stateDir), null)
+    })
+
+    it('a failed forced reinstall keeps the files of the install that is still registered (#8890)', () => {
+      const stateDir = join(tmpDir, 'state-rollback-keep')
+      const wrapperPath = join(stateDir, 'w.cmd')
+      const base = {
+        nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+        _platform: 'win32', _stateDir: stateDir, _logDir: join(tmpDir, 'l-rb2'),
+        _wrapperPath: wrapperPath,
+      }
+      installService({ ...base, _skipRegister: true, _exec: () => '' })
+      assert.ok(loadServiceState(stateDir))
+      assert.throws(() => installService({ ...base, force: true, _exec: () => { throw new Error('boom') } }))
+      assert.equal(existsSync(wrapperPath), true)
+      assert.ok(loadServiceState(stateDir))
+    })
+
+    it('a failed --force install over a definition with NO service.json keeps the existing files (#8890)', () => {
+      // assertReinstallAllowed recognises an existing install from its wrapper or
+      // definition alone, so this is a reinstall; its files may still be registered.
+      const stateDir = join(tmpDir, 'state-nostate-win')
+      mkdirSync(stateDir, { recursive: true })
+      const wrapperPath = join(stateDir, 'w.cmd')
+      writeFileSync(wrapperPath, 'rem pre-existing\r\n')
+      assert.equal(loadServiceState(stateDir), null)
+      assert.throws(() => installService({
+        nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js', force: true,
+        _platform: 'win32', _stateDir: stateDir, _logDir: join(tmpDir, 'l-ns'),
+        _wrapperPath: wrapperPath, _exec: () => { throw new Error('boom') },
+      }), /schtasks could not register/)
+      assert.equal(existsSync(wrapperPath), true, 'the pre-existing wrapper survives')
+    })
+
+    it('a failed --force install over a unix definition with NO service.json keeps both existing files (#8890)', { skip: posixOnly }, () => {
+      for (const plat of ['darwin', 'linux']) {
+        const dir = join(tmpDir, `ns-${plat}`)
+        mkdirSync(dir, { recursive: true })
+        const stateDir = join(dir, 'state')
+        mkdirSync(stateDir, { recursive: true })
+        const servicePath = join(dir, 'chroxy.def')
+        const wrapperPath = join(stateDir, 'w.sh')
+        writeFileSync(servicePath, 'old definition')
+        writeFileSync(wrapperPath, 'old wrapper')
+        assert.throws(() => installService({
+          nodePath: '/usr/local/bin/node',
+          chroxyBin: '/usr/local/lib/node_modules/chroxy/src/cli.js',
+          cwd: '/home/testuser', force: true,
+          _servicePath: servicePath, _wrapperPath: wrapperPath,
+          _logDir: join(dir, 'logs'), _stateDir: stateDir,
+          _platform: plat, _exec: () => { throw new Error('bootstrap failed') },
+        }), /bootstrap failed/, plat)
+        assert.equal(existsSync(servicePath), true, `${plat}: definition kept`)
+        assert.equal(existsSync(wrapperPath), true, `${plat}: wrapper kept`)
+      }
+    })
+
     it('start runs the scheduled task (schtasks /Run)', () => {
       const { calls, exec } = spy()
       const r = startService({ _platform: 'win32', _exec: exec })
@@ -598,6 +665,27 @@ describe('service', () => {
       assert.ok(state)
       assert.equal(state.platform, 'darwin')
       assert.ok(state.servicePath.includes('com.chroxy.server.plist'))
+    })
+
+    it('a launchctl/systemctl registration failure on a first install rolls back the definition and wrapper (#8890)', { skip: posixOnly }, () => {
+      for (const plat of ['darwin', 'linux']) {
+        const serviceDir = join(tmpDir, `rb-${plat}`)
+        mkdirSync(serviceDir, { recursive: true })
+        const stateDir = join(tmpDir, `rb-state-${plat}`)
+        const servicePath = join(serviceDir, 'chroxy.def')
+        const wrapperPath = join(stateDir, 'w.sh')
+        assert.throws(() => installService({
+          nodePath: '/usr/local/bin/node',
+          chroxyBin: '/usr/local/lib/node_modules/chroxy/src/cli.js',
+          cwd: '/home/testuser',
+          _servicePath: servicePath, _wrapperPath: wrapperPath,
+          _logDir: join(tmpDir, `rb-logs-${plat}`), _stateDir: stateDir,
+          _platform: plat, _exec: () => { throw new Error('bootstrap failed') },
+        }), /bootstrap failed/, plat)
+        assert.equal(existsSync(servicePath), false, `${plat}: definition removed`)
+        assert.equal(existsSync(wrapperPath), false, `${plat}: wrapper removed`)
+        assert.equal(loadServiceState(stateDir), null, plat)
+      }
     })
 
     it('generates and writes a systemd unit on linux', () => {

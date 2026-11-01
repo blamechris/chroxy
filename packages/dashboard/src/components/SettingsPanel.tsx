@@ -789,6 +789,8 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
+  // #8890 — `config` when config.json sets the tunnel, so the picker below is not what applies.
+  const [tunnelModeSource, setTunnelModeSource] = useState<'config' | 'app'>('app')
   const [restarting, setRestarting] = useState(false)
   // #5356 — LAN exposure of the embedded server. `exposeOnLan` is the saved
   // setting; `savedExposeOnLan` tracks what's persisted so the panel can prompt
@@ -919,6 +921,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     // Read running server's actual mode (may differ if not restarted)
     getServerInfo().then(info => {
       if (info?.tunnelMode) setServerTunnelMode(info.tunnelMode)
+      setTunnelModeSource(info?.tunnelModeSource === 'config' ? 'config' : 'app')
     })
     // Read current auto-permission flag from ~/.chroxy/config.json
     getAllowAutoPermissionMode().then(value => {
@@ -2279,7 +2282,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 {tunnelError && (
                   <p className="tunnel-mode-error">{tunnelError}</p>
                 )}
-                {tunnelMode !== serverTunnelMode ? (
+                {tunnelModeSource === 'config' ? (
+                  <p className="tunnel-mode-note" data-testid="tunnel-mode-config-note">
+                    Set by config.json (tunnel: {serverTunnelMode}). The choice above is not applied while config.json sets the tunnel.
+                  </p>
+                ) : tunnelMode !== serverTunnelMode ? (
                   <button
                     type="button"
                     className="tunnel-restart-btn"

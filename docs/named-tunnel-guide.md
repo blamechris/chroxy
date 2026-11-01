@@ -100,6 +100,13 @@ Both modes auto-recover if `cloudflared` crashes. Named tunnels are better becau
 | `named` | `--tunnel named` | Your domain | Yes (free) |
 | `none` | `--tunnel none` | `localhost` only | No |
 
+### Desktop app
+
+When the desktop app starts its own server, the `tunnel` in `config.json` takes
+precedence over the app's tunnel mode setting (and `host` over "Expose on LAN"), so
+a saved app `quick` never replaces a configured `named` tunnel. Settings shows
+"Set by config.json" when this applies.
+
 ## Troubleshooting
 
 ### "cloudflared not found"

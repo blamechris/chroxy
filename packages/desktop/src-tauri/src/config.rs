@@ -14,6 +14,10 @@ pub struct ChroxyConfig {
     pub port: u16,
     #[serde(default)]
     pub tunnel: Option<String>,
+    /// The bind interface (`host`). When set it wins over the app's
+    /// expose-on-LAN setting (#8890).
+    #[serde(default)]
+    pub host: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -186,6 +190,57 @@ fn token_or_store(file_token: Option<String>, read_store: impl FnOnce() -> Optio
 /// `None` for a missing or empty token.
 fn non_empty(token: Option<String>) -> Option<String> {
     token.filter(|t| !t.is_empty())
+}
+
+/// `config.json` without the keychain fallback, for callers that only need the
+/// non-secret launch settings (`tunnel`, `host`) and must not prompt.
+pub fn load_file_config() -> ChroxyConfig {
+    load_config_file()
+}
+
+/// The two `config.json` values that decide what the app may expose, read
+/// leniently (#8890): only these keys matter here, so an unrelated field of the
+/// wrong type (which makes the typed [`ChroxyConfig`] parse fall back to
+/// defaults) cannot hide them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchOverrides {
+    pub tunnel: Option<String>,
+    pub host: Option<String>,
+}
+
+/// Read `tunnel` and `host` from the raw `config.json` text, FAIL CLOSED:
+///
+/// - no file: nothing configured (`Ok` default), the app's own values apply;
+/// - a file that is not valid JSON, or not an object: `Err`, because the app
+///   cannot tell what the operator configured and must not substitute its own,
+///   possibly public, tunnel;
+/// - `tunnel` / `host` present but not a string (or `null`): `Err`, likewise.
+pub(crate) fn parse_launch_overrides(contents: Option<&str>) -> Result<LaunchOverrides, String> {
+    let Some(text) = contents else { return Ok(LaunchOverrides::default()) };
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| format!("config.json is not valid JSON ({}), so the server was not started. Fix or remove it.", e))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "config.json is not a JSON object, so the server was not started. Fix or remove it.".to_string())?;
+    let field = |key: &str| -> Result<Option<String>, String> {
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(format!("config.json sets \"{}\" to something that is not a string, so the server was not started. Fix \"{}\" in config.json.", key, key)),
+        }
+    };
+    Ok(LaunchOverrides { tunnel: field("tunnel")?, host: field("host")? })
+}
+
+/// [`parse_launch_overrides`] against the real `config.json`. A missing file is
+/// "nothing configured"; a file that exists but cannot be read is an error.
+pub fn load_launch_overrides() -> Result<LaunchOverrides, String> {
+    let Some(path) = config_path() else { return Ok(LaunchOverrides::default()) };
+    match fs::read_to_string(&path) {
+        Ok(text) => parse_launch_overrides(Some(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LaunchOverrides::default()),
+        Err(e) => Err(format!("config.json could not be read ({}), so the server was not started.", e)),
+    }
 }
 
 /// The configured daemon port, read from `config.json` only. Unlike
@@ -668,6 +723,7 @@ mod tests {
         assert_eq!(config.port, 0);
         assert!(config.api_token.is_none());
         assert!(config.tunnel.is_none());
+        assert!(config.host.is_none());
         assert!(config.model.is_none());
         assert!(config.cwd.is_none());
     }
@@ -685,6 +741,7 @@ mod tests {
             "apiToken": "test-token-123",
             "port": 9999,
             "tunnel": "named",
+            "host": "127.0.0.1",
             "model": "sonnet",
             "cwd": "/home/user/projects"
         }"#;
@@ -692,6 +749,7 @@ mod tests {
         assert_eq!(config.api_token.as_deref(), Some("test-token-123"));
         assert_eq!(config.port, 9999);
         assert_eq!(config.tunnel.as_deref(), Some("named"));
+        assert_eq!(config.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         assert_eq!(config.cwd.as_deref(), Some("/home/user/projects"));
     }
@@ -703,6 +761,33 @@ mod tests {
         assert_eq!(config.api_token.as_deref(), Some("tok"));
         assert_eq!(config.port, 8765); // default
         assert!(config.tunnel.is_none());
+        assert!(config.host.is_none());
+    }
+
+    #[test]
+    fn launch_overrides_survive_an_unrelated_wrong_typed_field() {
+        // The typed parse rejects this file (port is a string) and falls back to
+        // defaults; the tunnel and host must still be read.
+        let json = r#"{"port": "not-a-number", "tunnel": "named", "host": "127.0.0.1"}"#;
+        assert!(parse_config(json).is_err(), "premise: the typed parse fails");
+        let o = parse_launch_overrides(Some(json)).unwrap();
+        assert_eq!((o.tunnel.as_deref(), o.host.as_deref()), (Some("named"), Some("127.0.0.1")));
+    }
+
+    #[test]
+    fn launch_overrides_fail_closed_on_an_unreadable_config() {
+        for bad in ["{", "", "[]", "\"x\"", "null", r#"{"tunnel": 5}"#, r#"{"host": ["a"]}"#, r#"{"tunnel": {"a": 1}}"#] {
+            let err = parse_launch_overrides(Some(bad)).unwrap_err();
+            assert!(err.contains("config.json") && err.contains("not started"), "{:?}: {}", bad, err);
+        }
+    }
+
+    #[test]
+    fn launch_overrides_with_nothing_configured_are_empty() {
+        assert_eq!(parse_launch_overrides(None).unwrap(), LaunchOverrides::default());
+        assert_eq!(parse_launch_overrides(Some("{}")).unwrap(), LaunchOverrides::default());
+        let o = parse_launch_overrides(Some(r#"{"tunnel": null, "host": null, "model": 3}"#)).unwrap();
+        assert_eq!(o, LaunchOverrides::default());
     }
 
     #[test]

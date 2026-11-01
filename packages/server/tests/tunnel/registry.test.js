@@ -39,6 +39,16 @@ describe('tunnel/index — parseTunnelArg', () => {
     assert.throws(() => parseTunnelArg('cloudflare:'), /Invalid tunnel format/)
   })
 
+  it('maps "cloudflare:none" to no tunnel, like "none"', () => {
+    assert.equal(parseTunnelArg('cloudflare:none'), null)
+  })
+
+  it('fails closed on an unknown cloudflare mode instead of passing it through', () => {
+    for (const bad of ['cloudflare:naemd', 'cloudflare:Quick', 'cloudflare:quick ', 'cloudflare:foo']) {
+      assert.throws(() => parseTunnelArg(bad), /Unknown tunnel mode .*Refusing to start a tunnel/, bad)
+    }
+  })
+
   it('throws on unknown value', () => {
     assert.throws(() => parseTunnelArg('ngrok'), /Unknown tunnel value/)
   })

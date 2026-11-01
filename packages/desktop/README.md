@@ -27,6 +27,25 @@ npm run check  -w packages/desktop   # cargo check (Rust type-check, no build)
 - **Client mode:** the desktop app can either auto-start its own bundled server
   or attach to an already-running daemon (e.g. the dev daemon on `:8765`) as a
   LAN client — pick a server from the picker / mDNS discovery.
+- **`config.json` wins over the app's settings (#8890).** When the app starts its
+  own server, a non-empty `tunnel` or `host` in `config.json` is not overridden by
+  the app's tunnel mode or "Expose on LAN" setting; the app only supplies a value
+  where `config.json` is silent (loopback bind, saved tunnel mode). A differing app
+  value is noted in the server log as a `[tray]` line, and Settings shows
+  "Set by config.json" next to the tunnel picker.
+- **The app defers to an installed chroxy service (#8890).** If
+  `chroxy service install` has set up a launchd job (`com.chroxy.server`), systemd
+  user unit (`chroxy.service`) or Windows task, the app never spawns its own server
+  into that service's restart gap: a launch-time start, crash auto-restart or
+  Start/Restart (including a Restart of the app's own server) with the port free waits
+  up to 30 s (a real deadline) for the service, adopts it once it answers, and
+  otherwise refuses with a message to run `chroxy service start` (or `chroxy service
+  uninstall` if it is no longer registered). A definition file without `service.json` is treated as
+  "cannot rule out" and also blocks a spawn (the refusal names the file; delete it if
+  nothing is registered, since `chroxy service uninstall` needs `service.json`).
+  A `tunnel` in `config.json` that is not `quick`, `named` or `none`, or a
+  `config.json` that is not valid JSON, refuses the start.
+  With no service installed the app starts its own server as before.
 - Signing/notarization and release wiring live in `docs/release-signing.md`.
 
 ## Isolated native notification smoke
