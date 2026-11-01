@@ -96,6 +96,13 @@ describe('restore_archived_session_result', () => {
     expect(sent.some((m) => m.type === 'switch_session' && m.sessionId === 'live-1')).toBe(true)
   })
 
+  it('records the record\'s name from the roster as of the reply, so a status line can name a row that has since left', () => {
+    useConnectionStore.setState({ archivedSessions: { sessions: [{ archiveId: A, name: 'Flag work' }] } } as unknown as Partial<State>)
+    get().restoreArchivedSession(A, 'native')
+    result()
+    expect(get().archiveRestoreResults[A]?.name).toBe('Flag work')
+  })
+
   it('a new thread outcome keeps the seed counts for the row to state', () => {
     get().restoreArchivedSession(A, 'new_thread')
     result({ mode: 'new_thread', seed: { messagesIncluded: 4, messagesTotal: 9, bytes: 100 } })

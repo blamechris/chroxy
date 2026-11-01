@@ -980,6 +980,7 @@ export declare const ServerDeleteArchivedSessionResultSchema: z.ZodObject<{
  * `ARCHIVED_SESSION_INVALID`, `ARCHIVE_RESTORE_PROVIDER_UNAVAILABLE`,
  * `ARCHIVE_RESTORE_FORBIDDEN_USER_SHELL`, `ARCHIVE_RESTORE_CWD_MISSING`,
  * `ARCHIVE_RESTORE_NATIVE_UNSUPPORTED`, `ARCHIVE_RESTORE_LOCATOR_MISSING`,
+ * `ARCHIVE_RESTORE_ALREADY_LIVE` (`sessionId` is the live or parked owner),
  * `ENVIRONMENT_UNAVAILABLE`, a provider start code, or, with `refused: true`,
  * `ARCHIVED_SESSION_FORBIDDEN_BOUND_CLIENT`. `mode` echoes the request's mode
  * (absent when it was not a valid one).

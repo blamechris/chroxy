@@ -20,7 +20,7 @@ vi.mock('../store/connection', () => ({
 }))
 vi.mock('zustand/react/shallow', () => ({ useShallow: (fn: unknown) => fn }))
 
-import { ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions'
+import { ArchivedSessionRestoreActions, ArchivedRestoreStatus } from './ArchivedSessionRestoreActions'
 
 afterEach(() => {
   cleanup()
@@ -99,5 +99,43 @@ describe('ArchivedSessionRestoreActions', () => {
   it('uses the sidebar test-id prefix on the sidebar surface', () => {
     render(<ArchivedSessionRestoreActions row={row({ native: true, newThread: true })} surface="sidebar" />)
     expect(screen.getByTestId(`sidebar-archived-restore-native-${A}`)).toBeTruthy()
+  })
+
+  it('only the CLICKED button reads Working… while pending', () => {
+    const { rerender } = render(<ArchivedSessionRestoreActions row={row({ native: true, newThread: true })} />)
+    fireEvent.click(newThread())
+    state.restoringArchiveIds = new Set([A])
+    rerender(<ArchivedSessionRestoreActions row={row({ native: true, newThread: true })} />)
+    expect(newThread().textContent).toBe('Working…')
+    expect(native().textContent).toBe('Resume')
+  })
+})
+
+describe('ArchivedRestoreStatus (outcomes whose row has left the list)', () => {
+  it('shows the outcome of a restore whose row is gone, naming it', () => {
+    state.archiveRestoreResults = { [A]: { ok: true, mode: 'native', sessionId: 'n1', name: 'Flag work' } }
+    render(<ArchivedRestoreStatus listedIds={[]} />)
+    expect(screen.getByTestId('archived-restore-status').textContent).toContain('Resumed the original conversation of "Flag work"')
+  })
+
+  it('says a native restore that failed to START moved to Failed restores, and to use Retry there', () => {
+    state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', sessionId: 'parked-1', code: 'START_FAILED', message: 'pty died', name: 'Flag work' } }
+    render(<ArchivedRestoreStatus listedIds={[]} />)
+    const text = screen.getByTestId('archived-restore-status').textContent ?? ''
+    expect(text).toContain('Failed restores')
+    expect(text).toContain('Retry')
+    expect(text).not.toContain('new thread instead')
+  })
+
+  it('does not duplicate an outcome that its listed row already shows', () => {
+    state.archiveRestoreResults = { [A]: { ok: true, mode: 'new_thread', sessionId: 'n1' } }
+    const { container } = render(<ArchivedRestoreStatus listedIds={[A]} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('relays the server message for an already-live refusal', () => {
+    state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', code: 'ARCHIVE_RESTORE_ALREADY_LIVE', message: 'This conversation is already live as "X".', sessionId: 'x1' } }
+    render(<ArchivedRestoreStatus listedIds={[]} />)
+    expect(screen.getByTestId('archived-restore-status').textContent).toContain('already live as "X"')
   })
 })

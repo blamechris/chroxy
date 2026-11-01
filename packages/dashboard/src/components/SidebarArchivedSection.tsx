@@ -30,7 +30,7 @@ import { useEffect, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
 import { ArchivedSessionHistoryPanel, archivedSessionHistoryPanelId } from './ArchivedSessionHistoryPanel'
-import { ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions'
+import { ArchivedRestoreStatus, ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions'
 import { ARCHIVE_REFUSED_TEXT, ArchivePolicyNote, archiveReasonLabel, archivedAtLabel } from './ArchivedSessionsSection'
 
 const BODY_ID = 'sidebar-archived-body'
@@ -93,6 +93,8 @@ export function SidebarArchivedSection() {
           >
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
+
+          <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} surface="sidebar" />
 
           {refused ? (
             <p className="sidebar-archived-note" data-testid="sidebar-archived-refused">

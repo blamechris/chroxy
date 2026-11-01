@@ -50,7 +50,7 @@ describe('continuation seed on the first input (#8866)', () => {
         recordUserIntent: (id) => mgr.recordUserIntent(id),
         touchActivity: (id) => mgr.touchActivity(id),
         claimContinuationSeed: (id) => mgr.claimContinuationSeed(id),
-        settleContinuationSeed: (id, ok) => mgr.settleContinuationSeed(id, ok),
+        settleContinuationSeed: (id, token, ok) => mgr.settleContinuationSeed(id, token, ok),
         getHistoryCount: () => 0,
         listSessions: () => [],
       },
@@ -116,11 +116,10 @@ describe('continuation seed on the first input (#8866)', () => {
     assert.equal(pending(), false)
   })
 
-  it('an UNCERTAIN admission keeps it pending (an explicit resend may carry it again)', async () => {
+  it('an UNCERTAIN admission counts as CONSUMED: the transcript is never risked twice', async () => {
     admission = { status: 'uncertain', delivery: 'unknown' }
     await send('first try', 'u1')
-    assert.equal(pending(), true)
-    assert.equal(mgr._continuationSeeds.get('s1').claimed, false)
+    assert.equal(pending(), false)
   })
 
   it('a provider that throws keeps it pending', async () => {
@@ -148,10 +147,61 @@ describe('continuation seed on the first input (#8866)', () => {
     assert.equal(calls[0].text, 'plain')
   })
 
-  it('a legacy client (no admission contract) consumes it once sendMessage returned', async () => {
+  it('a legacy client (no input acks) is observed through the admission callback too: accepted consumes', async () => {
     client = { id: 'c1', activeSessionId: 's1', clientCapabilities: new Set() }
     await handleSessionMessage(WS, client, { type: 'input', data: 'legacy' }, ctx)
     assert.ok(calls[0].text.includes(SEED_TEXT_MARK))
+    assert.equal(typeof calls[0].opts.onInputAdmission, 'function', 'passed because a seed is claimed')
     assert.equal(pending(), false)
+  })
+
+  it('a legacy client whose input is DEFINITELY rejected keeps the seed pending', async () => {
+    client = { id: 'c1', activeSessionId: 's1', clientCapabilities: new Set() }
+    admission = { status: 'rejected', delivery: 'not_dispatched', reason: 'busy' }
+    await handleSessionMessage(WS, client, { type: 'input', data: 'legacy' }, ctx)
+    assert.equal(pending(), true)
+    assert.equal(mgr._continuationSeeds.get('s1').claimed, false)
+  })
+
+  it('a provider that reports no admission at all settles it as consumed when its call returns', async () => {
+    admission = null
+    await send('first', 'u1')
+    assert.equal(pending(), false)
+  })
+
+  it('while the first input is unresolved a SECOND input is refused (retry-safe), not sent without the transcript', async () => {
+    admission = null
+    let finish
+    session.sendMessage = (text, attachments, opts) => { calls.push({ text, opts }); return new Promise((r) => { finish = r }) }
+    const first = send('first', 'u1')
+    await new Promise((r) => setImmediate(r))
+    assert.equal(calls.length, 1)
+    await send('second', 'u2')
+    assert.equal(calls.length, 1, 'the second input was never dispatched')
+    finish(); await first
+    assert.equal(pending(), false)
+    await send('third', 'u3')
+    assert.equal(calls[1].text, 'third', 'after the first settled, later input is plain')
+  })
+
+  it('the refused second input is acked rejected / not_dispatched / retrySafe with reason continuation_seed_pending', async () => {
+    admission = null
+    session.sendMessage = (text, attachments, opts) => { calls.push({ text, opts }); return new Promise(() => {}) }
+    send('first', 'u1')
+    await new Promise((r) => setImmediate(r))
+    const sent = []
+    ctx.transport.send = (_ws, m) => sent.push(m)
+    await send('second', 'u2')
+    const ack = sent.find((m) => m.type === 'input_ack' && m.clientMessageId === 'u2')
+    assert.deepEqual([ack.status, ack.delivery, ack.retrySafe, ack.reason], ['rejected', 'not_dispatched', true, 'continuation_seed_pending'])
+  })
+
+  it('a stale settle (wrong token) cannot consume or release a newer claim', async () => {
+    const claim = mgr.claimContinuationSeed('s1')
+    mgr.settleContinuationSeed('s1', 'not-the-token', true)
+    assert.equal(pending(), true)
+    assert.equal(mgr._continuationSeeds.get('s1').claimed, true)
+    mgr.settleContinuationSeed('s1', claim.token, false)
+    assert.equal(mgr._continuationSeeds.get('s1').claimed, false)
   })
 })

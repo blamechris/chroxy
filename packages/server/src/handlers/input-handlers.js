@@ -844,15 +844,45 @@ async function handleInput(ws, client, msg, ctx) {
   // of `contextCount` (history shows what the user typed) and of the
   // `sendOptions.context` below (that stays "what the user selected"; an adapter
   // that refuses selected context, like BYOK with attachments, is unaffected).
-  // It is consumed only when the provider ADMITS the input; a rejection, a
-  // throw or an uncertain admission returns it to pending for the next send.
+  // It is consumed when the provider ADMITS the input, and also when admission
+  // is UNCERTAIN (re-sending the transcript twice is worse than losing it once);
+  // a definite rejection or a throw returns it to pending. While a claim is
+  // unresolved a second input is REFUSED, so nothing can become the first
+  // delivered input without the transcript. The claim is observed through an
+  // admission callback passed whenever a seed is claimed, separately from the
+  // client-ack bookkeeping, so a client without input acks is covered too.
   const sm = ctx.sessions.sessionManager
   const seedClaim = sm.claimContinuationSeed?.(targetSessionId) ?? null
+  if (seedClaim?.busy) {
+    const message = 'The first message of this continued session is still being delivered. Wait for it to be accepted, then send again.'
+    if (inputRecord) {
+      sendInputAck(ws, ctx, inputRecord, {
+        status: 'rejected',
+        delivery: 'not_dispatched',
+        retrySafe: true,
+        reason: 'continuation_seed_pending',
+        message,
+      })
+      releaseInputRequest(ctx, inputRecord)
+    } else {
+      sendSessionError(ws, ctx, message)
+    }
+    return
+  }
   let seedSettled = !seedClaim
-  const settleSeed = (accepted) => {
+  const settleSeed = (consumed) => {
     if (seedSettled) return
     seedSettled = true
-    sm.settleContinuationSeed?.(targetSessionId, accepted)
+    sm.settleContinuationSeed?.(targetSessionId, seedClaim.token, consumed)
+  }
+  const observeSeedAdmission = (admission) => {
+    if (seedSettled || !admission || typeof admission !== 'object') return
+    if (admission.status === 'rejected' && admission.delivery === 'not_dispatched') settleSeed(false)
+    else if (
+      (admission.status === 'accepted' && admission.delivery === 'dispatch_started') ||
+      (admission.status === 'queued' && admission.delivery === 'queued') ||
+      (admission.status === 'uncertain' && admission.delivery === 'unknown')
+    ) settleSeed(true)
   }
   let dispatchText
   try {
@@ -880,6 +910,7 @@ async function handleInput(ws, client, msg, ctx) {
     )
   }
   const onInputAdmission = (admission) => {
+    observeSeedAdmission(admission)
     if (!inputRecord || admissionFinal || !admission || typeof admission !== 'object') return
     const status = admission.status
     const delivery = admission.delivery
@@ -896,12 +927,10 @@ async function handleInput(ws, client, msg, ctx) {
       inputRecord.acceptedAt = typeof ctx.now === 'function' ? ctx.now() : Date.now()
       sendInputAck(ws, ctx, inputRecord)
       commitForwardedEffects()
-      settleSeed(true)
       return
     }
 
     if (uncertain) {
-      settleSeed(false)
       // A lost native acknowledgement is terminal uncertainty, not definite
       // dispatch. Retain the reservation so the same id cannot be retried.
       sendInputAck(ws, ctx, inputRecord, {
@@ -914,7 +943,6 @@ async function handleInput(ws, client, msg, ctx) {
       return
     }
 
-    settleSeed(false)
     sendInputAck(ws, ctx, inputRecord, {
       status: 'rejected',
       delivery: 'not_dispatched',
@@ -930,11 +958,11 @@ async function handleInput(ws, client, msg, ctx) {
     sendResult = entry.session.sendMessage(dispatchText, attachments, {
       isVoice: !!msg.isVoice,
       clientMessageId: messageId,
-      ...(inputRecord ? { onInputAdmission } : {}),
+      ...(inputRecord || seedClaim ? { onInputAdmission } : {}),
       ...(preparedContext?.context ? { context: preparedContext.context } : {}),
     })
   } catch (err) {
-    if (!admissionFinal) settleSeed(false)
+    settleSeed(false)
     if (inputRecord && !admissionFinal) {
       inputRecord.status = 'uncertain'
       inputRecord.delivery = 'unknown'
@@ -964,14 +992,20 @@ async function handleInput(ws, client, msg, ctx) {
   // Older clients have no correlated admission contract. Preserve their
   // established fire-and-forget history, primary, and peer-echo behavior.
   //
-  // RESIDUAL (#8866): with no admission contract there is no signal that the
-  // provider took the input, so the seed is consumed once `sendMessage` returned
-  // without throwing. A provider that then rejects asynchronously loses the
-  // transcript for that one send; a client that negotiates input_context_v1 (the
-  // dashboard) has the exact signal and never takes this branch.
-  if (!inputRecord) {
-    commitForwardedEffects()
-    settleSeed(true)
+  if (!inputRecord) commitForwardedEffects()
+
+  // #8866: a claimed seed whose provider reported no admission by the time
+  // sendMessage returned. Every in-tree provider reports it (base/sdk/cli/
+  // claude-tui/jsonl-subprocess incl. codex-exec and gemini, byok, acp, codex
+  // app-server); one that does not is treated as having taken the input once its
+  // call settles (a rejected call included: no signal means uncertain, and
+  // uncertain counts as consumed). A synchronous return settles it now.
+  if (!seedSettled) {
+    if (sendResult && typeof sendResult.then === 'function') {
+      sendResult.then(() => settleSeed(true), () => settleSeed(true))
+    } else {
+      settleSeed(true)
+    }
   }
 }
 

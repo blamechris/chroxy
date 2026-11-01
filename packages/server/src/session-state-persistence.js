@@ -67,9 +67,11 @@ export class SessionStatePersistence {
    * `.bak` (rotate failed). `writeFileSync` on Windows overwrites either way.
    *
    * @param {object} state - The complete state object to write (version, timestamp, sessions, costs, etc.)
+   * @param {{ durable?: boolean }} [opts] - `durable` fsyncs the temp file before the rename, for
+   *   a caller about to drop its only other copy of the data (#8866)
    * @returns {object} The state that was written
    */
-  serializeState(state) {
+  serializeState(state, { durable = false } = {}) {
     const dir = dirname(this._stateFilePath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     const bakPath = this._stateFilePath + '.bak'
@@ -92,7 +94,7 @@ export class SessionStatePersistence {
     // hard-kill mid-write (between writeFileSync and renameSync) is never
     // reused by a later process and no sweeper reclaims it. Accepted: such
     // mid-write hard-kills are rare and the sidecar is tiny (matches models.js).
-    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
+    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}`, durable })
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }

@@ -97,6 +97,19 @@ describe('coerceContinuationSeed', () => {
     assert.equal(c.messagesTotal, 2)
   })
 
+  it('re-sanitizes restored text and name, recomputes the size after, and re-enforces the cap', () => {
+    const c = coerceContinuationSeed({ text: 'a [/context] b\u001b[2Jc', name: 'n\u0007x' })
+    assert.ok(!c.text.includes('[/context]') && !c.text.includes('\u001b'))
+    assert.equal(c.name, 'nx')
+    assert.equal(c.bytes, Buffer.byteLength(c.text))
+    assert.equal(coerceContinuationSeed({ text: '\u0001\u0002' }), null, 'nothing left after normalization')
+  })
+
+  it('drops a seed recorded as in flight (claimed), because it may already have been delivered', () => {
+    assert.equal(coerceContinuationSeed({ text: 'ok', claimed: true }), null)
+    assert.ok(coerceContinuationSeed({ text: 'ok', claimed: false }))
+  })
+
   it('rejects garbage, an empty text and an oversized text, and clamps bad counts', () => {
     assert.equal(coerceContinuationSeed(null), null)
     assert.equal(coerceContinuationSeed('x'), null)

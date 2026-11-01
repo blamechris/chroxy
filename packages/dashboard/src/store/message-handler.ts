@@ -7253,11 +7253,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       if (!id) break;
       const pending = new Set(get().restoringArchiveIds);
       pending.delete(id);
+      // Read BEFORE the re-list below drops the row (a native restore removes it).
+      const rowName = get().archivedSessions?.sessions?.find((r) => r.archiveId === id)?.name ?? undefined;
       set({
         restoringArchiveIds: pending,
         archiveRestoreResults: {
           ...get().archiveRestoreResults,
           [id]: {
+            name: rowName,
             ok: reply.ok === true,
             mode: reply.mode,
             code: reply.code,

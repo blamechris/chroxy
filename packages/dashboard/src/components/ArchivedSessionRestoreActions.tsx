@@ -16,6 +16,7 @@
  *
  * Plain text only; class names only (rules in theme/components.css, 44px floor).
  */
+import { useState } from 'react';
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
 import type { ServerArchivedSessionMeta } from '@chroxy/protocol';
@@ -54,6 +55,12 @@ function RestoreActions({
     })),
   );
   const restore = useConnectionStore((s) => s.restoreArchivedSession);
+  // Which button was clicked, so only THAT one reads "Working…" while pending.
+  const [clicked, setClicked] = useState<'native' | 'new_thread' | null>(null);
+  const click = (mode: 'native' | 'new_thread') => {
+    setClicked(mode);
+    restore(row.archiveId, mode);
+  };
 
   const id = row.archiveId;
   const label = row.name || row.sessionId;
@@ -66,22 +73,22 @@ function RestoreActions({
         <button
           type="button"
           className="aa-restore-btn"
-          onClick={() => restore(id, 'native')}
+          onClick={() => click('native')}
           disabled={disabled || !restoreHint.native}
           aria-label={`Resume archived session ${label}`}
           data-testid={`${p}archived-restore-native-${id}`}
         >
-          {pending ? 'Working…' : 'Resume'}
+          {pending && clicked === 'native' ? 'Working…' : 'Resume'}
         </button>
         <button
           type="button"
           className="aa-restore-btn"
-          onClick={() => restore(id, 'new_thread')}
+          onClick={() => click('new_thread')}
           disabled={disabled || !restoreHint.newThread}
           aria-label={`Continue archived session ${label} as a new thread`}
           data-testid={`${p}archived-restore-new-thread-${id}`}
         >
-          Continue as new thread
+          {pending && clicked === 'new_thread' ? 'Working…' : 'Continue as new thread'}
         </button>
       </div>
       {!restoreHint.native && restoreHint.nativeReason ? (
@@ -99,40 +106,58 @@ function RestoreActions({
   );
 }
 
-function RestoreOutcome({
-  id,
-  prefix,
-  result,
-}: {
-  id: string;
-  prefix: string;
-  result: NonNullable<ReturnType<typeof useConnectionStore.getState>['archiveRestoreResults'][string]>;
-}) {
+type RestoreResult = NonNullable<ReturnType<typeof useConnectionStore.getState>['archiveRestoreResults'][string]>;
+
+/** The one sentence that says what a restore attempt did (or why not), shared by the row and the section status. */
+export function restoreOutcomeText(result: RestoreResult): string {
+  const who = result.name ? `"${result.name}"` : 'the archived session';
   if (result.ok) {
     const seed = result.seed;
-    return (
-      <p className="aa-restore-note" data-testid={`${prefix}archived-restore-result-${id}`}>
-        {result.mode === 'new_thread'
-          ? `Started a NEW thread — not the original conversation. ${
-              seed
-                ? `${seed.messagesIncluded} of ${seed.messagesTotal} earlier messages will be sent as a transcript with your first message.`
-                : 'There was no earlier conversation text to carry over.'
-            }`
-          : 'Resumed the original conversation. It is live again and no longer archived.'}
-      </p>
-    );
+    return result.mode === 'new_thread'
+      ? `Started a NEW thread from ${who} — not the original conversation. ${
+          seed
+            ? `${seed.messagesIncluded} of ${seed.messagesTotal} earlier messages will be sent as a transcript with your first message.`
+            : 'There was no earlier conversation text to carry over.'
+        }`
+      : `Resumed the original conversation of ${who}. It is live again and no longer archived.`;
   }
-  const text = result.refused
-    ? 'This device is paired to a single session, so it cannot restore archived sessions.'
-    : result.code === 'ARCHIVED_SESSION_NOT_FOUND'
-      ? 'That archive no longer exists — it was restored, deleted or aged out.'
-      : (result.message ?? 'Could not continue this session.');
+  if (result.refused) return 'This device is paired to a single session, so it cannot restore archived sessions.';
+  if (result.code === 'ARCHIVED_SESSION_NOT_FOUND') return 'That archive no longer exists — it was restored, deleted or aged out.';
+  if (result.code === 'ARCHIVE_RESTORE_ALREADY_LIVE') {
+    return result.message ?? `${who} is already live or parked.`;
+  }
+  if (result.mode === 'native' && result.sessionId) {
+    // The session was restored but its provider failed to start: it is now parked.
+    return `${who} was restored but could not start (${result.message ?? 'start failed'}). It moved to Failed restores — use Retry there.`;
+  }
+  const text = result.message ?? 'Could not continue this session.';
+  return result.mode === 'native' ? `${text} You can continue it as a new thread instead.` : text;
+}
+
+function RestoreOutcome({ id, prefix, result }: { id: string; prefix: string; result: RestoreResult }) {
   return (
-    <p className="fr-result-error" data-testid={`${prefix}archived-restore-result-${id}`}>
-      {text}
-      {result.mode === 'native' && !result.refused && result.code !== 'ARCHIVED_SESSION_NOT_FOUND' && !result.sessionId
-        ? ' You can continue it as a new thread instead.'
-        : ''}
+    <p className={result.ok ? 'aa-restore-note' : 'fr-result-error'} data-testid={`${prefix}archived-restore-result-${id}`}>
+      {restoreOutcomeText(result)}
     </p>
+  );
+}
+
+/**
+ * Outcome lines for restore attempts whose row is no longer listed. A native
+ * restore removes its record, and a failed one re-parks the session, so the row
+ * that held the outcome is gone by the time the reply is read; this keeps it
+ * visible at the section level.
+ */
+export function ArchivedRestoreStatus({ listedIds, surface = 'control-room' }: { listedIds: string[]; surface?: ArchivedRestoreSurface }) {
+  const results = useConnectionStore((s) => s.archiveRestoreResults);
+  const p = PREFIX[surface];
+  const orphaned = Object.entries(results ?? {}).filter(([id]) => !listedIds.includes(id));
+  if (orphaned.length === 0) return null;
+  return (
+    <div className="aa-restore-status" data-testid={`${p}archived-restore-status`}>
+      {orphaned.map(([id, result]) => (
+        <RestoreOutcome key={id} id={id} prefix={`${p}status-`} result={result} />
+      ))}
+    </div>
   );
 }

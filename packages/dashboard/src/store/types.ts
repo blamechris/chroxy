@@ -976,7 +976,10 @@ export interface WslActionResult {
 }
 
 /** The outcome of one `restore_archived_session`, as the row renders it (#8866). */
-export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessage, 'ok' | 'mode' | 'code' | 'message' | 'sessionId' | 'seed' | 'refused'>;
+export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessage, 'ok' | 'mode' | 'code' | 'message' | 'sessionId' | 'seed' | 'refused'> & {
+  /** The record's name when the reply arrived, so a status line can still name it after the row has left the list. */
+  name?: string;
+};
 
 /** The archive retention policy as the daemon reports and accepts it. */
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];

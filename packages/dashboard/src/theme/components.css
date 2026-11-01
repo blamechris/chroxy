@@ -15037,6 +15037,17 @@ a.session-ci-chip__pr:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.aa-restore-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 14px;
+}
+
+.sidebar-archived-section .aa-restore-status {
+  padding: 0;
+}
+
 .sidebar-archived-item .aa-restore {
   padding: 0 0 4px;
 }

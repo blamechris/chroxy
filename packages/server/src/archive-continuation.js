@@ -37,7 +37,12 @@ export const CONTINUATION_SEED_SOURCE = 'archived_session'
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g
 
-function clean(text) {
+/**
+ * The ONE sanitizer for seed text: applied when the transcript is built and again
+ * when a seed is read back from the (untrusted) state file, so neither path can
+ * deliver a control sequence or a premature `[/context]` marker.
+ */
+export function sanitizeSeedText(text) {
   return String(text)
     .replace(/\r\n?/g, '\n')
     .replace(CONTROL_CHARS, '')
@@ -45,6 +50,7 @@ function clean(text) {
     // from ending it early.
     .replace(/\[\/context\]/gi, '[/ context]')
 }
+const clean = sanitizeSeedText
 
 function shorten(text, max) {
   const chars = [...text]
@@ -120,15 +126,22 @@ export function buildContinuationSeed(history, { omittedOldest = 0, maxBytes = C
  */
 export function coerceContinuationSeed(raw) {
   if (!raw || typeof raw !== 'object' || typeof raw.text !== 'string' || raw.text.length === 0) return null
-  const bytes = Buffer.byteLength(raw.text)
+  // A seed recorded as in-flight (claimed) may or may not have reached the
+  // provider before a crash; re-sending it risks injecting the transcript twice,
+  // so only a never-claimed seed is re-armed.
+  if (raw.claimed === true) return null
+  // Sanitize first and measure after: normalization can change the size.
+  const text = sanitizeSeedText(raw.text)
+  if (text.length === 0) return null
+  const bytes = Buffer.byteLength(text)
   if (bytes > CONTINUATION_SEED_HARD_MAX_BYTES) return null
   const count = (v) => (Number.isInteger(v) && v >= 0 && v <= 1_000_000 ? v : 0)
   return {
-    text: raw.text,
+    text,
     messagesIncluded: count(raw.messagesIncluded),
     messagesTotal: count(raw.messagesTotal),
     bytes,
-    name: typeof raw.name === 'string' ? raw.name.slice(0, 256) : null,
+    name: typeof raw.name === 'string' ? (sanitizeSeedText(raw.name).slice(0, 256) || null) : null,
     archivedAt: typeof raw.archivedAt === 'number' && Number.isFinite(raw.archivedAt) ? raw.archivedAt : null,
   }
 }

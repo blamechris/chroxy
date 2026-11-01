@@ -26,7 +26,7 @@ import { useEffect, useState } from 'react';
 import { useConnectionStore } from '../store/connection';
 import { useShallow } from 'zustand/react/shallow';
 import { ArchivedSessionHistoryPanel, archivedSessionHistoryPanelId } from './ArchivedSessionHistoryPanel';
-import { ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions';
+import { ArchivedRestoreStatus, ArchivedSessionRestoreActions } from './ArchivedSessionRestoreActions';
 
 const REASON_LABELS: Record<string, string> = {
   closed: 'Closed',
@@ -180,6 +180,8 @@ export function ArchivedSessionsSection() {
       </div>
 
       {policy && !refused ? <ArchivePolicyNote policy={policy} testId="archived-sessions-policy" /> : null}
+
+      <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} />
 
       {truncated && !refused ? (
         <p className="aa-policy" data-testid="archived-sessions-truncated">
