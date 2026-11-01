@@ -4663,9 +4663,10 @@ export class SessionManager extends EventEmitter {
         }
         try {
           const restoredId = this._attemptRestoreOne(saved, true)
-          // DURABLE (fsync'd): the archive copy is released next, so the state file
-          // must really hold the restored session before the record goes.
-          const flushed = this._flushPersistOrWarn(restoredId, null, { durable: true })
+          // CONFIRMED durable (file AND directory entry fsync'd): the archive copy is
+          // released next, so the state file must really hold the restored session
+          // before the record goes.
+          const flushed = this._flushPersistConfirmedDurable(restoredId)
           // Grab the settle handle NOW, while the entry is still mapped (see
           // retryFailedRestore): a rejected start re-parks it and drops the entry.
           awaitStart = { restoredId, settled: this._awaitStartSettled(restoredId, settleTimeoutMs), saved }
@@ -4766,6 +4767,8 @@ export class SessionManager extends EventEmitter {
    *   //                            settled: the caller must REFUSE this input, or it
    *   //                            could become the first delivered input without
    *   //                            the transcript
+   *   // { unpersisted: true }      the claim could not be confirmed durable; the
+   *   //                            caller must REFUSE this input (retry-safe)
    *   // { token, item }            claimed; settle with the token
    *   sm.settleContinuationSeed(id, token, consumed)
    *
@@ -4775,7 +4778,7 @@ export class SessionManager extends EventEmitter {
    * settled counts as CONSUMED (never reclaimable: re-injecting the transcript
    * twice is worse than losing it once), and says so in the log.
    * @param {string} sessionId
-   * @returns {null | { busy: true } | { token: string, item: object }}
+   * @returns {null | { busy: true } | { unpersisted: true } | { token: string, item: object }}
    */
   claimContinuationSeed(sessionId) {
     const held = this._continuationSeeds.get(sessionId)
@@ -4791,8 +4794,15 @@ export class SessionManager extends EventEmitter {
     held.claimed = true
     held.claimedAt = now
     held.token = randomBytes(8).toString('hex')
-    if (!this._flushPersistOrWarn(sessionId, null, { durable: true })) {
-      log.warn(`Continuation seed claim for session ${sessionId} could not be persisted; a crash during dispatch may re-send it`)
+    if (!this._flushPersistConfirmedDurable(sessionId)) {
+      // Disk may still say "unclaimed": dispatching now could replay the
+      // transcript after a crash. Back out, leave the seed pending, and tell the
+      // caller to refuse the input (retry-safe).
+      held.claimed = false
+      held.token = null
+      log.warn(`Continuation seed claim for session ${sessionId} could not be confirmed durable; refusing the input rather than risk a replay`)
+      this._flushPersistOrWarn(sessionId) // best effort: put the unclaimed state back on disk
+      return { unpersisted: true }
     }
     return { token: held.token, item: continuationSeedItem(held.seed) }
   }
@@ -4815,7 +4825,9 @@ export class SessionManager extends EventEmitter {
     } else {
       held.claimed = false
       held.token = null
-      this._schedulePersist()
+      // Immediately: the file says claimed:true, and a crash before the debounce
+      // would drop a seed that was never sent.
+      this._flushPersistOrWarn(sessionId)
     }
   }
 
@@ -5564,6 +5576,24 @@ export class SessionManager extends EventEmitter {
    */
   _flushPersist({ durable = false } = {}) {
     return this._persistence.flushPersist(() => this.serializeState({ durable }))
+  }
+
+  /**
+   * #8866: a durable flush whose verdict is CONFIRMED. `writeFileRestricted`
+   * does not throw when only the post-rename directory fsync fails (the file is
+   * live, its durability unproven), so a bare durable flush can "succeed"
+   * without proving anything. A caller about to drop its only other copy of the
+   * data must use this and treat `false` as "keep the copy".
+   * @returns {boolean} true only when the write succeeded AND its durability is confirmed
+   */
+  _flushPersistConfirmedDurable(sessionId, name = null) {
+    if (!this._flushPersistOrWarn(sessionId, name, { durable: true })) return false
+    const unconfirmed = this._persistence.lastDurabilityUnconfirmed
+    if (unconfirmed) {
+      log.error(`Session state for ${sessionId} was written but its durability is unconfirmed (${unconfirmed})`)
+      return false
+    }
+    return true
   }
 
   /**

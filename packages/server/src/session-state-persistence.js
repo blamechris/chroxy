@@ -30,6 +30,8 @@ export class SessionStatePersistence {
     this._persistDebounceMs = persistDebounceMs
     this._persistTimer = null
     this._isWindows = isWindowsOverride ?? isWindows
+    /** @type {string|null} the last write's unconfirmed-durability verdict (see serializeState) */
+    this.lastDurabilityUnconfirmed = null
   }
 
   /**
@@ -72,6 +74,8 @@ export class SessionStatePersistence {
    * @returns {object} The state that was written
    */
   serializeState(state, { durable = false } = {}) {
+    // Reset first: a throw before the write must not leave a previous verdict.
+    this.lastDurabilityUnconfirmed = null
     const dir = dirname(this._stateFilePath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     const bakPath = this._stateFilePath + '.bak'
@@ -94,7 +98,11 @@ export class SessionStatePersistence {
     // hard-kill mid-write (between writeFileSync and renameSync) is never
     // reused by a later process and no sweeper reclaims it. Accepted: such
     // mid-write hard-kills are rare and the sidecar is tiny (matches models.js).
-    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}`, durable })
+    const written = writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}`, durable })
+    // A post-rename directory-fsync failure does NOT throw: the file is live but
+    // its durability is unproven. Keep the verdict for callers that drop another
+    // copy on the strength of this write (`SessionManager._flushPersistConfirmedDurable`).
+    this.lastDurabilityUnconfirmed = written?.durabilityUnconfirmed ?? null
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }

@@ -135,6 +135,14 @@ describe('restore_archived_session_result', () => {
   })
 })
 
+describe('dismissArchiveRestoreResult', () => {
+  it('clears one outcome and leaves the others', () => {
+    useConnectionStore.setState({ archiveRestoreResults: { [A]: { ok: true }, other: { ok: false } } } as unknown as Partial<State>)
+    get().dismissArchiveRestoreResult(A)
+    expect(Object.keys(get().archiveRestoreResults)).toEqual(['other'])
+  })
+})
+
 describe('socket scoping', () => {
   it('the pending marker is part of the in-flight roster, so a socket drop clears it', () => {
     expect(Object.keys(createEmptyInFlightMarkers())).toContain('restoringArchiveIds')

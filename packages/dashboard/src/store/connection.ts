@@ -2211,6 +2211,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return true;
   },
 
+  dismissArchiveRestoreResult: (archiveId: string): void => {
+    const results = get().archiveRestoreResults ?? {};
+    if (!(archiveId in results)) return;
+    const next = { ...results };
+    delete next[archiveId];
+    set({ archiveRestoreResults: next });
+  },
+
   deleteAllArchivedSessions: (): boolean => {
     const { socket } = get();
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;

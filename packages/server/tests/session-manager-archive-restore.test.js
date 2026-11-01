@@ -326,6 +326,20 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
       assert.equal(sm.listArchivedSessions().sessions.some((x) => x.archiveId === row2.archiveId), true)
     })
 
+    it('keeps the record when the write was published but its DIRECTORY entry could not be fsynced (durability unconfirmed)', async () => {
+      makeSm()
+      const { row } = await archived()
+      const real = sm._persistence.serializeState.bind(sm._persistence)
+      sm._persistence.serializeState = (state, opts) => {
+        const out = real(state, opts)
+        sm._persistence.lastDurabilityUnconfirmed = 'EIO: directory fsync failed'
+        return out
+      }
+      const r = await sm.restoreArchivedSession(row.archiveId, 'native')
+      assert.equal(r.ok, true, 'the session itself is live')
+      assert.equal(sm.listArchivedSessions().sessions.length, 1, 'but the archive copy stays: durability was not confirmed')
+    })
+
     it('refuses a second native resume of a conversation that is already live (ARCHIVE_RESTORE_ALREADY_LIVE with the owner)', async () => {
       makeSm()
       const { row } = await archived()
@@ -509,6 +523,48 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
       sm.settleContinuationSeed(r.sessionId, claim.token, true)
       const onDisk = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
       assert.equal(onDisk.sessions.find((s) => s.id === r.sessionId).continuationSeed, undefined)
+    })
+
+    it('the claim-time write is DURABLE and records claimed:true', async () => {
+      makeSm()
+      const { row } = await archived()
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      const seen = []
+      const real = sm._persistence.serializeState.bind(sm._persistence)
+      sm._persistence.serializeState = (state, opts) => {
+        seen.push({ opts, claimed: state.sessions.find((x) => x.id === r.sessionId)?.continuationSeed?.claimed })
+        return real(state, opts)
+      }
+      assert.ok(sm.claimContinuationSeed(r.sessionId).token)
+      assert.deepEqual(seen.map((x) => [x.opts?.durable, x.claimed]), [[true, true]])
+    })
+
+    it('a claim that cannot be confirmed durable is NOT handed out: the seed stays pending and the caller is told to refuse the input', async () => {
+      makeSm()
+      const { row } = await archived()
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      const real = sm._persistence.serializeState.bind(sm._persistence)
+      sm._persistence.serializeState = (state, opts) => {
+        const out = real(state, opts)
+        if (opts?.durable) sm._persistence.lastDurabilityUnconfirmed = 'EIO'
+        return out
+      }
+      assert.deepEqual(sm.claimContinuationSeed(r.sessionId), { unpersisted: true })
+      assert.equal(sm._continuationSeeds.get(r.sessionId).claimed, false)
+      const onDisk = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+      assert.equal(onDisk.sessions.find((x) => x.id === r.sessionId).continuationSeed.claimed, undefined, 'disk is put back to unclaimed')
+      sm._persistence.serializeState = real
+      assert.ok(sm.claimContinuationSeed(r.sessionId).token, 'a later attempt can claim it')
+    })
+
+    it('a rejected settle writes the unclaimed state immediately', async () => {
+      makeSm()
+      const { row } = await archived()
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      const claim = sm.claimContinuationSeed(r.sessionId)
+      sm.settleContinuationSeed(r.sessionId, claim.token, false)
+      const onDisk = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+      assert.equal(onDisk.sessions.find((x) => x.id === r.sessionId).continuationSeed.claimed, undefined)
     })
 
     it('a claim that is never settled expires as CONSUMED, not reclaimable', async () => {

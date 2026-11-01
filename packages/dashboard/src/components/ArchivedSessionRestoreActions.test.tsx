@@ -14,6 +14,9 @@ const state = {
   restoringArchiveIds: new Set<string>(),
   archiveRestoreResults: {} as Record<string, unknown>,
   restoreArchivedSession: vi.fn(() => true),
+  dismissArchiveRestoreResult: vi.fn(),
+  switchSession: vi.fn(() => true),
+  sessions: [] as Array<{ sessionId: string }>,
 }
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: unknown) => unknown) => selector(state),
@@ -27,6 +30,7 @@ afterEach(() => {
   state.connectionPhase = 'connected'
   state.restoringArchiveIds = new Set()
   state.archiveRestoreResults = {}
+  state.sessions = []
   vi.clearAllMocks()
 })
 
@@ -114,13 +118,13 @@ describe('ArchivedSessionRestoreActions', () => {
 describe('ArchivedRestoreStatus (outcomes whose row has left the list)', () => {
   it('shows the outcome of a restore whose row is gone, naming it', () => {
     state.archiveRestoreResults = { [A]: { ok: true, mode: 'native', sessionId: 'n1', name: 'Flag work' } }
-    render(<ArchivedRestoreStatus listedIds={[]} />)
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
     expect(screen.getByTestId('archived-restore-status').textContent).toContain('Resumed the original conversation of "Flag work"')
   })
 
   it('says a native restore that failed to START moved to Failed restores, and to use Retry there', () => {
     state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', sessionId: 'parked-1', code: 'START_FAILED', message: 'pty died', name: 'Flag work' } }
-    render(<ArchivedRestoreStatus listedIds={[]} />)
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
     const text = screen.getByTestId('archived-restore-status').textContent ?? ''
     expect(text).toContain('Failed restores')
     expect(text).toContain('Retry')
@@ -129,13 +133,42 @@ describe('ArchivedRestoreStatus (outcomes whose row has left the list)', () => {
 
   it('does not duplicate an outcome that its listed row already shows', () => {
     state.archiveRestoreResults = { [A]: { ok: true, mode: 'new_thread', sessionId: 'n1' } }
-    const { container } = render(<ArchivedRestoreStatus listedIds={[A]} />)
+    const { container } = render(<ArchivedRestoreStatus listedIds={[A]} loaded />)
     expect(container.firstChild).toBeNull()
   })
 
   it('relays the server message for an already-live refusal', () => {
     state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', code: 'ARCHIVE_RESTORE_ALREADY_LIVE', message: 'This conversation is already live as "X".', sessionId: 'x1' } }
-    render(<ArchivedRestoreStatus listedIds={[]} />)
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
     expect(screen.getByTestId('archived-restore-status').textContent).toContain('already live as "X"')
+  })
+
+  it('renders nothing while the roster is still loading (no orphan duplicates of a row\'s own outcome)', () => {
+    state.archiveRestoreResults = { [A]: { ok: true, mode: 'native', sessionId: 'n1' } }
+    const { container } = render(<ArchivedRestoreStatus listedIds={[]} loaded={false} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('has a dismiss control (aria-labelled) that clears that outcome', () => {
+    state.archiveRestoreResults = { [A]: { ok: true, mode: 'native', sessionId: 'n1' } }
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
+    const btn = screen.getByTestId(`status-archived-restore-dismiss-${A}`)
+    expect(btn.getAttribute('aria-label')).toBeTruthy()
+    fireEvent.click(btn)
+    expect(state.dismissArchiveRestoreResult).toHaveBeenCalledWith(A)
+  })
+
+  it('offers Go to session for an already-live refusal whose owner is listed, and switches to it', () => {
+    state.sessions = [{ sessionId: 'x1' }]
+    state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', code: 'ARCHIVE_RESTORE_ALREADY_LIVE', message: 'already live', sessionId: 'x1' } }
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
+    fireEvent.click(screen.getByTestId(`status-archived-restore-goto-${A}`))
+    expect(state.switchSession).toHaveBeenCalledWith('x1', { allowStarting: true })
+  })
+
+  it('offers no Go to session when the owner is parked (not a listed session)', () => {
+    state.archiveRestoreResults = { [A]: { ok: false, mode: 'native', code: 'ARCHIVE_RESTORE_ALREADY_LIVE', message: 'parked', sessionId: 'p1' } }
+    render(<ArchivedRestoreStatus listedIds={[]} loaded />)
+    expect(screen.queryByTestId(`status-archived-restore-goto-${A}`)).toBeNull()
   })
 })

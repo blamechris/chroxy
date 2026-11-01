@@ -196,6 +196,28 @@ describe('continuation seed on the first input (#8866)', () => {
     assert.deepEqual([ack.status, ack.delivery, ack.retrySafe, ack.reason], ['rejected', 'not_dispatched', true, 'continuation_seed_pending'])
   })
 
+  it('an input whose seed claim could not be persisted is refused (retry-safe, continuation_seed_unpersisted) and nothing is dispatched', async () => {
+    ctx.sessions.sessionManager.claimContinuationSeed = () => ({ unpersisted: true })
+    const sent = []
+    ctx.transport.send = (_ws, m) => sent.push(m)
+    await send('first', 'u1')
+    assert.equal(calls.length, 0)
+    const ack = sent.find((m) => m.type === 'input_ack')
+    assert.deepEqual([ack.status, ack.delivery, ack.retrySafe, ack.reason], ['rejected', 'not_dispatched', true, 'continuation_seed_unpersisted'])
+    assert.ok(sent.some((m) => m.type === 'session_error' && /state file was not written/.test(m.message)), 'the user is shown why')
+  })
+
+  it('a refusal for a pending claim is also surfaced as a session error (the dashboard does not render the ack message)', async () => {
+    admission = null
+    session.sendMessage = (text, attachments, opts) => { calls.push({ text, opts }); return new Promise(() => {}) }
+    send('first', 'u1')
+    await new Promise((r) => setImmediate(r))
+    const sent = []
+    ctx.transport.send = (_ws, m) => sent.push(m)
+    await send('second', 'u2')
+    assert.ok(sent.some((m) => m.type === 'session_error' && /still being delivered/.test(m.message)))
+  })
+
   it('a stale settle (wrong token) cannot consume or release a newer claim', async () => {
     const claim = mgr.claimContinuationSeed('s1')
     mgr.settleContinuationSeed('s1', 'not-the-token', true)

@@ -15037,6 +15037,18 @@ a.session-ci-chip__pr:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.aa-restore-outcome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.aa-restore-outcome p {
+  flex: 1 1 12rem;
+  margin: 0;
+}
+
 .aa-restore-status {
   display: flex;
   flex-direction: column;

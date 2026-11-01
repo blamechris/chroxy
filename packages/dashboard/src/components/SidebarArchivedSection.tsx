@@ -94,7 +94,7 @@ export function SidebarArchivedSection() {
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
 
-          <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} surface="sidebar" />
+          <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} loaded={rows !== null && !refused} surface="sidebar" />
 
           {refused ? (
             <p className="sidebar-archived-note" data-testid="sidebar-archived-refused">

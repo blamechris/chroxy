@@ -2614,6 +2614,8 @@ export interface ConnectionState {
    * socket is closed or a restore of that record is already pending.
    */
   restoreArchivedSession: (archiveId: string, mode: 'native' | 'new_thread') => boolean;
+  /** Clear one restore outcome line (the × on a row or status line). */
+  dismissArchiveRestoreResult: (archiveId: string) => void;
   /** Delete every archive record. */
   deleteAllArchivedSessions: () => boolean;
   /**

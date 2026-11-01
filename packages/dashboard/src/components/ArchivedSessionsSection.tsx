@@ -181,7 +181,7 @@ export function ArchivedSessionsSection() {
 
       {policy && !refused ? <ArchivePolicyNote policy={policy} testId="archived-sessions-policy" /> : null}
 
-      <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} />
+      <ArchivedRestoreStatus listedIds={(rows ?? []).map((r) => r.archiveId)} loaded={rows !== null && !refused} />
 
       {truncated && !refused ? (
         <p className="aa-policy" data-testid="archived-sessions-truncated">

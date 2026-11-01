@@ -853,19 +853,23 @@ async function handleInput(ws, client, msg, ctx) {
   // client-ack bookkeeping, so a client without input acks is covered too.
   const sm = ctx.sessions.sessionManager
   const seedClaim = sm.claimContinuationSeed?.(targetSessionId) ?? null
-  if (seedClaim?.busy) {
-    const message = 'The first message of this continued session is still being delivered. Wait for it to be accepted, then send again.'
+  if (seedClaim?.busy || seedClaim?.unpersisted) {
+    const [reason, message] = seedClaim.busy
+      ? ['continuation_seed_pending', 'The first message of this continued session is still being delivered. Wait for it to be accepted, then send again.']
+      : ['continuation_seed_unpersisted', 'Could not safely record the start of this continued session (the state file was not written), so nothing was sent. Check disk space and try again.']
+    // The dashboard restores the draft from a retry-safe rejection but does not
+    // render the ack's message, so the refusal is ALSO a session error (the same
+    // pairing the budget-paused rejection uses) for the user to read.
+    sendSessionError(ws, ctx, message)
     if (inputRecord) {
       sendInputAck(ws, ctx, inputRecord, {
         status: 'rejected',
         delivery: 'not_dispatched',
         retrySafe: true,
-        reason: 'continuation_seed_pending',
+        reason,
         message,
       })
       releaseInputRequest(ctx, inputRecord)
-    } else {
-      sendSessionError(ws, ctx, message)
     }
     return
   }

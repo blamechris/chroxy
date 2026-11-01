@@ -135,10 +135,37 @@ export function restoreOutcomeText(result: RestoreResult): string {
 }
 
 function RestoreOutcome({ id, prefix, result }: { id: string; prefix: string; result: RestoreResult }) {
+  const dismiss = useConnectionStore((s) => s.dismissArchiveRestoreResult);
+  const switchSession = useConnectionStore((s) => s.switchSession);
+  // Only a LIVE session can be switched to; a parked one is not on the session list.
+  const ownerListed = useConnectionStore((s) =>
+    result.code === 'ARCHIVE_RESTORE_ALREADY_LIVE' && !!result.sessionId
+      && (s.sessions ?? []).some((x) => x.sessionId === result.sessionId));
   return (
-    <p className={result.ok ? 'aa-restore-note' : 'fr-result-error'} data-testid={`${prefix}archived-restore-result-${id}`}>
-      {restoreOutcomeText(result)}
-    </p>
+    <div className="aa-restore-outcome">
+      <p className={result.ok ? 'aa-restore-note' : 'fr-result-error'} data-testid={`${prefix}archived-restore-result-${id}`}>
+        {restoreOutcomeText(result)}
+      </p>
+      {ownerListed ? (
+        <button
+          type="button"
+          className="aa-restore-btn"
+          onClick={() => switchSession(result.sessionId as string, { allowStarting: true })}
+          data-testid={`${prefix}archived-restore-goto-${id}`}
+        >
+          Go to session
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="aa-restore-btn aa-restore-dismiss"
+        onClick={() => dismiss(id)}
+        aria-label="Dismiss this message"
+        data-testid={`${prefix}archived-restore-dismiss-${id}`}
+      >
+        ×
+      </button>
+    </div>
   );
 }
 
@@ -148,9 +175,12 @@ function RestoreOutcome({ id, prefix, result }: { id: string; prefix: string; re
  * that held the outcome is gone by the time the reply is read; this keeps it
  * visible at the section level.
  */
-export function ArchivedRestoreStatus({ listedIds, surface = 'control-room' }: { listedIds: string[]; surface?: ArchivedRestoreSurface }) {
+export function ArchivedRestoreStatus({ listedIds, loaded, surface = 'control-room' }: { listedIds: string[]; loaded: boolean; surface?: ArchivedRestoreSurface }) {
   const results = useConnectionStore((s) => s.archiveRestoreResults);
   const p = PREFIX[surface];
+  // Until the roster has loaded EVERY stored result would look orphaned and
+  // duplicate the outcome its own row is about to show.
+  if (!loaded) return null;
   const orphaned = Object.entries(results ?? {}).filter(([id]) => !listedIds.includes(id));
   if (orphaned.length === 0) return null;
   return (
