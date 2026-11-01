@@ -139,10 +139,12 @@ fn every_handle_start_call_names_its_origin_and_only_launch_and_the_user_path_ex
         origins.iter().any(|a| a == "handle_start(&app_handle, StartOrigin::Launch)"),
         "the launch-time auto-start with a service installed must start as Launch"
     );
-    assert!(origins.len() == 3, "an unexpected handle_start call site appeared: {:?}", origins);
+    assert!(origins.len() == 4, "an unexpected handle_start call site appeared: {:?}", origins);
+    // Two User spellings: the guarded start, and the fallback of the service wait
+    // (the service turned out to be gone, so the user's Start proceeds).
     assert!(
-        origins.iter().filter(|a| a.contains("StartOrigin::User")).count() == 1,
-        "exactly one handle_start call may start as User: {:?}",
+        origins.iter().filter(|a| a.contains("StartOrigin::User")).count() == 2,
+        "exactly two handle_start calls may start as User: {:?}",
         origins
     );
 }
@@ -445,25 +447,20 @@ fn the_service_wait_runs_before_any_lock_and_never_under_one() {
     let first_lock = body.find("lock_or_recover(").expect("handle_start locks the manager");
     assert!(wait < first_lock, "the launch-time wait must come before any lock_or_recover");
 
-    // Crash auto-restart: after the backoff sleep, a wait with no lock before it,
-    // and all of it before the restart that takes the lock.
+    // Crash auto-restart: the brief release lock comes first (before the backoff),
+    // and from the backoff sleep to the wait no lock is held; all before the
+    // restart that takes the lock.
     let sleep = body.find("std::thread::sleep(backoff)").expect("backoff sleep");
     let crash_wait = body[sleep..]
-        .find("wait_for_service(service_installed)")
+        .find("wait_for_service(service)")
         .map(|i| i + sleep)
         .expect("the crash restart must wait for a service");
-    // The one lock before the wait is the brief one that retires the old monitor,
-    // and it is closed (more `}` than `{`) before the wait begins.
-    let between = &body[sleep..crash_wait];
-    assert!(between.matches("lock_or_recover(").count() == 1, "only the brief release lock may precede the crash-restart wait");
-    let release = between.find("mgr.release_for_service()").expect("the release lock");
-    let after = &between[release..];
-    assert!(after.matches('}').count() > after.matches('{').count(), "the release lock must be dropped before the wait");
+    assert!(!body[sleep..crash_wait].contains("lock_or_recover("), "no lock may be taken between the backoff and the crash-restart wait");
     let restart = body.find("mgr.try_auto_restart(").expect("the crash restart");
     assert!(crash_wait < restart, "the crash-restart wait must precede try_auto_restart");
 
     // The wait is one implementation, shared with the user path.
-    assert!(fn_body(&lib, "await_installed_service").contains("wait_for_service(true)"));
+    assert!(fn_body(&lib, "await_installed_service").contains("wait_for_service(tray_state::chroxy_service_detection())"));
     assert!(fn_body(&lib, "wait_for_service").contains("poll_for_daemon_within("));
     let within = fn_body(&lib, "poll_for_daemon_within");
     assert!(within.contains("poll_until_chroxy_within(") && within.contains("tray_state::probe_port(port, timeout)"), "the deadline poll must challenge through probe_port with the capped timeout");
@@ -486,6 +483,7 @@ fn the_under_lock_backstop_probes_once_and_cannot_sleep() {
 }
 
 const DETECTOR: &str = "tray_state::chroxy_service_installed()";
+const DETECTION: &str = "tray_state::chroxy_service_detection()";
 
 #[test]
 fn the_detector_itself_is_what_reaches_every_decision() {
@@ -498,33 +496,64 @@ fn the_detector_itself_is_what_reaches_every_decision() {
         let args = call_args(&body[at..]);
         assert_eq!(args.get(2).map(String::as_str), Some(DETECTOR), "{}: the service argument must be the detector's result: {:?}", name, args);
     }
-    // Every wait for a service: the argument is the detector, or `true` where the
-    // caller has already established that a service is installed.
+    // Every wait for a service is given the detection itself, or the binding that
+    // is exactly the detection.
     let mut checked = 0;
     for (i, _) in lib.match_indices("wait_for_service(") {
         if lib[..i].ends_with("fn ") {
             continue;
         }
         let args = call_args(&lib[i..]);
-        let ok = args.len() == 1 && (args[0] == DETECTOR || args[0] == "true" || args[0] == "service_installed");
-        assert!(ok, "wait_for_service must be given the detector's result: {:?}", args);
+        let ok = args.len() == 1 && (args[0] == DETECTION || args[0] == "service");
+        assert!(ok, "wait_for_service must be given the detection: {:?}", args);
         checked += 1;
     }
     assert!(checked >= 4, "expected the launch, crash, restart and user paths, saw {}", checked);
-    // `service_installed` may only be a binding of the detector.
-    assert!(lib.contains("let service_installed = tray_state::chroxy_service_installed();"));
-    // Restart of the app's own server asks the detector before it respawns.
+    let binding = format!("let service = {};", DETECTION);
+    assert!(lib.matches(&binding).count() >= 2, "`service` may only be a binding of the detection (crash loop and restart)");
+    assert_eq!(
+        lib.matches("let service =").count(),
+        lib.matches(&binding).count(),
+        "another `let service =` binding is not the detection"
+    );
+
+    // The restart branch is driven by the pure plan, over the detection binding.
     let restart = fn_body(&lib, "restart_own_server");
-    assert!(restart.find(DETECTOR).unwrap() < restart.find("mgr.restart(StartOrigin::User)").unwrap());
+    let at = restart.find("restart_plan(").expect("the restart plan");
+    assert!(restart[..at].contains(&binding), "the plan must be computed from the detection binding");
+    assert_eq!(call_args(&restart[at..]), vec!["&service".to_string()], "the plan must be given the detection binding");
+    assert!(
+        restart.contains("if tray_state::restart_plan(&service) == tray_state::RestartPlan::HandOffToService {"),
+        "the restart plan must drive the branch (not a constant or a bare condition)"
+    );
+    assert!(restart.find("restart_plan(").unwrap() < restart.find("mgr.restart(StartOrigin::User)").unwrap());
     assert!(restart.contains("stop_for_service_handoff()"));
 }
 
 #[test]
-fn the_crash_restart_retires_the_old_monitor_before_waiting() {
+fn the_crash_restart_retires_the_old_monitor_when_the_crash_is_accepted() {
+    // Before the backoff, not after it: the monitor must not be left able to act
+    // on the port for the whole delay.
     let lib = read("src/lib.rs");
     let body = fn_body(&lib, "handle_start");
+    let arm = body.find("let service = tray_state::chroxy_service_detection();").expect("the crash arm reads the detection");
+    let release = body[arm..].find("mgr.release_for_service()").map(|i| i + arm).expect("release at acceptance");
     let sleep = body.find("std::thread::sleep(backoff)").unwrap();
-    let release = body[sleep..].find("mgr.release_for_service()").map(|i| i + sleep).expect("release before the wait");
-    let wait = body[sleep..].find("wait_for_service(service_installed)").map(|i| i + sleep).unwrap();
-    assert!(release < wait, "the monitor must be retired before the wait begins");
+    let wait = body[arm..].find("wait_for_service(service)").map(|i| i + arm).unwrap();
+    assert!(arm < release && release < sleep && sleep < wait, "release must come before the backoff, and the backoff before the wait");
+    assert!(body[arm..release].contains("service.blocks_spawn()"), "the release is conditional on the detection");
+}
+
+#[test]
+fn the_start_reads_tunnel_and_host_leniently_and_before_settling_the_port() {
+    // #8890: an unrelated bad field must not hide tunnel/host, and an unreadable
+    // config.json refuses the start before anything is adopted, reaped or spawned.
+    let server = squash(&read("src/server.rs"));
+    let start = server.find("fn start_server_process(").expect("start_server_process");
+    let body = &server[start..];
+    let read_at = body.find("self.apply_launch_overrides(config::load_launch_overrides())?;").expect("the lenient read must refuse on Err");
+    let settle_at = body.find("self.settle_port(").expect("settle_port");
+    assert!(read_at < settle_at, "the config read must come before the port is settled");
+    let lib = read("src/lib.rs");
+    assert!(fn_body(&lib, "handle_start").contains("cloudflared_missing_notice("), "the cloudflared notice must say who chose the tunnel");
 }

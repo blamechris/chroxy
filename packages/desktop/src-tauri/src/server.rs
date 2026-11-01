@@ -361,7 +361,7 @@ trait PortOps {
     fn terminate(&self, pids: &[u32]);
     fn kill_tunnels(&self, port: u16);
     /// Is a chroxy service (launchd / systemd / Task Scheduler) installed?
-    fn service_installed(&self) -> bool;
+    fn service_detection(&self) -> tray_state::ServiceDetection;
     /// ONE probe of `port` for the installed service's daemon. Never waits or
     /// sleeps: it runs with the manager lock held, and the real wait for the
     /// service is done by the caller before the lock is taken (#8890).
@@ -396,8 +396,9 @@ fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Resul
                 // the app's own server). Backstop only, like Launch: one probe, then
                 // adopt or refuse. Its tunnel is not reaped either: cloudflared on
                 // this port may be the service's.
-                if ops.service_installed() {
-                    return tray_state::service_wait_result(ops.probe_service_daemon(port))
+                let detection = ops.service_detection();
+                if detection.blocks_spawn() {
+                    return tray_state::service_wait_result(ops.probe_service_daemon(port), &detection)
                         .map(PortPrep::Adopt);
                 }
                 ops.kill_tunnels(port);
@@ -407,14 +408,14 @@ fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Resul
         StartOrigin::Launch => {
             let held = ops.probe(port);
             let own = if held.is_occupied() { ops.own_holder_pids(port) } else { Vec::new() };
-            let service = !held.is_occupied() && ops.service_installed();
-            match tray_state::launch_start_decision_with_service(held, !own.is_empty(), service) {
+            let detection = if held.is_occupied() { tray_state::ServiceDetection::Absent } else { ops.service_detection() };
+            match tray_state::launch_start_decision_with_service(held, !own.is_empty(), detection.blocks_spawn()) {
                 // #8890: backstop only. The callers wait for an installed service
                 // BEFORE taking the manager lock, so this is reached only when the
                 // service appeared in between. One probe, no waiting (the lock is
                 // held): adopt a daemon that answers, otherwise refuse; never spawn.
                 LaunchDecision::AwaitService => {
-                    tray_state::service_wait_result(ops.probe_service_daemon(port)).map(PortPrep::Adopt)
+                    tray_state::service_wait_result(ops.probe_service_daemon(port), &detection).map(PortPrep::Adopt)
                 }
                 LaunchDecision::Spawn => {
                     ops.kill_tunnels(port);
@@ -455,8 +456,8 @@ impl PortOps for RealPortOps<'_> {
     fn kill_tunnels(&self, port: u16) {
         ServerManager::kill_orphan_cloudflared(port, self.log_buffer)
     }
-    fn service_installed(&self) -> bool {
-        tray_state::chroxy_service_installed()
+    fn service_detection(&self) -> tray_state::ServiceDetection {
+        tray_state::chroxy_service_detection()
     }
     fn probe_service_daemon(&self, port: u16) -> PortState {
         tray_state::probe_port(port, Duration::from_secs(2))
@@ -556,6 +557,15 @@ impl ServerManager {
 
     pub fn set_expose_on_lan(&mut self, expose: bool) {
         self.expose_on_lan = expose;
+    }
+
+    /// Take `tunnel` and `host` from the lenient read (#8890); an `Err` refuses the
+    /// start and changes nothing.
+    fn apply_launch_overrides(&mut self, overrides: Result<config::LaunchOverrides, String>) -> Result<(), String> {
+        let o = overrides?;
+        self.config.tunnel = o.tunnel;
+        self.config.host = o.host;
+        Ok(())
     }
 
     /// What the spawned server is told about its tunnel mode and bind host:
@@ -1039,6 +1049,9 @@ impl ServerManager {
 
         // Reload config each start
         self.config = config::load_config();
+        // tunnel/host come from a lenient read of the raw file, so an unrelated
+        // bad field cannot hide them, and an unreadable file refuses the start.
+        self.apply_launch_overrides(config::load_launch_overrides())?;
         // Refuse a config.json tunnel the server would not accept, before the
         // port is settled (nothing is adopted, reaped or spawned for it).
         self.launch_resolutions()?;
@@ -1384,10 +1397,27 @@ impl ServerManager {
     /// A user Restart of the app's own server with a service installed: end the
     /// owned server and stay stopped, with no restart pending. The caller then
     /// waits for the service with the manager lock released.
+    ///
+    /// Reaps the app's OWN cloudflared like [`Self::stop`] does (on Windows, or
+    /// after the 5 s force-kill, the server never stopped its tunnel and it would
+    /// otherwise stay public and point at the port the service is about to take).
+    /// Safe here, unlike on the crash path: the app held the port, so the service
+    /// was not running and this tunnel is not its.
     pub fn stop_for_service_handoff(&mut self) {
+        self.stop_for_service_handoff_with(Self::kill_orphan_cloudflared);
+    }
+
+    fn stop_for_service_handoff_with(
+        &mut self,
+        reap: impl FnOnce(u16, &Arc<Mutex<VecDeque<String>>>),
+    ) {
+        let had_child = self.child.is_some();
         self.release_for_service();
         *lock_or_recover(&self.status) = ServerStatus::Stopped;
         self.auto_restart_pending.store(false, Ordering::Relaxed);
+        if had_child {
+            reap(self.config.port, &self.log_buffer);
+        }
     }
 
     /// Sleep in short increments, checking the generation counter between each.
@@ -1543,6 +1573,12 @@ impl ServerManager {
                             if !user_stopped.load(Ordering::Relaxed) {
                                 auto_restart_pending.store(true, Ordering::Relaxed);
                             }
+                            // The crash transition is TERMINAL for this monitor
+                            // (#8890): it must not keep probing and write `Running`
+                            // again if a different daemon (an installed service)
+                            // takes the port. Recovery goes through the restart,
+                            // which starts a new monitor under a new generation.
+                            return;
                         }
                     }
                 }
@@ -1684,7 +1720,7 @@ mod tests {
         held: PortState,
         own: Vec<u32>,
         log: RefCell<Vec<String>>,
-        service: bool,
+        service: tray_state::ServiceDetection,
         service_probe: PortState,
     }
 
@@ -1694,14 +1730,20 @@ mod tests {
                 held,
                 own: own.to_vec(),
                 log: RefCell::new(Vec::new()),
-                service: false,
+                service: tray_state::ServiceDetection::Absent,
                 service_probe: PortState::Free,
             }
         }
         /// A chroxy service is installed; `service_probe` is what the single
         /// backstop probe sees.
         fn with_service(mut self, service_probe: PortState) -> Self {
-            self.service = true;
+            self.service = tray_state::ServiceDetection::Installed;
+            self.service_probe = service_probe;
+            self
+        }
+        /// A definition file with no install record: cannot rule a service out.
+        fn with_indeterminate_service(mut self, service_probe: PortState) -> Self {
+            self.service = tray_state::ServiceDetection::Indeterminate("/d/chroxy.plist".into());
             self.service_probe = service_probe;
             self
         }
@@ -1729,8 +1771,8 @@ mod tests {
         fn kill_tunnels(&self, _: u16) {
             self.log.borrow_mut().push("kill_tunnels".into());
         }
-        fn service_installed(&self) -> bool {
-            self.service
+        fn service_detection(&self) -> tray_state::ServiceDetection {
+            self.service.clone()
         }
         fn probe_service_daemon(&self, _: u16) -> PortState {
             self.log.borrow_mut().push("probe_service_daemon".into());
@@ -1791,6 +1833,20 @@ mod tests {
     }
 
     #[test]
+    fn an_indeterminate_service_blocks_a_spawn_on_both_origins() {
+        // A definition without the install record may still be registered: the
+        // app must not spawn into its restart gap, and the refusal names the file.
+        for origin in [StartOrigin::Launch, StartOrigin::User] {
+            let rec = Rec::new(PortState::Free, &[]).with_indeterminate_service(PortState::Free);
+            let err = prepare_port_with(origin, 8765, &rec).unwrap_err();
+            assert!(err.contains("/d/chroxy.plist"), "{:?}: {}", origin, err);
+            assert!(!rec.log().iter().any(|l| l == "kill_tunnels"), "{:?}", rec.log());
+            let rec = Rec::new(PortState::Free, &[]).with_indeterminate_service(PortState::Chroxy(8765));
+            assert_eq!(prepare_port_with(origin, 8765, &rec), Ok(PortPrep::Adopt(8765)), "{:?}", origin);
+        }
+    }
+
+    #[test]
     fn a_user_start_without_a_service_is_unchanged_on_a_free_port() {
         let rec = Rec::new(PortState::Free, &[]);
         assert_eq!(prepare_port_with(StartOrigin::User, 8765, &rec), Ok(PortPrep::Ready));
@@ -1831,6 +1887,45 @@ mod tests {
         );
         mgr.adopt_service_after_crash();
         assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn the_monitor_stops_after_flagging_a_crash_so_a_service_answer_cannot_resurrect_running() {
+        // No release at all: the monitor itself must not write Running again once
+        // it has flagged the crash and a different daemon answers (the window
+        // between the crash and the supervisor accepting it).
+        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mgr = polling_manager(8765);
+        mgr.start_health_poll_with(switchable_probe(mode.clone()));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        mode.store(1, Ordering::SeqCst);
+        assert!(wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12), "{:?}", mgr.status());
+        mode.store(2, Ordering::SeqCst); // the service answers BEFORE any cleanup
+        assert!(
+            !wait_for(&mgr, |s| *s == ServerStatus::Running, 7),
+            "the old monitor resurrected Running: {:?}",
+            mgr.status()
+        );
+        assert!(mgr.is_auto_restart_pending(), "the crash stays pending for the supervisor");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_reaps_the_apps_own_tunnel_only_when_it_had_a_child() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, _path) = manager_recording_in(dir.path());
+        // No child: nothing to reap (a childless stop must not scan processes).
+        let mut reaped = Vec::new();
+        mgr.stop_for_service_handoff_with(|p, _| reaped.push(p));
+        assert!(reaped.is_empty());
+        // A child: its tunnel is reaped by the app's port, after the child ended.
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), &script), Ok(StartOutcome::Spawned));
+        let port = mgr.config.port;
+        mgr.stop_for_service_handoff_with(|p, _| reaped.push(p));
+        assert_eq!(reaped, vec![port]);
+        assert!(mgr.child.is_none());
     }
 
     #[cfg(unix)]
@@ -2403,6 +2498,18 @@ mod tests {
         // `/bin/sh` would run and succeed if the spawn were reached.
         assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), Path::new("/nonexistent")), Err(err));
         assert_eq!(mgr.status(), ServerStatus::Stopped, "nothing was started");
+    }
+
+    #[test]
+    fn an_unreadable_config_refuses_the_start_and_leaves_the_manager_alone() {
+        let mut mgr = ServerManager::new();
+        mgr.config.tunnel = Some("named".into());
+        let err = mgr.apply_launch_overrides(Err("config.json is not valid JSON".into())).unwrap_err();
+        assert!(err.contains("config.json"));
+        assert_eq!(mgr.config.tunnel.as_deref(), Some("named"), "nothing was replaced by a default");
+        // And a good read replaces both values, including clearing them.
+        mgr.apply_launch_overrides(Ok(config::LaunchOverrides { tunnel: None, host: Some("127.0.0.1".into()) })).unwrap();
+        assert_eq!((mgr.config.tunnel.clone(), mgr.config.host.clone()), (None, Some("127.0.0.1".to_string())));
     }
 
     #[test]

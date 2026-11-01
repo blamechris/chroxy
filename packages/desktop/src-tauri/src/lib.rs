@@ -189,12 +189,14 @@ async fn get_server_info(
         // app's own setting (#8890), so report that and where it came from.
         // An unrecognised config value is reported as-is, from config.json: the
         // start is refused for it, so it is the value that "applies".
-        let config_tunnel = config::load_file_config().tunnel;
-        let (tunnel_effective, tunnel_source) =
-            match launch_env::resolve_tunnel(config_tunnel.as_deref(), &tunnel_mode) {
+        let (tunnel_effective, tunnel_source) = match config::load_launch_overrides() {
+            Ok(o) => match launch_env::resolve_tunnel(o.tunnel.as_deref(), &tunnel_mode) {
                 Ok(t) => (t.effective, t.source),
-                Err(_) => (config_tunnel.unwrap_or_default(), launch_env::Source::Config),
-            };
+                Err(_) => (o.tunnel.unwrap_or_default(), launch_env::Source::Config),
+            },
+            // An unreadable config.json refuses the start; report it as the source.
+            Err(_) => ("invalid".to_string(), launch_env::Source::Config),
+        };
         serde_json::json!({
             "port": port,
             "token": token,
@@ -2162,8 +2164,8 @@ fn poll_for_daemon(port: u16, attempts: u32, interval: std::time::Duration) -> P
 /// never run with the ServerManager mutex held (tray handlers lock it on the main
 /// thread). Every route that could spawn calls this BEFORE it locks, and never
 /// starts a server of its own when it returns anything but `NotInstalled`.
-fn wait_for_service(service_installed: bool) -> tray_state::ServiceWait {
-    tray_state::wait_for_installed_service(service_installed, || {
+fn wait_for_service(service: tray_state::ServiceDetection) -> tray_state::ServiceWait {
+    tray_state::wait_for_installed_service(&service, || {
         poll_for_daemon_within(config::load_port(), tray_state::SERVICE_WAIT_BUDGET)
     })
 }
@@ -2186,16 +2188,18 @@ fn poll_for_daemon_within(port: u16, budget: std::time::Duration) -> PortState {
     )
 }
 
-/// A user Start/Restart found the port free with a chroxy service installed:
-/// adopt the service once it answers, otherwise say why nothing was started.
-fn await_installed_service(app: &tauri::AppHandle, title: &str) {
-    match wait_for_service(true) {
+/// A user Start/Restart found the port free with a chroxy service installed (or
+/// not ruled out): adopt the service once it answers, otherwise say why nothing
+/// was started. `proceed` runs only if the service turned out to be gone by the
+/// time the wait began (it was removed in between).
+fn await_installed_service(app: &tauri::AppHandle, title: &str, proceed: impl FnOnce()) {
+    match wait_for_service(tray_state::chroxy_service_detection()) {
         tray_state::ServiceWait::Adopt(port) => adopt_external_daemon(app, port),
         tray_state::ServiceWait::Refuse(last, msg) => {
             update_port_state(app, last);
             send_notification(app, title, &msg);
         }
-        tray_state::ServiceWait::NotInstalled => {}
+        tray_state::ServiceWait::NotInstalled => proceed(),
     }
 }
 
@@ -2239,7 +2243,7 @@ fn handle_start_checked(app: &tauri::AppHandle) {
                         update_port_state(&app, held);
                         send_notification(&app, "Cannot Start Server", &msg);
                     },
-                    || await_installed_service(&app, "Cannot Start Server"),
+                    || await_installed_service(&app, "Cannot Start Server", || handle_start(&app, StartOrigin::User)),
                     || handle_start(&app, StartOrigin::User),
                 );
             },
@@ -2264,7 +2268,7 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
     // #8890: with a chroxy service installed the launch-time start never spawns
     // into the service's restart gap. The wait happens here, before any lock.
     if origin == StartOrigin::Launch {
-        match wait_for_service(tray_state::chroxy_service_installed()) {
+        match wait_for_service(tray_state::chroxy_service_detection()) {
             tray_state::ServiceWait::NotInstalled => {}
             tray_state::ServiceWait::Adopt(port) => return adopt_external_daemon(app, port),
             tray_state::ServiceWait::Refuse(_, msg) => {
@@ -2292,14 +2296,20 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
         })
         .unwrap_or_else(|| ("quick".to_string(), None, false));
 
-    // Validate cloudflared for tunnel modes
-    if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
-        send_notification(
-            app,
-            "Tunnel Unavailable",
-            &format!("cloudflared not found. Install with: {}", cloudflared_install_hint()),
-        );
-        // Fall back to local-only mode for this start
+    // Validate cloudflared for tunnel modes. The notice depends on who chose the
+    // tunnel: the app's local-only fallback applies only when config.json is
+    // silent (#8890). An unreadable config.json refuses the start with its own
+    // error, so no notice here.
+    if !ServerManager::check_cloudflared() {
+        let config_tunnel = config::load_launch_overrides().ok().and_then(|o| o.tunnel);
+        if let Some(notice) = launch_env::cloudflared_missing_notice(
+            config_tunnel.as_deref(),
+            &tunnel_mode,
+            cloudflared_install_hint(),
+        ) {
+            send_notification(app, "Tunnel Unavailable", &notice);
+        }
+        // Without a config.json tunnel: fall back to local-only mode for this start
     }
 
     let state = app.state::<Mutex<ServerManager>>();
@@ -2350,7 +2360,26 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                     match status {
                         ServerStatus::Stopped => return, // User stopped
                         ServerStatus::Error(_) if pending => {
-                            // Crash detected — attempt auto-restart
+                            // Crash detected. #8890: with a chroxy service installed
+                            // (or not ruled out) the app never spawns a replacement
+                            // into its restart gap. Retire the old monitor and drop
+                            // the dead child NOW, at the moment the crash is
+                            // accepted and before any backoff, so nothing stale can
+                            // act on the port while the service takes it. Only if
+                            // the crash is still pending under the lock, so a user
+                            // Start/Restart that already recovered the server is not
+                            // undone.
+                            let service = tray_state::chroxy_service_detection();
+                            if service.blocks_spawn() {
+                                let state = app_handle.state::<Mutex<ServerManager>>();
+                                let mut mgr = lock_or_recover(&state);
+                                if mgr.is_auto_restart_pending()
+                                    && matches!(mgr.status(), ServerStatus::Error(_))
+                                {
+                                    mgr.release_for_service();
+                                }
+                            }
+
                             update_menu_state(&app_handle, MenuState::Restarting);
                             send_notification(
                                 &app_handle,
@@ -2374,25 +2403,8 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                             // Wait backoff delay
                             std::thread::sleep(backoff);
 
-                            // #8890: with a chroxy service installed the app never
-                            // spawns a replacement into the service's restart gap.
                             // Wait for the service BEFORE any lock is taken.
-                            let service_installed = tray_state::chroxy_service_installed();
-                            if service_installed {
-                                // Retire the old health monitor and forget the dead
-                                // child NOW, before the wait: the service answering
-                                // the monitor's probes must not flip the status to
-                                // Running, and no child handle may be left for a
-                                // later stop() to reap tunnels with.
-                                let state = app_handle.state::<Mutex<ServerManager>>();
-                                let mut mgr = lock_or_recover(&state);
-                                if mgr.is_auto_restart_pending()
-                                    && matches!(mgr.status(), ServerStatus::Error(_))
-                                {
-                                    mgr.release_for_service();
-                                }
-                            }
-                            match wait_for_service(service_installed) {
+                            match wait_for_service(service) {
                                 tray_state::ServiceWait::NotInstalled => {}
                                 outcome => {
                                     let still_crashed = {
@@ -2577,7 +2589,7 @@ fn handle_restart(app: &tauri::AppHandle) {
                         update_port_state(&app, held);
                         send_notification(&app, "Cannot Restart Server", &msg);
                     },
-                    || await_installed_service(&app, "Cannot Restart Server"),
+                    || await_installed_service(&app, "Cannot Restart Server", || restart_own_server(&app)),
                     || restart_own_server(&app),
                 );
             },
@@ -2586,17 +2598,20 @@ fn handle_restart(app: &tauri::AppHandle) {
 }
 
 fn restart_own_server(app: &tauri::AppHandle) {
-    // #8890: with a chroxy service installed, a Restart of the app's own server
-    // must not respawn into the port it just freed: the service could not bind
-    // while the app held it. End the owned server under the lock, release the
-    // lock, then wait for the service and adopt it or say why not.
-    if tray_state::chroxy_service_installed() {
+    // #8890: with a chroxy service installed (or not ruled out), a Restart of the
+    // app's own server must not respawn into the port it just freed: the service
+    // could not bind while the app held it. The plan, not a bare condition, picks
+    // the branch (`tray_state::restart_plan`, a table-tested pure function).
+    let service = tray_state::chroxy_service_detection();
+    if tray_state::restart_plan(&service) == tray_state::RestartPlan::HandOffToService {
+        // End the owned server under the lock, release the lock, then wait for the
+        // service and adopt it or say why not.
         {
             let state = app.state::<Mutex<ServerManager>>();
             lock_or_recover(&state).stop_for_service_handoff();
         }
         update_menu_state(app, MenuState::Stopped);
-        match wait_for_service(true) {
+        match wait_for_service(service) {
             tray_state::ServiceWait::Adopt(port) => adopt_external_daemon(app, port),
             tray_state::ServiceWait::Refuse(last, msg) => {
                 update_port_state(app, last);

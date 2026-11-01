@@ -879,7 +879,7 @@ export function installService(config) {
   })
 
   if (plat === 'win32') {
-    return installWindowsService(config, paths)
+    return installWindowsService(config, paths, reinstall)
   }
 
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
@@ -894,6 +894,10 @@ export function installService(config) {
     nodePath: config.nodePath,
     claudeBin: config.claudeBin,
   })
+
+  // What exists before this attempt writes anything: rollback removes only what
+  // this attempt created (#8890).
+  const preexisting = snapshotExisting([servicePath, wrapperPath])
 
   // Write the wrapper that resolves keychain secrets at spawn time (#5491).
   const wrapperContent = (config._generateWrapper || generateServiceWrapper)({
@@ -967,7 +971,7 @@ export function installService(config) {
       exec('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
     }
     } catch (err) {
-      rollbackFreshInstall(hadState, [servicePath, wrapperPath])
+      rollbackFreshInstall({ hadState, reinstall, preexisting }, [servicePath, wrapperPath])
       throw err
     }
   }
@@ -986,20 +990,32 @@ export function installService(config) {
   }, stateDir)
 }
 
+/** The subset of `paths` that exist right now. */
+function snapshotExisting(paths) {
+  return new Set(paths.filter((p) => p && existsSync(p)))
+}
+
 /**
  * Undo the files a FAILED first install left behind (#8890). The service
  * definition and wrapper are written before the service manager is asked to
  * register them, and service.json only after; so a registration that throws left
  * files that look like an install (and made the desktop app wait for a service
  * that does not exist) with no service.json for `service uninstall` to work from.
- * Only when this was a first install: on a forced reinstall the previous
- * registration is still live and still needs its files.
+ *
+ * Removes only what THIS attempt created, and never on a reinstall: a recognised
+ * existing install (`reinstall`, which `assertReinstallAllowed` also grants from a
+ * definition or wrapper with no service.json) may still be registered and needs
+ * every file it had.
+ *
+ * @param {{ hadState: boolean, reinstall: boolean, preexisting: Set<string> }} guard
+ * @param {string[]} paths
  */
-function rollbackFreshInstall(hadState, paths) {
-  if (hadState) return
+function rollbackFreshInstall({ hadState, reinstall, preexisting }, paths) {
+  if (hadState || reinstall) return
   for (const p of paths) {
+    if (!p || preexisting.has(p)) continue
     try {
-      if (p && existsSync(p)) unlinkSync(p)
+      if (existsSync(p)) unlinkSync(p)
     } catch {
       // best effort: the original registration error is the one to report
     }
@@ -1033,7 +1049,7 @@ function rollbackFreshInstall(hadState, paths) {
  * @param {object} paths - getServicePaths('win32') result.
  * @returns {{ installed: true, platform: 'win32', taskName: string, wrapperPath: string }}
  */
-function installWindowsService(config, paths) {
+function installWindowsService(config, paths, reinstall = false) {
   const stateDir = config._stateDir || defaultConfigDir()
   const logDir = config._logDir || paths.logDir
   const wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME)
@@ -1041,6 +1057,7 @@ function installWindowsService(config, paths) {
   const exec = config._exec || execFileSync
   const cwd = config.cwd || homedir()
   const hadState = !!loadServiceState(stateDir)
+  const preexisting = snapshotExisting([wrapperPath])
 
   if (!existsSync(logDir)) {
     mkdirSync(logDir, { recursive: true })
@@ -1074,7 +1091,7 @@ function installWindowsService(config, paths) {
       // generic "Command failed" and drops the real reason. Surface schtasks'
       // stderr, and — since creating an ONLOGON task requires elevation, so a
       // non-elevated install fails with "Access is denied." — add the fix (#6647).
-      rollbackFreshInstall(hadState, [wrapperPath])
+      rollbackFreshInstall({ hadState, reinstall, preexisting }, [wrapperPath])
       const detail = String(err?.stderr || '').trim()
       const denied = /access is denied/i.test(detail)
       throw new Error(
