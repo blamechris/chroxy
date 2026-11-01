@@ -37,8 +37,12 @@ npm run check  -w packages/desktop   # cargo check (Rust type-check, no build)
   `chroxy service install` has set up a launchd job (`com.chroxy.server`), systemd
   user unit (`chroxy.service`) or Windows task, the app never spawns its own server
   into that service's restart gap: a launch-time start, crash auto-restart or
-  Start/Restart with the port free waits up to 30 s for the service, adopts it once
-  it answers, and otherwise refuses with a message to run `chroxy service start`.
+  Start/Restart (including a Restart of the app's own server) with the port free waits
+  up to 30 s (a real deadline) for the service, adopts it once it answers, and
+  otherwise refuses with a message to run `chroxy service start` (or `chroxy service
+  uninstall` if it is no longer registered). "Installed" means `chroxy service
+  install` completed (`service.json` plus the definition file), not a leftover file.
+  A `tunnel` in `config.json` that is not `quick`, `named` or `none` refuses the start.
   With no service installed the app starts its own server as before.
 - Signing/notarization and release wiring live in `docs/release-signing.md`.
 

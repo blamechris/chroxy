@@ -864,6 +864,7 @@ export function installService(config) {
   // #7161: refuse to silently re-point an existing service at the invoking tree.
   // Runs before anything is written so a refusal leaves the install untouched.
   const stateDirForGuard = config._stateDir || defaultConfigDir()
+  const hadState = !!loadServiceState(stateDirForGuard)
   const { reinstall } = assertReinstallAllowed({
     chroxyBin: config.chroxyBin,
     force: config.force === true,
@@ -946,8 +947,10 @@ export function installService(config) {
   // Write service file
   writeFileRestricted(servicePath, content)
 
-  // Register with system (unless testing)
+  // Register with system (unless testing). A throw here leaves the definition and
+  // wrapper just written; a first install rolls them back (#8890).
   if (!config._skipRegister) {
+    try {
     if (plat === 'darwin') {
       if (reinstall) {
         // launchd refuses to bootstrap a label that is already loaded; a forced
@@ -963,6 +966,10 @@ export function installService(config) {
       if (reinstall) exec('systemctl', ['--user', 'daemon-reload'])
       exec('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
     }
+    } catch (err) {
+      rollbackFreshInstall(hadState, [servicePath, wrapperPath])
+      throw err
+    }
   }
 
   // Save state
@@ -977,6 +984,26 @@ export function installService(config) {
     cwd: genConfig.cwd,
     startAtLogin: genConfig.startAtLogin,
   }, stateDir)
+}
+
+/**
+ * Undo the files a FAILED first install left behind (#8890). The service
+ * definition and wrapper are written before the service manager is asked to
+ * register them, and service.json only after; so a registration that throws left
+ * files that look like an install (and made the desktop app wait for a service
+ * that does not exist) with no service.json for `service uninstall` to work from.
+ * Only when this was a first install: on a forced reinstall the previous
+ * registration is still live and still needs its files.
+ */
+function rollbackFreshInstall(hadState, paths) {
+  if (hadState) return
+  for (const p of paths) {
+    try {
+      if (p && existsSync(p)) unlinkSync(p)
+    } catch {
+      // best effort: the original registration error is the one to report
+    }
+  }
 }
 
 /**
@@ -1013,6 +1040,7 @@ function installWindowsService(config, paths) {
   const taskName = config._taskName || WINDOWS_TASK_NAME
   const exec = config._exec || execFileSync
   const cwd = config.cwd || homedir()
+  const hadState = !!loadServiceState(stateDir)
 
   if (!existsSync(logDir)) {
     mkdirSync(logDir, { recursive: true })
@@ -1046,6 +1074,7 @@ function installWindowsService(config, paths) {
       // generic "Command failed" and drops the real reason. Surface schtasks'
       // stderr, and — since creating an ONLOGON task requires elevation, so a
       // non-elevated install fails with "Access is denied." — add the fix (#6647).
+      rollbackFreshInstall(hadState, [wrapperPath])
       const detail = String(err?.stderr || '').trim()
       const denied = /access is denied/i.test(detail)
       throw new Error(

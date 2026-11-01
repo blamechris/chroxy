@@ -12,7 +12,12 @@ export { CloudflareTunnelAdapter } from './cloudflare.js'
  *   'cloudflare'       → { mode: 'quick' }
  *   'cloudflare:quick' → { mode: 'quick' }
  *   'cloudflare:named' → { mode: 'named' }
+ *   'cloudflare:none'  → null
  *   'none' / ''        → null
+ *
+ * Fails closed: any other `cloudflare:<mode>` throws. It used to be passed through
+ * as an arbitrary mode, and the adapter treated every mode other than `named` as a
+ * PUBLIC quick tunnel, so a typo (`cloudflare:naemd`) opened one.
  *
  * @param {string} value - Raw --tunnel flag value
  * @returns {{ mode: string } | null}
@@ -28,6 +33,10 @@ export function parseTunnelArg(value) {
     const mode = value.slice('cloudflare:'.length)
     if (!mode) {
       throw new Error(`Invalid tunnel format "${value}". Expected "cloudflare:quick" or "cloudflare:named"`)
+    }
+    if (mode === 'none') return null
+    if (mode !== 'quick' && mode !== 'named') {
+      throw new Error(`Unknown tunnel mode "${mode}" in "${value}". Use: cloudflare:quick, cloudflare:named, or none. Refusing to start a tunnel.`)
     }
     return { mode }
   }

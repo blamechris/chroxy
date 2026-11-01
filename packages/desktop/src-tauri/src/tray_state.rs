@@ -252,7 +252,7 @@ pub fn service_wait_refusal(last: PortState) -> String {
             "A chroxy service is installed, but port {} is held by something that did not prove it is chroxy, so the server was not started. Free the port, or change it in config.json.",
             p
         ),
-        PortState::Free | PortState::Chroxy(_) => "A chroxy service is installed but is not answering on its port. The app will not start a second server, because that would keep the service from starting. Start the service with `chroxy service start`, then try again.".to_string(),
+        PortState::Free | PortState::Chroxy(_) => "A chroxy service is installed but is not answering on its port. The app will not start a second server, because that would keep the service from starting. Start the service with `chroxy service start`, then try again. If the service is no longer registered, run `chroxy service uninstall` to remove it, and the app will start its own server again.".to_string(),
     }
 }
 
@@ -280,8 +280,44 @@ pub fn poll_until_chroxy(
 
 /// How long the app waits for an installed service to take the port: launchd's
 /// default KeepAlive throttle is 10 s between restarts, so 30 s spans a few.
-pub const SERVICE_WAIT_ATTEMPTS: u32 = 30;
+pub const SERVICE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 pub const SERVICE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// The longest one probe of the wait may take; also capped to the time left.
+pub const SERVICE_PROBE_CAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`poll_until_chroxy`] against a real deadline instead of an attempt count: it
+/// gives up once `budget` has elapsed by `elapsed()`, however slow the probes
+/// are. Each probe is told how long it may take (`probe_cap`, and never more than
+/// the time left) and each sleep is capped to the time left, so the total stays
+/// within `budget` plus one probe's own overhead. Always probes at least once.
+/// Returns the verified daemon, or the last state seen.
+pub fn poll_until_chroxy_within(
+    budget: std::time::Duration,
+    interval: std::time::Duration,
+    probe_cap: std::time::Duration,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut probe: impl FnMut(u32, std::time::Duration) -> PortState,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> PortState {
+    let mut last = PortState::Free;
+    let mut attempt = 0u32;
+    loop {
+        let left = budget.saturating_sub(elapsed());
+        if attempt > 0 && left.is_zero() {
+            return last;
+        }
+        last = probe(attempt, left.min(probe_cap));
+        if last.is_external_chroxy() {
+            return last;
+        }
+        attempt += 1;
+        let left = budget.saturating_sub(elapsed());
+        if left.is_zero() {
+            return last;
+        }
+        sleep(interval.min(left));
+    }
+}
 
 /// The result of waiting for the service: the port to adopt, or why not.
 pub fn service_wait_result(last: PortState) -> Result<u16, String> {
@@ -364,18 +400,30 @@ pub fn service_definition_path(
     }
 }
 
-/// Is a chroxy service installed? `exists` is injected so tests read no real
-/// filesystem. An unknown base directory reads as "not installed": the app then
-/// behaves exactly as it did before this check existed.
+/// Where `chroxy service install` records a COMPLETED install: `service.json` in
+/// the config dir. `service.js` writes it only after the service manager accepted
+/// the registration, whereas the definition file (plist, unit, wrapper) is
+/// written BEFORE registration and can outlive a failed install (#8890).
+pub fn service_state_path(config_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    config_dir.map(|d| d.join("service.json"))
+}
+
+/// Is a chroxy service installed? Both the definition file AND the completed-
+/// install record must exist: the definition alone can be debris of a failed
+/// install, and the record alone means the definition was removed by hand.
+/// `exists` is injected so tests read no real filesystem. An unknown base
+/// directory reads as "not installed": the app then behaves exactly as it did
+/// before this check existed.
 pub fn service_installed_with(
     plat: ServicePlatform,
     home: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> bool {
-    service_definition_path(plat, home, config_dir)
-        .map(|p| exists(&p))
-        .unwrap_or(false)
+    match (service_definition_path(plat, home, config_dir), service_state_path(config_dir)) {
+        (Some(def), Some(state)) => exists(&def) && exists(&state),
+        _ => false,
+    }
 }
 
 /// [`service_installed_with`] against the real home, config dir and filesystem.
@@ -997,32 +1045,36 @@ mod tests {
     }
 
     #[test]
-    fn automatic_start_is_unchanged_when_no_service_is_installed() {
-        for held in [PortState::Free, PortState::Chroxy(1), PortState::Foreign(1)] {
-            for own in [false, true] {
-                assert_eq!(
-                    launch_start_decision_with_service(held, own, false),
-                    launch_start_decision(held, own),
-                    "{:?} own={}",
-                    held,
-                    own
-                );
-            }
+    fn automatic_start_decisions_without_a_service_are_this_table() {
+        use LaunchDecision::*;
+        use PortState::*;
+        // (held, holder is own, expected): written out, not derived from the code under test.
+        for (held, own, want) in [
+            (Free, false, Spawn),
+            (Free, true, Spawn),
+            (Chroxy(1), false, Adopt(1)),
+            (Chroxy(1), true, ReclaimOwnOrphan),
+            (Foreign(1), false, Refuse(Foreign(1))),
+            (Foreign(1), true, ReclaimOwnOrphan),
+        ] {
+            assert_eq!(launch_start_decision_with_service(held, own, false), want, "{:?} own={}", held, own);
+            assert_eq!(launch_start_decision(held, own), want, "{:?} own={}", held, own);
         }
     }
 
     #[test]
-    fn the_service_flag_changes_only_the_free_port_cell() {
-        for held in [PortState::Chroxy(1), PortState::Foreign(1)] {
-            for own in [false, true] {
-                assert_eq!(
-                    launch_start_decision_with_service(held, own, true),
-                    launch_start_decision(held, own),
-                    "{:?} own={}",
-                    held,
-                    own
-                );
-            }
+    fn automatic_start_decisions_with_a_service_differ_only_on_a_free_port() {
+        use LaunchDecision::*;
+        use PortState::*;
+        for (held, own, want) in [
+            (Free, false, AwaitService),
+            (Free, true, AwaitService),
+            (Chroxy(1), false, Adopt(1)),
+            (Chroxy(1), true, ReclaimOwnOrphan),
+            (Foreign(1), false, Refuse(Foreign(1))),
+            (Foreign(1), true, ReclaimOwnOrphan),
+        ] {
+            assert_eq!(launch_start_decision_with_service(held, own, true), want, "{:?} own={}", held, own);
         }
     }
 
@@ -1035,22 +1087,34 @@ mod tests {
     }
 
     #[test]
-    fn a_user_start_is_unchanged_without_a_service_or_with_the_app_server_active() {
-        for held in [PortState::Free, PortState::Chroxy(1), PortState::Foreign(1)] {
-            for active in [false, true] {
-                assert_eq!(
-                    user_start_decision_with_service(active, held, false),
-                    user_start_decision(active, held)
-                );
-            }
+    fn user_start_decisions_are_this_table() {
+        use PortState::*;
+        use UserStartDecision::*;
+        // (app server active, held, service installed, expected)
+        for (active, held, service, want) in [
+            (false, Free, false, Proceed),
+            (false, Free, true, AwaitService),
+            (false, Chroxy(1), false, Refuse(Chroxy(1))),
+            (false, Chroxy(1), true, Refuse(Chroxy(1))),
+            (false, Foreign(1), false, Refuse(Foreign(1))),
+            (false, Foreign(1), true, Refuse(Foreign(1))),
+            // The app's own server is active: its restart is the caller's to route.
+            (true, Free, false, Proceed),
+            (true, Free, true, Proceed),
+            (true, Chroxy(1), false, Proceed),
+            (true, Foreign(1), true, Proceed),
+        ] {
+            assert_eq!(
+                user_start_decision_with_service(active, held, service),
+                want,
+                "active={} {:?} service={}",
+                active,
+                held,
+                service
+            );
         }
-        // The app's own server is active: its restart is legitimate.
-        assert_eq!(user_start_decision_with_service(true, PortState::Free, true), UserStartDecision::Proceed);
-        // A held port is refused exactly as before; nothing is awaited.
-        assert_eq!(
-            user_start_decision_with_service(false, PortState::Chroxy(7), true),
-            UserStartDecision::Refuse(PortState::Chroxy(7))
-        );
+        assert_eq!(user_start_decision(false, Free), Proceed);
+        assert_eq!(user_start_decision(false, Foreign(1)), Refuse(Foreign(1)));
     }
 
     #[test]
@@ -1101,6 +1165,92 @@ mod tests {
         assert_eq!(poll_until_chroxy(0, |_| panic!("no attempts"), || {}), PortState::Free);
     }
 
+    /// A fake clock the probe and the sleep both advance.
+    struct Clock(std::cell::Cell<std::time::Duration>);
+    impl Clock {
+        fn now(&self) -> std::time::Duration { self.0.get() }
+        fn advance(&self, d: std::time::Duration) { self.0.set(self.0.get() + d) }
+    }
+
+    #[test]
+    fn the_service_wait_stops_at_its_deadline_even_when_every_probe_stalls() {
+        use std::time::Duration as D;
+        // The review's case: a holder that accepts connections and never answers,
+        // so every probe uses its whole timeout. 30 attempts x (2 s + 1 s) would be
+        // ~89 s; a deadline keeps it to the budget.
+        let clock = Clock(std::cell::Cell::new(D::ZERO));
+        let mut probes = 0;
+        let got = poll_until_chroxy_within(
+            D::from_secs(30),
+            D::from_secs(1),
+            D::from_secs(2),
+            || clock.now(),
+            |_, timeout| {
+                probes += 1;
+                assert!(timeout <= D::from_secs(2), "a probe is capped");
+                clock.advance(timeout); // stalls for everything it is given
+                PortState::Foreign(9)
+            },
+            |d| clock.advance(d),
+        );
+        assert_eq!(got, PortState::Foreign(9));
+        assert!(clock.now() <= D::from_secs(30), "took {:?}", clock.now());
+        assert!(probes >= 10 && probes < 30, "{}", probes);
+    }
+
+    #[test]
+    fn the_service_wait_caps_the_last_probe_and_sleep_to_the_time_left() {
+        use std::time::Duration as D;
+        let clock = Clock(std::cell::Cell::new(D::ZERO));
+        let mut timeouts = Vec::new();
+        poll_until_chroxy_within(
+            D::from_millis(2500),
+            D::from_secs(1),
+            D::from_secs(2),
+            || clock.now(),
+            |_, t| { timeouts.push(t); clock.advance(t); PortState::Free },
+            |d| { assert!(d <= D::from_secs(1)); clock.advance(d) },
+        );
+        assert!(timeouts.iter().all(|t| *t <= D::from_secs(2)));
+        assert!(clock.now() <= D::from_millis(2500), "{:?}", clock.now());
+    }
+
+    #[test]
+    fn the_last_probe_is_told_only_the_time_that_is_left() {
+        use std::time::Duration as D;
+        // Cycles of 4 s + 1 s with a 28 s budget: the probe at t=25 may take 3 s,
+        // not its 4 s cap. A probe that was not capped to the time left would end
+        // at t=29, past the budget.
+        let clock = Clock(std::cell::Cell::new(D::ZERO));
+        let mut told = Vec::new();
+        poll_until_chroxy_within(
+            D::from_secs(28), D::from_secs(1), D::from_secs(4),
+            || clock.now(),
+            |_, t| { told.push(t); clock.advance(t); PortState::Foreign(1) },
+            |d| clock.advance(d),
+        );
+        assert_eq!(told.last(), Some(&D::from_secs(3)));
+        assert!(clock.now() <= D::from_secs(28), "{:?}", clock.now());
+    }
+
+    #[test]
+    fn the_service_wait_returns_the_moment_the_daemon_answers_and_probes_at_least_once() {
+        use std::time::Duration as D;
+        let clock = Clock(std::cell::Cell::new(D::ZERO));
+        let mut n = 0;
+        let got = poll_until_chroxy_within(
+            D::from_secs(30), D::from_secs(1), D::from_secs(2),
+            || clock.now(),
+            |_, _| { n += 1; if n == 3 { PortState::Chroxy(7) } else { PortState::Free } },
+            |d| clock.advance(d),
+        );
+        assert_eq!((got, n), (PortState::Chroxy(7), 3));
+        // A zero budget still probes once.
+        let mut probes = 0;
+        poll_until_chroxy_within(D::ZERO, D::from_secs(1), D::from_secs(2), || D::ZERO, |_, _| { probes += 1; PortState::Free }, |_| {});
+        assert_eq!(probes, 1);
+    }
+
     #[test]
     fn waiting_for_the_service_adopts_a_daemon_and_otherwise_refuses_without_offering_a_spawn() {
         assert_eq!(service_wait_result(PortState::Chroxy(8765)), Ok(8765));
@@ -1149,18 +1299,27 @@ mod tests {
     }
 
     #[test]
-    fn service_installed_reads_only_the_injected_paths() {
+    fn service_installed_needs_the_definition_and_the_completed_install_record() {
         use std::path::Path;
         let home = Some(Path::new("/h"));
-        let present = |p: &Path| p == Path::new("/h/Library/LaunchAgents/com.chroxy.server.plist");
-        assert!(service_installed_with(ServicePlatform::Macos, home, None, present));
-        assert!(!service_installed_with(ServicePlatform::Macos, home, None, |_| false));
-        // Another platform's file does not count, and an unknown home is "not installed".
-        assert!(!service_installed_with(ServicePlatform::Linux, home, None, present));
-        assert!(!service_installed_with(ServicePlatform::Macos, None, None, |_| true));
+        let cfg = Some(Path::new("/c"));
+        let plist = Path::new("/h/Library/LaunchAgents/com.chroxy.server.plist");
+        let state = Path::new("/c/service.json");
+        let both = |p: &Path| p == plist || p == state;
+        assert!(service_installed_with(ServicePlatform::Macos, home, cfg, both));
+        // Debris of a failed install: the definition without service.json.
+        assert!(!service_installed_with(ServicePlatform::Macos, home, cfg, |p| p == plist));
+        // The record without the definition: removed by hand.
+        assert!(!service_installed_with(ServicePlatform::Macos, home, cfg, |p| p == state));
+        // Windows: the wrapper alone (written before the task is registered) is not an install.
+        let wrapper = Path::new("/c/service-wrapper.cmd");
+        assert!(!service_installed_with(ServicePlatform::Windows, home, cfg, |p| p == wrapper));
+        assert!(service_installed_with(ServicePlatform::Windows, home, cfg, |p| p == wrapper || p == state));
+        // Another platform's file does not count, and an unknown dir is "not installed".
+        assert!(!service_installed_with(ServicePlatform::Linux, home, cfg, both));
+        assert!(!service_installed_with(ServicePlatform::Macos, None, cfg, |_| true));
+        assert!(!service_installed_with(ServicePlatform::Macos, home, None, |_| true));
     }
-
-    // --- Start/Restart exclusion (#8393) ----------------------------------
 
     #[test]
     fn a_second_operation_is_refused_while_the_first_runs() {

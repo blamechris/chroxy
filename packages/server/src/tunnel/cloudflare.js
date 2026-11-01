@@ -166,6 +166,11 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
   }
 
   async _startTunnel() {
+    // Fail closed: only the two known modes start a tunnel. Anything else used to
+    // fall through to a PUBLIC quick tunnel.
+    if (this.mode !== 'quick' && this.mode !== 'named') {
+      throw new Error(`Unsupported tunnel mode "${this.mode}"; refusing to start a tunnel (expected "quick" or "named")`)
+    }
     // #6858: gate the binary before either start path spawns it.
     this._verifyCloudflaredProvenance()
     if (this.mode === 'named') {

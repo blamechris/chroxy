@@ -538,6 +538,18 @@ describe('CloudflareTunnelAdapter', () => {
 // #5356 (visibility layer): quick-tunnel startup emits one public-exposure
 // warning. The tunnel logger writes warn-level lines via console.warn, so the
 // warning is captured there (same pattern as tunnel-check-logging.test.js).
+describe('an unsupported tunnel mode fails closed', () => {
+  it('start() refuses and never spawns cloudflared (it used to open a public quick tunnel)', async () => {
+    let spawned = 0
+    const mockSpawn = () => { spawned++; return createMockProcess() }
+    for (const mode of ['naemd', 'none', '', 'Quick']) {
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mode, mockSpawn })
+      await assert.rejects(() => tunnel.start(), /Unsupported tunnel mode|refusing to start/i, `mode=${JSON.stringify(mode)}`)
+    }
+    assert.equal(spawned, 0)
+  })
+})
+
 describe('quick-tunnel public exposure warning (#5356)', () => {
   afterEach(() => {
     mock.restoreAll()

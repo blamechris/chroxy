@@ -56,27 +56,50 @@ fn configured(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
-/// Tunnel mode: a non-empty `config.json` `tunnel` wins; otherwise the app's
-/// mode is handed to the server through `CHROXY_TUNNEL` as before.
-pub fn resolve_tunnel(config_tunnel: Option<&str>, app_mode: &str) -> Resolution {
-    match configured(config_tunnel) {
-        Some(c) => Resolution {
-            effective: c.to_string(),
-            source: Source::Config,
-            env: EnvAction::Clear,
-            conflict: (c != app_mode).then(|| {
+/// The tunnel modes the server accepts, as it spells them (`parseTunnelArg` in
+/// `packages/server/src/tunnel/index.js`), each with its canonical form. The
+/// server is exact: no trimming, no case folding. Anything else it rejects.
+fn canonical_tunnel_mode(value: &str) -> Option<&'static str> {
+    match value {
+        "quick" | "cloudflare" | "cloudflare:quick" => Some("quick"),
+        "named" | "cloudflare:named" => Some("named"),
+        "none" | "cloudflare:none" => Some("none"),
+        _ => None,
+    }
+}
+
+/// Tunnel mode: a `config.json` `tunnel` that is a recognised mode wins;
+/// otherwise (unset or empty) the app's mode is handed to the server through
+/// `CHROXY_TUNNEL` as before. A config value that is NOT a recognised mode is an
+/// error: the start is refused rather than silently replaced by the app's value
+/// (which could be a public quick tunnel) or passed on to the server.
+pub fn resolve_tunnel(config_tunnel: Option<&str>, app_mode: &str) -> Result<Resolution, String> {
+    match config_tunnel.filter(|v| !v.is_empty()) {
+        Some(raw) => {
+            let c = canonical_tunnel_mode(raw).ok_or_else(|| {
                 format!(
-                    "[tray] config.json sets tunnel={}; the app's tunnel mode ({}) is not applied",
-                    c, app_mode
+                    "config.json sets tunnel=\"{}\", which is not a recognised tunnel mode (use quick, named or none), so the server was not started. Fix \"tunnel\" in config.json.",
+                    raw
                 )
-            }),
-        },
-        None => Resolution {
+            })?;
+            Ok(Resolution {
+                effective: c.to_string(),
+                source: Source::Config,
+                env: EnvAction::Clear,
+                conflict: (c != app_mode).then(|| {
+                    format!(
+                        "[tray] config.json sets tunnel={}; the app's tunnel mode ({}) is not applied",
+                        c, app_mode
+                    )
+                }),
+            })
+        }
+        None => Ok(Resolution {
             effective: app_mode.to_string(),
             source: Source::App,
             env: EnvAction::Set(app_mode.to_string()),
             conflict: None,
-        },
+        }),
     }
 }
 
@@ -123,9 +146,13 @@ pub fn resolve_host(config_host: Option<&str>, expose_on_lan: bool) -> Resolutio
 mod tests {
     use super::*;
 
+    fn tunnel(cfg: Option<&str>, app: &str) -> Resolution {
+        resolve_tunnel(cfg, app).expect("a recognised or unset tunnel resolves")
+    }
+
     #[test]
     fn config_tunnel_wins_and_the_env_is_cleared() {
-        let r = resolve_tunnel(Some("named"), "quick");
+        let r = tunnel(Some("named"), "quick");
         assert_eq!(r.effective, "named");
         assert_eq!(r.source, Source::Config);
         assert_eq!(r.env, EnvAction::Clear, "CHROXY_TUNNEL must not shadow config.json");
@@ -135,21 +162,47 @@ mod tests {
 
     #[test]
     fn config_none_beats_an_app_quick_tunnel() {
-        let r = resolve_tunnel(Some("none"), "quick");
+        let r = tunnel(Some("none"), "quick");
         assert_eq!((r.effective.as_str(), r.source, r.env), ("none", Source::Config, EnvAction::Clear));
     }
 
     #[test]
+    fn every_accepted_spelling_resolves_to_its_canonical_mode() {
+        for (cfg, want) in [
+            ("quick", "quick"),
+            ("cloudflare", "quick"),
+            ("cloudflare:quick", "quick"),
+            ("named", "named"),
+            ("cloudflare:named", "named"),
+            ("none", "none"),
+            ("cloudflare:none", "none"),
+        ] {
+            assert_eq!(tunnel(Some(cfg), "quick").effective, want, "{}", cfg);
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_config_tunnel_is_an_error_not_a_fallback() {
+        // Neither the app's value (here a public quick tunnel) nor the raw string
+        // may be used; the message names the bad value.
+        for bad in ["cloudflare:naemd", "cloudflare:", "ngrok", "Named", " named", "   ", "quick "] {
+            let err = resolve_tunnel(Some(bad), "quick").unwrap_err();
+            assert!(err.contains(&format!("tunnel=\"{}\"", bad)) && err.contains("config.json"), "{:?}: {}", bad, err);
+        }
+    }
+
+    #[test]
     fn matching_config_tunnel_is_not_a_conflict() {
-        let r = resolve_tunnel(Some("quick"), "quick");
+        let r = tunnel(Some("quick"), "quick");
         assert_eq!(r.source, Source::Config);
         assert_eq!(r.conflict, None);
+        assert_eq!(tunnel(Some("cloudflare:quick"), "quick").conflict, None);
     }
 
     #[test]
     fn unset_config_tunnel_keeps_the_app_behaviour() {
-        for blank in [None, Some(""), Some("   ")] {
-            let r = resolve_tunnel(blank, "quick");
+        for blank in [None, Some("")] {
+            let r = tunnel(blank, "quick");
             assert_eq!(r.effective, "quick");
             assert_eq!(r.source, Source::App);
             assert_eq!(r.env, EnvAction::Set("quick".into()), "{:?}", blank);

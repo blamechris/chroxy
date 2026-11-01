@@ -41,6 +41,31 @@ fn fn_body(src: &str, name: &str) -> String {
     squash(&rest[..end])
 }
 
+/// The top-level, whitespace-squashed arguments of the call that `src` starts at.
+fn call_args(src: &str) -> Vec<String> {
+    let call = balanced_call(src);
+    let open = call.find('(').expect("a call");
+    let inner = &call[open + 1..call.len() - 1];
+    let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
+    for c in inner.chars() {
+        match c {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(squash(&cur));
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        out.push(squash(&cur));
+    }
+    out
+}
+
 /// `src` starts at a call's name; returns it through its matching `)`.
 fn balanced_call(src: &str) -> String {
     let mut depth = 0usize;
@@ -423,14 +448,25 @@ fn the_service_wait_runs_before_any_lock_and_never_under_one() {
     // Crash auto-restart: after the backoff sleep, a wait with no lock before it,
     // and all of it before the restart that takes the lock.
     let sleep = body.find("std::thread::sleep(backoff)").expect("backoff sleep");
-    let crash_wait = body[sleep..].find("wait_for_service(").map(|i| i + sleep).expect("the crash restart must wait for a service");
-    assert!(!body[sleep..crash_wait].contains("lock_or_recover("), "no lock may be taken before the crash-restart wait");
+    let crash_wait = body[sleep..]
+        .find("wait_for_service(service_installed)")
+        .map(|i| i + sleep)
+        .expect("the crash restart must wait for a service");
+    // The one lock before the wait is the brief one that retires the old monitor,
+    // and it is closed (more `}` than `{`) before the wait begins.
+    let between = &body[sleep..crash_wait];
+    assert!(between.matches("lock_or_recover(").count() == 1, "only the brief release lock may precede the crash-restart wait");
+    let release = between.find("mgr.release_for_service()").expect("the release lock");
+    let after = &between[release..];
+    assert!(after.matches('}').count() > after.matches('{').count(), "the release lock must be dropped before the wait");
     let restart = body.find("mgr.try_auto_restart(").expect("the crash restart");
     assert!(crash_wait < restart, "the crash-restart wait must precede try_auto_restart");
 
     // The wait is one implementation, shared with the user path.
     assert!(fn_body(&lib, "await_installed_service").contains("wait_for_service(true)"));
-    assert!(fn_body(&lib, "wait_for_service").contains("poll_for_daemon("));
+    assert!(fn_body(&lib, "wait_for_service").contains("poll_for_daemon_within("));
+    let within = fn_body(&lib, "poll_for_daemon_within");
+    assert!(within.contains("poll_until_chroxy_within(") && within.contains("tray_state::probe_port(port, timeout)"), "the deadline poll must challenge through probe_port with the capped timeout");
 }
 
 #[test]
@@ -447,4 +483,48 @@ fn the_under_lock_backstop_probes_once_and_cannot_sleep() {
     let real = slice("    fn probe_service_daemon(&self, port: u16) -> PortState {\n        tray_state", "\n    }\n");
     assert!(real.contains("tray_state::probe_port("), "the real probe challenges through probe_port");
     assert!(!real.contains("sleep") && !real.contains("poll_until_chroxy") && !real.contains("SERVICE_WAIT"), "the real probe must not wait");
+}
+
+const DETECTOR: &str = "tray_state::chroxy_service_installed()";
+
+#[test]
+fn the_detector_itself_is_what_reaches_every_decision() {
+    // Spelling is not enough: `{ let _ = chroxy_service_installed(); false }` names
+    // the detector and still passes a constant. The argument must BE the call.
+    let lib = read("src/lib.rs");
+    for name in ["handle_start_checked", "handle_restart"] {
+        let body = lib[lib.find(&format!("\nfn {}(", name)).expect("fn")..].to_string();
+        let at = body.find("run_guarded_user_start_with_service(").expect("the guarded start");
+        let args = call_args(&body[at..]);
+        assert_eq!(args.get(2).map(String::as_str), Some(DETECTOR), "{}: the service argument must be the detector's result: {:?}", name, args);
+    }
+    // Every wait for a service: the argument is the detector, or `true` where the
+    // caller has already established that a service is installed.
+    let mut checked = 0;
+    for (i, _) in lib.match_indices("wait_for_service(") {
+        if lib[..i].ends_with("fn ") {
+            continue;
+        }
+        let args = call_args(&lib[i..]);
+        let ok = args.len() == 1 && (args[0] == DETECTOR || args[0] == "true" || args[0] == "service_installed");
+        assert!(ok, "wait_for_service must be given the detector's result: {:?}", args);
+        checked += 1;
+    }
+    assert!(checked >= 4, "expected the launch, crash, restart and user paths, saw {}", checked);
+    // `service_installed` may only be a binding of the detector.
+    assert!(lib.contains("let service_installed = tray_state::chroxy_service_installed();"));
+    // Restart of the app's own server asks the detector before it respawns.
+    let restart = fn_body(&lib, "restart_own_server");
+    assert!(restart.find(DETECTOR).unwrap() < restart.find("mgr.restart(StartOrigin::User)").unwrap());
+    assert!(restart.contains("stop_for_service_handoff()"));
+}
+
+#[test]
+fn the_crash_restart_retires_the_old_monitor_before_waiting() {
+    let lib = read("src/lib.rs");
+    let body = fn_body(&lib, "handle_start");
+    let sleep = body.find("std::thread::sleep(backoff)").unwrap();
+    let release = body[sleep..].find("mgr.release_for_service()").map(|i| i + sleep).expect("release before the wait");
+    let wait = body[sleep..].find("wait_for_service(service_installed)").map(|i| i + sleep).unwrap();
+    assert!(release < wait, "the monitor must be retired before the wait begins");
 }

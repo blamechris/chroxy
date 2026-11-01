@@ -391,6 +391,15 @@ fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Resul
     match origin {
         StartOrigin::User => {
             if !ops.is_held(port) {
+                // #8890: a free port with a service installed is the service's, not
+                // ours to spawn into (a Start that raced an install, or a restart of
+                // the app's own server). Backstop only, like Launch: one probe, then
+                // adopt or refuse. Its tunnel is not reaped either: cloudflared on
+                // this port may be the service's.
+                if ops.service_installed() {
+                    return tray_state::service_wait_result(ops.probe_service_daemon(port))
+                        .map(PortPrep::Adopt);
+                }
                 ops.kill_tunnels(port);
             }
             Ok(PortPrep::Ready)
@@ -554,11 +563,15 @@ impl ServerManager {
     /// apply only where it is silent. #5356 — with no `host` in config the
     /// embedded server is pinned to loopback unless the user opted into LAN
     /// exposure.
-    fn launch_resolutions(&self) -> (launch_env::Resolution, launch_env::Resolution) {
-        (
-            launch_env::resolve_tunnel(self.config.tunnel.as_deref(), &self.tunnel_mode),
+    ///
+    /// `Err` when `config.json`'s `tunnel` is not a recognised mode: the start is
+    /// refused (the server would reject it, and the app must not substitute its
+    /// own, possibly public, mode).
+    fn launch_resolutions(&self) -> Result<(launch_env::Resolution, launch_env::Resolution), String> {
+        Ok((
+            launch_env::resolve_tunnel(self.config.tunnel.as_deref(), &self.tunnel_mode)?,
             launch_env::resolve_host(self.config.host.as_deref(), self.expose_on_lan),
-        )
+        ))
     }
 
     /// Set a custom Node binary path from settings.
@@ -1026,6 +1039,9 @@ impl ServerManager {
 
         // Reload config each start
         self.config = config::load_config();
+        // Refuse a config.json tunnel the server would not accept, before the
+        // port is settled (nothing is adopted, reaped or spawned for it).
+        self.launch_resolutions()?;
 
         // Resolve Node 22 path.
         // If a custom path was set but no longer exists on disk, clear it
@@ -1072,6 +1088,8 @@ impl ServerManager {
     /// Spawn `<node_path> <cli_js> start --no-supervisor`, record its pid and start
     /// health polling. The port has already been settled.
     fn spawn_server(&mut self, node_path: &Path, cli_js: &Path) -> Result<StartOutcome, String> {
+        // Before anything is touched: a bad config value refuses the start.
+        let (tunnel, host) = self.launch_resolutions()?;
         *lock_or_recover(&self.status) = ServerStatus::Starting;
 
         // Build command
@@ -1127,7 +1145,6 @@ impl ServerManager {
         // variable is cleared so the server keeps its 0.0.0.0 default. The
         // control socket drives a billed claude PTY and takes a token over the
         // wire, which is why loopback is the default.
-        let (tunnel, host) = self.launch_resolutions();
         apply_env_action(&mut cmd, "CHROXY_TUNNEL", &tunnel.env);
         apply_env_action(&mut cmd, "CHROXY_HOST", &host.env);
         for conflict in [&tunnel.conflict, &host.conflict].into_iter().flatten() {
@@ -1346,9 +1363,29 @@ impl ServerManager {
         }
     }
 
+    /// Hand the port over to an installed chroxy service (#8890): retire the
+    /// health monitor (its generation is advanced, so a late successful probe, such
+    /// as the service's own answer, can no longer write `Running`), and end and
+    /// forget the owned child and its pid record. Unlike [`Self::stop`] this does
+    /// NOT reap cloudflared: the tunnel on this port may be the service's. Does not
+    /// change the status; callers decide it.
+    pub fn release_for_service(&mut self) {
+        self.kill_child();
+    }
+
     /// A crash restart found an installed chroxy service serving the port and the
-    /// app adopted it (#8890): nothing of ours is left to restart.
+    /// app adopted it (#8890): nothing of ours is left to restart or monitor.
     pub fn adopt_service_after_crash(&mut self) {
+        self.release_for_service();
+        *lock_or_recover(&self.status) = ServerStatus::Stopped;
+        self.auto_restart_pending.store(false, Ordering::Relaxed);
+    }
+
+    /// A user Restart of the app's own server with a service installed: end the
+    /// owned server and stay stopped, with no restart pending. The caller then
+    /// waits for the service with the manager lock released.
+    pub fn stop_for_service_handoff(&mut self) {
+        self.release_for_service();
         *lock_or_recover(&self.status) = ServerStatus::Stopped;
         self.auto_restart_pending.store(false, Ordering::Relaxed);
     }
@@ -1737,6 +1774,82 @@ mod tests {
                 seen
             );
         }
+    }
+
+    #[test]
+    fn a_user_start_with_a_service_and_a_free_port_never_spawns_or_reaps() {
+        // The Start that raced an install, and the restart of the app's own server.
+        let rec = Rec::new(PortState::Free, &[]).with_service(PortState::Chroxy(8765));
+        assert_eq!(prepare_port_with(StartOrigin::User, 8765, &rec), Ok(PortPrep::Adopt(8765)));
+        assert_eq!(rec.log(), vec!["is_held".to_string(), "probe_service_daemon".to_string()]);
+        for after in [PortState::Free, PortState::Foreign(8765)] {
+            let rec = Rec::new(PortState::Free, &[]).with_service(after);
+            let err = prepare_port_with(StartOrigin::User, 8765, &rec).unwrap_err();
+            assert!(err.contains("chroxy service"), "{}", err);
+            assert!(!rec.log().iter().any(|l| l == "kill_tunnels" || l.starts_with("terminate")), "{:?}", rec.log());
+        }
+    }
+
+    #[test]
+    fn a_user_start_without_a_service_is_unchanged_on_a_free_port() {
+        let rec = Rec::new(PortState::Free, &[]);
+        assert_eq!(prepare_port_with(StartOrigin::User, 8765, &rec), Ok(PortPrep::Ready));
+        assert_eq!(rec.log(), vec!["is_held".to_string(), "kill_tunnels".to_string()]);
+    }
+
+    /// A probe whose answer the test flips, standing in for the service taking
+    /// the port over after the app's server crashed.
+    fn switchable_probe(mode: std::sync::Arc<std::sync::atomic::AtomicU8>) -> Arc<dyn Fn(u16) -> PortState + Send + Sync> {
+        // 1 = nothing answers; anything else = a chroxy daemon answers.
+        Arc::new(move |port| match mode.load(Ordering::SeqCst) {
+            1 => PortState::Free,
+            _ => PortState::Chroxy(port),
+        })
+    }
+
+    #[test]
+    fn a_late_health_answer_after_the_handoff_cannot_resurrect_the_old_server() {
+        // The app's server runs, crashes (monitor flags Error + pending), and the
+        // installed service then takes the port and ANSWERS the monitor's probes.
+        // Once the manager has released for the service, that answer must not
+        // write `Running` (it did: the monitor kept going after flagging the crash).
+        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mut mgr = polling_manager(8765);
+        mgr.start_health_poll_with(switchable_probe(mode.clone()));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        mode.store(1, Ordering::SeqCst); // crash: nothing answers
+        assert!(wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12), "{:?}", mgr.status());
+        assert!(mgr.is_auto_restart_pending());
+
+        mgr.release_for_service(); // the app hands over to the service
+        mode.store(2, Ordering::SeqCst); // the service answers
+        // Longer than one monitor interval (5 s): at least one more probe runs.
+        assert!(
+            !wait_for(&mgr, |s| *s == ServerStatus::Running, 7),
+            "a late answer resurrected the old server: {:?}",
+            mgr.status()
+        );
+        mgr.adopt_service_after_crash();
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn releasing_for_the_service_forgets_the_child_and_its_pid_record_without_reaping_tunnels() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), &script), Ok(StartOutcome::Spawned));
+        let gen = mgr.health_generation.load(Ordering::SeqCst);
+        mgr.stop_for_service_handoff();
+        assert!(mgr.child.is_none(), "no owned child is retained");
+        assert_eq!(owned_server::read_pid(&path), None);
+        assert!(mgr.health_generation.load(Ordering::SeqCst) > gen, "the monitor is retired");
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+        assert!(!mgr.is_auto_restart_pending());
+        // With no child, a later stop() has no tunnel cleanup to run.
+        assert!(mgr.child.is_none());
     }
 
     #[test]
@@ -2233,7 +2346,7 @@ mod tests {
     // in which case the var is cleared and the server keeps its 0.0.0.0 default.
 
     fn host_env(mgr: &ServerManager) -> EnvAction {
-        mgr.launch_resolutions().1.env
+        mgr.launch_resolutions().unwrap().1.env
     }
 
     #[test]
@@ -2266,7 +2379,7 @@ mod tests {
         mgr.set_expose_on_lan(true);
         mgr.config.tunnel = Some("named".into());
         mgr.config.host = Some("127.0.0.1".into());
-        let (tunnel, host) = mgr.launch_resolutions();
+        let (tunnel, host) = mgr.launch_resolutions().unwrap();
         assert_eq!((tunnel.effective.as_str(), tunnel.env), ("named", EnvAction::Clear));
         assert_eq!((host.effective.as_str(), host.env), ("127.0.0.1", EnvAction::Clear));
     }
@@ -2275,9 +2388,21 @@ mod tests {
     fn unset_config_leaves_the_app_tunnel_and_host_unchanged() {
         let mut mgr = ServerManager::new();
         mgr.set_tunnel_mode("quick");
-        let (tunnel, host) = mgr.launch_resolutions();
+        let (tunnel, host) = mgr.launch_resolutions().unwrap();
         assert_eq!(tunnel.env, EnvAction::Set("quick".into()));
         assert_eq!(host.env, EnvAction::Set("127.0.0.1".into()));
+    }
+
+    #[test]
+    fn a_bad_config_tunnel_refuses_the_spawn_and_runs_nothing() {
+        let mut mgr = ServerManager::new();
+        mgr.set_tunnel_mode("quick");
+        mgr.config.tunnel = Some("cloudflare:naemd".into());
+        let err = mgr.launch_resolutions().unwrap_err();
+        assert!(err.contains("cloudflare:naemd"), "{}", err);
+        // `/bin/sh` would run and succeed if the spawn were reached.
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), Path::new("/nonexistent")), Err(err));
+        assert_eq!(mgr.status(), ServerStatus::Stopped, "nothing was started");
     }
 
     #[test]
