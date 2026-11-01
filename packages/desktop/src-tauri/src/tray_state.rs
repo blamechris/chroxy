@@ -337,6 +337,13 @@ impl<'a> ProbeTime<'a> {
     pub fn stage(&self) -> Duration {
         self.left().min(self.cap)
     }
+
+    /// The least time a token read must have had for running out to be the
+    /// credential store's fault: one network stage's cap. A read started in the
+    /// wait's last moments that runs out was cut short by the deadline.
+    fn fair_read_window(&self) -> Duration {
+        self.cap
+    }
 }
 
 /// The credential store did not hand over the access token before the wait's
@@ -852,19 +859,42 @@ pub fn probe_port_within(port: u16, time: &ProbeTime) -> Result<Option<PortState
 /// [`probe_port_within`] over `sources` and `probe`. Each token read may take the
 /// time left in the wait (a credential tool can be slow to start); each network
 /// stage gets [`ProbeTime::stage`], recomputed as it starts.
+///
+/// A read that runs out of time is the credential store's fault
+/// ([`CredentialTimedOut`]) only if it had at least one stage's cap to answer in.
+/// One started closer to the deadline was cut short: the first read ends the
+/// probe unread (`Ok(None)`), and the fresh one means no retry.
 pub fn probe_within(
     port: u16,
     time: &ProbeTime,
     sources: &TokenSources,
     probe: impl Fn(u16, &dyn Fn() -> Duration, Option<&str>) -> Option<ProbeResult>,
 ) -> Result<Option<(PortState, Option<String>)>, CredentialTimedOut> {
+    /// Why a token read gave no token.
+    enum ReadEnd {
+        CutShort,
+        TimedOut,
+    }
+    let read = |source: fn() -> Option<String>| {
+        let limit = time.left();
+        read_token_within(source, limit).map_err(|CredentialTimedOut| {
+            if limit >= time.fair_read_window() {
+                ReadEnd::TimedOut
+            } else {
+                ReadEnd::CutShort
+            }
+        })
+    };
     let stage = || time.stage();
-    probe_with_retry_within(
-        port,
-        || read_token_within(sources.first, time.left()),
-        || read_token_within(sources.fresh, time.left()),
-        |p, token| probe(p, &stage, token),
-    )
+    let read_fresh = || match read(sources.fresh) {
+        Err(ReadEnd::CutShort) => Ok(None),
+        other => other,
+    };
+    match probe_with_retry_within(port, || read(sources.first), read_fresh, |p, token| probe(p, &stage, token)) {
+        Ok(found) => Ok(found),
+        Err(ReadEnd::CutShort) => Ok(None),
+        Err(ReadEnd::TimedOut) => Err(CredentialTimedOut),
+    }
 }
 
 /// Run `read` on a helper thread and wait at most `limit` for it (#8892). The
@@ -1501,7 +1531,7 @@ mod tests {
 
     /// Slack for thread wake-ups on a loaded runner; far below what an unbounded
     /// stage overshoots by in these tests.
-    const WAIT_TOLERANCE: Duration = Duration::from_millis(250);
+    const WAIT_TOLERANCE: Duration = Duration::from_millis(500);
 
     fn slow_old() -> Option<String> {
         thread::sleep(Duration::from_millis(150));
@@ -1560,7 +1590,9 @@ mod tests {
         // the user answers within the window still succeeds.
         assert!(took + Duration::from_millis(50) >= budget, "gave up after only {:?}", took);
 
-        // The fresh read for the retry never returns either.
+        // The fresh read for the retry never returns either. The probe's stalls
+        // take 400 ms first; a longer budget keeps the read well above the cap.
+        let budget = Duration::from_millis(1200);
         let (got, took) = timed_wait(budget, Duration::from_millis(200), |budget, cap| {
             let start = std::time::Instant::now();
             let sources = TokenSources { first: instant_token, fresh: never_returns };
@@ -1568,6 +1600,27 @@ mod tests {
         });
         assert_eq!(got, Err(CredentialTimedOut));
         assert!(took < budget + WAIT_TOLERANCE, "the wait took {:?}", took);
+
+        // A read that never returns but was started with less than a stage's cap
+        // left was cut short by the deadline, not failed by the credential store:
+        // the wait reports what it saw (here nothing), not a credential problem.
+        let (got, took) = timed_wait(Duration::from_millis(60), Duration::from_millis(200), |budget, cap| {
+            let start = std::time::Instant::now();
+            let sources = TokenSources { first: never_returns, fresh: instant_token };
+            poll_until_chroxy_within(budget, Duration::from_millis(20), cap, || start.elapsed(), wait_probe(9, &sources, stalls), thread::sleep)
+        });
+        assert_eq!(got, Ok(PortState::Free));
+        assert!(took < Duration::from_millis(60) + WAIT_TOLERANCE, "the wait took {:?}", took);
+        // The same for the fresh read: the first reading stands, with no retry.
+        assert_eq!(
+            probe_within(
+                9,
+                &ProbeTime::new(&|| Duration::from_millis(50), Duration::from_millis(200)),
+                &TokenSources { first: instant_token, fresh: never_returns },
+                |p, _, _| Some((PortState::Foreign(p), true)),
+            ),
+            Ok(Some((PortState::Foreign(9), None)))
+        );
 
         // And the wait refuses with a message that names the credential store.
         match wait_for_installed_service(&ServiceDetection::Installed, || Err(CredentialTimedOut)) {

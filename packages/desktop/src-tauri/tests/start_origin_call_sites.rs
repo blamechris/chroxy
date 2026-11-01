@@ -472,7 +472,9 @@ fn the_service_wait_runs_before_any_lock_and_never_under_one() {
     let tray = squash(&read("src/tray_state.rs"));
     assert!(
         tray.contains("probe_within(port, time, &REAL_TOKEN_SOURCES, probe_port_outcome_within)")
-            && tray.contains("|| read_token_within(sources.first, time.left()), || read_token_within(sources.fresh, time.left()),"),
+            && tray.contains("let limit = time.left(); read_token_within(source, limit)")
+            && tray.contains("probe_with_retry_within(port, || read(sources.first), read_fresh,")
+            && tray.contains("let read_fresh = || match read(sources.fresh) {"),
         "the service-wait probe must read the real token sources, each bounded by the time left"
     );
 }
