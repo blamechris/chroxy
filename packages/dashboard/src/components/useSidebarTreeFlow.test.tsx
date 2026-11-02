@@ -13,9 +13,10 @@ class FakeResizeObserver {
   observed: Element[] = []
   disconnected = false
   constructor(public cb: ResizeObserverCallback) { FakeResizeObserver.instances.push(this) }
-  observe(el: Element) { this.observed.push(el) }
+  observe(el: Element) { this.disconnected = false; this.observed.push(el) }
   unobserve() {}
-  disconnect() { this.disconnected = true }
+  // Like the real one: disconnect drops every target; observe starts again.
+  disconnect() { this.disconnected = true; this.observed = [] }
   fire() { this.cb([], this as unknown as ResizeObserver) }
 }
 
@@ -30,10 +31,10 @@ function stubGeometry() {
   Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get() { return id(this) === 'tree' ? geo.treeHeight : 0 } })
 }
 
-function Harness() {
+function Harness({ mounted = true }: { mounted?: boolean }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const treeRef = useRef<HTMLDivElement>(null)
-  const flow = useSidebarTreeFlow(scrollRef, treeRef)
+  const flow = useSidebarTreeFlow(scrollRef, treeRef, mounted)
   return (
     <div ref={scrollRef} data-testid="col">
       <div>other</div>
@@ -104,6 +105,32 @@ describe('useSidebarTreeFlow', () => {
     vi.stubGlobal('ResizeObserver', undefined)
     const view = render(<Harness />)
     expect(view.getByTestId('tree').className).toBe('flow') // the one-shot evaluation ran
+  })
+
+  it('uses the floor-adjusted rule, not the raw scrollHeight (a naive rule would flow here)', () => {
+    // client 1000, scroll 1504, tree 700: need = 1504 - 700 + 96 = 900 <= 1000.
+    // The raw scrollHeight (1504) would say flow although the others fit.
+    const { tree } = setup({ clientHeight: 1000, scrollHeight: 1504, treeHeight: 700 })
+    expect(tree.className).toBe('boxed')
+  })
+
+  it('observes a child added after mount (sections mount and unmount)', async () => {
+    const { view } = setup({ clientHeight: 400, scrollHeight: 900, treeHeight: 96 })
+    const col = view.getByTestId('col')
+    const extra = document.createElement('div')
+    await act(async () => { col.appendChild(extra); await Promise.resolve() })
+    const observed = FakeResizeObserver.instances.flatMap(o => (o.disconnected ? [] : o.observed))
+    expect(observed.includes(extra)).toBe(true)
+  })
+
+  it('re-runs when `mounted` flips', () => {
+    geo = { clientHeight: 400, scrollHeight: 900, treeHeight: 96 }
+    stubGeometry()
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    const view = render(<Harness mounted={false} />)
+    const before = FakeResizeObserver.instances.length
+    view.rerender(<Harness mounted />)
+    expect(FakeResizeObserver.instances.length).toBe(before + 1)
   })
 
   it('stays boxed when the column has no height (not laid out)', () => {

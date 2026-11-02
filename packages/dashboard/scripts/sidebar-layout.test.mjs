@@ -70,6 +70,26 @@ async function measure(page, archived) {
   })
 }
 
+// A measured value that is missing (null) or NaN must fail, not satisfy a
+// comparison: `null <= n` is true and `Math.abs(null)` is 0.
+const num = (v, what) => { assert.ok(typeof v === 'number' && Number.isFinite(v), `${what} was not measured (${v})`); return v }
+
+function assertFlowing(m) {
+  assert.ok(m.col.scrollHeight > m.col.clientHeight + 1, `the column scrolls on a short window (${m.col.scrollHeight} vs ${m.col.clientHeight})`)
+  assert.ok(m.tree.scrollHeight <= m.tree.clientHeight + 1, `the tree has no content hidden behind its own scroll (scrollHeight ${m.tree.scrollHeight} > clientHeight ${m.tree.clientHeight})`)
+  assert.ok(m.tree.overflowY !== 'auto' && m.tree.overflowY !== 'scroll', `the tree's overflow-y is ${m.tree.overflowY}, a nested scroller`)
+  assert.ok(num(m.pickerBottom, 'the server list bottom') <= num(m.endColBottom, 'the column bottom') + 1, `the server list is reachable at the end of the column (bottom ${m.pickerBottom} vs ${m.endColBottom})`)
+}
+
+function assertBoxed(m) {
+  assert.ok(m.col.scrollHeight <= m.col.clientHeight + 1, `the column must not overflow on a tall window (${m.col.scrollHeight} vs ${m.col.clientHeight})`)
+  assert.ok(m.tree.scrollHeight > m.tree.clientHeight + 1, `the list is longer than the tree box, so it scrolls inside it (${m.tree.scrollHeight} vs ${m.tree.clientHeight})`)
+  assert.ok(m.tree.overflowY === 'auto', `the tree keeps its own scroller (overflow-y ${m.tree.overflowY})`)
+  assert.ok(m.slot !== null && num(m.slot.bottom, 'the panel slot bottom') <= num(m.colRect.bottom, 'the column bottom') + 1 && num(m.slot.top, 'the panel slot top') >= num(m.colRect.top, 'the column top'), `the panel slot is visible inside the column without scrolling (${JSON.stringify(m.slot)} vs ${JSON.stringify(m.colRect)})`)
+  assert.ok(num(m.pickerBottom, 'the server list bottom') <= m.colRect.bottom + 1, `the server list is visible without scrolling (bottom ${m.pickerBottom} vs column ${m.colRect.bottom})`)
+  assert.ok(Math.abs(num(m.treeBottomGap, 'the gap under the tree')) <= 1, `the tree's bottom touches the next section (gap ${m.treeBottomGap})`)
+}
+
 describe('sidebar project tree layout (#8888)', () => {
   before(async () => {
     vite = await createServer({
@@ -122,21 +142,33 @@ describe('sidebar project tree layout (#8888)', () => {
     }))
 
     if (mode === 'flow') {
-      test(`${name}: the tree is not a scroller nested in the column scroller, and every section is reachable`, () => withPage(m => {
-        assert.ok(m.col.scrollHeight > m.col.clientHeight + 1, `the column scrolls on a short window (${m.col.scrollHeight} vs ${m.col.clientHeight})`)
-        assert.ok(m.tree.scrollHeight <= m.tree.clientHeight + 1, `the tree has no content hidden behind its own scroll (scrollHeight ${m.tree.scrollHeight} > clientHeight ${m.tree.clientHeight})`)
-        assert.ok(m.tree.overflowY !== 'auto' && m.tree.overflowY !== 'scroll', `the tree's overflow-y is ${m.tree.overflowY}, a nested scroller`)
-        assert.ok(m.pickerBottom <= m.endColBottom + 1, `the server list is reachable at the end of the column (bottom ${m.pickerBottom} vs ${m.endColBottom})`)
-      }))
+      test(`${name}: the tree is not a scroller nested in the column scroller, and every section is reachable`, () => withPage(assertFlowing))
     } else {
-      test(`${name}: the tree fills the free space, scrolls inside, and the panel slot stays visible`, () => withPage(m => {
-        assert.ok(m.col.scrollHeight <= m.col.clientHeight + 1, `the column must not overflow on a tall window (${m.col.scrollHeight} vs ${m.col.clientHeight})`)
-        assert.ok(m.tree.scrollHeight > m.tree.clientHeight + 1, `the list is longer than the tree box, so it scrolls inside it (${m.tree.scrollHeight} vs ${m.tree.clientHeight})`)
-        assert.ok(m.tree.overflowY === 'auto', `the tree keeps its own scroller (overflow-y ${m.tree.overflowY})`)
-        assert.ok(m.slot !== null && m.slot.bottom <= m.colRect.bottom + 1 && m.slot.top >= m.colRect.top, `the panel slot is visible inside the column without scrolling (${JSON.stringify(m.slot)} vs ${JSON.stringify(m.colRect)})`)
-        assert.ok(m.pickerBottom <= m.colRect.bottom + 1, `the server list is visible without scrolling (bottom ${m.pickerBottom} vs column ${m.colRect.bottom})`)
-        assert.ok(Math.abs(m.treeBottomGap) <= 1, `the tree's bottom touches the next section (gap ${m.treeBottomGap})`)
-      }))
+      test(`${name}: the tree fills the free space, scrolls inside, and the panel slot stays visible`, () => withPage(assertBoxed))
     }
   }
+
+  // #8888: a window that grows from short to tall (and back) must leave flow
+  // mode and re-enter it on the SAME page, with no reload: a mode that sticks
+  // is invisible to the one-shot cases above.
+  test('resizing 640 -> 1200 -> 640 on one page returns to boxed and back to flow, stable each time', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 640 } })
+    try {
+      page.setDefaultTimeout(10000)
+      await page.goto(base)
+      const short = await measure(page, 'collapsed')
+      assert.deepEqual(short.modes, ['flow'], `starts flowing at 640 (saw ${short.modes.join(',')})`)
+      assertFlowing(short)
+      await page.setViewportSize({ width: 1280, height: 1200 })
+      const tall = await measure(page, 'collapsed')
+      assert.deepEqual(tall.modes, ['boxed'], `returns to boxed at 1200 (saw ${tall.modes.join(',')})`)
+      assertBoxed(tall)
+      await page.setViewportSize({ width: 1280, height: 640 })
+      const again = await measure(page, 'collapsed')
+      assert.deepEqual(again.modes, ['flow'], `flows again back at 640 (saw ${again.modes.join(',')})`)
+      assertFlowing(again)
+    } finally {
+      await page.close()
+    }
+  })
 })
