@@ -584,6 +584,36 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #8236: trigger phrase 'show-settings-bar' re-announces the session
+        // WITHOUT a terminal. SessionScreen renders the SettingsBar only for a
+        // non-terminal CLI session that has models (`!activeSession.hasTerminal`);
+        // the mock session defaults to hasTerminal: true (see sendPostAuthBurst),
+        // so the bar — and the expanded-bar composer-above-keyboard case — is
+        // otherwise unreachable. Used by chat-composer-above-keyboard.yaml.
+        if (text.trim() === 'show-settings-bar') {
+          secureSend(ws, {
+            type: 'session_list',
+            sessions: [{
+              sessionId: 'mock-sess-1',
+              name: 'Mock Session',
+              cwd: '/tmp/mock-project',
+              type: 'cli',
+              hasTerminal: false,
+              model: 'sonnet',
+              permissionMode: 'approve',
+              isBusy: false,
+              createdAt: Date.now(),
+              conversationId: null,
+              provider: 'claude-sdk',
+              capabilities: {},
+            }],
+          })
+          // The app marks the session busy when it sends input; a trigger has no
+          // reply, so release it or the composer stays in its streaming layout.
+          secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
         // #4701: trigger phrase 'simulate-disconnect' abruptly tears
         // down the WebSocket from the server side after a 1s delay so
         // the Maestro `reconnect.yaml` flow can exercise the
@@ -1335,9 +1365,14 @@ function sendPostAuthBurst(ws, sendFn) {
   })
   sendFn(ws, {
     type: 'available_models',
+    // #8236: the roster is keyed by the provider it describes (#7728); without
+    // this tag it lands under no provider and the SettingsBar never gets chips.
+    provider: 'claude-sdk',
     models: [
-      { id: 'sonnet', name: 'Sonnet', description: 'Fast and capable' },
-      { id: 'opus', name: 'Opus', description: 'Most capable' },
+      // The client keeps only entries with non-empty id + label + fullId
+      // (handleAvailableModels); `name` is not part of the wire shape.
+      { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-mock', description: 'Fast and capable' },
+      { id: 'opus', label: 'Opus', fullId: 'claude-opus-mock', description: 'Most capable' },
     ],
   })
   sendFn(ws, {
