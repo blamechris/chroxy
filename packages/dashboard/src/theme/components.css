@@ -899,6 +899,14 @@ a.dev-preview-chip__link:focus-visible {
   padding: 0 0 8px;
 }
 
+/* #8888 — when the column overflows (useSidebarTreeFlow), the boxed tree would
+   be a 96px scroller nested in the column scroller. Flowing, it takes its
+   content height and the column is the only scroller. */
+.sidebar-tree.sidebar-tree--flow {
+  flex: 1 0 auto;
+  overflow-y: visible;
+}
+
 /* Conversation search */
 .conversation-search {
   padding: 0 8px 8px;

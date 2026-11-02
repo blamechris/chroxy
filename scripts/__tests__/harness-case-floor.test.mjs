@@ -180,6 +180,9 @@ const EXCLUDED_HARNESSES = [
   // node:test as well (#8618): the Dashboard Smoke job runs it by name and
   // checks its TAP summary with assert-test-count.mjs (minimum 15 browser cases).
   'packages/dashboard/scripts/header-layout.test.mjs',
+  // node:test too (#8888): Dashboard Smoke runs it by name and checks its TAP
+  // summary with assert-test-count.mjs (minimum 11 browser cases).
+  'packages/dashboard/scripts/sidebar-layout.test.mjs',
   // Uses node:test, not hand-rolled verdict counters. Dashboard Smoke checks
   // its TAP summary with assert-test-count.mjs (minimum 15 browser cases).
   'packages/dashboard/scripts/tool-layout.test.mjs',

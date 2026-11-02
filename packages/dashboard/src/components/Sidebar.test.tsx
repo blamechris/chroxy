@@ -919,6 +919,25 @@ describe('Sidebar — short window: one scroll column, footer pinned (#8886)', (
     expect(px(getComputedStyle(tree).minHeight) >= 96).toBe(true)
   })
 
+  // #8888 — when the column overflows, the tree flows with it instead of being
+  // a 96px scroller nested inside it. The class is toggled by useSidebarTreeFlow
+  // (see its test); here the stylesheet must make that class mean "content
+  // height, no own scroller" while the default stays boxed.
+  it('the tree is boxed by default and the flow modifier gives it content height with no own scroller', () => {
+    const { container } = renderSidebar()
+    const tree = container.querySelector('.sidebar-tree') as HTMLElement
+    const boxed = getComputedStyle(tree)
+    expect(boxed.overflowY).toBe('auto')
+    expect(boxed.flex).toBe('1 1 0%')
+    tree.classList.add('sidebar-tree--flow')
+    const flowing = getComputedStyle(tree)
+    expect(flowing.overflowY).toBe('visible')
+    expect(flowing.flexGrow).toBe('1')
+    expect(flowing.flexShrink).toBe('0')
+    expect(flowing.flexBasis).toBe('auto')
+    expect(px(flowing.minHeight) >= 96).toBe(true)
+  })
+
   it('the sidebar itself still clips, so the column is the only thing that scrolls', () => {
     renderSidebar()
     // jsdom does not expand the `overflow` shorthand into overflow-y.

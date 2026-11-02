@@ -16,6 +16,7 @@ import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } fr
 import { SidebarArchivedSection } from './SidebarArchivedSection'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
 import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
+import { useSidebarTreeFlow } from './useSidebarTreeFlow'
 import type { SearchResult, ConnectedClient, MonthlyBudgetState } from '../store/types'
 import {
   persistSidebarPanelHeight,
@@ -234,6 +235,9 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
   const treeRef = useRef<HTMLDivElement>(null)
+  // #8888 — the tree flows with the scroll column when the column overflows.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const treeFlows = useSidebarTreeFlow(scrollRef, treeRef, isOpen)
 
   // #7330 — inline rename of a repo group header. `repoRenameDoneRef` marks the
   // edit as already finished (Enter/Escape) so the blur that follows the input
@@ -883,7 +887,7 @@ export function Sidebar({
               list, so a short window scrolls it instead of clipping the server
               list and footer under the sidebar's overflow:hidden. The filter,
               search and footer stay pinned outside it. */}
-          <div className="sidebar-scroll" data-testid="sidebar-scroll">
+          <div className="sidebar-scroll" data-testid="sidebar-scroll" ref={scrollRef}>
             {/* #5183 — Projects/explorer header. Surfaces the daemon Running
                 state (reusing the same `serverStatus` signal the footer uses)
                 at the top of the left explorer where the user looks first,
@@ -911,7 +915,7 @@ export function Sidebar({
             </div>
 
             {/* Repo tree */}
-            <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
+            <div className={treeFlows ? 'sidebar-tree sidebar-tree--flow' : 'sidebar-tree'} role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
               {filteredRepos.map(repo => {
                 const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
                 const repoDragOver = dragOverRepo?.path === repo.path ? dragOverRepo.position : null
