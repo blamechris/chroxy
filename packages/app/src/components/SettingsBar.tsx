@@ -472,7 +472,7 @@ export function SettingsBar({
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}
+      <TouchableOpacity testID="settings-bar-toggle" onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}
         accessibilityHint={displayTarget ? `Model target: ${displayTarget}` : undefined}>
         <View
           style={[styles.statusDot, { backgroundColor: isIdle ? COLORS.accentGreen : COLORS.accentOrange }]}

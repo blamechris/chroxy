@@ -1,0 +1,65 @@
+appId: com.blamechris.chroxy
+name: Composer stays above the keyboard with the settings bar expanded (#8236)
+---
+
+# #8236 — with the settings bar expanded and/or the system text size at an
+# accessibility size, the chrome above the chat used to grow until the
+# composer was pushed behind the keyboard. The decisive observable: tapping
+# Send with the keyboard up actually SENDS. A send button hidden behind the
+# keyboard cannot be hit (the tap lands on a key), so the sent bubble never
+# shows up and this flow fails.
+#
+# Default size:
+#   maestro test .maestro/chat-composer-above-keyboard.yaml
+# At an accessibility size (cold launch — a live size switch fakes clipping):
+#   xcrun simctl ui <udid> content_size accessibility-extra-large
+#   xcrun simctl terminate <udid> com.blamechris.chroxy
+#   maestro test .maestro/chat-composer-above-keyboard.yaml
+#   xcrun simctl ui <udid> content_size large     # reset afterwards
+#
+# The sent-bubble assertion needs the chat to have some room. That holds up to
+# accessibility-extra-large; at the largest sizes the pinned navigation alone
+# leaves the chat ~0pt above the composer, so verify those by reading the
+# composer's bounds against the keyboard top (maestro hierarchy) instead.
+
+- runFlow: setup/ensure-session-screen.yaml
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# The mock session has a terminal, which hides the SettingsBar. This trigger
+# re-announces it without one (mock-server.mjs 'show-settings-bar').
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-settings-bar"
+- tapOn:
+    id: "chat-send-button"
+
+# Expand the settings bar with the keyboard still up (the chrome region keeps
+# banner/bar taps working while it is open: keyboardShouldPersistTaps).
+- extendedWaitUntil:
+    visible:
+      id: "settings-bar-toggle"
+    timeout: 5000
+- tapOn:
+    id: "settings-bar-toggle"
+- waitForAnimationToEnd
+
+# Composer is still focused; type the real message.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "Composer above keyboard"
+- takeScreenshot: composer-above-keyboard
+
+# The decisive tap: Send must be reachable while the keyboard is up.
+- tapOn:
+    id: "chat-send-button"
+
+# The sent message shows up as a user bubble ("You, <text>"). The typed draft
+# in the composer never carries the "You, " prefix, so this only matches if the
+# tap on Send landed. (The mock's reply is not asserted: at accessibility sizes
+# the bubbles are tall enough to push it out of the accessibility tree.)
+- extendedWaitUntil:
+    visible:
+      text: "You, Composer above keyboard"
+    timeout: 5000

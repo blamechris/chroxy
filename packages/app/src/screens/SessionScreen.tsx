@@ -13,9 +13,11 @@ import {
   Modal,
   Pressable,
   LayoutAnimation,
+  ScrollView,
   ActivityIndicator as RNActivityIndicator,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import { chromeMaxHeight } from '../utils/sessionChromeLayout';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectActiveProviderModels, selectActivePermissionModes, selectPermissionMode, selectContextOccupancy, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
@@ -155,6 +157,7 @@ export function SessionScreen() {
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
+  const [containerHeight, setContainerHeight] = useState(0);
   const layout = useLayout();
   useAndroidSessionNotification();
 
@@ -1351,8 +1354,14 @@ export function SessionScreen() {
     ? keyboardHeight + suggestionBarBuffer
     : Math.max(insets.bottom, 12);
 
+  // #8236 — cap the scrollable chrome region while the keyboard is up
+  const chromeCap = chromeMaxHeight({ containerHeight, keyboardHeight, bottomPadding });
+
   return (
-    <View style={styles.container}>
+    <View
+      style={styles.container}
+      onLayout={(e) => setContainerHeight(e.nativeEvent.layout.height)}
+    >
       {/* Session picker (CLI mode with multi-session support) */}
       {isCliMode && sessions.length > 0 && (
         <View style={styles.sessionPickerRow}>
@@ -1483,451 +1492,460 @@ export function SessionScreen() {
         </View>
       )}
 
-      {/* Secondary tools row (collapsed by default) */}
-      {showMoreTools && (
-        <View style={styles.secondaryToolsRow}>
-          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
-            <Icon name="diff" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.diffButton} onPress={() => setShowCheckpoints(true)} accessibilityRole="button" accessibilityLabel="View checkpoints">
-            <Icon name="clock" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.diffButton} onPress={() => setShowGitView(true)} accessibilityRole="button" accessibilityLabel="Git operations">
-            <Icon name="gitBranch" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          {(viewMode === 'chat' || viewMode === 'system' || (layout.isSplitView && viewMode !== 'files')) && (
-            <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
-              <Icon name="search" size={16} color={COLORS.textMuted} />
+      {/* #8236 — chrome scrolls instead of pushing the composer off-screen. Primary
+          navigation (picker, overview, mode toggle) stays pinned above. */}
+      <ScrollView
+        testID="session-chrome-scroll"
+        style={[styles.chromeScroll, chromeCap !== undefined && { maxHeight: chromeCap }]}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+      >
+        {/* Secondary tools row (collapsed by default) */}
+        {showMoreTools && (
+          <View style={styles.secondaryToolsRow}>
+            <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
+              <Icon name="diff" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
-          )}
-          {(viewMode === 'terminal' || (layout.isSplitView && hasTerminal && viewMode !== 'files')) && (
-            <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
-              <Icon name="export" size={16} color={COLORS.textMuted} />
+            <TouchableOpacity style={styles.diffButton} onPress={() => setShowCheckpoints(true)} accessibilityRole="button" accessibilityLabel="View checkpoints">
+              <Icon name="clock" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
-          )}
-          <TouchableOpacity style={styles.diffButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
-            <Icon name="clock" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.diffButton}
-            onPress={() => setViewMode('system')}
-            accessibilityRole="button"
-            accessibilityLabel="System messages"
-          >
-            <Icon name="terminal" size={16} color={viewMode === 'system' ? COLORS.accentBlue : COLORS.textMuted} />
-            {unreadSystemCount > 0 && (
-              <View style={styles.systemBadge}>
-                <Text style={styles.systemBadgeText}>{unreadSystemCount > 99 ? '99+' : unreadSystemCount}</Text>
-              </View>
+            <TouchableOpacity style={styles.diffButton} onPress={() => setShowGitView(true)} accessibilityRole="button" accessibilityLabel="Git operations">
+              <Icon name="gitBranch" size={16} color={COLORS.textMuted} />
+            </TouchableOpacity>
+            {(viewMode === 'chat' || viewMode === 'system' || (layout.isSplitView && viewMode !== 'files')) && (
+              <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
+                <Icon name="search" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
             )}
-          </TouchableOpacity>
-        </View>
-      )}
+            {(viewMode === 'terminal' || (layout.isSplitView && hasTerminal && viewMode !== 'files')) && (
+              <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
+                <Icon name="export" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.diffButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
+              <Icon name="clock" size={16} color={COLORS.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.diffButton}
+              onPress={() => setViewMode('system')}
+              accessibilityRole="button"
+              accessibilityLabel="System messages"
+            >
+              <Icon name="terminal" size={16} color={viewMode === 'system' ? COLORS.accentBlue : COLORS.textMuted} />
+              {unreadSystemCount > 0 && (
+                <View style={styles.systemBadge}>
+                  <Text style={styles.systemBadgeText}>{unreadSystemCount > 99 ? '99+' : unreadSystemCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
 
-      {/* Search bar */}
-      {searchVisible && (
-        <View style={styles.searchBar}>
-          <TextInput
-            ref={searchInputRef}
-            style={styles.searchInput}
-            placeholder="Search messages..."
-            placeholderTextColor={COLORS.textDim}
-            value={inSessionSearchQuery}
-            onChangeText={setInSessionSearchQuery}
-            returnKeyType="search"
-            autoCapitalize="none"
-            autoCorrect={false}
+        {/* Search bar */}
+        {searchVisible && (
+          <View style={styles.searchBar}>
+            <TextInput
+              ref={searchInputRef}
+              style={styles.searchInput}
+              placeholder="Search messages..."
+              placeholderTextColor={COLORS.textDim}
+              value={inSessionSearchQuery}
+              onChangeText={setInSessionSearchQuery}
+              returnKeyType="search"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {searchMatchArray.length > 0 && (
+              <Text style={styles.searchCount}>
+                {currentMatchIndex + 1}/{searchMatchArray.length}
+              </Text>
+            )}
+            <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Previous match">
+              <Icon name="arrowUp" size={16} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Next match">
+              <Icon name="arrowDown" size={16} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Close search">
+              <Icon name="close" size={16} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
+        {(isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextOccupancy)) && (
+          <SettingsBar
+            expanded={settingsExpanded}
+            onToggle={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setSettingsExpanded((prev) => !prev);
+            }}
+            activeModel={activeModel}
+            defaultModelId={defaultModelId}
+            availableModels={availableModels}
+            permissionMode={permissionMode}
+            availablePermissionModes={availablePermissionModes}
+            lastResultCost={lastResultCost}
+            lastResultDuration={lastResultDuration}
+            sessionCost={sessionCost}
+            cumulativeUsage={cumulativeUsage}
+            costBudget={costBudget}
+            contextOccupancy={contextOccupancy}
+            sessionCwd={sessionCwd}
+            serverMode={serverMode}
+            isIdle={isIdle}
+            activeAgents={activeAgents}
+            interventions={interventions}
+            connectedClients={connectedClients}
+            customAgents={customAgents}
+            mcpServers={mcpServers}
+            onInvokeAgent={handleInvokeAgent}
+            onToggleMcpServer={setMcpServerEnabled}
+            onSubmitMcpAuthCode={submitMcpAuthCode}
+            setModel={setModel}
+            setPermissionMode={setPermissionMode}
+            pendingPermissionConfirm={pendingPermissionConfirm}
+            onConfirmPermissionMode={confirmPermissionMode}
+            onCancelPermissionConfirm={cancelPermissionConfirm}
+            conversationId={conversationId}
+            sessionContext={sessionContext}
+            statusLine={statusLine}
+            latencyMs={latencyMs}
+            connectionQuality={connectionQuality}
+            activePath={activePath}
+            // #5424: provider drives context-window resolution — for providers
+            // that legitimately report no window (ollama) the usage meter shows
+            // the raw token count instead of a percentage against 200k.
+            provider={activeSessionProvider}
+            modelSwitchSupported={providerCaps.modelSwitchSupported}
+            permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
+            codexSandbox={activeSessionCodexSandbox}
+            thinkingLevelEffectiveSupported={providerCaps.thinkingLevelEffectiveSupported}
+            thinkingLevel={activeThinkingLevel}
+            effectiveThinkingLevel={activeEffectiveThinkingLevel}
           />
-          {searchMatchArray.length > 0 && (
-            <Text style={styles.searchCount}>
-              {currentMatchIndex + 1}/{searchMatchArray.length}
-            </Text>
-          )}
-          <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Previous match">
-            <Icon name="arrowUp" size={16} color={COLORS.textSecondary} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Next match">
-            <Icon name="arrowDown" size={16} color={COLORS.textSecondary} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Close search">
-            <Icon name="close" size={16} color={COLORS.textSecondary} />
-          </TouchableOpacity>
-        </View>
-      )}
+        )}
 
-      {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
-      {(isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextOccupancy)) && (
-        <SettingsBar
-          expanded={settingsExpanded}
-          onToggle={() => {
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-            setSettingsExpanded((prev) => !prev);
-          }}
-          activeModel={activeModel}
-          defaultModelId={defaultModelId}
-          availableModels={availableModels}
-          permissionMode={permissionMode}
-          availablePermissionModes={availablePermissionModes}
-          lastResultCost={lastResultCost}
-          lastResultDuration={lastResultDuration}
-          sessionCost={sessionCost}
-          cumulativeUsage={cumulativeUsage}
-          costBudget={costBudget}
-          contextOccupancy={contextOccupancy}
-          sessionCwd={sessionCwd}
-          serverMode={serverMode}
-          isIdle={isIdle}
-          activeAgents={activeAgents}
-          interventions={interventions}
-          connectedClients={connectedClients}
-          customAgents={customAgents}
-          mcpServers={mcpServers}
-          onInvokeAgent={handleInvokeAgent}
-          onToggleMcpServer={setMcpServerEnabled}
-          onSubmitMcpAuthCode={submitMcpAuthCode}
-          setModel={setModel}
-          setPermissionMode={setPermissionMode}
-          pendingPermissionConfirm={pendingPermissionConfirm}
-          onConfirmPermissionMode={confirmPermissionMode}
-          onCancelPermissionConfirm={cancelPermissionConfirm}
-          conversationId={conversationId}
-          sessionContext={sessionContext}
-          statusLine={statusLine}
-          latencyMs={latencyMs}
-          connectionQuality={connectionQuality}
-          activePath={activePath}
-          // #5424: provider drives context-window resolution — for providers
-          // that legitimately report no window (ollama) the usage meter shows
-          // the raw token count instead of a percentage against 200k.
-          provider={activeSessionProvider}
-          modelSwitchSupported={providerCaps.modelSwitchSupported}
-          permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
-          codexSandbox={activeSessionCodexSandbox}
-          thinkingLevelEffectiveSupported={providerCaps.thinkingLevelEffectiveSupported}
-          thinkingLevel={activeThinkingLevel}
-          effectiveThinkingLevel={activeEffectiveThinkingLevel}
-        />
-      )}
-
-      {/* Offline cached session banner */}
-      {viewingCachedSession && (
-        <View style={styles.reconnectingBanner}>
-          <View style={styles.cachedBannerRow}>
-            <Text style={styles.reconnectingText}>Viewing cached history</Text>
-            <View style={styles.cachedBannerActions}>
-              {savedConnection && (
+        {/* Offline cached session banner */}
+        {viewingCachedSession && (
+          <View style={styles.reconnectingBanner}>
+            <View style={styles.cachedBannerRow}>
+              <Text style={styles.reconnectingText}>Viewing cached history</Text>
+              <View style={styles.cachedBannerActions}>
+                {savedConnection && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      exitCachedSession();
+                      // #5518 — re-select LAN vs tunnel for the saved record.
+                      void useConnectionStore.getState().connectAuto(savedConnection);
+                    }}
+                    style={styles.cachedReconnectButton}
+                    accessibilityRole="button"
+                    accessibilityLabel="Reconnect to server"
+                  >
+                    <Text style={styles.cachedReconnectText}>Reconnect</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity
-                  onPress={() => {
-                    exitCachedSession();
-                    // #5518 — re-select LAN vs tunnel for the saved record.
-                    void useConnectionStore.getState().connectAuto(savedConnection);
-                  }}
-                  style={styles.cachedReconnectButton}
+                  onPress={exitCachedSession}
+                  style={styles.cachedBackButton}
                   accessibilityRole="button"
-                  accessibilityLabel="Reconnect to server"
+                  accessibilityLabel="Go back to connect screen"
                 >
-                  <Text style={styles.cachedReconnectText}>Reconnect</Text>
+                  <Text style={styles.cachedBackText}>Back</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+
+        {/* Reconnecting / restarting banner */}
+        {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting' || connectionPhase === 'server_down') && (
+          <View testID="reconnect-banner" style={styles.reconnectingBanner}>
+            <View style={styles.reconnectingRow}>
+              {/* #5725 (#5698) — server_down is terminal: no indefinite spinner. */}
+              {connectionPhase !== 'server_down' && (
+                <RNActivityIndicator
+                  testID="reconnect-spinner"
+                  size="small"
+                  color={COLORS.accentBlue}
+                  style={styles.reconnectingSpinner}
+                />
+              )}
+              <Text style={[styles.reconnectingText, { flex: 1 }]}>
+                {connectionPhase === 'server_down'
+                  ? 'Server appears to be down'
+                  : connectionPhase === 'server_restarting'
+                    ? shutdownReason === 'shutdown'
+                      ? 'Server shut down'
+                      : restartCountdown != null && restartCountdown > 0
+                        ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
+                        : 'Server restarting...'
+                    : connectionRetryCount > 0
+                      ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
+                      : 'Reconnecting...'}
+              </Text>
+              {/* #5725 (#5698) — server_down offers a manual Reconnect (resets the
+                  ladder + re-dials); the live states keep the Disconnect affordance. */}
+              {connectionPhase === 'server_down' ? (
+                <TouchableOpacity testID="server-down-reconnect" onPress={retryConnection} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
+                  <Text style={styles.reconnectDisconnectText}>Reconnect</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity onPress={handleStopReconnecting} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
+                  <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
                 </TouchableOpacity>
               )}
+            </View>
+            {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
+              <Text style={styles.reconnectingDetail}>Graceful restart</Text>
+            )}
+            {connectionPhase === 'server_restarting' && !shutdownReason && (
+              <Text style={styles.reconnectingDetail}>Recovering from crash</Text>
+            )}
+            {connectionPhase === 'reconnecting' && connectionError && (
+              <Text style={styles.reconnectingDetail}>{connectionError}</Text>
+            )}
+            {/* #5699 — surface unsent queued messages so the user knows they're
+                held (and at risk if they disconnect), rather than silently lost. */}
+            {queuedMessageCount > 0 && (
+              <Text testID="reconnect-queued-count" style={styles.reconnectingDetail}>
+                {queuedMessageCount} unsent message{queuedMessageCount === 1 ? '' : 's'} queued
+              </Text>
+            )}
+          </View>
+        )}
+
+        {/* Crash banner for active session */}
+        {activeSessionHealth === 'crashed' && (
+          <View style={[styles.reconnectingBanner, styles.errorBanner]}>
+            <View style={styles.errorBannerContent}>
+              <Text style={styles.errorBannerText} numberOfLines={2}>
+                Session crashed. Delete this session to free resources.
+              </Text>
               <TouchableOpacity
-                onPress={exitCachedSession}
-                style={styles.cachedBackButton}
+                onPress={() => {
+                  if (sessions.length <= 1) {
+                    Alert.alert('Cannot Delete', 'You must have at least one session.');
+                    return;
+                  }
+                  Alert.alert(
+                    'Delete Crashed Session',
+                    'This session has crashed. Delete it?',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Delete',
+                        style: 'destructive',
+                        onPress: () => { if (activeSessionId) destroySession(activeSessionId); },
+                      },
+                    ],
+                  );
+                }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 accessibilityRole="button"
-                accessibilityLabel="Go back to connect screen"
+                accessibilityLabel="Delete crashed session"
               >
-                <Text style={styles.cachedBackText}>Back</Text>
+                <Icon name="close" size={14} color={COLORS.accentRed} />
               </TouchableOpacity>
             </View>
           </View>
-        </View>
-      )}
+        )}
 
-      {/* Reconnecting / restarting banner */}
-      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting' || connectionPhase === 'server_down') && (
-        <View testID="reconnect-banner" style={styles.reconnectingBanner}>
-          <View style={styles.reconnectingRow}>
-            {/* #5725 (#5698) — server_down is terminal: no indefinite spinner. */}
-            {connectionPhase !== 'server_down' && (
-              <RNActivityIndicator
-                testID="reconnect-spinner"
-                size="small"
-                color={COLORS.accentBlue}
-                style={styles.reconnectingSpinner}
-              />
-            )}
-            <Text style={[styles.reconnectingText, { flex: 1 }]}>
-              {connectionPhase === 'server_down'
-                ? 'Server appears to be down'
-                : connectionPhase === 'server_restarting'
-                  ? shutdownReason === 'shutdown'
-                    ? 'Server shut down'
-                    : restartCountdown != null && restartCountdown > 0
-                      ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
-                      : 'Server restarting...'
-                  : connectionRetryCount > 0
-                    ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
-                    : 'Reconnecting...'}
-            </Text>
-            {/* #5725 (#5698) — server_down offers a manual Reconnect (resets the
-                ladder + re-dials); the live states keep the Disconnect affordance. */}
-            {connectionPhase === 'server_down' ? (
-              <TouchableOpacity testID="server-down-reconnect" onPress={retryConnection} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
-                <Text style={styles.reconnectDisconnectText}>Reconnect</Text>
+        {/* #4879: Quiet stopped status strip for active session — surfaced
+            when the server confirms a user-initiated Stop (session_stopped
+            wire message, wired in #4868). Intentionally informational
+            rather than error-styled: this is positive feedback that the
+            Stop tap landed. Suppressed when health === 'crashed' so the
+            loud red crash banner above isn't doubled up on the unlikely
+            race where both arrive (defensive — the server only emits
+            stopped for clean exits per CliSession._handleChildClose). The
+            strip auto-clears on the next `claude_ready` (typically when
+            the operator sends another message). */}
+        {/* #7603: container-stopped banner. Third rung of the mutual-exclusion
+            ladder (crashed > container-lost > stopped): a vanished container is
+            neither a crash nor a user-initiated Stop, and stacking two banners
+            on one session reads as two separate faults. Suppressed under the
+            crash banner for the same reason the stopped strip is.
+
+            Copy is reconnect-oriented, NOT "Session crashed. Delete this
+            session." — this state recovers on its own (#7602) and the delete
+            affordance would destroy the session that is about to come back. */}
+        {activeSessionHealth !== 'crashed' && activeContainerLostAt !== null && (
+          <View
+            testID="container-lost-banner"
+            style={[styles.reconnectingBanner, styles.warningBanner]}
+          >
+            <View style={styles.errorBannerContent}>
+              <Text
+                testID="container-lost-banner-text"
+                style={styles.warningBannerText}
+                numberOfLines={2}
+              >
+                {activeContainerReattachError
+                  ? 'Container stopped — chroxy could not re-enter it. Needs attention.'
+                  : "Container stopped — this session will re-enter it automatically once it's running again."}
+              </Text>
+              <TouchableOpacity
+                testID="container-lost-banner-dismiss"
+                onPress={() => {
+                  if (activeSessionId) dismissContainerLost(activeSessionId);
+                }}
+                // 48dp: Material's floor, which the repo prefers over the 44pt
+                // iOS minimum wherever the layout allows. The banner row has the
+                // height for it, so the visible control IS the hit area rather
+                // than an undersized box widened invisibly by hitSlop.
+                style={styles.containerLostDismiss}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss container-stopped notice"
+              >
+                <Icon name="close" size={14} color={COLORS.accentOrange} />
               </TouchableOpacity>
-            ) : (
-              <TouchableOpacity onPress={handleStopReconnecting} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
-                <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
+            </View>
+          </View>
+        )}
+
+        {/* #7603: the stopped strip now also yields to the container-lost banner
+            (see the ladder note above). */}
+        {activeSessionHealth !== 'crashed' && activeContainerLostAt === null && activeSessionStoppedAt !== null && (
+          <View
+            testID="session-stopped-banner"
+            style={[styles.reconnectingBanner, styles.stoppedBanner]}
+          >
+            <View style={styles.errorBannerContent}>
+              <Text
+                testID="session-stopped-banner-text"
+                style={styles.stoppedBannerText}
+                numberOfLines={1}
+              >
+                {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
+                  ? `Session stopped. (exit ${activeSessionStoppedCode})`
+                  : 'Session stopped.'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Server error banners */}
+        {serverErrors.map((err) => (
+          <View
+            key={err.id}
+            style={[
+              styles.reconnectingBanner,
+              err.recoverable ? styles.warningBanner : styles.errorBanner,
+            ]}
+          >
+            <View style={styles.errorBannerContent}>
+              <Text
+                style={[
+                  styles.reconnectingText,
+                  err.recoverable ? styles.warningBannerText : styles.errorBannerText,
+                ]}
+                numberOfLines={2}
+              >
+                {err.message}
+              </Text>
+              <TouchableOpacity
+                onPress={() => dismissServerError(err.id)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss server error"
+              >
+                <Icon name="close" size={14} color={err.recoverable ? COLORS.accentOrange : COLORS.accentRed} />
               </TouchableOpacity>
-            )}
+            </View>
           </View>
-          {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
-            <Text style={styles.reconnectingDetail}>Graceful restart</Text>
-          )}
-          {connectionPhase === 'server_restarting' && !shutdownReason && (
-            <Text style={styles.reconnectingDetail}>Recovering from crash</Text>
-          )}
-          {connectionPhase === 'reconnecting' && connectionError && (
-            <Text style={styles.reconnectingDetail}>{connectionError}</Text>
-          )}
-          {/* #5699 — surface unsent queued messages so the user knows they're
-              held (and at risk if they disconnect), rather than silently lost. */}
-          {queuedMessageCount > 0 && (
-            <Text testID="reconnect-queued-count" style={styles.reconnectingDetail}>
-              {queuedMessageCount} unsent message{queuedMessageCount === 1 ? '' : 's'} queued
-            </Text>
-          )}
-        </View>
-      )}
+        ))}
 
-      {/* Crash banner for active session */}
-      {activeSessionHealth === 'crashed' && (
-        <View style={[styles.reconnectingBanner, styles.errorBanner]}>
-          <View style={styles.errorBannerContent}>
-            <Text style={styles.errorBannerText} numberOfLines={2}>
-              Session crashed. Delete this session to free resources.
-            </Text>
-            <TouchableOpacity
-              onPress={() => {
-                if (sessions.length <= 1) {
-                  Alert.alert('Cannot Delete', 'You must have at least one session.');
-                  return;
-                }
-                Alert.alert(
-                  'Delete Crashed Session',
-                  'This session has crashed. Delete it?',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Delete',
-                      style: 'destructive',
-                      onPress: () => { if (activeSessionId) destroySession(activeSessionId); },
-                    },
-                  ],
-                );
-              }}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityRole="button"
-              accessibilityLabel="Delete crashed session"
-            >
-              <Icon name="close" size={14} color={COLORS.accentRed} />
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
-      {/* #4879: Quiet stopped status strip for active session — surfaced
-          when the server confirms a user-initiated Stop (session_stopped
-          wire message, wired in #4868). Intentionally informational
-          rather than error-styled: this is positive feedback that the
-          Stop tap landed. Suppressed when health === 'crashed' so the
-          loud red crash banner above isn't doubled up on the unlikely
-          race where both arrive (defensive — the server only emits
-          stopped for clean exits per CliSession._handleChildClose). The
-          strip auto-clears on the next `claude_ready` (typically when
-          the operator sends another message). */}
-      {/* #7603: container-stopped banner. Third rung of the mutual-exclusion
-          ladder (crashed > container-lost > stopped): a vanished container is
-          neither a crash nor a user-initiated Stop, and stacking two banners
-          on one session reads as two separate faults. Suppressed under the
-          crash banner for the same reason the stopped strip is.
-
-          Copy is reconnect-oriented, NOT "Session crashed. Delete this
-          session." — this state recovers on its own (#7602) and the delete
-          affordance would destroy the session that is about to come back. */}
-      {activeSessionHealth !== 'crashed' && activeContainerLostAt !== null && (
-        <View
-          testID="container-lost-banner"
-          style={[styles.reconnectingBanner, styles.warningBanner]}
-        >
-          <View style={styles.errorBannerContent}>
-            <Text
-              testID="container-lost-banner-text"
-              style={styles.warningBannerText}
-              numberOfLines={2}
-            >
-              {activeContainerReattachError
-                ? 'Container stopped — chroxy could not re-enter it. Needs attention.'
-                : "Container stopped — this session will re-enter it automatically once it's running again."}
-            </Text>
-            <TouchableOpacity
-              testID="container-lost-banner-dismiss"
-              onPress={() => {
-                if (activeSessionId) dismissContainerLost(activeSessionId);
-              }}
-              // 48dp: Material's floor, which the repo prefers over the 44pt
-              // iOS minimum wherever the layout allows. The banner row has the
-              // height for it, so the visible control IS the hit area rather
-              // than an undersized box widened invisibly by hitSlop.
-              style={styles.containerLostDismiss}
-              accessibilityRole="button"
-              accessibilityLabel="Dismiss container-stopped notice"
-            >
-              <Icon name="close" size={14} color={COLORS.accentOrange} />
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
-      {/* #7603: the stopped strip now also yields to the container-lost banner
-          (see the ladder note above). */}
-      {activeSessionHealth !== 'crashed' && activeContainerLostAt === null && activeSessionStoppedAt !== null && (
-        <View
-          testID="session-stopped-banner"
-          style={[styles.reconnectingBanner, styles.stoppedBanner]}
-        >
-          <View style={styles.errorBannerContent}>
-            <Text
-              testID="session-stopped-banner-text"
-              style={styles.stoppedBannerText}
-              numberOfLines={1}
-            >
-              {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
-                ? `Session stopped. (exit ${activeSessionStoppedCode})`
-                : 'Session stopped.'}
+        {/* Unencrypted LAN warning */}
+        {!isEncrypted && connectionPhase === 'connected' && wsUrl?.startsWith('ws://') && (
+          <View style={styles.lanWarningBanner}>
+            <Text style={styles.lanWarningText}>
+              Unencrypted LAN connection — auth token sent in plaintext. Use a tunnel for secure remote access.
             </Text>
           </View>
-        </View>
-      )}
+        )}
 
-      {/* Server error banners */}
-      {serverErrors.map((err) => (
-        <View
-          key={err.id}
-          style={[
-            styles.reconnectingBanner,
-            err.recoverable ? styles.warningBanner : styles.errorBanner,
-          ]}
-        >
-          <View style={styles.errorBannerContent}>
-            <Text
-              style={[
-                styles.reconnectingText,
-                err.recoverable ? styles.warningBannerText : styles.errorBannerText,
-              ]}
-              numberOfLines={2}
-            >
-              {err.message}
-            </Text>
-            <TouchableOpacity
-              onPress={() => dismissServerError(err.id)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityRole="button"
-              accessibilityLabel="Dismiss server error"
-            >
-              <Icon name="close" size={14} color={err.recoverable ? COLORS.accentOrange : COLORS.accentRed} />
-            </TouchableOpacity>
-          </View>
-        </View>
-      ))}
+        {/* Background session notifications */}
+        <SessionNotificationBanner />
 
-      {/* Unencrypted LAN warning */}
-      {!isEncrypted && connectionPhase === 'connected' && wsUrl?.startsWith('ws://') && (
-        <View style={styles.lanWarningBanner}>
-          <Text style={styles.lanWarningText}>
-            Unencrypted LAN connection — auth token sent in plaintext. Use a tunnel for secure remote access.
-          </Text>
-        </View>
-      )}
+        {/* Background session progress indicators */}
+        <BackgroundSessionProgress />
 
-      {/* Background session notifications */}
-      <SessionNotificationBanner />
-
-      {/* Background session progress indicators */}
-      <BackgroundSessionProgress />
-
-      {/* Stdin forwarding lost banner (#3595) — render the latched
-          `stdinForwardingDisabled` flag from session_list metadata for the
-          currently-active session. The flag persists across server restarts
-          (#3540 / #3564), so this banner appears immediately after a
-          cold-restart reconnect without needing a fresh `error` event. */}
-      <StdinDisabledBanner
-        visible={!!activeSession?.stdinForwardingDisabled}
-        sessionId={activeSessionId}
-        onRestart={handleRestartStdinSession}
-      />
-
-      {/* #5589 / #5281: observer role banner. Shows only when ANOTHER device is
-          the primary (driver) for the active session; names it (when the roster
-          resolves the id) and offers an explicit force take-over. */}
-      <ObserverBanner
-        visible={sessionRole === 'observer'}
-        sessionId={activeSessionId}
-        driverName={
-          connectedClients.find((c) => c.clientId === activePrimaryClientId)?.deviceName ?? null
-        }
-        onTakeOver={(sid) => claimPrimary(sid, { force: true })}
-      />
-
-      {/* #4075: cost-threshold soft warning banner. Server fires once per
-          session via `session_cost_threshold_crossed`; user dismissal
-          flips `dismissedAt` so the banner stays hidden for this session's
-          lifetime even though the record persists. */}
-      <CostThresholdBanner
-        visible={!!costThresholdWarning && costThresholdWarning.dismissedAt == null}
-        costUsd={costThresholdWarning?.costUsd ?? 0}
-        thresholdUsd={costThresholdWarning?.thresholdUsd ?? 0}
-        onDismiss={() => {
-          if (!activeSessionId || !costThresholdWarning) return;
-          const { sessionStates } = useConnectionStore.getState();
-          const ss = sessionStates[activeSessionId];
-          if (!ss?.costThresholdWarning) return;
-          useConnectionStore.setState({
-            sessionStates: {
-              ...sessionStates,
-              [activeSessionId]: {
-                ...ss,
-                costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
-              },
-            },
-          });
-        }}
-      />
-
-      {/* Session timeout warning banner */}
-      {timeoutWarning && (
-        <SessionTimeoutBanner
-          remainingMs={timeoutWarning.remainingMs}
-          sessionName={timeoutWarning.sessionName}
-          onKeepAlive={() => {
-            // Switch to the warned session to make it "active" (server exempts active-viewer sessions)
-            if (timeoutWarning.sessionId && timeoutWarning.sessionId !== activeSessionId) {
-              switchSession(timeoutWarning.sessionId, { serverNotify: true });
-            }
-            dismissTimeoutWarning();
-          }}
-          onDismiss={dismissTimeoutWarning}
+        {/* Stdin forwarding lost banner (#3595) — render the latched
+            `stdinForwardingDisabled` flag from session_list metadata for the
+            currently-active session. The flag persists across server restarts
+            (#3540 / #3564), so this banner appears immediately after a
+            cold-restart reconnect without needing a fresh `error` event. */}
+        <StdinDisabledBanner
+          visible={!!activeSession?.stdinForwardingDisabled}
+          sessionId={activeSessionId}
+          onRestart={handleRestartStdinSession}
         />
-      )}
 
-      {/* Pull-request and CI status */}
-      <SessionCiChip status={prStatus} onRefresh={requestSessionPrStatus} disabled={connectionPhase !== 'connected'} />
-      {/* Dev server preview banner */}
-      <DevPreviewBanner key={activeSessionId} requests={devPreviewRequests} previews={devPreviews} onClose={closeDevPreview} onOpen={openDevPreview} />
+        {/* #5589 / #5281: observer role banner. Shows only when ANOTHER device is
+            the primary (driver) for the active session; names it (when the roster
+            resolves the id) and offers an explicit force take-over. */}
+        <ObserverBanner
+          visible={sessionRole === 'observer'}
+          sessionId={activeSessionId}
+          driverName={
+            connectedClients.find((c) => c.clientId === activePrimaryClientId)?.deviceName ?? null
+          }
+          onTakeOver={(sid) => claimPrimary(sid, { force: true })}
+        />
 
-      {/* Web tasks panel (Claude Code Web cloud delegation) */}
-      {webTasks.length > 0 && (
-        <WebTasksPanel tasks={webTasks} webFeatures={webFeatures} onTeleport={teleportWebTask} />
-      )}
+        {/* #4075: cost-threshold soft warning banner. Server fires once per
+            session via `session_cost_threshold_crossed`; user dismissal
+            flips `dismissedAt` so the banner stays hidden for this session's
+            lifetime even though the record persists. */}
+        <CostThresholdBanner
+          visible={!!costThresholdWarning && costThresholdWarning.dismissedAt == null}
+          costUsd={costThresholdWarning?.costUsd ?? 0}
+          thresholdUsd={costThresholdWarning?.thresholdUsd ?? 0}
+          onDismiss={() => {
+            if (!activeSessionId || !costThresholdWarning) return;
+            const { sessionStates } = useConnectionStore.getState();
+            const ss = sessionStates[activeSessionId];
+            if (!ss?.costThresholdWarning) return;
+            useConnectionStore.setState({
+              sessionStates: {
+                ...sessionStates,
+                [activeSessionId]: {
+                  ...ss,
+                  costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+                },
+              },
+            });
+          }}
+        />
+
+        {/* Session timeout warning banner */}
+        {timeoutWarning && (
+          <SessionTimeoutBanner
+            remainingMs={timeoutWarning.remainingMs}
+            sessionName={timeoutWarning.sessionName}
+            onKeepAlive={() => {
+              // Switch to the warned session to make it "active" (server exempts active-viewer sessions)
+              if (timeoutWarning.sessionId && timeoutWarning.sessionId !== activeSessionId) {
+                switchSession(timeoutWarning.sessionId, { serverNotify: true });
+              }
+              dismissTimeoutWarning();
+            }}
+            onDismiss={dismissTimeoutWarning}
+          />
+        )}
+
+        {/* Pull-request and CI status */}
+        <SessionCiChip status={prStatus} onRefresh={requestSessionPrStatus} disabled={connectionPhase !== 'connected'} />
+        {/* Dev server preview banner */}
+        <DevPreviewBanner key={activeSessionId} requests={devPreviewRequests} previews={devPreviews} onClose={closeDevPreview} onOpen={openDevPreview} />
+
+        {/* Web tasks panel (Claude Code Web cloud delegation) */}
+        {webTasks.length > 0 && (
+          <WebTasksPanel tasks={webTasks} webFeatures={webFeatures} onTeleport={teleportWebTask} />
+        )}
+      </ScrollView>
 
       {/* Content area — split view on tablets in landscape */}
       {!showSessionOverview && (
@@ -2255,6 +2273,11 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.backgroundCard,
+  },
+  // #8236 — natural height when there is room, shrinks and scrolls otherwise
+  chromeScroll: {
+    flexGrow: 0,
+    flexShrink: 1,
   },
   secondaryToolsRow: {
     flexDirection: 'row',

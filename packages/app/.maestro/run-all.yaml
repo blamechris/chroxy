@@ -155,3 +155,9 @@ name: All E2E flows
 # CompactionMarker render chain via mock-server 'show-compaction' trigger,
 # asserting the "Context compacted" headline + token delta + trigger.
 - runFlow: compaction-marker.yaml
+
+# Flow 25: Composer stays above the keyboard (#8236) — expands the settings
+# bar (mock-server 'show-settings-bar' trigger), raises the keyboard and
+# asserts Send is reachable. Run again at an accessibility text size for the
+# second trigger (see the flow's header).
+- runFlow: chat-composer-above-keyboard.yaml
