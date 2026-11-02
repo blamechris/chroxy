@@ -469,7 +469,9 @@ describe('ActivityGroup header tap target (#8811)', () => {
   it('leaves no non-pressable padding above the header', () => {
     const root = renderGroup([makeToolMessage({ id: 'm1' })]);
     const card = StyleSheet.flatten(findByTestId(root, 'activity-group')[0]!.props.style);
-    const top = card.paddingTop ?? card.paddingVertical ?? card.padding ?? 0;
-    expect(top).toBe(0);
+    // Every spelling that can put padding above the header, logical ones
+    // included — a fallback chain would stop at the first one that is set.
+    const tops = [card.paddingTop, card.paddingVertical, card.padding, card.paddingBlock, card.paddingBlockStart];
+    expect(tops.filter((v) => v !== undefined && v !== 0)).toEqual([]);
   });
 });
