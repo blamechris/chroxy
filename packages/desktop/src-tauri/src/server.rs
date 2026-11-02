@@ -782,7 +782,22 @@ impl ServerManager {
     /// foreign 200 can't flip us to Running post-mortem, classifies the
     /// failure from the buffered logs, flips status to `Error`, and returns
     /// the one-line cause for the UI.
+    ///
+    /// A server that dies here may already have started its cloudflared, so the
+    /// tunnel the app can prove that server started is reaped, as in
+    /// [`Self::release_for_service`] (#8897). The next start's by-port reap would
+    /// catch it, but not with a service installed: that start defers to the
+    /// service and leaves the port's tunnels alone.
     pub fn check_startup_child_exit(&mut self) -> Option<String> {
+        self.check_startup_child_exit_with(Self::reap_own_orphaned_cloudflared)
+    }
+
+    /// [`Self::check_startup_child_exit`] with the own-tunnel reap injected; `reap`
+    /// receives `(port, server pid, log buffer)` and runs only for a dead child.
+    fn check_startup_child_exit_with(
+        &mut self,
+        reap: impl FnOnce(u16, u32, &Arc<Mutex<VecDeque<String>>>),
+    ) -> Option<String> {
         if !matches!(
             self.status(),
             ServerStatus::Starting | ServerStatus::Running
@@ -798,9 +813,13 @@ impl ServerManager {
         // Stop the health poll: the child is dead, so any 200 from this
         // port now belongs to a different server.
         self.health_generation.fetch_add(1, Ordering::SeqCst);
-        if let (Some(path), Some(child)) = (self.pid_file.as_deref(), self.child.as_ref()) {
-            owned_server::clear_pid_if(path, child.id());
+        let server_pid = child.id();
+        if let Some(path) = self.pid_file.as_deref() {
+            owned_server::clear_pid_if(path, server_pid);
         }
+        // Dropped before the reap, as in `release_for_service_with`: an open handle
+        // may keep the dead server listed, and the Windows reap takes a listed
+        // process at that pid for a reused one and reaps nothing.
         self.child = None;
 
         Self::push_log_line(
@@ -810,6 +829,7 @@ impl ServerManager {
                 exit_status
             ),
         );
+        reap(self.config.port, server_pid, &self.log_buffer);
         let logs = self.get_logs();
         let msg = classify_startup_exit(&logs, self.config.port, exit_status.code());
         *lock_or_recover(&self.status) = ServerStatus::Error(msg.clone());
@@ -3547,6 +3567,142 @@ mod tests {
         *lock_or_recover(&mgr.status) = ServerStatus::Starting;
         assert!(mgr.check_startup_child_exit().is_none());
         assert_eq!(mgr.status(), ServerStatus::Starting);
+    }
+
+    // -- a server dead during startup has its own tunnel reaped (#8897) --------
+
+    #[cfg(unix)]
+    #[test]
+    fn a_server_dead_during_startup_reaps_its_own_tunnel_for_the_port_and_its_pid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let mut child = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+        child.wait().unwrap();
+        let pid = child.id();
+        owned_server::record_pid(&path, pid).unwrap();
+        mgr.child = Some(child);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        let port = mgr.config.port;
+
+        let mut seen = Vec::new();
+        let msg = mgr.check_startup_child_exit_with(|p, server, _| {
+            // The record is gone by the time the reap runs.
+            seen.push((p, server, owned_server::read_pid(&path)));
+        });
+        assert!(msg.is_some(), "the dead server must still surface an error");
+        assert_eq!(seen, vec![(port, pid, None)]);
+        assert!(mgr.child.is_none());
+    }
+
+    #[test]
+    fn no_startup_reap_without_a_child() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        let mut called = false;
+        assert!(mgr.check_startup_child_exit_with(|_, _, _| called = true).is_none());
+        assert!(!called);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_startup_reap_while_the_server_is_alive() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        mgr.child = Some(Command::new("sleep").arg("30").spawn().unwrap());
+        let mut called = false;
+        assert!(mgr.check_startup_child_exit_with(|_, _, _| called = true).is_none());
+        assert!(!called);
+        mgr.kill_child();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_startup_reap_once_the_status_is_settled() {
+        let mut mgr = manager_on(8765);
+        let mut child = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+        child.wait().unwrap();
+        mgr.child = Some(child);
+        let mut called = false;
+        assert!(mgr.check_startup_child_exit_with(|_, _, _| called = true).is_none());
+        assert!(!called, "a Stopped manager is not watching a startup");
+    }
+
+    /// End to end on real processes: the server backgrounds a fake cloudflared
+    /// (which stays in the app's process group, as a real one does) and dies;
+    /// the startup check reaps that tunnel and leaves a same-port tunnel in
+    /// another group alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_server_dead_during_startup_has_its_own_tunnel_reaped_and_no_other() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        struct KillPid(Option<i32>);
+        impl Drop for KillPid {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    // SAFETY: a pid this test started, killed only on failure.
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, _path) = manager_recording_in(dir.path());
+        let port = mgr.config.port;
+        let url = format!("http://localhost:{}", port);
+        let bin = dir.path().join("cloudflared");
+        std::fs::write(&bin, "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let foreign = Command::new(&bin)
+            .args(["tunnel", "--url", &url])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut foreign = KillOnDrop(vec![foreign]);
+
+        // The server records its tunnel's pid, lets it exec, then dies.
+        let tunnel_pid_file = dir.path().join("tunnel.pid");
+        let server = Command::new("sh")
+            .args([
+                "-c",
+                "\"$0\" tunnel --url \"$1\" & echo $! > \"$2\"; sleep 0.5; exit 1",
+            ])
+            .arg(&bin)
+            .arg(&url)
+            .arg(&tunnel_pid_file)
+            .spawn()
+            .unwrap();
+        mgr.child = Some(server);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+
+        let start = Instant::now();
+        while mgr.check_startup_child_exit().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10), "the server never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let tunnel_pid: i32 = std::fs::read_to_string(&tunnel_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut tunnel = KillPid(Some(tunnel_pid));
+
+        // The orphan is reparented and reaped by init, so it is gone once
+        // signalling it fails.
+        // SAFETY: signal 0 only checks that the pid exists.
+        let alive = || unsafe { libc::kill(tunnel_pid, 0) } == 0;
+        let start = Instant::now();
+        while alive() && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the server's own cloudflared was not reaped");
+        tunnel.0 = None;
+        assert!(
+            !wait_exit(&mut foreign.0[0], 1),
+            "a tunnel the server did not start was reaped"
+        );
     }
 
     #[test]
