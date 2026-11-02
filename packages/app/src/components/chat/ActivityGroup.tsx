@@ -320,19 +320,25 @@ export function ActivityGroup({
 }
 
 const styles = StyleSheet.create({
+  // #8811: no vertical padding here — the header owns that space so its tap
+  // region spans the card's top edge instead of a ~14pt strip inside it.
   activityGroup: {
     backgroundColor: COLORS.backgroundTertiary,
-    padding: 10,
+    paddingHorizontal: 10,
     borderRadius: 10,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: COLORS.backgroundCard,
     maxWidth: '90%',
   },
+  // #8811: 44pt tap-target floor (48dp on Android). A floor, not a fixed
+  // height, so the row still grows with Dynamic Type or a wrapped breakdown.
   activityHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    minHeight: Platform.OS === 'android' ? 48 : 44,
+    paddingVertical: 10,
   },
   activityPulse: {
     width: 6,
@@ -347,8 +353,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  // The header's own padding now separates it from the list; the bottom
+  // padding replaces the card's, which moved to the header (#8811).
   activityList: {
-    marginTop: 8,
+    paddingBottom: 10,
   },
   activityEntry: {
     minHeight: 44,
