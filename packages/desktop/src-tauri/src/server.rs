@@ -3653,10 +3653,11 @@ mod tests {
         let port = mgr.config.port;
         let url = format!("http://localhost:{}", port);
         let bin = dir.path().join("cloudflared");
-        // Touches $READY (when set) once it has exec'd, so `ps` shows its command.
+        // Touches $CHROXY_TEST_TUNNEL_READY (when set) once it has exec'd, so `ps`
+        // shows its command.
         std::fs::write(
             &bin,
-            "#!/bin/sh\n[ -n \"$READY\" ] && : > \"$READY\"\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\n[ -n \"$CHROXY_TEST_TUNNEL_READY\" ] && : > \"$CHROXY_TEST_TUNNEL_READY\"\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3674,12 +3675,12 @@ mod tests {
         let server = Command::new("sh")
             .args([
                 "-c",
-                "\"$0\" tunnel --url \"$1\" & echo $! > \"$2\"; while [ ! -e \"$READY\" ]; do sleep 0.05; done; exit 1",
+                "\"$0\" tunnel --url \"$1\" & echo $! > \"$2\"; while [ ! -e \"$CHROXY_TEST_TUNNEL_READY\" ]; do sleep 0.05; done; exit 1",
             ])
             .arg(&bin)
             .arg(&url)
             .arg(&tunnel_pid_file)
-            .env("READY", &ready)
+            .env("CHROXY_TEST_TUNNEL_READY", &ready)
             .spawn()
             .unwrap();
         mgr.child = Some(server);
@@ -3698,20 +3699,32 @@ mod tests {
         let mut tunnel = KillPid(Some(tunnel_pid));
 
         // The orphan is reparented to init. It is gone once `ps` no longer lists
-        // it, or lists it as a zombie that init has not collected yet.
-        let alive = || {
+        // it (exit 1), or lists it as a zombie that init has not collected yet.
+        // Any other exit is a failed probe, never "gone", and the probe must see
+        // the live foreign tunnel, or "not reaped" could not be observed at all.
+        let alive = |pid: u32| {
             let out = Command::new("ps")
-                .args(["-o", "stat=", "-p", &tunnel_pid.to_string()])
+                .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
                 .unwrap();
-            let stat = String::from_utf8_lossy(&out.stdout);
-            !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
+            match out.status.code() {
+                Some(0) => !String::from_utf8_lossy(&out.stdout).trim_start().starts_with('Z'),
+                Some(1) => false,
+                other => panic!(
+                    "ps -o stat= -p {} failed ({:?}): {}",
+                    pid,
+                    other,
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            }
         };
+        assert!(alive(foreign.0[0].id()), "the probe cannot see a live tunnel");
+        let tunnel_alive = || alive(tunnel_pid as u32);
         let start = Instant::now();
-        while alive() && start.elapsed() < Duration::from_secs(5) {
+        while tunnel_alive() && start.elapsed() < Duration::from_secs(5) {
             thread::sleep(Duration::from_millis(50));
         }
-        assert!(!alive(), "the server's own cloudflared was not reaped");
+        assert!(!tunnel_alive(), "the server's own cloudflared was not reaped");
         tunnel.0 = None;
         assert!(
             !wait_exit(&mut foreign.0[0], 1),
