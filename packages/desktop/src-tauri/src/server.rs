@@ -3653,7 +3653,12 @@ mod tests {
         let port = mgr.config.port;
         let url = format!("http://localhost:{}", port);
         let bin = dir.path().join("cloudflared");
-        std::fs::write(&bin, "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
+        // Touches $READY (when set) once it has exec'd, so `ps` shows its command.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ -n \"$READY\" ] && : > \"$READY\"\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let foreign = Command::new(&bin)
             .args(["tunnel", "--url", &url])
@@ -3662,16 +3667,19 @@ mod tests {
             .unwrap();
         let mut foreign = KillOnDrop(vec![foreign]);
 
-        // The server records its tunnel's pid, lets it exec, then dies.
+        // The server records its tunnel's pid, waits until it has exec'd (a
+        // fixed sleep can lose that race on a loaded runner), then dies.
         let tunnel_pid_file = dir.path().join("tunnel.pid");
+        let ready = dir.path().join("tunnel.ready");
         let server = Command::new("sh")
             .args([
                 "-c",
-                "\"$0\" tunnel --url \"$1\" & echo $! > \"$2\"; sleep 0.5; exit 1",
+                "\"$0\" tunnel --url \"$1\" & echo $! > \"$2\"; while [ ! -e \"$READY\" ]; do sleep 0.05; done; exit 1",
             ])
             .arg(&bin)
             .arg(&url)
             .arg(&tunnel_pid_file)
+            .env("READY", &ready)
             .spawn()
             .unwrap();
         mgr.child = Some(server);
@@ -3689,10 +3697,16 @@ mod tests {
             .unwrap();
         let mut tunnel = KillPid(Some(tunnel_pid));
 
-        // The orphan is reparented and reaped by init, so it is gone once
-        // signalling it fails.
-        // SAFETY: signal 0 only checks that the pid exists.
-        let alive = || unsafe { libc::kill(tunnel_pid, 0) } == 0;
+        // The orphan is reparented to init. It is gone once `ps` no longer lists
+        // it, or lists it as a zombie that init has not collected yet.
+        let alive = || {
+            let out = Command::new("ps")
+                .args(["-o", "stat=", "-p", &tunnel_pid.to_string()])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout);
+            !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
+        };
         let start = Instant::now();
         while alive() && start.elapsed() < Duration::from_secs(5) {
             thread::sleep(Duration::from_millis(50));
