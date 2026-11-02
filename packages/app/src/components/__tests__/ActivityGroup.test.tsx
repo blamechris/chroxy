@@ -20,7 +20,7 @@
  */
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import { ActivityGroup } from '../chat/ActivityGroup';
 import type { ChatMessage } from '../../store/connection';
 
@@ -452,5 +452,24 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
       const second = mountGroup(reg, messages);
       expect(findByTestId(second, 'todo-list-header')).toHaveLength(0);
     });
+  });
+});
+
+describe('ActivityGroup header tap target (#8811)', () => {
+  // The header used to be a ~14pt strip inside the card's 10pt padding: the
+  // padding belonged to the non-pressable View, not to the header.
+  it('gives the header a ≥44pt minimum height', () => {
+    const root = renderGroup([makeToolMessage({ id: 'm1' })]);
+    const header = findByTestId(root, 'activity-group-header')[0];
+    const minHeight = StyleSheet.flatten(header!.props.style).minHeight;
+    expect(typeof minHeight).toBe('number');
+    expect(minHeight).toBeGreaterThanOrEqual(44);
+  });
+
+  it('leaves no non-pressable padding above the header', () => {
+    const root = renderGroup([makeToolMessage({ id: 'm1' })]);
+    const card = StyleSheet.flatten(findByTestId(root, 'activity-group')[0]!.props.style);
+    const top = card.paddingTop ?? card.paddingVertical ?? card.padding ?? 0;
+    expect(top).toBe(0);
   });
 });
