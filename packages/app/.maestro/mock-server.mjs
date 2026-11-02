@@ -590,6 +590,8 @@ wss.on('connection', (ws) => {
         // the mock session defaults to hasTerminal: true (see sendPostAuthBurst),
         // so the bar — and the expanded-bar composer-above-keyboard case — is
         // otherwise unreachable. Used by chat-composer-above-keyboard.yaml.
+        // The flip lasts for the rest of this connection: a flow that runs after
+        // it on the same socket and needs the Term button must reconnect first.
         if (text.trim() === 'show-settings-bar') {
           secureSend(ws, {
             type: 'session_list',

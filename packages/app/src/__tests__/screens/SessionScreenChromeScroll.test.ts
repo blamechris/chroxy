@@ -18,6 +18,9 @@ const region = regionStart === -1 || regionEnd === -1 ? '' : src.slice(regionSta
 describe('SessionScreen chrome scroll region (#8236)', () => {
   it('exists, wrapped in a single ScrollView', () => {
     expect(open !== -1 && regionStart !== -1 && regionEnd !== -1).toBe(true);
+    // The region is sliced at the first `</ScrollView>`; a second ScrollView in
+    // the file would truncate that slice and make the NOT-contains checks vacuous.
+    expect((src.match(/<ScrollView\b/g) || []).length).toBe(1);
   });
 
   it('is shrinkable and does not grow (flexGrow 0, flexShrink 1)', () => {
@@ -57,5 +60,11 @@ describe('SessionScreen chrome scroll region (#8236)', () => {
     expect(/chromeMaxHeight\(\{/.test(src)).toBe(true);
     expect(/\{\s*maxHeight:\s*chromeCap\s*\}/.test(region)).toBe(true);
     expect(/minHeight/.test(region)).toBe(false);
+  });
+
+  it('feeds the helper the measured root container height', () => {
+    // Without the measurement the helper sees 0 and never caps the region.
+    expect(/<View\s+style=\{styles\.container\}\s+onLayout=\{\(e\) => setContainerHeight\(e\.nativeEvent\.layout\.height\)\}/.test(src)).toBe(true);
+    expect(/chromeMaxHeight\(\{\s*containerHeight,\s*keyboardHeight,\s*bottomPadding\s*\}\)/.test(src)).toBe(true);
   });
 });
