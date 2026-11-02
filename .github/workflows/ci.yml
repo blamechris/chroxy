@@ -2274,6 +2274,17 @@ jobs:
           node packages/dashboard/scripts/header-layout.test.mjs | tee /tmp/chroxy-header-layout.tap
           node scripts/lib/assert-test-count.mjs --min 15 cat /tmp/chroxy-header-layout.tap > /dev/null
 
+      - name: Verify sidebar tree layout
+        # #8888 — the real Sidebar with 30 sessions, measured in a real browser at
+        # 1280x640 / 1280x480 (the tree must flow with the column, no nested
+        # scroller) and 1280x1200 (the tree fills the free space and scrolls
+        # inside). 10 = 3 short cases x 2 checks + 2 tall cases x 2 checks; the
+        # floor catches a run that discovered nothing (#7447's class).
+        run: |
+          set -o pipefail
+          node packages/dashboard/scripts/sidebar-layout.test.mjs | tee /tmp/chroxy-sidebar-layout.tap
+          node scripts/lib/assert-test-count.mjs --min 10 cat /tmp/chroxy-sidebar-layout.tap > /dev/null
+
       - name: Run dashboard smoke test
         working-directory: packages/server
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
