@@ -27,7 +27,7 @@ const expectedInventory = [
   'ask-user-question-multi.yaml', 'ask-question-other-freeform.yaml',
   'chat-multi-question.yaml', 'key-exchange.yaml',
   'permission-disconnected-noop.yaml', 'diff-comment.yaml',
-  'compaction-marker.yaml'
+  'compaction-marker.yaml', 'chat-composer-above-keyboard.yaml'
 ]
 
 function fixture() {
@@ -630,7 +630,7 @@ printf '%s\\n' '${output}'
         [['--shard-index', '-1', '--shard-count', '2'], 'non-negative decimal integer'],
         [['--shard-index', '01', '--shard-count', '2'], 'non-negative decimal integer'],
         [['--shard-index', '2', '--shard-count', '2'], 'less than --shard-count'],
-        [['--shard-index', '0', '--shard-count', '27'], 'empty shard'],
+        [['--shard-index', '0', '--shard-count', String(expectedInventory.length + 1)], 'empty shard'],
         [['--flow', 'connect-screen.yaml', '--shard-index', '0', '--shard-count', '2'], 'cannot be combined']
       ]) {
         const result = f.run(args)
@@ -649,7 +649,7 @@ printf '%s\\n' '${output}'
       assert.equal(result.status, 1, result.stderr)
       assert.deepEqual(tracedFlows(f.trace), ['manual-connect.yaml'])
       assert.ok(result.stdout.includes('Stopping after 1 failed flows; remaining inventory not run.'))
-      assert.ok(result.stdout.includes('1 attempted of 13 selected; 12 not run; 26 inventoried; shard 1/2'))
+      assert.ok(result.stdout.includes(`1 attempted of 13 selected; 12 not run; ${expectedInventory.length} inventoried; shard 1/2`))
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
@@ -687,7 +687,7 @@ printf '%s\\n' '${output}'
       assert.equal(readFileSync(f.trace, 'utf8').trim().split('\n').length, 3)
       assert.ok(result.stdout.includes('Stopping after 3 failed flows; remaining inventory not run.'))
       assert.ok(result.stdout.includes('3 attempted of'))
-      assert.ok(result.stdout.includes('not run; 26 inventoried; shard 0/1)'))
+      assert.ok(result.stdout.includes(`not run; ${expectedInventory.length} inventoried; shard 0/1)`))
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 
