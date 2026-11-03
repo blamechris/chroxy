@@ -29,13 +29,8 @@
       ]
     },
     "batch-merge": {
-      "hash": "37866a5",
-      "installed": "2026-11-03",
-      "profileHash": "b97f5ac",
-      "targets": [
-        "claude",
-        "gemini"
-      ]
+      "hash": "8c8e472",
+      "installed": "2026-07-30"
     },
     "bug-hunt": {
       "hash": "600c374",
