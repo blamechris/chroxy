@@ -105,7 +105,7 @@ Present the proposed breakdown to the user as a table and wait for confirmation:
 | 2 | type(scope): … | Files: src/c.ts; new test surface | medium |
 | 3 | type(scope): … | Migration + backfill | medium |
 
-**Labels each sub-issue will receive:** enhancement{{PARENT_LABEL_SUFFIX}}
+**Labels each sub-issue will receive:** enhancement (plus from-review when the parent carries it), plus any `--label` flags
 
 Approve to create these 3 sub-issues, or reply with changes (e.g. "merge 1 and 2", "drop 3", "add a sub-issue for X").
 ```
@@ -122,6 +122,10 @@ for SUB in "${PROPOSED_SUBS[@]}"; do
     --title "${SUB_TITLE}" \
     --label "${SUB_LABELS}" \
     --body "$(cat <<EOF
+## Context
+
+Filed from: #${PARENT_NUM}
+
 ## Summary
 
 ${SUB_DESCRIPTION}

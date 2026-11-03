@@ -106,6 +106,67 @@ How this change fits within the project architecture.
 - [ ] Comment - Feedback only, author decides
 ```
 
+#### Structured result (machine-read)
+
+The reviewer's final report MUST end with a fenced ```` ```json review-result ```` block
+conforming to `review-result.py schema` (#267) — placed **immediately before** the mechanical
+`**Status:**` block, which stays the actual last thing in the message per the global
+end-of-message convention. This block is what makes the verdict and findings queryable across
+runs instead of existing only as prose:
+
+```json review-result
+{
+  "kind": "review-result",
+  "verdict": "approve",
+  "body_matches_tree": true,
+  "findings": [
+    {
+      "severity": "critical",
+      "title": "one line, matches the table row above",
+      "file": "path/to/file.ext",
+      "line": 42,
+      "evidence": "the command output or quoted lines that support this — not a restatement of the title",
+      "mutation_ran": true,
+      "red_line": false
+    }
+  ],
+  "pr": 123,
+  "repo": "owner/repo",
+  "skill": "agent-review",
+  "round": 1
+}
+```
+
+If more than one such block appears in the report (a draft superseded by a final revision),
+the LAST one is what gets recorded — always end with the one that should count.
+
+One line per field:
+- **kind** — always the literal string `"review-result"`; the positive marker that tells this
+  apart from any other verdict/findings-shaped dict (`review-result.py list --near-misses`
+  is what a missing `kind` shows up as).
+- **verdict** — `approve` / `request_changes` / `comment`; matches the checkbox ticked above.
+- **body_matches_tree** — bool or null; see the rule below. Never left `true` by default.
+- **findings** — every row from Critical/Suggestions/Nitpicks above, one object each.
+- **severity** — `critical` / `suggestion` / `nitpick`, matching which table the row came from.
+- **file** / **line** — where the finding lives, or `null` when it doesn't apply.
+- **evidence** — the command output or quoted lines that back the finding.
+- **mutation_ran** — see the rule below.
+- **red_line** — true only for a hard rule violation no severity downgrade can waive (a secret,
+  an attribution miss, a protected-branch bypass); independent of `severity`.
+- **pr** / **repo** / **round** — context; `round` increments on a re-review of the same PR.
+
+Two rules, non-negotiable:
+1. **`mutation_ran` is true only if the reviewer actually RE-RAN the cited check or mutation in
+   this review.** A finding asserted from reading the diff, however confident, is `false` — this
+   field is what lets `review-result.py list` count proven findings separately from asserted ones.
+2. **`body_matches_tree` is true only after comparing the PR body's claims against the diff.** A
+   review that never checked the body (or the PR carries none) reports `null`, never a
+   default-true.
+
+This repo's reviewer runs as a subagent (spawned via the Agent tool from `/full-review`), so the
+orchestrator records the block after the agent returns — see step 7 below — instead of the agent
+recording its own result.
+
 ### 4. Post Review on PR
 
 Post review as a PR comment using heredoc:
@@ -121,19 +182,24 @@ EOF
 
 ### 5. Create Follow-Up Issues for Deferred Items
 
-**Classify impact before choosing a disposition.** Read inline and general-summary findings; a narrative location does not exempt a finding from acceptance review. Blocking correctness, security, data-integrity and promised-acceptance defects require a fix, removal or verified authorized containment before a clean verdict. A >15-minute estimate or follow-up issue URL is not a fix. If the repair is outside authority, unavailable or exceeds the shared remaining allowance, keep `request_changes`, name the blocker and return it to the coordinator.
+**MANDATORY: For any suggestion or nitpick that is valid but out of scope, create a tracked GitHub issue.**
 
-For a cheap adjacent fix within existing user authorization, prefer **FOLD** over filing another issue: the implementer fixes it in this PR, names the scope adjustment and cites the actual commit SHA. A read-only reviewer proposes that change rather than editing. Nonblocking findings may become follow-up issues with evidence that acceptance, correctness and safety remain intact. Critical/security severity is not an exemption to the blocking gate. False positives need evidence. Optional narrative observations need no new issue, but must not conceal a real blocking finding from `/check-pr`.
+Never leave deferred items as just review comments. If it's worth mentioning, it's worth tracking.
+
+**Classify impact before choosing a disposition.** Read inline and general-summary findings; a narrative location does not exempt a finding from acceptance review. Blocking correctness, security, data-integrity and promised-acceptance defects require a fix, removal or verified authorized containment before a clean verdict. A >15-minute estimate or follow-up issue URL is not a fix. If the repair is outside authority, unavailable or exceeds the shared remaining allowance, keep `request_changes`, name the blocker and return it to the coordinator.
 
 Honor explicit holds and the caller's durable correction/budget record. A new review agent, nested skill or resumed context grants no extra repair allowance or merge authority.
 
 ```bash
+# Labels: enhancement, from-review (this repo has no complexity:* or testing:* labels)
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
   --label "from-review" \
-  --body "$(cat <<'EOF'
+  --body "$(cat <<EOF
 ## Context
+
+Filed from: #${PR_NUM}
 
 Identified during review of PR #${PR_NUM}.
 
@@ -190,11 +256,26 @@ Then below the table, list:
 - URLs for all created/closed issues
 - Link to posted review comment
 
+**Capture the result.** When this review ran as a subagent (spawned via the Agent tool), the
+orchestrator records its structured result — the agent's full report, including the
+`review-result` block from step 3, fed on stdin — beside the subagent sidecar: `python3
+~/.claude/scripts/review-result.py record --agent <id> --skill agent-review --pr ${PR_NUM}
+<<'EOF' … EOF` (the agent's report between the markers, or `< report.md` if it was saved to a
+file first), where `<id>` is the agent id the Agent tool result reported.
+
+If the orchestrator never runs `record` (the agent's report was only read, not captured),
+`review-result.py harvest` recovers the block from the transcript afterward — see
+`/session-lifecycle`. When this review ran inline rather than as a subagent, there is no
+sidecar to record beside; the block in step 3 still satisfies the `structured-review-result`
+guard on this skill.
+
 ## Agent Persona
 
 **Chroxy Inspector** — expert in Node.js, React Native/Expo, WebSocket protocol, Claude Code CLI, Cloudflare tunnels, mobile connectivity.
 
 Mindset: "Will this code work reliably over a cellular connection through a tunnel to a remote dev machine?"
+
+You are an expert code reviewer with deep knowledge of the project's tech stack. You review with the mindset of reliability, maintainability, and correctness.
 
 When this persona runs as a spawned subagent (fresh context, no CLAUDE.md), use the **repo-memory** MCP to gather surrounding context cheaply: `get_file_summary`/`batch_file_summaries` and `get_dependency_graph` for the files the diff touches (blast radius for a fraction of a full Read), `search_by_purpose` to locate related code the diff should have updated — then `Read` the changed regions in full to review the actual lines.
 
@@ -205,4 +286,5 @@ When this persona runs as a spawned subagent (fresh context, no CLAUDE.md), use 
 3. **Pragmatic over perfect** - Working code first, polish later
 4. **Reliability first** - Always consider error recovery and edge cases
 5. **Keep it simple** - No over-engineering, no premature abstractions
-<!-- skill-templates: agent-review 5c35725 2026-07-30 -->
+
+<!-- skill-templates: agent-review 81d191b 2026-11-03 -->

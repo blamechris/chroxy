@@ -41,15 +41,14 @@ Extract `parallel:N` from arguments if present, override default. Cap at 5.
 
 Apply sort order and cap to `max` (hard cap 10 — parallel sessions should be focused and well-scoped). Recommended: 3-5 issues for first use.
 
-**Filter out assigned issues** — exclude issues with assignees from the working queue. Show in queue table as informational.
+**Filter out assigned issues** — exclude work owned by other runs. Restore this run's assignments from its durable record; do not filter its unfinished work out merely because it is assigned.
 
-**Check for existing branches/PRs** for each issue — skip any that already have open PRs or merged branches (same resume logic as autonomous-dev-flow).
+**Check existing branches/PRs** against the durable run record. Verify merged work and its ledger entry. Resume this run's owned open PR at its unfinished review/repair/merge step instead of creating another PR or skipping delivery. Preserve other runs' work.
 
 **Validate the queue before starting:**
-- At least 1 issue must be open, unassigned, and without an existing PR
-- If all matching issues are assigned, report "All N matching issues are assigned — nothing to process" and stop
-- If 0 issues match, report and stop — don't start an empty session
-- Show the user the queue and get confirmation
+- At least one new unassigned issue or this run's owned unfinished attempt must be actionable.
+- If nothing is actionable, reconcile acceptance, open PRs and the ledger before reporting completion or the precise blocker; do not infer completion from an empty issue query.
+- Show the bounded queue; reuse existing authorization when it already covers these items.
 
 ```markdown
 ## Parallel Work Queue ({N} issues, {P} concurrent agents)
@@ -66,9 +65,9 @@ Mode: **Parallel** ({P} agents per batch, {B} batches)
 Start parallel dev session?
 ```
 
-Wait for user confirmation. **This is the ONLY confirmation point** — everything after runs autonomously.
+**This is the ONLY confirmation point**, and only when the proposed queue needs authority or scope not already supplied. Otherwise proceed. Do not ask again for routine review, repair or gated merge of delegated work.
 
-After confirmation, create task list tracking:
+After establishing the authorized scope, create task list tracking:
 ```
 For each issue in work queue:
   TaskCreate: "Issue #N — <title>" with status pending
@@ -92,13 +91,13 @@ For each high-complexity issue:
 
 After decomposition, if total queue exceeds 10, truncate to 10.
 
-**Skip criteria** — auto-skip these issues (comment on each with reason):
-- Empty issue body or no identifiable acceptance criteria
-- No code path (manual testing, design docs, decisions needed)
-- Requires user input not present in the description
-- Deployment/release tasks
-- Issues labeled `blocked` or `wontfix`
-- Issues requiring design decisions with multiple valid approaches not specified
+**Skip criteria** — verify the current dependency and record the specific reason, rather than skipping by task type:
+- No identifiable acceptance criteria after reading the delegated outcome and linked context — request the missing requirement while continuing independent preparation.
+- An indispensable owner-reserved decision, QA action, access or release authorization is unavailable — block only the dependent work; keep authorized design, documentation, implementation and preparation with the agent.
+- `wontfix` without authority to revisit it, or a `blocked` label whose documented dependency still applies — inspect the reason rather than assuming the label is permanent.
+- An applicable attempt, budget or host limit prevents this item — preserve consumed allowance and advance independent authorized work with known remaining allowance.
+
+Multiple valid implementation approaches are not themselves a blocker: investigate reusable code, decide within delegated authority and record a proportional plan. Re-evaluate the item when a prerequisite arrives, preserving its state and limits rather than requiring another delegation.
 
 ### Phase 1: Build Agent Prompts
 
@@ -144,7 +143,7 @@ Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceili
 - **Implementers run at the workhorse tier by default.** Well-scoped, low/medium-complexity issues are workhorse work. Spawn a **ceiling-tier implementer only for a non-trivial issue** — genuine design latitude, cross-cutting change surface, or a prior workhorse failure on the same issue — and note which issues got the ceiling tier in the progress table.
 - **Triage/classification at the mechanical tier.** The queue triage pass (complexity read, skip-criteria checks, label classification) runs at the mechanical tier at low effort.
 - **Sample-verify instead of up-tiering.** Re-check a ~10% sample of the mechanical triage's classifications with a stronger tier rather than running the whole triage on an expensive one; a failed sample sends the batch back for verification, not up-tier.
-- **Fan-out budget: ~12 workhorse/ceiling subagents per run** (implementers + reviewers across all batches). Mechanical-tier triage/pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification recorded in the session summary.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run** (implementers + reviewers across all batches). Mechanical-tier triage/pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 requires an explicit one-line justification recorded in the session summary; **20 is a hard ceiling that includes every refute/verify agent, and no justification lifts it** (≤3 refuters per finding — queue rounds rather than widen).
 
 Each agent independently:
 1. Installs dependencies in its worktree
@@ -204,13 +203,15 @@ For each successfully created PR (one at a time, sequentially):
 
 | Verdict | Meaning | Action |
 |---------|---------|--------|
-| Clean | No critical findings, all comments addressed | Edit PR body: `Refs` → `Closes`. Mark issue done |
-| Needs attention | Critical findings or unresolved comments | Keep `Refs`. Flag for user |
-| Broken | Tests failing after review fixes | Keep `Refs`. Flag for user |
+| Clean | No blocking findings, all dispositions evidenced | Edit PR body: `Refs` → `Closes` only if acceptance is met; proceed to coordinator merge gates |
+| Needs attention | Blocking findings or unresolved dispositions | Keep `Refs`; repair within remaining attempts or record the precise blocker |
+| Broken | Tests failing after review fixes | Keep `Refs`; repair within remaining attempts or record the failed gate |
 
 4. **Two fix attempts max** — if /full-review finds critical issues, fix them. If a second attempt still fails, flag and move on.
 
-5. **Update progress table** after each review.
+5. **Coordinator delivery:** implementation workers do NOT merge the PR; the coordinator owns review and delivery. For delegated implementation in either normal or prime mode, verify final-commit CI, `/full-review`, required resolved threads and repository requirements, then merge synchronously in dependency order without another confirmation. Refresh dependent PRs after their base changes. Respect explicit holds and required external approvals; never bypass gates or use `--admin`/`--auto`. Verify `MERGED` and record the merge SHA, acceptance and follow-ups in the ledger before marking the issue delivered. A clean open PR is reviewed, not delivered.
+
+6. **Update progress table** after each review/merge. When the selected package finishes, normal mode writes the verified seed and requests a fresh session; prime mode checkpoints and continues only its authorized mission within the original limits.
 
 **CRITICAL:** Reviews run sequentially, never in parallel. Each review may push commits, and reviews benefit from focus.
 
@@ -228,13 +229,13 @@ After all reviews complete, output final summary:
 
 | # | Issue | PR | Review Verdict | Status |
 |---|-------|----|---------------|--------|
-| 1 | #12 — Add retry logic | [#45](url) | Approve | Ready to merge |
-| 2 | #15 — Fix login timeout | [#46](url) | Approve | Ready to merge |
+| 1 | #12 — Add retry logic | [#45](url) | Approve | Merged; SHA recorded |
+| 2 | #15 — Fix login timeout | [#46](url) | Approve | Merged; SHA recorded |
 | 3 | #18 — Add integration tests | — | — | Failed (implementation) |
 | 4 | #20 — Update error messages | [#48](url) | Request Changes | Needs attention |
 
 ### Summary
-- **Ready to merge:** N PRs
+- **Verified merged:** N PRs
 - **Needs attention:** M PRs (details below)
 - **Failed (implementation):** K issues
 - **Decomposed:** J issues → L sub-issues created
@@ -248,9 +249,9 @@ After all reviews complete, output final summary:
 - **#18** — Add integration tests: npm test error: missing fixture. Consider running `/autonomous-dev-flow #18` for sequential diagnostics.
 
 ### Next Steps
-- Merge ready PRs: `/batch-merge #45 #46`
-- Address flagged PRs
-- Retry failed issues: `/autonomous-dev-flow #18`
+- State the actual remaining gate for open PRs; request an owner action only if required
+- Normal mode: verified seed path for the next session
+- Prime mode: next authorized item, or the actual stop condition
 ```
 
 ## Agent Prompt Template
@@ -287,6 +288,25 @@ Generate a branch name from the issue title:
 SLUG=$(printf '%s' "<issue title>" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40)
 BRANCH="feat/<issue_number>-${SLUG}"
 git checkout -b "${BRANCH}"
+SESSION_BRANCH="${BRANCH}"
+
+**Assert the branch before you write.** Your worktree is meant to be private, but that is a
+property of how you were launched, not something you can assume — a stray `git checkout`
+(yours, or another agent's if you are not actually isolated) moves HEAD, and `git` HEAD is
+global to whatever working copy you are standing in. So record the branch you created as
+`SESSION_BRANCH` above, and re-check it immediately before your first edit AND again
+immediately before staging. Re-check, never remember. If it fails, stop and re-establish
+`SESSION_BRANCH` — never write to a branch this session did not create.
+
+assert_branch() {
+  local now; now="$(git branch --show-current)"
+  [ "${now}" = "${SESSION_BRANCH}" ] || {
+    echo "STOP: on '${now}', expected '${SESSION_BRANCH}' — HEAD moved. Do not edit, do not stage." >&2
+    return 1
+  }
+}
+
+assert_branch || exit 1   # before the first edit
 
 ### RED — Write Failing Tests
 
@@ -311,8 +331,17 @@ Dashboard: `cd packages/server && npm run dashboard:typecheck`
 
 ### Commit and PR
 
-Stage specific files (never git add -A or git add .):
+**Stage explicit paths.** `git status --short` first, then `git add` the files you changed,
+by name. Never `git add -A`, `git add .`, `git add -u`, `git add <dir>/`, or `git commit -a` —
+a bulk add commits whatever else happens to be in the tree. `-u` is not the safe one: it
+restages every *tracked* file whose worktree copy differs, including files a clean/smudge
+filter rewrote without you touching them — that is how `git add -u` turned a tracked 21KB
+`.docx` into a git-lfs pointer and committed it as an edit.
 
+assert_branch || exit 1   # second mandatory check — before staging
+                          # (defined under "Create Branch"; re-declare in a fresh shell)
+
+git status --short
 git add <specific-files>
 
 git commit -m "$(cat <<'EOF'
@@ -354,10 +383,11 @@ EOF
 1. NO attribution — no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere
 2. TDD is mandatory — RED → GREEN → REFACTOR. No skipping tests.
 3. Branch from main (your worktree HEAD)
-4. Stage specific files only — never `git add -A` or `git add .`
-5. Do NOT run /full-review — the coordinator handles reviews after you finish
-6. Do NOT merge the PR
-7. If you cannot implement the issue (missing requirements, blocked, etc.), output status "failed" with the reason instead of forcing bad code
+4. Stage specific files by name — never `git add -A`, `git add .`, `git add -u`, `git add <dir>/`, or `git commit -a`. `-u` is not the safe one: it restages tracked files a clean/smudge filter rewrote behind your back, which is how a tracked 21KB `.docx` was committed as a git-lfs pointer.
+5. Assert the branch before you write — re-check `git branch --show-current` against `SESSION_BRANCH` immediately before your first edit and again immediately before staging. Never write to a branch this session did not create.
+6. Do NOT run /full-review — the coordinator handles reviews after you finish
+7. Do NOT merge the PR
+8. If you cannot implement the issue (missing requirements, blocked, etc.), output status "failed" with the reason instead of forcing bad code
 
 ## Output
 
@@ -380,22 +410,22 @@ REASON: <why it failed>
 
 ## Resume Strategy
 
-This skill uses **GitHub state** for resume — no local state files.
-
-If a session is interrupted, re-running with the same arguments will:
-1. Query GitHub for existing session branches (matching `BRANCH_PREFIX`) and PRs referencing each issue
-2. Skip issues that already have merged or open PRs
-3. Process only issues without existing PRs
-
-This makes the skill **idempotent** — safe to re-run without duplicating work.
+Resume from the durable run record: run identity, mode, selected scope, branch/worktree
+ownership, per-item stage, attempts (including failures before a PR), review/worker counts
+and consumed limits. Query GitHub to reconcile current PR heads, gates and verified merges.
+Resume owned open PRs at their unfinished stage; do not duplicate implementation or skip
+delivery. Zero PRs does not imply zero attempts. Recover missing accounting before capped
+work; unknown allowance is not zero consumption. Record attempts when they start and retain
+the same counters across compaction/restart. Re-entry is **idempotent** and does not reset
+the two repair attempts or the selected queue/fan-out limits.
 
 ## Critical Rules
 
 1. **NO attribution** — No Co-Authored-By, no "Generated with Claude", no AI mentions anywhere. Zero Attribution Policy.
 2. **TDD is mandatory** — RED → GREEN → REFACTOR for every agent. No skipping tests.
 3. **Branch from main** — Every agent branches from its worktree HEAD (which is main). Never stack branches.
-4. **One confirmation point** — The initial queue approval. Everything after is fully autonomous.
-5. **Never merge** — PRs accumulate for user review. Agents keep working.
+4. **One confirmation point** — Establish missing queue authority only; reuse existing authorization. Routine gated merges need no further approval.
+5. **Worker/coordinator ownership** — Workers never merge; the coordinator completes required review, final-commit CI, gated merge and ledger update for authorized delivery in either mode.
 6. **Reviews run sequentially** — Never run /full-review in parallel. Each review may push commits and benefits from focus.
 7. **Two fix attempts max** — If /full-review finds critical issues, fix them. Second failure → flag and move on.
 8. **Hard cap 10 issues** — Parallel sessions should be focused. Refuse larger queues.
@@ -406,3 +436,5 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before each /full-review run.
 15. **Compose existing skills** — /full-review is called as-is. Don't reinvent its logic.
+16. **Explicit-path staging** — every agent stages the changed files by name. Never `git add -A`, `git add .`, `git add -u`, `git add <dir>/`, or `git commit -a`. `-u` is not the safe one: it restages tracked files a clean/smudge filter rewrote behind your back, which is how a tracked 21KB `.docx` was committed as a git-lfs pointer.
+17. **Assert the branch before writing** — an agent records the branch it creates as `SESSION_BRANCH` and re-checks `git branch --show-current` against it before its first edit and again before staging. Worktree isolation is the plan, not a guarantee; a stray checkout still moves HEAD.

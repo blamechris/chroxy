@@ -143,7 +143,10 @@ Single file, inline `<style>` and `<script>`, zero external requests. The
 tester may open it weeks later from a different machine — it must work from
 `file://`.
 
-**Theme:** dark mode, system font stack, comfortable line height. Use one
+**Theme:** dark mode, always — set `color-scheme: dark` and add no
+`prefers-color-scheme` light flip: the Claude app's browser pane renders local
+HTML light whatever the OS setting, so a flip hands the tester a glaring white
+page. System font stack, comfortable line height. Use one
 accent color for interactive elements and result-state colors matching the five
 statuses: pass=green, note=sky-blue, fail=red, skip=gray, need-help=amber.
 Respect `prefers-reduced-motion`.
@@ -262,7 +265,7 @@ Result: X pass / N notes / Y fail / W skipped / Z need help / U untested
 - [ ] **<Item title>** — (untested)
 ```
 
-  Use `navigator.clipboard.writeText` with a `document.execCommand('copy')`
+  Use `navigator.clipboard.writeText` with a `document.execCommand('copy')
   fallback (file:// clipboard quirks). Failed items list their notes verbatim —
   this paste goes straight into a bug report or release-gate comment.
 

@@ -1,435 +1,129 @@
-description = "Sequentially merge a set of reviewed PRs, handling branch protection's \"must be up-to-date\" requirement by updating each branch after the previous merge."
+description = 'Merge an authorized set of PRs sequentially through the same review, CI and delivery gates used for a single PR.'
 prompt = '''
 # /batch-merge
 
-Sequentially merge a set of reviewed PRs, handling branch protection's "must be up-to-date" requirement by updating each branch after the previous merge.
+Merge an authorized set of PRs sequentially through the same review, CI and delivery gates used for a single PR. Handle dependencies and branch freshness, verify each merge, and record delivery before moving on. This skill coordinates `/full-review`, `/check-pr`, `/fix-ci` and `/merge-gate`; it never calls `/merge`, which may itself call this skill.
 
 ## Arguments
 
-- `{{args}}` - Space-separated PR numbers, `all` to merge all open PRs targeting main (sorted by number), or `--dry-run` to preview without merging.
-  - Examples: `1570 1571 1572`, `all`, `1570 1571 --dry-run`
+- `{{args}}` — explicit PR numbers, `all` only when the user expressly requested all open PRs targeting main, or `--dry-run` for a read-only preview.
+- Examples: `1570 1571 1572`, `all`, `1570 1571 --dry-run`.
+- An orchestrator may supply its already-authorized PR set, dependency order, ledger and shared repair/budget limits. An empty argument does not authorize every open PR.
 
 ## Instructions
 
-### Phase 0: Build Merge Queue
+### Phase 0: Build the Authorized Queue
 
-```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+Read the selected PRs and the caller's durable state. Confirm repository, base, current head, open/draft status and scope. Remove closed entries; verify already-merged entries and distinguish earlier delivery from work merged by this run. Drafts retain their actual readiness gap. Never silently add unrelated existing PRs.
 
-# Parse arguments
-PR_NUMS=()
-DRY_RUN=false
-for arg in {{args}}; do
-  case "$arg" in
-    --dry-run) DRY_RUN=true ;;
-    all) PR_NUMS=($(gh pr list --base main --state open --json number --jq '.[].number | tostring' | sort -n)) ;;
-    \#*) PR_NUMS+=("${arg#\#}") ;;
-    *) PR_NUMS+=("$arg") ;;
-  esac
-done
-```
+Gated merge authority is the same in ordinary and prime-directive runs: proceed for delegated implementation once its gates pass. Preserve explicit user holds, required human approvals and unavailable permissions. Display the queue and continue under existing authorization; do not add a routine queue-confirmation pause. Ask only for genuinely missing scope or an owner-reserved action.
 
-Validate each PR: must be OPEN, targeting main, not draft. Remove invalid entries and warn.
+Order by verified dependencies, then retain the supplied order for independent PRs. A blocked prerequisite blocks its dependents; independent ready PRs may proceed. Merge order by itself is an execution detail.
 
-Display the queue for user confirmation (**this is the ONLY confirmation point** — after approval, the entire loop runs autonomously):
+For `--dry-run`, inspect current state and report the proposed order and missing gates, then return. Do not launch posting/fixing reviews, update branches, resolve threads, create issues or merge.
 
-```markdown
-## Merge Queue ({N} PRs)
+### Phase 1: Establish Bounded State
 
-| # | PR | Title | CI | Copilot | Status |
-|---|-----|-------|----|---------|--------|
-| 1 | #1570 | test(combat): Assert carrier bay... | — | — | Queued |
-| 2 | #1571 | test(combat): Add dodge roll... | — | — | Queued |
-```
+Use the caller's ledger, stable run identity and consumed allowances. Standalone, record the PR queue, dependency edges, current head, review coverage, CI state, disposition evidence, attempts and verified merges in a session ledger (`autonomous-session-<date>.md` at repo root — gitignored, never commit). Restore existing state on retry; never reset consumption because no merge occurred.
 
-If `--dry-run`, state that no merges will be performed.
+Absent a caller-specified limit, allow at most **one corrective round per PR** and **one branch-update recovery per PR** in this batch. Record the round before edits and share it with nested review/CI skills; nested calls do not grant extra rounds. A remaining blocking finding at the limit stays blocked while independent PRs proceed. Read-only classification does not consume a corrective round. Do not infer unused caller allowance from missing accounting.
 
-### Phase 1: Pre-Flight Check
-
-Before entering the merge loop, pre-check all PRs to surface blockers early. For each PR:
-
-```bash
-# CI status
-gh pr checks ${PR_NUM} --json name,state \
-  --jq '[.[] | select(.state != "SUCCESS" and .state != "SKIPPED")] | length'
-
-# Copilot review presence
-# DISMISSED is excluded on purpose: after `dismiss_stale_reviews` fires, a
-# superseded review is still returned by this endpoint, so counting it reports
-# the gate as satisfied by a review of code that no longer exists.
-gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")
-             | select(.state != "DISMISSED")] | length'
-```
-
-Update the progress table with pre-flight results. This is informational — does not block the loop.
+For pending remote work, use the host's supported event/status/continuation mechanism. Respect configured waits and host restrictions; do not introduce prohibited CI polling or repeatedly issue unchanged checks. A wait timeout leaves the gate pending, not passed. Report a real host limitation if supported continuation is unavailable.
 
 ### Phase 2: Sequential Merge Loop
 
-Process PRs in order. For each PR:
+**Sequential only:** process one PR's merge at a time. Recompute its prerequisite and base/head state immediately before entering its gates.
 
-#### Step 2a: Check CI
+#### Step 2a: Reconcile Branch Freshness
 
-The required-check roster is **derived here, never typed here.**
-`scripts/lib/contributing-roster.mjs` is this repo's one parse of
-CONTRIBUTING.md's required-checks bullet — the same implementation
-`packages/server/tests/contributing-required-checks.test.js` pins against
-`ci.yml`'s job names and `scripts/check-required-contexts.sh` diffs against the
-live branch protection. A list typed into this file instead is the "hardcoded
-list beside a growing set" entry in `docs/false-safety-guards.md`, and this step
-had already failed exactly that way (#7503): the names it carried — `Run Tests`
-and `Validate Project` — matched **zero** of the 23 contexts a real chroxy PR
-produces, so the filter selected no rows, "nothing failing" read as "all green",
-and the gate passed on a red PR.
+If a prerequisite remains unmerged, retain its dependent PR as blocked and select an independent ready PR. If main has advanced, determine whether protection or the PR's changes require an update. For an authorized owned branch, an `update-branch` request can use the current head as its expected value:
 
 ```bash
-# One required context per line. Run from the repo root: only the PATH to the
-# parser is relative - it resolves CONTRIBUTING.md against its own module URL.
-# REFUSE rather than gate on a guess.
-REQUIRED_CHECKS=$(node scripts/lib/contributing-roster.mjs) || {
-  echo "REFUSE: cannot read the required-checks roster - not gating blind" >&2
-  exit 2
-}
-
-# Extraction runs through gh's BUILT-IN `--jq` (gojq, compiled into gh), like
-# every other extraction in this playbook - never an external `jq` binary.
-# macOS ships no jq, and a classifier whose failure yields an empty blocker list
-# is fail-open: #7503's own shape one layer down, with "cannot check" reading as
-# "nothing to check" (#7540 review, and Copilot's thread on the same lines).
-#
-# `gh pr checks` exits non-zero when a check is red or still running. The rows
-# are still on stdout and classifying them is this step's whole job, so gh's
-# exit code is deliberately not the gate. An EMPTY stdout is: no rows must never
-# read as nothing wrong, and it is equally what a gh auth failure, a network
-# error and a broken --jq program produce.
-ROWS=$(gh pr checks "${PR_NUM}" --json name,state --jq '.[] | [.name, .state] | @tsv')
-[ -n "$ROWS" ] || {
-  echo "REFUSE: no check rows for #${PR_NUM} - not gating blind" >&2
-  exit 2
-}
-
-# Classification is pure shell: there is no third binary here whose failure
-# could empty the blocker list. It counts what it classified, so "examined
-# nothing" cannot report clean either.
-#
-# A required context MISSING from the payload BLOCKS. Absence is what a stale or
-# misspelled roster entry produces, and it is equally what a renamed ci.yml job
-# produces (#7191) - branch protection wedges on both, so neither may pass here.
-BLOCKERS=""
-GATED=0
-TAB=$(printf '\t')
-while IFS= read -r name; do
-  [ -n "$name" ] || continue
-  GATED=$((GATED + 1))
-  seen=0
-  bad=""
-  while IFS="$TAB" read -r rname rstate; do
-    [ "$rname" = "$name" ] || continue
-    seen=1
-    # SUCCESS and SKIPPED are the ONLY accepted states. FAILURE, ERROR,
-    # CANCELLED, TIMED_OUT, PENDING, QUEUED, IN_PROGRESS and any state GitHub
-    # adds later all fall to the else arm and block. Listing what passes, not
-    # what fails, is what keeps a new state from being accepted by default.
-    case "$rstate" in
-      SUCCESS|SKIPPED) ;;
-      *) bad="${bad}${bad:+,}${rstate}" ;;
-    esac
-  done <<<"$ROWS"
-  if [ "$seen" -eq 0 ]; then
-    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=MISSING"
-  elif [ -n "$bad" ]; then
-    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=${bad}"
-  fi
-done <<<"$REQUIRED_CHECKS"
-
-# Classifying nothing is not a pass.
-[ "$GATED" -gt 0 ] || {
-  echo "REFUSE: classified 0 required contexts - not gating blind" >&2
-  exit 2
-}
+# EXPECTED_HEAD is the full SHA just read for this PR; if it changes, inspect again.
+gh api "repos/${REPO}/pulls/${PR_NUM}/update-branch" --method PUT \
+  -f expected_head_sha="${EXPECTED_HEAD}"
 ```
 
-An empty `BLOCKERS` **after a non-zero `GATED`** is the only pass — the count is
-the positive signal, and every way of failing to look reaches a `REFUSE` above
-rather than an empty list. A non-empty `BLOCKERS` names every required context
-that is missing, red, or still running:
+Do not update a branch blindly. Preserve unrelated dirty work and use an owned worktree for conflict or code fixes. A recoverable conflict is agent work within scope and remaining limits; otherwise record the exact dependency. Every push, conflict resolution or base update invalidates stale gate readings. Read the new head and continue through review and CI again.
 
-- **`=PENDING` / `=QUEUED` / `=IN_PROGRESS`** — poll every 30s for up to 3
-  minutes, re-running the block each time.
-- **`=FAILURE` / `=ERROR` / any other state** — run `/fix-ci ${PR_NUM}`. If
-  fixed, continue. If escalated, mark the PR `Skipped` and continue to the next.
-- **`=MISSING`** — **re-poll once** after the pending window before treating it
-  as final, then mark the PR `Skipped` with the reason and continue to the next
-  (Critical Rule 6: one stale PR must not stop the batch). Absence is not
-  automatically terminal — a push can produce **no workflow run at all** for the
-  new head, and every tool renders that as pending rather than absent. This repo
-  has an instance: on PR #7023 the concurrency group was never freed by a
-  run stuck on an offline runner, the next push created zero runs, and
-  `gh pr checks` reported "no checks reported" indefinitely. So assert a run
-  exists for the head before concluding:
+#### Step 2b: Verify Independent Review and Posted Feedback
 
-  ```bash
-  gh run list --branch "$(gh pr view ${PR_NUM} --json headRefName -q .headRefName)" \
-    --limit 5 --json headSha,name,status,conclusion
-  ```
+The quality gate is a clean `/full-review` covering the current head, with an independent reviewer and triage of **all posted Copilot, human and agent findings**, including general summaries. Existing review evidence may be reused only when its head coverage and dispositions are verified. A review-comment count, old CLEAN label, dismissed review or thread reply does not establish that gate.
 
-  If the newest run's `headSha` is not the PR's head, nothing is running and
-  waiting longer cannot help. If a run *does* exist for the head and the context
-  is still absent, it is terminal: a `ci.yml` job was renamed without updating
-  CONTRIBUTING.md and the live protection, and branch protection will refuse the
-  merge however long you wait.
+If evidence is absent or changes are uncovered, run `/full-review ${PR_NUM}` with the shared limits. After additional commits, include independent fix-delta verification. Check `dismiss_stale_reviews` requirements: obtain a fresh Copilot review or other approval when repository rules require it. A required pending review remains blocking regardless of PR age; an optional unavailable Copilot review may be recorded and skipped without skipping independent review or posted feedback.
 
-Note that Phase 1's pre-flight count is a *different* expression on purpose — it
-quantifies over every check the PR has, required or not, and is explicitly
-informational. This step is the gate.
+Use `/check-pr` to verify impact and disposition:
 
-#### Step 2b: Check Copilot Review
+- **FIX:** repair a blocking correctness, security, data-integrity or promised-acceptance defect, remove the defective change, or verify acceptable containment.
+- **FALSE POSITIVE:** explain why the claim is unsupported, with evidence.
+- **FOLLOW-UP ISSUE:** document an eligible low-impact nonblocking finding with its issue, impact and acceptance evidence. This includes minor introduced findings when delivery remains acceptable; it need not cause another CI cycle.
+
+A blocking finding is not cleared by an issue link or a short estimate. Resolve only threads with supported current-head dispositions through `/check-pr` step 6b's paginated GraphQL `resolveReviewThread` procedure. Never resolve every open thread on the assumption that an earlier review handled it. Findings without threads have the same acceptance requirements.
+
+#### Step 2c: Verify Final-Head CI
+
+Read the current head SHA and check results through supported host tools. **ALL CI checks must pass on the final commit** under the repository's check policy; a documented intentionally skipped check may count only when that policy accepts it. Empty results, a prior commit's results, pending/unknown state or a failed required check do not pass.
+
+Use `/fix-ci` for a verified failure within the same recorded corrective allowance. After **any fix or branch update**, return to Step 2b to review uncovered changes and then re-run Step 2c against the new head. This includes fixes made by `/fix-ci` itself. No path goes directly from a pushed fix to merge.
+
+#### Step 2d: Merge and Verify
+
+Immediately before merging, reconcile the current head and base with the checked evidence. Require clean independent `/full-review`, all final-head CI passing, ALL review threads resolved with supported dispositions, required approvals and repository protection satisfied, and no explicit user hold. If evidence changed, revisit the affected gates.
+
+Verify that repository policy permits synchronous merge. If a merge queue is required, report that policy dependency rather than silently enqueueing or bypassing it. Never use `gh pr merge --auto`, GitHub auto-merge or `--admin`.
 
 ```bash
-COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")
-             | select(.state != "DISMISSED")] |
-    if length == 0 then "NOT_FOUND"
-    elif any(.[]; .state == "PENDING") then "IN_PROGRESS"
-    else "COMPLETED" end')
+# CHECKED_HEAD is the full SHA whose review, CI and thread gates just passed.
+# Merge strategy: always --squash --delete-branch
+gh pr merge ${PR_NUM} --squash --delete-branch --match-head-commit "${CHECKED_HEAD}"
+gh pr view ${PR_NUM} --json state,mergeCommit,mergedAt
 ```
 
-Copilot review **must be present** before merge. This is the quality gate.
+Require `MERGED`, capture the merge SHA and verify it is reachable from current `origin/main` before recording the delivered result. If the head moved, recheck instead of retrying against unchecked code. A successful command exit or queued merge is not delivery evidence.
 
-- **COMPLETED:** Proceed.
-- **IN_PROGRESS:** Poll every 30s, max 5 min.
-- **NOT_FOUND + PR < 8 min old:** Poll every 30s, max 8 min. Copilot takes 3-5 min to start.
-- **NOT_FOUND + PR >= 8 min old:** Proceed with warning (Copilot won't come for old PRs).
+#### Step 2e: Record and Advance
 
-Compute the age rather than estimating it — the branch above is only reproducible
-if both operators derive it the same way:
+Immediately append the outcome, PR, reviewed/checked head, review verdict, CI evidence, merge SHA and follow-up issues to the ledger. Show a concise progress table after every merge, then read the next PR's actual state. Main changed, so Step 2a runs again; do not reuse the next PR's pre-flight CI or review assumptions.
 
-```bash
-PR_AGE_MIN=$(gh pr view ${PR_NUM} --json createdAt \
-  --jq '((now - (.createdAt | fromdateiso8601)) / 60) | floor')
-```
+| PR | Review / CI at head | Merge | Remaining gate |
+|----|---------------------|-------|----------------|
+| #1570 | Clean / PASS at `head-sha` | Merged `merge-sha` | none |
+| #1571 | Clean / pending at `head-sha` | Pending | CI completion |
+| #1572 | Unchecked | Blocked | depends on #1571 |
 
-#### Step 2c: Address Unaddressed Copilot Comments
+### Phase 3: Recover a Failed Gate
 
-Check for Copilot inline comments without replies:
+Use `/merge-gate` to identify the actual requirement from current-head evidence; it does not call `/merge` or restart this batch. Handle supported CI/review/branch remediation inside the shared allowances. Re-enter Steps 2a–2d after any change. Do not lower requirements to make the retry pass.
 
-```bash
-# Get all inline comments
-ALL_COMMENTS=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate)
+| Verified condition | Action |
+|--------------------|--------|
+| Branch behind / owned conflict | Update or repair within remaining allowance; repeat affected review and CI gates |
+| CI failure | `/fix-ci` within the shared corrective round; return to review and fresh CI |
+| Unaddressed finding / conversation | `/check-pr`; verify disposition before resolving; review fixes and verify new CI |
+| Required human approval / permission | Record exact owner action and what the agent resumes afterward |
+| Pending review / CI | Supported host continuation; preserve pending state and advance independent work |
+| Rate limit | Honor the retry interval through supported waiting; at most two retries, preserving consumption |
+| Unknown or exhausted recovery | Record evidence and precise unresolved gate; advance only independent work |
+| Already merged | Verify merge state/SHA and reconcile ledger without duplicate credit |
 
-# Find Copilot comments without a reply from us
-WORKFLOW_USER=$(gh api user --jq .login)
+Re-evaluate a blocked PR when its recorded prerequisite arrives, within its existing authority and remaining allowance. A user supplying access or approval does not take over the remaining review, merge or recording steps.
 
-# Copilot-authored top-level comments (not replies) that have no reply from us.
-# Scope to the Copilot bot so this step only processes Copilot threads, as the
-# heading claims — human review comments are out of scope for batch-merge.
-UNREPLIED=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" '
-  . as $all
-  | [ $all[]
-      | select(.in_reply_to_id == null)
-      | select(.user.login == "copilot-pull-request-reviewer[bot]")
-      | select(.id as $id
-          | ($all | any(.[]; .in_reply_to_id == $id and .user.login == $user)) | not) ]
-')
-```
+### Phase 4: Return or Finish
 
-For each unreplied comment, handle using the 3-outcome model from `/check-pr`:
-1. **FIX** — Fix the issue, commit, reply with before/after
-2. **FALSE POSITIVE** — Reply explaining why no change needed
-3. **DEFER** — Create follow-up issue, reply with issue link
+Report the actual merged PRs, merge SHAs, documented follow-ups and exact remaining gates from the ledger. Do not claim a completed batch while gates remain pending. End with the global concise status block and next-action line, identifying a real owner action only when required.
 
-**CRITICAL:** If any fix commits are pushed, `dismiss_stale_reviews` will invalidate the Copilot review. You MUST re-enter Step 2b and wait for a fresh Copilot review before proceeding to merge.
-
-#### Step 2d: Merge
-
-```bash
-if [ "$DRY_RUN" = true ]; then
-  echo "DRY RUN: Would merge PR #${PR_NUM}"
-else
-  gh pr merge ${PR_NUM} --squash --delete-branch
-fi
-```
-
-**If merge fails**, apply the blocker decision tree (Phase 3).
-
-#### Step 2e: Update Next PR Branch
-
-This step and 2f apply only under `strict: true` branch protection ("Require
-branches to be up to date before merging"). Under `strict: false` a merge does
-not make the remaining PRs unmergeable, and updating each one just spends a CI
-run. **chroxy main is `strict: false`** — recorded in
-`docs/decisions/2026-06-02-overnight-marathon.md`, where a 12-PR batch skipped
-2e and 2f on exactly that basis. Derive the setting rather than trusting that
-sentence: it is per-repo and per-branch, and this playbook is installed in more
-than one repo.
-
-```bash
-# Fail CLOSED: anything other than a definite `false` is treated as strict.
-# Reading protection needs repo-admin scope, so an operator without it gets the
-# safe answer - a needless update-branch costs a CI run, a skipped necessary one
-# wedges the merge.
-STRICT=$(gh api "repos/${REPO}/branches/main/protection" \
-  --jq '.required_status_checks.strict' 2>/dev/null) || STRICT=true
-[ "$STRICT" = "false" ] || STRICT=true
-```
-
-If `STRICT` is `false`, skip the rest of this step and Step 2f, and go straight
-to the next PR. Otherwise PR N+1 is now stale — update it:
-
-```bash
-NEXT_PR=${PR_NUMS[$((current_index + 1))]}
-if [ -n "$NEXT_PR" ]; then
-  gh api repos/${REPO}/pulls/${NEXT_PR}/update-branch \
-    --method PUT \
-    -f expected_head_sha="$(gh pr view ${NEXT_PR} --json headRefOid -q .headRefOid)"
-fi
-```
-
-If `update-branch` fails with a conflict, mark the next PR as `Blocked` and try the PR after that (it still needs updating since main changed).
-
-#### Step 2f: Wait for CI on Updated Branch
-
-Skipped together with 2e when `STRICT` is `false` — there is no updated branch
-to wait on.
-
-```bash
-MAX_WAIT=180  # 3 minutes
-INTERVAL=30
-
-ELAPSED=0
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-  PENDING=$(gh pr checks ${NEXT_PR} --json state \
-    --jq '[.[] | select(.state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS")] | length')
-  FAILED=$(gh pr checks ${NEXT_PR} --json state \
-    --jq '[.[] | select(.state == "FAILURE" or .state == "ERROR")] | length')
-
-  if [ "$PENDING" = "0" ] && [ "$FAILED" = "0" ]; then
-    break  # All checks done and passing
-  fi
-  if [ "$FAILED" != "0" ] && [ "$PENDING" = "0" ]; then
-    break  # Failed but nothing pending — don't wait
-  fi
-
-  sleep $INTERVAL
-  ELAPSED=$((ELAPSED + INTERVAL))
-done
-```
-
-If CI fails after update-branch, run `/fix-ci ${NEXT_PR}`.
-
-#### Step 2g: Update Progress Table
-
-Output the progress table after **every merge**. This is the user's live dashboard.
-
-```markdown
-## Merge Progress ({merged}/{total})
-
-| # | PR | Title | CI | Copilot | Merge | Notes |
-|---|-----|-------|----|---------|-------|-------|
-| 1 | #1570 | test(combat): Assert carrier... | PASS | Reviewed (0) | Merged | — |
-| 2 | #1571 | test(combat): Add dodge roll... | PASS | Reviewed (1→fixed) | Merged | 1 fix in abc1234 |
-| 3 | #1572 | test(autoload): Add Statistics... | Updating | — | Next | CI running after update-branch |
-| 4 | #1573 | fix: Address silent failures... | — | — | Queued | — |
-```
-
-**Column values:**
-
-| Column | Values |
-|--------|--------|
-| CI | `PASS`, `FAIL→fixed`, `FAIL→skipped`, `Updating`, `Pending`, `—` |
-| Copilot | `Reviewed (N)`, `Reviewed (N→M fixed)`, `Pending`, `None (old PR)`, `—` |
-| Merge | `Merged`, `Blocked`, `Skipped`, `Next`, `Queued`, `DRY RUN` |
-
-### Phase 3: Merge Blocker Decision Tree
-
-When `gh pr merge` fails, classify and respond:
-
-| Error Pattern | Action | Max Retries |
-|---------------|--------|-------------|
-| "not up to date" / "branch is behind" | `update-branch` → wait CI → retry | 1 |
-| "status check" / "required status" | `/fix-ci` → retry | 1 |
-| "review" / "approval" / "dismissed" | Wait for fresh Copilot review → retry | 1 |
-| "conversation" / "unresolved" / "must be resolved" | Resolve open review threads (see below), then retry | 1 |
-| "conflict" / "not mergeable" | Skip immediately, report | 0 |
-| "already merged" | Skip silently, note in table | 0 |
-| Rate limit (403/429) | Back off 60s → retry | 2 |
-| Unknown | Log full error, skip PR | 0 |
-
-After max retries exhausted: mark PR as `Skipped` with reason, continue to next PR.
-
-**Unresolved review conversations.** When branch protection requires conversation
-resolution, `gh pr merge` fails with a message about unresolved conversations rather
-than a status-check or review failure — easy to misclassify as `Unknown` and skip
-opaquely. Detect it explicitly and surface it as the blocker reason. Confirm the cause
-via GraphQL (REST does not expose thread state):
-
-```bash
-UNRESOLVED=$(gh api graphql -f query="
-  query {
-    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
-      pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) { nodes { isResolved } }
-      }
-    }
-  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
-```
-
-If `UNRESOLVED > 0`, the threads were left open by the earlier review pass (reviews
-should run BEFORE batch-merge — see Critical Rule 2). Resolve them with the same
-GraphQL `resolveReviewThread` mutation `/check-pr` step 6b uses, then retry the merge
-once. If threads cannot be resolved (e.g., a reviewer re-opened one intentionally),
-mark the PR `Blocked` with reason "unresolved review conversations" rather than failing
-silently — the user must weigh in.
-
-### Phase 4: Session Summary
-
-After all PRs processed:
-
-```markdown
-## Batch Merge Complete
-
-**Merged:** {N}/{total} | **Skipped:** {M} | **Blocked:** {K}
-
-| # | PR | Title | Merge | Notes |
-|---|-----|-------|-------|-------|
-| 1 | #1570 | test(combat): Assert carrier bay... | Merged | — |
-| 2 | #1571 | test(combat): Add dodge roll... | Merged | 1 Copilot fix |
-| 3 | #1572 | test(autoload): Add Statistics... | Skipped | CI timeout |
-
-### Skipped/Blocked PRs
-- **#1572**: `Server Tests` timed out after update-branch. Needs manual investigation.
-
-### Copilot Comments Addressed During Merge
-- **#1571**: 1 comment → FIX in `abc1234` (added null guard)
-```
-
-## Error Recovery
-
-| Error | Recovery | Max Retries |
-|-------|----------|-------------|
-| CI failure after update-branch | `/fix-ci`, wait, retry merge | 1 |
-| Copilot review not posted | Poll every 30s, max 8 min | 16 polls |
-| Copilot review dismissed (stale) | Wait for new review cycle | 1 |
-| Merge blocked (unknown) | Diagnose via `gh pr checks`, report | 1 |
-| update-branch conflict | Skip PR, continue | 0 |
-| Rate limiting | Back off 60s, retry | 2 |
-| PR already merged | Skip silently | 0 |
-| PR closed | Skip silently | 0 |
+If called by `/merge` or another orchestration skill, return this evidence to the caller for authorized post-merge work and its mode boundary. Standalone ordinary development finishes the bounded feature through delivery and ledger, then `/session-lifecycle` writes the verified seed and instructs the user to start a fresh session. Prime-directive runs checkpoint the same state and continue the authorized mission using supported host continuation/compaction. A completed batch does not expand the delegated scope.
 
 ## Critical Rules
 
-1. **Sequential only** — one PR at a time, so each PR's gate is evaluated against
-   the `main` it will actually land on. Where branch protection sets `strict: true`
-   the order is additionally *mandatory* (PR N+1 goes stale the instant PR N lands);
-   chroxy main is `strict: false`, so Steps 2e/2f are normally a no-op here. Step 2e
-   derives `STRICT` rather than assuming either way.
-2. **Never run reviews** — Reviews happen BEFORE this skill. This skill only merges.
-3. **Never use `--admin`** — Respect branch protections.
-4. **Progress table after every merge** — User can check in anytime.
-5. **Copilot review is a hard gate** — Must be present before merge (except old PRs where Copilot won't arrive).
-6. **Skip and continue** — Never block the batch on one stuck PR.
-7. **Idempotent** — Safe to re-run. Already-merged PRs are detected and skipped.
-8. **Handle stale reviews** — Pushing fixes invalidates reviews. Wait for fresh cycle.
-9. **Compose with `/fix-ci`** — Don't reinvent CI diagnosis.
-10. **No attribution** — Follow project's attribution policy in any fix commits.
+1. **Sequential only** — verify dependencies and current state before each merge.
+2. **Review the current head** — mandatory independent `/full-review`, posted feedback triage and supported dispositions; reuse verified coverage, not stale labels.
+3. **Never use `--admin`** — no protection override, `gh pr merge --auto` or GitHub auto-merge.
+4. **Progress table after every merge** — record the verified merge in the ledger first.
+5. **Required reviews stay required** — PR age does not waive a Copilot or human approval requirement.
+6. **Block only dependent work** — one failed gate does not stop independent ready PRs.
+7. **Idempotent** — preserve shared counters and verified ledger entries across retries; no duplicate delivery credit.
+8. **Changes repeat the gates** — fixes and base updates require covered review and final-head CI before merge.
+9. **Compose supported recovery** — `/fix-ci`, `/check-pr` and `/merge-gate`; never recursively invoke `/merge`.
+10. **No attribution** — follow Zero Attribution Policy in commits, comments and reports.
 '''
