@@ -19,7 +19,10 @@ ureq = "2"
 uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-single-instance = "2"
-tauri-plugin-updater = "2"
+# No `zip` feature: it only extracts v1Compatible `.msi.zip` payloads, and
+# `createUpdaterArtifacts: true` ships raw `.msi` + `.msi.sig`. The macOS
+# `.app.tar.gz` path does not depend on it.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-process = "2"
 qrcode = "0.14"
 tauri-plugin-clipboard-manager = "2"

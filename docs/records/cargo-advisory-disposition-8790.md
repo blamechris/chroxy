@@ -78,12 +78,32 @@ configuration or warning filtering is introduced.
 
 | Remaining record | Actual parent / applicability | Disposition and revisit trigger |
 | --- | --- | --- |
-| [RUSTSEC-2026-0367](https://rustsec.org/advisories/RUSTSEC-2026-0367.html), [-0368](https://rustsec.org/advisories/RUSTSEC-2026-0368.html), [-0369](https://rustsec.org/advisories/RUSTSEC-2026-0369.html) | tauri-plugin-updater 2.10.1 → zip ^4 → 4.6.1, Windows only | **Open, unfixed.** Fix requires zip ≥9; latest stable updater 2.14.0 still declares zip ^4. Revisit a supported updater release adopting fixed zip or removing this extraction path. |
+| [RUSTSEC-2026-0367](https://rustsec.org/advisories/RUSTSEC-2026-0367.html), [-0368](https://rustsec.org/advisories/RUSTSEC-2026-0368.html), [-0369](https://rustsec.org/advisories/RUSTSEC-2026-0369.html) | tauri-plugin-updater 2.10.1 → zip ^4 → 4.6.1, Windows only | **Resolved 2026-11-03** by removing the extraction path; see the update below. |
 | RUSTSEC-2024-0429 | Linux GTK/glib stack | Open as alert 207 above. |
 | RUSTSEC-2024-0370 | proc-macro-error 1.0.4 | Unmaintained warning retained; revisit a supported GTK/build-macro parent replacement. |
 | RUSTSEC-2025-0075, -0080, -0081, -0098, -0100 | unic-char-range, unic-common, unic-char-property, unic-ucd-version, unic-ucd-ident 0.9.0 through the Tauri/URL-pattern graph | Unmaintained warnings retained; revisit supported parent replacement of the unic stack. |
 | RUSTSEC-2026-0370, -0371, -0372 | zvariant 5.11.0, zbus_names 4.3.2, zvariant_derive 5.11.0 through the Linux zbus graph | Unmaintained warnings retained; revisit supported parent replacements or upstream maintenance resolution. |
 | Yanked: clipboard-win 5.4.1; spin 0.9.8 | Existing locked transitive crates | Warnings retained; revisit supported parent updates or upstream yank guidance. No replacement is forced in this patch. |
+
+### Update 2026-11-03: zip removed from the graph
+
+GitHub alerts 290 (critical, GHSA-m665-v7pm-7grj, first fixed 9.0.5), 291 (high,
+GHSA-q7v9-x93c-xqv3) and 292 (medium, GHSA-8hxf-qr8p-62x4) cover the same zip 4.6.1.
+No 2.x updater moves to a fixed zip, so the desktop crate now depends on
+`tauri-plugin-updater` with `default-features = false, features = ["rustls-tls"]`.
+That drops the plugin's `zip` feature, and with it `zip`, `arbitrary` and
+`derive_arbitrary` from `Cargo.lock`. No other locked version changes.
+
+The feature only does two things. On Windows it extracts a `.msi.zip` / `.exe.zip`
+payload; on Linux it untars a `.AppImage.tar.gz`. Tauri v2 produces those archives
+only with `createUpdaterArtifacts: "v1Compatible"`. This repo sets `true`, which
+publishes the raw `.msi` and its `.msi.sig`, and the plugin installs a raw MSI
+without the feature. macOS is unaffected: its `.app.tar.gz` path uses `tar` and
+`flate2`, which the plugin depends on unconditionally on macOS. If the bundle
+config ever moves to `"v1Compatible"`, Windows updates would need this feature back,
+and with it a zip release that fixes these advisories.
+
+The historical text below describes the path as it was before this update.
 
 The updater's Windows ZIP path invokes `ZipArchive::extract`; its download API
 verifies the configured release signature before the normal download-and-install
