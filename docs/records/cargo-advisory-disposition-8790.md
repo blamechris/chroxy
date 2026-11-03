@@ -94,14 +94,22 @@ No 2.x updater moves to a fixed zip, so the desktop crate now depends on
 That drops the plugin's `zip` feature, and with it `zip`, `arbitrary` and
 `derive_arbitrary` from `Cargo.lock`. No other locked version changes.
 
-The feature only does two things. On Windows it extracts a `.msi.zip` / `.exe.zip`
-payload; on Linux it untars a `.AppImage.tar.gz`. Tauri v2 produces those archives
+The feature adds support for Tauri v1-style compressed updater bundles, and in
+2.10.1 that is all it gates. On Windows it extracts a `.msi.zip` /
+`-setup.exe.zip` payload; on Linux it untars a `.AppImage.tar.gz`. Tauri v2 produces those archives
 only with `createUpdaterArtifacts: "v1Compatible"`. This repo sets `true`, which
 publishes the raw `.msi` and its `.msi.sig`, and the plugin installs a raw MSI
 without the feature. macOS is unaffected: its `.app.tar.gz` path uses `tar` and
-`flate2`, which the plugin depends on unconditionally on macOS. If the bundle
-config ever moves to `"v1Compatible"`, Windows updates would need this feature back,
-and with it a zip release that fixes these advisories.
+`flate2`, which the plugin depends on unconditionally on macOS. On Linux, the plugin
+now writes the downloaded bytes as the AppImage without untarring them, so only a raw
+`.AppImage` payload installs; no Linux desktop bundle ships today. If the bundle
+config ever moves to `"v1Compatible"`, Windows and Linux updates would need this
+feature back, and with it a zip release that fixes these advisories.
+
+The release workflow and `docs/release-signing.md` still describe the `.msi.zip`
+layout, and the workflow Authenticode-signs the raw MSI after its updater signature
+is computed. Both are tracked in #8906 and must be fixed before a release publishes
+an updater feed.
 
 The historical text below describes the path as it was before this update.
 
