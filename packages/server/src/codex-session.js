@@ -856,6 +856,7 @@ export class CodexSession extends JsonlSubprocessSession {
         args: ['--version'],
         candidates: BINARY_CANDIDATES,
         installHint: 'install Codex CLI',
+        overrideEnv: 'CHROXY_CODEX_BIN', // #8609
       },
       credentials: {
         envVars: ['OPENAI_API_KEY'],

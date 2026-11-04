@@ -867,6 +867,8 @@ function validateUserShellBlock(userShell, warnings) {
  * startup. An env var already set wins (it is the same key merged by
  * mergeConfig, so a file value only matters when the env is unset).
  */
+// Needed beyond the env→config merge: that merge only reads the env, but the static
+// resolvedBinary getter has no config handle, so a file value must be pushed to the env.
 export function applyCodexBinaryConfig(config, env = process.env) {
   const configured = typeof config?.codexBinary === 'string' ? config.codexBinary.trim() : ''
   const current = typeof env.CHROXY_CODEX_BIN === 'string' ? env.CHROXY_CODEX_BIN.trim() : ''

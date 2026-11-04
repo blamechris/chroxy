@@ -25,7 +25,9 @@ function textOf(value) {
 
 /**
  * @returns {{model: string|null}|null} null when this is not a model rejection;
- *   `model` is the quoted id, or null when the text names none.
+ *   `model` is the quoted id, or null when the text names none. Only a QUOTED id
+ *   is evidence about a specific model; callers must not blame a client for an
+ *   unquoted match.
  */
 export function detectModelRejection(err, raw) {
   const haystack = `${typeof err?.message === 'string' ? err.message : ''}\n${textOf(raw)}`
@@ -38,8 +40,8 @@ export function detectModelRejection(err, raw) {
 /** @type {Map<string, {rejected: Set<string>, defaultRejected: string|null}>} */
 const ledger = new Map()
 
-export function codexClientKey(binaryPath, version) {
-  return `${binaryPath || 'codex'}@${version || 'unknown'}`
+export function codexClientKey(binaryPath, version, route) {
+  return `${binaryPath || 'codex'}@${version || 'unknown'}#${route || 'unknown'}`
 }
 
 export function recordModelRejection(clientKey, model, { wasDefault = false } = {}) {

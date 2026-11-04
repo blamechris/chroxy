@@ -342,6 +342,13 @@ export class CodexAppServerSession extends BaseSession {
     // after the handshake; null when none / not newer. `bundledClientFinder` is a
     // test seam for the app-bundle probe.
     this._newerBinary = null
+    // #8609 — verified auth route ('native' | 'api') once the handshake has
+    // checked it; null when the connection pinned none. The backend's model
+    // rejection is route-dependent, so the rejection ledger keys on it.
+    this._observedAuthRoute = null
+    // #8609 — a start-time substitute for a rejected catalog default. Deliberately
+    // NOT `this.model`: that is the operator's explicit choice and is persisted.
+    this._defaultFallbackModel = null
     this._findBundledClient = typeof opts.bundledClientFinder === 'function'
       ? opts.bundledClientFinder : findNewestBundledCodexClient
     this._activeTurn = null // { messageId, turnId, didStreamStart }
@@ -581,8 +588,9 @@ export class CodexAppServerSession extends BaseSession {
     }
     this._captureHandshake(init)
     this._noteNewerBundledClient()
-    if (!this._nativeRestore) this._avoidRejectedDefaultModel()
     const actualAuthRoute = await this._verifyConnectionAuthRoute()
+    this._observedAuthRoute = actualAuthRoute || null
+    if (!this._nativeRestore) this._avoidRejectedDefaultModel()
     if (this._nativeRestore) this._verifyNativeOwnership(init)
     const started = await this._client.request(
       this._nativeRestore ? 'thread/resume' : 'thread/start',
@@ -730,7 +738,7 @@ export class CodexAppServerSession extends BaseSession {
       approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
       cwd: this.cwd,
       sandbox,
-      ...(this.model ? { model: this.model } : {}),
+      ...((this.model || this._defaultFallbackModel) ? { model: this.model || this._defaultFallbackModel } : {}),
       // #7730 — effort is seeded ASYMMETRICALLY, and this half is the one that
       // is easy to get wrong. `thread/start` has NO top-level effort field:
       // the value goes through the generic `config` map as
@@ -1039,7 +1047,7 @@ export class CodexAppServerSession extends BaseSession {
 
   /** #8609 — the launched client's identity for the model-rejection ledger. */
   _clientKey() {
-    return codexClientKey(this._spawnedBinary, this.codexVersion)
+    return codexClientKey(this._spawnedBinary, this.codexVersion, this._observedAuthRoute || this._connectionAuthRoute)
   }
 
   /**
@@ -1079,7 +1087,7 @@ export class CodexAppServerSession extends BaseSession {
     if (!rejected) return
     const fallback = this._suggestFallbackModel(rejected)
     if (!fallback) return
-    this.model = fallback
+    this._defaultFallbackModel = fallback
     ;(this._log || log).info(`codex model '${rejected}' was rejected for this client earlier; starting on '${fallback}' instead`)
   }
 
@@ -1088,12 +1096,19 @@ export class CodexAppServerSession extends BaseSession {
    * alternative, newer client) and remember it for this client.
    */
   _modelUnsupportedPayload(rejection) {
-    const model = rejection.model || this._effectiveModelId()
-    const key = this._clientKey()
-    if (model) recordModelRejection(key, model, { wasDefault: !this.model })
+    const ran = this._effectiveModelId()
+    // Blame the client (and remember it) ONLY when the rejection text quoted a
+    // model id AND that is the model this turn ran. An unquoted match ("the
+    // requested model is not supported for this endpoint") says nothing about
+    // the client's default, and recording it would blacklist a working model.
+    const evidence = rejection.model !== null && rejection.model === ran
+    const model = rejection.model || ran
+    if (evidence) recordModelRejection(this._clientKey(), model, { wasDefault: !this.model })
     const version = this.codexVersion || 'unknown version'
     const path = this._spawnedBinary || 'codex'
-    const parts = [`Codex rejected model '${model || 'unknown'}': it is not supported by the codex client this session launched (${version}, ${path}).`]
+    const parts = [evidence || rejection.model
+      ? `Codex rejected model '${model}': it is not supported by the codex client this session launched (${version}, ${path}).`
+      : `Codex reported that a model is not supported (session model: ${ran ? `'${ran}'` : 'unknown'}; codex client ${version}, ${path}).`]
     const fallback = this._suggestFallbackModel(model)
     if (fallback) parts.push(`Try '${fallback}'.`)
     if (this._newerBinary) {

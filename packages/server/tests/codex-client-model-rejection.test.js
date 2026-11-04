@@ -14,6 +14,7 @@ import {
 } from '../src/codex-model-rejections.js'
 import { parseSemver, compareSemver } from '../src/codex-protocol-capabilities.js'
 import { applyCodexBinaryConfig } from '../src/config.js'
+import { runProviderPreflight, ProviderBinaryNotFoundError } from '../src/utils/preflight.js'
 import { getProviderRuntimeInfo } from '../src/providers.js'
 import { ServerProviderRuntimeInfoSchema } from '@chroxy/protocol'
 
@@ -179,7 +180,9 @@ function stubClient(userAgent) {
   c.initialize = async () => ({ userAgent })
   c.request = async (method, params) => {
     calls.push([method, params])
-    if (method === 'thread/start') return { model: 'gpt-6.1-sol', thread: { id: THREAD, model: 'gpt-6.1-sol' } }
+    if (method === 'thread/start') return { model: params?.model || 'gpt-6.1-sol', modelProvider: 'openai', thread: { id: THREAD, model: params?.model || 'gpt-6.1-sol' } }
+    if (method === 'config/read') return { config: { model_provider: 'openai' } }
+    if (method === 'account/read') return { account: { type: 'chatgpt' } }
     if (method === 'turn/start') return { turn: { id: TURN } }
     return {}
   }
@@ -264,7 +267,10 @@ describe('CodexAppServerSession — backend model rejection (#8609)', () => {
     try {
       const threadStart = second.calls.find(([m]) => m === 'thread/start')
       assert.equal(threadStart[1].model, 'gpt-5.5', 'the rejected default must not be requested again')
-      assert.equal(second.s.model, 'gpt-5.5')
+      // The substitute is a start-time detail, never the operator's explicit (persisted) choice.
+      assert.equal(second.s.model, null, 'this.model is what gets persisted; it must stay null')
+      assert.equal(second.s._buildTurnParams([]).model, undefined, 'later turns do not pin the substitute either')
+      assert.equal(second.s._effectiveModelId(), 'gpt-5.5', 'the booted echo reports the substitute as usual')
     } finally { second.s.destroy() }
   })
 
@@ -345,5 +351,74 @@ describe('CodexAppServerSession — backend model rejection (#8609)', () => {
       const bare = getProviderRuntimeInfo('claude-sdk', { providerBinaryVersion: '1.0.0' })
       assert.ok(!('binaryPath' in bare) && !('newerBinary' in bare), 'providers without the facts omit the keys')
     } finally { s.destroy() }
+  })
+
+  it('an UNQUOTED "model is not supported" text neither blames the client nor poisons the ledger', async () => {
+    const unrelated = { message: 'The requested model is not supported for this endpoint', codexErrorInfo: 'other' }
+    const first = await startSession()
+    try {
+      await first.s.sendMessage('hi')
+      first.s._onNotification(turnStarted())
+      first.s._onNotification(errorNote(unrelated))
+      assert.equal(first.errors[0].code, 'model_unsupported')
+      assert.ok(!first.errors[0].message.includes('rejected model'), first.errors[0].message)
+      assert.ok(first.errors[0].message.includes('gpt-6.1-sol'), 'still names the session model as a fact')
+      assert.equal(rejectedDefaultFor(codexClientKey(BIN, '0.163.0')), null)
+    } finally { first.s.destroy() }
+    const second = await startSession()
+    try {
+      assert.equal(second.calls.find(([m]) => m === 'thread/start')[1].model, undefined, 'no fallback after an unquoted match')
+    } finally { second.s.destroy() }
+  })
+
+  it('a quoted id that is not the model this turn ran is not recorded', async () => {
+    const other = { message: "The 'gpt-4o' model is not supported when using Codex with a ChatGPT account.", codexErrorInfo: 'other' }
+    const first = await startSession()
+    try {
+      await first.s.sendMessage('hi')
+      first.s._onNotification(turnStarted())
+      first.s._onNotification(errorNote(other))
+      assert.equal(rejectedDefaultFor(codexClientKey(BIN, '0.163.0')), null)
+    } finally { first.s.destroy() }
+    const second = await startSession()
+    try {
+      assert.equal(second.calls.find(([m]) => m === 'thread/start')[1].model, undefined)
+    } finally { second.s.destroy() }
+  })
+
+  it('a rejection on one auth route does not change the default on another route', async () => {
+    const native = await startSession({ connectionAuthRoute: 'native' })
+    try {
+      await native.s.sendMessage('hi')
+      native.s._onNotification(turnStarted())
+      native.s._onNotification(errorNote(rejectionError()))
+      assert.equal(rejectedDefaultFor(codexClientKey(BIN, '0.163.0', 'native')), 'gpt-6.1-sol')
+    } finally { native.s.destroy() }
+    const sameRoute = await startSession({ connectionAuthRoute: 'native' })
+    const noRoute = await startSession()
+    try {
+      assert.equal(sameRoute.calls.find(([m]) => m === 'thread/start')[1].model, 'gpt-5.5')
+      assert.equal(noRoute.calls.find(([m]) => m === 'thread/start')[1].model, undefined, 'same binary, different route: untouched')
+    } finally { sameRoute.s.destroy(); noRoute.s.destroy() }
+  })
+})
+
+describe('preflight names the CHROXY_CODEX_BIN override (#8609)', () => {
+  let saved
+  beforeEach(() => { saved = process.env.CHROXY_CODEX_BIN })
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CHROXY_CODEX_BIN
+    else process.env.CHROXY_CODEX_BIN = saved
+  })
+
+  it('a bad override path fails naming the path and the variable, not the PATH search', () => {
+    process.env.CHROXY_CODEX_BIN = '/var/empty/no-such-codex'
+    assert.throws(() => runProviderPreflight(CodexSession, { env: process.env }), (err) => {
+      assert.ok(err instanceof ProviderBinaryNotFoundError)
+      assert.ok(err.message.includes('CHROXY_CODEX_BIN'), err.message)
+      assert.ok(err.message.includes('/var/empty/no-such-codex'), err.message)
+      assert.ok(!err.message.includes('checked PATH'), err.message)
+      return true
+    })
   })
 })
