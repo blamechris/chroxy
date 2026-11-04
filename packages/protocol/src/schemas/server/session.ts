@@ -374,6 +374,9 @@ export const ProviderInstructionProjectionSchema = z.object({
 
 export const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128
 export const PROVIDER_BINARY_PATH_MAX_LENGTH = 1024
+// #8909 — bounds for the per-session list of models the backend refused for the launched client.
+export const PROVIDER_MODEL_ID_MAX_LENGTH = 128
+export const PROVIDER_REJECTED_MODELS_MAX = 64
 
 export const ServerProviderRuntimeInfoSchema = z.object({
   type: z.literal('provider_runtime_info'),
@@ -387,6 +390,9 @@ export const ServerProviderRuntimeInfoSchema = z.object({
     path: z.string().min(1).max(PROVIDER_BINARY_PATH_MAX_LENGTH),
     version: z.string().min(1).max(PROVIDER_BINARY_VERSION_MAX_LENGTH),
   }).strict().optional(),
+  // #8909 — optional: model ids the backend refused for the client+auth route this
+  // session launched, so a picker can disable them. Per-session, not on the shared roster.
+  rejectedModels: z.array(z.string().min(1).max(PROVIDER_MODEL_ID_MAX_LENGTH)).max(PROVIDER_REJECTED_MODELS_MAX).optional(),
   // Static adapter trait. Only drivers whose native process must finish
   // startup before accepting input set this; live admission is `inputReady` in
   // the session-scoped capability list below.

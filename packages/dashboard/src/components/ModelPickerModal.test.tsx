@@ -223,3 +223,50 @@ it('preserves a named non-Claude producer default current row', () => {
   renderModal({ activeModel: null, providerLabel: 'codex' })
   expect(screen.getByTestId('model-picker-item-opus')).toHaveAttribute('aria-selected', 'true')
 })
+
+describe('ModelPickerModal — models the backend refused (#8909)', () => {
+  it('renders a rejected row disabled and marked, with an explanatory title', () => {
+    renderModal({ rejectedModelIds: ['claude-opus-4-8'] })
+    const row = screen.getByTestId('model-picker-item-opus') as HTMLButtonElement
+    expect(row.disabled).toBe(true)
+    expect(row.textContent).toMatch(/refused by this session/)
+    expect(row.title).toMatch(/rejected/)
+    expect((screen.getByTestId('model-picker-item-haiku') as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByTestId('model-picker-item-haiku').textContent).not.toMatch(/refused/)
+  })
+
+  it('matches on the short id too, and does not call onSelect on click', () => {
+    const { props } = renderModal({ rejectedModelIds: ['opus'] })
+    fireEvent.click(screen.getByTestId('model-picker-item-opus'))
+    expect(props.onSelect).not.toHaveBeenCalled()
+    expect(props.onClose).not.toHaveBeenCalled()
+  })
+
+  it('Enter on a single filtered rejected match does not select', () => {
+    const { props } = renderModal({ rejectedModelIds: ['opus'] })
+    const search = screen.getByTestId('model-picker-search')
+    fireEvent.change(search, { target: { value: 'opus' } })
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(props.onSelect).not.toHaveBeenCalled()
+  })
+
+  it('ArrowDown from search skips a rejected first row', () => {
+    renderModal({ rejectedModelIds: ['sonnet'] })
+    fireEvent.keyDown(screen.getByTestId('model-picker-search'), { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByTestId('model-picker-item-opus'))
+  })
+
+  it('keeps the active checkmark when the active model is rejected', () => {
+    renderModal({ activeModel: 'sonnet', rejectedModelIds: ['sonnet'] })
+    const row = screen.getByTestId('model-picker-item-sonnet')
+    expect(row.getAttribute('aria-selected')).toBe('true')
+    expect(row.textContent).toMatch(/✓/)
+  })
+
+  it('an empty or absent list changes nothing', () => {
+    renderModal({ rejectedModelIds: [] })
+    for (const id of ['sonnet', 'opus', 'haiku']) {
+      expect((screen.getByTestId(`model-picker-item-${id}`) as HTMLButtonElement).disabled).toBe(false)
+    }
+  })
+})

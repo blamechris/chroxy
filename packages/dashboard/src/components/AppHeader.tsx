@@ -123,6 +123,8 @@ export interface AppHeaderProps {
   agentCount: number
   provider?: string
   providerRuntimeInfo?: ComponentProps<typeof StatusBar>['providerRuntimeInfo']
+  /** #8909 — model ids the backend refused for this session's client (shown disabled in the picker). */
+  rejectedModelIds?: readonly string[]
   modelLabel?: string
   costBadgeMode: ComponentProps<typeof StatusBar>['costBadgeMode']
   // Dev-server preview tunnels (#6790) — active session's live devPreviews
@@ -237,6 +239,7 @@ export function AppHeader(props: AppHeaderProps) {
       <div className="header-center">
         <ChatSettingsDropdown
           availableModels={props.showModelPicker ? props.availableModels : []}
+          rejectedModelIds={props.rejectedModelIds}
           activeModel={props.activeModel}
           modelTooltipTarget={props.modelTooltipTarget}
           defaultModelId={props.defaultModelId}

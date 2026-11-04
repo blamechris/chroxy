@@ -30,6 +30,8 @@ import {
   DEFAULT_PROVIDER,
   PROVIDER_BINARY_VERSION_MAX_LENGTH,
   PROVIDER_BINARY_PATH_MAX_LENGTH,
+  PROVIDER_MODEL_ID_MAX_LENGTH,
+  PROVIDER_REJECTED_MODELS_MAX,
   USER_SHELL_PROVIDER,
   ProviderCustomizationDescriptorSchema,
 } from '@chroxy/protocol'
@@ -213,6 +215,13 @@ export function getProviderRuntimeInfo(provider, session) {
     && typeof observedNewer.version === 'string' && observedNewer.version.length > 0
     && observedNewer.version.length <= PROVIDER_BINARY_VERSION_MAX_LENGTH
       ? { path: observedNewer.path, version: observedNewer.version } : null
+  // #8909 — models the backend refused for this session's client; omitted when empty.
+  const observedRejected = session?.providerRejectedModels
+  const rejectedModels = Array.isArray(observedRejected)
+    ? observedRejected
+      .filter((m) => typeof m === 'string' && m.length > 0 && m.length <= PROVIDER_MODEL_ID_MAX_LENGTH)
+      .slice(0, PROVIDER_REJECTED_MODELS_MAX)
+    : []
   return {
     provider: typeof provider === 'string' && provider.length > 0
       ? provider
@@ -220,6 +229,7 @@ export function getProviderRuntimeInfo(provider, session) {
     binaryVersion,
     ...(binaryPath ? { binaryPath } : {}),
     ...(newerBinary ? { newerBinary } : {}),
+    ...(rejectedModels.length > 0 ? { rejectedModels } : {}),
     inputRequiresReady: ProviderClass?.inputRequiresReady === true,
     capabilities,
     customization,

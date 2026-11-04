@@ -353,6 +353,36 @@ describe('CodexAppServerSession — backend model rejection (#8609)', () => {
     } finally { s.destroy() }
   })
 
+  it('carries the refused model on the runtime frame of every session on the same client, and no other (#8909)', async () => {
+    const first = await startSession({ connectionAuthRoute: 'native' })
+    const same = await startSession({ connectionAuthRoute: 'native' })
+    const otherVersion = await startSession({ connectionAuthRoute: 'native', clientFactory: () => stubClient('codex_cli_rs/0.150.0 (Mac OS 26.0; arm64) chroxy').client })
+    const otherRoute = await startSession()
+    try {
+      for (const x of [first, same, otherVersion, otherRoute]) {
+        assert.ok(!('rejectedModels' in getProviderRuntimeInfo('codex', x.s)), 'nothing is emitted while the ledger is empty')
+      }
+      await first.s.sendMessage('hi')
+      first.s._onNotification(turnStarted())
+      first.s._onNotification(errorNote(rejectionError()))
+      assert.deepEqual(getProviderRuntimeInfo('codex', first.s).rejectedModels, ['gpt-6.1-sol'])
+      const info = getProviderRuntimeInfo('codex', same.s)
+      assert.deepEqual(info.rejectedModels, ['gpt-6.1-sol'])
+      assert.ok(ServerProviderRuntimeInfoSchema.safeParse({ type: 'provider_runtime_info', sessionId: 's1', ...info }).success)
+      assert.ok(!('rejectedModels' in getProviderRuntimeInfo('codex', otherVersion.s)), 'another client version is unaffected')
+      assert.ok(!('rejectedModels' in getProviderRuntimeInfo('codex', otherRoute.s)), 'another auth route is unaffected')
+      assert.ok(!('rejectedModels' in getProviderRuntimeInfo('claude-sdk', { providerBinaryVersion: '1.0.0' })))
+    } finally { for (const x of [first, same, otherVersion, otherRoute]) x.s.destroy() }
+  })
+
+  it('drops malformed or oversize providerRejectedModels entries instead of failing the frame (#8909)', () => {
+    const info = getProviderRuntimeInfo('codex', { providerRejectedModels: ['ok', '', 5, 'm'.repeat(129), ...Array.from({ length: 80 }, (_, i) => `m${i}`)] })
+    assert.equal(info.rejectedModels[0], 'ok')
+    assert.equal(info.rejectedModels.length, 64)
+    assert.ok(info.rejectedModels.every((m) => typeof m === 'string' && m.length > 0 && m.length <= 128))
+    assert.ok(!('rejectedModels' in getProviderRuntimeInfo('codex', { providerRejectedModels: 'nope' })))
+  })
+
   it('an UNQUOTED "model is not supported" text neither blames the client nor poisons the ledger', async () => {
     const unrelated = { message: 'The requested model is not supported for this endpoint', codexErrorInfo: 'other' }
     const first = await startSession()

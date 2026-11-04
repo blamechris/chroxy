@@ -162,6 +162,59 @@ describe('setupForwarding', () => {
     assert.equal(ctx.broadcastToSession.mock.calls.some(call => call.arguments[0] === 'sess-b' && call.arguments[1]?.type === 'provider_runtime_info'), false)
   })
 
+  // #8909 — a backend model refusal must reach every same-provider session's picker.
+  describe('model_unsupported refreshes provider_runtime_info (#8909)', () => {
+    const setup = () => {
+      const mk = (rejected) => ({
+        providerBinaryVersion: '0.163.0', providerRejectedModels: rejected,
+        isReady: true, model: null, bootedModel: null, permissionMode: 'approve',
+      })
+      const entries = new Map([
+        ['a', { provider: 'codex', session: mk(['gpt-6.1-sol']) }],
+        ['b', { provider: 'codex', session: mk(['gpt-6.1-sol']) }],
+        ['c', { provider: 'claude-sdk', session: mk([]) }],
+        ['d', { provider: 'codex', session: { ...mk([]), boom: true, get providerRejectedModels() { throw new Error('bad') } } }],
+      ])
+      const ctx = makeCtx()
+      ctx.sessionManager.getSession = mock.fn(id => entries.get(id) || null)
+      ctx.sessionManager.listSessions = mock.fn(() => [...entries.keys()].map(sessionId => ({ sessionId })))
+      setupForwarding(ctx)
+      return ctx
+    }
+    const frames = (ctx) => ctx.broadcastToSession.mock.calls
+      .filter(c => c.arguments[1]?.type === 'provider_runtime_info')
+
+    it('resends the frame to each same-provider session, not other providers, surviving one failure', () => {
+      const ctx = setup()
+      ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'refused', code: 'model_unsupported' } })
+      const sent = frames(ctx)
+      assert.deepEqual(sent.map(c => c.arguments[0]).sort(), ['a', 'b'])
+      for (const c of sent) assert.deepEqual(c.arguments[1].rejectedModels, ['gpt-6.1-sol'])
+      const errIdx = ctx.broadcastToSession.mock.calls.findIndex(c => c.arguments[1]?.type === 'error' || c.arguments[1]?.type === 'message')
+      assert.ok(errIdx >= 0 && errIdx < ctx.broadcastToSession.mock.calls.indexOf(sent[0]), 'the error goes out before the refresh')
+    })
+
+    it('a throwing listSessions does not skip the afterEffects that follow the refresh', () => {
+      const releasePermission = mock.fn()
+      const normalizer = new EventNormalizer()
+      normalizer.normalize = () => ({ messages: [], afterEffects: [{ type: 'release_permission', requestId: 'req-1' }] })
+      const ctx = makeCtx({ normalizer, releasePermission })
+      ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'codex', session: {} }))
+      ctx.sessionManager.listSessions = mock.fn(() => { throw new Error('enumeration failed') })
+      setupForwarding(ctx)
+      ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'refused', code: 'model_unsupported' } })
+      assert.equal(ctx.sessionManager.listSessions.mock.callCount(), 1, 'the refresh ran and hit the throw')
+      assert.equal(releasePermission.mock.callCount(), 1, 'the afterEffects step still ran')
+    })
+
+    it('does nothing for an error without the model_unsupported code', () => {
+      const ctx = setup()
+      ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'other' } })
+      ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'x', code: 'something_else' } })
+      assert.equal(frames(ctx).length, 0)
+    })
+  })
+
   // #7096 — the legacy-cli forwarder normalises with `sessionId: null`, and several
   // server schemas declare `sessionId: z.string().optional()` where `undefined` is legal
   // but `null` is NOT. `permission_expired` stamped it unguarded, so every frame it

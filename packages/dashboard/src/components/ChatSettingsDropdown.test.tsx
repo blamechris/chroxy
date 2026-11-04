@@ -141,6 +141,13 @@ describe('ChatSettingsDropdown', () => {
       expect(screen.getByTestId('model-picker-item-opus')).toBeInTheDocument()
     })
 
+    it('threads rejectedModelIds into the picker so the refused row is disabled (#8909)', () => {
+      renderDropdown({ rejectedModelIds: ['opus'] })
+      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+      expect((screen.getByTestId('model-picker-item-opus') as HTMLButtonElement).disabled).toBe(true)
+      expect((screen.getByTestId('model-picker-item-sonnet') as HTMLButtonElement).disabled).toBe(false)
+    })
+
     it('calls onModelChange when a model is picked from the modal', () => {
       const onModelChange = vi.fn()
       renderDropdown({ onModelChange })

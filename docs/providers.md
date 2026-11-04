@@ -493,6 +493,8 @@ The fallback is a start-time substitute only: it is never saved as the session's
 chosen model. Only a rejection that quotes the model the turn actually ran is
 recorded.
 
+The dashboard model picker marks a refused model as disabled ("refused by this session's client") for every session on that same client and auth route: the per-session `provider_runtime_info` frame carries the refused ids as `rejectedModels`, and is resent to every session of the provider when a rejection is recorded. The shared `available_models` roster is not filtered.
+
 Codex's `approvalPolicy` is derived from the session's permission mode, and
 Chroxy's `PermissionManager` decides whether to prompt or auto-resolve:
 
