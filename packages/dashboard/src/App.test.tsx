@@ -116,9 +116,12 @@ vi.mock('./components/CreateSessionModal', () => ({
     // else-branch) are directly assertable from the modal's DOM.
     isCreating?: boolean
     serverError?: string
+    onClose?: () => void
+    initialCwd?: string
   }) =>
     props.open ? (
-      <div data-testid="create-session-modal-mock">
+      <div data-testid="create-session-modal-mock" data-cwd={props.initialCwd}>
+        <button type="button" data-testid="create-session-modal-cancel" onClick={props.onClose} />
         <button
           type="button"
           data-testid="create-session-modal-confirm"
@@ -3545,6 +3548,48 @@ describe('App', () => {
       // Seed landed in the active session's composer — proves the seed path is
       // observable, so the empty-composer assertions below are meaningful.
       expect(viewSessionComposer().value).toBe(REASON)
+    })
+
+    it('Continue from seed stages an editable absolute path, never calls send or summarizer', async () => {
+      const seedPath = '/vault/NEXT-demo.md'
+      const ts = Date.now()
+      const sendInput = vi.fn()
+      const summarizeSession = vi.fn()
+      stateOverrides = { ...connectedState(), apiToken: 'fixture-primary', sendInput, summarizeSession }
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ continuations: [
+        { id: 'seed-demo', seedPath, cwd: '/projects/demo', ts, available: true, unavailable: null },
+      ] }))))
+      try {
+        render(<App />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Continue from seed' }))
+        await screen.findByTestId('create-session-modal-mock')
+        expect(screen.getByTestId('create-session-modal-mock')).toHaveAttribute('data-cwd', '/projects/demo')
+        confirmCreate()
+        const composer = viewSessionComposer()
+        expect(composer.value).toBe(seedPath)
+        fireEvent.change(composer, { target: { value: seedPath + ' edited' } })
+        expect(composer.value).toBe(seedPath + ' edited')
+        expect(sendInput).not.toHaveBeenCalled()
+        expect(summarizeSession).not.toHaveBeenCalled()
+      } finally { vi.unstubAllGlobals() }
+    })
+
+    it('cancelled continuation cannot seed a later plain session', async () => {
+      const ts = Date.now()
+      stateOverrides = { ...connectedState(), apiToken: 'fixture-primary' }
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ continuations: [
+        { id: 'seed-cancel', seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo', ts, available: true, unavailable: null },
+      ] }))))
+      try {
+        render(<App />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Continue from seed' }))
+        await screen.findByTestId('create-session-modal-mock')
+        fireEvent.click(screen.getByTestId('create-session-modal-cancel'))
+        fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+        fireEvent.click(screen.getByTestId('header-overflow-item-new-session'))
+        confirmCreate()
+        expect(viewSessionComposer().value).toBe('')
+      } finally { vi.unstubAllGlobals() }
     })
 
     it.each([

@@ -39,6 +39,7 @@ export const INGEST_EVENT_TYPES = [
   'post_tool_use',
   'user_prompt_submit',
   'stop',
+  'wave_complete',
 ] as const
 
 export type IngestEventType = (typeof INGEST_EVENT_TYPES)[number]
@@ -100,5 +101,21 @@ export const IngestEventSchema = z
     ts: z.number().int().min(INGEST_TS_MIN_MS).max(INGEST_TS_MAX_MS),
   })
   .strict()
+  .superRefine((event, ctx) => {
+    if (event.type !== 'wave_complete' && event.source !== 'session-seed') return
+    if (event.type !== 'wave_complete' || event.source !== 'session-seed') {
+      ctx.addIssue({ code: 'custom', message: 'session-seed requires wave_complete' })
+    }
+    const data = event.data || {}
+    if (Object.keys(data).some((key) => key !== 'seedPath' && key !== 'cwd')) {
+      ctx.addIssue({ code: 'custom', path: ['data'], message: 'continuations carry paths only' })
+    }
+    for (const key of ['seedPath', 'cwd']) {
+      const path = data[key]
+      if (typeof path !== 'string' || !/^(\/|[A-Za-z]:[\\/])/.test(path) || /[\x00-\x1f\x7f]/.test(path)) {
+        ctx.addIssue({ code: 'custom', path: ['data', key], message: 'must be an absolute path without control characters' })
+      }
+    }
+  })
 
 export type IngestEvent = z.infer<typeof IngestEventSchema>

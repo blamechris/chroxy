@@ -12,6 +12,7 @@ import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
 import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
 import { handleEventIngest } from './event-ingest.js'
+import { listContinuations } from './continuations.js'
 import { handleGithubWebhook } from './github-webhook.js'
 import { handleMailboxPing, handleMailboxRegister } from './mailbox-route.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
@@ -571,6 +572,15 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
     // callbacks and guards them per the #5313 pattern.
     if (req.method === 'POST' && snapPath === '/api/events') {
       handleEventIngest(server, req, res)
+      return
+    }
+
+    // Path metadata is a global host surface: primary bearer only, never the
+    // ingest credential that can announce it or a session-bound pairing token.
+    if (req.method === 'GET' && snapPath === '/api/continuations') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ continuations: listContinuations(server) }))
       return
     }
 

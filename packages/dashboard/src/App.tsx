@@ -77,6 +77,7 @@ import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { NotificationBanners, permissionNotificationStatus } from './components/NotificationBanners'
+import { ContinuationOpportunities } from './components/ContinuationOpportunities'
 import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
@@ -3185,6 +3186,7 @@ export function App() {
           isSessionStarting={sessionIsStarting}
           permissionStatus={permissionStatus}
         />
+        <ContinuationOpportunities connected={isConnected} onContinue={openCreateSession} />
 
         {/* Normal session UI. #5204 — suppressed while the Control Room tab
             is active (the CR view above takes the main content area). */}

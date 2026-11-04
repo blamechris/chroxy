@@ -44,7 +44,8 @@ describe('IngestEventSchema (#5413 Phase 3)', () => {
 
   it('accepts every enumerated event type', () => {
     for (const type of INGEST_EVENT_TYPES) {
-      const result = IngestEventSchema.safeParse(validEvent({ type }))
+      const result = IngestEventSchema.safeParse(validEvent({ type, ...(type === 'wave_complete'
+        ? { source: 'session-seed', data: { seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo' } } : {}) }))
       assert.ok(result.success, `type ${type} should validate`)
     }
   })

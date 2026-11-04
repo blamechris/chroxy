@@ -29,7 +29,7 @@ import { z } from 'zod';
  * Inert until the hooks package emits them (PR 2 of #5541); old hooks that
  * emit only the original six types remain valid.
  */
-export declare const INGEST_EVENT_TYPES: readonly ["session_start", "session_end", "subagent_start", "subagent_stop", "notification", "post_tool_use", "user_prompt_submit", "stop"];
+export declare const INGEST_EVENT_TYPES: readonly ["session_start", "session_end", "subagent_start", "subagent_stop", "notification", "post_tool_use", "user_prompt_submit", "stop", "wave_complete"];
 export type IngestEventType = (typeof INGEST_EVENT_TYPES)[number];
 /**
  * Sanity bounds for `ts` (epoch milliseconds). Rejects seconds-precision
@@ -68,6 +68,7 @@ export declare const IngestEventSchema: z.ZodObject<{
         notification: "notification";
         post_tool_use: "post_tool_use";
         user_prompt_submit: "user_prompt_submit";
+        wave_complete: "wave_complete";
     }>;
     data: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean, z.ZodNull]>>>;
     ts: z.ZodNumber;

@@ -74,6 +74,7 @@ export function settlePush(promise, label, logger = log) {
 // file went unenforced for eight categories because its coverage test derived
 // its expectation from ALL_CATEGORIES, so it could not go red (#7424).
 export const RATE_LIMITS = {
+  continuation: 0,     // One announcement per completed seed; quiet hours apply.
   permission: 0,       // Always send permission prompts immediately
   result: 30_000,      // At most once per 30s for task completion
   activity_update: 0,       // Immediate: one push per unattended completion (noActiveViewers gate is the real dedupe)
