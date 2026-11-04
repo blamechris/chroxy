@@ -55,6 +55,8 @@ function buildActiveModelTooltip(
 
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
+  /** #8909 — model ids the backend refused for this session's client; shown disabled in the picker. */
+  rejectedModelIds?: readonly string[]
   activeModel: string | null
   modelTooltipTarget?: string | null
   defaultModelId: string | null
@@ -132,6 +134,7 @@ export interface ChatSettingsDropdownProps {
 
 export function ChatSettingsDropdown({
   availableModels,
+  rejectedModelIds,
   activeModel,
   modelTooltipTarget,
   defaultModelId,
@@ -246,6 +249,7 @@ export function ChatSettingsDropdown({
             activeModel={activeModel}
             defaultModelId={defaultModelId}
             providerLabel={providerLabel}
+            rejectedModelIds={rejectedModelIds}
             onSelect={onModelChange}
           />
         </>

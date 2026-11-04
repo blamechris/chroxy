@@ -4,6 +4,7 @@ import { settlePush } from './push.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
 import { broadcastRosterPerRecipient } from './roster-broadcast.js'
 import { getProviderRuntimeInfo } from './providers.js'
+import { MODEL_UNSUPPORTED_CODE } from './codex-model-rejections.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -427,6 +428,32 @@ function setupSessionForwarding(normalizer, ctx) {
         broadcastToSession(sessionId, stamped, filter)
       } else {
         broadcastToSession(sessionId, stamped)
+      }
+    }
+
+    // #8909: a backend model refusal changes the ledger every session on the same
+    // codex client reads live, so resend each same-provider session's runtime frame
+    // (this one included) and let its picker disable the model. After the event's
+    // own messages, so the error reaches clients first. One failing session must
+    // not stop the rest.
+    if (event === 'error' && data?.code === MODEL_UNSUPPORTED_CODE) {
+      const provider = sessionManager.getSession(sessionId)?.provider
+      if (provider) {
+        for (const row of sessionManager.listSessions() || []) {
+          const sid = row?.sessionId
+          if (!sid) continue
+          try {
+            const peer = sessionManager.getSession(sid)
+            if (!peer?.session || peer.provider !== provider) continue
+            broadcastToSession(sid, withServerTs({
+              type: 'provider_runtime_info',
+              sessionId: sid,
+              ...getProviderRuntimeInfo(peer.provider, peer.session),
+            }))
+          } catch (err) {
+            log.error(`provider_runtime_info refresh after model rejection failed for session ${sid}: ${err?.message || err}`)
+          }
+        }
       }
     }
 

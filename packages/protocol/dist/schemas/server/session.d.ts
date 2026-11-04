@@ -463,6 +463,8 @@ export declare const ProviderInstructionProjectionSchema: z.ZodObject<{
 }, z.core.$strict>;
 export declare const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128;
 export declare const PROVIDER_BINARY_PATH_MAX_LENGTH = 1024;
+export declare const PROVIDER_MODEL_ID_MAX_LENGTH = 128;
+export declare const PROVIDER_REJECTED_MODELS_MAX = 64;
 export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_runtime_info">;
     sessionId: z.ZodString;
@@ -473,6 +475,7 @@ export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
         path: z.ZodString;
         version: z.ZodString;
     }, z.core.$strict>>;
+    rejectedModels: z.ZodOptional<z.ZodArray<z.ZodString>>;
     inputRequiresReady: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
     capabilities: z.ZodArray<z.ZodObject<{
         name: z.ZodString;

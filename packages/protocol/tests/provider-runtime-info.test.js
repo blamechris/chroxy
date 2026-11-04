@@ -46,4 +46,17 @@ describe('provider_runtime_info schema', () => {
     assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, binaryPath: '' }))
     assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, newerBinary: { path: '/a', version: '1.0.0', extra: 1 } }))
   })
+
+  it('accepts an optional bounded rejectedModels list and still validates without it (#8909)', () => {
+    assert.deepEqual(ServerProviderRuntimeInfoSchema.parse({ ...frame, rejectedModels: ['gpt-6.1-sol'] }), { ...frame, rejectedModels: ['gpt-6.1-sol'] })
+    assert.ok(ServerProviderRuntimeInfoSchema.safeParse(frame).success, 'an older server omits it')
+    assert.ok(ServerProviderRuntimeInfoSchema.safeParse({ ...frame, rejectedModels: [] }).success)
+  })
+
+  it('bounds rejectedModels entries and count (#8909)', () => {
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, rejectedModels: ['m'.repeat(129)] }))
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, rejectedModels: [''] }))
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, rejectedModels: Array.from({ length: 65 }, (_, i) => `m${i}`) }))
+    assert.ok(ServerProviderRuntimeInfoSchema.safeParse({ ...frame, rejectedModels: Array.from({ length: 64 }, (_, i) => `m${i}`) }).success)
+  })
 })

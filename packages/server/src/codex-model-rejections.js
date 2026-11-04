@@ -7,11 +7,14 @@
 // daemon-lifetime, bounded record per launched client (`<binaryPath>@<version>`)
 // so the next session on the same client does not walk into the same refusal.
 
+import { PROVIDER_MODEL_ID_MAX_LENGTH, PROVIDER_REJECTED_MODELS_MAX } from '@chroxy/protocol'
+
 export const MODEL_UNSUPPORTED_CODE = 'model_unsupported'
 
 const MAX_CLIENTS = 32
-const MAX_MODELS_PER_CLIENT = 64
-const MAX_MODEL_ID = 128
+// Shared with the provider_runtime_info schema so the two bounds cannot drift.
+const MAX_MODELS_PER_CLIENT = PROVIDER_REJECTED_MODELS_MAX
+const MAX_MODEL_ID = PROVIDER_MODEL_ID_MAX_LENGTH
 // path (bounded by PROVIDER_BINARY_PATH_MAX_LENGTH upstream) + version + route
 const MAX_CLIENT_KEY = 1400
 

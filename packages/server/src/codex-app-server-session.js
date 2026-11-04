@@ -13,7 +13,7 @@ import { parseCodexUserAgent, capabilitiesForVersion, parseSemver, compareSemver
 import { findNewestBundledCodexClient } from './codex-bundled-client.js'
 import {
   MODEL_UNSUPPORTED_CODE, detectModelRejection, codexClientKey, recordModelRejection,
-  rejectedDefaultFor, suggestFallbackModel,
+  rejectedDefaultFor, rejectedModelsFor, suggestFallbackModel,
 } from './codex-model-rejections.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -174,6 +174,10 @@ export class CodexAppServerSession extends BaseSession {
   // #8609 — WHICH codex this session launched, and a newer bundled one it did not.
   get providerBinaryPath() { return this._spawnedBinary || null }
   get providerNewerBinary() { return this._newerBinary }
+  /** #8909 — models the backend refused for this session's client + auth route (read live from the ledger). */
+  get providerRejectedModels() {
+    return this.codexVersion ? [...rejectedModelsFor(this._clientKey())] : []
+  }
   get providerRuntimeCapabilities() {
     return {
       ...(this.codexCapabilities || {}),

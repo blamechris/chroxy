@@ -24,6 +24,11 @@ export interface ModelPickerModalProps {
   defaultModelId: string | null
   /** Active provider label used as the group header (e.g. "claude-cli"). */
   providerLabel?: string | null
+  /**
+   * #8909 — model ids the backend refused for the client this session launched.
+   * Matching rows render disabled and marked; the active one keeps its checkmark.
+   */
+  rejectedModelIds?: readonly string[]
   onSelect: (id: string) => void
 }
 
@@ -37,6 +42,7 @@ export function ModelPickerModal({
   activeModel,
   defaultModelId,
   providerLabel,
+  rejectedModelIds,
   onSelect,
 }: ModelPickerModalProps) {
   const [query, setQuery] = useState('')
@@ -51,6 +57,11 @@ export function ModelPickerModal({
   const choices = useMemo(() => modelChoices(availableModels), [availableModels])
   const activeEntry = findModelEntry(availableModels, resolveCurrentModel(activeModel, defaultModelId, providerLabel))
   const defaultEntry = findModelEntry(availableModels, defaultModelId)
+  const rejectedSet = useMemo(() => new Set(rejectedModelIds ?? []), [rejectedModelIds])
+  const isRejected = useCallback(
+    (m: ModelInfo) => rejectedSet.size > 0 && (rejectedSet.has(m.id) || (m.fullId != null && rejectedSet.has(m.fullId))),
+    [rejectedSet],
+  )
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return choices
@@ -101,14 +112,14 @@ export function ModelPickerModal({
         return
       }
       if (e.key === 'Enter') {
-        const enabled = filtered.filter((m) => (m as PickerModel).disabled !== true)
+        const enabled = filtered.filter((m) => (m as PickerModel).disabled !== true && !isRejected(m))
         if (enabled.length === 1) {
           e.preventDefault()
           handleSelect(enabled[0]!.id)
         }
       }
     },
-    [filtered, handleSelect],
+    [filtered, handleSelect, isRejected],
   )
 
   return (
@@ -145,7 +156,8 @@ export function ModelPickerModal({
             filtered.map((m) => {
               const isDefault = defaultEntry != null && (m.fullId || m.id) === (defaultEntry.fullId || defaultEntry.id)
               const isActive = activeEntry != null && (m.fullId || m.id) === (activeEntry.fullId || activeEntry.id)
-              const disabled = (m as PickerModel).disabled === true
+              const rejected = isRejected(m)
+              const disabled = (m as PickerModel).disabled === true || rejected
               return (
                 <button
                   key={m.id}
@@ -155,7 +167,9 @@ export function ModelPickerModal({
                   disabled={disabled}
                   className={`model-picker-item${isActive ? ' model-picker-item-active' : ''}`}
                   data-testid={`model-picker-item-${m.id}`}
-                  title={m.fullId || m.id}
+                  title={rejected
+                    ? `The backend rejected ${m.fullId || m.id} for the client this session launched, so it cannot be used here.`
+                    : (m.fullId || m.id)}
                   onClick={() => {
                     if (!disabled) handleSelect(m.id)
                   }}
@@ -163,6 +177,7 @@ export function ModelPickerModal({
                   <span className="model-picker-item-label">
                     {m.label || m.id}
                     {isDefault ? ' (default)' : ''}
+                    {rejected ? ' — refused by this session\'s client' : ''}
                   </span>
                   {isActive ? (
                     <span className="model-picker-item-check" aria-hidden="true">

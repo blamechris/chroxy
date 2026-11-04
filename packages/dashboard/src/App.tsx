@@ -2984,6 +2984,7 @@ export function App() {
         agentCount={activeAgents.length}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         providerRuntimeInfo={activeProviderRuntimeInfo}
+        rejectedModelIds={activeProviderRuntimeInfo?.rejectedModels}
         modelLabel={activeModelLabel}
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
