@@ -53,8 +53,10 @@ separate feature; this dashboard flow always leaves Send to the operator.
 The ingest secret and session-bound tokens cannot list these paths. The dashboard
 refreshes it while connected and visible, every 15 seconds and on focus, and
 checks again before opening the session picker. Metadata checks run in a dedicated
-child with a 200 ms deadline and one-child concurrency limit; timeouts offer the
-manual path. Expired entries skip filesystem probes. Notification muting does not hide
+child with a 1 second deadline and one-child concurrency limit; timeouts offer the
+manual path. A failed initial check requires a fresh announcement before Continue
+can become available; a timeout after an established baseline can recover only
+when the fingerprint still matches. Expired entries skip filesystem probes. Notification muting does not hide
 the dashboard list.
 
 Opportunities last for the current daemon lifetime, with at most 50 paths retained.

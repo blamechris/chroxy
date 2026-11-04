@@ -3,3 +3,5 @@
 .continuation-opportunity + .continuation-opportunity { margin-top: 8px; }
 .continuation-path { overflow-wrap: anywhere; user-select: text; color: var(--text-secondary); margin-top: 4px; }
 .continuation-opportunity button { min-height: 44px; min-width: 44px; margin: 8px 8px 0 0; padding: 8px 12px; }
+.continuation-continue { background: var(--accent-blue-light); color: var(--accent-blue); border: 1px solid var(--accent-blue-border-strong); }
+.continuation-opportunity button:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }

@@ -87,7 +87,7 @@ export function ContinuationOpportunities({ connected, onContinue }: {
       <div className="continuation-path">{item.seedPath}</div>
       <div className="continuation-path">{item.cwd}</div>
       {(!item.available || error) && <p role="status">{error || `Seed unavailable (${item.unavailable || 'unknown'}). Copy the path above and continue manually.`}</p>}
-      <button type="button" disabled={busy || !item.available} onClick={async () => {
+      <button type="button" className="notification-banner-btn continuation-continue" disabled={busy || !item.available} onClick={async () => {
         if (continuing.current) return
         continuing.current = true
         setBusy(true)
@@ -102,7 +102,7 @@ export function ContinuationOpportunities({ connected, onContinue }: {
           setItems((current) => [...current])
         } finally { continuing.current = false; setBusy(false) }
       }}>Continue from seed</button>
-      <button type="button" onClick={() => {
+      <button type="button" className="notification-banner-btn notification-banner-btn--dismiss" onClick={() => {
         dismissed.current.set(item.id, item.ts)
         setItems((current) => [...current])
       }}>Dismiss</button>

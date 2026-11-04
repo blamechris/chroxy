@@ -13,6 +13,55 @@ import { WsServer } from '../src/ws-server.js'
 const INGEST = 'fixture-ingest-credential'
 const PRIMARY = 'fixture-primary-credential'
 
+it('initial metadata failure stays unavailable across replacement and replay until a newer announcement', async () => {
+  const server = {}
+  const ts = Date.now()
+  const event = { source: 'session-seed', type: 'wave_complete', ts, data: { seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo' } }
+  const initial = recordContinuation(server, event, ts, async () => null)
+  await server._continuationRefresh
+  assert.equal(initial.opportunity.fingerprint, null)
+  assert.equal(initial.opportunity.baselineFailed, true)
+  let laterProbes = 0
+  const replacementProbe = async () => { laterProbes++; return { [initial.opportunity.id]: 'replacement-file' } }
+  assert.equal((await listContinuations(server, ts, replacementProbe))[0].available, false)
+  assert.equal(laterProbes, 0, 'a failed baseline must never adopt later metadata')
+  assert.equal(recordContinuation(server, event, ts, replacementProbe).duplicate, true)
+  assert.equal((await listContinuations(server, ts, replacementProbe))[0].unavailable, 'metadata timeout')
+  assert.equal(laterProbes, 0, 'same-ts replay cannot revive an initial failure')
+  assert.equal(recordContinuation(server, { ...event, ts: ts + 1 }, ts + 1, replacementProbe).duplicate, false)
+  await server._continuationRefresh
+  assert.equal((await listContinuations(server, ts + 1, replacementProbe))[0].available, true)
+  assert.equal(server._continuations.get(initial.opportunity.id).fingerprint, 'replacement-file')
+})
+
+it('an established metadata baseline recovers from timeout only when the original fingerprint matches', async () => {
+  const server = {}
+  const ts = Date.now()
+  const event = { source: 'session-seed', type: 'wave_complete', ts, data: { seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo' } }
+  const initial = recordContinuation(server, event, ts, async (entries) => ({ [entries[0].id]: 'original-file' }))
+  await server._continuationRefresh
+  assert.equal((await listContinuations(server, ts, async () => null))[0].unavailable, 'metadata timeout')
+  assert.equal((await listContinuations(server, ts, async () => ({ [initial.opportunity.id]: 'original-file' })))[0].available, true)
+  assert.equal((await listContinuations(server, ts, async () => ({ [initial.opportunity.id]: 'replacement-file' })))[0].unavailable, 'changed')
+})
+
+it('an announcement excluded from an already-running batch cannot acquire its baseline later', async () => {
+  const server = {}
+  const ts = Date.now()
+  const event = { source: 'session-seed', type: 'wave_complete', ts, data: { seedPath: '/vault/NEXT-one.md', cwd: '/projects/demo' } }
+  let finish
+  const first = recordContinuation(server, event, ts, () => new Promise((resolve) => { finish = resolve }))
+  const second = recordContinuation(server, { ...event, data: { ...event.data, seedPath: '/vault/NEXT-two.md' } }, ts)
+  assert.equal(second.opportunity.baselineFailed, true)
+  finish({ [first.opportunity.id]: 'first-file' })
+  await server._continuationRefresh
+  const result = await listContinuations(server, ts, async (entries) => {
+    assert.deepEqual(entries.map((entry) => entry.id), [first.opportunity.id])
+    return { [first.opportunity.id]: 'first-file', [second.opportunity.id]: 'replacement-file' }
+  })
+  assert.equal(result.find((item) => item.id === second.opportunity.id).available, false)
+})
+
 describe('seed continuation HTTP flow', () => {
   let http, root, server
   afterEach(async () => {

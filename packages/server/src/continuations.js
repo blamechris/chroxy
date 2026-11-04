@@ -9,7 +9,7 @@ const MAX_CONTINUATIONS = 50
 /** One killable worker globally; a stuck syscall cannot fill libuv's pool or
  * create an unbounded process queue. Keep the slot until child close. The worker
  * path seam is direct-test-only, never populated from HTTP input. */
-export function createContinuationProbe({ workerPath = fileURLToPath(new URL('./continuation-metadata-worker.js', import.meta.url)), timeoutMs = 200 } = {}) {
+export function createContinuationProbe({ workerPath = fileURLToPath(new URL('./continuation-metadata-worker.js', import.meta.url)), timeoutMs = 1000 } = {}) {
   let active = false
   return (entries) => {
     if (active || entries.length === 0) return Promise.resolve(null)
@@ -56,13 +56,20 @@ function expired(entry, now) {
 
 async function refreshMetadata(server, now, probe) {
   if (server._continuationRefresh) return server._continuationRefresh
-  const entries = [...(server._continuations?.values() || [])].filter((entry) => !expired(entry, now))
+  const entries = [...(server._continuations?.values() || [])].filter((entry) => !expired(entry, now) && !entry.baselineFailed)
   if (entries.length === 0) return
   const refresh = (async () => {
     const results = await probe(entries)
     for (const entry of entries) {
       if (server._continuations?.get(entry.id) !== entry) continue
       if (!results || !Object.hasOwn(results, entry.id)) {
+        // Without the announcement's initial snapshot we cannot tell whether a
+        // later successful check sees the original file or a replacement. Only
+        // a newer announcement may establish another baseline in that case.
+        if (entry.fingerprint === undefined) {
+          entry.fingerprint = null
+          entry.baselineFailed = true
+        }
         entry.unavailable = 'metadata timeout'
         continue
       }
@@ -75,7 +82,7 @@ async function refreshMetadata(server, now, probe) {
   try { await refresh } finally { if (server._continuationRefresh === refresh) server._continuationRefresh = null }
 }
 
-export function recordContinuation(server, event, now = Date.now()) {
+export function recordContinuation(server, event, now = Date.now(), probe = probeMetadata) {
   const { seedPath, cwd } = event.data
   const id = createHash('sha256').update(JSON.stringify([cwd, seedPath])).digest('hex')
   if (!server._continuations) server._continuations = new Map()
@@ -86,7 +93,15 @@ export function recordContinuation(server, event, now = Date.now()) {
   server._continuations.set(id, opportunity)
   while (server._continuations.size > MAX_CONTINUATIONS) server._continuations.delete(server._continuations.keys().next().value)
   // The isolated probe never delays the ingest acknowledgement.
-  void refreshMetadata(server, now, probeMetadata).catch(() => {})
+  if (server._continuationRefresh) {
+    // That batch already captured its entries. Joining its promise would leave
+    // this announcement unexamined until a later refresh could adopt a new file.
+    opportunity.fingerprint = null
+    opportunity.baselineFailed = true
+    opportunity.unavailable = 'metadata timeout'
+  } else {
+    void refreshMetadata(server, now, probe).catch(() => {})
+  }
   return { opportunity, duplicate: false }
 }
 
