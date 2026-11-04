@@ -422,3 +422,19 @@ describe('preflight names the CHROXY_CODEX_BIN override (#8609)', () => {
     })
   })
 })
+
+describe('#8609 rejection ledger bounds its keys and values', () => {
+  beforeEach(() => _resetModelRejectionsForTests())
+  afterEach(() => _resetModelRejectionsForTests())
+
+  it('ignores an oversize model id or client key', () => {
+    const key = codexClientKey('/bin/codex', '0.154.0', 'native')
+    recordModelRejection(key, 'm'.repeat(129), { wasDefault: true })
+    assert.equal(rejectedDefaultFor(key), null)
+    const hugeKey = codexClientKey('/' + 'p'.repeat(5000), '0.154.0', 'native')
+    recordModelRejection(hugeKey, 'gpt-x', { wasDefault: true })
+    assert.equal(rejectedDefaultFor(hugeKey), null)
+    recordModelRejection(key, 'gpt-x', { wasDefault: true })
+    assert.equal(rejectedDefaultFor(key), 'gpt-x')
+  })
+})

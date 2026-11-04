@@ -12,6 +12,8 @@ export const MODEL_UNSUPPORTED_CODE = 'model_unsupported'
 const MAX_CLIENTS = 32
 const MAX_MODELS_PER_CLIENT = 64
 const MAX_MODEL_ID = 128
+// path (bounded by PROVIDER_BINARY_PATH_MAX_LENGTH upstream) + version + route
+const MAX_CLIENT_KEY = 1400
 
 // "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
 const QUOTED_RE = /['"‘’`]([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})['"‘’`]\s+model\s+is\s+not\s+supported/i
@@ -45,7 +47,8 @@ export function codexClientKey(binaryPath, version, route) {
 }
 
 export function recordModelRejection(clientKey, model, { wasDefault = false } = {}) {
-  if (typeof clientKey !== 'string' || typeof model !== 'string' || !model) return
+  if (typeof clientKey !== 'string' || !clientKey || clientKey.length > MAX_CLIENT_KEY) return
+  if (typeof model !== 'string' || !model || model.length > MAX_MODEL_ID) return
   let entry = ledger.get(clientKey)
   if (entry) ledger.delete(clientKey) // re-insert below: Map order = recency
   else entry = { rejected: new Set(), defaultRejected: null }
