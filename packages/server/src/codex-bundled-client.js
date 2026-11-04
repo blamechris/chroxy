@@ -9,8 +9,12 @@
 
 import { readFileSync as nodeReadFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, isAbsolute } from 'path'
+import { posix } from 'path'
 import { parseSemver, compareSemver } from './codex-protocol-capabilities.js'
+
+// macOS app-bundle paths only (darwin-gated below), so POSIX joins on every
+// host keep the returned path and its tests platform-independent.
+const { join, isAbsolute } = posix
 
 const APP_NAMES = ['ChatGPT.app', 'Codex.app']
 const MANIFEST_REL = join('Contents', 'Resources', 'codex-cli', 'codex-package.json')
