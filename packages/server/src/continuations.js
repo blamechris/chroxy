@@ -23,7 +23,7 @@ export function createContinuationProbe({ workerPath = fileURLToPath(new URL('./
         resolve(result)
       }
       try {
-        child = spawn(process.execPath, [workerPath], { stdio: ['pipe', 'pipe', 'ignore'] })
+        child = spawn(process.execPath, ['--', workerPath], { stdio: ['pipe', 'pipe', 'ignore'] })
         timer = setTimeout(() => { finish(null); child.kill('SIGKILL') }, timeoutMs)
         child.on('error', () => { active = false; finish(null) })
         child.on('close', (code) => {

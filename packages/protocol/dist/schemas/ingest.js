@@ -97,7 +97,7 @@ export const IngestEventSchema = z
     if (event.type !== 'wave_complete' && event.source !== 'session-seed')
         return;
     if (event.type !== 'wave_complete' || event.source !== 'session-seed') {
-        ctx.addIssue({ code: 'custom', message: 'session-seed requires wave_complete' });
+        ctx.addIssue({ code: 'custom', message: 'session-seed and wave_complete must be used together' });
     }
     const data = event.data || {};
     if (Object.keys(data).some((key) => key !== 'seedPath' && key !== 'cwd')) {
