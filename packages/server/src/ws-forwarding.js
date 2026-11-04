@@ -435,11 +435,14 @@ function setupSessionForwarding(normalizer, ctx) {
     // codex client reads live, so resend each same-provider session's runtime frame
     // (this one included) and let its picker disable the model. After the event's
     // own messages, so the error reaches clients first. One failing session must
-    // not stop the rest.
+    // not stop the rest, and a failure to enumerate sessions must not abort the
+    // rest of this listener (the afterEffects step below; today only permission
+    // events carry any, but the refresh should not be the reason one is skipped).
     if (event === 'error' && data?.code === MODEL_UNSUPPORTED_CODE) {
-      const provider = sessionManager.getSession(sessionId)?.provider
-      if (provider) {
-        for (const row of sessionManager.listSessions() || []) {
+      try {
+        const provider = sessionManager.getSession(sessionId)?.provider
+        const rows = provider ? sessionManager.listSessions() || [] : []
+        for (const row of rows) {
           const sid = row?.sessionId
           if (!sid) continue
           try {
@@ -454,6 +457,8 @@ function setupSessionForwarding(normalizer, ctx) {
             log.error(`provider_runtime_info refresh after model rejection failed for session ${sid}: ${err?.message || err}`)
           }
         }
+      } catch (err) {
+        log.error(`provider_runtime_info refresh after model rejection failed: ${err?.message || err}`)
       }
     }
 

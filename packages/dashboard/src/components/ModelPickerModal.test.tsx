@@ -250,6 +250,12 @@ describe('ModelPickerModal — models the backend refused (#8909)', () => {
     expect(props.onSelect).not.toHaveBeenCalled()
   })
 
+  it('ArrowDown from search skips a rejected first row', () => {
+    renderModal({ rejectedModelIds: ['sonnet'] })
+    fireEvent.keyDown(screen.getByTestId('model-picker-search'), { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByTestId('model-picker-item-opus'))
+  })
+
   it('keeps the active checkmark when the active model is rejected', () => {
     renderModal({ activeModel: 'sonnet', rejectedModelIds: ['sonnet'] })
     const row = screen.getByTestId('model-picker-item-sonnet')
