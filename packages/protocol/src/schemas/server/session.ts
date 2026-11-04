@@ -373,12 +373,20 @@ export const ProviderInstructionProjectionSchema = z.object({
 }).strict()
 
 export const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128
+export const PROVIDER_BINARY_PATH_MAX_LENGTH = 1024
 
 export const ServerProviderRuntimeInfoSchema = z.object({
   type: z.literal('provider_runtime_info'),
   sessionId: z.string().min(1).max(256),
   provider: z.string().min(1).max(128),
   binaryVersion: z.union([z.string().min(1).max(PROVIDER_BINARY_VERSION_MAX_LENGTH), z.literal('unknown')]),
+  // #8609 — optional, so an older server's frame still validates: the executable
+  // this session launched, and a newer bundled client it did not.
+  binaryPath: z.string().min(1).max(PROVIDER_BINARY_PATH_MAX_LENGTH).optional(),
+  newerBinary: z.object({
+    path: z.string().min(1).max(PROVIDER_BINARY_PATH_MAX_LENGTH),
+    version: z.string().min(1).max(PROVIDER_BINARY_VERSION_MAX_LENGTH),
+  }).strict().optional(),
   // Static adapter trait. Only drivers whose native process must finish
   // startup before accepting input set this; live admission is `inputReady` in
   // the session-scoped capability list below.

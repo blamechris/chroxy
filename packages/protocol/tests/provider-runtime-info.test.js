@@ -34,4 +34,16 @@ describe('provider_runtime_info schema', () => {
     assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, capabilities: [{ name: 'mcp', state: 'maybe' }] }))
     assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, surprise: true }))
   })
+
+  it('accepts the optional launched-binary path and newer-client fields, and still validates without them (#8609)', () => {
+    const extra = { binaryPath: '/opt/codex/bin/codex', newerBinary: { path: '/Applications/ChatGPT.app/x/bin/codex', version: '0.166.0-alpha.5.1' } }
+    assert.deepEqual(ServerProviderRuntimeInfoSchema.parse({ ...frame, ...extra }), { ...frame, ...extra })
+    assert.ok(ServerProviderRuntimeInfoSchema.safeParse(frame).success, 'an older server omits both')
+  })
+
+  it('bounds the binary path and rejects extra keys on newerBinary (#8609)', () => {
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, binaryPath: 'x'.repeat(1025) }))
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, binaryPath: '' }))
+    assert.throws(() => ServerProviderRuntimeInfoSchema.parse({ ...frame, newerBinary: { path: '/a', version: '1.0.0', extra: 1 } }))
+  })
 })

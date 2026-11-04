@@ -9,7 +9,12 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
-import { parseCodexUserAgent, capabilitiesForVersion } from './codex-protocol-capabilities.js'
+import { parseCodexUserAgent, capabilitiesForVersion, parseSemver, compareSemver } from './codex-protocol-capabilities.js'
+import { findNewestBundledCodexClient } from './codex-bundled-client.js'
+import {
+  MODEL_UNSUPPORTED_CODE, detectModelRejection, codexClientKey, recordModelRejection,
+  rejectedDefaultFor, suggestFallbackModel,
+} from './codex-model-rejections.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
@@ -166,6 +171,9 @@ export class CodexAppServerSession extends BaseSession {
   static get inputRequiresReady() { return true }
 
   get providerBinaryVersion() { return this.codexVersion || 'unknown' }
+  // #8609 — WHICH codex this session launched, and a newer bundled one it did not.
+  get providerBinaryPath() { return this._spawnedBinary || null }
+  get providerNewerBinary() { return this._newerBinary }
   get providerRuntimeCapabilities() {
     return {
       ...(this.codexCapabilities || {}),
@@ -330,6 +338,12 @@ export class CodexAppServerSession extends BaseSession {
     this.codexUserAgent = null
     this.codexVersion = null
     this.codexCapabilities = capabilitiesForVersion(null)
+    // #8609 — a newer client bundled in a desktop app ({path, version}), found
+    // after the handshake; null when none / not newer. `bundledClientFinder` is a
+    // test seam for the app-bundle probe.
+    this._newerBinary = null
+    this._findBundledClient = typeof opts.bundledClientFinder === 'function'
+      ? opts.bundledClientFinder : findNewestBundledCodexClient
     this._activeTurn = null // { messageId, turnId, didStreamStart }
     // #8710 — codex turns codex has ended (`turn/completed`, or a terminal
     // `error`); a notification still naming one is a straggler, not a live turn.
@@ -566,6 +580,8 @@ export class CodexAppServerSession extends BaseSession {
       throw err
     }
     this._captureHandshake(init)
+    this._noteNewerBundledClient()
+    if (!this._nativeRestore) this._avoidRejectedDefaultModel()
     const actualAuthRoute = await this._verifyConnectionAuthRoute()
     if (this._nativeRestore) this._verifyNativeOwnership(init)
     const started = await this._client.request(
@@ -1021,6 +1037,71 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
+  /** #8609 — the launched client's identity for the model-rejection ledger. */
+  _clientKey() {
+    return codexClientKey(this._spawnedBinary, this.codexVersion)
+  }
+
+  /**
+   * #8609 — after the handshake, note (warn once, expose in runtime info) a
+   * client bundled in a desktop app that is newer than the one we launched.
+   * Advisory only: never switches binaries and never throws.
+   */
+  _noteNewerBundledClient() {
+    try {
+      const have = parseSemver(this.codexVersion)
+      const bundled = this._findBundledClient()
+      if (!have || !bundled || bundled.path === this._spawnedBinary) return
+      const want = parseSemver(bundled.version)
+      if (!want || compareSemver(want, have) <= 0) return
+      this._newerBinary = { path: bundled.path, version: bundled.version }
+      ;(this._log || log).warn(`a newer codex client is installed: ${bundled.version} (${bundled.path}); this session launched ${this.codexVersion} (${this._spawnedBinary}) — set CHROXY_CODEX_BIN to use it`)
+    } catch (err) {
+      ;(this._log || log).debug(`bundled codex client probe failed: ${err?.message || err}`)
+    }
+  }
+
+  /** #8609 — the first codex-roster model this client has not had rejected. */
+  _suggestFallbackModel(rejected) {
+    let roster = []
+    try { roster = CodexAppServerSession.getFallbackModels().map((m) => m.id) } catch { /* no roster */ }
+    return suggestFallbackModel(roster, this._clientKey(), rejected ? [rejected] : [])
+  }
+
+  /**
+   * #8609 — an earlier session on THIS client (same path and version) had its
+   * default model rejected by the backend. With no explicit model, start the
+   * thread on the fallback instead of walking into the same refusal.
+   */
+  _avoidRejectedDefaultModel() {
+    if (this.model) return
+    const rejected = rejectedDefaultFor(this._clientKey())
+    if (!rejected) return
+    const fallback = this._suggestFallbackModel(rejected)
+    if (!fallback) return
+    this.model = fallback
+    ;(this._log || log).info(`codex model '${rejected}' was rejected for this client earlier; starting on '${fallback}' instead`)
+  }
+
+  /**
+   * #8609 — the backend refused the model: say so legibly (model, client,
+   * alternative, newer client) and remember it for this client.
+   */
+  _modelUnsupportedPayload(rejection) {
+    const model = rejection.model || this._effectiveModelId()
+    const key = this._clientKey()
+    if (model) recordModelRejection(key, model, { wasDefault: !this.model })
+    const version = this.codexVersion || 'unknown version'
+    const path = this._spawnedBinary || 'codex'
+    const parts = [`Codex rejected model '${model || 'unknown'}': it is not supported by the codex client this session launched (${version}, ${path}).`]
+    const fallback = this._suggestFallbackModel(model)
+    if (fallback) parts.push(`Try '${fallback}'.`)
+    if (this._newerBinary) {
+      parts.push(`A newer codex client is installed: ${this._newerBinary.version} (${this._newerBinary.path}) — set CHROXY_CODEX_BIN to use it.`)
+    }
+    return { message: parts.join(' '), code: MODEL_UNSUPPORTED_CODE }
+  }
+
   /**
    * #8301: `sendMessage` on a session whose app-server is not up emits a
    * user-visible "not started" error. A daemon wake must not cause one.
@@ -1431,6 +1512,8 @@ export class CodexAppServerSession extends BaseSession {
     if (err?.codexErrorInfo === 'usageLimitExceeded' && typeof err.message === 'string' && err.message) {
       return { message: err.message, code: USAGE_LIMIT_CODE }
     }
+    const rejection = detectModelRejection(err, raw)
+    if (rejection) return this._modelUnsupportedPayload(rejection)
     if (raw == null) return { message: 'Codex turn failed' }
     return { message: `Codex error: ${JSON.stringify(raw).slice(0, 200)}` }
   }

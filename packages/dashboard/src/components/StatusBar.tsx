@@ -176,7 +176,10 @@ export function StatusBar({
           >{prov.short}</summary>
           <div className="status-provider-panel" data-testid="status-provider-panel">
             <strong>{providerRuntimeInfo?.provider || provider}</strong>
-            <span>Binary: {providerRuntimeInfo?.binaryVersion || 'unknown'}</span>
+            <span data-testid="status-binary">Binary: {providerRuntimeInfo?.binaryVersion || 'unknown'}{providerRuntimeInfo?.binaryPath ? ` (${providerRuntimeInfo.binaryPath})` : ''}</span>
+            {providerRuntimeInfo?.newerBinary && (
+              <span data-testid="status-newer-binary">Newer client installed: {providerRuntimeInfo.newerBinary.version} ({providerRuntimeInfo.newerBinary.path}) — set CHROXY_CODEX_BIN to use it</span>
+            )}
             <span>Observed capabilities: {runtimeCapabilitiesText(providerRuntimeInfo)}</span>
             <span>Native instructions: {String(providerRuntimeInfo?.customization.nativeDiscovery.state ?? 'unknown')} ({providerRuntimeInfo?.customization.nativeDiscovery.delivery || 'unknown'} delivery)</span>
             <span>Project policy: {providerRuntimeInfo?.projectInstructions.status || 'unknown'} ({providerRuntimeInfo?.projectInstructions.enforcement || 'instructional'})</span>
