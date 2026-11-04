@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, unlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHttpHandler } from '../src/http-routes.js'
-import { recordContinuation, listContinuations, CONTINUATION_TTL_MS } from '../src/continuations.js'
+import { recordContinuation, listContinuations, createContinuationProbe, CONTINUATION_TTL_MS } from '../src/continuations.js'
 import { PushManager } from '../src/push.js'
 import { WsServer } from '../src/ws-server.js'
 
@@ -76,10 +76,11 @@ describe('seed continuation HTTP flow', () => {
   it('marks changed/deleted/expired seeds unavailable; retries never adopt replacements', async () => {
     const { event, post, get } = await setup()
     await post()
+    await (await get()).json()
     writeFileSync(event.data.seedPath, 'replacement content with different size')
     await post()
     assert.equal((await (await get()).json()).continuations[0].unavailable, 'changed')
-    assert.equal(listContinuations(server, event.ts + CONTINUATION_TTL_MS + 1)[0].unavailable, 'expired')
+    assert.equal((await listContinuations(server, event.ts + CONTINUATION_TTL_MS + 1))[0].unavailable, 'expired')
     unlinkSync(event.data.seedPath)
     assert.equal((await (await get()).json()).continuations[0].unavailable, 'missing')
   })
@@ -89,7 +90,29 @@ describe('seed continuation HTTP flow', () => {
     await post()
     assert.equal((await (await get()).json()).continuations[0].available, false)
     for (let i = 0; i < 60; i++) recordContinuation(server, { ...event, data: { ...event.data, seedPath: join(root, `${i}.md`) } })
-    assert.equal(listContinuations(server).length, 50)
+    assert.equal((await listContinuations(server)).length, 50)
+  })
+  it('isolates slow metadata with a deadline and concurrency bound while HTTP and timers stay responsive', async () => {
+    const { event, post, get } = await setup()
+    await post()
+    await (await get()).json()
+    const slowWorker = join(root, 'slow-worker.cjs')
+    writeFileSync(slowWorker, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000)')
+    const probe = createContinuationProbe({ workerPath: slowWorker, timeoutMs: 150 })
+    const pending = listContinuations(server, Date.now(), probe)
+    assert.equal(await probe([{ id: 'second', ...event.data }]), null, 'only one child can be active')
+    let timerFired = false
+    const timer = setTimeout(() => { timerFired = true }, 0)
+    const started = Date.now()
+    assert.equal((await get('fixture-denied')).status, 403, 'daemon HTTP responds during stalled stat')
+    const result = await pending
+    clearTimeout(timer)
+    assert.equal(timerFired, true, 'main event loop runs while child is blocked')
+    assert.ok(Date.now() - started < 1000, 'child has an enforceable wall-clock deadline')
+    assert.equal(result[0].unavailable, 'metadata timeout')
+    const expiredResult = await listContinuations(server, event.ts + CONTINUATION_TTL_MS + 1,
+      () => { assert.fail('expired seeds and cwd must never be probed') })
+    assert.equal(expiredResult[0].unavailable, 'expired')
   })
 })
 

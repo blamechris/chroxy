@@ -24,7 +24,8 @@ The writer announces only after its canonical proof succeeds. It makes one
 request, with a 250 ms socket timeout and a 750 ms total child-process deadline
 covering configuration reads and DNS too. Missing credentials, an offline daemon,
 HTTP errors, redirects and timeouts leave the seed, writer output and successful
-exit unchanged. There is no retry queue. Unproved test writes do not announce.
+exit unchanged. There is no retry queue. Unproved test writes and pulse-only
+metadata refreshes do not announce a completed wave.
 
 The authenticated contract is:
 
@@ -51,7 +52,9 @@ separate feature; this dashboard flow always leaves Send to the operator.
 `GET /api/continuations` is a global, primary-bearer-only, read-only endpoint.
 The ingest secret and session-bound tokens cannot list these paths. The dashboard
 refreshes it while connected and visible, every 15 seconds and on focus, and
-checks again before opening the session picker. Notification muting does not hide
+checks again before opening the session picker. Metadata checks run in a dedicated
+child with a 200 ms deadline and one-child concurrency limit; timeouts offer the
+manual path. Expired entries skip filesystem probes. Notification muting does not hide
 the dashboard list.
 
 Opportunities last for the current daemon lifetime, with at most 50 paths retained.

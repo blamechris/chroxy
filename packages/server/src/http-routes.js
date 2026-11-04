@@ -580,7 +580,7 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
     if (req.method === 'GET' && snapPath === '/api/continuations') {
       if (!server._validatePrimaryBearerAuth(req, res)) return
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ continuations: listContinuations(server) }))
+      res.end(JSON.stringify({ continuations: await listContinuations(server) }))
       return
     }
 

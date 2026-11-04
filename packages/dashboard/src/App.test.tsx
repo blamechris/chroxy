@@ -3526,8 +3526,16 @@ describe('App', () => {
 
     // Drive the mocked modal's onCreate seam → App.handleCreateSession, which
     // flips isCreatingSession and lets the create-confirm effect run.
-    function confirmCreate() {
+    function confirmServerSession(rerender: ReturnType<typeof render>['rerender']) {
+      stateOverrides = { ...stateOverrides, activeSessionId: 's-new', sessions: [
+        ...oneSessionWithCwd, { ...oneSessionWithCwd[0], sessionId: 's-new', name: 'New' },
+      ] }
+      rerender(<App />)
+    }
+    function confirmCreate(rerender: ReturnType<typeof render>['rerender']) {
       fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+      expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
+      confirmServerSession(rerender)
     }
 
     // After create, make sure we're viewing the session (not the Control Room)
@@ -3542,35 +3550,67 @@ describe('App', () => {
 
     it('positive control: Investigate → create seeds the composer with the reason', () => {
       stateOverrides = connectedState()
-      render(<App />)
+      const { rerender } = render(<App />)
       stashSeedViaInvestigate()
-      confirmCreate()
+      confirmCreate(rerender)
       // Seed landed in the active session's composer — proves the seed path is
       // observable, so the empty-composer assertions below are meaningful.
       expect(viewSessionComposer().value).toBe(REASON)
     })
 
-    it('Continue from seed stages an editable absolute path, never calls send or summarizer', async () => {
+    it('keeps repository preset precedence for ordinary Investigate creation', () => {
+      stateOverrides = { ...connectedState(), takePendingServerSeed: vi.fn(() => 'Repository template') }
+      const { rerender } = render(<App />)
+      stashSeedViaInvestigate()
+      confirmCreate(rerender)
+      expect(viewSessionComposer().value).toBe('Repository template')
+    })
+
+    it('continues from the welcome screen after the first session is confirmed', async () => {
+      const ts = Date.now()
+      stateOverrides = { ...connectedState(), sessions: [], activeSessionId: null, apiToken: 'fixture-primary' }
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ continuations: [
+        { id: 'seed-first', seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo', ts, available: true, unavailable: null },
+      ] }))))
+      try {
+        const { rerender } = render(<App />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Continue from seed' }))
+        await screen.findByTestId('create-session-modal-mock')
+        confirmCreate(rerender)
+        expect(viewSessionComposer().value).toBe('/vault/NEXT-demo.md')
+      } finally { vi.unstubAllGlobals() }
+    })
+
+    it.each([null, 'Repository first-message template'])('Continue stages its path after async confirmation, overriding preset %s', async (preset) => {
       const seedPath = '/vault/NEXT-demo.md'
       const ts = Date.now()
       const sendInput = vi.fn()
       const summarizeSession = vi.fn()
-      stateOverrides = { ...connectedState(), apiToken: 'fixture-primary', sendInput, summarizeSession }
+      const takePendingServerSeed = vi.fn(() => preset)
+      stateOverrides = { ...connectedState(), apiToken: 'fixture-primary', sendInput, summarizeSession, takePendingServerSeed }
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ continuations: [
         { id: 'seed-demo', seedPath, cwd: '/projects/demo', ts, available: true, unavailable: null },
       ] }))))
       try {
-        render(<App />)
+        const { rerender } = render(<App />)
+        fireEvent.change(viewSessionComposer(), { target: { value: 'Existing draft stays here' } })
         fireEvent.click(await screen.findByRole('button', { name: 'Continue from seed' }))
         await screen.findByTestId('create-session-modal-mock')
         expect(screen.getByTestId('create-session-modal-mock')).toHaveAttribute('data-cwd', '/projects/demo')
-        confirmCreate()
+        fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+        expect(viewSessionComposer().value).toBe('Existing draft stays here')
+        expect(takePendingServerSeed).not.toHaveBeenCalled()
+        expect(screen.getByTestId('create-session-modal-creating')).toBeInTheDocument()
+        confirmServerSession(rerender)
         const composer = viewSessionComposer()
         expect(composer.value).toBe(seedPath)
         fireEvent.change(composer, { target: { value: seedPath + ' edited' } })
         expect(composer.value).toBe(seedPath + ' edited')
         expect(sendInput).not.toHaveBeenCalled()
         expect(summarizeSession).not.toHaveBeenCalled()
+        stateOverrides = { ...stateOverrides, activeSessionId: 's1' }
+        rerender(<App />)
+        expect(viewSessionComposer().value).toBe('Existing draft stays here')
       } finally { vi.unstubAllGlobals() }
     })
 
@@ -3581,13 +3621,13 @@ describe('App', () => {
         { id: 'seed-cancel', seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo', ts, available: true, unavailable: null },
       ] }))))
       try {
-        render(<App />)
+        const { rerender } = render(<App />)
         fireEvent.click(await screen.findByRole('button', { name: 'Continue from seed' }))
         await screen.findByTestId('create-session-modal-mock')
         fireEvent.click(screen.getByTestId('create-session-modal-cancel'))
         fireEvent.click(screen.getByTestId('header-overflow-trigger'))
         fireEvent.click(screen.getByTestId('header-overflow-item-new-session'))
-        confirmCreate()
+        confirmCreate(rerender)
         expect(viewSessionComposer().value).toBe('')
       } finally { vi.unstubAllGlobals() }
     })
@@ -3604,10 +3644,10 @@ describe('App', () => {
       }],
     ])('does not leak the seed when a plain session is opened via %s', (_label, openPlainSession) => {
       stateOverrides = connectedState()
-      render(<App />)
+      const { rerender } = render(<App />)
       stashSeedViaInvestigate()   // seed stashed
       openPlainSession()          // plain opener must CLEAR the seed ref
-      confirmCreate()             // create — must NOT seed
+      confirmCreate(rerender)             // create — must NOT seed
       expect(viewSessionComposer().value).toBe('')
     })
   })

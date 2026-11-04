@@ -999,6 +999,8 @@ export function App() {
   // the server confirms the session (the create-confirm effect). A ref (not
   // state) so it survives without re-renders and is read at the transition.
   const pendingSeedPromptRef = useRef<string | null>(null)
+  const pendingSeedIsExplicitRef = useRef(false)
+  const creatingFromSessionIdsRef = useRef<Set<string> | null>(null)
 
   // #5217 — single owner of the create-session picker open path. Every opener
   // routes through this so none can diverge on the three things that must stay
@@ -1006,11 +1008,15 @@ export function App() {
   // Investigate opener passes a non-null seed; everyone else clears it so a
   // stale reason can't leak into an unrelated session, #5214), and showing the
   // modal. Stable identity ([] deps) so effects/handlers can depend on it freely.
-  const openCreateSession = useCallback(({ cwd = null, seed = null }: { cwd?: string | null; seed?: string | null } = {}) => {
+  const openCreateSession = useCallback(({ cwd = null, seed = null, preferSeed = false }: { cwd?: string | null; seed?: string | null; preferSeed?: boolean } = {}) => {
     pendingSeedPromptRef.current = seed || null
+    pendingSeedIsExplicitRef.current = preferSeed
     setPendingCwd(cwd)
     setShowCreateSession(true)
   }, [])
+  const continueFromSeed = useCallback((options: { cwd: string; seed: string }) => {
+    openCreateSession({ ...options, preferSeed: true })
+  }, [openCreateSession])
 
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
@@ -1515,7 +1521,8 @@ export function App() {
 
   // Close Create Session modal when server confirms (activeSessionId changes)
   useEffect(() => {
-    if (isCreatingSession && activeSessionId) {
+    if (isCreatingSession && activeSessionId && creatingFromSessionIdsRef.current &&
+        !creatingFromSessionIdsRef.current.has(activeSessionId)) {
       setShowCreateSession(false)
       setIsCreatingSession(false)
       setSessionCreateError(null)
@@ -1527,12 +1534,16 @@ export function App() {
       // rather than clobbering it with an empty draft.
       // #5553: a server-provided repo-preset SEED (delivered on session_switched
       // and stashed in the store keyed by sessionId) takes precedence — it's the
-      // repo's intentional first-message template. Falls back to the client-side
+      // repo's intentional first-message template. An explicit continuation path
+      // selected by the operator takes priority over that default; other openers
+      // keep the existing preset precedence. Falls back to the client-side
       // Investigate/summarize seed (#5202/#5547). Either way the seed is staged
       // EDITABLE (never auto-sent) via the same draft-ref path.
       const takeSeed = useConnectionStore.getState().takePendingServerSeed
       const serverSeed = typeof takeSeed === 'function' ? takeSeed(activeSessionId) : null
-      const seed = serverSeed || pendingSeedPromptRef.current
+      const seed = pendingSeedIsExplicitRef.current ? pendingSeedPromptRef.current : serverSeed || pendingSeedPromptRef.current
+      creatingFromSessionIdsRef.current = null
+      pendingSeedIsExplicitRef.current = false
       if (seed) {
         inputDraftsRef.current.set(activeSessionId, seed)
         syncRestoredComposer(activeSessionId)
@@ -2442,6 +2453,11 @@ export function App() {
 
   const handleCreateSession = useCallback((data: CreateSessionData) => {
     setSessionCreateError(null)
+    // A sent request is not a confirmation. Keep the old composer's draft
+    // intact until the server selects a newly-created session, rather than
+    // consuming the seed immediately against the currently active id.
+    creatingFromSessionIdsRef.current = new Set(sessions.map((session) => session.sessionId))
+    if (activeSessionId) creatingFromSessionIdsRef.current.add(activeSessionId)
     // #6285 — only latch the "Creating…" spinner when the request actually went
     // on the wire. createSession is a silent no-op when the socket is closed; if
     // we latched unconditionally the spinner would wedge forever (no
@@ -2451,9 +2467,10 @@ export function App() {
     if (sent) {
       setIsCreatingSession(true)
     } else {
+      creatingFromSessionIdsRef.current = null
       setSessionCreateError('Connection lost — try again')
     }
-  }, [createSession])
+  }, [createSession, sessions, activeSessionId])
 
   const handlePlanApprove = useCallback(() => {
     sendInput('approve')
@@ -3186,7 +3203,7 @@ export function App() {
           isSessionStarting={sessionIsStarting}
           permissionStatus={permissionStatus}
         />
-        <ContinuationOpportunities connected={isConnected} onContinue={openCreateSession} />
+        <ContinuationOpportunities connected={isConnected} onContinue={continueFromSeed} />
 
         {/* Normal session UI. #5204 — suppressed while the Control Room tab
             is active (the CR view above takes the main content area). */}
@@ -3611,7 +3628,7 @@ export function App() {
         onTranscriptViewerClose={closeTranscriptViewer}
         onTranscriptViewerRetry={requestConversationTranscript}
         showCreateSession={showCreateSession}
-        onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
+        onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null; pendingSeedIsExplicitRef.current = false; creatingFromSessionIdsRef.current = null }}
         onCreateSession={handleCreateSession}
         createSessionInitialCwd={pendingCwd}
         knownCwds={knownCwds}
