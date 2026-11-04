@@ -73,6 +73,7 @@ import { configPath } from './config-dir.js'
  * can map these to friendlier labels without changing the protocol).
  */
 export const ALL_CATEGORIES = Object.freeze([
+  'continuation',
   'permission',
   'result',
   'activity_update',

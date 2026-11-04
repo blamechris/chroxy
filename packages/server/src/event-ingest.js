@@ -46,6 +46,7 @@ import { IngestEventSchema } from '@chroxy/protocol'
 // (packages/claude-hooks/src/project.js) and this server fallback can't drift.
 import { deriveProjectFromCwd } from '@chroxy/protocol/project'
 import { configPath } from './config-dir.js'
+import { recordContinuation } from './continuations.js'
 
 const log = createLogger('ingest')
 
@@ -129,6 +130,7 @@ const INGEST_IP_BURST = 30
  *                    with idle→idle dedup, the bash idle_prompt arm)
  */
 export const INGEST_CATEGORY_FOR_TYPE = {
+  wave_complete: { category: 'continuation', title: 'Wave complete', body: 'Next session ready — continue from seed' },
   session_start: { category: 'session_online', title: 'Session online', body: 'External session started' },
   session_end: { category: 'session_offline', title: 'Session offline', body: 'External session ended' },
   subagent_start: { category: 'session_activity', title: 'Subagent started', body: 'A subagent is running' },
@@ -505,6 +507,17 @@ export function handleEventIngest(server, req, res) {
       // walk). The Discord sink's _projectKey prefers data.project, so this
       // is what keys the per-project status embed.
       const data = event.data || {}
+
+      if (event.type === 'wave_complete') {
+        const { duplicate } = recordContinuation(server, event)
+        if (!duplicate) {
+          Promise.resolve(pushManager.send('continuation', mapping.title, mapping.body,
+            { seedPath: data.seedPath, cwd: data.cwd }, 'continuation'))
+            .catch(() => log.warn('Continuation notification delivery failed'))
+        }
+        sendJson(res, 200, { ok: true, category: 'continuation' })
+        return
+      }
 
       // #5439 GAP A: split the Notification hook by its discriminator —
       // idle prompts are "ready for input" (idle embed), not approvals.

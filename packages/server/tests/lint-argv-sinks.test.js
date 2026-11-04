@@ -17,7 +17,7 @@
  */
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,6 +67,17 @@ function runLint(files, opts = {}) {
 }
 
 const EMPTY_CATALOGUE = 'export const AUDITED_SINKS = []\n'
+
+test('real continuation worker uses Node option terminator; deleting it fails the argv lint', () => {
+  const source = readFileSync(resolve(__dirname, '..', 'src', 'continuations.js'), 'utf8')
+  const protectedResult = runLint({ 'continuations.js': source }, { catalogue: EMPTY_CATALOGUE })
+  assert.equal(protectedResult.status, 0, protectedResult.stderr)
+  const mutant = source.replace("['--', workerPath]", '[workerPath]')
+  assert.notEqual(mutant, source, 'negative control must remove the production worker option terminator')
+  const unprotectedResult = runLint({ 'continuations.js': mutant }, { catalogue: EMPTY_CATALOGUE })
+  assert.equal(unprotectedResult.status, 1, 'removing the guard must fail normally, not time out or crash')
+  assert.ok(unprotectedResult.stderr.includes('workerPath'), 'failure must identify the unguarded worker path')
+})
 
 // ─── Fixture sources ────────────────────────────────────────────────────────
 

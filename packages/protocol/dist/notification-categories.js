@@ -32,6 +32,11 @@
  */
 export const NOTIFICATION_CATEGORIES = Object.freeze([
     {
+        key: 'continuation',
+        label: 'Session continuation',
+        hint: 'A completed handoff seed is ready for a fresh session. Quiet hours apply.',
+    },
+    {
         key: 'permission',
         label: 'Permission requests',
         hint: 'Tool-use prompts that need an allow / deny decision.',

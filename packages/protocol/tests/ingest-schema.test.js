@@ -28,6 +28,16 @@ function validEvent(overrides = {}) {
 }
 
 describe('IngestEventSchema (#5413 Phase 3)', () => {
+  it('explains either source/type mismatch with the same paired-contract diagnostic', () => {
+    for (const pair of [
+      { source: 'other', type: 'wave_complete' },
+      { source: 'session-seed', type: 'stop' },
+    ]) {
+      const result = IngestEventSchema.safeParse(validEvent({ ...pair, data: { seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo' } }))
+      assert.equal(result.success, false)
+      assert.ok(result.error.issues.some((issue) => issue.message === 'session-seed and wave_complete must be used together'))
+    }
+  })
   it('accepts a fully-populated valid event', () => {
     const result = IngestEventSchema.safeParse(validEvent())
     assert.ok(result.success, JSON.stringify(result.error?.issues))
@@ -44,7 +54,8 @@ describe('IngestEventSchema (#5413 Phase 3)', () => {
 
   it('accepts every enumerated event type', () => {
     for (const type of INGEST_EVENT_TYPES) {
-      const result = IngestEventSchema.safeParse(validEvent({ type }))
+      const result = IngestEventSchema.safeParse(validEvent({ type, ...(type === 'wave_complete'
+        ? { source: 'session-seed', data: { seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo' } } : {}) }))
       assert.ok(result.success, `type ${type} should validate`)
     }
   })
