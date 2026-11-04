@@ -194,6 +194,19 @@ describe('setupForwarding', () => {
       assert.ok(errIdx >= 0 && errIdx < ctx.broadcastToSession.mock.calls.indexOf(sent[0]), 'the error goes out before the refresh')
     })
 
+    it('a throwing listSessions does not skip the afterEffects that follow the refresh', () => {
+      const releasePermission = mock.fn()
+      const normalizer = new EventNormalizer()
+      normalizer.normalize = () => ({ messages: [], afterEffects: [{ type: 'release_permission', requestId: 'req-1' }] })
+      const ctx = makeCtx({ normalizer, releasePermission })
+      ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'codex', session: {} }))
+      ctx.sessionManager.listSessions = mock.fn(() => { throw new Error('enumeration failed') })
+      setupForwarding(ctx)
+      ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'refused', code: 'model_unsupported' } })
+      assert.equal(ctx.sessionManager.listSessions.mock.callCount(), 1, 'the refresh ran and hit the throw')
+      assert.equal(releasePermission.mock.callCount(), 1, 'the afterEffects step still ran')
+    })
+
     it('does nothing for an error without the model_unsupported code', () => {
       const ctx = setup()
       ctx.sessionManager.emit('session_event', { sessionId: 'a', event: 'error', data: { message: 'other' } })

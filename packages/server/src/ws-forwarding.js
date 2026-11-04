@@ -436,8 +436,7 @@ function setupSessionForwarding(normalizer, ctx) {
     // (this one included) and let its picker disable the model. After the event's
     // own messages, so the error reaches clients first. One failing session must
     // not stop the rest, and a failure to enumerate sessions must not abort the
-    // rest of this listener (the afterEffects step below; today only permission
-    // events carry any, but the refresh should not be the reason one is skipped).
+    // rest of this listener, including the afterEffects step below.
     if (event === 'error' && data?.code === MODEL_UNSUPPORTED_CODE) {
       try {
         const provider = sessionManager.getSession(sessionId)?.provider
