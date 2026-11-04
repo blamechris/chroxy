@@ -63,7 +63,7 @@ import { clientActiveProvider, overlayBroadcastReachesProvider, broadcastRosterP
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled, applyCodexBinaryConfig } from './config.js'
 import { sweepStaleProviderDirs } from './sweep-stale-provider-dirs.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { buildSchedulerEngine } from './scheduler.js'
@@ -868,6 +868,7 @@ export function createDefaultSessionIfNeeded({ sessionManager, defaultSessionId,
 }
 
 export async function startCliServer(config) {
+  applyCodexBinaryConfig(config)
   // Enable JSON log format if configured
   if (config.logFormat === 'json') {
     setJsonMode(true)

@@ -462,11 +462,17 @@ export declare const ProviderInstructionProjectionSchema: z.ZodObject<{
     includedRequiredRuleIds: z.ZodArray<z.ZodString>;
 }, z.core.$strict>;
 export declare const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128;
+export declare const PROVIDER_BINARY_PATH_MAX_LENGTH = 1024;
 export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_runtime_info">;
     sessionId: z.ZodString;
     provider: z.ZodString;
     binaryVersion: z.ZodUnion<readonly [z.ZodString, z.ZodLiteral<"unknown">]>;
+    binaryPath: z.ZodOptional<z.ZodString>;
+    newerBinary: z.ZodOptional<z.ZodObject<{
+        path: z.ZodString;
+        version: z.ZodString;
+    }, z.core.$strict>>;
     inputRequiresReady: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
     capabilities: z.ZodArray<z.ZodObject<{
         name: z.ZodString;

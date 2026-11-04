@@ -148,6 +148,20 @@ describe('StatusBar', () => {
     expect(panel).toHaveTextContent('calls unknown')
   })
 
+  it('#8609: shows the launched binary path beside its version, and a newer installed client', () => {
+    const info = { ...runtimeInfo([]), binaryPath: '/opt/codex/bin/codex', newerBinary: { path: '/Applications/ChatGPT.app/c/bin/codex', version: '0.166.0-alpha.5.1' } }
+    render(<StatusBar provider="codex" providerRuntimeInfo={info} />)
+    expect(screen.getByTestId('status-binary')).toHaveTextContent('Binary: 1.2.3 (/opt/codex/bin/codex)')
+    expect(screen.getByTestId('status-newer-binary')).toHaveTextContent(
+      'Newer client installed: 0.166.0-alpha.5.1 (/Applications/ChatGPT.app/c/bin/codex) — set CHROXY_CODEX_BIN to use it')
+  })
+
+  it('#8609: with no path or newer client the binary line is unchanged and no notice renders', () => {
+    render(<StatusBar provider="codex" providerRuntimeInfo={runtimeInfo([])} />)
+    expect(screen.getByTestId('status-binary').textContent).toBe('Binary: 1.2.3')
+    expect(screen.queryByTestId('status-newer-binary')).toBeNull()
+  })
+
   it('shows true, false, and unknown observed capability states separately from customization', () => {
     render(<StatusBar provider="codex" providerRuntimeInfo={runtimeInfo([
       { name: 'approvalApi', state: true },

@@ -162,6 +162,10 @@ const CONFIG_SCHEMA = {
   // runs with a GUI/launchd PATH that misses npm globals. Mirrored by the
   // CHROXY_REPO_MEMORY_BIN env var.
   controlRoomRepoMemoryBin: 'string',
+  // #8609: explicit path of the codex client the codex provider launches
+  // (instead of the first `codex` on PATH). Mirrored by CHROXY_CODEX_BIN, which
+  // is what CodexSession.resolvedBinary reads — see applyCodexBinaryConfig.
+  codexBinary: 'string',
   maxSessions: 'number',
   maxHistory: 'number',
   maxMessages: 'number',
@@ -855,6 +859,20 @@ function validateUserShellBlock(userShell, warnings) {
     }
   }
   warnUnknownKeys(userShell, USER_SHELL_SUPPORTED_KEYS, 'userShell', warnings)
+}
+
+/**
+ * #8609: CodexSession.resolvedBinary is a static getter with no config handle,
+ * so the config-file `codexBinary` is published to CHROXY_CODEX_BIN once at
+ * startup. An env var already set wins (it is the same key merged by
+ * mergeConfig, so a file value only matters when the env is unset).
+ */
+// Needed beyond the env→config merge: that merge only reads the env, but the static
+// resolvedBinary getter has no config handle, so a file value must be pushed to the env.
+export function applyCodexBinaryConfig(config, env = process.env) {
+  const configured = typeof config?.codexBinary === 'string' ? config.codexBinary.trim() : ''
+  const current = typeof env.CHROXY_CODEX_BIN === 'string' ? env.CHROXY_CODEX_BIN.trim() : ''
+  if (configured && !current) env.CHROXY_CODEX_BIN = configured
 }
 
 // #5985: single source of truth for "may a user-shell session be created?".
@@ -1800,6 +1818,8 @@ function envKeyForConfig(key) {
     controlRoomContainersIncludeStats: 'CHROXY_CONTAINERS_INCLUDE_STATS',
     // #5499: explicit repo-memory binary path for the Integrations survey.
     controlRoomRepoMemoryBin: 'CHROXY_REPO_MEMORY_BIN',
+    // #8609: codex client to launch (read by CodexSession.resolvedBinary).
+    codexBinary: 'CHROXY_CODEX_BIN',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',

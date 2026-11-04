@@ -471,6 +471,28 @@ To fall back to the legacy `codex exec --json` path (one subprocess per turn, **
 approval surface** — codex runs whatever its sandbox allows without asking, and no
 attachments), set `CHROXY_CODEX_APPSERVER=0` (also accepts `false`/`no`/`off`).
 
+#### Choosing the codex client (`CHROXY_CODEX_BIN` / `codexBinary`) — #8609
+
+By default chroxy launches the first `codex` on `PATH`. Set `CHROXY_CODEX_BIN`
+(or the config key `codexBinary`; the env var wins) to an **absolute path** (`~` is not expanded) to launch
+a different client — for example the one bundled in the ChatGPT desktop app,
+`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. That exact
+path is what preflight and binary-provenance verification check, so a bad path
+fails at preflight naming it. The config file value is read once at daemon start;
+the env var is read on every launch. The provider panel shows `Binary: <version> (<path>)`,
+and, on macOS, a "Newer client installed" line when an app-bundled client is newer
+than the one launched (chroxy never switches clients on its own).
+
+An older client's `model/list` echoes the shared `~/.codex/models_cache.json`, so it
+can list — and default to — a model the backend then refuses for it. That refusal
+surfaces as an `error` with `code: "model_unsupported"` naming the model, the
+client and a suggested alternative. Later sessions that did not pick a model
+explicitly start on the fallback instead of the rejected default; this lasts for
+the daemon's lifetime and is keyed per client (path + version) and auth route.
+The fallback is a start-time substitute only: it is never saved as the session's
+chosen model. Only a rejection that quotes the model the turn actually ran is
+recorded.
+
 Codex's `approvalPolicy` is derived from the session's permission mode, and
 Chroxy's `PermissionManager` decides whether to prompt or auto-resolve:
 

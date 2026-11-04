@@ -29,6 +29,7 @@ import { BILLING_CLASSES } from './billing-class.js'
 import {
   DEFAULT_PROVIDER,
   PROVIDER_BINARY_VERSION_MAX_LENGTH,
+  PROVIDER_BINARY_PATH_MAX_LENGTH,
   USER_SHELL_PROVIDER,
   ProviderCustomizationDescriptorSchema,
 } from '@chroxy/protocol'
@@ -199,11 +200,26 @@ export function getProviderRuntimeInfo(provider, session) {
     && observedVersion.length <= PROVIDER_BINARY_VERSION_MAX_LENGTH
       ? observedVersion
       : 'unknown'
+  // #8609 — optional: which binary this session launched, and a newer bundled
+  // client it did not. Omitted (not blank) when unknown or over the wire bound,
+  // so one oversize value cannot fail the whole frame.
+  const observedPath = session?.providerBinaryPath
+  const binaryPath = typeof observedPath === 'string' && observedPath.length > 0
+    && observedPath.length <= PROVIDER_BINARY_PATH_MAX_LENGTH ? observedPath : null
+  const observedNewer = session?.providerNewerBinary
+  const newerBinary = observedNewer
+    && typeof observedNewer.path === 'string' && observedNewer.path.length > 0
+    && observedNewer.path.length <= PROVIDER_BINARY_PATH_MAX_LENGTH
+    && typeof observedNewer.version === 'string' && observedNewer.version.length > 0
+    && observedNewer.version.length <= PROVIDER_BINARY_VERSION_MAX_LENGTH
+      ? { path: observedNewer.path, version: observedNewer.version } : null
   return {
     provider: typeof provider === 'string' && provider.length > 0
       ? provider
       : (ProviderClass?.providerName || 'unknown'),
     binaryVersion,
+    ...(binaryPath ? { binaryPath } : {}),
+    ...(newerBinary ? { newerBinary } : {}),
     inputRequiresReady: ProviderClass?.inputRequiresReady === true,
     capabilities,
     customization,

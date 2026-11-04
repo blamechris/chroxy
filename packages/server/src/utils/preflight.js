@@ -117,12 +117,17 @@ const log = createLogger('preflight')
  * Thrown when a provider's required binary cannot be located or executed.
  */
 export class ProviderBinaryNotFoundError extends Error {
-  constructor({ provider, binary, candidates, installHint }) {
+  constructor({ provider, binary, candidates, installHint, override }) {
     const hint = installHint || `install ${binary}`
     const tried = candidates && candidates.length > 0
       ? ` (checked PATH and ${candidates.join(', ')})`
       : ' (checked PATH)'
-    super(`${provider}: required binary "${binary}" not found${tried}. ${hint}.`)
+    // #8609 — an operator-chosen binary path is the only one tried: name it and
+    // the variable, not the PATH search that never ran.
+    super(override
+      ? `${provider}: ${override.envVar} is set to "${override.path}" but that binary was not found or is not executable (use an absolute path; "~" is not expanded). Fix or unset ${override.envVar}.`
+      : `${provider}: required binary "${binary}" not found${tried}. ${hint}.`)
+    this.override = override || null
     this.name = 'ProviderBinaryNotFoundError'
     this.code = 'PROVIDER_BINARY_NOT_FOUND'
     this.provider = provider
@@ -424,11 +429,14 @@ export function runProviderPreflight(ProviderClass, {
     // returns the bare name when nothing matched, which verifyBinary reports as
     // NOT_FOUND.
     if (!health.ok) {
+      const overrideEnv = spec.binary.overrideEnv
+      const overridePath = typeof overrideEnv === 'string' && typeof env?.[overrideEnv] === 'string' ? env[overrideEnv].trim() : ''
       throw new ProviderBinaryNotFoundError({
         provider: providerLabel,
         binary: spec.binary.name,
         candidates,
         installHint: spec.binary.installHint,
+        override: overridePath && overridePath === resolved ? { envVar: overrideEnv, path: overridePath } : undefined,
       })
     }
     binaryPath = health.path

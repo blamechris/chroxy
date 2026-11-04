@@ -544,6 +544,12 @@ export class CodexSession extends JsonlSubprocessSession {
     // Re-resolve fresh on every access (NOT a frozen module-load const) so a
     // binary quarantined / moved / reinstalled after daemon start is spawned
     // from its CURRENT path — and matches what preflight verified (#6708).
+    //
+    // #8609 — CHROXY_CODEX_BIN (config `codexBinary`) names the client to
+    // launch. No PATH lookup: this exact path is what preflight/provenance
+    // verifies, so a bad path fails at preflight naming it. Read per access.
+    const override = typeof process.env.CHROXY_CODEX_BIN === 'string' ? process.env.CHROXY_CODEX_BIN.trim() : ''
+    if (override) return override
     return resolveBinary('codex', BINARY_CANDIDATES)
   }
 
@@ -850,6 +856,7 @@ export class CodexSession extends JsonlSubprocessSession {
         args: ['--version'],
         candidates: BINARY_CANDIDATES,
         installHint: 'install Codex CLI',
+        overrideEnv: 'CHROXY_CODEX_BIN', // #8609
       },
       credentials: {
         envVars: ['OPENAI_API_KEY'],
