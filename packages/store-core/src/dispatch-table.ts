@@ -188,7 +188,7 @@ import {
   isQuestionNoAnswerToken,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
-import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
+import { mergeModelsByProvider, selectModelsForProvider, type ModelsByProvider } from './models-by-provider'
 import {
   mergePermissionModesByProvider,
   type PermissionModesByProvider,
@@ -1205,10 +1205,23 @@ function dispatchModelChanged<S extends DispatchSessionBase>(
   const model = (patch as { activeModel: string | null }).activeModel
   if (!model) return
   const sessions = adapter.getSessions()
-  if (!sessions.some((s) => s.sessionId === sessionId && s.model !== model)) return
-  adapter.setState({
-    sessions: sessions.map((s) => (s.sessionId === sessionId ? { ...s, model } : s)),
-  } as Record<string, SessionInfo[]>)
+  const entry = sessions.find((s) => s.sessionId === sessionId)
+  if (!entry) return
+  // The wire carries the SHORT id (`haiku`); `session_list` entries carry the
+  // FULL id (`claude-haiku-4-5`). Keep the list in the session_list shape by
+  // resolving through the provider roster, and leave the entry untouched when
+  // the roster cannot resolve it rather than write a different shape.
+  adapter.updateState((flat) => {
+    const roster = selectModelsForProvider(
+      (flat as { modelsByProvider?: ModelsByProvider }).modelsByProvider,
+      entry.provider ?? null,
+    ).models
+    const fullId = roster.find((m) => m.id === model || m.fullId === model)?.fullId
+    if (!fullId || fullId === entry.model) return {}
+    return {
+      sessions: sessions.map((s) => (s.sessionId === sessionId ? { ...s, model: fullId } : s)),
+    }
+  })
 }
 
 /** `agent_busy` — flip the target session to non-idle when it exists locally. */
