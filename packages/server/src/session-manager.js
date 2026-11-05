@@ -265,6 +265,7 @@ export { UnsupportedPermissionModeError }
  * @property {string}  [stateFilePath]           - Path to session state JSON file (default: ~/.chroxy/session-state.json)
  * @property {number}  [stateTtlMs]              - Max age of persisted state before discard (default: 24 hours)
  * @property {number}  [persistDebounceMs=2000]  - Debounce interval for state file writes
+ * @property {number}  [persistMaxWaitMs=10000]  - Max time a continuous stream of appends may postpone a state write (#8954)
  *
  * Message history
  * @property {number}  [maxMessages=1000]        - Max history messages per session (alias: maxHistory)
@@ -569,6 +570,7 @@ export class SessionManager extends EventEmitter {
     stateFilePath,
     stateTtlMs,
     persistDebounceMs = 2000,
+    persistMaxWaitMs = 10_000,
 
     // Provider-neutral session archive: the chroxy-held history of a session
     // that leaves the live set (closed, idle-timed-out, stale at boot, or a
@@ -890,6 +892,7 @@ export class SessionManager extends EventEmitter {
       stateFilePath: stateFilePath || defaultStateFile(),
       stateTtlMs,
       persistDebounceMs,
+      persistMaxWaitMs,
     })
     // Backward-compatible accessors for tests that reference internal state
     this._stateFilePath = this._persistence._stateFilePath
@@ -5629,7 +5632,7 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Schedule a debounced persist. Multiple rapid calls reset the timer.
+   * Schedule a debounced persist (trailing debounce with a max-wait, #8954).
    * No-op once `destroyAll()` has run — see `serializeState()` (#3697).
    */
   _schedulePersist() {
