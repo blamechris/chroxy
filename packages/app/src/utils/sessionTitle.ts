@@ -27,8 +27,10 @@ import { repoDisplayName } from '@chroxy/store-core';
  * as it did before.
  */
 export function abbreviateSessionCwd(cwd: string): string {
-  const shortened = cwd.replace(/^\/Users\/[^/]+/, '~');
-  const parts = shortened.split('/');
+  // The daemon may run on macOS, Linux or Windows: shorten any of the three
+  // home prefixes and split on either separator (a path can mix them).
+  const shortened = cwd.replace(/^(?:\/Users\/[^/\\]+|\/home\/[^/\\]+|[A-Za-z]:[\\/]Users[\\/][^/\\]+)/, '~');
+  const parts = shortened.split(/[\\/]/);
   return parts.length > 2 ? parts.slice(-2).join('/') : shortened;
 }
 

@@ -65,3 +65,23 @@ describe('abbreviateSessionCwd', () => {
     expect(abbreviateSessionCwd('/Users/blamechris')).toBe('~');
   });
 });
+
+// #8922 review: the daemon can run on Windows or Linux, so the cwd may use
+// backslashes or live under /home/<name> or C:\Users\<name>.
+describe('abbreviateSessionCwd cross-platform', () => {
+  it('Windows path: backslash separators, last two segments', () => {
+    expect(abbreviateSessionCwd('C:\\Users\\me\\Projects\\chroxy')).toBe('Projects/chroxy');
+  });
+  it('Linux /home/<name> path', () => {
+    expect(abbreviateSessionCwd('/home/me/Projects/chroxy')).toBe('Projects/chroxy');
+    expect(abbreviateSessionCwd('/home/me')).toBe('~');
+  });
+  it('Windows home itself and drive root stay short', () => {
+    expect(abbreviateSessionCwd('C:\\Users\\me')).toBe('~');
+    expect(abbreviateSessionCwd('C:\\')).toBe('C:\\');
+  });
+  it('mixed separators split at every boundary', () => {
+    expect(abbreviateSessionCwd('C:\\Users\\me/Projects\\chroxy')).toBe('Projects/chroxy');
+    expect(abbreviateSessionCwd('D:/work\\a/b')).toBe('a/b');
+  });
+});
