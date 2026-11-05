@@ -1,7 +1,7 @@
 import { statSync, existsSync, readdirSync } from 'fs'
 import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
-import { homedir } from 'os'
+import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { constants as fsConstants } from 'fs'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 
@@ -72,9 +72,9 @@ export function decodeProjectPath(encoded) {
  * @param {string} conversationId - UUID of the conversation
  * @returns {string} Absolute path to the JSONL file
  */
-export function resolveJsonlPath(cwd, conversationId) {
+export function resolveJsonlPath(cwd, conversationId, env = process.env) {
   const encoded = encodeProjectPath(cwd)
-  return join(homedir(), '.claude', 'projects', encoded, `${conversationId}.jsonl`)
+  return join(claudeProjectsDir(env), encoded, `${conversationId}.jsonl`)
 }
 
 /**
@@ -85,9 +85,7 @@ export function resolveJsonlPath(cwd, conversationId) {
  * @returns {string}
  */
 export function resolveClaudeProjectsDir(env = process.env) {
-  const override = env?.CLAUDE_CONFIG_DIR
-  const root = typeof override === 'string' && override !== '' ? override : join(homedir(), '.claude')
-  return join(root, 'projects')
+  return claudeProjectsDir(env)
 }
 
 /**

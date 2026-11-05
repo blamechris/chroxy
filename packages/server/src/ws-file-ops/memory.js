@@ -2,6 +2,7 @@ import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
+import { claudeConfigDir } from '../utils/claude-config-dir.js'
 import { realpathOfDeepestAncestor, isConfigDirOrDirectChild } from './common.js'
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
@@ -379,9 +380,9 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
 
     let claudeHomeReal
     try {
-      claudeHomeReal = await realpathOfDeepestAncestor(resolve(homedir(), '.claude'))
+      claudeHomeReal = await realpathOfDeepestAncestor(claudeConfigDir())
     } catch {
-      claudeHomeReal = normalize(resolve(homedir(), '.claude'))
+      claudeHomeReal = normalize(claudeConfigDir())
     }
 
     const allowedRoots = [cwdReal, claudeHomeReal]

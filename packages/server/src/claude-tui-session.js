@@ -19,7 +19,8 @@ import {
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
 // event loop — which would freeze EVERY claude-tui session (the default provider).
 import { lstat, open, readdir, unlink } from 'fs/promises'
-import { homedir, tmpdir } from 'os'
+import { tmpdir } from 'os'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -261,7 +262,7 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   static get dataDir() {
-    return join(homedir(), '.claude')
+    return claudeConfigDir()
   }
 
   static get capabilities() {
@@ -1628,8 +1629,8 @@ export class ClaudeTuiSession extends BaseSession {
   // field — `readSessionStatus` will return null forever, the probe
   // will time out on every turn, and we degrade silently to "always
   // not-ready" (the warn at the timeout site catches this at runtime).
-  static sessionFilePath(pid) {
-    return join(homedir(), '.claude', 'sessions', `${pid}.json`)
+  static sessionFilePath(pid, env = process.env) {
+    return join(claudeConfigDir(env), 'sessions', `${pid}.json`)
   }
 
   // Read + parse the session file. Returns the `status` string when
@@ -1662,7 +1663,7 @@ export class ClaudeTuiSession extends BaseSession {
    *   1. Fast path — `sessionFilePath(ptyPid)`; verify its parsed `sessionId`
    *      matches (or accept it verbatim when `sessionId` is falsy, preserving
    *      the legacy pid-keyed behaviour for callers without a known id).
-   *   2. Dir-scan — read `~/.claude/sessions` and return the first `*.json`
+   *   2. Dir-scan — read `<claude config dir>/sessions` and return the first `*.json`
    *      whose parsed `sessionId === sessionId`.
    *
    * Swallows ALL I/O/parse errors (returns null) — this feeds the readiness
@@ -1672,14 +1673,14 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {number} ptyPid          the pty child pid (fast-path filename)
    * @returns {string|null}
    */
-  static resolveSessionFile(sessionId, ptyPid, { allowDirScan = true } = {}) {
+  static resolveSessionFile(sessionId, ptyPid, { allowDirScan = true, env = process.env } = {}) {
     // Fast path: the pty-pid-named file. When we have no sessionId to match on
     // (older callers), accept it verbatim if it exists — matches the legacy
     // pid-keyed behaviour. With a sessionId, only accept it on a match. This is a
     // single stat+read and runs on every poll; the dir-scan below is the costly
     // part and the caller throttles it via `allowDirScan`.
     if (Number.isInteger(ptyPid) && ptyPid > 0) {
-      const fast = this.sessionFilePath(ptyPid)
+      const fast = this.sessionFilePath(ptyPid, env)
       try {
         const data = JSON.parse(readFileSync(fast, 'utf8'))
         if (!sessionId || data.sessionId === sessionId) return fast
@@ -1690,7 +1691,7 @@ export class ClaudeTuiSession extends BaseSession {
     // cost during the warmup window — the cheap fast-path above still runs.
     if (!sessionId || !allowDirScan) return null
     try {
-      const dir = join(homedir(), '.claude', 'sessions')
+      const dir = join(claudeConfigDir(env), 'sessions')
       for (const name of readdirSync(dir)) {
         if (!name.endsWith('.json')) continue
         const full = join(dir, name)
@@ -1886,7 +1887,18 @@ export class ClaudeTuiSession extends BaseSession {
   _resolveTranscriptPath() {
     const pid = this._term && this._term.pid
     if (!Number.isInteger(pid) || pid <= 0) return null
-    return transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
+    const env = this._claudeEnv()
+    return transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid, env), env)
+  }
+
+  /**
+   * The env the claude child runs with (the per-connection env when one was
+   * supplied, else the daemon's). claude's data dir is derived from it, so
+   * every session-file / transcript lookup agrees with where claude writes
+   * (#8270).
+   */
+  _claudeEnv() {
+    return this._connectionChildEnv || process.env
   }
 
   /**
@@ -4069,7 +4081,7 @@ export class ClaudeTuiSession extends BaseSession {
         const now = this._nowMonotonic()
         const allowDirScan = (now - this._lastSessionDirScanMs) >= 500
         if (allowDirScan) this._lastSessionDirScanMs = now
-        sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid, { allowDirScan })
+        sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid, { allowDirScan, env: this._claudeEnv() })
         this._resolvedSessionFile = sessFile
       }
       if (!sessFile) {

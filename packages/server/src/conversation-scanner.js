@@ -1,10 +1,9 @@
 import { readdir, stat, open } from 'fs/promises'
 import { join, basename } from 'path'
-import { homedir } from 'os'
+import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
 import { runWithConcurrency } from './utils/concurrency.js'
 
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PREVIEW_BYTES = 32 * 1024 // read first 32KB for preview extraction
 const MIN_FILE_SIZE = 100       // skip tiny/empty files
 const CONCURRENCY = 15          // max parallel file reads
@@ -215,7 +214,7 @@ export async function scanConversations(opts = {}) {
     }
   } else {
     // The default store is Claude's; an explicit single dir is untagged.
-    dirs = [{ projectsDir: opts.projectsDir || PROJECTS_DIR, provider: opts.projectsDir ? null : 'claude' }]
+    dirs = [{ projectsDir: opts.projectsDir || claudeProjectsDir(), provider: opts.projectsDir ? null : 'claude' }]
   }
   const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
 
