@@ -1238,6 +1238,34 @@ describe('dashboard message-handler dispatch', () => {
     // the THINKING_LEVEL_NOT_APPLIED block only drives the `error` revert —
     // so this pins that the migration preserved the dashboard's own
     // resolveSessionId + updateSession behavior it used to do by hand.
+    // #8962 — the session tab chip renders the `sessions` list entry's model;
+    // a header model switch must update that entry, not only activeModel.
+    describe('model_changed updates the session-list entry (#8962)', () => {
+      it('the tab chip source (sessions[].model) follows the switch without a session_list', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [
+              { sessionId: 's1', name: 'One', cwd: '/a', model: 'claude-sonnet-5-5' } as any,
+              { sessionId: 's2', name: 'Two', cwd: '/b', model: 'claude-sonnet-5-5' } as any,
+            ],
+            sessionStates: {
+              s1: { ...createEmptySessionState(), activeModel: 'claude-sonnet-5-5' },
+              s2: { ...createEmptySessionState(), activeModel: 'claude-sonnet-5-5' },
+            },
+          }),
+        )
+        setStore(store)
+
+        handleMessage({ type: 'model_changed', sessionId: 's1', model: 'claude-haiku-4-5' }, ctx() as any)
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.activeModel).toBe('claude-haiku-4-5')
+        expect(state.sessions.find((s: any) => s.sessionId === 's1').model).toBe('claude-haiku-4-5')
+        expect(state.sessions.find((s: any) => s.sessionId === 's2').model).toBe('claude-sonnet-5-5')
+      })
+    })
+
     describe('thinking_level_changed dispatch (#7807 — migrated to the shared dispatch table)', () => {
       it('sets the TARGETED session thinkingLevel from an explicit sessionId, not the active one', () => {
         store = createMockStore(

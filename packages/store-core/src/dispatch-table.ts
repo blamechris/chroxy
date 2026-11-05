@@ -1188,6 +1188,29 @@ function dispatchSessionUpdated<S extends DispatchSessionBase>(
   }
 }
 
+/**
+ * `model_changed` — set the session's live `activeModel` AND mirror the model
+ * onto its session-list entry (#8962). The session tab chip renders the list
+ * entry's `model`, which only `session_list` otherwise refreshed, so the chip
+ * kept the old model until a reload. Unknown sessions and a null model (the
+ * provider-default marker) leave the list untouched.
+ */
+function dispatchModelChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['model_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleModelChangedPatch(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!sessionId || !adapter.hasSession(sessionId)) return
+  adapter.updateSession(sessionId, () => patch as Partial<S>)
+  const model = (patch as { activeModel: string | null }).activeModel
+  if (!model) return
+  const sessions = adapter.getSessions()
+  if (!sessions.some((s) => s.sessionId === sessionId && s.model !== model)) return
+  adapter.setState({
+    sessions: sessions.map((s) => (s.sessionId === sessionId ? { ...s, model } : s)),
+  } as Record<string, SessionInfo[]>)
+}
+
 /** `agent_busy` — flip the target session to non-idle when it exists locally. */
 function dispatchAgentBusy<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['agent_busy'],
@@ -2737,7 +2760,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     statusline_output: sessionPatchDispatcher<S>(handleStatuslineOutput),
-    model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
+    model_changed: dispatchModelChanged,
     // #7807 — migrated from the dashboard's dashboard-local HANDLERS-map entry;
     // the app gains coverage via runDispatch for free.
     thinking_level_changed: sessionPatchDispatcher<S>(handleThinkingLevelChangedPatch),

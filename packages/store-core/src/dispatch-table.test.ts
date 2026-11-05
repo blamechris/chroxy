@@ -3222,3 +3222,37 @@ it('preserves null replay then observed runtime identity across session switches
   expect(label()).toBe('Fable 5.1')
   expect(env.sessions.fresh!.activeModel).toBe('claude-sonnet-5-5')
 })
+
+describe('model_changed keeps the session-list entry in step (#8962)', () => {
+  const list = [
+    { sessionId: 's1', name: 'One', model: 'claude-sonnet-5-5' },
+    { sessionId: 's2', name: 'Two', model: 'claude-sonnet-5-5' },
+  ] as SessionInfo[]
+
+  it('updates the matching list entry so the tab chip follows the switch', () => {
+    const env = makeAdapter({
+      activeSessionId: 's1',
+      sessions: {
+        s1: { sessionId: 's1', messages: [], activeModel: 'claude-sonnet-5-5' },
+        s2: { sessionId: 's2', messages: [], activeModel: 'claude-sonnet-5-5' },
+      },
+      sessionList: list,
+    })
+    expect(dispatch(env, { type: 'model_changed', sessionId: 's1', model: 'claude-haiku-4-5' })).toBe(true)
+    expect(env.sessions.s1!.activeModel).toBe('claude-haiku-4-5')
+    const next = env.flat.sessions as SessionInfo[]
+    expect(next.find((s) => s.sessionId === 's1')!.model).toBe('claude-haiku-4-5')
+    expect(next.find((s) => s.sessionId === 's2')!.model).toBe('claude-sonnet-5-5')
+  })
+
+  it('writes nothing to the list for an unknown session or a null model', () => {
+    const env = makeAdapter({
+      activeSessionId: 's1',
+      sessions: { s1: { sessionId: 's1', messages: [], activeModel: 'claude-sonnet-5-5' } },
+      sessionList: list,
+    })
+    dispatch(env, { type: 'model_changed', sessionId: 'ghost', model: 'claude-haiku-4-5' })
+    dispatch(env, { type: 'model_changed', sessionId: 's1', model: null })
+    expect(env.flat.sessions).toBeUndefined()
+  })
+})
