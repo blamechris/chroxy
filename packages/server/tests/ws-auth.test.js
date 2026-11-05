@@ -892,7 +892,7 @@ describe('handlePairMessage', () => {
       const authFailures = new Map([
         ['127.0.0.1', { count: 3, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
       ])
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })), getSessionIdForToken: () => null }
       const { ctx, ws } = makePairCtx({ pairingManager, authFailures })
       const result = handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'abc123' })
       assert.equal(result, true)
@@ -910,7 +910,7 @@ describe('handlePairMessage', () => {
       const authFailures = new Map([
         ['127.0.0.1', { count: 3, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
       ])
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })), getSessionIdForToken: () => null }
       const legitClient = makeMockClient({
         ip: '127.0.0.1',          // Cloudflare tunnel peer (shared)
         rateLimitKey: '198.51.100.7',  // real CF-Connecting-IP
@@ -964,7 +964,7 @@ describe('handlePairMessage', () => {
 
   describe('successful pairing', () => {
     it('authenticates client when pairingManager validates successfully', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'sess-tok' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'sess-tok' })), getSessionIdForToken: () => null }
       const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager })
       const result = handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
       assert.equal(result, true)
@@ -977,7 +977,7 @@ describe('handlePairMessage', () => {
     })
 
     it('stores device info on successful pair', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws, client } = makePairCtx({ pairingManager })
       handlePairMessage(ctx, ws, {
         type: 'pair',
@@ -994,7 +994,7 @@ describe('handlePairMessage', () => {
 
     it('clears auth failures on successful pair', () => {
       const authFailures = new Map([['127.0.0.1', { count: 2, blockedUntil: 0 }]])
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws } = makePairCtx({ pairingManager, authFailures })
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
       assert.equal(authFailures.has('127.0.0.1'), false)
@@ -1003,7 +1003,7 @@ describe('handlePairMessage', () => {
 
   describe('protocol version negotiation', () => {
     it('rejects when client protocol version is below minimum', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws } = makePairCtx({
         pairingManager,
         minProtocolVersion: 3,
@@ -1017,7 +1017,7 @@ describe('handlePairMessage', () => {
     })
 
     it('negotiates protocol version on successful pair', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws, client } = makePairCtx({
         pairingManager,
         minProtocolVersion: 1,
@@ -1115,7 +1115,7 @@ describe('handlePairMessage', () => {
       const freshWs = makeMockWs()
       const freshClient = makeMockClient({ ip: '1.2.3.4' })
       const onAuthSuccess = createSpy()
-      const freshPm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'new-tok' })) }
+      const freshPm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'new-tok' })), getSessionIdForToken: () => null }
       const freshCtx = {
         clients: new Map([[freshWs, freshClient]]),
         pairingManager: freshPm,
@@ -1379,7 +1379,7 @@ describe('handlePairMessage', () => {
       // Successful pair on the same IP wipes the lenient entry.
       const w = makeMockWs()
       const c = makeMockClient({ ip: '6.6.6.6' })
-      const pm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const pm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })), getSessionIdForToken: () => null }
       const ctx = {
         clients: new Map([[w, c]]),
         pairingManager: pm,
@@ -1491,7 +1491,7 @@ describe('handlePairMessage', () => {
   describe('session binding (#2693)', () => {
     it('passes activeSessionId to validatePairing', () => {
       const validateSpy = createSpy(() => ({ valid: true, sessionToken: 'tok' }))
-      const pairingManager = { validatePairing: validateSpy }
+      const pairingManager = { validatePairing: validateSpy, getSessionIdForToken: () => null }
       const { ctx, ws } = makePairCtx({ pairingManager, activeSessionId: 'session-xyz' })
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
       assert.equal(validateSpy.callCount, 1)
@@ -1501,7 +1501,7 @@ describe('handlePairMessage', () => {
 
     it('passes null activeSessionId when ctx has no active session', () => {
       const validateSpy = createSpy(() => ({ valid: true, sessionToken: 'tok' }))
-      const pairingManager = { validatePairing: validateSpy }
+      const pairingManager = { validatePairing: validateSpy, getSessionIdForToken: () => null }
       const { ctx, ws } = makePairCtx({ pairingManager, activeSessionId: null })
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
       assert.equal(validateSpy.lastCall[1], null)
@@ -1904,7 +1904,7 @@ describe('clientCapabilities', () => {
 
   describe('handlePairMessage capability storage', () => {
     it('stores capabilities from pair message on client as a Set', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws, client } = makePairCtx({ pairingManager })
       handlePairMessage(ctx, ws, {
         type: 'pair',
@@ -1918,7 +1918,7 @@ describe('clientCapabilities', () => {
     })
 
     it('defaults to empty Set when capabilities absent in pair message', () => {
-      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })), getSessionIdForToken: () => null }
       const { ctx, ws, client } = makePairCtx({ pairingManager })
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'pair-id-2' })
       assert.ok(client.clientCapabilities instanceof Set)
@@ -1947,5 +1947,32 @@ describe('clientCapabilities', () => {
       const ws = { clientCapabilities: undefined }
       assert.equal(clientHasCapability(ws, 'console'), false)
     })
+  })
+})
+
+describe('handlePairMessage session scope', () => {
+  it('scopes the connection before onAuthSuccess runs', async () => {
+    const { PairingManager } = await import('../src/pairing.js')
+    const pairingManager = new PairingManager({ wsUrl: 'wss://example.com' })
+    const { pairingId } = pairingManager.generateBoundPairing('sess-A')
+    let scopeAtAuthSuccess
+    const { ctx, ws, client } = makePairCtx({
+      pairingManager,
+      onAuthSuccess: createSpy((_ws, c) => { scopeAtAuthSuccess = c.boundSessionId }),
+    })
+    handlePairMessage(ctx, ws, { type: 'pair', pairingId })
+    assert.equal(client.boundSessionId, 'sess-A')
+    assert.equal(scopeAtAuthSuccess, 'sess-A', 'scope must be set before onAuthSuccess')
+    pairingManager.destroy()
+  })
+
+  it('leaves a linking-mode redemption unscoped', async () => {
+    const { PairingManager } = await import('../src/pairing.js')
+    const pairingManager = new PairingManager({ wsUrl: 'wss://example.com' })
+    const { ctx, ws, client } = makePairCtx({ pairingManager })
+    handlePairMessage(ctx, ws, { type: 'pair', pairingId: pairingManager.currentPairingId })
+    assert.equal(client.authenticated, true)
+    assert.equal(client.boundSessionId, undefined)
+    pairingManager.destroy()
   })
 })

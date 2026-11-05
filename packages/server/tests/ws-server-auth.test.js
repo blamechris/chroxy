@@ -1690,3 +1690,86 @@ describe('Protocol version enforcement (#1058)', () => {
     ws.close()
   })
 })
+
+describe('WsServer session scope of a redeemed pairing', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function start() {
+    const { PairingManager } = await import('../src/pairing.js')
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const { manager } = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' },
+      { id: 'session-2', name: 'Project 2', cwd: '/tmp/project-2' },
+    ])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'primary-tok',
+      sessionManager: manager,
+      authRequired: true,
+      pairingManager: pm,
+    })
+    return startServerAndGetPort(server)
+  }
+
+  async function redeem(port, pairingId) {
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'pair', pairingId })
+    const authOk = await waitForMessage(messages, 'auth_ok')
+    const sessionList = await waitForMessage(messages, 'session_list')
+    return { ws, messages, authOk, sessionList }
+  }
+
+  function redeemingConnection() {
+    return [...server.clients.values()].find(c => c.authenticated && c.pairedWith) || null
+  }
+
+  const RULES = { type: 'set_permission_rules', requestId: 'r1', rules: [{ tool: 'Write', decision: 'allow' }] }
+
+  it('a session-scoped pairing scopes the connection that redeems it', async () => {
+    const port = await start()
+    const { pairingId } = pm.generateBoundPairing('session-1')
+    const { ws, messages, authOk, sessionList } = await redeem(port, pairingId)
+
+    assert.equal(redeemingConnection().boundSessionId, 'session-1')
+    assert.ok(authOk.sessionToken, 'redeeming issues a token')
+    assert.deepEqual(sessionList.sessions.map(s => s.sessionId), ['session-1'])
+
+    send(ws, RULES)
+    const err = await waitForMessage(messages, 'error')
+    assert.equal(err.code, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT')
+    ws.close()
+  })
+
+  it('a session-scoped pairing behaves like the token it issued', async () => {
+    const port = await start()
+    const { pairingId } = pm.generateBoundPairing('session-1')
+    const first = await redeem(port, pairingId)
+    const token = first.authOk.sessionToken
+    first.ws.close()
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token })
+    await waitForMessage(messages, 'auth_ok')
+    const list = await waitForMessage(messages, 'session_list')
+    assert.deepEqual(list.sessions.map(s => s.sessionId), ['session-1'])
+    send(ws, RULES)
+    const err = await waitForMessage(messages, 'error')
+    assert.equal(err.code, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT')
+    ws.close()
+  })
+
+  it('a linking-mode pairing leaves the redeeming connection unscoped', async () => {
+    const port = await start()
+    const { ws, sessionList } = await redeem(port, pm.currentPairingId)
+
+    assert.equal(redeemingConnection().boundSessionId, undefined)
+    assert.deepEqual(sessionList.sessions.map(s => s.sessionId).sort(), ['session-1', 'session-2'])
+    ws.close()
+  })
+})

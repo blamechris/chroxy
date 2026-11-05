@@ -175,12 +175,7 @@ export function handleAuthMessage(ctx, ws, msg) {
     // If this token was issued via pairing, bind the client to the session
     // that was active at pairing time (if any). This prevents a valid
     // session token from being used to attach to an unrelated session.
-    if (pairingManager && msg.token) {
-      const boundSessionId = pairingManager.getSessionIdForToken(msg.token)
-      if (boundSessionId) {
-        client.boundSessionId = boundSessionId
-      }
-    }
+    applySessionScope(client, pairingManager, msg.token)
 
     // #5985b (epic #5982) — the WS analog of the HTTP-only
     // `_validatePrimaryBearerAuth`. The WS layer previously could not tell the
@@ -251,6 +246,22 @@ export function handleAuthMessage(ctx, ws, msg) {
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
   ws.close()
   return true
+}
+
+/**
+ * Apply the session scope carried by a pairing-issued token to a connection.
+ * Shared by every path that authenticates a connection (token auth and pairing
+ * redemption) so the scope is decided in exactly one place. A token with no
+ * session binding (linking-mode pairing, primary token) leaves the connection
+ * unscoped. Must run before `onAuthSuccess`, which builds the session list and
+ * subscriptions from `client.boundSessionId`.
+ */
+function applySessionScope(client, pairingManager, token) {
+  if (!pairingManager || !token) return
+  const boundSessionId = pairingManager.getSessionIdForToken(token)
+  if (boundSessionId) {
+    client.boundSessionId = boundSessionId
+  }
 }
 
 /**
@@ -338,6 +349,9 @@ export function handlePairMessage(ctx, ws, msg) {
     client.authenticated = true
     client.authTime = Date.now()
     client.pairedWith = msg.pairingId
+    // Scope the connection to the session the issued token is bound to, before
+    // onAuthSuccess builds the session list and subscriptions.
+    applySessionScope(client, pairingManager, result.sessionToken)
     authFailures.delete(rateLimitKey)
     if (benignPairAttempts) benignPairAttempts.delete(rateLimitKey)
 

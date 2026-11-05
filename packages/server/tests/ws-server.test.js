@@ -4342,6 +4342,7 @@ describe('WsServer linking-mode pairing default (#3079)', () => {
       validateCalls.push({ pairingId, sessionId })
       return { valid: true, sessionToken: 'session-token-abc' }
     }
+    pairingManager.getSessionIdForToken = () => null
     pairingManager.getCurrentId = () => null
     pairingManager.consumeIfRefreshGrace = () => null
 
