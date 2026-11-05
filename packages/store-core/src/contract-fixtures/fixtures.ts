@@ -1657,6 +1657,22 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    name: 'git_repo_check_result → app fires gitRepoCheck callback; dashboard declines',
+    type: 'git_repo_check_result',
+    message: { type: 'git_repo_check_result', path: '/p', isGitRepo: false, requestId: 'r1' },
+    divergent: {
+      reason:
+        'app opts its imperative-callback registry into the shared table; dashboard reads _gitRepoCheckCallback in its own switch (#8972)',
+      app: {
+        noop: true,
+        callbacks: [
+          { name: 'gitRepoCheck', payload: { path: '/p', isGitRepo: false, requestId: 'r1' } },
+        ],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
     name: 'file_listing → app fires fileBrowser callback; dashboard declines',
     type: 'file_listing',
     message: { type: 'file_listing', path: '/p', entries: [], error: 'oops' },

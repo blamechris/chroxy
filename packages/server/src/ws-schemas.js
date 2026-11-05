@@ -33,6 +33,7 @@ export {
   NotificationPrefsSetSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
+  CheckGitRepoSchema,
   BrowseFilesSchema,
   ReadFileSchema,
   WriteFileSchema,

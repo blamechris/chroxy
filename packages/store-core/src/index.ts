@@ -84,7 +84,7 @@ export type {
 } from './input-delivery'
 export { deriveComposerReadiness, providerInputReadinessFallback } from './composer-readiness'
 export type { ComposerReadiness } from './composer-readiness'
-export { deriveWorktreeSwitch, WORKTREE_NEEDS_CWD_REASON } from './worktree-switch'
+export { deriveWorktreeSwitch, WORKTREE_NEEDS_CWD_REASON, WORKTREE_NOT_GIT_REASON } from './worktree-switch'
 export type { WorktreeSwitchState } from './worktree-switch'
 export { recoverRejectedComposer, ComposerRecoveryQueue } from './composer-recovery'
 export type { ComposerRecoveryResult } from './composer-recovery'
@@ -661,6 +661,7 @@ export type {
   SessionWarningPayload,
   SessionSwitchedPayload,
   DirectoryListingPayload,
+  GitRepoCheckResultPayload,
   FileListingPayload,
   FileContentPayload,
   WriteFileResultPayload,
@@ -829,6 +830,7 @@ export {
   handleSessionWarning,
   handleSessionSwitched,
   handleDirectoryListing,
+  handleGitRepoCheckResult,
   handleFileListing,
   handleFileContent,
   handleWriteFileResult,

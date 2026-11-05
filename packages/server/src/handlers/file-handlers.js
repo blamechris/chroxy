@@ -1,12 +1,13 @@
 /**
  * File operations and git command handlers.
  *
- * Handles: list_directory, browse_files, list_files, read_file, write_file,
+ * Handles: list_directory, check_git_repo, browse_files, list_files, read_file, write_file,
  *          get_diff, git_status, git_branches, git_stage, git_unstage,
  *          git_commit, git_create_pr, list_slash_commands, list_agents
  */
 import { resolveSession, sendError } from '../handler-utils.js'
 import { loggerForSession } from '../logger.js'
+import { isBoundClient } from '../environments/authority.js'
 
 /**
  * #6541 — file/git MUTATION gate: reject pairing-bound (share-a-session) tokens.
@@ -48,6 +49,24 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 
 function handleListDirectory(ws, client, msg, ctx) {
   ctx.services.fileOps.listDirectory(ws, msg.path)
+}
+
+/**
+ * #8972 — the New Session dialog's git-repo probe. A bound (share-a-session)
+ * token cannot create sessions (docs/security/bearer-token-authority.md §4), so
+ * it has no use for this query and must not be able to ask the host about
+ * arbitrary directories. Refused FIRST, before any path resolution or
+ * filesystem access, with the same `isGitRepo: null` ("cannot tell") reply
+ * every other non-answer gets, so the refusal is not distinguishable. Uses the
+ * fail-safe `isBoundClient` (`boundSessionId == null` is the only unbound
+ * case — never a truthy check, which would treat '' as unbound).
+ */
+function handleCheckGitRepo(ws, client, msg, ctx) {
+  if (isBoundClient(client)) {
+    ctx.services.fileOps.refuseGitRepoCheck(ws, msg.path, msg.requestId)
+    return
+  }
+  ctx.services.fileOps.checkGitRepo(ws, msg.path, msg.requestId)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {
@@ -168,6 +187,7 @@ function handleListAgents(ws, client, msg, ctx) {
 
 export const fileHandlers = {
   list_directory: handleListDirectory,
+  check_git_repo: handleCheckGitRepo,
   browse_files: handleBrowseFiles,
   list_files: handleListFiles,
   read_file: handleReadFile,

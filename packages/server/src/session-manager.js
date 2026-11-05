@@ -11,6 +11,7 @@ import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
+import { isGitRepoSync } from './utils/git-repo.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
@@ -2552,12 +2553,7 @@ export class SessionManager extends EventEmitter {
    */
   _addDetachedWorktree(repoDir, worktreeDir, { force = false, commit = 'HEAD', noHooks = false } = {}) {
     assertSafeArgvValue(commit, 'worktree commit')
-    try {
-      execFileSync(GIT, ['-C', repoDir, 'rev-parse', '--git-dir'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        encoding: 'utf-8',
-      })
-    } catch {
+    if (!isGitRepoSync(repoDir)) {
       throw new WorktreeError(`Not a git repository: ${repoDir}`)
     }
 

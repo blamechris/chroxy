@@ -44,6 +44,15 @@ const CODEX_SANDBOX_CHIPS: ReadonlyArray<{ id: '' | CodexSandboxMode; label: str
   ...CODEX_SANDBOX_MODE_META,
 ];
 
+// #8972: request ids for check_git_repo are unique across mounts (module-level
+// counter + per-load random prefix), so a delayed reply from an earlier mount
+// can never match a later mount's request.
+const gitCheckPrefix = Math.random().toString(36).slice(2, 8);
+let gitCheckSeq = 0;
+function nextGitCheckRequestId(): string {
+  return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`;
+}
+
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
@@ -166,7 +175,31 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   )?.capabilities;
   const providerLimitationNote = buildProviderLimitationNote(selectedProviderCaps);
 
-  const worktreeSwitch = deriveWorktreeSwitch(cwd, worktree);
+  // #8972: ask the daemon whether the chosen directory is a git repo so the
+  // switch is refused up front, not after Create. Only an answer that belongs
+  // to the CURRENT cwd counts; no answer yet or `null` (server cannot tell)
+  // leaves the switch enabled and the daemon's refusal on create is the backstop.
+  const requestGitRepoCheck = useConnectionStore((s) => s.requestGitRepoCheck);
+  const setGitRepoCheckCallback = useConnectionStore((s) => s.setGitRepoCheckCallback);
+  const [gitCheck, setGitCheck] = useState<{ path: string; isGitRepo: boolean | null } | null>(null);
+  const trimmedCwd = cwd.trim();
+  useEffect(() => {
+    if (!visible || !trimmedCwd || typeof requestGitRepoCheck !== 'function' || typeof setGitRepoCheckCallback !== 'function') return;
+    const requestId = nextGitCheckRequestId();
+    setGitRepoCheckCallback((result) => {
+      // Superseded request, or a reply for a different path than the one sent
+      // (the server echoes the path verbatim).
+      if (result.requestId !== requestId || result.path !== trimmedCwd) return;
+      setGitCheck({ path: trimmedCwd, isGitRepo: result.isGitRepo });
+    });
+    const t = setTimeout(() => requestGitRepoCheck(trimmedCwd, requestId), 300);
+    return () => {
+      clearTimeout(t);
+      setGitRepoCheckCallback(null);
+    };
+  }, [visible, trimmedCwd, requestGitRepoCheck, setGitRepoCheckCallback]);
+  const knownIsGitRepo = gitCheck && gitCheck.path === trimmedCwd ? gitCheck.isGitRepo : null;
+  const worktreeSwitch = deriveWorktreeSwitch(cwd, worktree, knownIsGitRepo);
 
   const handleCreate = () => {
     if (selectedConnectionUnavailable) return;
@@ -547,8 +580,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   toggleHint: {
-    color: COLORS.textDisabled,
-    fontSize: 11,
+    // #8972: this text explains a disabled control, so it must stay legible —
+    // textDisabled (#555 on the dark card) was the hardest text on the screen.
+    color: COLORS.textMuted,
+    fontSize: 12,
     marginTop: 2,
   },
   buttons: {

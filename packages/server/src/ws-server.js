@@ -278,6 +278,7 @@ function _isSecureRequest(req) {
  *   { type: 'register_push_token', token }             — register push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
+ *   { type: 'check_git_repo', path, requestId? }       — is path a git repo? (New Session worktree switch, #8972)
  *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
  *   { type: 'read_file', path }                       — request file content for file viewer
  *   { type: 'write_file', path, content }              — write file content (path validated, 5MB limit)
@@ -430,6 +431,7 @@ function _isSecureRequest(req) {
  *   { type: 'server_status', message, phase?, tunnelMode?, tunnelUrl?, attempt?, maxAttempts? }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category?, message, recoverable, correlationId?, sessionId? } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
+ *   { type: 'git_repo_check_result', path, isGitRepo, requestId? } — is the New Session dir a git repo (true/false, null = cannot tell) (#8972)
  *   { type: 'file_listing', path, parentPath, entries, error } — file browser listing response
  *   { type: 'file_content', path, content, language, size, truncated, error, requestId? } — file content response
  *   { type: 'symbols_snapshot', path, symbols: [{ name, kind, file, line, exported }], truncated, error } — #6471 workspace symbol table (opt-in IDE, features.ide; dashboard-only v1)

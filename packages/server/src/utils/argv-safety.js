@@ -631,6 +631,11 @@ export const AUDITED_SINKS = [
     reason: "repoDir is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form), so it cannot be read as an option whatever it holds. It is the create-time cwd (gated by validateCwdAllowed() at create), or on a #8856 restore the persisted worktreeRepoDir, which is restore-time input not re-validated against the cwd allowlist; _recreateMissingWorktree holds it to a non-empty absolute path and disables its hooks (config-defined commands such as checkout filters still run, as for any git call in that repository).",
   },
   {
+    file: 'utils/git-repo.js',
+    match: 'dir',
+    reason: "dir is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form), so it cannot be read as an option whatever it holds. Callers: _addDetachedWorktree's repoDir (see the session-manager.js entry above) and the check_git_repo query, which passes a home-contained, realpath-resolved existing directory (#8972).",
+  },
+  {
     file: 'session-manager.js',
     match: 'worktreePath',
     reason: 'set at creation to the server-computed worktreeDir (see above) or, on restore, to a saved path that is exact-matched against the deterministic expected worktreeBase/sessionId path before being accepted — never wired to a live WS field.',

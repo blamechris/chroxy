@@ -79,6 +79,7 @@ import {
   handleSessionWarning,
   handleSessionSwitched,
   handleDirectoryListing,
+  handleGitRepoCheckResult,
   handleFileListing,
   handleFileContent,
   handleWriteFileResult,
@@ -3538,6 +3539,37 @@ describe('handleSessionSwitched', () => {
     expect(handleSessionSwitched({ sessionId: 'sess-1', conversationId: 42 })).toEqual({
       newSessionId: 'sess-1',
       conversationId: null,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleGitRepoCheckResult (#8972)
+// ---------------------------------------------------------------------------
+describe('handleGitRepoCheckResult', () => {
+  it('extracts path, isGitRepo and requestId', () => {
+    expect(handleGitRepoCheckResult({ path: '/repo', isGitRepo: false, requestId: 'r1' })).toEqual({
+      path: '/repo',
+      isGitRepo: false,
+      requestId: 'r1',
+    })
+  })
+
+  it('keeps null (cannot tell) distinct from false', () => {
+    expect(handleGitRepoCheckResult({ path: '/x', isGitRepo: null }).isGitRepo).toBe(null)
+  })
+
+  it('treats a non-boolean isGitRepo as unknown, never as false', () => {
+    for (const v of ['false', 0, undefined, {}]) {
+      expect(handleGitRepoCheckResult({ path: '/x', isGitRepo: v }).isGitRepo).toBe(null)
+    }
+  })
+
+  it('defaults to nulls when fields are missing or mistyped', () => {
+    expect(handleGitRepoCheckResult({ path: 5, requestId: 7 })).toEqual({
+      path: null,
+      isGitRepo: null,
+      requestId: null,
     })
   })
 })

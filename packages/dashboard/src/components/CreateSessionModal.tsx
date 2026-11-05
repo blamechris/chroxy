@@ -284,6 +284,15 @@ export function resolveCreateSessionModel(
     : undefined
 }
 
+// #8972: request ids for check_git_repo are unique across mounts (module-level
+// counter + per-load random prefix), so a delayed reply from an earlier mount
+// can never match a later mount's request.
+const gitCheckPrefix = Math.random().toString(36).slice(2, 8)
+let gitCheckSeq = 0
+function nextGitCheckRequestId(): string {
+  return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`
+}
+
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
@@ -389,7 +398,31 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // derived value, so a cleared cwd can never submit `worktree: true` (the
   // daemon rejects that), and the tick comes back if the user re-enters a cwd,
   // preserving their choice.
-  const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree)
+  // #8972: ask the daemon whether the chosen directory is a git repo so the
+  // switch is refused up front, not after Create. Only an answer that belongs
+  // to the CURRENT cwd counts — a reply for a superseded path (or no reply
+  // yet, or `null` = server cannot tell) leaves the switch enabled; the
+  // daemon's refusal on create stays the backstop.
+  const requestGitRepoCheck = useConnectionStore(s => s.requestGitRepoCheck)
+  const setGitRepoCheckCallback = useConnectionStore(s => s.setGitRepoCheckCallback)
+  const [gitCheck, setGitCheck] = useState<{ path: string; isGitRepo: boolean | null } | null>(null)
+  useEffect(() => {
+    if (!open || !trimmedCwd || typeof requestGitRepoCheck !== 'function' || typeof setGitRepoCheckCallback !== 'function') return
+    const requestId = nextGitCheckRequestId()
+    setGitRepoCheckCallback((result) => {
+      // Superseded request, or a reply for a different path than the one sent
+      // (the server echoes the path verbatim).
+      if (result.requestId !== requestId || result.path !== trimmedCwd) return
+      setGitCheck({ path: trimmedCwd, isGitRepo: result.isGitRepo })
+    })
+    const t = setTimeout(() => { requestGitRepoCheck(trimmedCwd, requestId) }, 300)
+    return () => {
+      clearTimeout(t)
+      setGitRepoCheckCallback(null)
+    }
+  }, [open, trimmedCwd, requestGitRepoCheck, setGitRepoCheckCallback])
+  const knownIsGitRepo = gitCheck && gitCheck.path === trimmedCwd ? gitCheck.isGitRepo : null
+  const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree, knownIsGitRepo)
   const effectiveWorktree = worktreeSwitch.effectiveWorktree
   useEffect(() => {
     if (!open || !trimmedCwd || !requestSessionPresetSafe) return

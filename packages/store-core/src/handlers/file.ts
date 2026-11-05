@@ -73,6 +73,29 @@ export function handleDirectoryListing(
   return extractEntriesPayload(msg)
 }
 
+/** Parsed payload for a `git_repo_check_result` message (#8972). */
+export interface GitRepoCheckResultPayload {
+  /** The path that was checked, echoed verbatim. Null if missing/non-string. */
+  path: string | null
+  /**
+   * True/false when the server could tell, null when it could not (path outside
+   * the home directory, unresolvable, not a directory) or the field is
+   * missing/non-boolean. Strict boolean check: truthy strings do not count.
+   */
+  isGitRepo: boolean | null
+  /** Echo of the request nonce; null when missing/non-string. */
+  requestId: string | null
+}
+
+/** Parse a `git_repo_check_result` message into a normalised payload. */
+export function handleGitRepoCheckResult(msg: Record<string, unknown>): GitRepoCheckResultPayload {
+  return {
+    path: parseRawStringField(msg, 'path'),
+    isGitRepo: typeof msg.isGitRepo === 'boolean' ? msg.isGitRepo : null,
+    requestId: parseRawStringField(msg, 'requestId'),
+  }
+}
+
 /** Parsed payload for a `file_listing` message. */
 export interface FileListingPayload {
   /** Listed path (raw string). Null if missing/non-string. */
