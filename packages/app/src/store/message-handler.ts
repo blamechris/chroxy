@@ -4114,8 +4114,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // #8237: console.error/warn raise React Native's LogBox overlay in dev, a
       // sticky toast over the composer that cannot be repositioned. Every error
       // reaching this branch is already shown to the user by an Alert below (or a
-      // question card), so log at info level to report the event once.
-      console.log(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+      // question card), so in dev log at info level to report the event once.
+      // Release builds have no LogBox, so keep console.error there (searchable).
+      const handlerErrorLine = `[ws] Server handler error [${errCode}]: ${errMsg}`;
+      if (__DEV__) console.log(handlerErrorLine);
+      else console.error(handlerErrorLine);
 
       // #8470: the server dropped a question answer this client sent. The card was
       // marked answered on send; retract that, in place, so it reads "not
