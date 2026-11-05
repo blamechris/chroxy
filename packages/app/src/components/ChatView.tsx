@@ -200,6 +200,11 @@ function PlanApprovalCard({
  * the active session id gives each session fresh list, scroll and expand state —
  * the same remount Files -> Chat performed by hand.
  */
+/** How long the layout must be quiet before a freshly opened chat stops following (#8961). */
+const OPENING_SETTLE_MS = 1500;
+/** Hard cap from the first size event, so a streaming chat cannot hold the opening open forever. */
+const OPENING_MAX_MS = 5000;
+
 export function ChatView(props: ChatViewProps) {
   const sessionId = useConnectionStore((s) => s.activeSessionId);
   // Namespaced so no real session id can equal the no-session key.
@@ -237,6 +242,83 @@ function ChatViewForSession({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const showScrollToBottomRef = useRef(false);
+  // #8961: true from mount until the layout settles (OPENING_SETTLE_MS after the
+  // last content size event) or the reader takes the list over (drag, jump to
+  // top, search jump). The settle bound matters for scroll paths that fire no
+  // drag-begin (VoiceOver/TalkBack gestures, a wheel, programmatic scrolls): they
+  // must not be yanked back to the end by later streamed growth. While true the list follows its content to the end even
+  // though the mount's own first scroll events read "scrolled up" (offset 0 on
+  // estimated, still-unmeasured rows), which would otherwise latch
+  // `showScrollToBottomRef` and leave a freshly opened chat at its first message.
+  const openingRef = useRef(true);
+  const openingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hard cap, armed once at the first size event and never restarted: a chat
+  // that is streaming re-arms the quiet timer faster than it can expire.
+  const openingCapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The end-follow runs on the next frame, never inside the size callback, and
+  // unanimated. A scrollToEnd issued from onContentSizeChange is computed against
+  // metrics the native scroll view has not committed yet and is dropped (device
+  // log: the remounted list got one size event, one sync scrollToEnd, and zero
+  // scroll events -- it stayed at offset 0). An ANIMATED end-follow lags a fast
+  // growing reply, the lag reads as "scrolled up" in handleScroll and latches
+  // the follow off while the reply is still streaming. One pending frame is
+  // enough: it scrolls to wherever the end is by then.
+  const followRafRef = useRef<number | null>(null);
+  // A queued frame owed to the opening phase still follows after the phase ends
+  // on its own (settle or cap), so the last growth before the timer is not lost.
+  const followForcedRef = useRef(false);
+  const followEnd = (force = false) => {
+    if (force) followForcedRef.current = true;
+    if (followRafRef.current != null) return;
+    followRafRef.current = requestAnimationFrame(() => {
+      followRafRef.current = null;
+      const forced = followForcedRef.current;
+      followForcedRef.current = false;
+      if (isSelectingRef.current) return;
+      // Re-check the reader's position: a scroll-up reported between the size
+      // event and this frame must not be yanked back.
+      if (!forced && !openingRef.current && showScrollToBottomRef.current) return;
+      scrollViewRef.current?.scrollToEnd({ animated: false });
+    });
+  };
+  const cancelFollow = () => {
+    followForcedRef.current = false;
+    if (followRafRef.current != null) {
+      cancelAnimationFrame(followRafRef.current);
+      followRafRef.current = null;
+    }
+  };
+  const clearOpeningTimers = () => {
+    if (openingTimerRef.current != null) {
+      clearTimeout(openingTimerRef.current);
+      openingTimerRef.current = null;
+    }
+    if (openingCapTimerRef.current != null) {
+      clearTimeout(openingCapTimerRef.current);
+      openingCapTimerRef.current = null;
+    }
+  };
+  // The reader took the list over (drag, search jump, jump-to-top): end the
+  // opening and drop any queued follow so it cannot yank them.
+  const endOpening = () => {
+    openingRef.current = false;
+    cancelFollow();
+    clearOpeningTimers();
+  };
+  // The opening ran its course (quiet window or hard cap) with no takeover:
+  // issue one last follow, so a queued frame is not dropped and a device that
+  // needs more than one frame to commit metrics still lands at the end.
+  const settleOpening = () => {
+    if (!openingRef.current) return;
+    followEnd(true);
+    openingRef.current = false;
+    clearOpeningTimers();
+  };
+  useEffect(() => () => {
+    cancelFollow();
+    if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
+    if (openingCapTimerRef.current != null) clearTimeout(openingCapTimerRef.current);
+  }, []);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
@@ -244,10 +326,10 @@ function ChatViewForSession({
   // screen readers (the prompt auto-denies on timeout, so silence loses the
   // user an action they might have allowed). Mirrors the dashboard's #5733
   // assertive treatment; fires once per prompt and stays silent for a prompt
-  // already present at mount OR in the session we just switched to (the hook
-  // re-seeds on activeSessionId change — ChatView isn't remounted per switch).
-  const announcerSessionId = useConnectionStore((s) => s.activeSessionId);
-  usePermissionAnnouncer(messages, announcerSessionId);
+  // already present at mount. ChatView is keyed per session (#8959), so a
+  // session switch mounts a fresh instance whose hook seeds from that session's
+  // existing prompts -- no session id needs to be threaded through.
+  usePermissionAnnouncer(messages);
 
   // #5517: row expand/collapse registry, keyed by message id / activity
   // group key. The list is now a virtualized FlatList, so an off-screen tool
@@ -292,6 +374,7 @@ function ChatViewForSession({
     if (!currentMatchId) return;
     const index = groupIndexByMessageIdRef.current.get(currentMatchId);
     if (index != null) {
+      endOpening(); // the search jump takes the list over (#8961)
       scrollViewRef.current?.scrollToIndex({
         index,
         animated: true,
@@ -429,7 +512,14 @@ function ChatViewForSession({
     showScrollToBottomRef.current = isScrolledUp;
   };
 
+  // Only a finger starts a drag; programmatic scrolls never fire this, so it is
+  // the unambiguous "the reader took over" signal.
+  const handleScrollBeginDrag = () => {
+    endOpening();
+  };
+
   const scrollToTop = () => {
+    endOpening();
     scrollViewRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
@@ -613,15 +703,29 @@ function ChatViewForSession({
         // scrolled-up reader) we additionally gate on `showScrollToBottomRef`
         // — the same "is the user near the bottom?" signal the keyboard and
         // prompt auto-scroll effects already honour.
+        //
+        // #8961: while the chat is still opening, follow every size change (the
+        // estimate -> measured corrections) to the end, unanimated, and ignore
+        // the scrolled-up latch the mount's own scroll events set.
         onContentSizeChange={() => {
-          if (
-            !isSelectingRef.current &&
-            !hasUnansweredPrompt &&
-            !showScrollToBottomRef.current
-          ) {
-            scrollViewRef.current?.scrollToEnd();
+          if (isSelectingRef.current) return;
+          if (openingRef.current) {
+            // The end is the right place even with an unanswered prompt: it is
+            // the last row. Each size event restarts the settle window.
+            followEnd();
+            if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
+            openingTimerRef.current = setTimeout(settleOpening, OPENING_SETTLE_MS);
+            if (openingCapTimerRef.current == null) {
+              openingCapTimerRef.current = setTimeout(settleOpening, OPENING_MAX_MS);
+            }
+            return;
+          }
+          if (hasUnansweredPrompt) return;
+          if (!showScrollToBottomRef.current) {
+            followEnd();
           }
         }}
+        onScrollBeginDrag={handleScrollBeginDrag}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         keyboardDismissMode="on-drag"

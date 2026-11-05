@@ -22,12 +22,11 @@
  *     silent — only genuinely newly-arriving prompts are announced.
  *   - Clears the ref when no prompt is live, so the next arrival announces.
  *
- * Session-aware (#5760 review): ChatView is NOT remounted on a tab-switch — it
- * just re-renders with the new session's `messages` — so a single persistent
- * ref would carry across sessions and falsely announce the destination
- * session's ALREADY-pending prompt. We therefore re-seed whenever `sessionKey`
- * changes: the seed runs again for the new session, suppressing its existing
- * prompt and announcing only what arrives after the switch settles.
+ * Session-aware (#5760 review): a host that is NOT remounted on a tab-switch
+ * can pass `sessionKey`; the seed then re-runs whenever it changes, suppressing
+ * the destination session's existing prompt. ChatView no longer needs this
+ * (#8959 keys it per session, so each session mounts a freshly seeded hook) and
+ * omits the argument.
  */
 import { useEffect, useRef } from 'react';
 import { AccessibilityInfo } from 'react-native';
@@ -38,7 +37,7 @@ import type { ChatMessage } from '@chroxy/store-core';
 import { livePermissionPrompts } from '@chroxy/store-core';
 import { getPermissionSummary } from '../components/PermissionDetail';
 
-export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: string | null): void {
+export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: string | null = null): void {
   // requestIds we've already announced. A Set (not a single id) because more
   // than one permission can be live at once (parallel SDK tool calls) — keying
   // on the *first* live prompt would never announce a second concurrent one
@@ -46,9 +45,8 @@ export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: stri
   // bounds it and (harmlessly, since requestIds are unique) allows re-use.
   const announcedRef = useRef<Set<string>>(new Set());
   // The session the set is seeded for. A change means we navigated sessions and
-  // must re-seed against the destination's existing prompts (ChatView doesn't
-  // remount on switch, so the set would otherwise leak across sessions and
-  // either re-announce or wrongly suppress).
+  // must re-seed against the destination's existing prompts (for a host that
+  // is not remounted on switch, the set would otherwise leak across sessions).
   const seededSessionRef = useRef<string | null | undefined>(undefined);
   if (seededSessionRef.current !== sessionKey) {
     seededSessionRef.current = sessionKey;
