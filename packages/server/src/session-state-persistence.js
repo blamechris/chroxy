@@ -22,13 +22,17 @@ export class SessionStatePersistence {
    * @param {string} options.stateFilePath - Path to session state JSON file
    * @param {number} [options.stateTtlMs=86400000] - Max age of persisted state before discard (default: 24 hours)
    * @param {number} [options.persistDebounceMs=2000] - Debounce interval for state file writes
+   * @param {number} [options.persistMaxWaitMs=10000] - Upper bound on how long a pending write may be postponed by a continuous stream of schedulePersist calls
    * @param {boolean} [options.isWindowsOverride] - Test-only: force Windows-specific branches regardless of host platform
    */
-  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000, isWindowsOverride } = {}) {
+  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000, persistMaxWaitMs = 10_000, isWindowsOverride } = {}) {
     this._stateFilePath = stateFilePath
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000
     this._persistDebounceMs = persistDebounceMs
+    this._persistMaxWaitMs = persistMaxWaitMs
     this._persistTimer = null
+    /** @type {number|null} when the oldest unwritten schedulePersist call arrived (max-wait anchor) */
+    this._persistPendingSince = null
     this._isWindows = isWindowsOverride ?? isWindows
     /** @type {string|null} the last write's unconfirmed-durability verdict (see serializeState) */
     this.lastDurabilityUnconfirmed = null
@@ -269,7 +273,12 @@ export class SessionStatePersistence {
   }
 
   /**
-   * Schedule a debounced persist. Multiple rapid calls reset the timer.
+   * Schedule a debounced persist with a max-wait. Calls arriving within
+   * persistDebounceMs of each other coalesce into one trailing write, but the
+   * write is never postponed past persistMaxWaitMs after the FIRST unwritten
+   * call (#8954). Without the max-wait a pure trailing debounce was reset by
+   * every append, so a long continuously-streaming turn wrote nothing until it
+   * ended.
    *
    * #5309 (WP-0.3) — durability boundary, by design: this debounce backs
    * high-frequency message-history appends only. Session-LIST mutations
@@ -277,25 +286,37 @@ export class SessionStatePersistence {
    * every CLEAN exit path serializes immediately — SIGINT/SIGTERM (server-cli.js)
    * and the supervised IPC shutdown + crash handlers (server-cli-child.js, #5308)
    * all call serializeState() directly (followed by destroyAll(), which cancels
-   * this timer and no-ops any stray fire). So the only way to lose up to
-   * persistDebounceMs (2s) of
-   * message history is an abrupt kill that runs NO handler at all — SIGKILL,
-   * OOM-kill, or power loss. That window is accepted as best-effort: shrinking
-   * it trades constant write amplification on every token for protection against
-   * an unrecoverable kill we can't flush before anyway.
+   * this timer and no-ops any stray fire). So the only way to lose message
+   * history is an abrupt kill that runs NO handler at all — SIGKILL, OOM-kill,
+   * or power loss. The real bound on that loss is persistMaxWaitMs (default 10s)
+   * of history, NOT persistDebounceMs: during a continuous stream the debounce
+   * alone never fires, and the max-wait is what forces a write. That window is
+   * accepted as best-effort: shrinking it further trades constant write
+   * amplification on every token for protection against a kill we can't flush
+   * before anyway.
+   *
+   * Implemented with a single timer (delay = min(debounce, time left until the
+   * max-wait deadline)), so clearing `_persistTimer` cancels everything.
    *
    * @param {() => void} serializeFn - Function to call when the debounce fires
    */
   schedulePersist(serializeFn) {
+    const now = Date.now()
+    if (this._persistTimer === null || this._persistPendingSince === null) {
+      this._persistPendingSince = now
+    }
     clearTimeout(this._persistTimer)
+    const remaining = Math.max(0, this._persistPendingSince + this._persistMaxWaitMs - now)
+    const delay = Math.min(this._persistDebounceMs, remaining)
     this._persistTimer = setTimeout(() => {
       this._persistTimer = null
+      this._persistPendingSince = null
       try {
         serializeFn()
       } catch (err) {
         log.error(`Failed to persist session state: ${err?.stack || err}`)
       }
-    }, this._persistDebounceMs)
+    }, delay)
   }
 
   /**
@@ -304,6 +325,7 @@ export class SessionStatePersistence {
   cancelPersist() {
     clearTimeout(this._persistTimer)
     this._persistTimer = null
+    this._persistPendingSince = null
   }
 
   /**

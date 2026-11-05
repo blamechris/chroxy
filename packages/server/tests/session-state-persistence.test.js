@@ -825,3 +825,111 @@ describe('SessionStatePersistence rename-failure cleanup (regression: #2909)', (
     assert.equal(existsSync(stateFile + '.tmp'), false, '.tmp should never leak across repeated failures')
   })
 })
+
+// #8954 — the debounce used to reset on every call, so a continuously active
+// turn postponed the write for its whole duration.
+describe('SessionStatePersistence.schedulePersist max-wait (#8954)', () => {
+  const make = (opts) => new SessionStatePersistence({ stateFilePath: join(tmpdir(), 'chroxy-persist-maxwait-test.json'), ...opts })
+
+  it('writes by persistMaxWaitMs while calls keep arriving faster than the debounce', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const p = make({ persistDebounceMs: 2000, persistMaxWaitMs: 10_000 })
+    try {
+      let writes = 0
+      const fn = () => { writes++ }
+      // Stream for 9.5s with a call every 500ms: the debounce alone never fires.
+      for (let t = 0; t < 9500; t += 500) {
+        p.schedulePersist(fn)
+        mock.timers.tick(500)
+      }
+      assert.equal(writes, 0, 'no write before the max-wait')
+      p.schedulePersist(fn)
+      mock.timers.tick(500) // t = 10_000
+      assert.equal(writes, 1, 'a write must land by persistMaxWaitMs')
+
+      // The max-wait window restarts for the next stream.
+      for (let t = 0; t < 9500; t += 500) {
+        p.schedulePersist(fn)
+        mock.timers.tick(500)
+      }
+      assert.equal(writes, 1)
+      p.schedulePersist(fn)
+      mock.timers.tick(500)
+      assert.equal(writes, 2, 'second window also bounded')
+    } finally {
+      p.destroy()
+      mock.timers.reset()
+    }
+  })
+
+  it('still coalesces a short burst into one trailing write', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const p = make({ persistDebounceMs: 2000, persistMaxWaitMs: 10_000 })
+    try {
+      let writes = 0
+      const fn = () => { writes++ }
+      for (let i = 0; i < 5; i++) { p.schedulePersist(fn); mock.timers.tick(100) }
+      assert.equal(writes, 0)
+      mock.timers.tick(1899)
+      assert.equal(writes, 0, 'trailing debounce not yet elapsed')
+      mock.timers.tick(1)
+      assert.equal(writes, 1, 'exactly one trailing write')
+      mock.timers.tick(30_000)
+      assert.equal(writes, 1, 'nothing further scheduled')
+      assert.equal(p._persistTimer, null)
+    } finally {
+      p.destroy()
+      mock.timers.reset()
+    }
+  })
+
+  it('cancelPersist and destroy leave no timer behind and reset the max-wait anchor', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const p = make({ persistDebounceMs: 2000, persistMaxWaitMs: 10_000 })
+    try {
+      let writes = 0
+      const fn = () => { writes++ }
+      p.schedulePersist(fn)
+      mock.timers.tick(1500)
+      p.cancelPersist()
+      assert.equal(p._persistTimer, null)
+      assert.equal(p._persistPendingSince, null)
+      mock.timers.tick(60_000)
+      assert.equal(writes, 0)
+      // A fresh schedule after cancel uses a fresh window, not a stale anchor.
+      p.schedulePersist(fn)
+      mock.timers.tick(1999)
+      assert.equal(writes, 0)
+      mock.timers.tick(1)
+      assert.equal(writes, 1)
+      p.schedulePersist(fn)
+      p.destroy()
+      assert.equal(p._persistTimer, null)
+      mock.timers.tick(60_000)
+      assert.equal(writes, 1)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('flushPersist cancels the pending timer and anchor', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const p = make({ persistDebounceMs: 2000, persistMaxWaitMs: 10_000 })
+    try {
+      let writes = 0
+      p.schedulePersist(() => { writes++ })
+      p.flushPersist(() => {})
+      assert.equal(p._persistTimer, null)
+      assert.equal(p._persistPendingSince, null)
+      mock.timers.tick(60_000)
+      assert.equal(writes, 0)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('is configurable and defaults to 10s', () => {
+    assert.equal(make()._persistMaxWaitMs, 10_000)
+    assert.equal(make({ persistMaxWaitMs: 3000 })._persistMaxWaitMs, 3000)
+  })
+})
