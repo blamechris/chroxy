@@ -67,6 +67,11 @@ import {
   // HANDLERS map), so this shared import remains.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  handleSessionCreateFailed as sharedSessionCreateFailed,
+  planCreateFailure,
+  stashCreateFailure,
+  settleCreateFailures,
+  clearPendingCreateFailures,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   // conversation_id migrated to the shared dispatch table (#5556)
@@ -2417,6 +2422,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // Auto-resume on server restart: if reconnecting and server has no sessions,
       // restore the last active conversation so user doesn't have to navigate History.
       if (sessionList.length === 0 && ctx.isReconnect) {
+        // This path returns before the roster is applied, so nothing settles a
+        // parked create-failure here; drop it (the Alert already surfaced it).
+        clearPendingCreateFailures();
         void (async () => {
           const snapSocket = ctx.socket;
           const lastId = await loadLastConversationId();
@@ -2454,6 +2462,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         set(patch);
       }
       set({ sessions: sessionList });
+      // #8981: hand any parked create-failure to the session we ended up on.
+      for (const d of settleCreateFailures(
+        sessionList.map((x) => x.sessionId),
+        get().activeSessionId,
+        (id) => !!get().sessionStates[id],
+      )) {
+        updateSession(d.sessionId, (ss) => ({ messages: [...ss.messages, d.chatMessage] }));
+      }
       // Initialize session state for any new sessions not yet tracked.
       //
       // #7518 — the fresh shell keeps its default `isIdle: true`; the resync
@@ -2673,6 +2689,28 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         } else {
           get().addMessage(noticeMsg);
         }
+      } else if (parsed.category === 'create_failed') {
+        // #8981: a fresh session's start() was refused. Record it as a coded chat
+        // error (the shared chip routing keys off `code`) and keep the Alert.
+        // The server destroys the failed session right after and the next session_list
+        // drops it with its messages, so the entry is appended to the active session
+        // now, or parked and settled onto the session the client lands on.
+        const failed = sharedSessionCreateFailed(msg);
+        if (failed) {
+          const plan = planCreateFailure(
+            failed.sessionId,
+            get().activeSessionId,
+            (id) => !!get().sessionStates[id],
+          );
+          if (plan.kind === 'now') {
+            updateSession(plan.targetSessionId, (ss) => ({ messages: [...ss.messages, failed.chatMessage] }));
+          } else if (plan.kind === 'defer' && failed.sessionId) {
+            // The failed session is about to vanish with its messages; the
+            // session_list that drops it settles this onto the session we land on.
+            stashCreateFailure(failed.sessionId, failed.chatMessage);
+          }
+        }
+        Alert.alert('Session Error', parsed.message ?? 'Unknown error');
       } else if (parsed.category !== 'crash') {
         if (parsed.code === 'SESSION_TOKEN_MISMATCH' && parsed.boundSessionName) {
           showBoundSessionMismatchAlert(

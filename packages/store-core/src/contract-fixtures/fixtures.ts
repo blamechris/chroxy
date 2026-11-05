@@ -253,6 +253,21 @@ export interface ContractFixture {
 // Helpers for building fixture chat messages
 // ---------------------------------------------------------------------------
 
+/** A minimal valid `session_list` entry (#8981 fixtures). */
+function createFailedListEntry(sessionId: string): Record<string, unknown> {
+  return {
+    sessionId,
+    name: sessionId,
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 0,
+  }
+}
+
 function sysMsg(content: string): Partial<ChatMessage> {
   return { type: 'system', content }
 }
@@ -3149,6 +3164,85 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     init: { activeSessionId: 's1', sessions: { s1: { health: 'ok' } } },
     message: { type: 'session_error', category: 'crash', sessionId: 's1' },
     expect: { sessions: { s1: { health: 'crashed' } } },
+  },
+  // #8981: a refused fresh session arrives as session_error{category:'create_failed'}
+  // (the server's session_create_failed, forwarded) and the server destroys that
+  // session right after, so the next session_list drops it WITH its messages. The
+  // coded `error` entry must therefore end up in a session that survives: the
+  // active session now (failed one in the background), or — when the failed
+  // session IS the active one — parked until the list that removes it, then
+  // handed to the session the client lands on. Each case runs the error as a
+  // prelude and asserts the state AFTER the following session_list.
+  {
+    name: 'session_error (create_failed) for a background session lands in the active session and survives the list that drops it (both clients)',
+    type: 'session_list',
+    init: { activeSessionId: 's1', sessions: { s1: {}, s2: {} } },
+    prelude: [
+      {
+        type: 'session_error',
+        category: 'create_failed',
+        code: 'NATIVE_ENDPOINT_UNVERIFIED',
+        sessionId: 's2',
+        recoverable: false,
+        message: 'The session failed to start: endpoint not verified',
+      },
+    ],
+    message: { type: 'session_list', sessions: [createFailedListEntry('s1')] },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'error', code: 'NATIVE_ENDPOINT_UNVERIFIED', content: 'The session failed to start: endpoint not verified' },
+          ],
+        },
+      },
+      // the roster no longer lists the failed session
+      flat: { activeSessionId: 's1', sessions: [{ sessionId: 's1' }] },
+    },
+  },
+  {
+    name: 'session_error (create_failed) for the ACTIVE session is deferred to the session the client lands on after the list drops it (both clients)',
+    type: 'session_list',
+    init: { activeSessionId: 's1', sessions: { s1: {}, s2: {} } },
+    prelude: [
+      {
+        type: 'session_error',
+        category: 'create_failed',
+        code: 'START_FAILED',
+        sessionId: 's1',
+        recoverable: false,
+        message: 'The session failed to start: boom',
+      },
+    ],
+    message: { type: 'session_list', sessions: [createFailedListEntry('s2')] },
+    expect: {
+      sessions: {
+        s2: { messages: [{ type: 'error', code: 'START_FAILED', content: 'The session failed to start: boom' }] },
+      },
+      flat: { activeSessionId: 's2', sessions: [{ sessionId: 's2' }] },
+    },
+  },
+  {
+    // No session survives: the entry has nowhere to land and is dropped (the
+    // toast/Alert stays the surface) — nothing is written to the flat log.
+    name: 'session_error (create_failed) with no session left writes no entry anywhere and does not crash (both clients)',
+    type: 'session_list',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    prelude: [
+      {
+        type: 'session_error',
+        category: 'create_failed',
+        code: 'START_FAILED',
+        sessionId: 's1',
+        recoverable: false,
+        message: 'The session failed to start: boom',
+      },
+    ],
+    message: { type: 'session_list', sessions: [] },
+    expect: {
+      flat: { activeSessionId: null, sessions: [] },
+      added: [],
+    },
   },
   {
     // #6325 (drain #6314): a legacy server_status (no phase) — both clients append

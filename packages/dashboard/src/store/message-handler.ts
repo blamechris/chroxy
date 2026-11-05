@@ -59,6 +59,10 @@ import {
   // this switch, so no shared import is needed here.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  handleSessionCreateFailed as sharedSessionCreateFailed,
+  planCreateFailure,
+  stashCreateFailure,
+  settleCreateFailures,
   handleLogEntry as sharedLogEntry,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
@@ -5334,6 +5338,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         set(patch);
       }
       set({ sessions: sessionList });
+      // #8981: hand any parked create-failure to the session we ended up on.
+      for (const d of settleCreateFailures(
+        sessionList.map((x) => x.sessionId),
+        get().activeSessionId,
+        (id) => !!get().sessionStates[id],
+      )) {
+        updateSession(d.sessionId, (ss) => ({ messages: [...ss.messages, d.chatMessage] }));
+      }
       // Sync activeModel from session list to prevent dropdown reset.
       // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
       // dropdown uses short IDs (e.g. sonnet). Resolve against THAT SESSION's
@@ -5771,6 +5783,31 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         if (crashedId && get().sessionStates[crashedId]) {
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
+        }
+      } else if (parsed.category === 'create_failed') {
+        // #8981: a fresh session's start() was refused. Record it as a coded chat
+        // error (the shared chip routing keys off `code`) and keep the toast.
+        // The server destroys the failed session right after and the next session_list
+        // drops it with its messages, so the entry is appended to the active session
+        // now, or parked and settled onto the session the client lands on.
+        const failed = sharedSessionCreateFailed(msg);
+        if (failed) {
+          const plan = planCreateFailure(
+            failed.sessionId,
+            get().activeSessionId,
+            (id) => !!get().sessionStates[id],
+          );
+          if (plan.kind === 'now') {
+            updateSession(plan.targetSessionId, (ss) => ({ messages: [...ss.messages, failed.chatMessage] }));
+          } else if (plan.kind === 'defer' && failed.sessionId) {
+            // The failed session is about to vanish with its messages; the
+            // session_list that drops it settles this onto the session we land on.
+            stashCreateFailure(failed.sessionId, failed.chatMessage);
+          }
+        }
+        if (parsed.message) {
+          _adapters.alert.alert('Session Error', parsed.message);
+          get().addServerError(parsed.message);
         }
       } else if (parsed.code === 'SESSION_NOT_FOUND') {
         // #4982 — dashboard's persisted `activeSessionId` points at a

@@ -1003,6 +1003,7 @@ describe('setupForwarding', () => {
       assert.equal(sessionId, 'sess-1')
       assert.equal(msg.sessionId, 'sess-1')
       assert.equal(msg.recoverable, false, 'fresh-session failure has no retry affordance')
+      assert.equal(msg.category, 'create_failed', 'clients key the coded chat error off this category (#8981)')
       assert.match(msg.message, /failed to start/)
       assert.match(msg.message, /warmup/, 'includes the provider rejection reason when present')
     })
@@ -1020,6 +1021,22 @@ describe('setupForwarding', () => {
       const msg = call.arguments[1]
       assert.equal(msg.code, 'SESSION_START_FAILED')
       assert.match(msg.message, /\(claude-tui\)/)
+    })
+
+    it('queues one session_list AFTER the destroy that follows a create failure (#8981)', async () => {
+      let destroyed = false
+      const seenDestroyed = []
+      const broadcastSessionList = mock.fn(() => { seenDestroyed.push(destroyed) })
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_create_failed', { sessionId: 'sess-1', errorCode: 'START_FAILED', errorMessage: 'boom' })
+      assert.equal(broadcastSessionList.mock.callCount(), 0, 'not synchronously, before the session is destroyed')
+      destroyed = true // SessionManager.destroySession runs synchronously after the emit
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'exactly one list')
+      assert.deepEqual(seenDestroyed, [true], 'the list was built after the destroy, so it omits the session')
     })
 
     it('ignores a session_create_failed with no sessionId', () => {

@@ -26,6 +26,7 @@ import {
   type ContractFixture,
   FakeHandshakeServer,
   FakeHandshakeClient,
+  clearPendingCreateFailures,
   type HandshakeStoreAdapter,
   type DriverMessage,
   type FixtureFieldMatcher,
@@ -115,6 +116,9 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     toolResultIsError: m.toolResultIsError,
     // #7376: the terminated-turn marker, so a fixture can assert it reached the bubble.
     toolResultTerminatedReason: m.toolResultTerminatedReason,
+    // #8981: the structured error code on `type: 'error'` bubbles, so a fixture can
+    // assert the code that drives the error-chip routing reached the message.
+    code: m.code,
   }))
 }
 
@@ -206,6 +210,7 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
     clearDeltaBuffers()
     clearPermissionSplits()
     resetReplayFlags()
+    clearPendingCreateFailures()
     mockSocket = createMockSocket()
   })
 

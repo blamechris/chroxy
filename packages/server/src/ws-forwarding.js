@@ -525,12 +525,23 @@ function setupSessionForwarding(normalizer, ctx) {
     broadcastToSession(sessionId, {
       type: 'session_error',
       code: errorCode || 'SESSION_START_FAILED',
+      // #8981: lets clients tell a refused fresh session apart from every other
+      // session_error and record it as a coded chat error. Mirrored by
+      // SESSION_CREATE_FAILED_CATEGORY in store-core.
+      category: 'create_failed',
       sessionId,
       recoverable: false,
       message: errorMessage
         ? `The session failed to start: ${errorMessage}`
         : `The session failed to start${provider ? ` (${provider})` : ''}.`,
     })
+    // #8981: nothing else announces the removal. `session_destroyed` listeners
+    // never send a `session_list`, and clients drop a session (and its messages)
+    // only when a list omits it, so the failed session would linger in sidebars
+    // and a coded entry parked for it would never land. The setImmediate inside
+    // fires after the synchronous destroySession that follows this emit, so the
+    // list omits the session.
+    queueStartOutcomeSessionList()
   }))
 
   // #5731 (T3): a checkpoint create/delete that couldn't be flushed to disk will

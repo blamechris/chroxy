@@ -2321,9 +2321,11 @@ export class SessionManager extends EventEmitter {
         // yet usable — and, for a restore, may still be re-parked. `listSessions`
         // reports it as `starting` so no client offers it as openable, and the
         // success branch announces the change so every client's list refreshes.
-        // The rejection branch needs no announcement of its own: the fresh path
-        // destroys the session and the restore path emits
-        // `session_restore_failed`, and each already refreshes the list.
+        // The rejection branch needs no announcement of its own: the restore
+        // path emits `session_restore_failed` and the fresh path emits
+        // `session_create_failed`, and the ws-forwarding listener for each
+        // queues the refreshed `session_list` (queueStartOutcomeSessionList).
+        // `session_destroyed` itself announces nothing.
         //
         // #8876: the wait is bounded. A start() that never settles (Codex
         // app-server has no startup timeout of its own) is rejected with

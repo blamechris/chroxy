@@ -50,6 +50,8 @@ jest.mock('../src/store/persistence', () => ({
   clearPersistedSession: jest.fn(),
   // #6325: session_list persists the active conversation id as a side effect.
   persistLastConversationId: jest.fn(),
+  // #8981: the empty-reconnect-list auto-resume path reads the last conversation.
+  loadLastConversationId: jest.fn(async () => null),
 }));
 
 jest.mock('../src/store/imperative-callbacks', () => ({
@@ -148,6 +150,9 @@ import {
   type ContractFixture,
   FakeHandshakeServer,
   FakeHandshakeClient,
+  clearPendingCreateFailures,
+  stashCreateFailure,
+  settleCreateFailures,
   type HandshakeStoreAdapter,
   type DriverMessage,
   type FixtureFieldMatcher,
@@ -197,6 +202,9 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     toolResultIsError: m.toolResultIsError,
     // #7376: the terminated-turn marker, so a fixture can assert it reached the bubble.
     toolResultTerminatedReason: m.toolResultTerminatedReason,
+    // #8981: the structured error code on `type: 'error'` bubbles, so a fixture can
+    // assert the code that drives the error-chip routing reached the message.
+    code: m.code,
   }));
 }
 
@@ -273,6 +281,7 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
     // gates off activity_delta's inactivity-warning clear (test-order
     // contamination).
     resetReplayFlags();
+    clearPendingCreateFailures();
   });
 
   afterEach(() => {
@@ -390,6 +399,25 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
     jest.runAllTimers();
     jest.useRealTimers();
     setConnectionContext(null);
+  });
+
+  it('an empty reconnect session_list drops a parked create-failure instead of stranding it (#8981)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      availableProviders: [],
+      sessionStates: { s1: createEmptySessionState() } as unknown as ConnectionState['sessionStates'],
+      messages: [],
+      addMessage: jest.fn(),
+      appendTerminalData: jest.fn(),
+    } as unknown as ConnectionState);
+    setStore(store);
+    setConnectionContext({ ...mockCtx, isReconnect: true } as never);
+    stashCreateFailure('s1', { id: 'e1', type: 'error', content: 'x', timestamp: 1, code: 'START_FAILED' } as never);
+
+    handleMessage({ type: 'session_list', sessions: [] });
+
+    expect(settleCreateFailures([], 's1', () => true)).toEqual([]);
   });
 
   it('permission_resolved flips answered + clears options (in-place) (#6074)', () => {

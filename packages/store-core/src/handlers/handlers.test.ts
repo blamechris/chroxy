@@ -5,6 +5,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MAX_SANE_DURATION_MS, MODEL_ENTRY_METADATA_KEYS } from '@chroxy/protocol'
 import {
   resolveSessionId,
+  handleSessionCreateFailed,
+  planCreateFailure,
+  stashCreateFailure,
+  settleCreateFailures,
+  clearPendingCreateFailures,
   handleModelChanged,
   handlePermissionModeChanged,
   handleAvailablePermissionModes,
@@ -10624,5 +10629,84 @@ describe('dropPendingRestoreNotice (#6808 teardown)', () => {
   })
   it('tolerates a null id', () => {
     expect(() => dropPendingRestoreNotice(null)).not.toThrow()
+  })
+})
+
+describe('handleSessionCreateFailed (#8981)', () => {
+  it('builds a coded error ChatMessage for a create_failed session_error', () => {
+    const r = handleSessionCreateFailed({
+      type: 'session_error',
+      category: 'create_failed',
+      code: 'NATIVE_ENDPOINT_UNVERIFIED',
+      sessionId: 's2',
+      message: 'The session failed to start: not verified',
+    })
+    expect(r).not.toBeNull()
+    expect(r!.sessionId).toBe('s2')
+    expect(r!.chatMessage).toMatchObject({
+      type: 'error',
+      code: 'NATIVE_ENDPOINT_UNVERIFIED',
+      content: 'The session failed to start: not verified',
+    })
+  })
+
+  it('ignores every other session_error, and falls back for a blank message / missing code', () => {
+    expect(handleSessionCreateFailed({ type: 'session_error', category: 'crash', sessionId: 's2' })).toBeNull()
+    expect(handleSessionCreateFailed({ type: 'session_error', code: 'START_FAILED', message: 'x' })).toBeNull()
+    const r = handleSessionCreateFailed({ type: 'session_error', category: 'create_failed', sessionId: 's2', message: '  ' })
+    expect(r!.sessionId).toBe('s2')
+    expect(r!.chatMessage.content).toBe('The session failed to start.')
+    expect('code' in r!.chatMessage).toBe(false)
+  })
+
+  it('returns null for a message that is not a session_error, or has no sessionId', () => {
+    expect(handleSessionCreateFailed({ type: 'error', category: 'create_failed', sessionId: 's2', message: 'x' })).toBeNull()
+    expect(handleSessionCreateFailed({ category: 'create_failed', sessionId: 's2', message: 'x' })).toBeNull()
+    expect(handleSessionCreateFailed({ type: 'session_error', category: 'create_failed', message: 'x' })).toBeNull()
+    expect(handleSessionCreateFailed({ type: 'session_error', category: 'create_failed', sessionId: 7, message: 'x' })).toBeNull()
+  })
+})
+
+describe('planCreateFailure (#8981)', () => {
+  const has = (ids: string[]) => (id: string) => ids.includes(id)
+  it('appends now to the active session when the failed one is a background session', () => {
+    expect(planCreateFailure('f', 'a', has(['f', 'a']))).toEqual({ kind: 'now', targetSessionId: 'a' })
+    expect(planCreateFailure('unknown', 'a', has(['a']))).toEqual({ kind: 'now', targetSessionId: 'a' })
+    expect(planCreateFailure(null, 'a', has(['a']))).toEqual({ kind: 'now', targetSessionId: 'a' })
+  })
+  it('defers when the failed session is the active one (it is about to be removed)', () => {
+    expect(planCreateFailure('a', 'a', has(['a']))).toEqual({ kind: 'defer' })
+    expect(planCreateFailure('f', null, has(['f']))).toEqual({ kind: 'defer' })
+  })
+  it('does nothing when the client holds neither', () => {
+    expect(planCreateFailure('f', 'a', has([]))).toEqual({ kind: 'none' })
+    expect(planCreateFailure(null, null, has([]))).toEqual({ kind: 'none' })
+  })
+})
+
+describe('settleCreateFailures (#8981)', () => {
+  const has = (ids: string[]) => (id: string) => ids.includes(id)
+  const entry = { id: 'e1', type: 'error', content: 'x', timestamp: 1, code: 'START_FAILED' } as ChatMessage
+  beforeEach(() => clearPendingCreateFailures())
+
+  it('hands a removed session\'s entry to the session the client landed on, once', () => {
+    stashCreateFailure('f', entry)
+    expect(settleCreateFailures(['b'], 'b', has(['b']))).toEqual([{ sessionId: 'b', chatMessage: entry }])
+    expect(settleCreateFailures(['b'], 'b', has(['b']))).toEqual([])
+  })
+  it('drops the entry when no session remains', () => {
+    stashCreateFailure('f', entry)
+    expect(settleCreateFailures([], null, has([]))).toEqual([])
+    expect(settleCreateFailures([], null, has([]))).toEqual([])
+  })
+  it('a parked entry does not survive resetReplayReconcile (fresh auth / reconnect / host switch)', () => {
+    stashCreateFailure('f', entry)
+    resetReplayReconcile()
+    expect(settleCreateFailures(['b'], 'b', has(['b']))).toEqual([])
+  })
+  it('settles onto the session itself when a list still contains it, then clears the record', () => {
+    stashCreateFailure('f', entry)
+    expect(settleCreateFailures(['f', 'b'], 'b', has(['f', 'b']))).toEqual([{ sessionId: 'f', chatMessage: entry }])
+    expect(settleCreateFailures(['f', 'b'], 'b', has(['f', 'b']))).toEqual([])
   })
 })

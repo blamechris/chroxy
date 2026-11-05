@@ -761,6 +761,14 @@ export {
   clearPendingRestoreNotices,
   handleError,
   handleSessionError,
+  // #8981: a refused fresh session (server `session_create_failed`, forwarded as
+  // `session_error{category:'create_failed'}`) becomes a coded chat error.
+  handleSessionCreateFailed,
+  planCreateFailure,
+  stashCreateFailure,
+  settleCreateFailures,
+  clearPendingCreateFailures,
+  SESSION_CREATE_FAILED_CATEGORY,
   // #4879: quiet "user-initiated Stop" confirmation handler — flips
   // stoppedAt/stoppedCode on the target session for the inline status strip
   handleSessionStopped,
