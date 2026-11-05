@@ -192,6 +192,45 @@ export function parseExtraOverrides(options) {
 }
 
 /**
+ * Defaults `chroxy start` merges under flag > env > config file. Shared with
+ * `resolveConfiguredPort` so `chroxy doctor` cannot drift from the port `start` binds.
+ */
+export const SERVER_CONFIG_DEFAULTS = Object.freeze({
+  port: 8765,
+  noAuth: false,
+})
+
+/**
+ * #8233: the port `chroxy start` would bind, for `chroxy doctor` to probe.
+ *
+ * Runs the SAME mergeConfig + defaults as loadAndMergeConfig (flag > env > config
+ * file > 8765), reading the file named by `-c/--config` (default: the
+ * CHROXY_CONFIG_DIR-aware config.json). Unlike `start`, a missing or unparseable
+ * config is not fatal: doctor must still run on an uninitialised host, and its
+ * Config check reports the file's own problems.
+ *
+ * @param {{ config?: string, port?: string|number }} options - Commander options
+ * @returns {number}
+ */
+export function resolveConfiguredPort(options = {}) {
+  const path = options.config ?? configFile()
+  let fileConfig = {}
+  try {
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fileConfig = parsed
+    }
+  } catch {
+    fileConfig = {}
+  }
+  const cliOverrides = {}
+  const flagPort = options.port !== undefined ? parseInt(options.port, 10) : NaN
+  if (!Number.isNaN(flagPort)) cliOverrides.port = flagPort
+  const merged = mergeConfig({ fileConfig, cliOverrides, defaults: SERVER_CONFIG_DEFAULTS })
+  return merged.port || SERVER_CONFIG_DEFAULTS.port
+}
+
+/**
  * Load config file, build CLI overrides, merge, validate, and set env vars.
  *
  * @param {object} options - Commander options object
@@ -268,10 +307,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   // existing config.json files.
   if (options.dangerouslySkipPermissions) cliOverrides.dangerouslySkipPermissions = true
 
-  const defaults = {
-    port: 8765,
-    noAuth: false,
-  }
+  const defaults = SERVER_CONFIG_DEFAULTS
 
   const config = mergeConfig({
     fileConfig,
