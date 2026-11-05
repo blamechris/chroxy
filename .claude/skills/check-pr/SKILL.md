@@ -226,7 +226,7 @@ Use only for the eligible cases defined in step 3. Create or link a matching Git
 
 ```bash
 # 1. Create the scoped issue unless a matching issue already tracks this finding
-# Labels: enhancement, from-review (this repo has no complexity:* or testing:* labels)
+# Labels: enhancement, from-review (add complexity: low|medium|high or testing when they apply)
 # COMMENT_ID — the id of the comment THIS iteration of step 3's loop is
 # processing (from step 1's fetched `.../pulls/${PR_NUM}/comments`, same
 # per-comment variable the reply examples above use). COMMENT_URL is its

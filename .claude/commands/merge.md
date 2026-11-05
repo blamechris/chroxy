@@ -9,7 +9,7 @@ Merge authorized PRs through verified review/CI gates, record delivery, and run 
   - `all` — all open PRs targeting main, only when the user explicitly requests this scope
   - `--no-build` — skip post-merge Tauri desktop rebuild
   - `--build-only` — rebuild desktop on current main without merging
-  - `--skip-version-check` — don't wait for auto-version CI
+  - `--skip-version-check` — skip the Phase 2b version step
 
 ## Instructions
 
@@ -64,7 +64,7 @@ Display a concise summary table, then proceed within the authority already grant
 For each PR:
 
 1. **Check current-head gates** — read `headRefOid`, CI, review evidence and `mergeStateStatus`. ALL CI checks must be green on the final commit, `/full-review` must be clean for that head, ALL review threads must have supported resolved dispositions, and repository protection must be satisfied. Use the host's supported status/continuation mechanism for pending checks; never substitute polling prohibited by the host.
-2. **Recover a failed gate** — use `/merge-gate` to identify the actual missing requirement. A push, update-branch or prerequisite merge invalidates stale head/base readings. `UNKNOWN` needs a fresh supported status check. Handle CI fixes, owned-branch conflicts and review findings within delegated authority and the shared repair allowance; preserve unrelated changes. Ask only for a verified owner-reserved prerequisite, and keep independent authorized work moving.
+2. **Recover a failed gate** — follow the "Merge Gate — MANDATORY triage" checklist in `AGENTS.md` to identify the actual missing requirement. A push, update-branch or prerequisite merge invalidates stale head/base readings. `UNKNOWN` needs a fresh supported status check. Handle CI fixes, owned-branch conflicts and review findings within delegated authority and the shared repair allowance; preserve unrelated changes. Ask only for a verified owner-reserved prerequisite, and keep independent authorized work moving.
 3. **Resolve only supported review dispositions** — run `/check-pr` step 6b with the triage record. Its paginated GraphQL `resolveReviewThread` procedure resolves eligible threads and verifies the result. Do not resolve every unresolved thread wholesale. The Python helper passes IDs as GraphQL variables; the existing rule remains: `resolveReviewThread must use Python`. Recheck inline and general findings at the current head before declaring the review clean.
 4. **Capture the checked head and merge synchronously** — first verify that the repository permits a synchronous merge. If it requires a merge queue, report that policy dependency; do not silently enqueue or use `--admin` to bypass it. Set `CHECKED_HEAD` to the full SHA whose review, CI and thread gates just passed:
    ```bash
@@ -80,7 +80,7 @@ Run `/batch-merge ${PR_NUMS}` with the authorized PR set, dependency order, shar
 
 ### Phase 2b: Version Verification
 
-Versioning here is automatic: `.github/workflows/auto-version.yml` bumps the patch version on every merge to main (it skips commits starting with `chore: bump version`). The source of truth is `packages/server/package.json`; `scripts/bump-version.sh` syncs it across server, app, desktop, root `package.json`, `tauri.conf.json` and `Cargo.toml`.
+Versioning here is manual: no workflow bumps the version on merge. The source of truth is `packages/server/package.json`; `scripts/bump-version.sh` syncs it across server, app, desktop, root `package.json`, `tauri.conf.json` and `Cargo.toml`.
 
 Apply the repository's established version policy within the delegated release authority. If no bump is required, record the current version and continue. Ask only for an indispensable choice or release action reserved to the owner; do not invent an optional version decision that blocks the completed feature's handoff.
 
@@ -132,7 +132,7 @@ If `--skip-version-check` is set, skip this phase.
 **Skip conditions:**
 - Post-merge skip flag is set
 - No PRs were merged (all skipped/blocked)
-- Merged PRs only touch: `docs/`, `.github/`, `packages/app/`, `scripts/`, `*.md` (always rebuild when they touch `packages/server/`, `packages/desktop/`, `packages/protocol/` or `dashboard-next/`)
+- Merged PRs only touch: `docs/`, `.github/`, `packages/app/`, `scripts/`, `*.md` (always rebuild when they touch `packages/server/`, `packages/desktop/`, `packages/protocol/` or `packages/dashboard/`)
 
 #### Step 3a: Pull latest main
 
@@ -143,9 +143,9 @@ git pull --ff-only origin main
 # worktree or reconcile deliberately. Never reset away unrelated work.
 ```
 
-Verify local version matches the auto-versioned remote:
+Verify the local version matches the remote:
 ```bash
-echo "Local version: $(node -p \"require('./packages/server/package.json').version\")"
+echo "Local version: $(node -p "require('./packages/server/package.json').version")"
 ```
 
 #### Step 3b: Rebuild Tauri Desktop App

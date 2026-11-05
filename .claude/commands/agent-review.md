@@ -191,7 +191,7 @@ Never leave deferred items as just review comments. If it's worth mentioning, it
 Honor explicit holds and the caller's durable correction/budget record. A new review agent, nested skill or resumed context grants no extra repair allowance or merge authority.
 
 ```bash
-# Labels: enhancement, from-review (this repo has no complexity:* or testing:* labels)
+# Labels: enhancement, from-review (add complexity: low|medium|high or testing when they apply)
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
