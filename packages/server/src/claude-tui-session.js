@@ -125,6 +125,19 @@ function latchNodePtyImportFailure(session, err) {
   session.emit('error', { code: failure.code, message: failure.message })
 }
 
+/**
+ * The ONE argv for `claude auth status` (#8269). The subcommand accepts only
+ * `--json`/`--text`/`--help` — `--settings` is rejected ("unknown option": exit 1,
+ * empty stdout), which the native route read as NATIVE_LOGIN_REQUIRED on a logged-in
+ * host and the pre-spawn probe (#8223) read as an inconclusive no-op. Both callers
+ * take their argv from this one frozen list; each call gets a copy, so a caller
+ * that appends to its own argv cannot change the shared base.
+ */
+const CLAUDE_AUTH_STATUS_ARGS = Object.freeze(['auth', 'status', '--json'])
+function claudeAuthStatusArgs() {
+  return [...CLAUDE_AUTH_STATUS_ARGS]
+}
+
 function runClaudeAuthStatus({ binary, args, cwd, env }) {
   return new Promise((resolve, reject) => {
     execFile(binary, args, {
@@ -3364,7 +3377,7 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       result = await this._connectionAuthStatusRunner({
         binary,
-        args: ['auth', 'status', '--json', '--settings', this._settingsPath],
+        args: claudeAuthStatusArgs(),
         cwd,
         env,
       })
@@ -3439,10 +3452,8 @@ export class ClaudeTuiSession extends BaseSession {
     this._loginProbeRan = true
     if (this._connectionAuthRoute === 'native') return
 
-    // No `--settings`: `claude auth status` rejects it ("unknown option" on
-    // claude 2.1.289) with an empty stdout, which this probe reads as
-    // unparseable and fails open — so passing it made the probe a no-op.
-    const args = ['auth', 'status', '--json']
+    // No `--settings` (see claudeAuthStatusArgs): it made this probe a no-op.
+    const args = claudeAuthStatusArgs()
     let result
     try {
       result = await this._loginProbeRunner({ binary, args, cwd, env })

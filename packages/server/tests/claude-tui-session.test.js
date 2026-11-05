@@ -616,7 +616,9 @@ describe('ClaudeTuiSession', () => {
           'the configured provenance gate runs before each auth probe and again immediately before each PTY spawn')
         assert.equal(authContexts[0].binary, '/fixture/claude')
         assert.equal(authContexts[0].cwd, realpathSync('/tmp'))
-        assert.deepEqual(authContexts[0].args, ['auth', 'status', '--json', '--settings', session._settingsPath])
+        assert.deepEqual(authContexts[0].args, ['auth', 'status', '--json'])
+        assert.equal(authContexts[0].args.includes('--settings'), false,
+          '`claude auth status` rejects --settings (exit 1, empty stdout) — #8269')
         assert.equal(authContexts[0].args.includes('--setting-sources'), false,
           'native auth keeps the normal Claude Code user/project/local customization sources')
         assert.equal(authContexts[0].env, spawnedEnvs[0], 'the auth probe and PTY receive the same env object')
@@ -680,6 +682,39 @@ describe('ClaudeTuiSession', () => {
           await candidate.destroy()
         })
       }
+    })
+
+    it('passes the native check against a runner that rejects unknown options like the real claude auth status (#8269)', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      // Mirrors `claude auth status` 2.1.318: only --json/--text/--help exist; any
+      // other flag exits 1 with empty stdout.
+      const strictRunner = async ({ args }) => {
+        const unknown = args.slice(2).filter((a) => !['--json', '--text', '--help', '-h'].includes(a))
+        if (unknown.length) return { status: 1, stdout: '', stderr: `error: unknown option '${unknown[0]}'` }
+        return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }), stderr: '' }
+      }
+      const candidate = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/claude',
+        connectionRuntimePreflight: () => '/fixture/claude',
+        connectionAuthStatusRunner: strictRunner,
+      })
+      candidate._sessionId = 'strict-auth-status'
+      candidate._sinkDir = fakeHome
+      candidate._settingsPath = join(fakeHome, 'settings.json')
+      candidate.on('error', () => {})
+      let ptySpawned = false
+      candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('captured-and-bail') } }
+      await origSpawnPty.call(candidate, false).catch((err) => {
+        assert.notEqual(err?.code, 'NATIVE_LOGIN_REQUIRED', 'a strict runner must not read as a logged-out host')
+      })
+      assert.equal(candidate._spawnRefusal?.code, undefined, 'no refusal latched')
+      assert.equal(ptySpawned, true, 'a logged-in host passes the auth check and reaches the PTY spawn')
+      await candidate.destroy()
     })
 
     it('refuses an explicit native session without the binary captured by preflight', async () => {
