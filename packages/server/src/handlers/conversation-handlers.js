@@ -234,9 +234,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // BOTH the scope check and the on-disk read, so a symlinked hint can't point
     // the scope check at one directory and the file read at another.
     try {
-      // native: the JS realpath keeps Windows 8.3 short names, which encode a
-      // different claude project slug than the long form claude records (#8978).
-      cwd = realpathSync.native(msg.cwd)
+      cwd = realpathSync(msg.cwd)
     } catch {
       fail(`Cannot resolve path: ${msg.cwd}`)
       return

@@ -364,7 +364,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
    *
    * Also resolves the project's auto-generated MEMORY.md descriptor, keyed by
    * the SAME per-cwd path encoding `resolveJsonlPath` uses for transcript
-   * storage (`encodeProjectPath` in jsonl-reader.js) — confirmed empirically
+   * storage (`projectSlug` in jsonl-reader.js) — confirmed empirically
    * against a live `~/.claude/projects/` tree to be keyed by the literal
    * session cwd, not the git repository root (each worktree gets its own,
    * separate memory directory).

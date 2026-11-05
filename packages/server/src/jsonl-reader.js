@@ -110,10 +110,11 @@ export function decodeProjectPath(encoded) {
  * @param {string} conversationId - UUID of the conversation
  * @param {Record<string, string|undefined>} [env] - env claude runs with; its
  *   `CLAUDE_CONFIG_DIR` (when valid) picks the projects root, else `~/.claude`
+ * @param {Parameters<typeof canonicalProjectCwd>[1]} [slugOpts] - test seam for the cwd canonicaliser
  * @returns {string} Absolute path to the JSONL file
  */
-export function resolveJsonlPath(cwd, conversationId, env = process.env) {
-  const encoded = projectSlug(cwd)
+export function resolveJsonlPath(cwd, conversationId, env = process.env, slugOpts) {
+  const encoded = projectSlug(cwd, slugOpts)
   return join(claudeProjectsDir(env), encoded, `${conversationId}.jsonl`)
 }
 
@@ -155,9 +156,10 @@ export function resolveClaudeProjectsDir(env = process.env) {
  * @param {string} cwd - the directory claude was launched in (real path)
  * @param {string} conversationId
  * @param {Record<string, string|undefined>} [env] - env claude runs with
+ * @param {Parameters<typeof canonicalProjectCwd>[1]} [slugOpts] - test seam for the cwd canonicaliser
  * @returns {boolean}
  */
-export function hasPersistedTranscript(cwd, conversationId, env = process.env) {
+export function hasPersistedTranscript(cwd, conversationId, env = process.env, slugOpts) {
   // The id becomes a path segment; real ids are UUIDs. Anything else cannot be
   // looked up safely, so do not claim the transcript is absent.
   if (typeof conversationId !== 'string' || !/^[A-Za-z0-9-]+$/.test(conversationId)) return true
@@ -165,7 +167,7 @@ export function hasPersistedTranscript(cwd, conversationId, env = process.env) {
   const fileName = `${conversationId}.jsonl`
   const projectsDir = resolveClaudeProjectsDir(env)
   try {
-    statSync(join(projectsDir, projectSlug(cwd), fileName))
+    statSync(join(projectsDir, projectSlug(cwd, slugOpts), fileName))
     return true
   } catch (err) {
     if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') return true

@@ -7,6 +7,7 @@ import {
   encodeProjectPath,
   decodeProjectPath,
   resolveJsonlPath,
+  hasPersistedTranscript,
   projectSlug,
   canonicalProjectCwd,
   PROJECT_CWD_REALPATH,
@@ -99,6 +100,25 @@ describe('projectSlug — 8.3 short names (#8978)', () => {
   it('the default resolver is the native realpath, not the JS one', () => {
     assert.equal(PROJECT_CWD_REALPATH, realpathSync.native)
     assert.notEqual(PROJECT_CWD_REALPATH, realpathSync)
+  })
+
+  it('resolveJsonlPath: short and long cwd give the same transcript path', () => {
+    const opts = { platform: 'win32', realpath: fakeNative }
+    const env = { CLAUDE_CONFIG_DIR: join(tmpdir(), 'claude-cfg-8978') }
+    assert.equal(resolveJsonlPath(SHORT, 'abc', env, opts), resolveJsonlPath(LONG, 'abc', env, opts))
+    assert.ok(resolveJsonlPath(SHORT, 'abc', env, opts).includes(encodeProjectPath(LONG)))
+  })
+
+  it('hasPersistedTranscript derives its slug through the resolver', () => {
+    const cfg = mkdtempSync(join(tmpdir(), 'claude-cfg-8978-'))
+    try {
+      const seen = []
+      const realpath = (p) => { seen.push(p); return fakeNative(p) }
+      hasPersistedTranscript(SHORT, 'abc', { CLAUDE_CONFIG_DIR: cfg }, { platform: 'win32', realpath })
+      assert.deepEqual(seen, [SHORT])
+    } finally {
+      rmSync(cfg, { recursive: true, force: true })
+    }
   })
 
   it('does not resolve on other platforms (behaviour unchanged)', () => {
