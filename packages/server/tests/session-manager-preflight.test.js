@@ -424,17 +424,27 @@ describe('SessionManager.createSession — preflight', () => {
     assert.equal(mgr.listSessions().length, 0)
   })
 
-  it('falls back to provider default when a stale Claude-family model is supplied (#3403)', () => {
-    // Uses the fake Claude-family provider (claudeFamily=true) so this runs
-    // on CI without the real `claude` binary. A retired model id
-    // ('opus-4-6' after opus-4-7 ships) gets soft-cleared to null so the
-    // underlying session picks the upstream default, rather than crashing
-    // the create flow with a hard rejection that surfaces as the unhelpful
-    // "There's an issue with the selected model" message in the dashboard.
-    const id = mgr.createSession({ provider: 'test-fake-claude-3403', model: 'opus-4-6', skipPersist: true })
-    assert.ok(id, 'session id should be returned')
-    const entry = mgr.getSession(id)
-    assert.equal(entry.session.model, null, 'stale model must be cleared to null (use provider default)')
+  it('rejects an explicitly requested malformed Claude-family model instead of defaulting it (#7855, was #3403 fallback)', () => {
+    // #3403 used to soft-clear any unlisted id to null so a stale dashboard
+    // default could not break create. That also turned a requested model into
+    // the account default without telling anyone (#7855). A request the roster
+    // does not list but that is a well-formed Claude id is forwarded verbatim
+    // (next test); one that cannot be a Claude id is rejected with the
+    // supported list. Restore and configured defaults still degrade to null.
+    assert.throws(
+      () => mgr.createSession({ provider: 'test-fake-claude-3403', model: 'opus-4-6', skipPersist: true }),
+      (err) => {
+        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0)
+  })
+
+  it('forwards a well-formed off-roster Claude model verbatim (#7855)', () => {
+    const id = mgr.createSession({ provider: 'test-fake-claude-3403', model: 'claude-sonnet-5', skipPersist: true })
+    assert.equal(mgr.getSession(id).session.model, 'claude-sonnet-5', 'requested model must reach the session, not be cleared to null')
     mgr.destroySession(id)
   })
 

@@ -954,6 +954,30 @@ describe('#6865 SchedulerEngine', () => {
       assert.deepEqual(events, [['end', REFUSED_STATUS]])
     })
 
+    it('passes a saved model as a replay, and names a task whose saved model went unused, once (#7855)', async () => {
+      const warns = []
+      const sm = new FakeSessionManager()
+      const task = store.add({
+        name: 'nightly',
+        prompt: 'go',
+        cadence: { kind: 'interval', everyMs: MINUTE, anchor: 1000 },
+        target: { provider: SCHEDULABLE_PROVIDER, model: 'opus-4-6' },
+      })
+      const engine = newEngine({ sessionManager: sm, logger: { ...silentLog, warn: (m) => warns.push(m) } })
+      engine.start()
+      clock = 61_000
+      await timers.tick()
+      assert.equal(sm.created.length, 1)
+      assert.equal(sm.created[0].opts.model, 'opus-4-6')
+      assert.equal(sm.created[0].opts.modelSource, 'replay', 'a persisted model is a replay, never an explicit request')
+      sm.sessions.clear()
+      clock = 121_000
+      await timers.tick()
+      const stale = warns.filter((m) => m.includes(task.id) && m.includes("'opus-4-6'"))
+      assert.equal(stale.length, 1, 'logged once, not on every fire')
+      assert.match(stale[0], /nightly/)
+    })
+
     it('refuses a task with NO explicit provider when the daemon default is hook-routed', async () => {
       const { sm, record } = await fireTask({ target: { model: 'sonnet' } }, { providerType: 'claude-tui' })
       assert.equal(sm.created.length, 0)

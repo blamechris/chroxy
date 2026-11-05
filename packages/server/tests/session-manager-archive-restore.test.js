@@ -52,10 +52,15 @@ class ThrowingResumeProvider extends ResumeProvider {
 class DeadStartResumeProvider extends ResumeProvider {
   start() { return new Promise((_resolve, reject) => { this._reject = reject }) }
 }
+class ClaudeFamilyResumeProvider extends ResumeProvider {
+  static claudeFamily = true
+  static getAllowedModels() { return ['sonnet', 'claude-sonnet-5-5'] }
+}
 class ShellLikeProvider extends BaseProvider {
   static get isUserShell() { return true }
 }
-declareUnknownCustomization(BaseProvider, ResumeProvider, ThrowingResumeProvider, DeadStartResumeProvider, ShellLikeProvider)
+declareUnknownCustomization(ClaudeFamilyResumeProvider, BaseProvider, ResumeProvider, ThrowingResumeProvider, DeadStartResumeProvider, ShellLikeProvider)
+registerProvider('test-restore-claude-7855', ClaudeFamilyResumeProvider)
 registerProvider('test-restore-plain', BaseProvider)
 registerProvider('test-restore-resume', ResumeProvider)
 registerProvider('test-restore-throwing', ThrowingResumeProvider)
@@ -109,11 +114,12 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
   ]
 
   /** Create a live session, give it history, close it, and return its archive row. */
-  async function archived({ provider = 'test-restore-resume', conversationId = 'conv-1', permissionMode = 'acceptEdits', history = convo, cwd } = {}) {
+  async function archived({ provider = 'test-restore-resume', conversationId = 'conv-1', permissionMode = 'acceptEdits', history = convo, cwd, model } = {}) {
     const id = sm.createSession({ cwd: cwd ?? workDir, provider, name: 'Flag work' })
     const entry = sm._sessions.get(id)
     entry.session.resumeSessionId = conversationId
     entry.session.permissionMode = permissionMode
+    if (model) entry.session.model = model
     sm._history.setHistory(id, history.map((e) => ({ ...e })))
     sm.destroySession(id)
     await sm.whenArchiveIdle()
@@ -456,6 +462,23 @@ describe('SessionManager.restoreArchivedSession (#8866)', () => {
       assert.equal(live.provider, 'test-restore-resume')
       assert.deepEqual(r.seed, { messagesIncluded: 2, messagesTotal: 2, bytes: r.seed.bytes })
       assert.equal(sm.listArchivedSessions().sessions.length, 1, 'the old thread is not live again, so the record stays')
+    })
+
+    it('continues an archive saved with a retired model id on the default model (#7855)', async () => {
+      makeSm()
+      const { row } = await archived({ provider: 'test-restore-claude-7855', model: 'opus-4-6' })
+      BaseProvider.constructed.length = 0
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      assert.equal(r.ok, true, `continue must not fail: ${r.message || r.code || ''}`)
+      assert.equal(sm._sessions.get(r.sessionId).session.model, null, 'the provider default, not the retired id')
+    })
+
+    it('continues an archive saved with a well-formed off-roster model on that model (#7855)', async () => {
+      makeSm()
+      const { row } = await archived({ provider: 'test-restore-claude-7855', model: 'claude-sonnet-5' })
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      assert.equal(r.ok, true)
+      assert.equal(sm._sessions.get(r.sessionId).session.model, 'claude-sonnet-5')
     })
 
     it('carries NO authority and no native locator from the old session', async () => {

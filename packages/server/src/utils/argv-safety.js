@@ -287,7 +287,7 @@ export const AUDITED_SINKS = [
   {
     file: 'claude-tui-session.js',
     match: 'this.model [[_spawnPty#spawn',
-    reason: 'this.model is gated BEFORE ClaudeTuiSession is constructed by SessionManager against ClaudeTuiSession.getAllowedModels() (models.js ALLOWED_MODEL_IDS, none starting with "-") — the same allowlist and preflight gate cli-session.js\'s own "model" entry documents — unless an operator opted the provider into config.providers.allowAnyModel (not client-reachable).',
+    reason: 'this.model is gated BEFORE ClaudeTuiSession is constructed by SessionManager against ClaudeTuiSession.getAllowedModels() (models.js ALLOWED_MODEL_IDS, none starting with "-") or, for an off-roster id, against the native-id grammar in claude-model-request.js (an alias or claude-[a-z0-9][a-z0-9.-]*, #7855) — the same allowlist and preflight gate cli-session.js\'s own "model" entry documents — unless an operator opted the provider into config.providers.allowAnyModel (not client-reachable).',
   },
   {
     file: 'claude-tui-session.js',
