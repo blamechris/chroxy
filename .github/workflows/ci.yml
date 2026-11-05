@@ -1833,6 +1833,13 @@ jobs:
         # clients and shows up only after a release.
         run: bash scripts/__tests__/merge-updater-feeds.test.sh
 
+      - name: Run updater-feed tests (build/verify/minisign)
+        # #8906/#8917 — release.yml builds each desktop job's feed fragment with
+        # build-updater-feed.mjs and refuses to publish unless verify-updater-feed.mjs
+        # (via lib/minisign-verify.mjs) proves every entry verifies against the
+        # committed pubkey. Fixtures are real `cargo tauri signer` output.
+        run: node scripts/__tests__/updater-feed.test.mjs
+
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs
 

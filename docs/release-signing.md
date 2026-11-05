@@ -4,7 +4,7 @@ This document describes the GitHub Actions secrets used by `release.yml` to sign
 
 ## Tauri updater signing (cross-platform)
 
-Used by both macOS and Windows desktop jobs to sign the auto-update artifacts (`.app.tar.gz.sig`, `.msi.zip.sig`, `latest.json`).
+Used by both macOS and Windows desktop jobs to sign the auto-update payloads and publish the update feed (`latest.json`).
 
 | Secret | Required? | Notes |
 |--------|-----------|-------|
@@ -13,9 +13,24 @@ Used by both macOS and Windows desktop jobs to sign the auto-update artifacts (`
 
 Both must be set and non-empty for signing to run. If either is missing, the workflow passes `-c '{"bundle":{"createUpdaterArtifacts":false}}'` to `cargo tauri build` to suppress the updater bundle entirely. The MSI / DMG / `.app` still build and upload; the `.sig` / `latest.json` outputs do not. The committed `plugins.updater.pubkey` in `tauri.conf.json` remains untouched — only the runtime artifact generation is skipped.
 
+### Artifact layout (Tauri v2, `createUpdaterArtifacts: true`)
+
+The updater payload is whatever the platform installer is, plus a detached signature:
+
+| Platform | Payload | Signature |
+|----------|---------|-----------|
+| macOS | `*.app.tar.gz` (one universal archive, used for both `darwin-aarch64` and `darwin-x86_64`) | `*.app.tar.gz.sig` |
+| Windows | the raw `*.msi` | `*.msi.sig` |
+
+There is no `.msi.zip` (that is the `"v1Compatible"` layout). A `.sig` file is the base64 of a minisign signature box, and that same string is the `signature` field in `latest.json`.
+
 ### Cross-platform feed assembly
 
-The `desktop-macos` and `desktop-windows` jobs each emit their own `latest.json` containing only the platform entries they built. The `github-release` job then downloads both artifacts and runs `scripts/merge-updater-feeds.mjs` to combine them into a single `artifacts/updater/latest.json` whose `platforms` map covers `darwin-aarch64`, `darwin-x86_64`, and `windows-x86_64`. The merged file is what gets attached to the GitHub Release and consumed by the auto-updater endpoint configured in `tauri.conf.json`. If updater signing is disabled for one of the jobs (e.g. signing secrets are only configured for macOS), the merge step still publishes the surviving platform; if neither job produced a feed, no `latest.json` is attached and installed clients keep their existing update endpoint until the next release.
+`cargo tauri build` writes the payload and its `.sig` but **never** a `latest.json` (that file comes from `tauri-action` or by hand). So each desktop job builds its own fragment with `scripts/build-updater-feed.mjs` from the payload and `.sig`, pointing at the tag's release asset (`https://github.com/<repo>/releases/download/v<version>/<file>`), then verifies it in-job (see below). Asset file names must stay within `[A-Za-z0-9._-]`: GitHub renames other characters on upload, which would make the feed URL a 404, and `build-updater-feed.mjs` refuses them. Each fragment contains only the platform entries that job built. The `github-release` job then downloads both artifacts and runs `scripts/merge-updater-feeds.mjs` to combine them into a single `artifacts/updater/latest.json` whose `platforms` map covers `darwin-aarch64`, `darwin-x86_64`, and `windows-x86_64`. The merged file is what gets attached to the GitHub Release and consumed by the auto-updater endpoint configured in `tauri.conf.json`. If updater signing is disabled for one of the jobs (e.g. signing secrets are only configured for macOS), the merge step still publishes the surviving platform; if neither job produced a feed, no `latest.json` is attached and installed clients keep their existing update endpoint until the next release.
+
+### Release-time verification gate
+
+`scripts/verify-updater-feed.mjs` checks a feed the way an installed client does: for every `platforms` entry it finds the asset the URL names (exactly one match), then verifies the embedded signature over those bytes against the `plugins.updater.pubkey` committed in `tauri.conf.json`, using `scripts/lib/minisign-verify.mjs` (pure Node, prehashed `ED` minisign signatures only). It also checks the trusted-comment signature, and that any signed `version:` equals the feed version. It runs twice: in each desktop job right after the fragment is written, and in `github-release` on the merged feed with `--expect-version` set to the tag. Any failure fails the release, so a feed that clients would reject is never published. Tests: `scripts/__tests__/updater-feed.test.mjs`, against signatures produced by `cargo tauri signer`.
 
 ### Generating a new key
 
@@ -88,7 +103,7 @@ gh secret set APPLE_CERTIFICATE_PASSWORD --body 'your-p12-password'
 Used by the `desktop-windows` job to Authenticode-sign the standalone `.msi` so a
 first-time install no longer trips the Windows SmartScreen "Windows protected your
 PC" dialog (#3808). This is **separate from Tauri updater signing** above: the
-updater secrets minisign the auto-update payload (`.msi.zip.sig`), while these
+updater secrets minisign the auto-update payload (`.msi.sig`), while these
 secrets Authenticode-sign the installer that Windows itself trusts.
 
 We use [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/)
@@ -109,13 +124,21 @@ We use [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing
 step is skipped — the MSI still builds and uploads, just unsigned (SmartScreen
 warning persists, as it does today). No partial state.
 
-> **Known gap:** only the standalone `.msi` (the installer users download) is
-> Authenticode-signed. The auto-updater payload (`.msi.zip`) is zipped during the
-> Tauri build step *before* the signing step runs, so its embedded MSI carries the
-> minisign updater signature only, not an Authenticode one. First-install — the
-> SmartScreen pain point #3808 targets — is covered; signing the updater payload
-> too would require moving signing into Tauri's `bundle.windows.signCommand` so it
-> happens pre-zip. Tracked as a follow-up.
+**Ordering.** With `createUpdaterArtifacts: true` the Windows updater payload is the
+raw `.msi`, so Authenticode signing (which rewrites the file) must come *before* the
+updater signature is final. The job therefore runs: build (minisigns the `.msi`) ->
+`Sign MSI (Azure Trusted Signing)` -> `Re-sign MSI for the updater`
+(`cargo tauri signer sign` overwrites `.msi.sig` over the Authenticode-signed bytes)
+-> write and verify the feed. The re-sign step runs only when both updater signing and
+Authenticode signing are enabled; if only updater signing is on, the build's signature
+is already correct. The in-job verification fails the job if the `.msi` in the feed does
+not match its signature (the failure #8906 describes).
+
+> **Known gap:** only the `.msi` container is Authenticode-signed. The executables
+> packaged *inside* the MSI are not signed by this job; that would require moving
+> signing into Tauri's `bundle.windows.signCommand` so each binary is signed during
+> bundling. The updater payload and the downloaded installer are now the same
+> Authenticode-signed file.
 
 ### One-time Azure setup
 
