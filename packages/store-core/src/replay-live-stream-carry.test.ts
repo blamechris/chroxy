@@ -75,6 +75,30 @@ describe('a response still streaming across a full replay swap (#8960)', () => {
     expect(swapped).toEqual([response('done-1', 'finished answer')])
   })
 
+  it('carries a thinking bubble that is still streaming, but not a finished one', () => {
+    const thinking = (id: string, content: string, streaming: boolean): ChatMessage =>
+      ({ id, type: 'thinking', content, timestamp: 1, thinkingStreaming: streaming }) as ChatMessage
+    const before = [
+      thinking('think-done', 'old thought', false),
+      thinking('think-live', 'reasoning so far', true),
+    ]
+    const swapped = fullReplay(before, [], null)
+    expect(swapped.map((m) => m.id)).toEqual(['think-live'])
+    expect(swapped[0]!.content).toBe('reasoning so far')
+  })
+
+  it('does not duplicate a streaming thinking bubble the replay already holds', () => {
+    const before = [
+      { id: 'think-live', type: 'thinking', content: 'reasoning', timestamp: 1, thinkingStreaming: true } as ChatMessage,
+    ]
+    const swapped = fullReplay(
+      before,
+      [{ id: 'think-live', type: 'thinking', content: 'reasoning', timestamp: 1 } as ChatMessage],
+      null,
+    )
+    expect(swapped.map((m) => m.id)).toEqual(['think-live'])
+  })
+
   it('does not resurrect a stale prefix response that is not the streaming one', () => {
     const before = [response('stale-1', 'gone from server'), response('live-1', 'part one ')]
     const swapped = fullReplay(before, [], 'live-1')

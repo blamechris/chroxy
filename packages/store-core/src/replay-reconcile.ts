@@ -1198,7 +1198,11 @@ export interface ReplayEndLiveState {
  * and strands the deltas.
  *
  * An id the replayed tail already holds is NOT carried: the replay is then the
- * authoritative copy and carrying it would duplicate the row. Live last, as in
+ * authoritative copy and carrying it would duplicate the row. That relies on a
+ * server invariant: history only ever holds a COMPLETED response (the entry is
+ * pushed at `stream_end` with its full content; deltas only accumulate in the
+ * server's pending stream), so a replayed same-id copy is never a partial one
+ * that would be poorer than the live copy we drop. Live last, as in
  * {@link orderByProvenance}, since an in-flight response is newer than history.
  */
 function carriedLiveMessages(
