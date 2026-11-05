@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { getErrorPresentation, getAuthRequiredPresentation, parseAuthCause, CLAUDE_LOGIN_COMMAND, type ErrorKind } from './error-presentation'
+import { AUTH_REQUIRED_CAUSES } from '@chroxy/protocol'
+import { getErrorPresentation, getAuthRequiredPresentation, parseAuthCause, AUTH_PRESENTATION_BY_CAUSE, CLAUDE_LOGIN_COMMAND, type ErrorKind } from './error-presentation'
 import { RETRYABLE_ASK_USER_QUESTION_ERROR_CODES } from './ask-user-question-errors'
 
 describe('getErrorPresentation', () => {
@@ -101,15 +102,56 @@ describe('getAuthRequiredPresentation', () => {
   })
 
   it('keeps the alert role for every cause', () => {
-    for (const cause of ['login', 'api_key', 'container', undefined]) {
+    for (const cause of [...AUTH_REQUIRED_CAUSES, undefined]) {
       expect(getAuthRequiredPresentation(cause).role).toBe('alert')
     }
   })
 })
 
 describe('parseAuthCause', () => {
-  it('accepts exactly the three known causes', () => {
+  it('accepts exactly the known causes', () => {
     expect(['login', 'api_key', 'container'].map(parseAuthCause)).toEqual(['login', 'api_key', 'container'])
     for (const bad of ['', 'API_KEY', 'sk-ant-x', 7, null, undefined, {}]) expect(parseAuthCause(bad)).toBeUndefined()
+  })
+})
+
+// #8970: the server's cause roster and the clients' presentation map must agree in
+// BOTH directions. The expected list is written out by hand on purpose: deriving it
+// from either side would leave the test unable to go red (an expectation derived from
+// its own subject, docs/false-safety-guards.md), and a one-directional check is the
+// roster-checked-one-way class from the same catalogue.
+describe('AUTH_REQUIRED cause roster parity (#8970)', () => {
+  const EXPECTED = ['api_key', 'api_key_helper', 'auth_token', 'bedrock', 'container', 'login', 'vertex']
+
+  it('the server roster is exactly the expected causes', () => {
+    expect([...AUTH_REQUIRED_CAUSES].sort()).toEqual(EXPECTED)
+  })
+
+  it('every server cause has a client presentation', () => {
+    const missing = AUTH_REQUIRED_CAUSES.filter((c) => !Object.hasOwn(AUTH_PRESENTATION_BY_CAUSE, c))
+    expect(missing).toEqual([])
+  })
+
+  it('every client presentation is for a real server cause', () => {
+    const orphans = Object.keys(AUTH_PRESENTATION_BY_CAUSE).filter(
+      (c) => !(AUTH_REQUIRED_CAUSES as readonly string[]).includes(c),
+    )
+    expect(orphans).toEqual([])
+  })
+
+  it('every cause parses, and only the login cause offers the host login command', () => {
+    for (const c of AUTH_REQUIRED_CAUSES) {
+      expect(parseAuthCause(c)).toBe(c)
+      expect(getAuthRequiredPresentation(c).showLoginCommand).toBe(c === 'login')
+    }
+  })
+
+  it('every mechanism gets its own headline', () => {
+    const headlines = AUTH_REQUIRED_CAUSES.map((c) => getAuthRequiredPresentation(c).headline)
+    expect(new Set(headlines).size).toBe(AUTH_REQUIRED_CAUSES.length)
+    expect(getAuthRequiredPresentation('bedrock').headline).toMatch(/Bedrock/)
+    expect(getAuthRequiredPresentation('vertex').headline).toMatch(/Vertex/)
+    expect(getAuthRequiredPresentation('auth_token').headline).toMatch(/ANTHROPIC_AUTH_TOKEN/)
+    expect(getAuthRequiredPresentation('api_key_helper').headline).toMatch(/apiKeyHelper/)
   })
 })

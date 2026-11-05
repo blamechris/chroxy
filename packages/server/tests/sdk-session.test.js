@@ -2791,19 +2791,45 @@ describe('SdkSession', () => {
 
       // #8273: the typed cause the chip switches on, per path.
       describe('authCause (#8273)', () => {
-        let savedKey, savedToken
+        // #8970: every env name the classifier looks at, plus an empty temp config
+        // dir so the developer's real settings.json (apiKeyHelper) cannot leak in.
+        const CAUSE_ENV = [
+          'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN',
+          'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CONFIG_DIR',
+        ]
+        let saved, causeDir
         beforeEach(() => {
-          savedKey = process.env.ANTHROPIC_API_KEY
-          savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
-          delete process.env.ANTHROPIC_API_KEY
-          delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+          saved = Object.fromEntries(CAUSE_ENV.map((k) => [k, process.env[k]]))
+          for (const k of CAUSE_ENV) delete process.env[k]
+          causeDir = mkdtempSync(join(tmpdir(), 'chroxy-authcause-sdk-'))
+          process.env.CLAUDE_CONFIG_DIR = causeDir
         })
         afterEach(() => {
-          if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY
-          else process.env.ANTHROPIC_API_KEY = savedKey
-          if (savedToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN
-          else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken
+          for (const k of CAUSE_ENV) {
+            if (saved[k] === undefined) delete process.env[k]
+            else process.env[k] = saved[k]
+          }
+          rmSync(causeDir, { recursive: true, force: true })
         })
+
+        // #8970: the cause is read from the session's real spawn env / settings, and
+        // a non-login mechanism never gets told to run `claude auth login`.
+        for (const [label, setup, cause] of [
+          ['CLAUDE_CODE_USE_BEDROCK', () => { process.env.CLAUDE_CODE_USE_BEDROCK = '1' }, 'bedrock'],
+          ['CLAUDE_CODE_USE_VERTEX', () => { process.env.CLAUDE_CODE_USE_VERTEX = '1' }, 'vertex'],
+          ['ANTHROPIC_AUTH_TOKEN', () => { process.env.ANTHROPIC_AUTH_TOKEN = 'tok-test' }, 'auth_token'],
+          ['an apiKeyHelper in settings.json', () => { writeFileSync(join(causeDir, 'settings.json'), JSON.stringify({ apiKeyHelper: '/bin/key.sh' })) }, 'api_key_helper'],
+        ]) {
+          it(`is ${cause} for ${label}, with advice that is not "log in"`, async () => {
+            setup()
+            const s = createSession()
+            const { errors } = await runTurn(s, () => (async function* () { yield authAssistantMsg; yield resultMsg })())
+            s.destroy()
+            assert.equal(errors[0].code, 'AUTH_REQUIRED')
+            assert.equal(errors[0].authCause, cause)
+            assert.ok(!/auth login/.test(errors[0].message), errors[0].message)
+          })
+        }
 
         it('is login when the session has no env credential (it falls back to a host login)', async () => {
           const s = createSession()

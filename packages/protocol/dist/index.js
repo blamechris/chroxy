@@ -109,6 +109,8 @@ export * from "./codex.js";
 // entry, and store-core / the clients import it without pulling in Zod.
 export * from "./notification-categories.js";
 export * from "./thinking-levels.js";
+// #8970: the roster of AUTH_REQUIRED causes the server tags and the clients present.
+export * from "./auth-causes.js";
 // #7822: one canonical serializer keeps the dashboard and mobile wire shape
 // identical as optional selected-context fields are negotiated.
 export { computeHunks, splitContentLines, DEFAULT_CONTEXT_LINES, MAX_DIFF_LINES } from "./hunk-diff.js";

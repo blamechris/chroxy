@@ -16,7 +16,7 @@
  * reaches both, and the replay-parity fixtures in store-core
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { MAX_SANE_DURATION_MS, AUTH_REQUIRED_CAUSES } from '@chroxy/protocol'
 import { redactWhole, clipRedacted } from './redaction.js'
 
 /**
@@ -262,8 +262,8 @@ function errorMessageText(message) {
   return redactAndClip(String(message), ERROR_TEXT_MAX, ERROR_TRUNCATION_MARKER)
 }
 
-/** #8273: the credential causes an AUTH_REQUIRED error may name on the wire. */
-const AUTH_CAUSES = new Set(['login', 'api_key', 'container'])
+/** #8273 / #8970: the credential causes an AUTH_REQUIRED error may name on the wire. */
+const AUTH_CAUSES = new Set(AUTH_REQUIRED_CAUSES)
 
 /**
  * Longest `code` a client will chip on. A code is an identifier (`stream_stall`,

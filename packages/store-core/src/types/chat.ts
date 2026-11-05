@@ -3,7 +3,7 @@
  *
  * Re-exported via ../types (barrel) — see ./index.ts.
  */
-import type { MarkedTurnOutcome } from '@chroxy/protocol';
+import type { MarkedTurnOutcome, AuthRequiredCause } from '@chroxy/protocol';
 
 /** Attachment metadata stored on a ChatMessage (base64 data cleared after send) */
 export interface MessageAttachment {
@@ -214,11 +214,13 @@ export interface ChatMessage {
    * #8273: only set on `type: 'error'` bubbles whose `code` is `'AUTH_REQUIRED'`.
    * Which credential the failure concerns, so the sign-in chip names the real
    * remedy: `login` (a host `claude auth login`), `api_key` (ANTHROPIC_API_KEY was
-   * rejected) or `container` (the session container needs ANTHROPIC_API_KEY).
+   * rejected) or `container` (the session container needs ANTHROPIC_API_KEY), or one of the
+   * non-login mechanisms (`bedrock`, `vertex`, `auth_token`, `api_key_helper`, #8970).
+   * The roster is `AUTH_REQUIRED_CAUSES` in @chroxy/protocol.
    * Undefined for older servers and where the cause is unknown; renderers then
    * show the login remedy.
    */
-  authCause?: 'login' | 'api_key' | 'container';
+  authCause?: AuthRequiredCause;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**

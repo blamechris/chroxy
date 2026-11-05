@@ -18,6 +18,7 @@
  * rather than re-listing its six codes here.
  */
 
+import { parseAuthRequiredCause, type AuthRequiredCause } from '@chroxy/protocol'
 import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 
 /**
@@ -107,16 +108,12 @@ export function getErrorPresentation(
   return PRESENTATION_BY_CODE[code] ?? GENERIC_PRESENTATION
 }
 
-/** #8273: why a session reported `AUTH_REQUIRED`, as the server tags it on the wire. */
-export type AuthRequiredCause = 'login' | 'api_key' | 'container'
-
-const AUTH_REQUIRED_CAUSES: readonly string[] = ['login', 'api_key', 'container']
+/** #8273 / #8970: why a session reported `AUTH_REQUIRED`, as the server tags it on the wire. */
+export type { AuthRequiredCause }
 
 /** Narrow an untrusted wire value to a known cause; anything else is `undefined`. */
 export function parseAuthCause(value: unknown): AuthRequiredCause | undefined {
-  return typeof value === 'string' && AUTH_REQUIRED_CAUSES.includes(value)
-    ? (value as AuthRequiredCause)
-    : undefined
+  return parseAuthRequiredCause(value)
 }
 
 export interface AuthRequiredPresentation {
@@ -132,7 +129,7 @@ const AUTH_LOGIN_PRESENTATION: AuthRequiredPresentation = {
   showLoginCommand: true,
 }
 
-const AUTH_PRESENTATION_BY_CAUSE: Readonly<Record<AuthRequiredCause, AuthRequiredPresentation>> = {
+export const AUTH_PRESENTATION_BY_CAUSE: Readonly<Record<AuthRequiredCause, AuthRequiredPresentation>> = {
   login: AUTH_LOGIN_PRESENTATION,
   // The session authenticates with ANTHROPIC_API_KEY, so signing in is not the fix.
   api_key: { role: 'alert', headline: 'Your Anthropic API key was rejected', showLoginCommand: false },
@@ -142,6 +139,12 @@ const AUTH_PRESENTATION_BY_CAUSE: Readonly<Record<AuthRequiredCause, AuthRequire
     headline: 'The session container needs ANTHROPIC_API_KEY',
     showLoginCommand: false,
   },
+  // #8970: none of these mechanisms uses `claude auth login`, so the login
+  // command row is wrong advice for every one of them.
+  bedrock: { role: 'alert', headline: 'Amazon Bedrock rejected the AWS credentials', showLoginCommand: false },
+  vertex: { role: 'alert', headline: 'Google Vertex AI rejected the Google Cloud credentials', showLoginCommand: false },
+  auth_token: { role: 'alert', headline: 'Your ANTHROPIC_AUTH_TOKEN was rejected', showLoginCommand: false },
+  api_key_helper: { role: 'alert', headline: 'The apiKeyHelper key was rejected or the helper failed', showLoginCommand: false },
 }
 
 /**
