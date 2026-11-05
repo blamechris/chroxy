@@ -190,7 +190,22 @@ function PlanApprovalCard({
 
 // -- Main ChatView component --
 
-export function ChatView({
+/**
+ * #8953 — one list per session. SessionScreen hands ChatView a different
+ * `messages` array when the active session changes but never remounts it, so the
+ * FlatList kept the previous session's scroll offset, measured row layouts and
+ * render window. Against the other session's rows that window rendered blank or
+ * only the first rows: the store held every message (Files -> Chat, which remounts
+ * the list, showed them all), the list was stale. Keying the whole component by
+ * the active session id gives each session fresh list, scroll and expand state —
+ * the same remount Files -> Chat performed by hand.
+ */
+export function ChatView(props: ChatViewProps) {
+  const sessionId = useConnectionStore((s) => s.activeSessionId);
+  return <ChatViewForSession key={sessionId ?? 'no-session'} {...props} />;
+}
+
+function ChatViewForSession({
   messages,
   scrollViewRef,
   claudeReady,
