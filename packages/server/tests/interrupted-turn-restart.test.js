@@ -249,6 +249,26 @@ describe('interrupted turn after a restart (#8259)', () => {
     assert.ok(second >= ctx.mgr._history.getLastIssuedSeq(ctx.sid) - 1000, 'it never trails what was issued by more than the step')
   })
 
+  it('adopts a persisted reservation far above the fallback gap (restoreSeqReservation is load-bearing)', () => {
+    const ctx = boot()
+    prompt(ctx.mgr, ctx.sid, 'A')
+    ctx.session.sendMessage('A')
+    ctx.mgr._flushPersist()
+    const state = JSON.parse(readFileSync(ctx.stateFilePath, 'utf-8'))
+    state.sessions[0].seqReservedThrough = 500000
+    state.sessions[0].turnInFlight = true
+    writeFileSync(ctx.stateFilePath, JSON.stringify(state))
+    const after = crash(ctx)
+    const history = after.mgr.getHistory(after.sid)
+    const marker = history.find((e) => e.turnOutcome === 'interrupted')
+    assert.ok(marker, 'marked')
+    // the best-effort gap would land near 100000; only the adopted reservation reaches past 500000
+    assert.ok(marker._seq > 500000, `marker seq ${marker._seq} is above the reservation`)
+    const plan = resolveReplayPlan(after.mgr, history, after.sid, 499999, after.mgr.getLatestHistorySeq(after.sid))
+    assert.equal(plan.fullHistory, false, 'the cursor is honoured')
+    assert.ok(history.slice(plan.startOffset).some((e) => e.turnOutcome === 'interrupted'), 'cursor 499999 receives the marker')
+  })
+
   it('restores a state file with no reservation (falls back to the gap)', () => {
     const ctx = boot()
     prompt(ctx.mgr, ctx.sid, 'A')
