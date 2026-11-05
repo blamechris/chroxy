@@ -1204,6 +1204,10 @@ export const RequestConversationTranscriptSchema = z.object({
     // the protocol layer instead of relying on the handler's runtime guard).
     conversationId: z.string().max(256).regex(CONVERSATION_ID_RE, 'conversationId must be a UUID'),
     cwd: z.string().max(4096).optional(),
+    // #7828: which provider's store to read. Optional so existing clients are
+    // unchanged; needed in effect only when the same id exists under more than
+    // one provider, in which case the server refuses rather than picking one.
+    provider: z.string().max(64).optional(),
 });
 export const RequestCostSummarySchema = z.object({
     type: z.literal('request_cost_summary'),

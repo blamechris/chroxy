@@ -621,7 +621,7 @@ describe('conversation-handlers', () => {
 
     it('replays a closed conversation from disk WITHOUT spawning a provider', async () => {
       const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
       const transcript = [
         { type: 'user_input', content: 'hello', timestamp: 1 },
         { type: 'response', content: 'hi there', timestamp: 2 },
@@ -665,7 +665,7 @@ describe('conversation-handlers', () => {
     // session for that reason, not the conversation.
     it('re-seeds the ACTIVE session\'s live subagents, not the conversation\'s', async () => {
       const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
         type: 'request_conversation_transcript',
@@ -691,7 +691,7 @@ describe('conversation-handlers', () => {
     // user opened read-only.
     it('does NOT re-send pending questions (a conversationId has no live session behind it)', async () => {
       const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
         type: 'request_conversation_transcript',
@@ -710,7 +710,7 @@ describe('conversation-handlers', () => {
 
     it('re-seeds nothing when the client has no active session', async () => {
       const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: null }), {
         type: 'request_conversation_transcript',
@@ -761,7 +761,7 @@ describe('conversation-handlers', () => {
       const sessions = new Map()
       sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
       const ctx = makeCtx(sessions)
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/home/dev/Projects/secret' }])
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/home/dev/Projects/secret' }])
       ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'x', timestamp: 1 }])
       const client = makeClient({ boundSessionId: 'bound-1' })
 
@@ -784,7 +784,7 @@ describe('conversation-handlers', () => {
       sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
       const ctx = makeCtx(sessions)
       ctx.scanConversations = createSpy(async () => [
-        { conversationId: CONV_ID, cwd: '/home/dev/Projects/chroxy/packages/server' },
+        { conversationId: CONV_ID, provider: 'claude', cwd: '/home/dev/Projects/chroxy/packages/server' },
       ])
       ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'in scope', timestamp: 1 }])
       const client = makeClient({ boundSessionId: 'bound-1' })
@@ -810,7 +810,7 @@ describe('conversation-handlers', () => {
       sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
       const ctx = makeCtx(sessions)
       ctx.scanConversations = createSpy(async () => [
-        { conversationId: CONV_ID, cwd: '/home/dev/Projects/chroxy/real' },
+        { conversationId: CONV_ID, provider: 'claude', cwd: '/home/dev/Projects/chroxy/real' },
       ])
       let readPath = null
       ctx.readConversationTranscript = createSpy(async (p) => {

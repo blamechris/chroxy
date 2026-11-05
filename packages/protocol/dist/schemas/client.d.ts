@@ -1050,6 +1050,7 @@ export declare const RequestConversationTranscriptSchema: z.ZodObject<{
     type: z.ZodLiteral<"request_conversation_transcript">;
     conversationId: z.ZodString;
     cwd: z.ZodOptional<z.ZodString>;
+    provider: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const RequestCostSummarySchema: z.ZodObject<{
     type: z.ZodLiteral<"request_cost_summary">;
@@ -1949,6 +1950,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"request_conversation_transcript">;
     conversationId: z.ZodString;
     cwd: z.ZodOptional<z.ZodString>;
+    provider: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"request_cost_summary">;
 }, z.core.$strip>, z.ZodObject<{

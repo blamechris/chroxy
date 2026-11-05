@@ -13,6 +13,7 @@
  * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
  * See sdk-session.js or cli-session.js for a worked example.
  */
+import { join } from 'path'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
@@ -373,6 +374,39 @@ export function getProviderDataDirs() {
     dirs.push(dir)
   }
   return dirs
+}
+
+/**
+ * The provider each transcript source belongs to, derived from the registry
+ * name: every `claude-*` registry entry shares the one `~/.claude` store and is
+ * the `claude` family; anything else is its own name.
+ */
+export function transcriptProviderOf(registryName) {
+  return typeof registryName === 'string' && registryName.startsWith('claude-') ? 'claude' : registryName
+}
+
+/**
+ * Provider-tagged transcript sources (#7828): `{ provider, projectsDir }` for
+ * every registered (non-hidden) provider with a `dataDir`. Same dedup as
+ * getProviderDataDirs, but the tag survives so the transcript reader can tell
+ * WHICH provider's store a conversation was found in instead of assuming Claude.
+ * The first registered name for a directory wins (Docker aliases and the hidden
+ * codex-appserver share their base's directory).
+ *
+ * @returns {Array<{ provider: string, projectsDir: string }>}
+ */
+export function getProviderTranscriptSources() {
+  const seen = new Set()
+  const sources = []
+  for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+    if (HIDDEN.has(name)) continue
+    const dir = ProviderClass.dataDir
+    if (typeof dir !== 'string' || dir.length === 0) continue
+    if (seen.has(dir)) continue
+    seen.add(dir)
+    sources.push({ provider: transcriptProviderOf(name), projectsDir: join(dir, 'projects') })
+  }
+  return sources
 }
 
 /**

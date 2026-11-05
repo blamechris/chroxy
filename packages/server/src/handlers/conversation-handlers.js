@@ -8,7 +8,8 @@
 import { realpathSync } from 'fs'
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { resolveJsonlPath, readConversationHistoryWithMetaAsync as defaultReadConversationTranscript } from '../jsonl-reader.js'
+import { readConversationTranscriptStrictAsync as defaultReadConversationTranscript } from '../jsonl-reader.js'
+import { resolveTranscriptSource } from '../transcript-sources.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
 import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
@@ -21,13 +22,21 @@ const log = createLogger('ws')
 // before it reaches the filesystem, closing path-traversal via the id segment.
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// Prefer the provider-TAGGED sources (#7828) so every discovered conversation
+// carries its provider; fall back to bare dirs (untagged), then the scanner
+// default (~/.claude/projects).
+function scanOptsFor(ctx) {
+  const tagged = ctx.runtime.transcriptSources
+  if (Array.isArray(tagged) && tagged.length > 0) return { projectsDirs: tagged }
+  return ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
+}
+
 async function handleListConversations(ws, client, msg, ctx) {
   // ctx.scanConversations override allows tests to inject a stub and skip real fs.
   const scan = ctx.scanConversations || defaultScanConversations
   try {
-    // Pass provider-driven projectsDirs when available (#2965); falls back to
-    // the scanner's default (~/.claude/projects) when not set.
-    const scanOpts = ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
+    // Pass provider-driven sources when available (#2965, #7828).
+    const scanOpts = scanOptsFor(ctx)
     const all = await scan(scanOpts)
     // Adversary A8: scope results so a bound pairing-issued client
     // cannot enumerate conversations outside its session cwd.
@@ -161,20 +170,55 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     return
   }
 
+  // Every failure from here on names the conversation it answers, with a
+  // stable code, so a viewer waiting on THIS conversation can settle on the
+  // reason instead of waiting out its inactivity timer.
+  const fail = (message) => ctx.transport.send(ws, {
+    type: 'session_error',
+    message,
+    code: 'TRANSCRIPT_UNAVAILABLE',
+    conversationId,
+  })
+
   // Resolve the conversation's recorded cwd authoritatively from the persisted
   // store (the scanner reads the same JSONL layer list_conversations does). Only
   // fall back to a client-provided cwd hint when the scan can't find it (e.g. a
   // tiny conversation below the scanner's MIN_FILE_SIZE floor).
   const scan = ctx.scanConversations || defaultScanConversations
-  let conv = null
+  //
+  // The same conversation id can exist under more than one provider's store.
+  // Collect EVERY match; the optional `provider` on the request selects one. An
+  // id that matches several providers with no selector is refused rather than
+  // resolved by whichever the scanner happened to list first (#7828).
+  let matches = []
   try {
-    const scanOpts = ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
-    const all = await scan(scanOpts)
-    conv = Array.isArray(all) ? all.find((c) => c?.conversationId === conversationId) || null : null
+    const all = await scan(scanOptsFor(ctx))
+    matches = Array.isArray(all) ? all.filter((c) => c?.conversationId === conversationId) : []
   } catch (err) {
     // Scan failure is non-fatal — fall through to the client-provided cwd hint.
     log.warn(`Transcript scan failed for ${conversationId}: ${err.message}`)
   }
+  const wantedProvider = typeof msg.provider === 'string' && msg.provider ? msg.provider : null
+  // Authorization comes BEFORE any answer that depends on how many records
+  // exist or which providers hold them: a bound client is shown only the
+  // records it may see, and when every record is outside its scope it gets the
+  // same response a single out-of-scope record always got.
+  if (matches.length > 0) {
+    matches = scopeConversationsToClient(matches, client, ctx)
+    if (matches.length === 0) {
+      fail('Not authorized to view this conversation')
+      return
+    }
+  }
+  if (wantedProvider) matches = matches.filter((c) => c?.provider === wantedProvider)
+  if (matches.length > 1) {
+    const providers = new Set(matches.map((c) => c?.provider))
+    fail(providers.size > 1
+      ? 'This conversation id exists under more than one provider and cannot be opened unambiguously from here. Open it from its provider\'s own session list.'
+      : 'Conversation id has more than one record for this provider, so it cannot be read unambiguously')
+    return
+  }
+  const conv = matches[0] || null
 
   let cwd = conv?.cwd || null
   if (!cwd && typeof msg.cwd === 'string' && msg.cwd) {
@@ -182,7 +226,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // create/resume paths enforce before trusting it to resolve a filesystem path.
     const cwdError = validateCwdAllowed(msg.cwd, ctx.services.config)
     if (cwdError) {
-      sendSessionError(ws, ctx, cwdError)
+      fail(cwdError)
       return
     }
     // Defense-in-depth: validateCwdAllowed already resolved + vetted the realpath
@@ -192,13 +236,13 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     try {
       cwd = realpathSync(msg.cwd)
     } catch {
-      sendSessionError(ws, ctx, `Cannot resolve path: ${msg.cwd}`)
+      fail(`Cannot resolve path: ${msg.cwd}`)
       return
     }
   }
 
   if (!cwd) {
-    sendSessionError(ws, ctx, `Conversation not found: ${conversationId}`)
+    fail(`Conversation not found: ${conversationId}`)
     return
   }
 
@@ -206,7 +250,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   // use. A bound client that can't see this cwd gets an empty set → reject.
   const scoped = scopeConversationsToClient([{ conversationId, cwd }], client, ctx)
   if (scoped.length === 0) {
-    sendSessionError(ws, ctx, 'Not authorized to view this conversation')
+    fail('Not authorized to view this conversation')
     return
   }
 
@@ -221,11 +265,30 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   // `getFullHistoryAsync` uses for the full-history path (#7484) rather than a
   // second meta implementation, so both replays report the same caps from one
   // place and cannot drift apart.
+  //
+  // #7828 — the file is chosen by the conversation's OWN provider and locator,
+  // never by assuming Claude's layout. A refusal (unknown/unsupported provider,
+  // mismatched or escaping locator) is a session_error; nothing is retried
+  // against another provider's store.
+  const source = resolveTranscriptSource({
+    // A conversation the scan found carries its provider (absent => unknown).
+    // The cwd-hint path has no scan record and is Claude-only unless the
+    // request names another provider, which then reports its own refusal.
+    provider: conv ? conv.provider : (wantedProvider || 'claude'),
+    conversationId,
+    cwd,
+    sourceLocator: conv?.sourceLocator ?? null,
+    sources: ctx.runtime.transcriptSources,
+  })
+  if (!source.ok) {
+    fail(source.reason)
+    return
+  }
   const readTranscript = ctx.readConversationTranscript || defaultReadConversationTranscript
   let messages = []
   let truncated = false
   try {
-    const read = await readTranscript(resolveJsonlPath(cwd, conversationId))
+    const read = await readTranscript(source.path, undefined, { expectedIdentity: source.identity })
     if (Array.isArray(read)) {
       // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a
       // TEST-ONLY injection seam — nothing in production injects it, so this
@@ -243,14 +306,11 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
       truncated = read.truncated === true
     }
   } catch (err) {
-    // A read error is graceful — surface an empty transcript rather than a crash.
+    // #7828 — a missing/unreadable file or a corrupt record is a DATA error, not
+    // an empty successful transcript: say so, and send no replay frames.
     log.warn(`Failed to read transcript for ${conversationId}: ${err.message}`)
-    messages = []
-    // And unreadable is NOT truncated: nothing was dropped from a slice that
-    // does not exist, and claiming otherwise would put a permanent "history
-    // incomplete" banner in front of every conversation whose file has gone.
-    // jsonl-reader takes the same position on its own catch.
-    truncated = false
+    fail(err?.name === 'TranscriptDataError' ? err.message : 'Transcript could not be read. Try again.')
+    return
   }
 
   // Stream back using the SAME wire shape as request_full_history so existing

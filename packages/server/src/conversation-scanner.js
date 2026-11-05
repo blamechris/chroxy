@@ -97,7 +97,7 @@ async function extractMetadata(filePath) {
   }
 }
 
-async function performScan(projectsDir) {
+async function performScan(projectsDir, provider) {
   let projectDirs
   try {
     projectDirs = await readdir(projectsDir, { withFileTypes: true })
@@ -129,6 +129,7 @@ async function performScan(projectsDir) {
       candidates.push({
         filePath: join(dirPath, file),
         conversationId: file.replace('.jsonl', ''),
+        locator: `${encodedName}/${file}`,
         decodedPath,
         projectName,
       })
@@ -150,6 +151,12 @@ async function performScan(projectsDir) {
 
     return {
       conversationId: c.conversationId,
+      // #7828: which provider's store this was found in, and an opaque,
+      // read-only locator (`<project dir>/<file>`, relative to that provider's
+      // projects dir) the matching transcript adapter resolves. Never a path
+      // the client can substitute: the reader re-validates it.
+      provider,
+      sourceLocator: c.locator,
       project: cwd || c.decodedPath,
       projectName: cwd ? basename(cwd) : c.projectName,
       modifiedAt: fileStat.mtime.toISOString(),
@@ -194,14 +201,26 @@ export async function scanConversations(opts = {}) {
   let dirs
   if (Array.isArray(opts.projectsDirs) && opts.projectsDirs.length > 0) {
     // Deduplicate while preserving order
-    dirs = [...new Set(opts.projectsDirs)]
+    // Entries are a bare directory (untagged: provider null) or a
+    // `{ provider, projectsDir }` source (#7828). Dedup on directory + provider.
+    const seenEntries = new Set()
+    dirs = []
+    for (const e of opts.projectsDirs) {
+      const entry = typeof e === 'string' ? { projectsDir: e, provider: null } : { projectsDir: e?.projectsDir, provider: e?.provider ?? null }
+      if (typeof entry.projectsDir !== 'string' || entry.projectsDir === '') continue
+      const k = `${entry.provider}\0${entry.projectsDir}`
+      if (seenEntries.has(k)) continue
+      seenEntries.add(k)
+      dirs.push(entry)
+    }
   } else {
-    dirs = [opts.projectsDir || PROJECTS_DIR]
+    // The default store is Claude's; an explicit single dir is untagged.
+    dirs = [{ projectsDir: opts.projectsDir || PROJECTS_DIR, provider: opts.projectsDir ? null : 'claude' }]
   }
   const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
 
   // Cache key is the sorted+joined list of directories (sorted for stability)
-  const cacheKey = [...dirs].sort().join('\0')
+  const cacheKey = dirs.map(d => `${d.provider}\u0001${d.projectsDir}`).sort().join('\0')
 
   // Check cache
   const now = Date.now()
@@ -220,7 +239,7 @@ export async function scanConversations(opts = {}) {
   // Scan all directories and merge results
   _pendingScanKey = cacheKey
   _pendingScan = (async () => {
-    const perDirResults = await Promise.all(dirs.map(d => performScan(d)))
+    const perDirResults = await Promise.all(dirs.map(d => performScan(d.projectsDir, d.provider)))
     // Flatten, sort merged results by most recently modified
     const merged = perDirResults.flat()
     merged.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)

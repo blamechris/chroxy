@@ -92,6 +92,7 @@
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
  * @property {string[]} projectsDirs - Per-provider projects dirs (computed fresh each access).
+ * @property {Array<{provider: string, projectsDir: string}>} transcriptSources - The same dirs tagged with the owning provider (#7828).
  * @property {string[]} userAgentsDirs - Per-provider agents dirs (computed fresh each access).
  * @property {Map} evaluatorIterations - sessionId → stable auto-evaluator iteration counter (#3186/#3637).
  * @property {Map} inputDedupRecords - sessionId → bounded clientMessageId acceptance records (#7822).
@@ -211,6 +212,7 @@ export const CTX_NAMESPACES = {
   runtime: [
     'draining',
     'projectsDirs',
+    'transcriptSources',
     'userAgentsDirs',
     'evaluatorIterations',
     'inputDedupRecords',

@@ -5573,6 +5573,28 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     }
 
     case 'session_error': {
+      // A refused transcript request names the conversation it answers (the
+      // server's TRANSCRIPT_UNAVAILABLE code + conversationId): end that viewer's
+      // loading state with the server's reason now, rather than leaving it to the
+      // inactivity timer to report a known failure as a timeout. Correlated by
+      // the echoed id, never by message text; any other session_error is left to
+      // the generic handling below.
+      if (msg.code === 'TRANSCRIPT_UNAVAILABLE' && typeof msg.conversationId === 'string') {
+        const failedId = msg.conversationId;
+        endTranscriptFetch(failedId);
+        clearTranscriptWatchdog(failedId);
+        const viewer = get().transcriptViewer;
+        if (viewer.conversationId === failedId && viewer.status === 'loading') {
+          set({
+            transcriptViewer: {
+              ...viewer,
+              status: 'error',
+              error: typeof msg.message === 'string' && msg.message ? msg.message : 'Could not load transcript.',
+            },
+          });
+        }
+        return;
+      }
       // Crash branch: flip session health + notify; non-crash branch: rewrite
       // SESSION_TOKEN_MISMATCH into the actionable bound-session hint (#2904)
       // and surface via toast/banner. Parser is shared via store-core; the
