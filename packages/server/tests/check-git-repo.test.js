@@ -104,14 +104,122 @@ describe('the shared git-repo probe (#8972)', () => {
   })
 })
 
-describe('check_git_repo wiring (#8972)', () => {
-  it('the handler forwards path and requestId to fileOps.checkGitRepo', () => {
-    const calls = []
-    const ctx = { services: { fileOps: { checkGitRepo: (...a) => calls.push(a) } } }
+describe('check_git_repo authority (#8972)', () => {
+  function run(client) {
+    const probes = []
+    const refusals = []
+    const ctx = {
+      services: {
+        fileOps: {
+          checkGitRepo: (...a) => probes.push(a),
+          refuseGitRepoCheck: (...a) => refusals.push(a),
+        },
+      },
+    }
     const ws = {}
-    fileHandlers.check_git_repo(ws, {}, { type: 'check_git_repo', path: '/p', requestId: 'r9' }, ctx)
-    assert.deepEqual(calls, [[ws, '/p', 'r9']])
+    fileHandlers.check_git_repo(ws, client, { type: 'check_git_repo', path: '/p', requestId: 'r9' }, ctx)
+    return { probes, refusals, ws }
+  }
+
+  it('an unbound client (null or undefined boundSessionId) and a primary client get the real probe', () => {
+    for (const client of [{ boundSessionId: null }, {}, { boundSessionId: undefined, isPrimaryToken: true }]) {
+      const { probes, refusals, ws } = run(client)
+      assert.deepEqual(probes, [[ws, '/p', 'r9']])
+      assert.equal(refusals.length, 0)
+    }
   })
+
+  it('a bound client — including boundSessionId "" — is refused and no probe is started', () => {
+    for (const client of [{ boundSessionId: 'sess-a' }, { boundSessionId: '' }, null, undefined]) {
+      const { probes, refusals, ws } = run(client)
+      assert.equal(probes.length, 0, `no probe for ${JSON.stringify(client)}`)
+      assert.deepEqual(refusals, [[ws, '/p', 'r9']])
+    }
+  })
+
+  it('the refusal is the "cannot tell" reply and touches no filesystem', async () => {
+    const sent = []
+    const ops = createBrowserOps(
+      (_ws, msg) => sent.push(msg),
+      () => { throw new Error('no cwd resolution expected') },
+      () => { throw new Error('no path validation expected') },
+    )
+    // A repo that would answer true if probed.
+    const base = mkdtempSync(join(homedir(), '.chroxy-test-8972r-'))
+    try {
+      execFileSync(GIT, ['init', '-q', base])
+      ops.refuseGitRepoCheck({}, base, 'rq')
+      assert.deepEqual(sent, [{ type: 'git_repo_check_result', path: base, isGitRepo: null, requestId: 'rq' }])
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('check_git_repo spawn budget (#8972)', () => {
+  let base
+
+  beforeEach(() => {
+    base = mkdtempSync(join(homedir(), '.chroxy-test-8972b-'))
+    mkdirSync(join(base, 'repo', 'sub'), { recursive: true })
+    execFileSync(GIT, ['init', '-q', join(base, 'repo')])
+  })
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  function ops(sent) {
+    return createBrowserOps(
+      (_ws, msg) => sent.push(msg),
+      (cwd) => resolveSessionCwd(cwd, new Map(), 60_000),
+      (absPath, cwd) => validatePathWithinCwd(absPath, cwd, new Map(), 60_000),
+    )
+  }
+
+  it('caps distinct in-flight probes per socket at 4: the rest answer null without probing', async () => {
+    const sent = []
+    const o = ops(sent)
+    const ws = {}
+    // Six distinct spellings of the same repo; every one would answer true if probed.
+    // (concatenated, not join()ed, so the spellings stay distinct strings)
+    const paths = ['repo', 'repo/.', 'repo/sub/..', 'repo/./sub/..', 'repo/sub/../.', 'repo//']
+      .map((p) => `${base}/${p}`)
+    await Promise.all(paths.map((p, i) => o.checkGitRepo(ws, p, `r${i}`)))
+    const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
+    assert.deepEqual(['r0', 'r1', 'r2', 'r3'].map((id) => byId[id]), [true, true, true, true])
+    assert.deepEqual(['r4', 'r5'].map((id) => byId[id]), [null, null])
+  })
+
+  it('deduplicates an identical in-flight path: duplicates share one probe and do not use budget', async () => {
+    const sent = []
+    const o = ops(sent)
+    const ws = {}
+    const p = `${base}/repo`
+    const distinct = ['repo/.', 'repo/sub/..', 'repo/./sub/..'].map((x) => `${base}/${x}`)
+    await Promise.all([p, p, p, p, p, ...distinct, p].map((x, i) => o.checkGitRepo(ws, x, `d${i}`)))
+    assert.equal(sent.length, 9)
+    assert.ok(sent.every((m) => m.isGitRepo === true), 'every duplicate got the real answer')
+  })
+
+  it('the budget frees up after probes settle, and is per socket', async () => {
+    const sent = []
+    const o = ops(sent)
+    const ws = {}
+    const wsOther = {}
+    const spell = ['repo', 'repo/.', 'repo/sub/..', 'repo/./sub/..', 'repo/sub/../.'].map((x) => `${base}/${x}`)
+    await Promise.all(spell.slice(0, 4).map((x, i) => o.checkGitRepo(ws, x, `a${i}`)))
+    // Same socket again after settling: budget is free.
+    await o.checkGitRepo(ws, spell[4], 'again')
+    // A different socket is unaffected by this one's load.
+    await o.checkGitRepo(wsOther, spell[0], 'other')
+    const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
+    assert.equal(byId.again, true)
+    assert.equal(byId.other, true)
+  })
+})
+
+describe('check_git_repo wiring (#8972)', () => {
 
   it('the client schema accepts a request and rejects a missing or over-long path', () => {
     assert.ok(CheckGitRepoSchema.safeParse({ type: 'check_git_repo', path: '/p', requestId: 'r' }).success)

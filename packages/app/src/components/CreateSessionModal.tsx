@@ -44,6 +44,15 @@ const CODEX_SANDBOX_CHIPS: ReadonlyArray<{ id: '' | CodexSandboxMode; label: str
   ...CODEX_SANDBOX_MODE_META,
 ];
 
+// #8972: request ids for check_git_repo are unique across mounts (module-level
+// counter + per-load random prefix), so a delayed reply from an earlier mount
+// can never match a later mount's request.
+const gitCheckPrefix = Math.random().toString(36).slice(2, 8);
+let gitCheckSeq = 0;
+function nextGitCheckRequestId(): string {
+  return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`;
+}
+
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
@@ -173,13 +182,14 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const requestGitRepoCheck = useConnectionStore((s) => s.requestGitRepoCheck);
   const setGitRepoCheckCallback = useConnectionStore((s) => s.setGitRepoCheckCallback);
   const [gitCheck, setGitCheck] = useState<{ path: string; isGitRepo: boolean | null } | null>(null);
-  const gitCheckSeq = useRef(0);
   const trimmedCwd = cwd.trim();
   useEffect(() => {
     if (!visible || !trimmedCwd || typeof requestGitRepoCheck !== 'function' || typeof setGitRepoCheckCallback !== 'function') return;
-    const requestId = `gitcheck-${++gitCheckSeq.current}`;
+    const requestId = nextGitCheckRequestId();
     setGitRepoCheckCallback((result) => {
-      if (result.requestId !== requestId) return; // superseded request
+      // Superseded request, or a reply for a different path than the one sent
+      // (the server echoes the path verbatim).
+      if (result.requestId !== requestId || result.path !== trimmedCwd) return;
       setGitCheck({ path: trimmedCwd, isGitRepo: result.isGitRepo });
     });
     const t = setTimeout(() => requestGitRepoCheck(trimmedCwd, requestId), 300);

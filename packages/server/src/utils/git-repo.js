@@ -7,8 +7,10 @@ const execFileAsync = promisify(execFile)
 /**
  * The one "is this directory inside a git repository?" probe. Both the
  * worktree-create path (`SessionManager._addDetachedWorktree`) and the
- * New Session dialog's up-front `check_git_repo` query use it, so the dialog
- * can never accept a directory the create path then refuses (#8972).
+ * New Session dialog's up-front `check_git_repo` query use it, so the two
+ * agree on what a repo is (#8972). They can still disagree at the margins
+ * (timeouts, transient failures, the filesystem changing between the check and
+ * Create); the create-time refusal is the backstop.
  *
  * `git -C <dir> rev-parse --git-dir` succeeds for the repo root and for any
  * subdirectory of a repo or worktree. `dir` is the argument of `-C`, so it is

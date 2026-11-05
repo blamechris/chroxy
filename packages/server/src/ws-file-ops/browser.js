@@ -11,6 +11,9 @@ import { isGitRepo } from '../utils/git-repo.js'
 
 const log = createLogger('ws')
 
+// #8972 — max distinct check_git_repo probes in flight per socket.
+const MAX_GIT_CHECKS_PER_CLIENT = 4
+
 // #8012 — the message list_directory / browse_files send when `realpath()`
 // failed with one of these codes for a path INSIDE their boundary. Any other
 // code, or any path outside it, gets the handler's generic denial instead
@@ -687,35 +690,64 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    *
    * Answers `isGitRepo: true | false | null`. `null` means "cannot tell" and
    * the client must leave the switch enabled: the path is outside the home
-   * directory, unresolvable, or not a directory. Those cases collapse into one
-   * answer on purpose, so the reply is never an existence oracle for paths
-   * outside home (same containment as `list_directory`).
+   * directory, unresolvable, not a directory, refused (bound client) or over
+   * the per-client probe budget. Those cases share one answer on purpose, so
+   * the PAYLOAD is uniform for paths outside home (same containment as
+   * `list_directory`); reply timing is not guaranteed uniform.
+   *
+   * Spawn budget: identical in-flight paths from one socket share one probe,
+   * and a socket may have at most MAX_GIT_CHECKS_PER_CLIENT distinct probes in
+   * flight; beyond that the reply is `null` without touching the filesystem.
    */
-  async function checkGitRepo(ws, requestedPath, requestId) {
-    const reply = (isGitRepoValue) => {
-      const msg = { type: 'git_repo_check_result', path: typeof requestedPath === 'string' ? requestedPath : '', isGitRepo: isGitRepoValue }
-      if (requestId) msg.requestId = requestId
-      sendFn(ws, msg)
-    }
+  const inFlightChecks = new WeakMap() // ws -> Map<trimmed path, Promise<boolean|null>>
+
+  function replyGitRepoCheck(ws, requestedPath, requestId, isGitRepoValue) {
+    const msg = { type: 'git_repo_check_result', path: typeof requestedPath === 'string' ? requestedPath : '', isGitRepo: isGitRepoValue }
+    if (requestId) msg.requestId = requestId
+    sendFn(ws, msg)
+  }
+
+  async function probeGitRepo(trimmed) {
     try {
       const home = homedir()
-      const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
-      if (!trimmed) return reply(null)
       const absPath = normalize(trimmed.startsWith('~')
         ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
         : resolve(trimmed))
       const [realAbs, homeReal] = await Promise.all([realpath(absPath), realpath(home)])
-      if (!isPathWithin(realAbs, homeReal)) return reply(null)
-      if (!(await stat(realAbs)).isDirectory()) return reply(null)
-      return reply(await isGitRepo(realAbs))
+      if (!isPathWithin(realAbs, homeReal)) return null
+      if (!(await stat(realAbs)).isDirectory()) return null
+      return await isGitRepo(realAbs)
     } catch {
-      return reply(null)
+      return null
     }
+  }
+
+  /** Refuse without any path resolution or filesystem access (bound clients). */
+  function refuseGitRepoCheck(ws, requestedPath, requestId) {
+    replyGitRepoCheck(ws, requestedPath, requestId, null)
+  }
+
+  async function checkGitRepo(ws, requestedPath, requestId) {
+    const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
+    if (!trimmed) return replyGitRepoCheck(ws, requestedPath, requestId, null)
+    let pending = ws && typeof ws === 'object' ? inFlightChecks.get(ws) : undefined
+    if (!pending) {
+      pending = new Map()
+      if (ws && typeof ws === 'object') inFlightChecks.set(ws, pending)
+    }
+    let probe = pending.get(trimmed)
+    if (!probe) {
+      if (pending.size >= MAX_GIT_CHECKS_PER_CLIENT) return replyGitRepoCheck(ws, requestedPath, requestId, null)
+      probe = probeGitRepo(trimmed).finally(() => { pending.delete(trimmed) })
+      pending.set(trimmed, probe)
+    }
+    return replyGitRepoCheck(ws, requestedPath, requestId, await probe)
   }
 
   return {
     listDirectory,
     checkGitRepo,
+    refuseGitRepoCheck,
     browseFiles,
     listFiles,
     listSlashCommands,

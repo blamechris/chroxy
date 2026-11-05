@@ -142,6 +142,38 @@ describe('CreateSessionModal worktree checkbox: non-git directory (#8972)', () =
     expect(worktreeCheckbox().disabled).toBe(false)
   })
 
+  it('ignores a reply carrying the right requestId but a different path', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    render(<Modal {...baseProps} />)
+    openAdvanced()
+    typeCwd('/tmp/plain')
+    await settle()
+    reply(false, { path: '/some/other/dir' })
+    expect(worktreeCheckbox().disabled).toBe(false)
+    reply(false) // the matching path is still accepted
+    expect(worktreeCheckbox().disabled).toBe(true)
+  })
+
+  it('request ids are unique across mounts: a reply from an earlier mount is ignored', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    const first = render(<Modal {...baseProps} />)
+    openAdvanced()
+    typeCwd('/tmp/plain')
+    await settle()
+    const earlier = requests[requests.length - 1]!
+    first.unmount()
+    render(<Modal {...baseProps} />)
+    openAdvanced()
+    typeCwd('/tmp/plain')
+    await settle()
+    const later = requests[requests.length - 1]!
+    expect(later.requestId).not.toBe(earlier.requestId)
+    act(() => { callback?.({ path: earlier.path, isGitRepo: false, requestId: earlier.requestId }) })
+    expect(worktreeCheckbox().disabled).toBe(false)
+  })
+
   it('re-enables the checkbox when the cwd changes to a path that has no answer', async () => {
     mockStore()
     const Modal = await loadModal()

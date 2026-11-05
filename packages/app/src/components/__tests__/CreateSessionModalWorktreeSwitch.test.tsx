@@ -180,6 +180,34 @@ describe('CreateSessionModal — #8972 worktree switch refuses a non-git directo
     expect(sw(c).props.disabled).toBe(false);
   });
 
+  it('ignores a reply carrying the right requestId but a different path', () => {
+    const c = mount();
+    setCwd(c, '/tmp/plain');
+    settle();
+    answer(false, { path: '/some/other/dir' });
+    expect(sw(c).props.disabled).toBe(false);
+    answer(false);
+    expect(sw(c).props.disabled).toBe(true);
+  });
+
+  it('request ids are unique across mounts: a reply from an earlier mount is ignored', () => {
+    const first = mount();
+    setCwd(first, '/tmp/plain');
+    settle();
+    const earlier = requests[requests.length - 1];
+    act(() => {
+      first.unmount();
+    });
+    const second = mount();
+    setCwd(second, '/tmp/plain');
+    settle();
+    expect(requests[requests.length - 1].requestId).not.toBe(earlier.requestId);
+    act(() => {
+      reply!({ path: earlier.path, isGitRepo: false, requestId: earlier.requestId });
+    });
+    expect(sw(second).props.disabled).toBe(false);
+  });
+
   it('does not submit worktree:true for a non-git directory ticked before the answer arrived', () => {
     const c = mount();
     setCwd(c, '/tmp/plain');

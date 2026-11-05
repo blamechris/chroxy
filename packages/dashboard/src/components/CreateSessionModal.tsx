@@ -284,6 +284,15 @@ export function resolveCreateSessionModel(
     : undefined
 }
 
+// #8972: request ids for check_git_repo are unique across mounts (module-level
+// counter + per-load random prefix), so a delayed reply from an earlier mount
+// can never match a later mount's request.
+const gitCheckPrefix = Math.random().toString(36).slice(2, 8)
+let gitCheckSeq = 0
+function nextGitCheckRequestId(): string {
+  return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`
+}
+
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
@@ -397,12 +406,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const requestGitRepoCheck = useConnectionStore(s => s.requestGitRepoCheck)
   const setGitRepoCheckCallback = useConnectionStore(s => s.setGitRepoCheckCallback)
   const [gitCheck, setGitCheck] = useState<{ path: string; isGitRepo: boolean | null } | null>(null)
-  const gitCheckSeq = useRef(0)
   useEffect(() => {
     if (!open || !trimmedCwd || typeof requestGitRepoCheck !== 'function' || typeof setGitRepoCheckCallback !== 'function') return
-    const requestId = `gitcheck-${++gitCheckSeq.current}`
+    const requestId = nextGitCheckRequestId()
     setGitRepoCheckCallback((result) => {
-      if (result.requestId !== requestId) return // superseded request
+      // Superseded request, or a reply for a different path than the one sent
+      // (the server echoes the path verbatim).
+      if (result.requestId !== requestId || result.path !== trimmedCwd) return
       setGitCheck({ path: trimmedCwd, isGitRepo: result.isGitRepo })
     })
     const t = setTimeout(() => { requestGitRepoCheck(trimmedCwd, requestId) }, 300)
