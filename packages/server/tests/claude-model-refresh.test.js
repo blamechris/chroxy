@@ -11,16 +11,18 @@ import { tmpdir } from 'node:os'
 import {
   refreshClaudeModels,
   stopClaudeModelRefresh,
+  resumeClaudeModelRefresh,
+  RETRY_BACKOFF_MS,
   managedPolicyBlockingProbe,
   _resetClaudeModelRefreshForTests,
 } from '../src/claude-model-refresh.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
-import { DockerSdkSession } from '../src/docker-sdk-session.js'
 import { getModels, resetModels } from '../src/models.js'
 import { SessionManager } from '../src/session-manager.js'
 import { scheduleProviderModelsRefresh } from '../src/ws-history.js'
-import { startBootModelRefresh } from '../src/server-cli.js'
+import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #8275 — a claude-tui daemon never starts an SDK session, so the Claude
@@ -180,6 +182,42 @@ describe('refreshClaudeModels (#8275)', () => {
     assert.equal(q.calls.length, 3)
   })
 
+  it('stamps the 6 h window on success only: a failure retries after the 5 min backoff, not 6 h', async () => {
+    let t = 1_000_000
+    let fail = true
+    const calls = []
+    const q = (args) => {
+      const handle = { closed: 0, close() { handle.closed++ }, supportedModels: async () => { if (fail) throw new Error('offline'); return LIVE } }
+      calls.push(args)
+      return handle
+    }
+    const deps = { bin: () => '/c', queryFn: q, now: () => t }
+    assert.equal(await refreshClaudeModels(deps), null)
+    assert.equal(calls.length, 1)
+    t += RETRY_BACKOFF_MS - 1
+    assert.equal(await refreshClaudeModels(deps), null, 'still backing off')
+    assert.equal(calls.length, 1)
+    t += 2
+    fail = false
+    assert.ok(await refreshClaudeModels(deps), 'retried after the backoff')
+    assert.equal(calls.length, 2)
+    t += 6 * 60 * 60 * 1000 - 1
+    assert.equal(await refreshClaudeModels(deps), null, 'success holds the 6 h window')
+    t += 2
+    assert.ok(await refreshClaudeModels(deps), 'refreshes once the window is over')
+    assert.equal(calls.length, 3)
+  })
+
+  it('treats an empty answer and a policy skip as failures for the backoff', async () => {
+    let t = 5_000_000
+    const q = stubQuery(async () => [])
+    const deps = { bin: () => '/c', queryFn: q, now: () => t }
+    assert.equal(await refreshClaudeModels(deps), null)
+    t += 1000
+    assert.equal(await refreshClaudeModels(deps), null)
+    assert.equal(q.calls.length, 1)
+  })
+
   it('shares one in-flight refresh between concurrent callers', async () => {
     const q = stubQuery(async () => LIVE)
     const deps = { bin: () => '/c', queryFn: q }
@@ -210,6 +248,7 @@ describe('managed policy (#8275 review)', () => {
   for (const [label, name, body] of [
     ['managed hooks', 'managed-settings.json', { hooks: { SessionStart: [{ hooks: [] }] } }],
     ['managed hooks in managed-settings.d', 'managed-settings.d/10-x.json', { hooks: { Stop: [{}] } }],
+    ['managed plugins', 'managed-settings.json', { enabledPlugins: { 'x@y': true } }],
     ['managed MCP', 'managed-mcp.json', { mcpServers: {} }],
     ['an unparseable policy file', 'managed-settings.json', '{not json'],
   ]) {
@@ -258,11 +297,18 @@ describe('real SDK transport with a fake child (#8275 review)', () => {
       spawnFn: (command, args, opts) => { spawned.push({ command, args, opts }); return child },
       ...extra,
     })
+    // The escalation timers are unref'd (a daemon must be able to exit), so a
+    // test awaiting them has to hold the event loop open itself.
+    const keepAlive = setInterval(() => {}, 25)
+    p.finally(() => clearInterval(keepAlive))
     return { p, spawned }
   }
   const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
 
-  it('writes only the initialize request, launches with the inert flags, and leaves no timer on success', async () => {
+  it('writes only the initialize request, launches with the inert flags, and leaves no timer on success', async (t) => {
+    const prevMarker = process.env.CLAUDECODE
+    process.env.CLAUDECODE = '1'
+    t.after(() => { if (prevMarker === undefined) delete process.env.CLAUDECODE; else process.env.CLAUDECODE = prevMarker })
     const child = fakeChild()
     const before = timers()
     const { p, spawned } = run(child)
@@ -278,9 +324,34 @@ describe('real SDK transport with a fake child (#8275 review)', () => {
     assert.ok(args.includes('{"disableAllHooks":true}'))
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk')
     assert.equal(spawned[0].opts.signal, undefined, 'no spawn signal: cleanup is ours')
+    assert.equal(spawned[0].command, '/fake/claude', 'the verified binary, exactly')
+    assert.equal(spawned[0].opts.cwd, tmpdir())
+    assert.equal(spawned[0].opts.env.CLAUDECODE, undefined, 'parent session marker stripped after SDK serialization')
+    assert.deepEqual(spawned[0].opts.stdio, ['pipe', 'pipe', 'ignore'])
     assert.deepEqual(child.signals, ['SIGTERM'], 'a child that exits on TERM is never KILLed')
     assert.equal(child.exitCode, 0)
     assert.equal(timers(), before, 'the escalation timer is cleared once the child exits')
+  })
+
+  it('does not keep the daemon alive on its escalation timers (they are unref\'d)', async () => {
+    const realSetTimeout = globalThis.setTimeout
+    const seen = new Map()
+    globalThis.setTimeout = (fn, ms, ...rest) => {
+      const t = realSetTimeout(fn, ms, ...rest)
+      if (ms === 1337 || ms === 1338) seen.set(ms, t)
+      return t
+    }
+    try {
+      const child = fakeChild({ ignoreTerm: true })
+      const { p } = run(child, { termGraceMs: 1337, killWaitMs: 1338 })
+      await new Promise((resolve) => realSetTimeout(resolve, 80))
+      assert.ok(seen.has(1337), 'the TERM->KILL timer was armed')
+      assert.equal(seen.get(1337).hasRef(), false)
+      child.kill('SIGKILL')
+      await p
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
   })
 
   it('SIGKILLs a child that ignores SIGTERM and holds inFlight until it is gone', async () => {
@@ -334,47 +405,10 @@ describe('real SDK transport with a fake child (#8275 review)', () => {
   })
 })
 
-describe('boot wiring (#8275 review)', () => {
-  it('startBootModelRefresh refreshes through the verified gate for a Claude provider only', async () => {
-    const calls = []
-    class P { static refreshLiveModels(deps) { calls.push(deps.bin()); return Promise.resolve([]) } }
-    const sessionManager = { verifyOneShotExecutable: (cls) => { assert.equal(cls, P); return '/verified' } }
-    await startBootModelRefresh({ providerType: 'claude-tui', sessionManager, getProviderFn: () => P })
-    assert.deepEqual(calls, ['/verified'])
-    assert.equal(startBootModelRefresh({ providerType: 'codex', sessionManager, getProviderFn: () => P }), null)
-    assert.equal(calls.length, 1)
-  })
-
-  it('startBootModelRefresh swallows a failing refresh', async () => {
-    class P { static refreshLiveModels() { return Promise.reject(new Error('boom')) } }
-    await startBootModelRefresh({ providerType: 'claude-tui', sessionManager: {}, getProviderFn: () => P })
-  })
-
-  it('startCliServer actually calls startBootModelRefresh', async () => {
-    const src = await readFile(new URL('../src/server-cli.js', import.meta.url), 'utf8')
-    const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module' })
-    const fn = ast.body.map((n) => (n.type === 'ExportNamedDeclaration' ? n.declaration : n))
-      .find((n) => n?.type === 'FunctionDeclaration' && n.id.name === 'startCliServer')
-    assert.ok(fn, 'startCliServer found')
-    let found = false
-    const walk = (n) => {
-      if (!n || typeof n.type !== 'string' || found) return
-      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'startBootModelRefresh') { found = true; return }
-      for (const k of Object.keys(n)) {
-        const v = n[k]
-        if (Array.isArray(v)) v.forEach(walk)
-        else if (v && typeof v === 'object') walk(v)
-      }
-    }
-    walk(fn.body)
-    assert.ok(found, 'startCliServer must call startBootModelRefresh at boot')
-  })
-})
-
 describe('provider wiring (#8275)', () => {
-  it('claude-tui and claude-sdk expose the refresh hook ws-history calls', () => {
+  it('only claude-tui exposes the session-less refresh hook; claude-sdk keeps its in-session flow', () => {
     assert.equal(typeof ClaudeTuiSession.refreshLiveModels, 'function')
-    assert.equal(typeof SdkSession.refreshLiveModels, 'function')
+    assert.equal(typeof SdkSession.refreshLiveModels, 'undefined')
   })
 
   it('is not a catalog-source seam: the Claude classes declare no refreshModels', () => {
@@ -388,33 +422,143 @@ describe('provider wiring (#8275)', () => {
     assert.ok(models && models.length > 0)
   })
 
-  it('a containerised SDK subclass does not refresh from the host claude', async () => {
-    const q = stubQuery(async () => LIVE)
-    assert.equal(await DockerSdkSession.refreshLiveModels({ bin: () => '/c', queryFn: q }), null)
-    assert.equal(q.calls.length, 0)
-  })
-
-  it('a client connecting on a claude-tui daemon triggers the refresh through the verified gate and pushes the roster', async () => {
+  it('a client connecting does NOT start a probe (it is user-initiated, not connect-initiated)', async () => {
     const original = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'refreshLiveModels')
-    const seen = []
-    ClaudeTuiSession.refreshLiveModels = async (deps) => { seen.push(deps.bin()); return [{ id: 'sonnet-5-5' }] }
+    let calls = 0
+    ClaudeTuiSession.refreshLiveModels = async () => { calls++; return [{ id: 'x' }] }
     try {
       const sent = []
-      const verified = []
       const ctx = {
-        sessionManager: { verifyOneShotExecutable: (cls) => { verified.push(cls); return '/verified/claude' } },
+        sessionManager: { verifyOneShotExecutable: () => '/verified/claude' },
         send: (_ws, msg) => sent.push(msg),
       }
       scheduleProviderModelsRefresh(ctx, { readyState: 1 }, 'claude-tui')
-      await new Promise((resolve) => setImmediate(resolve))
-      await new Promise((resolve) => setImmediate(resolve))
-      assert.deepEqual(seen, ['/verified/claude'])
-      assert.equal(verified[0], ClaudeTuiSession)
-      assert.equal(sent.length, 1)
-      assert.equal(sent[0].type, 'available_models')
-      assert.equal(sent[0].provider, 'claude-tui')
+      for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(calls, 0)
+      assert.equal(sent.length, 0)
     } finally {
       Object.defineProperty(ClaudeTuiSession, 'refreshLiveModels', original)
     }
+  })
+
+  it('neither server-cli (boot) nor ws-history (connect) references the refresh', async () => {
+    for (const file of ['../src/server-cli.js', '../src/ws-history.js']) {
+      const src = await readFile(new URL(file, import.meta.url), 'utf8')
+      const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module' })
+      const hits = []
+      const walk = (n) => {
+        if (!n || typeof n.type !== 'string') return
+        if (n.type === 'Identifier' && /^(refreshLiveModels|refreshClaudeModels|startBootModelRefresh)$/.test(n.name)) hits.push(n.name)
+        if (n.type === 'Literal' && typeof n.value === 'string' && n.value.includes('claude-model-refresh')) hits.push(n.value)
+        for (const k of Object.keys(n)) {
+          const v = n[k]
+          if (Array.isArray(v)) v.forEach(walk)
+          else if (v && typeof v === 'object') walk(v)
+        }
+      }
+      walk(ast)
+      assert.deepEqual(hits, [], `${file} must not start a probe`)
+    }
+  })
+})
+
+describe('session start triggers the probe (#8275)', () => {
+  const mk = (name, { refresh = true } = {}) => {
+    const calls = []
+    class Fake extends EventEmitter {
+      constructor(opts = {}) { super(); this.cwd = opts.cwd; this.model = opts.model; this.isRunning = false; this.resumeSessionId = null }
+      static get capabilities() { return { permissions: false, inProcessPermissions: false, modelSwitch: true, permissionModeSwitch: true, planMode: false, resume: false, terminal: false } }
+      start() { this.isRunning = true; return Promise.resolve() }
+      destroy() { this.isRunning = false }
+      sendMessage() {}
+      interrupt() {}
+      setModel() { return false }
+      setPermissionMode() { return false }
+    }
+    if (refresh) {
+      Fake.refreshLiveModels = (deps) => { calls.push(deps.bin()); return Promise.resolve([{ id: 'sonnet-5-5' }]) }
+    }
+    declareUnknownCustomization(Fake)
+    registerProvider(name, Fake)
+    return { Fake, calls }
+  }
+  const manager = () => new SessionManager({ skipPreflight: true, maxSessions: 8, stateFilePath: join(dir, `st-${process.hrtime.bigint()}.json`), defaultCwd: tmpdir() })
+  const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setImmediate(resolve)) }
+
+  it('a user-created session probes once, through the verified gate, and announces models_updated', async () => {
+    const { Fake, calls } = mk('test-8275-tui')
+    const mgr = manager()
+    const events = []
+    mgr.on('session_event', (e) => { if (e.event === 'models_updated') events.push(e) })
+    const id = mgr.createSession({ provider: 'test-8275-tui', skipPersist: true })
+    assert.equal(calls.length, 0, 'start is not delayed by the probe')
+    await settle()
+    assert.equal(calls.length, 1)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].sessionId, id)
+    assert.deepEqual(events[0].data.models, [{ id: 'sonnet-5-5' }])
+    assert.ok(Fake)
+    mgr.destroyAll()
+  })
+
+  it('a restored session does not probe', async () => {
+    const { calls } = mk('test-8275-restore')
+    const mgr = manager()
+    mgr.createSession({ provider: 'test-8275-restore', skipPersist: true, isRestore: true })
+    await settle()
+    assert.equal(calls.length, 0)
+    mgr.destroyAll()
+  })
+
+  it('a provider without the hook (claude-sdk style) does not probe', async () => {
+    const { calls } = mk('test-8275-nohook', { refresh: false })
+    const mgr = manager()
+    mgr.createSession({ provider: 'test-8275-nohook', skipPersist: true })
+    await settle()
+    assert.equal(calls.length, 0)
+    mgr.destroyAll()
+  })
+
+  it('a second session within the window does not probe again (real module throttle)', async () => {
+    const q = stubQuery(async () => LIVE)
+    class Tui extends EventEmitter {
+      constructor(opts = {}) { super(); this.cwd = opts.cwd; this.model = opts.model; this.isRunning = false; this.resumeSessionId = null }
+      static get capabilities() { return { permissions: false, inProcessPermissions: false, modelSwitch: true, permissionModeSwitch: true, planMode: false, resume: false, terminal: false } }
+      static refreshLiveModels(deps) { return refreshClaudeModels(deps) }
+      start() { return Promise.resolve() }
+      destroy() {}
+      sendMessage() {}
+      interrupt() {}
+      setModel() { return false }
+      setPermissionMode() { return false }
+    }
+    declareUnknownCustomization(Tui)
+    registerProvider('test-8275-throttle', Tui)
+    const mgr = new SessionManager({
+      skipPreflight: true, maxSessions: 8, defaultCwd: tmpdir(), stateFilePath: join(dir, 'st-throttle.json'),
+      modelRefreshDeps: { queryFn: q, managedDir: null },
+    })
+    // skipPreflight makes the gate return the provider's own resolvedBinary,
+    // which the fake lacks: give it one so the query is reached.
+    Tui.resolvedBinary = '/fake/claude'
+    mgr.createSession({ provider: 'test-8275-throttle', skipPersist: true })
+    await settle()
+    mgr.createSession({ provider: 'test-8275-throttle', skipPersist: true })
+    await settle()
+    assert.equal(q.calls.length, 1)
+    mgr.destroyAll()
+  })
+
+  it('destroyAll latches the module off and a new SessionManager lifts it', async () => {
+    const q = stubQuery(async () => LIVE)
+    const deps = { bin: () => '/c', queryFn: q, force: true }
+    const m1 = manager()
+    m1.destroyAll()
+    assert.equal(await refreshClaudeModels(deps), null)
+    assert.equal(q.calls.length, 0)
+    const m2 = manager()
+    assert.ok(await refreshClaudeModels(deps), 'a later manager can refresh')
+    m2.destroyAll()
+    resumeClaudeModelRefresh()
   })
 })

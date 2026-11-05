@@ -1,53 +1,62 @@
 /**
  * #8275 — refresh the Claude model registry from the installed `claude`
- * without a session.
+ * without an SDK session.
  *
  * The picker is fed by the live list `claude` reports (`supportedModels()`).
  * Chroxy used to ask for it only when a claude-sdk session initialised, so a
  * daemon whose sessions are claude-tui (the default) kept the list it warmed
  * from `models-cache.json` at boot indefinitely.
  *
- * What a refresh runs: ONE prompt-less Agent SDK `query()` against the verified
- * `claude` binary. The prompt is an async iterable that never yields, so WE
- * send no user turn; the only traffic we write is the SDK's initialize control
- * request, whose answer is `supportedModels()`. `persistSession: false` and
- * `settingSources: []` keep it from writing a transcript or loading the user's,
- * project's or local settings.
+ * WHEN it runs: only from a user-created claude-tui session, after that
+ * session's own claude has started (`SessionManager._refreshLiveModelsAfterStart`).
+ * The daemon never runs it at boot, on client connect or on restore. That is a
+ * deliberate boundary, not a tuning choice: this probe launches the same
+ * `claude`, with the same user/managed/plugin configuration, that the user's own
+ * session just launched, and whether a launch can be made inert cannot be proven
+ * from here (see Residual risk).
  *
- * Startup is made inert as far as the pinned SDK (0.2.141) allows, because
- * `settingSources: []` does NOT cover managed settings, global `~/.claude.json`
- * config or Claude.ai MCP connectors, and a SessionStart hook can return
- * `initialUserMessage`, which the CLI turns into a user turn on its own:
- *   - `settings: { disableAllHooks: true }`  (`--settings`) — no hooks / statusLine
- *   - `strictMcpConfig: true` + `mcpServers: {}` — only the (empty) --mcp-config
- *     is read, so no configured or connector MCP server starts
- *   - `tools: []` (`--tools ""`) — no built-in tool exists to call
- *   - `permissionMode: 'dontAsk'` — anything not pre-approved is denied
- *   - `maxTurns: 1` — even an injected turn is a single bounded turn
- * Residual risk, stated honestly: a managed-policy hook is NOT disabled by a
- * non-managed `disableAllHooks`. File-based managed policy (hooks or
- * managed-mcp.json under the platform's ClaudeCode directory) is detected and
- * the probe is SKIPPED with a log line. MDM / registry / remote-managed policy
- * and plugin-supplied hooks cannot be seen from here, so "no tokens" is a
- * guarantee about what chroxy sends, not an unconditional one about what a
- * hostile-or-unusual policy makes `claude` do on its own; the bounds above
- * (no tools, no MCP, one turn, denied permissions) cap what that can cost.
+ * What a refresh runs: ONE prompt-less Agent SDK `query()` against the verified
+ * `claude` binary. The prompt is an async iterable that never yields, so chroxy
+ * sends no user turn; the only traffic it writes is the SDK's initialize control
+ * request, whose answer is `supportedModels()`. `persistSession: false` and
+ * `settingSources: []` keep it from writing a transcript or loading user,
+ * project or local settings.
+ *
+ * Defence in depth (NOT a guarantee of inertness), as far as the pinned SDK
+ * (0.2.141) allows:
+ *   - `settings: { disableAllHooks: true }` (`--settings`)
+ *   - `strictMcpConfig: true` + `mcpServers: {}` — only the empty --mcp-config
+ *   - `tools: []` (`--tools ""`), `permissionMode: 'dontAsk'`, `maxTurns: 1`
+ *   - the probe is SKIPPED when file-based managed policy is visible: managed
+ *     hooks, managed `enabledPlugins`, or `managed-mcp.json`.
+ *
+ * Residual risk: a managed-policy hook is not disabled by a non-managed
+ * `disableAllHooks`, and plugins enabled by managed policy keep their
+ * SessionStart hooks. macOS managed preferences, Windows HKLM/HKCU policy and
+ * remote-managed settings can supply hooks too and are not detectable from
+ * files. Hook commands run outside tool permissions, and a SessionStart
+ * `initialUserMessage` can start a turn, so the probe can cost billed inference
+ * (`maxTurns: 1` bounds the turns, not retries). Because it only runs beside a
+ * claude-tui session the user just started, any such startup hook is one that
+ * session's own start also triggers. Do not read this as "no tokens".
  *
  * Lifecycle: the child is spawned through the SDK's `spawnClaudeCodeProcess`
  * so this module owns it until a CONFIRMED exit. (The SDK's own cleanup sends
  * SIGTERM on abort, which sets `killed`, and its transport `close()` then skips
- * the TERM→KILL escalation for a child that ignores SIGTERM.) Cleanup is
- * close() → TERM → bounded wait → KILL → bounded wait, independent of
+ * the TERM->KILL escalation for a child that ignores SIGTERM.) Cleanup is
+ * close() -> TERM -> bounded wait -> KILL -> bounded wait, independent of
  * `killed`, and `inFlight` stays set until it completes. `stopClaudeModelRefresh`
  * (called from `SessionManager.destroyAll`, which every shutdown path runs)
  * cancels a running probe, SIGKILLs its child synchronously and latches the
- * module so no later client connect can start another.
+ * module so nothing starts another during shutdown; a new `SessionManager`
+ * lifts the latch (`resumeClaudeModelRefresh`).
  *
  * Contract: best-effort and bounded. Every failure (no binary, refused by the
- * provenance gate, SDK throw, timeout, empty answer) returns null and leaves
- * the registry and cache file as they were. At most one refresh runs at a time
- * and a refresh is attempted at most once per `minIntervalMs`, because the
- * trigger (a client connecting) fires far more often than claude changes.
+ * provenance gate, SDK throw, timeout, empty answer, policy skip) returns null
+ * and leaves the registry and cache file as they were. At most one refresh runs
+ * at a time. The 6 h window is stamped on SUCCESS only; after a failure the next
+ * attempt waits `RETRY_BACKOFF_MS` (5 min), so an offline or not-yet-ready
+ * claude cannot freeze the picker for hours.
  * `CHROXY_DISABLE_MODEL_REFRESH=1` turns it off (the test harness sets it).
  */
 
@@ -65,6 +74,7 @@ const log = createLogger('claude-model-refresh')
 
 export const REFRESH_TIMEOUT_MS = 20_000
 export const REFRESH_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000
+export const RETRY_BACKOFF_MS = 5 * 60 * 1000
 
 /**
  * The SDK's per-model effort answer (`supportsEffort` + `supportedEffortLevels`)
@@ -161,6 +171,7 @@ export function managedPolicyBlockingProbe(dir = managedSettingsDir()) {
     let parsed
     try { parsed = JSON.parse(text) } catch { return `cannot parse ${file}` }
     if (hasEntries(parsed?.hooks)) return `managed hooks in ${file}`
+    if (hasEntries(parsed?.enabledPlugins)) return `managed plugins in ${file}`
   }
   try {
     readFileSync(join(dir, 'managed-mcp.json'))
@@ -174,14 +185,21 @@ export function managedPolicyBlockingProbe(dir = managedSettingsDir()) {
 let inFlight = null
 let active = null
 let stopped = false
-let lastAttemptAt = -Infinity
+let lastSuccessAt = -Infinity
+let lastFailureAt = -Infinity
 
 /** Test seam: forget the throttle, the stop latch and any in-flight refresh. */
 export function _resetClaudeModelRefreshForTests() {
   inFlight = null
   active = null
   stopped = false
-  lastAttemptAt = -Infinity
+  lastSuccessAt = -Infinity
+  lastFailureAt = -Infinity
+}
+
+/** A new daemon lifetime (a new SessionManager): lift the shutdown latch. */
+export function resumeClaudeModelRefresh() {
+  stopped = false
 }
 
 /**
@@ -208,7 +226,8 @@ export function stopClaudeModelRefresh() {
  * @param {number} [deps.timeoutMs]
  * @param {number} [deps.termGraceMs]
  * @param {number} [deps.killWaitMs]
- * @param {number} [deps.minIntervalMs]
+ * @param {number} [deps.minIntervalMs] - window after a SUCCESS
+ * @param {number} [deps.retryBackoffMs] - window after a failure
  * @param {() => number} [deps.now]
  * @param {boolean} [deps.force] - ignore the throttle
  * @returns {Promise<object[]|null>} the converted roster, or null (skipped / failed)
@@ -223,6 +242,7 @@ export function refreshClaudeModels(deps = {}) {
     termGraceMs = TERM_GRACE_MS,
     killWaitMs = KILL_WAIT_MS,
     minIntervalMs = REFRESH_MIN_INTERVAL_MS,
+    retryBackoffMs = RETRY_BACKOFF_MS,
     now = Date.now,
     force = false,
   } = deps
@@ -231,11 +251,15 @@ export function refreshClaudeModels(deps = {}) {
   // Operator/harness opt-out. An injected `queryFn` is a test double that can
   // spawn nothing, so it is exempt: the module's own tests exercise the path.
   if (process.env.CHROXY_DISABLE_MODEL_REFRESH === '1' && !deps.queryFn) return Promise.resolve(null)
-  if (!force && now() - lastAttemptAt < minIntervalMs) return Promise.resolve(null)
-  lastAttemptAt = now()
+  if (!force && (now() - lastSuccessAt < minIntervalMs || now() - lastFailureAt < retryBackoffMs)) return Promise.resolve(null)
   const run = { killNow: () => {} }
   active = run
   inFlight = runRefresh({ bin, queryFn, spawnFn, managedDir, timeoutMs, termGraceMs, killWaitMs, run })
+    .then((models) => {
+      if (models) lastSuccessAt = now()
+      else lastFailureAt = now()
+      return models
+    })
     .finally(() => { inFlight = null; if (active === run) active = null })
   return inFlight
 }
@@ -278,7 +302,9 @@ function confirmExit(track, { termGraceMs, killWaitMs }) {
         log.warn(`Claude model refresh child (pid ${child.pid}) did not exit after SIGKILL`)
         finish()
       }, killWaitMs)
+      giveUpTimer.unref?.()
     }, termGraceMs)
+    killTimer.unref?.()
   })
 }
 

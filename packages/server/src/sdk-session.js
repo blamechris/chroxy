@@ -8,7 +8,7 @@ import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-
 import { CLAUDE_SDK_CUSTOMIZATION } from './provider-customization.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, getRosterModelRow, ALLOWED_MODEL_IDS } from './models.js'
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
-import { effortRoster, annotateSupportedModels, refreshClaudeModels } from './claude-model-refresh.js'
+import { effortRoster, annotateSupportedModels } from './claude-model-refresh.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
@@ -406,22 +406,6 @@ export class SdkSession extends BaseSession {
    */
   static get resolvedBinary() {
     return resolveClaudeBinary()
-  }
-
-  /**
-   * #8275 — the hook `scheduleProviderModelsRefresh` (ws-history.js) calls on
-   * every post-auth `available_models` push. Deliberately NOT named
-   * `refreshModels`: that name marks a registry as a catalog-source registry
-   * (`getRegistryForProvider`'s discovery seam, #7776, and the #7731 roster
-   * parity guard), which the Claude registry is not — its list is replaced
-   * wholesale by `updateModels`, exactly as the SDK push already did. It
-   * refreshes the shared Claude registry from the installed claude without a
-   * session (see claude-model-refresh.js).
-   * A containerised subclass skips it (its claude is not the host one).
-   */
-  static refreshLiveModels(deps = {}) {
-    if (this.capabilities?.containerized) return Promise.resolve(null)
-    return refreshClaudeModels(deps)
   }
 
   /**
