@@ -3544,29 +3544,53 @@ export class ClaudeTuiSession extends BaseSession {
 
   /**
    * #8979: wait (bounded) for the SessionStart hook's marker, then validate it.
-   * Resolves once a parseable marker passes validation; throws
-   * NATIVE_ENDPOINT_ROUTE_MISMATCH at once for a parseable marker that fails
-   * it (waiting cannot change a verdict the hook already wrote), and
-   * NATIVE_ENDPOINT_UNVERIFIED if no parseable marker appears before the
-   * deadline (or the PTY/session went away first). An unparseable file is
-   * treated as not-yet-written: the hook's write is not atomic.
+   * Resolves true once a parseable marker passes validation. Resolves false,
+   * without touching any spawn state, when the wait ended because the session
+   * is being destroyed or its PTY already exited: teardown belongs to
+   * destroy() / _onPtyGone, and fabricating a refusal here would race them.
+   * Throws NATIVE_ENDPOINT_ROUTE_MISMATCH at once for a parseable marker that
+   * fails validation (waiting cannot change a verdict the hook already wrote),
+   * and NATIVE_ENDPOINT_UNVERIFIED if no parseable marker appears before the
+   * deadline or the marker cannot be read for a reason other than absence.
+   * Only an absent file (ENOENT), empty content or unparseable JSON counts as
+   * not-yet-written (the hook's write is not atomic).
    */
   async _verifyNativeRouteMarker(nonce) {
-    if (this._connectionAuthRoute !== 'native') return
+    if (this._connectionAuthRoute !== 'native') return true
     const markerPath = join(this._sinkDir, 'native-route.json')
     const waitMs = this._nativeRouteMarkerWaitMs ?? ClaudeTuiSession.NATIVE_ROUTE_MARKER_WAIT_MS
     const pollMs = ClaudeTuiSession.NATIVE_ROUTE_MARKER_POLL_MS
     const deadline = Date.now() + waitMs
     let marker
     for (;;) {
+      let raw
       try {
-        marker = JSON.parse(readFileSync(markerPath, 'utf8'))
-        rmSync(markerPath, { force: true })
-        break
-      } catch {
-        marker = undefined
+        raw = readFileSync(markerPath, 'utf8')
+      } catch (err) {
+        if (err?.code !== 'ENOENT') {
+          ;(this._log || log).warn(`native-route marker unreadable (${err?.code || err?.message}) — stopping the connection`)
+          throw nativeConnectionError(
+            'NATIVE_ENDPOINT_UNVERIFIED',
+            'Claude Code endpoint route marker could not be read, so this native connection was stopped.',
+          )
+        }
       }
-      if (this._destroying || this._ptyExited || Date.now() >= deadline) break
+      if (raw) {
+        try {
+          marker = JSON.parse(raw)
+        } catch {
+          marker = undefined // partially written; read again
+        }
+        if (marker !== undefined) {
+          // Best-effort: a failed delete must not turn a valid marker into a refusal.
+          try { rmSync(markerPath, { force: true }) } catch (err) {
+            ;(this._log || log).warn(`could not remove native-route marker: ${err?.message || err}`)
+          }
+          break
+        }
+      }
+      if (this._destroying || this._ptyExited) return false
+      if (Date.now() >= deadline) break
       await new Promise((resolve) => {
         this._nativeRouteMarkerWake = resolve
         this._nativeRouteMarkerTimer = setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now())))
@@ -3598,6 +3622,7 @@ export class ClaudeTuiSession extends BaseSession {
       }
     }
     this._nativeRouteVerifiedForSpawn = true
+    return true
   }
 
   /**
@@ -4000,7 +4025,9 @@ export class ClaudeTuiSession extends BaseSession {
     }
     if (nativeRouteNonce && !this._ptyExited) {
       try {
-        await this._verifyNativeRouteMarker(nativeRouteNonce)
+        // false: destroy() / a real PTY exit ended the wait and owns teardown;
+        // leave _term, _ptyExited and the kill escalation to them (#8979).
+        if (!(await this._verifyNativeRouteMarker(nativeRouteNonce))) return
       } catch (err) {
         // #8057: the SessionStart route marker is the native route's last
         // verdict — a custom endpoint / token / gateway / cloud selector

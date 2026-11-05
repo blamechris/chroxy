@@ -899,7 +899,9 @@ describe('ClaudeTuiSession', () => {
         try {
           const started = Date.now()
           await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === 'NATIVE_ENDPOINT_UNVERIFIED')
-          assert.ok(Date.now() - started >= 380, 'waited out the deadline before refusing')
+          const elapsed = Date.now() - started
+          assert.ok(elapsed >= 380, 'waited out the deadline before refusing')
+          assert.ok(elapsed < 3000, 'and refused promptly after it, not much later')
           assert.equal(holder.killed, true)
           assert.equal(candidate._nativeRouteMarkerTimer, null, 'no timer left behind')
         } finally {
@@ -926,20 +928,94 @@ describe('ClaudeTuiSession', () => {
         }
       })
 
-      it('destroy() during the wait ends it promptly and leaves no timer', async () => {
+      it('destroy() during the wait leaves teardown to destroy(): no refusal, SIGKILL escalation still runs for a PTY that ignores SIGTERM', async () => {
         ClaudeTuiSession.prototype._spawnPty = origSpawnPty
         const sink = mkdtempSync(join(fakeHome, 'marker-destroy-'))
         const { candidate } = makeCandidate(sink, 30000)
+        const termSignals = []
+        const procSignals = []
+        // A PTY that ignores SIGTERM and never reports an exit.
+        candidate._ptyModOverride = {
+          spawn: () => ({
+            pid: 4343,
+            kill: (sig) => { termSignals.push(sig) },
+            onData: () => {},
+            onExit: () => {},
+            on: () => {},
+          }),
+        }
+        mock.method(process, 'kill', (pid, sig) => {
+          procSignals.push([pid, sig])
+          if (sig === 0) return
+          throw new Error('ESRCH')
+        })
+        const savedDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'DESTROY_GRACE_MS')
+        Object.defineProperty(ClaudeTuiSession, 'DESTROY_GRACE_MS', { configurable: true, get: () => 100 })
         try {
-          const pending = origSpawnPty.call(candidate, false).catch((e) => e)
+          const pending = origSpawnPty.call(candidate, false).then(() => 'resolved', (e) => e)
           await new Promise((r) => setTimeout(r, 150))
+          assert.equal(candidate.writeTerminalInput('x'), false, 'raw input is refused while verification is pending')
+          candidate.on('error', () => {})
+          const sent = await candidate.sendMessage('hi')
+          assert.equal(sent?.ok, false, 'sendMessage is refused while verification is pending')
+
           const started = Date.now()
           await candidate.destroy()
-          const err = await pending
-          assert.equal(err.code, 'NATIVE_ENDPOINT_UNVERIFIED')
+          const outcome = await pending
+          assert.equal(outcome, 'resolved', 'a deliberate destroy is not a coded refusal')
           assert.ok(Date.now() - started < 2000, 'destroy did not wait out the 30 s deadline')
           assert.equal(candidate._nativeRouteMarkerTimer, null)
+          assert.equal(candidate._spawnRefusal, null, 'no refusal latched')
+          assert.equal(candidate._ptyExited, false, '_ptyExited stays false until a real exit')
+          assert.notEqual(candidate.agentConnection.readiness.state, 'blocked')
+
+          await new Promise((r) => setTimeout(r, 300))
+          assert.deepEqual(termSignals, ['SIGTERM', 'SIGKILL'], 'escalation reaches SIGKILL')
         } finally {
+          Object.defineProperty(ClaudeTuiSession, 'DESTROY_GRACE_MS', savedDescriptor)
+          mock.restoreAll()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('an unreadable marker (not ENOENT) fails closed promptly instead of waiting out the deadline', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-unreadable-'))
+        // A directory at the marker path: readFileSync fails with EISDIR, not ENOENT.
+        mkdirSync(join(sink, 'native-route.json'))
+        const { candidate, holder } = makeCandidate(sink, 30000)
+        try {
+          const started = Date.now()
+          await assert.rejects(
+            origSpawnPty.call(candidate, false),
+            (err) => err.code === 'NATIVE_ENDPOINT_UNVERIFIED' && /could not be read/.test(err.message),
+          )
+          assert.ok(Date.now() - started < 2000, 'did not wait for the deadline')
+          assert.equal(holder.killed, true)
+        } finally {
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('a failed marker delete does not turn a valid marker into a refusal', { skip: process.platform === 'win32' }, async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-nodelete-'))
+        const { candidate, holder } = makeCandidate(sink, 5000)
+        const timer = setTimeout(() => {
+          writeFileSync(join(sink, 'native-route.json'), good(holder.nonce))
+          chmodSync(sink, 0o500) // the unlink now fails with EACCES
+        }, 200)
+        try {
+          if (process.getuid?.() === 0) return // root ignores directory modes; nothing to prove
+          await origSpawnPty.call(candidate, false)
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+          assert.equal(holder.killed, false)
+        } finally {
+          clearTimeout(timer)
+          chmodSync(sink, 0o700)
+          candidate._term = null
+          await candidate.destroy()
           rmSync(sink, { recursive: true, force: true })
         }
       })
