@@ -252,6 +252,14 @@ export function withHookFsTimeout(promise, ms, label) {
  */
 export const SINK_BASE_UNTRUSTED_CODE = 'SINK_BASE_UNTRUSTED'
 
+/**
+ * #7881: coded startup diagnostic for a claude child that was alive but produced
+ * NO PTY bytes through the whole warmup window while no readiness signal arrived
+ * either. Seen live with a child blocked in getcwd() on a macOS privacy-protected
+ * directory. The session is not advertised ready until bytes (or a signal) show up.
+ */
+export const STARTUP_NO_OUTPUT_CODE = 'STARTUP_NO_OUTPUT'
+
 export class ClaudeTuiSession extends BaseSession {
   static get customizationDescriptor() {
     return CLAUDE_TUI_CUSTOMIZATION
@@ -698,6 +706,9 @@ export class ClaudeTuiSession extends BaseSession {
     // they detect a settled composer when no ~/.claude/sessions file exists.
     this._lastOutputMs = 0
     this._sawFirstOutput = false
+    // #7881: warmup expired with a live child that printed nothing and gave no
+    // readiness signal; `ready` is withheld until output arrives.
+    this._startupNoOutput = false
     // #8324: monotonic time of the last byte `writeTerminalInput` wrote (null =
     // never). See getRestartBlockers.
     this._lastTerminalInputMs = null
@@ -2789,6 +2800,47 @@ export class ClaudeTuiSession extends BaseSession {
     // seeding of the restored history, so the notice is recorded after the
     // history it explains and a client that connects later, or replays, sees it.
     this._deliverWipedConversationNotice()
+    if (this._withholdReadyForSilentChild()) return
+    this._processReady = true
+    this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
+    this._emitConfiguredMcpServers()
+  }
+
+  /**
+   * #7881: the text of the STARTUP_NO_OUTPUT diagnostic — what was observed, where,
+   * and the likeliest cause, so the operator can act without reading daemon logs.
+   */
+  _startupNoOutputMessage() {
+    const waitedSec = Math.round(ClaudeTuiSession.SPAWN_WARMUP_MAX_MS / 1000)
+    return `claude produced no output during startup (waited ${waitedSec}s) in ${this.cwd}. ` +
+      'The directory may be inaccessible to the Chroxy daemon (for example a macOS ' +
+      'privacy-protected folder such as Documents, Desktop or Downloads); try a ' +
+      'different working directory or grant the daemon access. This session is not ' +
+      'ready and becomes ready if claude starts producing output.'
+  }
+
+  /**
+   * #7881: if warmup latched a silent child, surface the coded diagnostic and
+   * report true so the caller skips `ready`; readiness is declared later by
+   * `_declareReadyAfterSilentStart` when output arrives. Shared by start() and
+   * the respawn path so both refuse to claim success the same way.
+   */
+  _withholdReadyForSilentChild() {
+    if (!this._startupNoOutput) return false
+    ;(this._log || log).warn(`claude TUI produced no output during warmup — withholding ready (${STARTUP_NO_OUTPUT_CODE})`)
+    this.emit('error', { code: STARTUP_NO_OUTPUT_CODE, message: this._startupNoOutputMessage() })
+    return true
+  }
+
+  /**
+   * #7881: the first PTY byte after a withheld `ready` — a genuinely slow start —
+   * declares readiness, emitting what start() / the respawn path would have.
+   */
+  _declareReadyAfterSilentStart() {
+    this._startupNoOutput = false
+    if (this._destroying || this._ptyExited || !this._term) return
+    ;(this._log || log).info('claude TUI produced output after a silent warmup — declaring ready')
+    this._respawnCount = 0
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
     this._emitConfiguredMcpServers()
@@ -3280,6 +3332,9 @@ export class ClaudeTuiSession extends BaseSession {
     // FUTURE unrelated death gets the full retry budget again (matches how
     // CliSession resets _respawnCount on system.init, cli-session.js:888), mark
     // ready, and re-emit `ready` so the dashboard knows the session recovered.
+    // #7881: a respawned child that stayed silent through warmup has not proven
+    // it came back — withhold ready (and keep the retry budget) like start().
+    if (this._withholdReadyForSilentChild()) return
     this._respawnCount = 0
     // #5348 — release the one-shot retry-FRESH latch on a warmup that survived
     // (mirrors cli-session.js releasing it on system.init): a FUTURE
@@ -3962,6 +4017,8 @@ export class ClaudeTuiSession extends BaseSession {
     // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
     // from the prior process can't read as "ready" the instant we respawn (#6604).
     this._resetQuiescenceForSpawn()
+    // #7881: a new spawn starts with no silent-child verdict.
+    this._startupNoOutput = false
 
     // #5794: a fresh PTY can swallow the first submit again, so re-arm the
     // first-turn submit nudge for the first message on THIS spawn. Reset after
@@ -4026,6 +4083,10 @@ export class ClaudeTuiSession extends BaseSession {
         `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${this._degradedProbeSuffix()} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailLogDump()}`,
       )
+      // #7881: a live PTY that never printed a byte AND never produced a
+      // readiness signal is not "ready, probe degraded" — nothing observed says
+      // claude started at all. Latch it so the caller withholds `ready`.
+      this._startupNoOutput = !this._sawFirstOutput
     }
     if (nativeRouteNonce && !this._ptyExited) {
       try {
@@ -4261,6 +4322,8 @@ export class ClaudeTuiSession extends BaseSession {
     // session file exists. Two cheap field writes on a hot (per-redraw) path.
     this._lastOutputMs = this._nowMonotonic()
     this._sawFirstOutput = true
+    // #7881: output after a silent warmup — a slow start, now provably alive.
+    if (this._startupNoOutput) this._declareReadyAfterSilentStart()
     const rawStr = String(data)
     const chunk = Buffer.from(rawStr, 'utf8')
     // #5794/#5809: monotonic total — never capped, so the nudge's progress check
@@ -4772,10 +4835,15 @@ export class ClaudeTuiSession extends BaseSession {
       return { ok: false, reason: 'busy' }
     }
     if (!this._processReady || !this._term || this._ptyExited) {
-      this.emit('error', { message: 'Session not started or PTY no longer alive' })
+      // #7881: a session still waiting on a silent child says so, with the code.
+      const silent = this._startupNoOutput && !!this._term && !this._ptyExited
+      this.emit('error', silent
+        ? { code: STARTUP_NO_OUTPUT_CODE, message: this._startupNoOutputMessage() }
+        : { message: 'Session not started or PTY no longer alive' })
       reportInputAdmission(sendOptions, {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
-        reason: 'not_runnable', message: 'The provider session is not ready to accept input.',
+        reason: silent ? STARTUP_NO_OUTPUT_CODE : 'not_runnable',
+        message: silent ? this._startupNoOutputMessage() : 'The provider session is not ready to accept input.',
       })
       return { ok: false, reason: 'not_runnable' }
     }
@@ -6782,8 +6850,13 @@ export class ClaudeTuiSession extends BaseSession {
             ? { code: modelErr.code, message: modelErr.message, model: modelErr.model }
           : {
             code: 'stream_stall',
-            message: `No response from claude TUI within ${friendly}. Try sending again.`,
+            // #7881: the prompt WAS written to the PTY, and a child that printed
+            // nothing may still act on it later — so this must not invite a blind
+            // resend (a duplicate turn if it does).
+            message: `No response from claude TUI within ${friendly}. The message was written to the terminal but nothing confirmed it was received; check the session before sending it again.`,
             timeoutMs: this._firstOutputTimeoutMs,
+            delivery: 'uncertain',
+            retrySafe: false,
           },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
