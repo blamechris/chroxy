@@ -14,6 +14,7 @@ import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
+import { CLAUDE_PARENT_SESSION_ENV } from '../src/utils/spawn-env.js'
 import { sendHistoryEntry } from '../src/ws-history.js'
 import {
   CLAUDE_NATIVE_FIRST_PARTY_BASE_URL,
@@ -9635,6 +9636,27 @@ describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
       } finally {
         if (prev === undefined) delete process.env.API_TOKEN
         else process.env.API_TOKEN = prev
+      }
+    })
+
+    // #8262: a parent Claude session's markers make the child a "nested"
+    // session, which turns transcript saving off and breaks --resume.
+    it('strips parent Claude session markers but keeps intended vars (#8262)', () => {
+      const keys = [...CLAUDE_PARENT_SESSION_ENV]
+      const prev = {}
+      for (const k of [...keys, 'CLAUDE_CODE_OAUTH_TOKEN']) prev[k] = process.env[k]
+      for (const k of keys) process.env[k] = 'parent-value'
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-keep'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(true)
+        for (const k of keys) assert.equal(env[k], undefined, `${k} must not reach the TUI child`)
+        assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'oauth-keep')
+      } finally {
+        for (const [k, v] of Object.entries(prev)) {
+          if (v === undefined) delete process.env[k]
+          else process.env[k] = v
+        }
       }
     })
 

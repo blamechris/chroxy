@@ -181,6 +181,41 @@ export function stripInheritedChroxySecrets(env) {
   return env
 }
 
+// #8262: markers a PARENT Claude Code session exports into the shell it opens.
+// A daemon started from inside such a shell inherits them, and a `claude`
+// child that sees them believes it is a nested session and turns transcript
+// saving OFF ("inherited CLAUDE_CODE_CHILD_SESSION marker"), so `--resume`
+// after a restart finds nothing and the model silently forgets earlier turns.
+// These identify the PARENT session (its id, host session, attended flag and
+// its messaging channel); a chroxy-spawned claude is a top-level session and
+// must start with none of them. Deliberately NOT here: auth and config the
+// daemon intends to hand on (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_ENTRYPOINT,
+// CLAUDE_CODE_USE_* routing, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING, ...).
+export const CLAUDE_PARENT_SESSION_ENV = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_HOST_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+]
+
+/**
+ * Strip a parent Claude Code session's identity markers from a full
+ * parent-env copy, IN PLACE, before it is handed to a spawned `claude`
+ * (claude-cli, claude-sdk, claude-tui). See CLAUDE_PARENT_SESSION_ENV.
+ *
+ * @param {Record<string, string|undefined>} env - mutated in place
+ * @returns {Record<string, string|undefined>} the same object, for chaining
+ */
+export function stripParentClaudeSessionEnv(env) {
+  for (const key of CLAUDE_PARENT_SESSION_ENV) {
+    delete env[key]
+  }
+  return env
+}
+
 const PROVIDERS = {
   codex: {
     mode: 'allowlist',
@@ -294,6 +329,9 @@ export function buildSpawnEnv(provider, extras = {}) {
   // after, or a session that DOES set its own port/secret would have them
   // wiped right back out (see the helper's own doc comment).
   stripInheritedChroxySecrets(parentEnv)
+  // #8262: denylist mode is the claude family (claude, claude-sdk); none may
+  // look like a nested session.
+  stripParentClaudeSessionEnv(parentEnv)
   // #3855: inject ONLY this provider's own credential-store keys that the
   // shell did not export (e.g. CLAUDE_CODE_OAUTH_TOKEN for claude). Scoped via
   // the per-provider `storeInjectKeys` allowlist so other providers' stored

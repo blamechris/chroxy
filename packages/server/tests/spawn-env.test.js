@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSpawnEnv } from '../src/utils/spawn-env.js'
+import { buildSpawnEnv, CLAUDE_PARENT_SESSION_ENV } from '../src/utils/spawn-env.js'
 import { withEnv } from './test-helpers.js'
 
 describe('buildSpawnEnv', () => {
@@ -459,5 +459,36 @@ describe('buildSpawnEnv', () => {
         assert.equal(env.CHROXY_HOST_APP, 'Chroxy')
       })
     })
+  })
+})
+
+// #8262: a daemon started from inside another Claude Code session must not hand
+// that session's markers to the claude children it spawns (claude-cli and
+// claude-sdk both build their env here; claude-tui has its own test).
+describe('buildSpawnEnv parent Claude session markers (#8262)', () => {
+  for (const provider of ['claude', 'claude-sdk']) {
+    it(`${provider}: strips every parent-session marker and keeps intended vars`, () => {
+      const parent = {}
+      for (const key of CLAUDE_PARENT_SESSION_ENV) parent[key] = 'parent-value'
+      withEnv({
+        ...parent,
+        CLAUDE_CODE_OAUTH_TOKEN: 'oauth-keep',
+        CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
+        MY_SHELL_VAR: 'keep',
+      }, () => {
+        const env = buildSpawnEnv(provider)
+        for (const key of CLAUDE_PARENT_SESSION_ENV) {
+          assert.equal(env[key], undefined, `${key} must not reach the ${provider} child`)
+        }
+        assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'oauth-keep')
+        assert.equal(env.CLAUDE_CODE_ENTRYPOINT, 'sdk-ts')
+        assert.equal(env.MY_SHELL_VAR, 'keep')
+      })
+    })
+  }
+
+  it('the roster names the markers the issue reports', () => {
+    assert.ok(CLAUDE_PARENT_SESSION_ENV.includes('CLAUDECODE'))
+    assert.ok(CLAUDE_PARENT_SESSION_ENV.includes('CLAUDE_CODE_CHILD_SESSION'))
   })
 })
