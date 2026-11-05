@@ -125,6 +125,7 @@ import {
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
+  handleGitRepoCheckResult as sharedGitRepoCheckResult,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
   buildSessionListPatches as sharedBuildSessionListPatches,
@@ -6679,6 +6680,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const payload = sharedDirectoryListing(msg);
         cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
       }
+      break;
+    }
+
+    case 'git_repo_check_result': {
+      const cb = get()._gitRepoCheckCallback;
+      if (cb) cb(sharedGitRepoCheckResult(msg));
       break;
     }
 

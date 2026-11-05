@@ -89,3 +89,137 @@ describe('CreateSessionModal — #8214 worktree switch explains why it is disabl
     expect(mockCreateSession.mock.calls[0][0].worktree).toBeUndefined();
   });
 });
+
+// #8972: a directory that is not a git repo must be refused up front, with the
+// reason as visible text and in the VoiceOver hint, instead of failing after
+// Create. Only a reply that echoes the latest request id and belongs to the
+// current directory may disable the switch; `null` ("cannot tell") must not.
+describe('CreateSessionModal — #8972 worktree switch refuses a non-git directory', () => {
+  const NOT_GIT = 'This directory is not a git repository — worktree isolation needs a git repo';
+  let requests: Array<{ path: string; requestId: string }>;
+  let reply: ((r: { path: string | null; isGitRepo: boolean | null; requestId: string | null }) => void) | null;
+
+  function mount() {
+    requests = [];
+    reply = null;
+    mockUseConnectionStore.mockImplementation((selector: any) =>
+      selector({
+        availableProviders: [],
+        fetchProviders: mockFetchProviders,
+        createSession: mockCreateSession,
+        sessions: [],
+        requestGitRepoCheck: (path: string, requestId: string) => requests.push({ path, requestId }),
+        setGitRepoCheckCallback: (cb: any) => {
+          reply = cb;
+        },
+      }),
+    );
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+    return component!;
+  }
+  const setCwd = (c: renderer.ReactTestRenderer, v: string) =>
+    act(() => {
+      c.root.findByProps({ testID: 'cwd-input' }).props.onChangeText(v);
+    });
+  const settle = () =>
+    act(() => {
+      jest.advanceTimersByTime(400);
+    });
+  const answer = (isGitRepo: boolean | null, over: Record<string, unknown> = {}) => {
+    const last = requests[requests.length - 1];
+    act(() => {
+      reply!({ path: last.path, isGitRepo, requestId: last.requestId, ...over });
+    });
+  };
+  const hintText = (c: renderer.ReactTestRenderer) =>
+    c.root.findByProps({ testID: 'worktree-switch-hint' }).props.children;
+  const sw = (c: renderer.ReactTestRenderer) => c.root.findByProps({ testID: 'worktree-switch' });
+
+  it('disables the switch and shows the reason (text + VoiceOver hint) for a non-git directory', () => {
+    const c = mount();
+    setCwd(c, '/tmp/plain');
+    expect(sw(c).props.disabled).toBe(false); // nothing known yet
+    settle();
+    expect(requests).toEqual([{ path: '/tmp/plain', requestId: expect.any(String) }]);
+    answer(false);
+    expect(sw(c).props.disabled).toBe(true);
+    expect(hintText(c)).toBe(NOT_GIT);
+    expect(sw(c).props.accessibilityState).toEqual({ disabled: true, checked: false });
+    expect(sw(c).props.accessibilityHint).toContain(NOT_GIT);
+  });
+
+  it('keeps the switch enabled for a git directory and when the server cannot tell', () => {
+    const c = mount();
+    setCwd(c, '/repo');
+    settle();
+    answer(true);
+    expect(sw(c).props.disabled).toBe(false);
+    setCwd(c, '/elsewhere');
+    settle();
+    answer(null);
+    expect(sw(c).props.disabled).toBe(false);
+  });
+
+  it('ignores a reply for a superseded request and re-enables on a new path', () => {
+    const c = mount();
+    setCwd(c, '/tmp/plain');
+    settle();
+    const stale = requests[0];
+    setCwd(c, '/tmp/plain2');
+    settle();
+    act(() => {
+      reply!({ path: stale.path, isGitRepo: false, requestId: stale.requestId });
+    });
+    expect(sw(c).props.disabled).toBe(false);
+    answer(false);
+    expect(sw(c).props.disabled).toBe(true);
+    setCwd(c, '/repo');
+    expect(sw(c).props.disabled).toBe(false);
+  });
+
+  it('ignores a reply carrying the right requestId but a different path', () => {
+    const c = mount();
+    setCwd(c, '/tmp/plain');
+    settle();
+    answer(false, { path: '/some/other/dir' });
+    expect(sw(c).props.disabled).toBe(false);
+    answer(false);
+    expect(sw(c).props.disabled).toBe(true);
+  });
+
+  it('request ids are unique across mounts: a reply from an earlier mount is ignored', () => {
+    const first = mount();
+    setCwd(first, '/tmp/plain');
+    settle();
+    const earlier = requests[requests.length - 1];
+    act(() => {
+      first.unmount();
+    });
+    const second = mount();
+    setCwd(second, '/tmp/plain');
+    settle();
+    expect(requests[requests.length - 1].requestId).not.toBe(earlier.requestId);
+    act(() => {
+      reply!({ path: earlier.path, isGitRepo: false, requestId: earlier.requestId });
+    });
+    expect(sw(second).props.disabled).toBe(false);
+  });
+
+  it('does not submit worktree:true for a non-git directory ticked before the answer arrived', () => {
+    const c = mount();
+    setCwd(c, '/tmp/plain');
+    act(() => {
+      sw(c).props.onValueChange(true);
+    });
+    settle();
+    answer(false);
+    expect(sw(c).props.value).toBe(false);
+    act(() => {
+      c.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+    expect(mockCreateSession.mock.calls[0][0].worktree).toBeUndefined();
+  });
+});

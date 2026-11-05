@@ -106,6 +106,15 @@ export const ServerDirectoryListingSchema = z.object({
     })),
     error: z.string().nullable(),
 });
+// #8972 — `check_git_repo` response. `isGitRepo` is null when the server cannot
+// tell (path outside home, unresolvable, not a directory): clients must leave
+// the worktree switch enabled then — the create path stays the backstop.
+export const ServerGitRepoCheckResultSchema = z.object({
+    type: z.literal('git_repo_check_result'),
+    path: z.string(),
+    isGitRepo: z.boolean().nullable(),
+    requestId: z.string().max(200).optional(),
+});
 // #6876 — `git_create_pr` response. The server pushes the current branch and
 // runs `gh pr create`; on success `url` is the created PR's URL and `number`
 // its integer number (best-effort — parsed from the URL). `branch`/`base` echo

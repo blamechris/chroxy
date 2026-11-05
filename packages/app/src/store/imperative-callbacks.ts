@@ -11,6 +11,7 @@
 
 import type {
   DirectoryListing,
+  GitRepoCheckResult,
   FileListing,
   FileContent,
   FileWriteResult,
@@ -24,6 +25,7 @@ import type {
 const CALLBACK_NAMES = [
   'terminalWrite',
   'directoryListing',
+  'gitRepoCheck',
   'fileBrowser',
   'fileContent',
   'fileWrite',
@@ -39,6 +41,7 @@ export type CallbackName = (typeof CALLBACK_NAMES)[number];
 export interface CallbackSignatures {
   terminalWrite: (data: string) => void;
   directoryListing: (listing: DirectoryListing) => void;
+  gitRepoCheck: (result: GitRepoCheckResult) => void;
   fileBrowser: (listing: FileListing) => void;
   fileContent: (content: FileContent) => void;
   fileWrite: (result: FileWriteResult) => void;
@@ -54,6 +57,7 @@ type CallbackStore = { [K in CallbackName]: CallbackSignatures[K] | null };
 const callbacks: CallbackStore = {
   terminalWrite: null,
   directoryListing: null,
+  gitRepoCheck: null,
   fileBrowser: null,
   fileContent: null,
   fileWrite: null,

@@ -311,6 +311,13 @@ export interface DirectoryListing {
   error: string | null;
 }
 
+/** #8972 — reply to `check_git_repo`; `isGitRepo` null = the server could not tell. */
+export interface GitRepoCheckResult {
+  path: string | null;
+  isGitRepo: boolean | null;
+  requestId: string | null;
+}
+
 export interface FileEntry {
   name: string;
   isDirectory: boolean;
@@ -1816,6 +1823,8 @@ export interface ConnectionState {
 
   // Directory listing callback for file browser
   _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
+  // #8972 — New Session dialog's worktree-switch git check
+  _gitRepoCheckCallback: ((result: GitRepoCheckResult) => void) | null;
 
   // File browser callbacks
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
@@ -2159,6 +2168,9 @@ export interface ConnectionState {
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
   requestDirectoryListing: (path?: string) => void;
+  // #8972 — is `path` a git repo? Reply arrives via the callback (echoes requestId).
+  setGitRepoCheckCallback: (cb: ((result: GitRepoCheckResult) => void) | null) => void;
+  requestGitRepoCheck: (path: string, requestId: string) => void;
 
   // File browser
   setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;

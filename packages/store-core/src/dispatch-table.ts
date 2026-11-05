@@ -121,6 +121,7 @@ import {
   handleNotificationPrefs,
   // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
   handleDirectoryListing,
+  handleGitRepoCheckResult,
   handleFileListing,
   handleFileContent,
   handleWriteFileResult,
@@ -161,6 +162,7 @@ import {
   type PendingPermissionConfirm,
   type NotificationPrefsState,
   type DirectoryListingPayload,
+  type GitRepoCheckResultPayload,
   type FileListingPayload,
   type FileContentPayload,
   type WriteFileResultPayload,
@@ -637,6 +639,7 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
  */
 export type DispatchCallbackName =
   | 'directoryListing'
+  | 'gitRepoCheck'
   | 'fileBrowser'
   | 'fileContent'
   | 'fileWrite'
@@ -654,6 +657,7 @@ export type DispatchCallbackName =
  */
 export type DispatchCallbackPayload =
   | DirectoryListingPayload
+  | GitRepoCheckResultPayload
   | FileListingPayload
   | FileContentPayload
   | WriteFileResultPayload
@@ -982,6 +986,7 @@ export interface DispatchMessageMap {
   // These all carry the raw fields the corresponding `handle*` parser reads;
   // the parser does the per-field narrowing, so the map only needs `type`.
   directory_listing: { type: 'directory_listing' }
+  git_repo_check_result: { type: 'git_repo_check_result' }
   file_listing: { type: 'file_listing' }
   file_content: { type: 'file_content' }
   write_file_result: { type: 'write_file_result' }
@@ -2798,6 +2803,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     notification_prefs: dispatchNotificationPrefs,
     // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
     directory_listing: callbackDispatcher<S>('directoryListing', (msg) => handleDirectoryListing(msg)),
+    git_repo_check_result: callbackDispatcher<S>('gitRepoCheck', (msg) => handleGitRepoCheckResult(msg)),
     file_listing: callbackDispatcher<S>('fileBrowser', (msg) => handleFileListing(msg)),
     file_content: callbackDispatcher<S>('fileContent', (msg) => handleFileContent(msg)),
     write_file_result: callbackDispatcher<S>('fileWrite', (msg) => handleWriteFileResult(msg)),
@@ -2923,6 +2929,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'notification_prefs',
   // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
   'directory_listing',
+  'git_repo_check_result',
   'file_listing',
   'file_content',
   'write_file_result',
