@@ -3151,6 +3151,56 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { s1: { health: 'crashed' } } },
   },
   {
+    // #8981: a refused fresh session arrives as session_error{category:'create_failed'}
+    // (the server's session_create_failed, forwarded). Both clients record it as a
+    // CODED `error` chat entry in the failed session while it is still held, so the
+    // error chip routing can key off `code`.
+    name: 'session_error (create_failed) records a coded chat error in the failed session (both clients)',
+    type: 'session_error',
+    init: { activeSessionId: 's1', sessions: { s1: {}, s2: {} } },
+    message: {
+      type: 'session_error',
+      category: 'create_failed',
+      code: 'NATIVE_ENDPOINT_UNVERIFIED',
+      sessionId: 's2',
+      recoverable: false,
+      message: 'The session failed to start: endpoint not verified',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [] },
+        s2: {
+          messages: [
+            {
+              type: 'error',
+              code: 'NATIVE_ENDPOINT_UNVERIFIED',
+              content: 'The session failed to start: endpoint not verified',
+            },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #8981: the server destroys the failed session right after, so a client that no
+    // longer holds it must not drop the failure — it lands in the active session.
+    name: 'session_error (create_failed) for a session the client no longer holds lands in the active session (both clients)',
+    type: 'session_error',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'session_error',
+      category: 'create_failed',
+      code: 'START_FAILED',
+      sessionId: 'gone',
+      message: 'The session failed to start: boom',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'error', code: 'START_FAILED', content: 'The session failed to start: boom' }] },
+      },
+    },
+  },
+  {
     // #6325 (drain #6314): a legacy server_status (no phase) — both clients append
     // the ANSI-stripped status message as a `system` bubble to the active session.
     name: 'server_status (legacy, no phase) appends the status message to the active session (both clients)',

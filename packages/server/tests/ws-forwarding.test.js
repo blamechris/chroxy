@@ -1003,6 +1003,7 @@ describe('setupForwarding', () => {
       assert.equal(sessionId, 'sess-1')
       assert.equal(msg.sessionId, 'sess-1')
       assert.equal(msg.recoverable, false, 'fresh-session failure has no retry affordance')
+      assert.equal(msg.category, 'create_failed', 'clients key the coded chat error off this category (#8981)')
       assert.match(msg.message, /failed to start/)
       assert.match(msg.message, /warmup/, 'includes the provider rejection reason when present')
     })

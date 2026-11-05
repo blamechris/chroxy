@@ -5,6 +5,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MAX_SANE_DURATION_MS, MODEL_ENTRY_METADATA_KEYS } from '@chroxy/protocol'
 import {
   resolveSessionId,
+  handleSessionCreateFailed,
+  resolveCreateFailedTarget,
   handleModelChanged,
   handlePermissionModeChanged,
   handleAvailablePermissionModes,
@@ -10624,5 +10626,45 @@ describe('dropPendingRestoreNotice (#6808 teardown)', () => {
   })
   it('tolerates a null id', () => {
     expect(() => dropPendingRestoreNotice(null)).not.toThrow()
+  })
+})
+
+
+describe('handleSessionCreateFailed (#8981)', () => {
+  it('builds a coded error ChatMessage for a create_failed session_error', () => {
+    const r = handleSessionCreateFailed({
+      type: 'session_error',
+      category: 'create_failed',
+      code: 'NATIVE_ENDPOINT_UNVERIFIED',
+      sessionId: 's2',
+      message: 'The session failed to start: not verified',
+    })
+    expect(r).not.toBeNull()
+    expect(r!.sessionId).toBe('s2')
+    expect(r!.chatMessage).toMatchObject({
+      type: 'error',
+      code: 'NATIVE_ENDPOINT_UNVERIFIED',
+      content: 'The session failed to start: not verified',
+    })
+  })
+
+  it('ignores every other session_error, and falls back for a blank message / missing code', () => {
+    expect(handleSessionCreateFailed({ type: 'session_error', category: 'crash', sessionId: 's2' })).toBeNull()
+    expect(handleSessionCreateFailed({ type: 'session_error', code: 'START_FAILED', message: 'x' })).toBeNull()
+    const r = handleSessionCreateFailed({ type: 'session_error', category: 'create_failed', message: '  ' })
+    expect(r!.sessionId).toBeNull()
+    expect(r!.chatMessage.content).toBe('The session failed to start.')
+    expect('code' in r!.chatMessage).toBe(false)
+  })
+})
+
+describe('resolveCreateFailedTarget (#8981)', () => {
+  const has = (ids: string[]) => (id: string) => ids.includes(id)
+  it('prefers the failed session, then the active one, then the flat log', () => {
+    expect(resolveCreateFailedTarget('f', 'a', has(['f', 'a']))).toBe('f')
+    expect(resolveCreateFailedTarget('f', 'a', has(['a']))).toBe('a')
+    expect(resolveCreateFailedTarget(null, 'a', has(['a']))).toBe('a')
+    expect(resolveCreateFailedTarget('f', 'a', has([]))).toBeNull()
+    expect(resolveCreateFailedTarget('f', null, has([]))).toBeNull()
   })
 })

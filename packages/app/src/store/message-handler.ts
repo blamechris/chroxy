@@ -67,6 +67,8 @@ import {
   // HANDLERS map), so this shared import remains.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  handleSessionCreateFailed as sharedSessionCreateFailed,
+  resolveCreateFailedTarget,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   // conversation_id migrated to the shared dispatch table (#5556)
@@ -2673,6 +2675,25 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         } else {
           get().addMessage(noticeMsg);
         }
+      } else if (parsed.category === 'create_failed') {
+        // #8981: a fresh session's start() was refused. Record it as a coded chat
+        // error (the shared chip routing keys off `code`) and keep the Alert. The
+        // server destroys the session right after, so the entry lands in the
+        // failed session if still held, else the active one, else the flat log.
+        const failed = sharedSessionCreateFailed(msg);
+        if (failed) {
+          const targetId = resolveCreateFailedTarget(
+            failed.sessionId,
+            get().activeSessionId,
+            (id) => !!get().sessionStates[id],
+          );
+          if (targetId) {
+            updateSession(targetId, (ss) => ({ messages: [...ss.messages, failed.chatMessage] }));
+          } else {
+            get().addMessage(failed.chatMessage);
+          }
+        }
+        Alert.alert('Session Error', parsed.message ?? 'Unknown error');
       } else if (parsed.category !== 'crash') {
         if (parsed.code === 'SESSION_TOKEN_MISMATCH' && parsed.boundSessionName) {
           showBoundSessionMismatchAlert(

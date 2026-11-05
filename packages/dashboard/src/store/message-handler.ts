@@ -59,6 +59,8 @@ import {
   // this switch, so no shared import is needed here.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  handleSessionCreateFailed as sharedSessionCreateFailed,
+  resolveCreateFailedTarget,
   handleLogEntry as sharedLogEntry,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
@@ -5771,6 +5773,28 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         if (crashedId && get().sessionStates[crashedId]) {
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
+        }
+      } else if (parsed.category === 'create_failed') {
+        // #8981: a fresh session's start() was refused. Record it as a coded chat
+        // error (the shared chip routing keys off `code`) and keep the toast. The
+        // server destroys the session right after, so the entry lands in the
+        // failed session if still held, else the active one, else the flat log.
+        const failed = sharedSessionCreateFailed(msg);
+        if (failed) {
+          const targetId = resolveCreateFailedTarget(
+            failed.sessionId,
+            get().activeSessionId,
+            (id) => !!get().sessionStates[id],
+          );
+          if (targetId) {
+            updateSession(targetId, (ss) => ({ messages: [...ss.messages, failed.chatMessage] }));
+          } else {
+            get().addMessage(failed.chatMessage);
+          }
+        }
+        if (parsed.message) {
+          _adapters.alert.alert('Session Error', parsed.message);
+          get().addServerError(parsed.message);
         }
       } else if (parsed.code === 'SESSION_NOT_FOUND') {
         // #4982 — dashboard's persisted `activeSessionId` points at a

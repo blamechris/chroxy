@@ -525,6 +525,10 @@ function setupSessionForwarding(normalizer, ctx) {
     broadcastToSession(sessionId, {
       type: 'session_error',
       code: errorCode || 'SESSION_START_FAILED',
+      // #8981: lets clients tell a refused fresh session apart from every other
+      // session_error and record it as a coded chat error. Mirrored by
+      // SESSION_CREATE_FAILED_CATEGORY in store-core.
+      category: 'create_failed',
       sessionId,
       recoverable: false,
       message: errorMessage

@@ -9,7 +9,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import type { SessionInfo } from '../types'
+import type { ChatMessage, SessionInfo } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
 import { parseRawStringField, parseStringField, resolveSessionId } from './_shared'
 import type { SessionPatch } from './_shared'
@@ -129,6 +129,66 @@ export function handleSessionError(
     sessionPatch: null,
     attemptedSessionId,
   }
+}
+
+// ---------------------------------------------------------------------------
+// session_error{category:'create_failed'} — a fresh session's start() rejected (#8981)
+// ---------------------------------------------------------------------------
+
+/**
+ * `session_error.category` the server stamps when it forwards a
+ * `session_create_failed` (ws-forwarding.js). The server never puts a
+ * `session_create_failed` type on the wire — it arrives as a `session_error`
+ * whose `code` is the provider's `errorCode` (NATIVE_ENDPOINT_UNVERIFIED,
+ * START_FAILED, AUTH_REQUIRED, ...). The category is the only way to tell it
+ * apart from the other `session_error` uses.
+ */
+export const SESSION_CREATE_FAILED_CATEGORY = 'create_failed'
+
+/**
+ * Build the coded chat error for a refused fresh session (#8981).
+ *
+ * Returns `null` when `msg` is not a create-failed `session_error`. Otherwise a
+ * `type: 'error'` ChatMessage carrying the server's `code`, so the existing
+ * error-chip routing (`getErrorPresentation`, the AUTH_REQUIRED chip, ...) keys
+ * off it exactly as it does for an `error` envelope. `sessionId` is where the
+ * failure belongs; callers append there when the session is still in their
+ * store, else to the session the user is looking at, else the flat log — the
+ * server destroys the failed session right after, so the entry must not depend
+ * on it surviving.
+ */
+export function handleSessionCreateFailed(
+  msg: Record<string, unknown>,
+): { sessionId: string | null; chatMessage: ChatMessage } | null {
+  if (parseRawStringField(msg, 'category') !== SESSION_CREATE_FAILED_CATEGORY) return null
+  const raw = parseStringField(msg, 'message')
+  const content = raw ? stripAnsi(raw).trim() : ''
+  const code = parseRawStringField(msg, 'code')
+  return {
+    sessionId: parseStringField(msg, 'sessionId'),
+    chatMessage: {
+      id: nextMessageId('create-failed'),
+      type: 'error',
+      content: content || 'The session failed to start.',
+      timestamp: Date.now(),
+      ...(code ? { code } : {}),
+    },
+  }
+}
+
+/**
+ * Which session's chat a create-failed entry lands in: the failed session when
+ * the client still holds it, else the active session, else `null` (the flat
+ * log). Shared so the dashboard and app place it identically.
+ */
+export function resolveCreateFailedTarget(
+  failedSessionId: string | null,
+  activeSessionId: string | null,
+  hasSession: (id: string) => boolean,
+): string | null {
+  if (failedSessionId && hasSession(failedSessionId)) return failedSessionId
+  if (activeSessionId && hasSession(activeSessionId)) return activeSessionId
+  return null
 }
 
 // ---------------------------------------------------------------------------
