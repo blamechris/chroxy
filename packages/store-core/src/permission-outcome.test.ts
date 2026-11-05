@@ -550,6 +550,33 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     expect(getExpiredPermissionTurnSummaries(env.sessions.s1!.messages, NOW + 1, true, 'marker')[0]!.count).toBe(1)
   })
 
+  // ---- #8937: the end-of-turn summary survives a cold reload ----
+
+  const coldReplay = (msg: Record<string, unknown>): ChatMessage[] => {
+    const env = makeEnv([])
+    dispatch(env, msg)
+    return [...env.sessions.s1!.messages, ...env.added]
+  }
+
+  it('#8937: a replayed expired outcome with NO live message is counted exactly once and is the Jump target', () => {
+    const replayed = coldReplay(outcome({ outcome: 'expired' }))
+    expect(replayed).toHaveLength(1)
+    expect(replayed[0]!.expiresAt).toBeUndefined()
+    const summaries = getExpiredPermissionTurnSummaries(replayed, NOW, true, 'marker')
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]!.count).toBe(1)
+    expect(summaries[0]!.requestIds).toEqual(['perm-1'])
+    expect(summaries[0]!.tools).toEqual(['Bash'])
+  })
+
+  it('#8937: a replayed user deny, allow and stop are NOT counted', () => {
+    for (const o of ['denied', 'allowed', 'stopped']) {
+      const replayed = coldReplay(outcome({ outcome: o }))
+      expect(replayed).toHaveLength(1)
+      expect(getExpiredPermissionTurnSummaries(replayed, NOW, true, 'marker')).toEqual([])
+    }
+  })
+
   it('a live "aborted" card and the replayed "expired" outcome are the same record (no duplicate, no change)', () => {
     const live = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
     const env = makeEnv([live])
