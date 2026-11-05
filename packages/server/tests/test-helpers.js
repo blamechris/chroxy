@@ -682,3 +682,63 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
   session._resetResultTimeout = reset
   reset()
 }
+
+// #8262: the parent-session env markers a chroxy-launched claude must never
+// inherit, declared as an INDEPENDENT literal (not imported from the production
+// roster) so deleting a roster entry turns a test red. KEPT_CLAUDE_ENV is the
+// config and auth a launched claude legitimately keeps (exact names, never a
+// prefix strip).
+export const PARENT_CLAUDE_SESSION_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_HOST_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_HOST_WORKTREE',
+  'CLAUDE_CODE_HOST_WORKTREE_FENCE',
+  'CLAUDE_PID',
+]
+export const KEPT_CLAUDE_ENV = {
+  CLAUDE_CODE_OAUTH_TOKEN: 'oauth-keep',
+  CLAUDE_CODE_ENTRYPOINT: 'entry-keep',
+  CLAUDE_CONFIG_DIR: '/cfg-keep',
+  HTTPS_PROXY: 'http://proxy-keep:3128',
+}
+
+/** Run `fn` with every parent marker + the kept vars set in process.env, restoring after. */
+export function withParentClaudeSessionEnv(fn) {
+  const all = { ...KEPT_CLAUDE_ENV }
+  for (const k of PARENT_CLAUDE_SESSION_MARKERS) all[k] = 'parent-value'
+  const prev = {}
+  for (const k of Object.keys(all)) prev[k] = process.env[k]
+  Object.assign(process.env, all)
+  const restore = () => {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  let result
+  try { result = fn() } catch (err) { restore(); throw err }
+  if (result && typeof result.then === 'function') return result.finally(restore)
+  restore()
+  return result
+}
+
+/**
+ * Assert `env` has none of the parent markers and keeps the intended vars.
+ * `notKept` names vars a site rewrites on purpose (the test harness repoints
+ * CLAUDE_CONFIG_DIR for real child spawns; BYOK tool shells drop credentials).
+ */
+export function assertParentMarkersStripped(assert, env, label, { notKept = [] } = {}) {
+  for (const k of PARENT_CLAUDE_SESSION_MARKERS) {
+    assert.equal(env[k], undefined, `${k} must not reach ${label}`)
+  }
+  for (const [k, v] of Object.entries(KEPT_CLAUDE_ENV)) {
+    if (notKept.includes(k)) continue
+    assert.equal(env[k], v, `${k} must still reach ${label}`)
+  }
+}

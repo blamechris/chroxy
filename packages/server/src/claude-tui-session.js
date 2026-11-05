@@ -43,7 +43,7 @@ import { classifyModelError } from './claude-tui/model-error.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 import { redactBounded, REDACT_KEEP_MAX } from './redaction.js'
@@ -3285,6 +3285,9 @@ export class ClaudeTuiSession extends BaseSession {
     // BEFORE the `permissionsEnabled` block below reassigns THIS session's
     // own values — must run before that assignment, never after.
     stripInheritedChroxySecrets(env)
+    // #8262: a parent Claude session's markers make this child a "nested"
+    // session and turn transcript saving off, which breaks --resume.
+    stripParentClaudeSessionEnv(env)
     env.TERM = 'xterm-256color'
 
     // permission-hook.sh reads these to phone home to /permission on the

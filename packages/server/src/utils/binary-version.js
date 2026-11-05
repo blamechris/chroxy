@@ -38,6 +38,7 @@
  */
 
 import { spawnSync } from 'child_process'
+import { buildClaudeLaunchEnv } from './spawn-env.js'
 import { statSync as fsStatSync } from 'fs'
 import { statIdentity } from './stat-identity.js'
 
@@ -173,6 +174,7 @@ export function probeBinaryVersion(path, args = ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: PROBE_TIMEOUT_MS,
       windowsHide: true,
+      env: buildClaudeLaunchEnv(),
     })
   } catch (err) {
     // spawnSync reports most failures on `result.error`, but it can still

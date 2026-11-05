@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSpawnEnv } from '../src/utils/spawn-env.js'
-import { withEnv } from './test-helpers.js'
+import { buildSpawnEnv, buildClaudeLaunchEnv, CLAUDE_PARENT_SESSION_ENV } from '../src/utils/spawn-env.js'
+import { withEnv, PARENT_CLAUDE_SESSION_MARKERS, withParentClaudeSessionEnv, assertParentMarkersStripped } from './test-helpers.js'
 
 describe('buildSpawnEnv', () => {
   describe('codex provider (allowlist)', () => {
@@ -459,5 +459,37 @@ describe('buildSpawnEnv', () => {
         assert.equal(env.CHROXY_HOST_APP, 'Chroxy')
       })
     })
+  })
+})
+
+// #8262: a daemon started from inside another Claude Code session must not hand
+// that session's markers to the claude children it spawns (claude-cli and
+// claude-sdk both build their env here; claude-tui has its own test). The
+// expected list is an independent literal (test-helpers.js), NOT the production
+// roster, so deleting a roster entry turns these red.
+describe('buildSpawnEnv parent Claude session markers (#8262)', () => {
+  for (const provider of ['claude', 'claude-sdk']) {
+    it(`${provider}: strips every parent-session marker and keeps intended vars`, () => {
+      withParentClaudeSessionEnv(() => {
+        const env = buildSpawnEnv(provider)
+        assertParentMarkersStripped(assert, env, `the ${provider} child`)
+      })
+    })
+  }
+
+  it('buildClaudeLaunchEnv returns a stripped COPY and leaves its input untouched', () => {
+    withParentClaudeSessionEnv(() => {
+      const base = { ...process.env }
+      const out = buildClaudeLaunchEnv(base)
+      assertParentMarkersStripped(assert, out, 'a host-side claude launch')
+      assert.notEqual(out, base)
+      assert.equal(base.CLAUDE_CODE_HOST_SESSION_ID, 'parent-value', 'the input must not be mutated')
+    })
+  })
+
+  it('the production roster covers the independent literal list', () => {
+    for (const k of PARENT_CLAUDE_SESSION_MARKERS) {
+      assert.ok(CLAUDE_PARENT_SESSION_ENV.includes(k), `${k} missing from CLAUDE_PARENT_SESSION_ENV`)
+    }
   })
 })

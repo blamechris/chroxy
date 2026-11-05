@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url'
 import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout, _resetLoginProbeWarningForTests } from '../src/claude-tui-session.js'
 import { AUTH_FAILURE_PATTERNS, AUTH_FAILURE_COMPACT_PATTERNS } from '../src/claude-tui/pty-driver.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
-import { recordTimerArms } from './test-helpers.js'
+import { recordTimerArms, withParentClaudeSessionEnv, assertParentMarkersStripped } from './test-helpers.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
@@ -9636,6 +9636,16 @@ describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
         if (prev === undefined) delete process.env.API_TOKEN
         else process.env.API_TOKEN = prev
       }
+    })
+
+    // #8262: a parent Claude session's markers make the child a "nested"
+    // session, which turns transcript saving off and breaks --resume.
+    it('strips parent Claude session markers but keeps intended vars (#8262)', () => {
+      withParentClaudeSessionEnv(() => {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(true)
+        assertParentMarkersStripped(assert, env, 'the TUI child')
+      })
     })
 
     it('still strips ANTHROPIC_API_KEY (OAuth-only invariant preserved)', () => {

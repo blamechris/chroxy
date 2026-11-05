@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { execFile } from 'child_process'
+import { buildClaudeLaunchEnv } from './utils/spawn-env.js'
 import { randomUUID } from 'crypto'
 import { cliHelpAdvertisesFlag, cliHelpFlagArity, isSafeArgvValue } from './utils/argv-safety.js'
 import { CliSession } from './cli-session.js'
@@ -165,7 +166,7 @@ export class WebTaskManager extends EventEmitter {
       return { remote: false, teleport: false }
     }
     try {
-      const stdout = await exec(bin, ['--help'])
+      const stdout = await exec(bin, ['--help'], { env: buildClaudeLaunchEnv() })
       // #7291: this was `stdout.includes('--remote')`, a SUBSTRING match, which
       // is satisfied by the LONGER flag `--remote-control`. The installed CLI
       // advertises `--remote-control` and `--remote-control-session-name-prefix`
@@ -302,7 +303,7 @@ export class WebTaskManager extends EventEmitter {
 
     try {
       const bin = this._verifyBinary()
-      const stdout = await execFileAsync(bin, ['--teleport', task.taskId], { cwd: task.cwd })
+      const stdout = await execFileAsync(bin, ['--teleport', task.taskId], { cwd: task.cwd, env: buildClaudeLaunchEnv() })
       return { success: true, output: stdout }
     } catch (err) {
       // #8060 review nitpick: only a GATE refusal gets a `(code=…)` suffix —
@@ -361,7 +362,7 @@ export class WebTaskManager extends EventEmitter {
       return
     }
     // Use execFile with args array to prevent command injection
-    const child = execFile(bin, buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
+    const child = execFile(bin, buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000, env: buildClaudeLaunchEnv() }, (err, stdout, stderr) => {
       this._childProcesses.delete(child)
       // #7299: this callback runs asynchronously and can fire AFTER
       // destroy() has already cleared _pollTimer and cleared _tasks — a late

@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { configDir, configFile, resolveVerifiedCliBinary } from './shared.js'
 import { CliSession } from '../cli-session.js'
+import { buildClaudeLaunchEnv } from '../utils/spawn-env.js'
 
 /**
  * #8061 — resolve AND verify the exact `claude` binary `chroxy resume`
@@ -278,6 +279,9 @@ export async function runSessionResume(sessionArg, options, deps = {}) {
     execFileSync(verifiedClaudePath, args, {
       stdio: 'inherit',
       cwd: target.cwd,
+      // #8262: a resumed claude is a top-level session; do not hand it the
+      // parent session's markers from the shell running `chroxy resume`.
+      env: buildClaudeLaunchEnv(),
     })
   } catch (err) {
     // #8065 review nitpick 4: `process.exitCode = ...; return` rather than

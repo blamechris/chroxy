@@ -20,7 +20,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { USER_SHELL_CUSTOMIZATION } from './provider-customization.js'
 import { createLogger } from './logger.js'
 import { isWindows, defaultShell, killProcessTree } from './platform.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from './utils/spawn-env.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 
 const log = createLogger('user-shell-session')
@@ -177,6 +177,7 @@ export class UserShellSession extends BaseSession {
       delete env[key]
     }
     stripInheritedChroxySecrets(env)
+    stripParentClaudeSessionEnv(env) // #8262
     return env
   }
 

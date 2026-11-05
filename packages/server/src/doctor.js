@@ -10,6 +10,7 @@ import { resolveDeclaredMinVersion } from './utils/binary-version.js'
 import { isShellShim, buildBinaryProvenanceOptions } from './utils/preflight.js'
 import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './utils/verify-provenance.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { buildClaudeLaunchEnv } from './utils/spawn-env.js'
 import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER, resolveDaemonDefaultProvider } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
@@ -313,7 +314,7 @@ export function checkClaudeTuiCliVersion(deps = {}) {
     // win32-routing test exercises this default path directly.
     exec = (bin, args) => {
       const s = prepareSpawn(bin, args)
-      return execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...s.options })
+      return execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env: buildClaudeLaunchEnv(), ...s.options })
     },
     tested = TESTED_CLAUDE_TUI_CLI_VERSION,
     // #5871: resolve against the SAME candidate paths the claude-tui provider
@@ -410,7 +411,7 @@ export function checkClaudeLogin(deps = {}) {
   if (!probe) return null
 
   const NAME = 'Claude login'
-  const probeEnv = { ...env }
+  const probeEnv = buildClaudeLaunchEnv(env)
   delete probeEnv.ANTHROPIC_API_KEY
 
   let stdout
@@ -1269,7 +1270,7 @@ export function checkBinary(name, args, {
     // a `.exe` and on POSIX, so non-Windows binary checks are unchanged.
     const spawnSpec = prepareSpawn(resolved, args)
     const output = execFileSync(spawnSpec.command, spawnSpec.args, {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...spawnSpec.options,
+      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env: buildClaudeLaunchEnv(), ...spawnSpec.options,
     })
     const message = parseVersion(output)
     // #3953: when the provider declares a minimum version, parse the
