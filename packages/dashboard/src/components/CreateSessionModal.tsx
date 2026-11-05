@@ -1204,7 +1204,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 id="worktree-checkbox"
                 checked={effectiveWorktree}
                 onChange={e => setWorktree(e.target.checked)}
-                disabled={!trimmedCwd}
+                disabled={worktreeSwitch.disabled}
                 aria-describedby="worktree-hint"
               />
               <span className="label-text">Isolate filesystem (worktree)</span>

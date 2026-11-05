@@ -80,6 +80,8 @@ describe('CreateSessionModal — #8214 worktree switch explains why it is disabl
       sw(c).props.onValueChange(true);
     });
     setCwd(c, '');
+    // the switch shows what will be sent: off once the directory is gone
+    expect(sw(c).props.value).toBe(false);
     act(() => {
       c.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
     });

@@ -539,6 +539,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    minHeight: 44, // 44pt touch-target floor for the switch rows
     marginBottom: 16,
     gap: 12,
   },
