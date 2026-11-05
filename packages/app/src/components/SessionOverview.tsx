@@ -17,6 +17,7 @@ import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth, SessionState, SessionNotification } from '../store/types';
 import { Icon, type IconName } from './Icon';
 import { COLORS } from '../constants/colors';
+import { isSessionBusy } from '../utils/sessionBusy';
 
 // -- Status classification --
 
@@ -125,7 +126,7 @@ export function lastPreviewMessage<T extends Parameters<typeof isTurnOutcomeMark
 function SessionCard({ session, sessionState, isActive, hasNotification, notification, onPress, onLongPress }: SessionCardProps) {
   const status = getSessionStatus({
     health: sessionState?.health ?? 'healthy',
-    isBusy: session.isBusy,
+    isBusy: isSessionBusy(session, sessionState),
     isIdle: sessionState?.isIdle ?? true,
     activeAgentCount: sessionState?.activeAgents?.length ?? 0,
     isPlanPending: sessionState?.isPlanPending ?? false,
@@ -264,7 +265,7 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
   const sorted = [...sessions].sort((a, b) => {
     const aStatus = getSessionStatus({
       health: sessionStates[a.sessionId]?.health ?? 'healthy',
-      isBusy: a.isBusy,
+      isBusy: isSessionBusy(a, sessionStates[a.sessionId]),
       isIdle: sessionStates[a.sessionId]?.isIdle ?? true,
       activeAgentCount: sessionStates[a.sessionId]?.activeAgents?.length ?? 0,
       isPlanPending: sessionStates[a.sessionId]?.isPlanPending ?? false,
@@ -272,7 +273,7 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
     });
     const bStatus = getSessionStatus({
       health: sessionStates[b.sessionId]?.health ?? 'healthy',
-      isBusy: b.isBusy,
+      isBusy: isSessionBusy(b, sessionStates[b.sessionId]),
       isIdle: sessionStates[b.sessionId]?.isIdle ?? true,
       activeAgentCount: sessionStates[b.sessionId]?.activeAgents?.length ?? 0,
       isPlanPending: sessionStates[b.sessionId]?.isPlanPending ?? false,

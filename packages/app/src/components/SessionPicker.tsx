@@ -20,6 +20,7 @@ import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
 import { hapticMedium } from '../utils/haptics';
+import { isSessionBusy } from '../utils/sessionBusy';
 
 /** Pulsing dot for busy sessions */
 function PulsingDot() {
@@ -59,6 +60,8 @@ interface SessionPillProps {
   // long-running shell. SECONDARY to the busy pulse — the busy dot wins
   // during an active turn.
   pendingShellCount: number;
+  // #8261 — LIVE busy, from sessionStates[id] (not the session_list snapshot).
+  isBusy: boolean;
   // #5750 — number of live, unanswered permission prompts the session is
   // blocked on. Projected from its messages so a background tab surfaces a
   // "needs your permission" dot (parity with the dashboard per-tab indicator).
@@ -68,7 +71,7 @@ interface SessionPillProps {
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, pendingPermissionCount, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, isBusy, pendingPermissionCount, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isCrashed = health === 'crashed';
   const hasNotification = notificationCount > 0 && !isActive;
   // #5750 — a session blocked on a permission prompt is the most actionable
@@ -77,7 +80,7 @@ function SessionPill({ session, isActive, health, notificationCount, pendingShel
   // screen). It takes precedence over the generic busy pulse — a session
   // waiting on you isn't merely "processing".
   const showPendingPermission = !isCrashed && !isActive && pendingPermissionCount > 0;
-  const showBusy = !isCrashed && !showPendingPermission && session.isBusy;
+  const showBusy = !isCrashed && !showPendingPermission && isBusy;
   // #4422 — only surface the pending-shells dot when the session is idle
   // (showBusy=false). During an active turn the busy pulse already conveys
   // "work happening"; the pending-shells indicator is for the "idle but
@@ -345,6 +348,8 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             // is undefined) and sessions whose state slot hasn't been seeded
             // yet (no entry in sessionStates).
             pendingShellCount={sessionStates[session.sessionId]?.pendingBackgroundShells?.length ?? 0}
+            // #8261 — live turn state, not the session_list snapshot.
+            isBusy={isSessionBusy(session, sessionStates[session.sessionId])}
             pendingPermissionCount={pendingPermissionCounts.get(session.sessionId) || 0}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
