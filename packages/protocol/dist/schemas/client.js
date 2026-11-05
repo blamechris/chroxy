@@ -934,6 +934,13 @@ export const ListDirectorySchema = z.object({
     type: z.literal('list_directory'),
     path: z.string().max(4096).optional(),
 });
+// #8972 — New Session dialog asks whether a typed/browsed directory is a git
+// repo before enabling the worktree switch. Reply: `git_repo_check_result`.
+export const CheckGitRepoSchema = z.object({
+    type: z.literal('check_git_repo'),
+    path: z.string().max(4096),
+    requestId: z.string().max(200).optional(),
+});
 export const BrowseFilesSchema = z.object({
     type: z.literal('browse_files'),
     path: z.string().max(4096).nullable().optional(),
@@ -1997,6 +2004,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     NotificationPrefsSetSchema,
     UserQuestionResponseSchema,
     ListDirectorySchema,
+    CheckGitRepoSchema,
     BrowseFilesSchema,
     ReadFileSchema,
     WriteFileSchema,

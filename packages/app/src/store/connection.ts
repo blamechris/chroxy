@@ -2537,6 +2537,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     sendIfOpen(msg);
   },
 
+  // #8972 — git-repo check for the New Session worktree switch
+
+  setGitRepoCheckCallback: (cb) => {
+    setImperativeCallback('gitRepoCheck', cb);
+  },
+
+  requestGitRepoCheck: (path: string, requestId: string) => {
+    sendIfOpen({ type: 'check_git_repo', path, requestId });
+  },
+
   // File browser
 
   setFileBrowserCallback: (cb) => {

@@ -112,6 +112,13 @@ export interface DirectoryListing {
   error: string | null;
 }
 
+/** #8972 — reply to `check_git_repo`; `isGitRepo` null = the server could not tell. */
+export interface GitRepoCheckResult {
+  path: string | null;
+  isGitRepo: boolean | null;
+  requestId: string | null;
+}
+
 export interface FileEntry {
   name: string;
   isDirectory: boolean;
@@ -721,6 +728,9 @@ export interface FileGitDiffActions {
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
   requestDirectoryListing: (path?: string) => void;
+  // #8972 — is `path` a git repo? Reply arrives via the callback (echoes requestId).
+  setGitRepoCheckCallback: (cb: ((result: GitRepoCheckResult) => void) | null) => void;
+  requestGitRepoCheck: (path: string, requestId: string) => void;
   // File browser
   setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;

@@ -1,7 +1,7 @@
 /**
  * File operations and git command handlers.
  *
- * Handles: list_directory, browse_files, list_files, read_file, write_file,
+ * Handles: list_directory, check_git_repo, browse_files, list_files, read_file, write_file,
  *          get_diff, git_status, git_branches, git_stage, git_unstage,
  *          git_commit, git_create_pr, list_slash_commands, list_agents
  */
@@ -48,6 +48,10 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 
 function handleListDirectory(ws, client, msg, ctx) {
   ctx.services.fileOps.listDirectory(ws, msg.path)
+}
+
+function handleCheckGitRepo(ws, client, msg, ctx) {
+  ctx.services.fileOps.checkGitRepo(ws, msg.path, msg.requestId)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {
@@ -168,6 +172,7 @@ function handleListAgents(ws, client, msg, ctx) {
 
 export const fileHandlers = {
   list_directory: handleListDirectory,
+  check_git_repo: handleCheckGitRepo,
   browse_files: handleBrowseFiles,
   list_files: handleListFiles,
   read_file: handleReadFile,

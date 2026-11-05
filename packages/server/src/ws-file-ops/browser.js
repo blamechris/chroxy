@@ -7,6 +7,7 @@ import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { isGitRepo } from '../utils/git-repo.js'
 
 const log = createLogger('ws')
 
@@ -678,8 +679,43 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     sendFn(ws, response)
   }
 
+
+  /**
+   * #8972 — `check_git_repo`: is the directory the New Session dialog is
+   * pointing at a git repository? Lets the dialog refuse the worktree switch
+   * up front instead of after Create (the server still refuses on create).
+   *
+   * Answers `isGitRepo: true | false | null`. `null` means "cannot tell" and
+   * the client must leave the switch enabled: the path is outside the home
+   * directory, unresolvable, or not a directory. Those cases collapse into one
+   * answer on purpose, so the reply is never an existence oracle for paths
+   * outside home (same containment as `list_directory`).
+   */
+  async function checkGitRepo(ws, requestedPath, requestId) {
+    const reply = (isGitRepoValue) => {
+      const msg = { type: 'git_repo_check_result', path: typeof requestedPath === 'string' ? requestedPath : '', isGitRepo: isGitRepoValue }
+      if (requestId) msg.requestId = requestId
+      sendFn(ws, msg)
+    }
+    try {
+      const home = homedir()
+      const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
+      if (!trimmed) return reply(null)
+      const absPath = normalize(trimmed.startsWith('~')
+        ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
+        : resolve(trimmed))
+      const [realAbs, homeReal] = await Promise.all([realpath(absPath), realpath(home)])
+      if (!isPathWithin(realAbs, homeReal)) return reply(null)
+      if (!(await stat(realAbs)).isDirectory()) return reply(null)
+      return reply(await isGitRepo(realAbs))
+    } catch {
+      return reply(null)
+    }
+  }
+
   return {
     listDirectory,
+    checkGitRepo,
     browseFiles,
     listFiles,
     listSlashCommands,

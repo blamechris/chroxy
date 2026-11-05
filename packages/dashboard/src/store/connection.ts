@@ -1274,6 +1274,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
+  _gitRepoCheckCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
   lastFileContentRequestId: null,
@@ -5468,6 +5469,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'list_directory' };
       if (path) msg.path = path;
       wsSend(socket, msg);
+    }
+  },
+
+  // #8972 — git-repo check for the New Session worktree switch
+
+  setGitRepoCheckCallback: (cb) => {
+    set({ _gitRepoCheckCallback: cb });
+  },
+
+  requestGitRepoCheck: (path: string, requestId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'check_git_repo', path, requestId });
     }
   },
 

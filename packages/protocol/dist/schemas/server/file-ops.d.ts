@@ -96,6 +96,12 @@ export declare const ServerDirectoryListingSchema: z.ZodObject<{
     }, z.core.$strip>>;
     error: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerGitRepoCheckResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_repo_check_result">;
+    path: z.ZodString;
+    isGitRepo: z.ZodNullable<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerGitCreatePrResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"git_create_pr_result">;
     url: z.ZodNullable<z.ZodString>;

@@ -34,6 +34,7 @@ export function createFileOps(sendFn, workspaceRoot) {
 
   return {
     listDirectory: browser.listDirectory,
+    checkGitRepo: browser.checkGitRepo,
     browseFiles: browser.browseFiles,
     readFile: reader.readFile,
     writeFile: reader.writeFile,
