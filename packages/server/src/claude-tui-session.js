@@ -3745,7 +3745,18 @@ export class ClaudeTuiSession extends BaseSession {
       // #8934: only the argv spelling is resolved. A roster short id
       // (`haiku-5-5`) is Chroxy's, not the CLI's, and the CLI rejects it on the
       // first prompt; `this.model` stays what the user asked for.
-      args.push('--model', resolveClaudeCliModelId(this.model))
+      const cliModel = resolveClaudeCliModelId(this.model)
+      // Validate the RESOLVED value: the create-time allowlist is bypassed when an
+      // operator opts the provider into allowAnyModel, and the two-token
+      // `--model <v>` form option-parses a value that starts with `-`. Refuse
+      // rather than fall back to the default model.
+      try {
+        assertSafeArgvValue(cliModel, 'model')
+      } catch (err) {
+        this.emit('error', { code: 'invalid_model', message: `Refusing to spawn claude TUI: ${err.message}` })
+        return
+      }
+      args.push('--model', cliModel)
     }
     // Inject the append-bucket skills text via --append-system-prompt at
     // spawn time so the TUI sees it as part of the system prompt — same
@@ -5126,8 +5137,11 @@ export class ClaudeTuiSession extends BaseSession {
         }
       }
       // #8934: claude rejected the requested model on screen and went idle; no
-      // hook will ever fire. Read only what it printed after our prompt.
-      if (!stopPayload) {
+      // hook will ever fire. Read only what it printed after our prompt, and only
+      // until the first hook is consumed (`_firstOutputDisarmed`): a rejected model
+      // never fires one, while a healthy turn's output may legitimately QUOTE this
+      // sentence (the assistant explaining it, a tool printing this file).
+      if (!stopPayload && !this._firstOutputDisarmed) {
         const modelError = classifyModelError(this._outputSinceBytes(this._limitScanFromBytes))
         if (modelError) {
           this._handleModelUnavailable(modelError)

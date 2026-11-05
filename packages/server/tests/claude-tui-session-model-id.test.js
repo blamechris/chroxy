@@ -94,6 +94,43 @@ describe('ClaudeTuiSession --model argv (#8934)', () => {
     assert.equal((await spawnedModelArg('claude-haiku-5-5')).value, 'claude-haiku-5-5')
   })
 
+  async function refusedSpawn(model) {
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', port: 15991, skillsDir: join(fakeHome, 'skills'), repoSkillsDir: null, model,
+    })
+    mkdirSync(join(fakeHome, 'skills'), { recursive: true })
+    session._sessionId = 'argv-8934-uuid'
+    session._conversationPersisted = () => true
+    session._settingsPath = join(fakeHome, 'settings.json')
+    session._buildCombinedSkillsPrefix = () => ''
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    let spawned = null
+    session._ptyModOverride = { spawn: (_cmd, a) => { spawned = a; throw new Error('captured-and-bail') } }
+    await session._spawnPty(true)
+    return { spawned, errors }
+  }
+
+  it('refuses a leading-dash model at spawn: structured error, never reaches argv', async () => {
+    const { spawned, errors } = await refusedSpawn('--dangerously-skip-permissions')
+    assert.equal(spawned, null, 'spawn was not reached')
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].code, 'invalid_model')
+    assert.ok(errors[0].message.startsWith('Refusing to spawn claude TUI'), errors[0].message)
+  })
+
+  it('refuses a model containing CR/LF at spawn', async () => {
+    const { spawned, errors } = await refusedSpawn('claude-x\nfoo')
+    assert.equal(spawned, null)
+    assert.equal(errors[0]?.code, 'invalid_model')
+  })
+
+  it('a normal id still spawns', async () => {
+    const { spawned, errors } = await refusedSpawn('claude-haiku-5-5')
+    assert.ok(spawned && spawned.includes('claude-haiku-5-5'))
+    assert.equal(errors.some((e) => e.code === 'invalid_model'), false)
+  })
+
   it('does not hand-prefix an unknown short id', async () => {
     assert.equal((await spawnedModelArg('haiku-9-9')).value, 'haiku-9-9')
   })
@@ -193,6 +230,23 @@ describe('ClaudeTuiSession — rejected model ends the turn at once (#8934)', ()
     // Let the poll loop make several passes, then finish the turn with a Stop.
     await new Promise((r) => setTimeout(r, 500))
     assert.equal(s._isBusy, true, 'still waiting: nothing was printed after the prompt')
+    writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+    await turn
+    assert.deepEqual(events.reasons, [])
+    assert.deepEqual(events.errors, [])
+  })
+
+  it('does not end a healthy turn whose output quotes the sentence once a hook has fired', async () => {
+    const { s, events } = turnSession()
+    const turn = s.sendMessage('explain that error')
+    await new Promise((r) => setTimeout(r, 200))
+    // A tool hook fires first: the model is demonstrably fine.
+    writeFileSync(join(s._sinkDir, 'pre-a.json'), JSON.stringify({ tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' } }))
+    await new Promise((r) => setTimeout(r, 400))
+    assert.equal(s._firstOutputDisarmed, true, 'the hook was consumed')
+    s._appendToOutputTail('The CLI says "There\'s an issue with the selected model (foo-1). It may not exist" when the id is wrong.')
+    await new Promise((r) => setTimeout(r, 500))
+    assert.equal(s._isBusy, true, 'quoted text did not tear the turn down')
     writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
     await turn
     assert.deepEqual(events.reasons, [])

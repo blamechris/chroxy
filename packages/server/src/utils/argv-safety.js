@@ -286,11 +286,6 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'claude-tui-session.js',
-    match: 'resolveClaudeCliModelId(this.model) [[_spawnPty#spawn',
-    reason: 'this.model is gated BEFORE ClaudeTuiSession is constructed by SessionManager against ClaudeTuiSession.getAllowedModels() (models.js ALLOWED_MODEL_IDS, none starting with "-") — the same allowlist and preflight gate cli-session.js\'s own "model" entry documents — unless an operator opted the provider into config.providers.allowAnyModel (not client-reachable). resolveClaudeCliModelId (claude-model-catalog.js, #8934) returns either its input unchanged or a catalog fullId (always "claude-…"), so it cannot introduce a leading "-".',
-  },
-  {
-    file: 'claude-tui-session.js',
     match: 'skillsPrefix [[_spawnPty#spawn',
     reason: 'bound via args.push("--append-system-prompt", skillsPrefix) — the same required-arg two-token flag on the same claude CLI that cli-session.js\'s "skillsText" entry already measured (2.1.282: a bogus flag-shaped value here starts the process normally, swallowed as the flag\'s own value); skillsPrefix carries client-settable skills/preamble text (_buildCombinedSkillsPrefix), but the argv SHAPE cannot be reinterpreted regardless of its content — same reasoning as skillsText.',
   },
