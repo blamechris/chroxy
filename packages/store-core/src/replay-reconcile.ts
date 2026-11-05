@@ -1185,7 +1185,8 @@ export interface ReplayEndLiveState {
   /**
    * The session's `streamingMessageId` — the id of the response still receiving
    * `stream_delta`s. `null`/absent/`'pending'` (no response exists yet) carries
-   * nothing.
+   * no RESPONSE; a thinking bubble still flagged `thinkingStreaming` is carried
+   * regardless, since its liveness is on the row itself.
    */
   streamingMessageId?: string | null
 }
