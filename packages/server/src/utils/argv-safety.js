@@ -268,7 +268,7 @@ export const AUDITED_SINKS = [
     // source text changes upstream of this cut point, this entry goes stale
     // and must be re-derived against the new truncation.
     match: "execFile(binary, args, { cwd, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true, }, (err, stdout, stderr) => { if (err && typeof err.code !== 'number') { reject(err) retur",
-    reason: "runClaudeAuthStatus's two call sites (_verifyNativeConnectionRoute, _probeLoginBeforeFirstSpawn) pass a literal ['auth','status','--json'(,'--settings', this._settingsPath)] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
+    reason: "runClaudeAuthStatus's two call sites (_verifyNativeConnectionRoute, _probeLoginBeforeFirstSpawn) pass claudeAuthStatusArgs(), a copy of the frozen static argv ['auth','status','--json'] — no interpolated value, never client text.",
   },
   // #7935 — `_spawnPty`'s node-pty `ptyMod.spawn(attemptedBinary, args, {...})`
   // became a scanned sink once the lint learned to recognise node-pty
@@ -282,7 +282,7 @@ export const AUDITED_SINKS = [
   {
     file: 'claude-tui-session.js',
     match: 'this._settingsPath [[_spawnPty#spawn',
-    reason: "this._settingsPath is set by writeHookSettings(this._sinkDir, ...) to join(this._sinkDir, 'settings.json'); this._sinkDir is always join(<server-config base>, `s-${randomUUID()}`) — a daemon-generated absolute path, same reasoning as this file's execFile(binary, args) entry above (runClaudeAuthStatus's own --settings argument).",
+    reason: "this._settingsPath is set by writeHookSettings(this._sinkDir, ...) to join(this._sinkDir, 'settings.json'); this._sinkDir is always join(<server-config base>, `s-${randomUUID()}`) — a daemon-generated absolute path, same reasoning as this file's execFile(binary, args) entry above (the `--settings` argument of the spawn itself).",
   },
   {
     file: 'claude-tui-session.js',
