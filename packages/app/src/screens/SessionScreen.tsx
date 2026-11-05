@@ -1592,6 +1592,7 @@ export function SessionScreen() {
             costBudget={costBudget}
             contextOccupancy={contextOccupancy}
             sessionCwd={sessionCwd}
+            activeSession={activeSession}
             serverMode={serverMode}
             isIdle={isIdle}
             activeAgents={activeAgents}

@@ -45,3 +45,20 @@ export function deriveSessionTitle(
   if (!session?.cwd) return 'Session';
   return repoDisplayName(session.cwd, session.repoCwd, abbreviateSessionCwd);
 }
+
+/**
+ * Location label for the collapsed settings summary row (#8238). Per-session,
+ * like the nav header: the active session's repo name for a worktree session
+ * (`repoCwd` basename), else its cwd shortened at a path boundary
+ * (`abbreviateSessionCwd`). Only with NO active session (or one without a cwd
+ * yet) does it fall back to the server's default cwd, shortened the same way.
+ * Returns `null` when there is nothing to show.
+ */
+export function deriveSummaryLocation(
+  session: { cwd?: string | null; repoCwd?: string | null } | null | undefined,
+  fallbackCwd?: string | null,
+): string | null {
+  const cwd = session?.cwd || fallbackCwd;
+  if (!cwd) return null;
+  return repoDisplayName(cwd, session?.cwd ? session.repoCwd : null, abbreviateSessionCwd);
+}
