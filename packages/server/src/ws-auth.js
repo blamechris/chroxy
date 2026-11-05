@@ -152,7 +152,12 @@ export function handleAuthMessage(ctx, ws, msg) {
     }
 
     // Scope and authenticate together (scope first), before anything else runs.
-    applySessionScope(client, pairingManager, msg.token)
+    if (!applySessionScope(client, pairingManager, msg.token)) {
+      log.warn(`Auth refused for ${rateLimitKey}: token's session binding cannot be applied`)
+      send(ws, { type: 'auth_fail', reason: 'session_unavailable' })
+      ws.close()
+      return true
+    }
     client.authenticated = true
     client.authTime = Date.now()
     // #6004 — remember the exact token this connection authed with so the
@@ -269,6 +274,9 @@ function applySessionScope(client, pairingManager, token, expectedSessionId) {
     ? (pairingManager.getSessionIdForToken(token) ?? null)
     : null
   if (expectedSessionId !== undefined && (expectedSessionId ?? null) !== fromToken) return false
+  // A binding must name a session: a stored empty or non-string id cannot be
+  // honoured as a scope (the WS gates read it as unscoped), so refuse.
+  if (fromToken != null && (typeof fromToken !== 'string' || fromToken.length === 0)) return false
   if (fromToken != null) {
     client.boundSessionId = fromToken
   }

@@ -822,7 +822,7 @@ export class WsServer {
       sendFn,
       broadcastFn,
       // Used by POST /permission-response, which limits a scoped token to its
-      // own session itself (and is the hook-auth fallback) — opt in explicitly.
+      // own session itself — opt in explicitly.
       validateBearerAuth: (req, res) => self._validateBearerAuth(req, res, { allowScoped: true }),
       validateHookAuth: (req, res) => self._validateHookAuth(req, res),
       pushManager,

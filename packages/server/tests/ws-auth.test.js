@@ -2021,12 +2021,26 @@ describe('handleAuthMessage scope and refusal ordering', () => {
     assert.equal(ws.closed, true)
   })
 
-  it('a stored empty-string session id still scopes the connection', () => {
-    const { ctx, ws, client } = makeAuthCtx({
+  it('a stored empty-string session id is refused, not treated as unscoped', () => {
+    const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
       isTokenValid: () => true,
       pairingManager: scopedManager(''),
     })
     handleAuthMessage(ctx, ws, { type: 'auth', token: 'tok' })
-    assert.equal(client.boundSessionId, '')
+    assert.equal(client.authenticated, false)
+    assert.equal(client.boundSessionId, undefined)
+    assert.equal(onAuthSuccess.callCount, 0)
+    assert.equal(ws.closed, true)
+  })
+
+  it('a valid session binding still scopes and authenticates the connection', () => {
+    const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
+      isTokenValid: () => true,
+      pairingManager: scopedManager('sess-A'),
+    })
+    handleAuthMessage(ctx, ws, { type: 'auth', token: 'tok' })
+    assert.equal(client.authenticated, true)
+    assert.equal(client.boundSessionId, 'sess-A')
+    assert.equal(onAuthSuccess.callCount, 1)
   })
 })
