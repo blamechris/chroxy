@@ -238,8 +238,10 @@ describe('round 1 (#8974)', () => {
     assert.equal(claudeConfigDir({ HOME: childHome, USERPROFILE: childHome }), join(childHome, '.claude'))
     // an override the resolver rejects still falls back to the CHILD home
     assert.equal(claudeGlobalConfigPath({ HOME: childHome, USERPROFILE: childHome, CLAUDE_CONFIG_DIR: 'rel' }), join(childHome, '.claude.json'))
-    // no HOME in the env -> the account's passwd home, which a HOME-less child resolves too
-    assert.equal(claudeGlobalConfigPath({}), join(userInfo().homedir, '.claude.json'))
+    // no home in the env -> the account home a home-less child resolves too:
+    // the passwd home on POSIX, os.homedir() (the profile API) on win32
+    const accountHome = process.platform === 'win32' ? homedir() : userInfo().homedir
+    assert.equal(claudeGlobalConfigPath({}), join(accountHome, '.claude.json'))
   })
 
   it('on POSIX HOME wins over USERPROFILE', { skip: process.platform === 'win32' }, () => {
@@ -265,7 +267,8 @@ describe('round 1 (#8974)', () => {
     ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: fresh })
     const written = JSON.parse(readFileSync(join(fresh, '.claude.json'), 'utf8'))
     assert.equal(written.projects[realpathSync(project)].hasTrustDialogAccepted, true)
-    assert.equal(lstatSync(fresh).mode & 0o077, 0)
+    // POSIX mode bits only; Windows does not enforce them
+    if (process.platform !== 'win32') assert.equal(lstatSync(fresh).mode & 0o077, 0)
   })
 
   it('selects the same active global file as claude: non-empty legacy .config.json wins', () => {
@@ -353,7 +356,8 @@ describe('round 2 (#8974)', () => {
 
   it('HOME=/ (a container or service user) is accepted by the reader and kept in the child env', () => {
     assert.equal(claudeHomeDir({ HOME: '/' }, 'linux'), '/')
-    assert.equal(claudeGlobalConfigPath({ HOME: '/' }), '/.claude.json')
+    // the path helper reads the running platform's home key (USERPROFILE on win32)
+    if (process.platform !== 'win32') assert.equal(claudeGlobalConfigPath({ HOME: '/' }), '/.claude.json')
     const env = { HOME: '/' }
     sanitizeClaudeConfigDirEnv(env, 'linux')
     assert.equal(env.HOME, '/')
