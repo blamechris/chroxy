@@ -414,8 +414,9 @@ export class SdkSession extends BaseSession {
    * `refreshModels`: that name marks a registry as a catalog-source registry
    * (`getRegistryForProvider`'s discovery seam, #7776, and the #7731 roster
    * parity guard), which the Claude registry is not — its list is replaced
-   * wholesale by `updateModels`, exactly as the SDK push already did. It: refresh the shared Claude registry
-   * from the installed claude without a session (see claude-model-refresh.js).
+   * wholesale by `updateModels`, exactly as the SDK push already did. It
+   * refreshes the shared Claude registry from the installed claude without a
+   * session (see claude-model-refresh.js).
    * A containerised subclass skips it (its claude is not the host one).
    */
   static refreshLiveModels(deps = {}) {

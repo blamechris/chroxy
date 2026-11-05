@@ -56,6 +56,7 @@ import { forgetSurveyKey } from './handlers/survey-throttle.js'
 import { busyStateOf } from './session-busy-state.js'
 import { pageHistory } from './history-page.js'
 import { SessionArchive } from './session-archive.js'
+import { stopClaudeModelRefresh } from './claude-model-refresh.js'
 
 /**
  * Session events that `_wireSessionEvents` forwards to clients AND records to
@@ -3336,6 +3337,11 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopSessionTimeouts()
+    // #8275: the session-less Claude model refresh owns a child `claude` that no
+    // session tracks. Every shutdown path ends here, so cancel it (SIGKILL, and a
+    // latch against a client connecting mid-shutdown) before the process exits.
+    // Fire-and-forget: destroyAll is synchronous and the kill is already sent.
+    stopClaudeModelRefresh().catch(() => {})
     // #8348: a permission prompt still open at shutdown can never be answered --
     // its hook is denied and its in-process request is cleared -- and the sessions
     // are about to be serialized and torn down with their listeners removed, so

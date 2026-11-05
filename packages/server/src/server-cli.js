@@ -774,6 +774,27 @@ export async function emergencyCleanup({
 }
 
 /**
+ * #8275: boot-time Claude model refresh. Fire-and-forget: bounded by its own
+ * timeout, best-effort (a failure keeps the cached list warmed at boot), never
+ * delays startup. The binary goes through the same verified one-shot gate as
+ * the summarizer. `getProviderFn` is a test seam.
+ * @returns {Promise<unknown>|null} the in-flight refresh (tests await it), or null when none was started
+ */
+export function startBootModelRefresh({ providerType, sessionManager, getProviderFn = getProvider }) {
+  try {
+    if (!isClaudeProvider(providerType)) return null
+    const RefreshClass = getProviderFn(providerType)
+    if (typeof RefreshClass?.refreshLiveModels !== 'function') return null
+    return Promise.resolve()
+      .then(() => RefreshClass.refreshLiveModels({ bin: () => sessionManager.verifyOneShotExecutable(RefreshClass) }))
+      .catch((err) => { log.debug(`Boot model refresh failed: ${err?.message || err}`) })
+  } catch (err) {
+    log.debug(`Boot model refresh skipped: ${err?.message || err}`)
+    return null
+  }
+}
+
+/**
  * #5369: unified SYNCHRONOUS crash teardown for uncaughtException /
  * unhandledRejection. `kind` is the log label. Deliberately NOT async and does
  * NOT await tunnel.stop() — the sigterm-not-sigkill invariant: a hung stop must
@@ -1275,21 +1296,8 @@ export async function startCliServer(config) {
 
   // #8275: refresh the Claude picker from the installed claude at boot, not
   // only when a claude-sdk session happens to start (a claude-tui daemon never
-  // starts one). Fire-and-forget: bounded by its own timeout, best-effort (a
-  // failure keeps the cached list warmed above), never delays startup. The
-  // binary goes through the same verified one-shot gate as the summarizer.
-  if (isClaudeProvider(providerType)) {
-    try {
-      const RefreshClass = getProvider(providerType)
-      if (typeof RefreshClass?.refreshLiveModels === 'function') {
-        Promise.resolve()
-          .then(() => RefreshClass.refreshLiveModels({ bin: () => sessionManager.verifyOneShotExecutable(RefreshClass) }))
-          .catch((err) => log.debug(`Boot model refresh failed: ${err?.message || err}`))
-      }
-    } catch (err) {
-      log.debug(`Boot model refresh skipped: ${err?.message || err}`)
-    }
-  }
+  // starts one). See startBootModelRefresh.
+  startBootModelRefresh({ providerType, sessionManager })
 
   // Log events for debugging
   sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
