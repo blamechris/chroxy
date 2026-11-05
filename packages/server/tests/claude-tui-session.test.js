@@ -978,6 +978,33 @@ describe('ClaudeTuiSession', () => {
         }
       })
 
+      // The refusal catch's own guard, pinned on its own: a destroy() that lands
+      // while the verdict throws (after the loop-top check) must not latch a
+      // refusal or fabricate _ptyExited, which would disarm destroy()'s SIGKILL.
+      it('a refusal thrown while destroy() is in progress is not latched and fabricates no exit', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-catch-guard-'))
+        const { candidate, holder } = makeCandidate(sink, 30000)
+        candidate._verifyNativeRouteMarker = async () => {
+          candidate._destroying = true
+          const err = new Error('route marker missing')
+          err.code = 'NATIVE_ENDPOINT_UNVERIFIED'
+          throw err
+        }
+        try {
+          const outcome = await origSpawnPty.call(candidate, false).then(() => 'resolved', (e) => e)
+          assert.equal(outcome, 'resolved', 'the refusal is not surfaced for a session being destroyed')
+          assert.equal(candidate._spawnRefusal, null, 'no refusal latched')
+          assert.equal(candidate._ptyExited, false, 'no exit fabricated')
+          assert.equal(holder.killed, false, 'the PTY is left to destroy()')
+        } finally {
+          candidate._destroying = false
+          candidate._term = null
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
       // destroy() lands during the wait and the marker path then turns hostile
       // (unreadable, or a stale invalid marker) before the waiter wakes: the
       // cancellation must win over any marker I/O.
