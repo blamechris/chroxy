@@ -645,6 +645,9 @@ function leaveServerDown(): void {
  */
 function retryFromGiveUpAlert(redial: () => void): void {
   const phase = useConnectionLifecycleStore.getState().connectionPhase;
+  // Deliberate no-op in any other phase, including 'connecting': a background
+  // retry already has a dial in flight, and if it fails the give-up latches
+  // 'server_down' again, where Retry works.
   if (phase !== 'server_down' && phase !== 'disconnected') return;
   leaveServerDown();
   redial();

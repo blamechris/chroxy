@@ -355,13 +355,14 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
   describe('#8258 alert Retry leaves server_down', () => {
     async function giveUpAndGetRetry(
       kind: 'probe' | 'restart',
+      hasSaved = true,
     ): Promise<() => void> {
       // The real repro is a drop after a successful session: the last connected
       // URL is this one, so the Retry re-dial takes connect()'s isReconnect path.
       setLastConnectedUrl('wss://tunnel.example.com');
       const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
       useConnectionLifecycleStore.setState({
-        savedConnection: { url: 'wss://tunnel.example.com', token: 'tok' },
+        savedConnection: hasSaved ? { url: 'wss://tunnel.example.com', token: 'tok' } : null,
       });
       (global.fetch as jest.Mock).mockImplementation(() =>
         kind === 'probe'
@@ -371,10 +372,10 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok');
       for (let i = 0; i < 12; i++) {
         await flushPromises();
-        if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') break;
+        if (useConnectionLifecycleStore.getState().connectionPhase === (hasSaved ? 'server_down' : 'disconnected')) break;
         jest.advanceTimersByTime(15_000);
       }
-      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe(hasSaved ? 'server_down' : 'disconnected');
       const call = alertSpy.mock.calls.find(([title]) => title === 'Connection Failed');
       expect(call).toBeDefined();
       const buttons = call![2] as Array<{ text: string; onPress?: () => void }>;
@@ -400,9 +401,23 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       ws.restore();
     });
 
-    // Copilot (#8921): the close/error ladder counter is the module-level
-    // reconnectAttempt. If alert Retry left it maxed, the first socket close after
-    // the redial would give up again and re-latch server_down.
+    // With NO saved connection the give-up lands in 'disconnected' (the connect
+    // form); the alert Retry must still dial from there.
+    it('alert Retry dials from disconnected (give-up with no saved connection)', async () => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry('probe', false);
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+      const before = ws.instances.length;
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(before);
+      ws.restore();
+    });
+
     // A stale alert (app already recovered some other way) must not retire the
     // healthy socket.
     it.each(['probe', 'restart'] as const)('%s alert Retry is a no-op once the connection recovered', async (kind) => {
@@ -421,6 +436,9 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       ws.restore();
     });
 
+    // Copilot (#8921): the close/error ladder counter is the module-level
+    // reconnectAttempt. If alert Retry left it maxed, the first socket close after
+    // the redial would give up again and re-latch server_down.
     it('alert Retry rewinds an exhausted close ladder so one more close reconnects', async () => {
       const ws = installMockWebSocket();
       const onPress = await giveUpAndGetRetry('probe');
