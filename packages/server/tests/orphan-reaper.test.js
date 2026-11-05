@@ -491,6 +491,7 @@ describe('lsof resolution wired into the sweep (#8083)', () => {
     const skipped = log._warn.filter((m) => /sweep skipped/.test(m))
     assert.equal(skipped.length, 1, `expected exactly one warning across 4 sweeps, got ${JSON.stringify(log._warn)}`)
     assert.match(skipped[0], /lsof not found/)
+    assert.ok(/install lsof/.test(skipped[0]) && /\/usr\/sbin to the service PATH/.test(skipped[0]), `WARN must name the fix: ${skipped[0]}`)
   })
 
   it('genuinely missing lsof via the REAL periodic interval: logs once across several ticks', () => {
