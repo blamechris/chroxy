@@ -409,6 +409,14 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
         />
       );
     }
+    // #8257 — a thinking block that has SETTLED (thinkingStreaming === false: its
+    // own stream_end, or the stream_end/result turn-boundary backstop) and carries
+    // no text (the claude SDK reports thinking_tokens without text) has nothing
+    // to show. Animating "Claude is thinking" for it leaves the dots pulsing
+    // above a finished reply on an idle session. The dashboard hides the same
+    // bubble (ChatMessage.tsx). The ephemeral placeholder and a block still
+    // streaming have thinkingStreaming !== false and keep the animation.
+    if (message.thinkingStreaming === false) return null;
     return <ThinkingIndicator />;
   }
 

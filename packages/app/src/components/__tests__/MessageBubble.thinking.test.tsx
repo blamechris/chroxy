@@ -109,6 +109,22 @@ describe('MessageBubble thinking content (#6756)', () => {
     expect(tree.root.findAllByProps({ testID: 'thinking-indicator-stub' }).length).toBeGreaterThan(0);
   });
 
+  // #8257 — a claude-sdk turn can end with an empty thinking block (the SDK reports
+  // thinking_tokens but no text). Once it has settled (thinkingStreaming === false,
+  // set by the thinking stream_end / the stream_end + result backstops) it must
+  // not keep animating "Claude is thinking" above the finished reply.
+  it('renders nothing for a settled thinking block with no text (#8257)', () => {
+    const tree = render(makeThinking({ content: '', thinkingStreaming: false, thinkingTokens: 42 }));
+    expect(tree.root.findAllByProps({ testID: 'thinking-indicator-stub' })).toHaveLength(0);
+    expect(tree.root.findAllByProps({ testID: 'thinking-bubble' })).toHaveLength(0);
+    expect(tree.toJSON()).toBeNull();
+  });
+
+  it('keeps the indicator for an empty block that is still streaming (#8257)', () => {
+    const tree = render(makeThinking({ content: '', thinkingStreaming: true }));
+    expect(tree.root.findAllByProps({ testID: 'thinking-indicator-stub' }).length).toBeGreaterThan(0);
+  });
+
   it('appends a "[thinking truncated]" marker when the content hit the size cap (#6756 review)', () => {
     const tree = render(makeThinking({ thinkingStreaming: false, thinkingTruncated: true }));
     act(() => { tree.root.findByProps({ testID: 'thinking-toggle' }).props.onPress(); });
