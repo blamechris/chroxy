@@ -3016,6 +3016,32 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    // #7847 — at a narrow PTY width claude's rejection reaches the tail as five
+    // cursor-positioned fragments with the inter-word spaces removed.
+    it('a cursor-wrapped, space-less unknown-resume rejection schedules exactly one fresh --session-id attempt (#7847)', async () => {
+      const spawns = []
+      session = makeSession((self) => {
+        spawns.push({ resumed: self._resumedFromPersisted, id: self._sessionId })
+        dieWithTail(self, self._resumedFromPersisted
+          ? `Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:00000000-0000-4000-8000-000000000000\r\n`
+          : null)
+      })
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      for (const d of [1000, 2000, 4000]) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+
+      assert.equal(spawns.length, 2, 'one doomed --resume attempt then exactly one fresh fallback (not a --resume loop)')
+      assert.equal(spawns[0].resumed, true)
+      assert.equal(spawns[1].resumed, false, 'fallback spawns FRESH (--session-id)')
+      assert.notEqual(spawns[1].id, 'conv-uuid-1234')
+      assert.equal(errors.filter((e) => e.code === 'resume_unknown').length, 1, 'one resume_unknown error')
+    })
+
     describe('_scanOutputForUnknownResume (#5417)', () => {
       it('matches claude\'s resume rejection through ANSI codes and line wrapping', () => {
         session = makeSession()
@@ -3046,6 +3072,47 @@ describe('ClaudeTuiSession', () => {
           'check the session state file under ~/.chroxy\r\n',
         )
         assert.equal(session._scanOutputForUnknownResume(), false, 'cross-line co-occurrence never matches')
+      })
+
+      it('matches the cursor-wrapped, space-less five-fragment rejection (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail('Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:00000000-0000-4000-8000-000000000000\r\n')
+        assert.ok(session._scanOutputForUnknownResume(), 'five-fragment shape must match')
+      })
+
+      it('matches when the UUID itself wraps across rows (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail('Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:\r\n00000000-0\r\n000-4000-8\r\n000-000000\r\n000000\r\n')
+        assert.ok(session._scanOutputForUnknownResume(), 'a wrapped UUID stays inside the window')
+      })
+
+      it('matches the fragments through ANSI cursor codes and blank lines (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail('\x1b[1;1HNoconvers\r\n\x1b[2;1Hation\r\n\r\n\x1b[3;1Hfoundwith\r\nsession\r\nID:00000000-0000-4000-8000-000000000000\x1b[0m\r\n')
+        assert.ok(session._scanOutputForUnknownResume())
+      })
+
+      it('does not match the compacted phrase without a session UUID (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail('Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:\r\n')
+        assert.equal(session._scanOutputForUnknownResume(), false, 'no UUID, no match')
+      })
+
+      it('does not match when the fragments are spread across far-apart lines (#7847)', () => {
+        session = makeSession()
+        const filler = Array.from({ length: 12 }, (_, i) => `unrelated line ${i}`).join('\r\n')
+        session._appendToOutputTail(`Noconvers\r\nation\r\nfoundwith\r\nsession\r\n${filler}\r\nID:00000000-0000-4000-8000-000000000000\r\n`)
+        assert.equal(session._scanOutputForUnknownResume(), false, 'unrelated lines between the phrase and the id never match')
+      })
+
+      it('does not match transcript text merely discussing resume/session/conversation errors (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail(
+          'The handler for resume was rewritten in the conversation module\r\n' +
+          'so the session ID 00000000-0000-4000-8000-000000000000 looks stale\r\n' +
+          'each session ID gets logged next to the word error\r\n',
+        )
+        assert.equal(session._scanOutputForUnknownResume(), false)
       })
     })
 
