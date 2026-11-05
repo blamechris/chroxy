@@ -29,6 +29,45 @@ function msg(partial: Partial<ChatMessage> & { id: string; type: ChatMessage['ty
 }
 
 describe('buildChatViewMessages', () => {
+  describe('contentless assistant response (#8271)', () => {
+    const user = msg({ id: 'u1', type: 'user_input', content: 'hi', timestamp: 1 })
+    const err = msg({ id: 'e1', type: 'error', content: 'No response for 90 seconds', code: 'stream_stall', timestamp: 3 })
+
+    it('drops an empty response row once the turn is over (stall / AUTH_REQUIRED)', () => {
+      const empty = msg({ id: 'r1', type: 'response', content: '', timestamp: 2 })
+      const out = buildChatViewMessages([user, empty, err], null)
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'e1'])
+      expect(out.displayGroups.length).toBe(2)
+      expect(out.chatTailMessageId).toBe('e1')
+    })
+
+    it('drops a whitespace-only response row once the turn is over', () => {
+      const blank = msg({ id: 'r1', type: 'response', content: ' \n ', timestamp: 2 })
+      const out = buildChatViewMessages([user, blank, err], null)
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'e1'])
+    })
+
+    it('keeps the empty slot while it is the live streaming target', () => {
+      const empty = msg({ id: 'r1', type: 'response', content: '', timestamp: 2 })
+      const out = buildChatViewMessages([user, empty], 'r1')
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'r1'])
+    })
+
+    it('keeps a response that has text', () => {
+      const text = msg({ id: 'r1', type: 'response', content: 'hello', timestamp: 2 })
+      const out = buildChatViewMessages([user, text, err], null)
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'r1', 'e1'])
+    })
+
+    it('keeps tool and thinking rows of a turn whose response is empty', () => {
+      const thinking = msg({ id: 'th1', type: 'thinking', content: 'hmm', timestamp: 2 })
+      const empty = msg({ id: 'r1', type: 'response', content: '', timestamp: 2 })
+      const tool = msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash', timestamp: 3 } as Partial<ChatMessage> & { id: string; type: ChatMessage['type'] })
+      const out = buildChatViewMessages([user, thinking, empty, tool], null)
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'th1', 't1'])
+    })
+  })
+
   it('projects the authoritative replay tail once per id without changing reconciliation storage (#8240)', () => {
     const cached = msg({ id: 'input-1', type: 'user_input', content: 'optimistic', timestamp: 1 })
     const authoritative = msg({ id: 'input-1', type: 'user_input', content: 'recorded', timestamp: 3 })
