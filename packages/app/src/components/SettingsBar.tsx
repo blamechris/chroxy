@@ -9,6 +9,8 @@ import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode, LEGACY_DEFAULT_THINKING_LEVEL, formatThinkingLevelLabel, isThinkingLevelMismatch } from '@chroxy/protocol';
 import type { ModelInfo, ContextOccupancy, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
+import { deriveSummaryLocation } from '../utils/sessionTitle';
+import { getProviderInfo } from '../constants/providers';
 import { COLORS } from '../constants/colors';
 
 // Connection quality → color mapping (consistent 13% opacity backgrounds)
@@ -76,8 +78,10 @@ export interface SettingsBarProps {
   // subclass, e.g. ollama, whose endpoint reports no usage) -> no meter,
   // the honest dash state. Never fed from the billing usage aggregate.
   contextOccupancy: ContextOccupancy | null;
+  // Server default cwd; only the no-active-session fallback for the summary.
   sessionCwd: string | null;
-  serverMode: 'cli' | null;
+  // #8238: the ACTIVE session's cwd/repoCwd drive the summary location.
+  activeSession?: { cwd?: string | null; repoCwd?: string | null } | null;
   isIdle: boolean;
   activeAgents: AgentInfo[];
   // #4764: chroxy-side intervention ring for the active session. When
@@ -301,7 +305,7 @@ export function SettingsBar({
   costBudget,
   contextOccupancy,
   sessionCwd,
-  serverMode,
+  activeSession,
   isIdle,
   activeAgents,
   interventions,
@@ -399,16 +403,9 @@ export function SettingsBar({
     );
   }, [pendingPermissionConfirm, onConfirmPermissionMode, onCancelPermissionConfirm]);
 
-  // Truncate working directory path for collapsed view
-  let truncatedCwd: string | null = null;
-  if (sessionCwd) {
-    // Replace common home-directory prefixes with "~" for macOS, Linux, and Windows
-    const homeShortened = sessionCwd.replace(
-      /^(?:\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/,
-      '~'
-    );
-    truncatedCwd = homeShortened.length > 30 ? homeShortened.slice(-30) : homeShortened;
-  }
+  // #8238: per-session location (repo name for worktrees, path-boundary
+  // shortening otherwise); server default cwd only with no active session.
+  const summaryLocation = deriveSummaryLocation(activeSession, sessionCwd);
 
   // Build collapsed summary: "main · 3 dirty · chroxy · Opus · $0.02"
   const summaryParts: string[] = [];
@@ -421,11 +418,12 @@ export function SettingsBar({
     if (sessionContext.projectName) {
       summaryParts.push(sessionContext.projectName);
     }
-  } else if (truncatedCwd) {
-    summaryParts.push(truncatedCwd);
+  } else if (summaryLocation) {
+    summaryParts.push(summaryLocation);
   }
-  if (serverMode && !sessionContext) {
-    summaryParts.push(serverMode);
+  // #8238: the session's provider, not the literal serverMode ('cli').
+  if (provider) {
+    summaryParts.push(getProviderInfo(provider).short);
   }
 
   if (activeModel || defaultModelId) {

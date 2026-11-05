@@ -79,7 +79,6 @@ function makeProps(overrides: Partial<SettingsBarProps> = {}): SettingsBarProps 
     costBudget: null,
     contextOccupancy: byokSnapshot(12_500),
     sessionCwd: '/tmp',
-    serverMode: 'cli' as const,
     isIdle: true,
     activeAgents: [],
     connectedClients: [],
