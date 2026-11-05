@@ -123,8 +123,8 @@ describe('ws-file-ops in-project failures carry no absolute server path (#8018)'
     writeFileSync(join(tmp, 'present.txt'), 'x')
     const res = await readResolvedMemoryFile(join(tmp, 'present.txt', 'CLAUDE.md'))
     if (IS_WIN) {
-      // ENOENT on Windows: the reader treats it as a missing file, no error.
-      if (res.error !== undefined) assertNoServerPaths(res.error, 'memory stat')
+      // ENOENT on Windows: the reader treats it as a missing file (error null).
+      if (res.error != null) assertNoServerPaths(res.error, 'memory stat')
     } else {
       assert.equal(res.error, 'Not a directory')
       assertNoServerPaths(res.error, 'memory stat')
