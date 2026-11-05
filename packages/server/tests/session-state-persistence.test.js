@@ -989,6 +989,28 @@ describe('SessionStatePersistence.schedulePersist max-wait (#8954)', () => {
     }
   })
 
+  it('does not re-arm a debounce timer that is overdue BEFORE the max-wait deadline', () => {
+    // Isolates the due-time guard: past the debounce, still short of the
+    // deadline, so the deadline guard alone would not hold the timer.
+    mock.timers.enable({ apis: ['setTimeout'] })
+    let clock = 0
+    const p = makeReal({ persistDebounceMs: 5, persistMaxWaitMs: 20, now: () => clock })
+    try {
+      let writes = 0
+      const fn = () => { writes++ }
+      p.schedulePersist(fn)
+      const armed = p._persistTimer
+      clock = 6 // due at 5, deadline at 20: overdue, callback not yet run
+      for (let i = 0; i < 10; i++) { clock += 1; p.schedulePersist(fn) }
+      assert.equal(p._persistTimer, armed, 'the overdue debounce timer must be left alone')
+      mock.timers.tick(5)
+      assert.equal(writes, 1, 'the overdue timer fires and writes once')
+    } finally {
+      p.destroy()
+      mock.timers.reset()
+    }
+  })
+
   it('end to end: writes even when scheduling calls run before the overdue timer callback every time', async () => {
     const p = makeReal({ persistDebounceMs: 5, persistMaxWaitMs: 20 })
     let writes = 0

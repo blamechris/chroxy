@@ -301,7 +301,8 @@ export class SessionStatePersistence {
    * before anyway.
    *
    * Implemented with a single timer (delay = min(debounce, time left until the
-   * max-wait deadline)), so clearing `_persistTimer` cancels everything.
+   * max-wait deadline), clamped at 0), so clearing `_persistTimer` cancels
+   * everything.
    * Elapsed time comes from a MONOTONIC clock (`now`), the same time base as
    * setTimeout, so a wall-clock rollback cannot stretch the window. A timer
    * that is already due is never cancelled and re-armed: a call that runs
