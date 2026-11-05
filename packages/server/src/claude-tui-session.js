@@ -4713,9 +4713,10 @@ export class ClaudeTuiSession extends BaseSession {
    * line pair (whitespace-collapsed, mirroring _scanOutputForAuthFailure's
    * normalization) still catches a rejection the TUI wrapped/box-padded
    * across one rendered line break, while keeping the match window ≤ two
-   * lines instead of the whole tail. A second, narrower pass handles cursor-wrapped
-   * output whose spaces were dropped (#7847): a whitespace-compacted window of up
-   * to 6 lines must contain the full canonical phrase AND a session UUID. Consulted by _scheduleRespawn at the
+   * lines instead of the whole tail. A second, narrower pass handles
+   * cursor-wrapped output whose spaces were dropped (#7847): a
+   * whitespace-compacted window of up to 10 lines must contain the full
+   * canonical phrase AND a session UUID. Consulted by _scheduleRespawn at the
    * respawn cap to decide retry-FRESH eligibility. The tail is only SCANNED
    * here, never logged — every diagnostic surface keeps routing through the
    * redaction helpers (_outputTailDiagnostic / _outputTailHexDump,

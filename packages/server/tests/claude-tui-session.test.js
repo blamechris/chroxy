@@ -3080,23 +3080,29 @@ describe('ClaudeTuiSession', () => {
         assert.ok(session._scanOutputForUnknownResume(), 'five-fragment shape must match')
       })
 
+      it('matches when the UUID itself wraps across rows (#7847)', () => {
+        session = makeSession()
+        session._appendToOutputTail('Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:\r\n00000000-0\r\n000-4000-8\r\n000-000000\r\n000000\r\n')
+        assert.ok(session._scanOutputForUnknownResume(), 'a wrapped UUID stays inside the window')
+      })
+
       it('matches the fragments through ANSI cursor codes and blank lines (#7847)', () => {
         session = makeSession()
         session._appendToOutputTail('\x1b[1;1HNoconvers\r\n\x1b[2;1Hation\r\n\r\n\x1b[3;1Hfoundwith\r\nsession\r\nID:00000000-0000-4000-8000-000000000000\x1b[0m\r\n')
         assert.ok(session._scanOutputForUnknownResume())
       })
 
-      it('does not match the compacted phrase without a session 00000000-0000-4000-8000-000000000000 (#7847)', () => {
+      it('does not match the compacted phrase without a session UUID (#7847)', () => {
         session = makeSession()
         session._appendToOutputTail('Noconvers\r\nation\r\nfoundwith\r\nsession\r\nID:\r\n')
-        assert.equal(session._scanOutputForUnknownResume(), false, 'no 00000000-0000-4000-8000-000000000000, no match')
+        assert.equal(session._scanOutputForUnknownResume(), false, 'no UUID, no match')
       })
 
       it('does not match when the fragments are spread across far-apart lines (#7847)', () => {
         session = makeSession()
-        const filler = Array.from({ length: 8 }, (_, i) => `unrelated line ${i}`).join('\r\n')
+        const filler = Array.from({ length: 12 }, (_, i) => `unrelated line ${i}`).join('\r\n')
         session._appendToOutputTail(`Noconvers\r\nation\r\nfoundwith\r\nsession\r\n${filler}\r\nID:00000000-0000-4000-8000-000000000000\r\n`)
-        assert.equal(session._scanOutputForUnknownResume(), false, 'phrase and id more than 6 lines apart')
+        assert.equal(session._scanOutputForUnknownResume(), false, 'phrase and id more than 10 lines apart')
       })
 
       it('does not match transcript text merely discussing resume/session/conversation errors (#7847)', () => {

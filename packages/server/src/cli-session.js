@@ -101,6 +101,10 @@ export function stderrIndicatesUnknownResume(stderrLines) {
   return false
 }
 
+// #7847: the canonical rejection with every space removed, followed by the session UUID.
+export const COMPACTED_UNKNOWN_RESUME_PATTERN =
+  /noconversationfoundwithsessionid:?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
 /**
  * Cursor-positioned TUI rendering of claude's unknown-resume rejection can reach
  * the PTY tail as several fragments with the inter-word spaces removed
@@ -112,14 +116,14 @@ export function stderrIndicatesUnknownResume(stderrLines) {
  * anchor keeps it narrow — transcript text that merely discusses resume or
  * session errors has no such phrase+id shape and never matches.
  *
+ * The window is 10 lines: the five phrase fragments plus a UUID that may itself
+ * wrap across several rows at the narrowest widths.
+ *
  * @param {string[]} lines
- * @param {number} [windowLines=6]
+ * @param {number} [windowLines=10]
  * @returns {boolean}
  */
-export const COMPACTED_UNKNOWN_RESUME_PATTERN =
-  /noconversationfoundwithsessionid:?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
-
-export function stderrIndicatesUnknownResumeCompacted(lines, windowLines = 6) {
+export function stderrIndicatesUnknownResumeCompacted(lines, windowLines = 10) {
   if (!Array.isArray(lines) || lines.length === 0) return false
   const compact = lines.map((l) => (typeof l === 'string' ? l.replace(/\s+/g, '') : ''))
   for (let i = 0; i < compact.length; i++) {
