@@ -24,4 +24,7 @@ describe('deriveSummaryLocation (#8238)', () => {
     expect(deriveSummaryLocation(null, '/srv/default/app')).toBe('default/app');
     expect(deriveSummaryLocation(null, null)).toBeNull();
   });
+  it('ignores repoCwd when the session has no cwd (uses the fallback tail)', () => {
+    expect(deriveSummaryLocation({ cwd: '', repoCwd: '/x/repo' }, '/srv/default/app')).toBe('default/app');
+  });
 });

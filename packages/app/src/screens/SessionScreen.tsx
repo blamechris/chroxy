@@ -1593,7 +1593,6 @@ export function SessionScreen() {
             contextOccupancy={contextOccupancy}
             sessionCwd={sessionCwd}
             activeSession={activeSession}
-            serverMode={serverMode}
             isIdle={isIdle}
             activeAgents={activeAgents}
             interventions={interventions}

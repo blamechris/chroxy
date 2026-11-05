@@ -82,7 +82,6 @@ export interface SettingsBarProps {
   sessionCwd: string | null;
   // #8238: the ACTIVE session's cwd/repoCwd drive the summary location.
   activeSession?: { cwd?: string | null; repoCwd?: string | null } | null;
-  serverMode: 'cli' | null;
   isIdle: boolean;
   activeAgents: AgentInfo[];
   // #4764: chroxy-side intervention ring for the active session. When
@@ -307,7 +306,6 @@ export function SettingsBar({
   contextOccupancy,
   sessionCwd,
   activeSession,
-  serverMode,
   isIdle,
   activeAgents,
   interventions,
