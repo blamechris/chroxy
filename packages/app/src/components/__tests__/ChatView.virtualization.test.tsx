@@ -163,7 +163,7 @@ describe('ChatView virtualization (#5517)', () => {
     // The follow now runs one frame later through followEnd (#8961); the
     // behaviour itself is pinned in ChatView.opensAtLatest.test.tsx.
     expect(/onContentSizeChange=\{[\s\S]{0,1900}followEnd\(\)/.test(source)).toBe(true);
-    expect(/const followEnd = [\s\S]{0,500}scrollToEnd\(/.test(source)).toBe(true);
+    expect(/const followEnd = [\s\S]{0,900}scrollToEnd\(/.test(source)).toBe(true);
   });
 
   it('still pauses auto-scroll while selecting or an unanswered prompt is up', () => {

@@ -137,12 +137,48 @@ describe('ChatView opens at the latest message (#8961)', () => {
       const { tree, flat, spy } = mount([reply('a'), reply('b')]);
       act(() => { flat().props.onContentSizeChange(400, 900); });
       act(() => { jest.advanceTimersByTime(1500); });
+      frame(); // the settle's own final follow runs on the next frame
       // a VoiceOver / wheel / programmatic scroll up: onScroll only, no drag-begin
       act(() => { flat().props.onScroll(scrollEvent(100, 900)); });
       spy.mockClear();
       act(() => { flat().props.onContentSizeChange(400, 1000); });
       frame();
       expect(spy).not.toHaveBeenCalled();
+      act(() => tree.unmount());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a follow still pending when the quiet window closes lands at the end (settle is not a takeover)', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat, spy } = mount([reply('a'), reply('b')]);
+      act(() => { flat().props.onContentSizeChange(400, 900); });
+      // the mount's offset-0 report latches "scrolled up"
+      act(() => { flat().props.onScroll(scrollEvent(0, 900)); });
+      // the quiet window closes before the queued frame has run
+      act(() => { jest.advanceTimersByTime(1500); });
+      frame();
+      expect(spy).toHaveBeenCalledWith({ animated: false });
+      act(() => tree.unmount());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('closing the opening issues one last follow, for a device that needs more than one frame', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat, spy } = mount([reply('a'), reply('b')]);
+      act(() => { flat().props.onContentSizeChange(400, 900); });
+      frame();
+      expect(spy).toHaveBeenCalledTimes(1);
+      // the metrics commit late: the list still reports offset 0
+      act(() => { flat().props.onScroll(scrollEvent(0, 900)); });
+      act(() => { jest.advanceTimersByTime(1500); });
+      frame();
+      expect(spy).toHaveBeenCalledTimes(2);
       act(() => tree.unmount());
     } finally {
       jest.useRealTimers();
@@ -177,6 +213,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
         act(() => { flat().props.onContentSizeChange(400, 900 + i * 20); });
         act(() => { jest.advanceTimersByTime(500); });
       }
+      frame(); // the cap's own final follow runs on the next frame
       // a screen-reader / wheel scroll up: onScroll only, no drag-begin
       act(() => { flat().props.onScroll(scrollEvent(100, 1200)); });
       spy.mockClear();

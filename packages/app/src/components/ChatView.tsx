@@ -264,26 +264,31 @@ function ChatViewForSession({
   // the follow off while the reply is still streaming. One pending frame is
   // enough: it scrolls to wherever the end is by then.
   const followRafRef = useRef<number | null>(null);
-  const followEnd = () => {
+  // A queued frame owed to the opening phase still follows after the phase ends
+  // on its own (settle or cap), so the last growth before the timer is not lost.
+  const followForcedRef = useRef(false);
+  const followEnd = (force = false) => {
+    if (force) followForcedRef.current = true;
     if (followRafRef.current != null) return;
     followRafRef.current = requestAnimationFrame(() => {
       followRafRef.current = null;
+      const forced = followForcedRef.current;
+      followForcedRef.current = false;
       if (isSelectingRef.current) return;
       // Re-check the reader's position: a scroll-up reported between the size
       // event and this frame must not be yanked back.
-      if (!openingRef.current && showScrollToBottomRef.current) return;
+      if (!forced && !openingRef.current && showScrollToBottomRef.current) return;
       scrollViewRef.current?.scrollToEnd({ animated: false });
     });
   };
   const cancelFollow = () => {
+    followForcedRef.current = false;
     if (followRafRef.current != null) {
       cancelAnimationFrame(followRafRef.current);
       followRafRef.current = null;
     }
   };
-  const endOpening = () => {
-    openingRef.current = false;
-    cancelFollow(); // a takeover (drag, search, jump-to-top) must not be yanked by a queued frame
+  const clearOpeningTimers = () => {
     if (openingTimerRef.current != null) {
       clearTimeout(openingTimerRef.current);
       openingTimerRef.current = null;
@@ -292,6 +297,22 @@ function ChatViewForSession({
       clearTimeout(openingCapTimerRef.current);
       openingCapTimerRef.current = null;
     }
+  };
+  // The reader took the list over (drag, search jump, jump-to-top): end the
+  // opening and drop any queued follow so it cannot yank them.
+  const endOpening = () => {
+    openingRef.current = false;
+    cancelFollow();
+    clearOpeningTimers();
+  };
+  // The opening ran its course (quiet window or hard cap) with no takeover:
+  // issue one last follow, so a queued frame is not dropped and a device that
+  // needs more than one frame to commit metrics still lands at the end.
+  const settleOpening = () => {
+    if (!openingRef.current) return;
+    followEnd(true);
+    openingRef.current = false;
+    clearOpeningTimers();
   };
   useEffect(() => () => {
     cancelFollow();
@@ -693,9 +714,9 @@ function ChatViewForSession({
             // the last row. Each size event restarts the settle window.
             followEnd();
             if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
-            openingTimerRef.current = setTimeout(endOpening, OPENING_SETTLE_MS);
+            openingTimerRef.current = setTimeout(settleOpening, OPENING_SETTLE_MS);
             if (openingCapTimerRef.current == null) {
-              openingCapTimerRef.current = setTimeout(endOpening, OPENING_MAX_MS);
+              openingCapTimerRef.current = setTimeout(settleOpening, OPENING_MAX_MS);
             }
             return;
           }
