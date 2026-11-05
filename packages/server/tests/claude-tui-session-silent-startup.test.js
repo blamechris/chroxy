@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { ClaudeTuiSession, STARTUP_NO_OUTPUT_CODE } from '../src/claude-tui-session.js'
+import { ClaudeTuiSession, STARTUP_NO_OUTPUT_CODE, STARTUP_NO_OUTPUT_REFUSAL } from '../src/claude-tui-session.js'
 
 /**
  * #7881 — a claude child blocked before it printed anything (seen live: stuck in
@@ -112,6 +112,10 @@ describe('ClaudeTuiSession — silent child at startup (#7881)', () => {
     assert.equal(admission.retrySafe, true)
     assert.equal(admission.reason, STARTUP_NO_OUTPUT_CODE)
     assert.equal(events.errors[0].code, STARTUP_NO_OUTPUT_CODE)
+    // The refusal is short; it does not repeat the startup diagnostic (cwd, hint).
+    assert.equal(events.errors[0].message, STARTUP_NO_OUTPUT_REFUSAL)
+    assert.equal(admission.message, STARTUP_NO_OUTPUT_REFUSAL)
+    assert.equal(events.errors[0].message.includes('/tmp'), false, 'no cwd paragraph on every send')
     assert.equal(s._isBusy, false)
   })
 

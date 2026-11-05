@@ -259,6 +259,9 @@ export const SINK_BASE_UNTRUSTED_CODE = 'SINK_BASE_UNTRUSTED'
  * directory. The session is not advertised ready until bytes (or a signal) show up.
  */
 export const STARTUP_NO_OUTPUT_CODE = 'STARTUP_NO_OUTPUT'
+// #7881: the per-send refusal while the child is still silent (the full
+// diagnostic is emitted once, at startup).
+export const STARTUP_NO_OUTPUT_REFUSAL = 'Not sent: claude has not produced any output yet, so this session is not ready. Your message was kept; send it again once the session is ready.'
 
 export class ClaudeTuiSession extends BaseSession {
   static get customizationDescriptor() {
@@ -4862,14 +4865,18 @@ export class ClaudeTuiSession extends BaseSession {
     }
     if (!this._processReady || !this._term || this._ptyExited) {
       // #7881: a session still waiting on a silent child says so, with the code.
+      // The full diagnostic (cwd, privacy-folder hint) was shown once at startup;
+      // the refusal says only what happened to THIS message, so it does not
+      // repeat that paragraph for every send.
       const silent = this._startupNoOutput && !!this._term && !this._ptyExited
+      const refusal = silent ? STARTUP_NO_OUTPUT_REFUSAL : null
       this.emit('error', silent
-        ? { code: STARTUP_NO_OUTPUT_CODE, message: this._startupNoOutputMessage() }
+        ? { code: STARTUP_NO_OUTPUT_CODE, message: refusal }
         : { message: 'Session not started or PTY no longer alive' })
       reportInputAdmission(sendOptions, {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: silent ? STARTUP_NO_OUTPUT_CODE : 'not_runnable',
-        message: silent ? this._startupNoOutputMessage() : 'The provider session is not ready to accept input.',
+        message: silent ? refusal : 'The provider session is not ready to accept input.',
       })
       return { ok: false, reason: 'not_runnable' }
     }
