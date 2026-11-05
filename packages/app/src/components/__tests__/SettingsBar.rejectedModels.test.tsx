@@ -101,6 +101,17 @@ describe('SettingsBar refused models (#8915)', () => {
     expect(setModel).toHaveBeenCalledWith('gpt-5.6');
   });
 
+  it('a refused ACTIVE model stays the selected chip and is still marked and disabled', () => {
+    const setModel = jest.fn();
+    const tree = render(makeProps({ setModel, activeModel: 'gpt-5.5', rejectedModelIds: ['gpt-5.5'] }));
+    const active = chip(tree, 'gpt-5.5');
+    expect(active.props.accessibilityState).toEqual({ selected: true, disabled: true });
+    expect(active.props.disabled).toBe(true);
+    expect(chipText(active)).toContain(MARK);
+    act(() => { active.props.onPress(); });
+    expect(setModel).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['absent', undefined],
     ['null', null],
