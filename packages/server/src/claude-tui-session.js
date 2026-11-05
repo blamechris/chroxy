@@ -3563,6 +3563,11 @@ export class ClaudeTuiSession extends BaseSession {
     const deadline = Date.now() + waitMs
     let marker
     for (;;) {
+      // Cancellation first, before any marker I/O: once destroy() or a real PTY
+      // exit owns teardown, a read error or a stale marker must not be turned
+      // into a refusal that fabricates `_ptyExited` and disarms the kill
+      // escalation.
+      if (this._destroying || this._ptyExited) return false
       let raw
       try {
         raw = readFileSync(markerPath, 'utf8')
@@ -3589,7 +3594,6 @@ export class ClaudeTuiSession extends BaseSession {
           break
         }
       }
-      if (this._destroying || this._ptyExited) return false
       if (Date.now() >= deadline) break
       await new Promise((resolve) => {
         this._nativeRouteMarkerWake = resolve
@@ -4029,6 +4033,10 @@ export class ClaudeTuiSession extends BaseSession {
         // leave _term, _ptyExited and the kill escalation to them (#8979).
         if (!(await this._verifyNativeRouteMarker(nativeRouteNonce))) return
       } catch (err) {
+        // A destroy() that landed while the verdict was being reached owns the
+        // PTY's end: latching a refusal here would mark it exited and disarm
+        // destroy()'s SIGKILL escalation.
+        if (this._destroying) return
         // #8057: the SessionStart route marker is the native route's last
         // verdict — a custom endpoint / token / gateway / cloud selector
         // (NATIVE_ENDPOINT_ROUTE_MISMATCH) comes from configuration, so a

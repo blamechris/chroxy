@@ -978,19 +978,97 @@ describe('ClaudeTuiSession', () => {
         }
       })
 
+      // destroy() lands during the wait and the marker path then turns hostile
+      // (unreadable, or a stale invalid marker) before the waiter wakes: the
+      // cancellation must win over any marker I/O.
+      for (const [label, hostile] of [
+        ['a post-wake read error', (sink) => mkdirSync(join(sink, 'native-route.json'))],
+        ['a stale invalid marker', (sink) => writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+          version: 1, nonce: 'stale', safe: true, firstPartyEndpoint: true, blockedKeys: [],
+        }))],
+      ]) {
+        it(`destroy() then ${label}: no refusal, no fabricated exit, SIGKILL escalation still runs`, async () => {
+          ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+          const sink = mkdtempSync(join(fakeHome, 'marker-destroy-hostile-'))
+          const { candidate } = makeCandidate(sink, 30000)
+          const termSignals = []
+          candidate._ptyModOverride = {
+            spawn: () => ({ pid: 4344, kill: (sig) => { termSignals.push(sig) }, onData: () => {}, onExit: () => {}, on: () => {} }),
+          }
+          mock.method(process, 'kill', (pid, sig) => {
+            if (sig === 0) return
+            throw new Error('ESRCH')
+          })
+          const savedDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'DESTROY_GRACE_MS')
+          Object.defineProperty(ClaudeTuiSession, 'DESTROY_GRACE_MS', { configurable: true, get: () => 100 })
+          try {
+            const pending = origSpawnPty.call(candidate, false).then(() => 'resolved', (e) => e)
+            await new Promise((r) => setTimeout(r, 150))
+            // Make the NEXT marker read hostile, then destroy: the wake must not reach it.
+            hostile(sink)
+            await candidate.destroy()
+            assert.equal(await pending, 'resolved', 'a deliberate destroy is not a coded refusal')
+            assert.equal(candidate._spawnRefusal, null, 'no refusal latched')
+            assert.equal(candidate._ptyExited, false, '_ptyExited is not fabricated')
+            await new Promise((r) => setTimeout(r, 300))
+            assert.deepEqual(termSignals, ['SIGTERM', 'SIGKILL'], 'escalation reaches SIGKILL')
+          } finally {
+            Object.defineProperty(ClaudeTuiSession, 'DESTROY_GRACE_MS', savedDescriptor)
+            mock.restoreAll()
+            rmSync(sink, { recursive: true, force: true })
+          }
+        })
+      }
+
+      it('a real PTY exit during the wait ends it without a refusal and the session is never reported ready', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-ptyexit-'))
+        const { candidate } = makeCandidate(sink, 30000)
+        let onExit
+        candidate._ptyModOverride = {
+          spawn: () => ({
+            pid: 4345,
+            kill: () => {},
+            onData: () => {},
+            onExit: (cb) => { onExit = cb },
+            on: () => {},
+          }),
+        }
+        const ready = []
+        candidate.on('ready', () => ready.push(true))
+        candidate.on('error', () => {})
+        try {
+          const pending = origSpawnPty.call(candidate, false).then(() => 'resolved', (e) => e)
+          await new Promise((r) => setTimeout(r, 150))
+          const started = Date.now()
+          onExit({ exitCode: 1 })
+          assert.equal(await pending, 'resolved')
+          assert.ok(Date.now() - started < 2000, 'the wait ended promptly on the exit')
+          assert.equal(candidate._spawnRefusal, null, 'a dead PTY is not a route refusal')
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+          assert.equal(candidate._ptyExited, true)
+          assert.equal(candidate._processReady, false)
+          assert.deepEqual(ready, [], 'never reported ready')
+          assert.equal(candidate.writeTerminalInput('x'), false)
+        } finally {
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
       it('an unreadable marker (not ENOENT) fails closed promptly instead of waiting out the deadline', async () => {
         ClaudeTuiSession.prototype._spawnPty = origSpawnPty
         const sink = mkdtempSync(join(fakeHome, 'marker-unreadable-'))
         // A directory at the marker path: readFileSync fails with EISDIR, not ENOENT.
         mkdirSync(join(sink, 'native-route.json'))
-        const { candidate, holder } = makeCandidate(sink, 30000)
+        const { candidate, holder } = makeCandidate(sink, 1500)
         try {
           const started = Date.now()
           await assert.rejects(
             origSpawnPty.call(candidate, false),
             (err) => err.code === 'NATIVE_ENDPOINT_UNVERIFIED' && /could not be read/.test(err.message),
           )
-          assert.ok(Date.now() - started < 2000, 'did not wait for the deadline')
+          assert.ok(Date.now() - started < 1000, 'failed at once, not at the 1500 ms deadline')
           assert.equal(holder.killed, true)
         } finally {
           await candidate.destroy()
