@@ -8,6 +8,7 @@ import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-
 import { CLAUDE_SDK_CUSTOMIZATION } from './provider-customization.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, getRosterModelRow, ALLOWED_MODEL_IDS } from './models.js'
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
+import { effortRoster, annotateSupportedModels, refreshClaudeModels } from './claude-model-refresh.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
@@ -405,6 +406,21 @@ export class SdkSession extends BaseSession {
    */
   static get resolvedBinary() {
     return resolveClaudeBinary()
+  }
+
+  /**
+   * #8275 — the hook `scheduleProviderModelsRefresh` (ws-history.js) calls on
+   * every post-auth `available_models` push. Deliberately NOT named
+   * `refreshModels`: that name marks a registry as a catalog-source registry
+   * (`getRegistryForProvider`'s discovery seam, #7776, and the #7731 roster
+   * parity guard), which the Claude registry is not — its list is replaced
+   * wholesale by `updateModels`, exactly as the SDK push already did. It: refresh the shared Claude registry
+   * from the installed claude without a session (see claude-model-refresh.js).
+   * A containerised subclass skips it (its claude is not the host one).
+   */
+  static refreshLiveModels(deps = {}) {
+    if (this.capabilities?.containerized) return Promise.resolve(null)
+    return refreshClaudeModels(deps)
   }
 
   /**
@@ -3280,11 +3296,7 @@ export class SdkSession extends BaseSession {
    * @returns {{reasoningLevels: string[], defaultReasoningLevel: string} | null}
    */
   static effortRoster(modelInfo) {
-    if (modelInfo?.supportsEffort !== true || !Array.isArray(modelInfo.supportedEffortLevels)) return null
-    const levels = [...new Set(modelInfo.supportedEffortLevels.filter(isWellFormedThinkingLevel))]
-      .filter((l) => l !== LEGACY_DEFAULT_THINKING_LEVEL)
-    if (levels.length === 0) return null
-    return { reasoningLevels: [LEGACY_DEFAULT_THINKING_LEVEL, ...levels], defaultReasoningLevel: LEGACY_DEFAULT_THINKING_LEVEL }
+    return effortRoster(modelInfo)
   }
 
   /**
@@ -3308,26 +3320,9 @@ export class SdkSession extends BaseSession {
     try {
       const sdkModels = await this._query.supportedModels()
       // #8700: each row's effort roster rides into the registry as its
-      // `reasoningLevels`, which the picker and the `set_thinking_level` gate
-      // both read, and this session remembers the answer per model for
-      // `_thinkingOptions`. `supportsEffort` alone decides effort support, so a
-      // row that claims it without naming its levels still gets `effort` (with
-      // the legacy roster in the picker). A row without it means "no effort"
-      // only from a CLI that reports effort for some model; one that reports it
-      // for none predates the field, and its silence says nothing.
-      const reportsEffort = Array.isArray(sdkModels) && sdkModels.some((m) => m?.supportsEffort === true)
-      const withEffort = Array.isArray(sdkModels)
-        ? sdkModels.map((m) => {
-          const support = m?.supportsEffort === true ? 'effort' : (reportsEffort ? 'budget' : null)
-          if (support) {
-            for (const key of [m?.value, m?.resolvedModel]) {
-              if (typeof key === 'string' && key.length > 0) this._modelEffortSupport.set(key, support)
-            }
-          }
-          const roster = SdkSession.effortRoster(m)
-          return roster ? { ...m, ...roster } : m
-        })
-        : sdkModels
+      // `reasoningLevels`; this session also remembers the per-model answer
+      // for `_thinkingOptions` (see annotateSupportedModels).
+      const withEffort = annotateSupportedModels(sdkModels, this._modelEffortSupport)
       const converted = updateModels(withEffort)
       if (converted && converted.length > 0) {
         // #4828: session-scoped (called from init handler so _log is set).

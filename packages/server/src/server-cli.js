@@ -50,13 +50,13 @@ import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopback
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
-import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER, resolveDaemonDefaultProvider } from './providers.js'
+import { getProvider, registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER, resolveDaemonDefaultProvider } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay } from './models.js'
+import { getRegistryForProvider, isClaudeProvider, watchModelsOverlay } from './models.js'
 import { clientActiveProvider, overlayBroadcastReachesProvider, broadcastRosterPerRecipient } from './roster-broadcast.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
@@ -1272,6 +1272,24 @@ export async function startCliServer(config) {
   // PushNotificationHandler, constructed + started after pushManager exists and
   // before wsServer (so the #3871 wsServer-undefined branch still covers an
   // early restoreState event). See below, right after `new PushManager(...)`.
+
+  // #8275: refresh the Claude picker from the installed claude at boot, not
+  // only when a claude-sdk session happens to start (a claude-tui daemon never
+  // starts one). Fire-and-forget: bounded by its own timeout, best-effort (a
+  // failure keeps the cached list warmed above), never delays startup. The
+  // binary goes through the same verified one-shot gate as the summarizer.
+  if (isClaudeProvider(providerType)) {
+    try {
+      const RefreshClass = getProvider(providerType)
+      if (typeof RefreshClass?.refreshLiveModels === 'function') {
+        Promise.resolve()
+          .then(() => RefreshClass.refreshLiveModels({ bin: () => sessionManager.verifyOneShotExecutable(RefreshClass) }))
+          .catch((err) => log.debug(`Boot model refresh failed: ${err?.message || err}`))
+      }
+    } catch (err) {
+      log.debug(`Boot model refresh skipped: ${err?.message || err}`)
+    }
+  }
 
   // Log events for debugging
   sessionManager.on('session_created', ({ sessionId, name, cwd }) => {

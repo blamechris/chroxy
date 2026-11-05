@@ -1,3 +1,4 @@
+import { refreshClaudeModels } from './claude-model-refresh.js'
 import { randomBytes, randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import {
@@ -321,6 +322,15 @@ export class ClaudeTuiSession extends BaseSession {
    */
   static get resolvedBinary() {
     return resolveClaudeBinary()
+  }
+
+  /**
+   * #8275 — a claude-tui daemon never starts an SDK session, so nothing else
+   * feeds the Claude picker the live list. `scheduleProviderModelsRefresh`
+   * (ws-history.js) calls this; it is the same refresh claude-sdk uses.
+   */
+  static refreshLiveModels(deps = {}) {
+    return refreshClaudeModels(deps)
   }
 
   static get preflight() {

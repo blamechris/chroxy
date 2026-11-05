@@ -1312,7 +1312,11 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
   } catch {
     return // unknown provider — nothing to refresh
   }
-  if (typeof ProviderClass?.refreshModels !== 'function') return
+  // #8275: `refreshLiveModels` is the Claude family's session-less refresh; see
+  // SdkSession.refreshLiveModels for why it is not named `refreshModels`.
+  const refreshName = typeof ProviderClass?.refreshModels === 'function' ? 'refreshModels'
+    : (typeof ProviderClass?.refreshLiveModels === 'function' ? 'refreshLiveModels' : null)
+  if (!refreshName) return
   const sessionManager = ctx?.sessionManager
   const verifyBin = typeof sessionManager?.verifyOneShotExecutable === 'function'
     ? () => sessionManager.verifyOneShotExecutable(ProviderClass)
@@ -1322,7 +1326,7 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
       throw err
     }
   Promise.resolve()
-    .then(() => ProviderClass.refreshModels({ bin: verifyBin }))
+    .then(() => ProviderClass[refreshName]({ bin: verifyBin }))
     .then((models) => {
       if (!Array.isArray(models) || models.length === 0) return
       if (ws.readyState !== undefined && ws.readyState !== 1) return // client gone
