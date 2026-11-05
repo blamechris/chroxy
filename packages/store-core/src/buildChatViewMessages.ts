@@ -282,6 +282,13 @@ export function buildChatViewMessages(
     // away from the turn it describes.
     if (m.type === 'system') return isTurnOutcomeMarker(m)
     if (hideToolAndThinking && isHiddenInCompactMode(m.type)) return false
+    // #8271: a `stream_start` opens an empty response slot; a turn that ends with
+    // no text (first-output stall, AUTH_REQUIRED teardown) never fills it, and the
+    // slot rendered as a bare avatar + timestamp above the error chip. Hide a
+    // contentless response once it is no longer the live streaming target. Tool
+    // and thinking rows are separate messages, so they are unaffected. View-only:
+    // the store keeps the slot, so a late delta still lands on it and reappears.
+    if (m.type === 'response' && m.content.trim() === '' && m.id !== streamingMessageId) return false
     return true
   })
 
