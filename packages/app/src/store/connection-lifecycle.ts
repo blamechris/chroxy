@@ -14,15 +14,16 @@ import type { ConnectionPhase, SavedConnection } from './types';
  * is REJECTED — `transitionPhase` warns and leaves `connectionPhase`
  * unchanged (#6286). `server_down` is the one terminal phase; it is left
  * only via its two declared legal edges — `connecting` (a user-initiated
- * retry, see `retryConnection`) or `disconnected` (an explicit disconnect).
+ * retry: `retryConnection` or an alert Retry, both via `leaveServerDown`) or
+ * `disconnected` (an explicit disconnect). No caller needs `force` today.
  * `transitionPhase(to, { force: true })` is a deliberately-flagged escape
  * hatch that applies an otherwise-illegal transition — but ONLY for the
  * edges enumerated in `FORCEABLE_TRANSITIONS` (#6296). `force` is NOT a
  * blanket override: an illegal transition that is not whitelisted is
  * rejected even with `force`, so a future caller cannot accidentally
  * bypass terminal-phase stickiness (the #5980 clobber protection #6286
- * added). It is currently used only by `retryConnection` and must stay
- * confined to audited call sites.
+ * added). No production call site uses it at present; any new one must be
+ * audited.
  *
  * Notes on non-obvious entries:
  *  - connecting → server_restarting: health check returns "restarting" during the
@@ -62,9 +63,9 @@ const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
  * #6286 fixed).
  *
  * Today this documents exactly one legitimate intent: leaving the terminal
- * `server_down` phase on a user-initiated retry (`retryConnection`). That edge
- * also happens to be legal in `VALID_TRANSITIONS`, so the current call site
- * never actually needs the escape hatch — the whitelist records the intent so
+ * `server_down` phase on a user-initiated retry (`leaveServerDown`). That edge
+ * is legal in `VALID_TRANSITIONS`, so no production call site needs the escape
+ * hatch (only tests exercise it) — the whitelist records the intent so
  * the edge stays force-safe even if its `VALID_TRANSITIONS` membership ever
  * changes. Encoded as `"from→to"` strings for cheap membership checks.
  */

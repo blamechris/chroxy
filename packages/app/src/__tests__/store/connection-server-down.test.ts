@@ -167,9 +167,8 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     // …and a fresh dial was attempted (connectAuto → connect → WebSocket).
     expect(ws.instances.length).toBeGreaterThan(before);
     // #6296 — and the terminal phase was actually left: retryConnection's
-    // `transitionPhase('connecting', { force: true })` exit is a whitelisted
-    // forceable edge (server_down → connecting), so the FSM applied it rather
-    // than rejecting it. (Tightening force to a whitelist must not wedge here.)
+    // `transitionPhase('connecting')` exit is a legal edge (server_down →
+    // connecting), so the FSM applied it rather than rejecting it.
     expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
 
     ws.restore();
@@ -404,6 +403,24 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     // Copilot (#8921): the close/error ladder counter is the module-level
     // reconnectAttempt. If alert Retry left it maxed, the first socket close after
     // the redial would give up again and re-latch server_down.
+    // A stale alert (app already recovered some other way) must not retire the
+    // healthy socket.
+    it.each(['probe', 'restart'] as const)('%s alert Retry is a no-op once the connection recovered', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind);
+      useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+      const before = ws.instances.length;
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBe(before);
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+      ws.restore();
+    });
+
     it('alert Retry rewinds an exhausted close ladder so one more close reconnects', async () => {
       const ws = installMockWebSocket();
       const onPress = await giveUpAndGetRetry('probe');

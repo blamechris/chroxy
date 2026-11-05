@@ -622,9 +622,8 @@ function clearSessionRolesAcrossSessions(
  * (isReconnect), and `server_down -> reconnecting` is an illegal FSM transition.
  * Move to 'connecting' first; clearing the error keeps the stale "Server appears
  * to be down" banner from leaking into the fresh attempt.
- * #6286 — the FSM REJECTS illegal transitions, so this user-initiated terminal
- * exit opts in via { force: true }: the ONLY deliberately-flagged way to leave a
- * terminal phase. Shared by retryConnection() (banner Reconnect) and both
+ * `server_down -> connecting` is a legal edge in VALID_TRANSITIONS, so no
+ * `force` is needed. Shared by retryConnection() (banner Reconnect) and both
  * "Connection Failed" alert Retry handlers so they cannot diverge.
  */
 function leaveServerDown(): void {
@@ -633,9 +632,22 @@ function leaveServerDown(): void {
   resetReconnectAttempt();
   const lifecycle = useConnectionLifecycleStore.getState();
   if (lifecycle.connectionPhase === 'server_down') {
-    lifecycle.transitionPhase('connecting', { force: true });
+    lifecycle.transitionPhase('connecting');
     lifecycle.setConnectionError(null, 0);
   }
+}
+
+/**
+ * #8258 — Retry on a "Connection Failed" alert. The alert can outlive the
+ * give-up (app resume / network change may already have recovered through
+ * retryConnection()), and a connect() then would retire the healthy socket and
+ * redial. Only act while the connection is still down.
+ */
+function retryFromGiveUpAlert(redial: () => void): void {
+  const phase = useConnectionLifecycleStore.getState().connectionPhase;
+  if (phase !== 'server_down' && phase !== 'disconnected') return;
+  leaveServerDown();
+  redial();
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -1293,7 +1305,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             'The server is still restarting. Try again later.',
             [
               { text: 'OK' },
-              { text: 'Retry', onPress: () => { leaveServerDown(); void get().connect(url, token); } },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
             ],
           );
         }
@@ -1325,7 +1337,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             [
               { text: 'OK' },
               { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
-              { text: 'Retry', onPress: () => { leaveServerDown(); void get().connect(url, token); } },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
             ],
           );
         }
