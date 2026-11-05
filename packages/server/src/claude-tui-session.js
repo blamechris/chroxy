@@ -29,7 +29,7 @@ import { CLAUDE_TUI_PTY_SIZE, CLAUDE_TUI_PTY_MIN_SIZE } from '@chroxy/protocol'
 // #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
 // merges stdout+stderr, so claude's resume rejection lands in _outputTail.
-import { stderrIndicatesUnknownResume } from './cli-session.js'
+import { stderrIndicatesUnknownResume, stderrIndicatesUnknownResumeCompacted } from './cli-session.js'
 // #6820 — the interactive TUI exposes no runtime MCP status (unlike SDK/CLI
 // stream-json `system/init`), so for MCP visibility parity we emit the
 // CONFIGURED server list discovered from the same ~/.claude.json / .mcp.json
@@ -4713,7 +4713,9 @@ export class ClaudeTuiSession extends BaseSession {
    * line pair (whitespace-collapsed, mirroring _scanOutputForAuthFailure's
    * normalization) still catches a rejection the TUI wrapped/box-padded
    * across one rendered line break, while keeping the match window ≤ two
-   * lines instead of the whole tail. Consulted by _scheduleRespawn at the
+   * lines instead of the whole tail. A second, narrower pass handles cursor-wrapped
+   * output whose spaces were dropped (#7847): a whitespace-compacted window of up
+   * to 6 lines must contain the full canonical phrase AND a session UUID. Consulted by _scheduleRespawn at the
    * respawn cap to decide retry-FRESH eligibility. The tail is only SCANNED
    * here, never logged — every diagnostic surface keeps routing through the
    * redaction helpers (_outputTailDiagnostic / _outputTailHexDump,
@@ -4729,7 +4731,9 @@ export class ClaudeTuiSession extends BaseSession {
     if (lines.length === 0) return false
     const candidates = lines.slice()
     for (let i = 0; i + 1 < lines.length; i++) candidates.push(`${lines[i]} ${lines[i + 1]}`)
-    return stderrIndicatesUnknownResume(candidates)
+    if (stderrIndicatesUnknownResume(candidates)) return true
+    // #7847: cursor-wrapped fragments with the inter-word spaces removed.
+    return stderrIndicatesUnknownResumeCompacted(lines)
   }
 
   async sendMessage(prompt, attachments, sendOptions = {}) {
