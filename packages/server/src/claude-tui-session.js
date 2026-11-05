@@ -5136,18 +5136,6 @@ export class ClaudeTuiSession extends BaseSession {
           break
         }
       }
-      // #8934: claude rejected the requested model on screen and went idle; no
-      // hook will ever fire. Read only what it printed after our prompt, and only
-      // until the first hook is consumed (`_firstOutputDisarmed`): a rejected model
-      // never fires one, while a healthy turn's output may legitimately QUOTE this
-      // sentence (the assistant explaining it, a tool printing this file).
-      if (!stopPayload && !this._firstOutputDisarmed) {
-        const modelError = classifyModelError(this._outputSinceBytes(this._limitScanFromBytes))
-        if (modelError) {
-          this._handleModelUnavailable(modelError)
-          break
-        }
-      }
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
       // stop-hook, emit a progress line. Sized at 5s so a healthy
@@ -6568,26 +6556,19 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * #8934 — the TUI printed its "issue with the selected model" screen. End the
-   * turn now with a structured error naming the model, instead of the 90s
-   * first-output watchdog's "try sending again".
-   * @param {{ code: string, model: string, message: string }} err
+   * #8934 — at the first-output watchdog: did the TUI print its "issue with the
+   * selected model" screen for THIS session's model? Only the post-prompt PTY
+   * output is read, and only the screen naming exactly the id we passed to
+   * `--model` counts. The sentence is plain text, so the TUI's own echo of a
+   * typed prompt (or a quoted reply) can contain it; naming a different model
+   * is therefore not evidence about ours. No live scan: a classification made
+   * mid-turn would kill healthy turns that merely quote the sentence.
+   * @returns {{ code: string, model: string, message: string }|null}
    */
-  _handleModelUnavailable(err) {
-    if (!this._isBusy) return
-    this._assertBusyHasMessageId('_handleModelUnavailable')
-    ;(this._log || log).warn(`claude rejected model '${err.model}' (requested '${this.model}') — ending the turn`)
-    const duration = this._activeTurn
-      ? this._nowMonotonic() - this._activeTurn.startedAt
-      : 0
-    // The teardown reason is the closest existing TURN_TERMINATION_REASONS value
-    // (the provider produced no reply); the error `code` is the specific cause.
-    this._teardownTurn('first_output_timeout', {
-      duration,
-      errorPayload: { code: err.code, message: err.message, model: err.model },
-      errorBeforeResult: false,
-      gateStreamEndOnMessageId: true,
-    })
+  _detectRejectedModel() {
+    if (!this.model) return null
+    const found = classifyModelError(this._outputSinceBytes(this._limitScanFromBytes))
+    return found && found.model === resolveClaudeCliModelId(this.model) ? found : null
   }
 
   /**
@@ -6668,6 +6649,8 @@ export class ClaudeTuiSession extends BaseSession {
     const authFail = this._scanTurnOutputForAuthFailure()
     // #8400: silence that is really a usage limit says so (retrying cannot help).
     const limit = authFail ? null : this._detectTurnUsageLimit()
+    // #8934: and a model the CLI rejected says so, naming it.
+    const modelErr = authFail || limit ? null : this._detectRejectedModel()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
     // the same fan-out it already handles for the inter-stream stall.
@@ -6677,6 +6660,8 @@ export class ClaudeTuiSession extends BaseSession {
         ? { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE }
         : limit
           ? this._usageLimitPayload(limit)
+          : modelErr
+            ? { code: modelErr.code, message: modelErr.message, model: modelErr.model }
           : {
             code: 'stream_stall',
             message: `No response from claude TUI within ${friendly}. Try sending again.`,

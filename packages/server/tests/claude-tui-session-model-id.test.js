@@ -158,7 +158,7 @@ describe('classifyModelError (#8934)', () => {
   })
 })
 
-describe('ClaudeTuiSession — rejected model ends the turn at once (#8934)', () => {
+describe('ClaudeTuiSession — rejected model reported at the first-output watchdog (#8934)', () => {
   let fakeHome
   let skillsDir
   let sinkBase
@@ -180,13 +180,13 @@ describe('ClaudeTuiSession — rejected model ends the turn at once (#8934)', ()
     for (const d of [fakeHome, skillsDir, sinkBase]) rmSync(d, { recursive: true, force: true })
   })
 
-  const SCREEN = "⏺ There's an issue with the selected model (haiku-5-5). It may not exist or you may not have access to it. Run /model to pick a different model."
+  const screenFor = (id) => `⏺ There's an issue with the selected model (${id}). It may not exist or you may not have access to it. Run /model to pick a different model.`
 
   function turnSession({ reply = '', echo = '' } = {}) {
     session = new ClaudeTuiSession({
       cwd: '/tmp', skillsDir, repoSkillsDir: null, model: 'haiku-5-5',
       loginProbeRunner: async () => ({ status: 0, stdout: '{"loggedIn":true}', stderr: '' }),
-      resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000, firstOutputTimeoutMs: 5000,
+      resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000, firstOutputTimeoutMs: 600,
     })
     const s = session
     s._processReady = true
@@ -211,41 +211,37 @@ describe('ClaudeTuiSession — rejected model ends the turn at once (#8934)', ()
     return { s, events }
   }
 
-  it('emits ONE structured model_unavailable error naming the id, not a 90s stream_stall', async () => {
-    const { s, events } = turnSession({ reply: SCREEN })
+
+  const OWN = 'claude-haiku-5-5' // what the session passes to --model for 'haiku-5-5'
+
+  it('a rejected model (screen names the session\'s own --model value, no hook) is reported as model_unavailable at the watchdog', async () => {
+    const { s, events } = turnSession({ reply: screenFor(OWN) })
     await s.sendMessage('hi')
     assert.deepEqual(events.reasons, ['first_output_timeout'])
     assert.equal(events.errors.length, 1)
     assert.equal(events.errors[0].code, 'model_unavailable')
-    assert.equal(events.errors[0].model, 'haiku-5-5')
-    assert.ok(events.errors[0].message.includes('haiku-5-5'))
+    assert.equal(events.errors[0].model, OWN)
+    assert.ok(events.errors[0].message.includes(OWN))
     assert.equal(events.results.length, 1, 'result emitted so the client leaves the busy state')
     assert.equal(s._isBusy, false)
-    assert.equal(s._firstOutputTimeout, null, 'the 90s watchdog was disarmed')
   })
 
-  it('ignores the sentence when it is only the terminal echo of the user\'s own prompt', async () => {
-    const { s, events } = turnSession({ echo: SCREEN })
-    const turn = s.sendMessage(SCREEN)
-    // Let the poll loop make several passes, then finish the turn with a Stop.
-    await new Promise((r) => setTimeout(r, 500))
-    assert.equal(s._isBusy, true, 'still waiting: nothing was printed after the prompt')
-    writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
-    await turn
-    assert.deepEqual(events.reasons, [])
-    assert.deepEqual(events.errors, [])
+  it('the prompt echo AND redraw quoting another model is never model_unavailable; at the watchdog it is a plain stream_stall', async () => {
+    const { s, events } = turnSession({ echo: screenFor('foo-1'), reply: screenFor('foo-1') })
+    await s.sendMessage(screenFor('foo-1'))
+    assert.deepEqual(events.errors.map((e) => e.code), ['stream_stall'])
   })
 
-  it('does not end a healthy turn whose output quotes the sentence once a hook has fired', async () => {
-    const { s, events } = turnSession()
+  it('a screen naming a DIFFERENT model than the session\'s is a stream_stall, not model_unavailable', async () => {
+    const { s, events } = turnSession({ reply: screenFor('claude-opus-5-5') })
+    await s.sendMessage('hi')
+    assert.deepEqual(events.errors.map((e) => e.code), ['stream_stall'])
+  })
+
+  it('an assistant reply quoting the sentence (even for the session\'s own model) with no hook, then Stop, completes normally', async () => {
+    const { s, events } = turnSession({ reply: `The CLI says "${screenFor(OWN)}" when the id is wrong.` })
     const turn = s.sendMessage('explain that error')
-    await new Promise((r) => setTimeout(r, 200))
-    // A tool hook fires first: the model is demonstrably fine.
-    writeFileSync(join(s._sinkDir, 'pre-a.json'), JSON.stringify({ tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' } }))
-    await new Promise((r) => setTimeout(r, 400))
-    assert.equal(s._firstOutputDisarmed, true, 'the hook was consumed')
-    s._appendToOutputTail('The CLI says "There\'s an issue with the selected model (foo-1). It may not exist" when the id is wrong.')
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, 300))
     assert.equal(s._isBusy, true, 'quoted text did not tear the turn down')
     writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
     await turn
