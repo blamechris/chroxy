@@ -233,9 +233,7 @@ describe('history sequence survives a restart (#8336)', () => {
   const codexCase = () => ({
     historyLastSeq: 8,
     history: [
-      // A finished earlier turn, not a prompt: a trailing prompt with no result would also
-      // get the #8259 interrupted-turn result, changing this fixture's entry count.
-      { type: 'result', timestamp: 1 },
+      { type: 'message', messageType: 'user_input', content: 'go', timestamp: 1 },
       { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 2 },
       { type: 'user_question', toolUseId: 'Q', questions: [Q], timestamp: 3 },
       { type: 'message', messageType: 'response', content: 'later', timestamp: 4 },
@@ -285,8 +283,7 @@ describe('history sequence survives a restart (#8336)', () => {
     for (const cursor of [latest + 1, latest + 50]) {
       const { plan, frames } = replayFrames(mgr, sid, cursor)
       assert.equal(plan.fullHistory, true, `cursor ${cursor} > latest ${latest}`)
-      // a `result` entry is followed by its own `agent_idle` frame
-      assert.equal(frames.filter((f) => f.type !== 'agent_idle').length, mgr.getHistory(sid).length)
+      assert.equal(frames.length, mgr.getHistory(sid).length)
     }
   })
 

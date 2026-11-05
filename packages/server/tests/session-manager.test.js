@@ -1036,7 +1036,7 @@ describe('SessionManager.restoreState', () => {
     assert.ok(wedged && healthy)
 
     const wedgedAfter = mgr.getHistory(wedged.sessionId)
-    assert.equal(wedgedAfter.length, 4, 'synthetic tool_result spliced after the orphan tool_start, then the interrupted-turn result (#8259)')
+    assert.equal(wedgedAfter.length, 3, 'synthetic tool_result spliced after the orphan tool_start')
     assert.equal(wedgedAfter[1].type, 'tool_start')
     assert.equal(wedgedAfter[1].toolUseId, 'wedged-tool')
     assert.equal(wedgedAfter[2].type, 'tool_result')
@@ -1046,9 +1046,6 @@ describe('SessionManager.restoreState', () => {
     assert.equal(wedgedAfter[2].isError, true)
     assert.equal(wedgedAfter[2].reason, 'session_restored')
     assert.ok(wedgedAfter[2].timestamp > wedgedAfter[1].timestamp, 'synthetic timestamp stays monotonic')
-    // #8259: the prompt had no result either, so the turn is closed as interrupted.
-    assert.equal(wedgedAfter[3].type, 'result')
-    assert.equal(wedgedAfter[3].turnOutcome, 'interrupted')
 
     // The healthy session must NOT pick up any synthetic results — its
     // tool_start already had a matching tool_result.
@@ -1089,13 +1086,10 @@ describe('SessionManager.restoreState', () => {
     const onDisk = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.equal(onDisk.sessions.length, 2)
     const bySavedName = Object.fromEntries(onDisk.sessions.map(s => [s.name, s]))
-    assert.equal(bySavedName.A.history.length, 3, `A history lost on disk — got ${bySavedName.A.history?.length}`)
+    assert.equal(bySavedName.A.history.length, 2, `A history lost on disk — got ${bySavedName.A.history?.length}`)
     assert.equal(bySavedName.A.history[0].content, 'question one')
     assert.equal(bySavedName.A.history[1].content, 'answer one')
-    // #8259: neither session's last turn has a result, so restore closes each as interrupted.
-    assert.equal(bySavedName.A.history[2].turnOutcome, 'interrupted')
-    assert.equal(bySavedName.B.history[1].turnOutcome, 'interrupted')
-    assert.equal(bySavedName.B.history.length, 2, `B history lost on disk — got ${bySavedName.B.history?.length}`)
+    assert.equal(bySavedName.B.history.length, 1, `B history lost on disk — got ${bySavedName.B.history?.length}`)
     assert.equal(bySavedName.B.history[0].content, 'B prompt')
 
     mgr.destroyAll()

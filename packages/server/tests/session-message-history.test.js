@@ -643,63 +643,6 @@ describe('SessionMessageHistory', () => {
   // a tool_start without a matching tool_result. The sweep synthesises the
   // missing tool_result so history replay → handleToolResult → applyToActiveTools
   // clears the entry on reconnect.
-  // #8259 — a turn the daemon went down under has no `result` in its history, so
-  // the clients showed a prompt with no reply and no error. The restore sweep
-  // closes it with a `result` carrying the `interrupted` outcome.
-  describe('markInterruptedTurn (static, #8259)', () => {
-    const NOW = 1700000009000
-
-    it('closes a trailing unanswered turn with an interrupted result', () => {
-      const input = [
-        { type: 'message', messageType: 'user_input', content: 'tell a story', timestamp: 1000 },
-        { type: 'result', cost: 0.01, timestamp: 1500 },
-        { type: 'message', messageType: 'user_input', content: 'a long one', timestamp: 2000 },
-        { type: 'thinking', content: 'hm', timestamp: 2100 },
-      ]
-      const out = SessionMessageHistory.markInterruptedTurn(input, NOW)
-      assert.equal(out.length, 5)
-      assert.equal(input.length, 4, 'input is not mutated')
-      const last = out[4]
-      assert.equal(last.type, 'result')
-      assert.equal(last.turnOutcome, 'interrupted')
-      assert.equal(last.timestamp, NOW)
-    })
-
-    it('leaves a history whose last turn ended (result or error) alone', () => {
-      const done = [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }, { type: 'result', timestamp: 2 }]
-      assert.equal(SessionMessageHistory.markInterruptedTurn(done, NOW), done)
-      const errored = [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }, { type: 'error', message: 'x', timestamp: 2 }]
-      assert.equal(SessionMessageHistory.markInterruptedTurn(errored, NOW), errored)
-    })
-
-    it('leaves empty, non-array and prompt-less histories alone', () => {
-      assert.deepEqual(SessionMessageHistory.markInterruptedTurn([], NOW), [])
-      assert.equal(SessionMessageHistory.markInterruptedTurn(undefined, NOW), undefined)
-      const noPrompt = [{ type: 'message', content: 'hello', timestamp: 1 }]
-      assert.equal(SessionMessageHistory.markInterruptedTurn(noPrompt, NOW), noPrompt)
-    })
-
-    it('is idempotent: a second restart does not stack a second marker', () => {
-      const once = SessionMessageHistory.markInterruptedTurn([{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }], NOW)
-      assert.equal(SessionMessageHistory.markInterruptedTurn(once, NOW + 5), once)
-    })
-
-    it('replays as a literal result frame carrying turnOutcome, in the delta tail past an old cursor', () => {
-      const h = new SessionMessageHistory({ maxHistory: 50 })
-      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }])
-      const before = h.getLatestSeq('s1')
-      const persisted = h.getHistory('s1').map(({ _seq, ...e }) => e)
-      const after = new SessionMessageHistory({ maxHistory: 50 })
-      after.setHistory('s1', SessionMessageHistory.markInterruptedTurn(persisted, NOW), { firstSeq: before })
-      const frames = []
-      for (const e of after.getHistory('s1')) sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', e)
-      const result = frames.find((f) => f.type === 'result')
-      assert.equal(result.turnOutcome, 'interrupted')
-      assert.equal(result.timestamp, NOW)
-      assert.ok(result.historySeq > before, 'numbered past the cursor a pre-restart client holds')
-    })
-  })
-
   describe('sweepUnresolvedToolStarts (static)', () => {
     it('injects a synthetic tool_result for an unresolved tool_start', () => {
       const input = [
@@ -1069,6 +1012,41 @@ describe('SessionMessageHistory', () => {
       history.cleanupSession('s1')
       history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 3 })
       assert.equal(history.getHistory('s1')[0]._seq, 1)
+    })
+  })
+  // #8259 — recordInterruptedTurn closes a turn the daemon went down under.
+  describe('recordInterruptedTurn (#8259)', () => {
+    it('appends an interrupted result that replays as a literal result frame', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 100 }])
+      const entry = h.recordInterruptedTurn('s1', 5000)
+      assert.equal(entry.turnOutcome, 'interrupted')
+      const frames = []
+      for (const e of h.getHistory('s1')) sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', e)
+      const result = frames.find((f) => f.type === 'result')
+      assert.equal(result.turnOutcome, 'interrupted')
+      assert.equal(result.timestamp, 5000)
+    })
+
+    it('clamps the timestamp to one past the newest entry (clock behind the persisted history)', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 9000 }])
+      assert.equal(h.recordInterruptedTurn('s1', 10).timestamp, 9001)
+    })
+
+    it('numbers the marker past any cursor the previous process could have issued (crash window)', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      // the state file said historyLastSeq 20, but a client had already applied seq 25
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }], { firstSeq: 20 })
+      h.recordInterruptedTurn('s1', 5000)
+      const history = h.getHistory('s1')
+      const plan = resolveReplayPlan(
+        { getLatestHistorySeq: (id) => h.getLatestSeq(id), getOldestHistorySeq: (id) => h.getOldestSeq(id) },
+        history, 's1', 25, h.getLatestSeq('s1'),
+      )
+      assert.equal(plan.fullHistory, false, 'the cursor is still honoured')
+      const sent = history.slice(plan.startOffset)
+      assert.deepEqual(sent.map((e) => e.turnOutcome), ['interrupted'], 'the client at seq 25 still receives the marker')
     })
   })
 })

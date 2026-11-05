@@ -6,6 +6,9 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 
+/** #8259: seq headroom a restore leaves before the interrupted-turn marker. See recordInterruptedTurn. */
+export const RESTART_SEQ_GAP = 100000
+
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
 
@@ -582,38 +585,51 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
-   * #8259: close a turn the daemon went down under. A turn that was streaming at
-   * shutdown has a `user_input` message and no `result` after it: the partial reply was
-   * only ever in memory, so no client could ever be told how it ended, and the
-   * prompt showed no reply and no error. Append a synthetic `result` carrying
-   * the `interrupted` turn outcome, the SAME marker path (`turnOutcome` on a
-   * `result`, rendered by every client's TurnOutcomeMarker) a stopped or
-   * truncated turn already uses, so a live client, a delta replay and a full
-   * rebuild all show it.
+   * #8259: close a turn the daemon went down under. Called by the SessionManager's
+   * restore ONLY for a session whose persisted state says a turn was in flight
+   * (dispatched to the provider and not yet ended). The partial reply only ever
+   * lived in memory, so without this no client could be told how that turn
+   * ended. Appends a `result` carrying the `interrupted` turn outcome, the SAME
+   * marker path (`turnOutcome` on a `result`) a stopped or truncated turn uses.
    *
-   * Appended at the tail (like #8336's re-delivered question) so a reconnecting
-   * client whose cursor sits inside the restored range receives it. An `error`
-   * entry after the last prompt also ends the turn. Returns the input unchanged
-   * (same reference) when there is nothing to close, and is idempotent: once
-   * the `result` is there, a later restart adds nothing. The input is not
-   * mutated.
+   * DELIVERY. The marker is numbered `RESTART_SEQ_GAP` past the last seq the
+   * previous process is known to have issued. A client's cursor comes from that
+   * process, and the state file is written on a debounce (2 s) and at turn
+   * start/end, so a crash can leave the persisted `historyLastSeq` a few entries
+   * behind what a client saw. Numbering the marker right after it could reuse a
+   * seq the client already holds, and the delta replay (strictly newer than the
+   * cursor) would skip it. A turn records tens of entries at most (deltas are
+   * coalesced at stream_end), so a gap of 100000 is beyond any cursor the
+   * previous process could have issued: every such cursor falls below the marker
+   * and the oldest retained entry is not past it, so the delta replay honours
+   * the cursor and sends the marker.
    *
-   * @param {Array} history
+   * The timestamp is clamped to one past the newest entry, like the synthetic
+   * tool_result of `sweepUnresolvedToolStarts`, so the marker never sorts before
+   * the entries it follows.
+   *
+   * PROVIDER RESUME. No provider continues a half-run turn after a restart: a
+   * restored session is a fresh idle provider that resumes the CONVERSATION
+   * (context), not the turn, so nothing completes the interrupted turn later.
+   * If one ever did, its completed result would simply follow this chip (a
+   * completed outcome adds no marker and does not remove one), which stays an
+   * honest record that the turn was cut off once.
+   *
+   * @param {string} sessionId
    * @param {number} [now] - injectable for tests
-   * @returns {Array}
+   * @returns {object} the appended entry
    */
-  static markInterruptedTurn(history, now = Date.now()) {
-    if (!Array.isArray(history) || history.length === 0) return history
-    let lastPrompt = -1
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i] && history[i].type === 'message' && history[i].messageType === 'user_input') { lastPrompt = i; break }
+  recordInterruptedTurn(sessionId, now = Date.now()) {
+    if (!this._messageHistory.has(sessionId)) this._messageHistory.set(sessionId, [])
+    const history = this._messageHistory.get(sessionId)
+    let lastTs = 0
+    for (const e of history) {
+      if (e && Number.isFinite(e.timestamp) && e.timestamp > lastTs) lastTs = e.timestamp
     }
-    if (lastPrompt === -1) return history
-    for (let i = lastPrompt + 1; i < history.length; i++) {
-      const t = history[i] && history[i].type
-      if (t === 'result' || t === 'error') return history
-    }
-    return [...history, { type: 'result', turnOutcome: 'interrupted', timestamp: now }]
+    this._seqCounters.set(sessionId, (this._seqCounters.get(sessionId) || 1) + RESTART_SEQ_GAP)
+    const marker = { type: 'result', turnOutcome: 'interrupted', timestamp: Math.max(now, lastTs + 1) }
+    this._pushHistory(history, marker, sessionId)
+    return marker
   }
 
   /**

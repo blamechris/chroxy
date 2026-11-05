@@ -425,12 +425,17 @@ function describePermissionForOutcome(tool, description, input, recordDescriptio
  * @param {boolean} truncated whether the slice is a truncated tail
  * @returns {Array}
  */
-function withRetainedPermissionOutcomes(transcript, ring, truncated) {
+export function withRetainedPermissionOutcomes(transcript, ring, truncated) {
   const seen = new Set()
   let outcomes = []
   for (const entry of ring) {
-    if (!entry || entry.type !== 'permission_outcome' || seen.has(entry.requestId)) continue
-    seen.add(entry.requestId)
+    // #8259: an interrupted turn's marker is daemon-written too (the provider's own
+    // transcript never saw the turn end), so it is retained the same way.
+    const isInterrupted = !!entry && entry.type === 'result' && entry.turnOutcome === 'interrupted'
+    if (!entry || (entry.type !== 'permission_outcome' && !isInterrupted)) continue
+    const key = isInterrupted ? `interrupted:${entry.timestamp}` : entry.requestId
+    if (seen.has(key)) continue
+    seen.add(key)
     const { _seq: _ringSeq, ...copy } = entry
     outcomes.push(copy)
   }
@@ -3591,6 +3596,9 @@ export class SessionManager extends EventEmitter {
         // keeps numbering past this value so that cursor still means what it did
         // (see SessionMessageHistory#setHistory). Absent on older state files.
         historyLastSeq: this._history.getLastIssuedSeq(id),
+        // #8259: a turn was dispatched to the provider and has not ended. Written only
+        // when true (absent otherwise), so ordinary state files are unchanged.
+        ...(entry.turnInFlight === true ? { turnInFlight: true } : {}),
         // #4664: persist per-session toggle/string settings via the
         // shared registry — each entry's coerce produces the same
         // strict-boolean/string-default shape the pre-refactor per-knob
@@ -3976,11 +3984,7 @@ export class SessionManager extends EventEmitter {
       // before shutdown re-enters `activeTools` on replay and never gets
       // cleared — the footer shows "Running X · Nh Mm" forever.
       if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
-        // #8259: a trailing turn with no result was cut off by the shutdown; close it
-        // so clients show it as interrupted rather than a prompt with no reply.
-        const swept = SessionMessageHistory.markInterruptedTurn(
-          SessionMessageHistory.sweepUnresolvedToolStarts(saved.history),
-        )
+        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
         // #8336: carry the previous run's numbering across the restart. The
         // persisted entries were contiguous and ended at `historyLastSeq`, so the
         // first one had `historyLastSeq - length + 1`; a state file without the
@@ -3990,6 +3994,16 @@ export class SessionManager extends EventEmitter {
           ? lastSeq - saved.history.length + 1
           : undefined
         this._history.setHistory(sessionId, swept, { firstSeq })
+      }
+      // #8259: close a turn the previous process was running when it went down. Driven
+      // by the persisted in-flight flag (set when a turn is dispatched to the
+      // provider, cleared when it ends), NOT by the shape of the history: a queued
+      // follow-up, an evaluator-held draft, an errored turn and a cap-evicted prompt
+      // all defeat any reading of the history. The flag was cleared on the live
+      // entry by createSession, so the next serialize records it as handled and a
+      // second restart adds nothing.
+      if (saved.turnInFlight === true) {
+        this._history.recordInterruptedTurn(sessionId)
       }
       if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
         this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
@@ -5721,6 +5735,21 @@ export class SessionManager extends EventEmitter {
         if (typeof timer.unref === 'function') timer.unref()
       })
     }
+
+    // #8259: BaseSession's `_isBusy` accessor reports a turn starting (input dispatched
+    // to the provider, including a queued follow-up when it flushes) and ending
+    // (result, error, stop, abort: every end reaches the same clear). Persist both
+    // edges at once rather than on the 2 s debounce, so a crash right after either
+    // leaves the state file saying the truth. Ignored during teardown: a session
+    // being destroyed flips busy off, and that is not its turn ending.
+    session.on('turn_state', ({ active } = {}) => {
+      const entry = this._sessions.get(sessionId)
+      if (!entry || entry.session !== session || this._destroying || entry._destroying) return
+      const next = active === true
+      if ((entry.turnInFlight === true) === next) return
+      entry.turnInFlight = next
+      this._flushPersistOrWarn(sessionId)
+    })
 
     for (const event of PROXIED_EVENTS) {
       session.on(event, (emitted) => {

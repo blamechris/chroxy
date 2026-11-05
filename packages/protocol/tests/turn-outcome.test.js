@@ -41,7 +41,7 @@ describe('turn outcome vocabulary (#7326)', () => {
     assert.deepEqual([...TURN_OUTCOMES], ['completed', 'truncated', 'refused', 'stopped', 'interrupted'])
   })
 
-  it('isTurnOutcome accepts the four and nothing else', () => {
+  it('isTurnOutcome accepts the five and nothing else', () => {
     for (const v of TURN_OUTCOMES) assert.ok(isTurnOutcome(v), v)
     for (const v of ['end_turn', 'refusal', 'cancelled', 'Truncated', '', null, undefined, 3, {}]) {
       assert.equal(isTurnOutcome(v), false, String(v))
