@@ -148,24 +148,27 @@ export const SESSION_CREATE_FAILED_CATEGORY = 'create_failed'
 /**
  * Build the coded chat error for a refused fresh session (#8981).
  *
- * Returns `null` when `msg` is not a create-failed `session_error`. Otherwise a
+ * Returns `null` when `msg` is not a `session_error` with category `create_failed`
+ * and a string `sessionId`. Otherwise a
  * `type: 'error'` ChatMessage carrying the server's `code`, so the existing
  * error-chip routing (`getErrorPresentation`, the AUTH_REQUIRED chip, ...) keys
- * off it exactly as it does for an `error` envelope. `sessionId` is where the
- * failure belongs; callers append there when the session is still in their
- * store, else to the session the user is looking at, else the flat log — the
- * server destroys the failed session right after, so the entry must not depend
- * on it surviving.
+ * off it exactly as it does for an `error` envelope. `sessionId` is the failed
+ * session. The entry must NOT be written into that session: the server destroys
+ * it right after, and the next `session_list` makes the client drop it with its
+ * messages. See {@link planCreateFailure} / {@link settleCreateFailures}.
  */
 export function handleSessionCreateFailed(
   msg: Record<string, unknown>,
-): { sessionId: string | null; chatMessage: ChatMessage } | null {
+): { sessionId: string; chatMessage: ChatMessage } | null {
+  if (msg.type !== 'session_error') return null
   if (parseRawStringField(msg, 'category') !== SESSION_CREATE_FAILED_CATEGORY) return null
+  const sessionId = parseStringField(msg, 'sessionId')
+  if (!sessionId) return null
   const raw = parseStringField(msg, 'message')
   const content = raw ? stripAnsi(raw).trim() : ''
   const code = parseRawStringField(msg, 'code')
   return {
-    sessionId: parseStringField(msg, 'sessionId'),
+    sessionId,
     chatMessage: {
       id: nextMessageId('create-failed'),
       type: 'error',
@@ -176,19 +179,73 @@ export function handleSessionCreateFailed(
   }
 }
 
+export type CreateFailurePlan =
+  | { kind: 'now'; targetSessionId: string }
+  | { kind: 'defer' }
+  | { kind: 'none' }
+
 /**
- * Which session's chat a create-failed entry lands in: the failed session when
- * the client still holds it, else the active session, else `null` (the flat
- * log). Shared so the dashboard and app place it identically.
+ * Where a create-failed entry goes when the `session_error` arrives.
+ *
+ * - `now`: the failed session is not the one the user is looking at and an
+ *   active session is held, so append to the active session immediately (it
+ *   survives the failed session's removal).
+ * - `defer`: the failed session is (or is the only held) session, so it is about
+ *   to be removed; park the entry and hand it to the session the client lands on
+ *   once the `session_list` that drops it is applied ({@link settleCreateFailures}).
+ * - `none`: the client holds nothing relevant; the toast/Alert is the only
+ *   surface.
  */
-export function resolveCreateFailedTarget(
+export function planCreateFailure(
   failedSessionId: string | null,
   activeSessionId: string | null,
   hasSession: (id: string) => boolean,
-): string | null {
-  if (failedSessionId && hasSession(failedSessionId)) return failedSessionId
-  if (activeSessionId && hasSession(activeSessionId)) return activeSessionId
-  return null
+): CreateFailurePlan {
+  const activeHeld = !!activeSessionId && hasSession(activeSessionId)
+  if (activeHeld && activeSessionId !== failedSessionId) {
+    return { kind: 'now', targetSessionId: activeSessionId as string }
+  }
+  if (failedSessionId && hasSession(failedSessionId)) return { kind: 'defer' }
+  return { kind: 'none' }
+}
+
+// Entries parked until the session_list that removes their session. Module state
+// is per client bundle (the dashboard and the app each load their own copy).
+const pendingCreateFailures = new Map<string, ChatMessage>()
+
+/** Park a create-failed entry for the failed session (see {@link planCreateFailure}). */
+export function stashCreateFailure(sessionId: string, chatMessage: ChatMessage): void {
+  pendingCreateFailures.set(sessionId, chatMessage)
+}
+
+/** Drop every parked entry (connection reset / tests). */
+export function clearPendingCreateFailures(): void {
+  pendingCreateFailures.clear()
+}
+
+/**
+ * Resolve parked entries against a `session_list`. Call after the client has
+ * applied the list (removed sessions pruned, active session switched).
+ *
+ * - A parked session that was removed: the entry goes to `activeSessionId` (the
+ *   session the client ended up on); with none left it is dropped.
+ * - A parked session that is still in the list: the entry goes to that session
+ *   and the record is cleared, so a record cannot linger forever.
+ * Returns the `{ sessionId, chatMessage }` appends the caller must perform.
+ */
+export function settleCreateFailures(
+  listedSessionIds: readonly string[],
+  activeSessionId: string | null,
+  hasSession: (id: string) => boolean,
+): Array<{ sessionId: string; chatMessage: ChatMessage }> {
+  const out: Array<{ sessionId: string; chatMessage: ChatMessage }> = []
+  const listed = new Set(listedSessionIds)
+  for (const [failedId, chatMessage] of [...pendingCreateFailures]) {
+    pendingCreateFailures.delete(failedId)
+    const target = listed.has(failedId) ? failedId : activeSessionId
+    if (target && hasSession(target)) out.push({ sessionId: target, chatMessage })
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
