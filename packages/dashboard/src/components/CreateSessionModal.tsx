@@ -10,7 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
-import { buildProviderLimitationNote, selectOwnModelsForProvider, selectPermissionModesForProvider } from '@chroxy/store-core'
+import { buildProviderLimitationNote, deriveWorktreeSwitch, selectOwnModelsForProvider, selectPermissionModesForProvider } from '@chroxy/store-core'
 import type { ModelsByProvider, PermissionMode } from '@chroxy/store-core'
 import {
   CODEX_PROVIDER,
@@ -389,7 +389,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // derived value, so a cleared cwd can never submit `worktree: true` (the
   // daemon rejects that), and the tick comes back if the user re-enters a cwd,
   // preserving their choice.
-  const effectiveWorktree = worktree && Boolean(trimmedCwd)
+  const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree)
+  const effectiveWorktree = worktreeSwitch.effectiveWorktree
   useEffect(() => {
     if (!open || !trimmedCwd || !requestSessionPresetSafe) return
     const t = setTimeout(() => { requestSessionPresetSafe(trimmedCwd) }, 400)
@@ -1212,11 +1213,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 Working directory is empty, so the hint states that blocker
                 first. A `title` on the disabled input would never render. */}
             <span id="worktree-hint" className="form-hint">
-              {!trimmedCwd
-                ? 'Choose a working directory first — worktree isolation needs a git repo'
-                : effectiveWorktree
-                  ? 'CWD must point to an existing git repository'
-                  : 'Runs in an isolated git worktree — requires a git repo CWD'}
+              {worktreeSwitch.hint}
             </span>
           </div>
           {/* #4208/#4244: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.

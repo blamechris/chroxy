@@ -15,7 +15,7 @@ import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
 import { getProviderLabel } from '../constants/providers';
-import { buildProviderLimitationNote } from '@chroxy/store-core';
+import { buildProviderLimitationNote, deriveWorktreeSwitch } from '@chroxy/store-core';
 import {
   DEFAULT_PROVIDER,
   CODEX_PROVIDER,
@@ -166,6 +166,8 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   )?.capabilities;
   const providerLimitationNote = buildProviderLimitationNote(selectedProviderCaps);
 
+  const worktreeSwitch = deriveWorktreeSwitch(cwd, worktree);
+
   const handleCreate = () => {
     if (selectedConnectionUnavailable) return;
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
@@ -173,7 +175,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     createSession({
       name: sessionName,
       cwd: sessionCwd,
-      worktree: worktree || undefined,
+      worktree: worktreeSwitch.effectiveWorktree || undefined,
       provider: provider || undefined,
       connectionId: provider ? connectionId || undefined : undefined,
       // #6689/#6903 — only forward the sandbox mode for codex, and only when
@@ -252,6 +254,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             <View style={styles.cwdRow}>
               <TextInput
                 style={[styles.input, styles.cwdInput]}
+                testID="cwd-input"
                 placeholder="Server default"
                 placeholderTextColor="#555"
                 value={cwd}
@@ -268,20 +271,24 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             <View style={styles.toggleRow}>
               <View style={styles.toggleLabel}>
                 <Text style={styles.label}>Isolate filesystem (git worktree)</Text>
-                <Text style={styles.toggleHint}>
-                  {worktree
-                    ? 'CWD must point to an existing git repository'
-                    : 'Runs in a separate worktree — requires a git repo CWD'}
+                <Text style={styles.toggleHint} testID="worktree-switch-hint">
+                  {worktreeSwitch.hint}
                 </Text>
               </View>
               <Switch
-                value={worktree}
+                testID="worktree-switch"
+                value={worktreeSwitch.effectiveWorktree}
                 onValueChange={setWorktree}
-                disabled={!cwd.trim()}
+                disabled={worktreeSwitch.disabled}
                 trackColor={{ false: COLORS.borderPrimary, true: COLORS.accentBlue }}
                 thumbColor={COLORS.textPrimary}
                 accessibilityLabel="Isolate filesystem in a git worktree"
-                accessibilityHint="When enabled, the session runs in an isolated git worktree"
+                accessibilityState={{ disabled: worktreeSwitch.disabled, checked: worktreeSwitch.effectiveWorktree }}
+                accessibilityHint={
+                  worktreeSwitch.disabledReason
+                    ? `Unavailable. ${worktreeSwitch.disabledReason}`
+                    : 'When enabled, the session runs in an isolated git worktree'
+                }
               />
             </View>
 
