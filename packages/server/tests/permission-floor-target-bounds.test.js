@@ -315,7 +315,11 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     assert.equal(many.value, false)
     assert.ok(one.normalizes >= 3, `premise: a walk folds the directory's names (${one.normalizes})`)
     assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
-    assertLinearFsCalls(run, one, many, dir.split(sep).length + 2)
+    // Per target: lstat + readlink of `L`, one lstat per component of the real
+    // directory, lstat of `xN` (= components + 2 today). Two calls of slack keep
+    // an innocent extra stat from reading as a regression; walking a target
+    // twice costs another `components + 2` and still fails.
+    assertLinearFsCalls(run, one, many, dir.split(sep).length + 4)
   })
 
   it('many targets above a long cwd fold its names once', () => {
@@ -330,7 +334,10 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     assert.equal(many.value, false)
     assert.ok(one.normalizes >= 3, `premise: a walk folds the cwd's names (${one.normalizes})`)
     assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
-    // `../xN` from the cwd: a lstat for `..` and for `xN`.
+    // `../xN` from the cwd: `..` is consumed lexically (no stat), so the two calls
+    // are the lstat of `xN` and `_hasOtherHardLinks`'s lstat of the resolved
+    // target, which runs because `apply_patch` writes. A read-only tool would cost
+    // one call per target, so this cap is tied to the tool above.
     assertLinearFsCalls(run, one, many, 2)
   })
 
