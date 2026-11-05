@@ -237,6 +237,12 @@ function ChatViewForSession({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const showScrollToBottomRef = useRef(false);
+  // #8961: true from mount until the reader takes the list over (drag, jump to
+  // top, search jump). While true the list follows its content to the end even
+  // though the mount's own first scroll events read "scrolled up" (offset 0 on
+  // estimated, still-unmeasured rows), which would otherwise latch
+  // `showScrollToBottomRef` and leave a freshly opened chat at its first message.
+  const openingRef = useRef(true);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
@@ -244,10 +250,10 @@ function ChatViewForSession({
   // screen readers (the prompt auto-denies on timeout, so silence loses the
   // user an action they might have allowed). Mirrors the dashboard's #5733
   // assertive treatment; fires once per prompt and stays silent for a prompt
-  // already present at mount OR in the session we just switched to (the hook
-  // re-seeds on activeSessionId change — ChatView isn't remounted per switch).
-  const announcerSessionId = useConnectionStore((s) => s.activeSessionId);
-  usePermissionAnnouncer(messages, announcerSessionId);
+  // already present at mount. ChatView is keyed per session (#8959), so a
+  // session switch mounts a fresh instance whose hook seeds from that session's
+  // existing prompts -- no session id needs to be threaded through.
+  usePermissionAnnouncer(messages);
 
   // #5517: row expand/collapse registry, keyed by message id / activity
   // group key. The list is now a virtualized FlatList, so an off-screen tool
@@ -292,6 +298,7 @@ function ChatViewForSession({
     if (!currentMatchId) return;
     const index = groupIndexByMessageIdRef.current.get(currentMatchId);
     if (index != null) {
+      openingRef.current = false; // the search jump takes the list over (#8961)
       scrollViewRef.current?.scrollToIndex({
         index,
         animated: true,
@@ -429,7 +436,14 @@ function ChatViewForSession({
     showScrollToBottomRef.current = isScrolledUp;
   };
 
+  // Only a finger starts a drag; programmatic scrolls never fire this, so it is
+  // the unambiguous "the reader took over" signal.
+  const handleScrollBeginDrag = () => {
+    openingRef.current = false;
+  };
+
   const scrollToTop = () => {
+    openingRef.current = false;
     scrollViewRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
@@ -613,15 +627,19 @@ function ChatViewForSession({
         // scrolled-up reader) we additionally gate on `showScrollToBottomRef`
         // — the same "is the user near the bottom?" signal the keyboard and
         // prompt auto-scroll effects already honour.
+        //
+        // #8961: while the chat is still opening, follow every size change (the
+        // estimate -> measured corrections) to the end, unanimated, and ignore
+        // the scrolled-up latch the mount's own scroll events set.
         onContentSizeChange={() => {
-          if (
-            !isSelectingRef.current &&
-            !hasUnansweredPrompt &&
-            !showScrollToBottomRef.current
-          ) {
+          if (isSelectingRef.current || hasUnansweredPrompt) return;
+          if (openingRef.current) {
+            scrollViewRef.current?.scrollToEnd({ animated: false });
+          } else if (!showScrollToBottomRef.current) {
             scrollViewRef.current?.scrollToEnd();
           }
         }}
+        onScrollBeginDrag={handleScrollBeginDrag}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         keyboardDismissMode="on-drag"
