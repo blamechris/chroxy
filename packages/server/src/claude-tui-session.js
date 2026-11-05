@@ -36,9 +36,10 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { CLAUDE_TUI_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { buildModelEvidence, MODEL_MISMATCH_CODE } from './claude-model-request.js'
-import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata, resolveClaudeCliModelId } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { classifyUsageLimit } from './claude-tui/usage-limit.js'
+import { classifyModelError } from './claude-tui/model-error.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
@@ -3740,7 +3741,11 @@ export class ClaudeTuiSession extends BaseSession {
       // claude TUI accepts --model (verified against `claude --help`). Without
       // this the requested model was silently dropped, leaving ready.model
       // disagreeing with the actual model the TUI booted on (#3921).
-      args.push('--model', this.model)
+      //
+      // #8934: only the argv spelling is resolved. A roster short id
+      // (`haiku-5-5`) is Chroxy's, not the CLI's, and the CLI rejects it on the
+      // first prompt; `this.model` stays what the user asked for.
+      args.push('--model', resolveClaudeCliModelId(this.model))
     }
     // Inject the append-bucket skills text via --append-system-prompt at
     // spawn time so the TUI sees it as part of the system prompt — same
@@ -5117,6 +5122,15 @@ export class ClaudeTuiSession extends BaseSession {
         const limit = this._checkTranscriptForUsageLimit()
         if (limit) {
           this._handleUsageLimit(limit)
+          break
+        }
+      }
+      // #8934: claude rejected the requested model on screen and went idle; no
+      // hook will ever fire. Read only what it printed after our prompt.
+      if (!stopPayload) {
+        const modelError = classifyModelError(this._outputSinceBytes(this._limitScanFromBytes))
+        if (modelError) {
+          this._handleModelUnavailable(modelError)
           break
         }
       }
@@ -6534,6 +6548,29 @@ export class ClaudeTuiSession extends BaseSession {
     this._teardownTurn('usage_limit', {
       duration,
       errorPayload: this._usageLimitPayload(limit),
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
+   * #8934 — the TUI printed its "issue with the selected model" screen. End the
+   * turn now with a structured error naming the model, instead of the 90s
+   * first-output watchdog's "try sending again".
+   * @param {{ code: string, model: string, message: string }} err
+   */
+  _handleModelUnavailable(err) {
+    if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleModelUnavailable')
+    ;(this._log || log).warn(`claude rejected model '${err.model}' (requested '${this.model}') — ending the turn`)
+    const duration = this._activeTurn
+      ? this._nowMonotonic() - this._activeTurn.startedAt
+      : 0
+    // The teardown reason is the closest existing TURN_TERMINATION_REASONS value
+    // (the provider produced no reply); the error `code` is the specific cause.
+    this._teardownTurn('first_output_timeout', {
+      duration,
+      errorPayload: { code: err.code, message: err.message, model: err.model },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })

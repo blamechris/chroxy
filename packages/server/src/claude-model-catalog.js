@@ -326,6 +326,33 @@ export function resolvePricingKey(modelId) {
   return fallback ? preferOneM(fallback.fullId) : null
 }
 
+// Short aliases the claude CLI resolves itself (the family heads of the roster
+// plus its meta aliases). They go to `--model` untouched: the catalog's
+// fallback rows share these ids (`haiku`), but the CLI's alias is the LATEST
+// version, not the catalog's pinned full id.
+export const CLAUDE_CLI_MODEL_ALIASES = Object.freeze(
+  new Set(['default', 'best', 'sonnet', 'opus', 'haiku', 'fable', 'opusplan']),
+)
+
+/**
+ * The id to hand the `claude` CLI for a requested model (#8934). The roster's
+ * short ids (`haiku-5-5`, from claudeDeriveId) are Chroxy's own spelling; the
+ * CLI accepts only aliases and full ids and rejects the rest. A short id is
+ * therefore resolved through the catalog's short-to-full mapping
+ * (resolvePricingKey), never by prefixing `claude-`. Aliases (with or without
+ * `[1m]`), `claude-*` full ids and anything the catalog does not know pass
+ * through unchanged: the CLI is the judge of those, and a guessed id would be
+ * worse than the CLI's own error.
+ * @param {string} modelId
+ * @returns {string}
+ */
+export function resolveClaudeCliModelId(modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return modelId
+  const base = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
+  if (CLAUDE_CLI_MODEL_ALIASES.has(base) || base.startsWith('claude-')) return modelId
+  return resolvePricingKey(modelId) ?? modelId
+}
+
 /**
  * Claude-style model metadata: strip the `claude-` prefix for the short id,
  * reuse the shared context-window heuristic. The single source of truth for
