@@ -1,17 +1,23 @@
 import { readFileSync, mkdirSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { shellQuotePath } from './utils/verify-binary.js'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 
 const log = createLogger('permission-hook')
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-const DEFAULT_SETTINGS_PATH = resolve(homedir(), '.claude', 'settings.json')
+// The user-level settings file claude loads: `<claude config dir>/settings.json`.
+// Resolved per call (not at import) so a CLAUDE_CONFIG_DIR override in the
+// daemon env is honoured the same way the claude child sees it (#8974); an
+// unusable override falls back to `~/.claude`, exactly as claudeConfigDir does.
+function defaultSettingsPath() {
+  return resolve(claudeConfigDir(), 'settings.json')
+}
 const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
 // Module-level, in-process lock for settings.json read-modify-write operations.
@@ -76,12 +82,12 @@ function _isChroxyHookEntry(entry) {
 /**
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
- * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [settingsPath] - Path to settings.json (defaults to <claude config dir>/settings.json)
  * @param {string} [hookScript] - Hook script path (defaults to the packaged script; a test seam
  *   so the written command can be checked against an install path that needs shell quoting)
  */
 function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
-  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
+  settingsPath = settingsPath || defaultSettingsPath()
 
   let settings = {}
   try {
@@ -135,10 +141,10 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
 
 /**
  * Remove the Chroxy permission hook from settings.json.
- * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [settingsPath] - Path to settings.json (defaults to <claude config dir>/settings.json)
  */
 function unregisterPermissionHookSync(settingsPath) {
-  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
+  settingsPath = settingsPath || defaultSettingsPath()
   let settings
   try {
     settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
@@ -174,7 +180,7 @@ function unregisterPermissionHookSync(settingsPath) {
  * @returns {{found: number, settingsPath: string, error?: string}}
  */
 export function countUserLevelChroxyHooks({ settingsPath } = {}) {
-  const target = settingsPath || DEFAULT_SETTINGS_PATH
+  const target = settingsPath || defaultSettingsPath()
   try {
     const settings = JSON.parse(readFileSync(target, 'utf-8'))
     const entries = settings?.hooks?.PreToolUse
@@ -209,7 +215,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
 
     retryCount++
     if (retryCount > 3) {
-      const effectivePath = settingsPath || DEFAULT_SETTINGS_PATH
+      const effectivePath = settingsPath || defaultSettingsPath()
       const errMsg = `Hook registration failed after 3 attempts. Please check ${effectivePath} and restart the server. Permissions will not work until this is fixed.`
       log.error(errMsg)
       emitter.emit('error', { message: errMsg })

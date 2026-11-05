@@ -31,7 +31,7 @@ import { existsSync, readFileSync, statSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { join } from 'path'
 import { homedir } from 'os'
-import { claudeConfigDir } from './utils/claude-config-dir.js'
+import { claudeConfigDir, claudeGlobalConfigPath } from './utils/claude-config-dir.js'
 import { configPath } from './config-dir.js'
 
 /**
@@ -90,7 +90,7 @@ function probeClaudeOAuthCreds() {
     const globalConfig = process.env.CHROXY_CLAUDE_CONFIG
       || (process.env.CHROXY_CLAUDE_HOME
             ? join(process.env.CHROXY_CLAUDE_HOME, '..', '.claude.json')
-            : join(homedir(), '.claude.json'))
+            : claudeGlobalConfigPath())
     if (existsSync(globalConfig)) {
       try {
         const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))

@@ -30,7 +30,7 @@
 
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
@@ -59,15 +59,15 @@ export const STATUSLINE_CONFIG_CACHE_TTL_MS = 5_000
  * the session cwd and the user home — none is client-supplied.
  *
  * @param {string} cwd     - session working directory (project scope)
- * @param {string} homeDir - user home directory (~/.claude scope)
+ * @param {string} claudeDir - claude's user-level config dir (`CLAUDE_CONFIG_DIR`, else `~/.claude`)
  * @returns {string[]} absolute settings.json paths, highest precedence first
  */
-export function statusLineSettingsPaths(cwd, homeDir) {
+export function statusLineSettingsPaths(cwd, claudeDir) {
   const paths = []
   if (cwd) paths.push(join(cwd, '.claude', 'settings.json'))
-  if (homeDir) {
-    paths.push(join(homeDir, '.claude', 'project-settings.json'))
-    paths.push(join(homeDir, '.claude', 'settings.json'))
+  if (claudeDir) {
+    paths.push(join(claudeDir, 'project-settings.json'))
+    paths.push(join(claudeDir, 'settings.json'))
   }
   return paths
 }
@@ -350,7 +350,8 @@ export function statusLineDisplayText(result) {
  */
 export class StatusLineManager extends EventEmitter {
   constructor({
-    homeDir = homedir(),
+    homeDir,
+    claudeDir,
     readFileFn = readFile,
     spawnFn = spawn,
     buildEnv = defaultBuildEnv,
@@ -364,7 +365,10 @@ export class StatusLineManager extends EventEmitter {
     configCacheTtlMs = STATUSLINE_CONFIG_CACHE_TTL_MS,
   } = {}) {
     super()
-    this._homeDir = homeDir
+    // The user-level dir follows CLAUDE_CONFIG_DIR (#8974). `claudeDir` pins it;
+    // a bare `homeDir` (test seam) means `<homeDir>/.claude`; neither resolves
+    // lazily from the daemon env.
+    this._claudeDir = claudeDir ?? (homeDir ? join(homeDir, '.claude') : null)
     this._readFileFn = readFileFn
     this._spawnFn = spawnFn
     this._buildEnv = buildEnv
@@ -398,7 +402,7 @@ export class StatusLineManager extends EventEmitter {
     if (cached && cached.expiresAt > this._now()) return cached.config
 
     let config = null
-    for (const path of statusLineSettingsPaths(cwd, this._homeDir)) {
+    for (const path of statusLineSettingsPaths(cwd, this._claudeDir ?? claudeConfigDir())) {
       let raw
       try {
         raw = await this._readFileFn(path, 'utf8')

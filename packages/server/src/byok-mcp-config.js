@@ -25,9 +25,9 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
+import { claudeGlobalConfigPath } from './utils/claude-config-dir.js'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 import {
   MCP_SERVER_NAME_RE,
@@ -51,7 +51,7 @@ import {
 export const CLAUDE_CONFIG_MAX_BYTES = 10 * 1024 * 1024
 
 export function defaultClaudeConfigPath() {
-  return process.env.CHROXY_CLAUDE_CONFIG || join(homedir(), '.claude.json')
+  return process.env.CHROXY_CLAUDE_CONFIG || claudeGlobalConfigPath()
 }
 
 /**

@@ -105,6 +105,21 @@ export function claudeProjectsDir(env = process.env) {
   return join(claudeConfigDir(env), 'projects')
 }
 
+/**
+ * claude's global config file (`.claude.json`: OAuth account metadata, user and
+ * per-project MCP servers, workspace trust). Unlike everything else under the
+ * config dir, claude derives it as
+ * `join(CLAUDE_CONFIG_DIR || homedir(), '.claude.json')` — directly in the
+ * override dir, but in the HOME directory (not `~/.claude/`) by default (#8974).
+ * The override goes through the same acceptance policy as {@link claudeConfigDir},
+ * so an unusable one falls back to `~/.claude.json` like the sanitised child env.
+ * @param {Record<string, unknown> | NodeJS.ProcessEnv | null | undefined} [env] - env claude runs with
+ * @returns {string} absolute path
+ */
+export function claudeGlobalConfigPath(env = process.env) {
+  return join(resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? homedir(), '.claude.json')
+}
+
 const warned = new Set()
 
 /** Is `p` a filesystem root (`/`, `C:\`)? For use sites that install a resolved dir as a containment root. */
