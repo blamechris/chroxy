@@ -19,6 +19,7 @@ function makeHandlerOpts(overrides = {}) {
     sendFn: mock.fn(),
     broadcastFn: mock.fn(),
     validateBearerAuth: mock.fn(() => true),
+    validateHookAuth: mock.fn(() => true),
     pushManager: null,
     pendingPermissions: new Map(),
     permissionSessionMap: new Map(),
@@ -494,7 +495,7 @@ describe('createPermissionHandler', () => {
     afterEach(() => { if (destroyFn) { destroyFn(); destroyFn = null } })
 
     it('rejects unauthenticated request', async () => {
-      const opts = makeHandlerOpts({ validateBearerAuth: mock.fn(() => false) })
+      const opts = makeHandlerOpts({ validateHookAuth: mock.fn(() => false) })
       const { handlePermissionRequest } = createPermissionHandler(opts)
       const req = makeReq('{}')
       const res = makeRes()

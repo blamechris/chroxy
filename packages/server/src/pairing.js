@@ -381,7 +381,7 @@ export class PairingManager extends EventEmitter {
       }
     }
 
-    return { valid: true, sessionToken }
+    return { valid: true, sessionToken, sessionId: effectiveSessionId }
   }
 
   /**
@@ -409,7 +409,7 @@ export class PairingManager extends EventEmitter {
    */
   getSessionIdForToken(token) {
     const meta = this._lookupToken(token)
-    return meta ? (meta.sessionId || null) : null
+    return meta ? (meta.sessionId ?? null) : null
   }
 
   /**
@@ -487,6 +487,17 @@ export class PairingManager extends EventEmitter {
       }
     }
     return { revoked: 0 }
+  }
+
+  /**
+   * Revoke one session token by its value (used to drop a token that was
+   * issued but never delivered). Same durable-first semantics as
+   * revokeSessionTokenById.
+   * @returns {{ revoked: number, persistFailed?: boolean }}
+   */
+  revokeSessionToken(token) {
+    if (!this._lookupToken(token)) return { revoked: 0 }
+    return this.revokeSessionTokenById(this._deviceIdForToken(token))
   }
 
   /**

@@ -183,8 +183,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   // Overridable via `rateLimit.floor` for tests.
   const _httpFloorLimiter = new RateLimiter({ ...(rateLimit?.floor || { windowMs: 60_000, maxMessages: 600, burst: 200 }), name: 'http-permission-floor' })
 
-  // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
-  const _validateHookAuth = validateHookAuth || validateBearerAuth
+  // No hook validator supplied: refuse. Never fall back to the bearer check,
+  // which a scoped client may be allowed to pass.
+  const _validateHookAuth = validateHookAuth || ((req, res) => {
+    res.writeHead(403, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'unauthorized' }))
+    return false
+  })
 
   // #5704: tear down a permission route's map entry AND its permission-induced
   // subscription refcount together. Prefer the WsServer-provided hook (which

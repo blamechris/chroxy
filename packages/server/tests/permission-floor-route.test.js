@@ -176,9 +176,10 @@ describe('POST /permission-floor through the real WsServer (#7019)', () => {
       assert.deepEqual(await res.json(), { floor: true })
     })
 
-    it('a pairing-issued token is ALSO accepted on this branch (it is a valid token to _isTokenValid)', async () => {
+    it('a session-scoped pairing token is rejected on this branch; an unscoped one is still accepted', async () => {
       await boot({ withHookSecret: false })
-      const res = await postFloor(readSrc, bearer(pairingToken({ bound: true })))
+      await assertRejected(await postFloor(readSrc, bearer(pairingToken({ bound: true }))))
+      const res = await postFloor(readSrc, bearer(pairingToken({ bound: false })))
       assert.equal(res.status, 200)
       assert.deepEqual(await res.json(), { floor: true })
     })

@@ -176,7 +176,7 @@ describe('createPermissionHandler — validateHookAuth integration', () => {
     assert.equal(bearerAuthCalled, false, 'validateBearerAuth should NOT be called for /permission')
   })
 
-  it('falls back to validateBearerAuth when validateHookAuth is not provided', () => {
+  it('refuses, without consulting validateBearerAuth, when validateHookAuth is not provided', () => {
     let bearerAuthCalled = false
 
     const handler = createPermissionHandler({
@@ -191,14 +191,16 @@ describe('createPermissionHandler — validateHookAuth integration', () => {
     })
 
     const req = { headers: { authorization: 'Bearer test' }, on() {} }
+    let statusCode = null
     const res = {
-      writeHead() {},
+      writeHead(code) { statusCode = code },
       end() {},
       on() {},
     }
 
     handler.handlePermissionRequest(req, res)
-    assert.equal(bearerAuthCalled, true, 'should fall back to validateBearerAuth')
+    assert.equal(bearerAuthCalled, false, 'must not fall back to validateBearerAuth')
+    assert.equal(statusCode, 403)
   })
 })
 

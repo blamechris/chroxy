@@ -823,7 +823,9 @@ export class WsServer {
     this._permissions = createPermissionHandler({
       sendFn,
       broadcastFn,
-      validateBearerAuth: (req, res) => self._validateBearerAuth(req, res),
+      // Used by POST /permission-response, which limits a scoped token to its
+      // own session itself — opt in explicitly.
+      validateBearerAuth: (req, res) => self._validateBearerAuth(req, res, { allowScoped: true }),
       validateHookAuth: (req, res) => self._validateHookAuth(req, res),
       pushManager,
       pendingPermissions: this._pendingPermissions,
@@ -1745,7 +1747,7 @@ export class WsServer {
     }
     const queryToken = dashUrl.searchParams.get('token')
     const token = queryToken || bearerToken || cookieVal
-    if (!token || !this._isTokenValid(token)) {
+    if (!token || !this._isTokenValid(token) || this._isSessionScopedToken(token)) {
       res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
       res.end('<h1>403 Forbidden</h1><p>Invalid or missing token.</p>')
       return false
@@ -1762,16 +1764,40 @@ export class WsServer {
   }
 
   /**
+   * True when `token` is a pairing-issued token bound to one session.
+   * Linking-mode (unbound) session tokens and the primary token are not.
+   */
+  _isSessionScopedToken(token) {
+    const pm = this._pairingManager
+    if (!pm || !token) return false
+    // Fail closed: a manager that cannot report a token's binding is treated
+    // as having bound it. Any stored session id (including an empty string)
+    // counts as bound; only null/undefined is unscoped.
+    if (typeof pm.getSessionIdForToken !== 'function') return true
+    return pm.getSessionIdForToken(token) != null
+  }
+
+  /**
    * Validate Bearer token on an HTTP request. Returns true if auth passes
    * (or auth is disabled). On failure, writes a 403 response and returns false.
+   *
+   * A session-scoped token is refused by default: routes guarded by this check
+   * serve host-wide data. A route that a scoped client legitimately calls opts
+   * in with `{ allowScoped: true }` and MUST itself limit the request to the
+   * token's bound session.
    */
-  _validateBearerAuth(req, res) {
+  _validateBearerAuth(req, res, { allowScoped = false } = {}) {
     if (!this.authRequired) return true
     const authHeader = req.headers['authorization'] || ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
     if (!token || !this._isTokenValid(token)) {
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    if (!allowScoped && this._isSessionScopedToken(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'session_scoped_token' }))
       return false
     }
     return true
@@ -1968,7 +1994,7 @@ export class WsServer {
     }
     // No hook secrets registered — fall back to main token validation
     // (handles legacy single-session setups and tests that don't register secrets)
-    if (!this._isTokenValid(token)) {
+    if (!this._isTokenValid(token) || this._isSessionScopedToken(token)) {
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'unauthorized' }))
       return false
@@ -2343,6 +2369,9 @@ export class WsServer {
         : null
 
       ws.on('message', (raw) => {
+        // Once a close has begun (e.g. after an auth failure) frames already in
+        // flight must not be dispatched.
+        if (ws.readyState !== 1) return
         let msg
         try {
           msg = JSON.parse(raw.toString())

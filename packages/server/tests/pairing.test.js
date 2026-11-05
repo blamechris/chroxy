@@ -645,3 +645,16 @@ describe('PairingManager (#1836)', () => {
     })
   })
 })
+
+describe('validatePairing reports the effective session id', () => {
+  it('returns the entry-level session for a share pairing and null for a linking pairing', async () => {
+    const { PairingManager } = await import('../src/pairing.js')
+    const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const shared = pm.validatePairing(pm.generateBoundPairing('sess-A').pairingId)
+    assert.equal(shared.sessionId, 'sess-A')
+    assert.equal(pm.getSessionIdForToken(shared.sessionToken), shared.sessionId)
+    const linking = pm.validatePairing(pm.currentPairingId)
+    assert.equal(linking.sessionId, null)
+    pm.destroy()
+  })
+})

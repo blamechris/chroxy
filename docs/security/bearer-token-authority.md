@@ -74,7 +74,7 @@ The implementation files are:
 
 ## 3. Primary API Token — Full Session Authority
 
-`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). There is **no session scoping at this layer**. A request that presents a valid primary token can:
+`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). Token validity itself carries no session scoping; the primary token is unscoped. `_validateBearerAuth` additionally refuses session-scoped pairing tokens by default (§4). A request that presents a valid primary token can:
 
 - Subscribe to events from any session (`subscribe_session` / `subscribedSessionIds`)
 - List and switch the active session (`set_active_session`)
@@ -124,10 +124,11 @@ Two creation paths differ in how the binding is set:
 
 ### What "bound" enforces
 
-When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` on the WebSocket client. Every session-scoped handler then filters by it:
+When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` on the WebSocket client. Redeeming a pairing applies the same scope to the connection that redeems it, before that connection is authenticated, through the same helper as token auth; `validatePairing` reports the effective session id and it must agree with the issued token's binding. Every session-scoped handler then filters by it:
 
 - History (`ws-history.js`) restricts session lists, fetches, and resumes to `boundSessionId` only
 - Broadcasts (`ws-server.js` — `_broadcastToSession`, `_subscribeAllClientsToSession`) skip bound clients whose binding does not match
+- HTTP routes behind `_validateBearerAuth` refuse a session-scoped token (403 + `session_scoped_token`) unless the route opts in with `{ allowScoped: true }` and limits the request to the token's bound session. Opted in: `POST /permission-response` (answers only the bound session's permissions). The dashboard shell and the hook-auth fallback also refuse scoped tokens. Unbound pairing tokens (linking-mode and host-approved) are host-level and keep the host read routes (`/version`, `/metrics`, `/diagnostics`, snapshots, pool stats). A token whose stored session id is anything other than null/undefined is treated as scoped.
 - HTTP `/permission-response` (`handlePermissionResponseHttp()` in [`ws-permissions.js`](../../packages/server/src/ws-permissions.js)) requires `originSessionId === callerBoundSessionId`; mismatch returns 403 + the unified `SESSION_TOKEN_MISMATCH` payload
 - The session list returned in `auth_ok` is filtered to the bound session ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 534)
 
@@ -212,7 +213,7 @@ Both revoke routes return **500 `{ "error": "revoke not persisted", "revoked": 0
 
 All are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
 
-The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `GET /api/snapshots`, `/api/pool/stats`) are read-only operational telemetry that exposes no pairing or credential material, so they stay on `_validateBearerAuth` (any valid token). Note the `DELETE /api/snapshots/:slug` mutation is the exception — it is primary-only (see the table above).
+The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `GET /api/snapshots`, `/api/pool/stats`) report host-wide data, so `_validateBearerAuth` refuses a session-scoped token for them (403 + `session_scoped_token`); the primary token and unbound linking-mode tokens are accepted. Note the `DELETE /api/snapshots/:slug` mutation is primary-only (see the table above).
 
 ### The WS primary-token gate (`client.isPrimaryToken`, #5985b)
 
@@ -247,7 +248,7 @@ User-shell sessions are additionally gated by the `userShell.enabled` config fla
 
 Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.js`](../../packages/server/src/cli-session.js) ~line 193) and exports it to the spawned `claude` CLI subprocess as `CHROXY_HOOK_SECRET`. The CLI uses it on outbound `POST /permission` callbacks.
 
-`_validateHookAuth` ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 882) checks the bearer token against the registered set of hook secrets only — it never accepts the primary API token when at least one hook secret is registered. The fallback to `_isTokenValid` exists for legacy single-session setups and tests where no hook secret was registered; it is not reached in normal multi-session operation.
+`_validateHookAuth` ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 882) checks the bearer token against the registered set of hook secrets only — it never accepts the primary API token when at least one hook secret is registered. The fallback to `_isTokenValid` exists for legacy single-session setups and tests where no hook secret was registered; it is not reached in normal multi-session operation. That fallback also refuses session-scoped pairing tokens, and a permission handler constructed without a hook validator refuses rather than falling back to the bearer check.
 
 Hook secrets are in-process only. They are never persisted, never sent over the user-facing WebSocket, and never appear in QR codes.
 
@@ -307,7 +308,7 @@ Before merging any PR that adds a new HTTP route or WebSocket message handler th
 
 1. **Decide which token classes you accept.** Most HTTP endpoints accept the primary token only. `/permission` and `/permission-floor` accept hook secrets. `/api/events` and `/api/mailbox*` accept the daemon-level ingest secret only (never the primary token). WS handlers accept primary + pairing-bound.
 2. **If the operation is session-scoped**, branch on `client.boundSessionId` (WS) or call the equivalent of `pairingManager.getSessionIdForToken(token)` (HTTP) and reject mismatches with 403 + `buildSessionTokenMismatchPayload()`. **Exception — a session-scoped SURVEY** (a read whose caller is waiting on a reply) refuses with a degraded, schema-valid snapshot instead, so the client cannot hang; see §4's "Session-scoped surveys" note for the two properties that keeps safe. Either way, run the authority check **before** the session lookup, or the reply distinguishes "exists" from "does not exist" for a caller with no right to know.
-3. **If the operation is global** (e.g. listing all sessions, changing config) or **mints/exposes pairing material or the primary token**, explicitly reject bound tokens — do not let them silently see everything. On HTTP, use **`_validatePrimaryBearerAuth(req, res)`** (403 + `primary_token_required`); see §4's HTTP table. `_validateBearerAuth` accepts ANY valid token, including pairing-bound ones, so it is only for read-only operational routes that leak no pairing/credential material. If the only legitimate caller is a process on the daemon's own machine (a deploy or maintenance script), ALSO require `isLoopbackPeer(req)` and run it before the token check (`GET /api/daemon/idle`, #8324).
+3. **If the operation is global** (e.g. listing all sessions, changing config) or **mints/exposes pairing material or the primary token**, explicitly reject bound tokens — do not let them silently see everything. On HTTP, use **`_validatePrimaryBearerAuth(req, res)`** (403 + `primary_token_required`); see §4's HTTP table. `_validateBearerAuth` refuses session-scoped tokens by default; a route a scoped client legitimately calls must opt in with `{ allowScoped: true }` and itself limit the request to the token's bound session (see `POST /permission-response`). If the only legitimate caller is a process on the daemon's own machine (a deploy or maintenance script), ALSO require `isLoopbackPeer(req)` and run it before the token check (`GET /api/daemon/idle`, #8324).
 4. **If the operation can execute host code**, the unbound bar is NOT enough — gate on strict `client.isPrimaryToken === true` (see §4's primary-token table). Ask the concrete question: *can a caller choose a binary, argv, or environment this daemon will spawn?* If yes (a shell, a PTY write, a worker session, an MCP server entry, a scheduled task), an ordinary paired phone must not reach it. Reject before any validation, session resolve, file read, or payload logging, so the payload never touches disk on the rejected path. **This step ADDS to step 3, it does not replace it** — if the operation is also global, keep the bound-token rejection too (`client.isPrimaryToken === true && !client.boundSessionId`), or the mutation gate ends up weaker than the read gate guarding the same surface (#7025). **Same bar, both directions, for anything that restarts or stops the daemon itself or reports what is queued for it** (`daemon_update_action`, `daemon_update_status`, #8331): gate the handler, and filter every send path (the post-auth send *and* the change broadcast) with the same predicate. A broadcast filtered by `!client.boundSessionId` alone reaches paired phones.
 5. **Never log raw tokens.** `maskToken()` exists for a reason.
 6. **Use `safeTokenCompare()`** for any byte-equality check against a token.
