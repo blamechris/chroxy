@@ -6312,6 +6312,50 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
     expect(alertSpy.mock.calls[0][0]).toBe('Server Error');
   });
 
+  it('reports a server error once: the alert, not a console.error LogBox toast (#8237)', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'MODEL_NOT_APPLIED',
+      message: "Model change to 'haiku' was not applied",
+    });
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('keeps console.error for server errors in release builds (__DEV__ false) (#8237)', () => {
+    const g = globalThis as unknown as { __DEV__: boolean };
+    const prevDev = g.__DEV__;
+    g.__DEV__ = false;
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockConnectionContext());
+      _testMessageHandler.handle({ type: 'error', code: 'MODEL_NOT_APPLIED', message: 'x' });
+      expect(errSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      g.__DEV__ = prevDev;
+      errSpy.mockRestore();
+    }
+  });
+
   it('clears pending requests for a session when permission_mode_changed arrives', () => {
     const store = createMockStore({
       activeSessionId: 's1',

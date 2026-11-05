@@ -70,6 +70,15 @@ function chip(tree: renderer.ReactTestRenderer, id: string): ReactTestInstance {
 }
 
 describe('SettingsBar refused models (#8915)', () => {
+  it('tapping the already-active chip is a client-side no-op (#8237)', () => {
+    const setModel = jest.fn();
+    const tree = render(makeProps({ setModel, activeModel: 'gpt-5.5' }));
+    act(() => { chip(tree, 'gpt-5.5').props.onPress(); });
+    expect(setModel).not.toHaveBeenCalled();
+    act(() => { chip(tree, 'gpt-5.4').props.onPress(); });
+    expect(setModel).toHaveBeenCalledWith('gpt-5.4');
+  });
+
   it('a refused chip (matched by id) is disabled, marked, and cannot select the model', () => {
     const setModel = jest.fn();
     const tree = render(makeProps({ setModel, rejectedModelIds: ['gpt-5.4'] }));

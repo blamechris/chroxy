@@ -610,7 +610,9 @@ export function SettingsBar({
                         key={m.id}
                         style={[styles.chip, isActive && styles.chipActive, rejected && styles.chipDisabled]}
                         onPress={() => {
-                          if (!rejected) setModel(m.id);
+                          // #8237: the active chip is a no-op; the server would
+                          // answer MODEL_NOT_APPLIED ("already on that model").
+                          if (!rejected && !isActive) setModel(m.id);
                         }}
                         disabled={rejected}
                         testID={`settings-model-${m.id}`}

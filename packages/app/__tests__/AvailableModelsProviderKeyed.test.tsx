@@ -155,6 +155,7 @@ function collectVisibleText(root: ReactTestInstance): string {
 function renderBarFor(
   state: ConnectionState,
   setModel: (id: string) => void = () => {},
+  activeModel: string | null = null,
 ) {
   const roster = selectActiveProviderModels(state);
   const provider = state.sessions.find((s) => s.sessionId === state.activeSessionId)?.provider ?? null;
@@ -165,7 +166,7 @@ function renderBarFor(
         {...({
           expanded: true,
           onToggle: () => {},
-          activeModel: null,
+          activeModel,
           defaultModelId: roster.defaultModelId,
           availableModels: roster.models,
           permissionMode: null,
@@ -242,7 +243,9 @@ describe('#7728 — the mobile store keys model rosters by provider', () => {
     handleMessage(CLAUDE_ROSTER, mockCtx as never);
 
     const sent: string[] = [];
-    const { tree } = renderBarFor(store.getState(), (id) => sent.push(id));
+    // The default model is the active chip, and tapping it is a no-op (#8237),
+    // so mark a different model active.
+    const { tree } = renderBarFor(store.getState(), (id) => sent.push(id), 'other-model');
     const chip = tree.root.findByProps({ testID: 'settings-model-gpt-5.5' });
     expect(chip).toBeDefined();
     act(() => { chip!.props.onPress(); });

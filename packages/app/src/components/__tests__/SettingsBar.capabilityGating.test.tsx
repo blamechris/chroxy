@@ -162,7 +162,8 @@ describe('SettingsBar null active-model default (#8260)', () => {
 it('shows and selects Chroxy Sonnet 5.5 Default alongside upstream Default and Fable (#8603)', () => {
   const setModel = jest.fn();
   const tree = render(makeProps({
-    activeModel: 'claude-sonnet-5-5',
+    // Another model is active: tapping the active chip is a no-op (#8237).
+    activeModel: 'claude-fable-5-1',
     defaultModelId: 'sonnet-5-5',
     availableModels: [
       { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
