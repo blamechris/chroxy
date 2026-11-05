@@ -6,7 +6,8 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { realpathOfDeepestAncestor, unresolvablePathError, fileOpErrorMessage } from './common.js'
+import { truncateForLog } from './reader.js'
 import { isGitRepo } from '../utils/git-repo.js'
 
 const log = createLogger('ws')
@@ -114,11 +115,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         error: null,
       })
     } catch (err) {
-      let errorMessage
-      if (err.code === 'ENOENT') errorMessage = 'Directory not found'
-      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
-      else errorMessage = err.message || 'Unknown error'
+      log.error(`list_directory failed: ${truncateForLog(err.message)}`)
+      const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
       sendFn(ws, {
         type: 'directory_listing',
@@ -213,11 +211,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         error: null,
       })
     } catch (err) {
-      let errorMessage
-      if (err.code === 'ENOENT') errorMessage = 'Directory not found'
-      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
-      else errorMessage = err.message || 'Unknown error'
+      log.error(`browse_files failed: ${truncateForLog(err.message)}`)
+      const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
       sendFn(ws, {
         type: 'file_listing',
