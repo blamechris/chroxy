@@ -35,6 +35,7 @@ import { stderrIndicatesUnknownResume } from './cli-session.js'
 import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { CLAUDE_TUI_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
+import { buildModelEvidence, MODEL_MISMATCH_CODE } from './claude-model-request.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { classifyUsageLimit } from './claude-tui/usage-limit.js'
@@ -1902,7 +1903,41 @@ export class ClaudeTuiSession extends BaseSession {
   _adoptObservedModel(observedModel) {
     if (typeof observedModel === 'string' && observedModel && observedModel !== this.bootedModel) {
       this.bootedModel = observedModel
+      this._observedModelAt = Date.now()
     }
+  }
+
+  /**
+   * #7855 — requested and observed model, kept apart. `requested` is what this
+   * session was asked to run (`--model` at spawn); `observed` is only ever a
+   * value the native journal showed, with its source and age. A configured
+   * model is not proof of the running one: `status` is `unobserved` until the
+   * journal says something, then `match` or `mismatch`.
+   */
+  get modelEvidence() {
+    return buildModelEvidence({
+      requested: this.model,
+      observed: this._observedModelAt ? this.bootedModel : null,
+      observedAt: this._observedModelAt || null,
+    })
+  }
+
+  /**
+   * #7855 — tell the user when the native journal shows a model other than the
+   * one requested. Latched per observed value so a steady mismatch is reported
+   * once, not on every turn end. Non-fatal: the session stays usable and the
+   * evidence getter keeps reporting `mismatch`.
+   */
+  _reportModelMismatch() {
+    const evidence = this.modelEvidence
+    if (evidence.status !== 'mismatch') return
+    const key = `${evidence.requested}->${evidence.observed}`
+    if (this._reportedMismatchKey === key) return
+    this._reportedMismatchKey = key
+    const message = `Requested model '${evidence.requested}' but the native client is running '${evidence.observed}' (seen in its conversation journal). ` +
+      'The request was not honoured; switch the model in the native client or start a new session.'
+    ;(this._log || log).warn(`model mismatch (#7855): ${message}`)
+    this.emit('error', { code: MODEL_MISMATCH_CODE, message })
   }
 
   /**
@@ -1945,6 +1980,7 @@ export class ClaudeTuiSession extends BaseSession {
       ;(this._log || log).debug?.(`_refreshObservedModel scan failed: ${err.message}`)
       return
     }
+    this._reportModelMismatch()
     if (this.bootedModel === before) return
     if (this._ptyExited || !this._processReady || this._destroying) {
       ;(this._log || log).debug?.(

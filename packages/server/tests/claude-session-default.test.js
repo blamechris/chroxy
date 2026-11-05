@@ -43,11 +43,10 @@ describe('Claude new-session default', () => {
       assert.equal(m._resolveCreateSessionPlan({ model }).resolvedModel, model)
     }
   })
-  it('retains the stale Claude model fallback for fresh and restored choices', () => {
+  it('keeps the stale Claude model fallback for restores; a fresh explicit request is rejected (#7855)', () => {
     const m = manager()
-    for (const isRestore of [false, true]) {
-      assert.equal(m._resolveCreateSessionPlan({ model: 'retired-unsupported-model', isRestore }).resolvedModel, null)
-    }
+    assert.equal(m._resolveCreateSessionPlan({ model: 'retired-unsupported-model', isRestore: true }).resolvedModel, null)
+    assert.throws(() => m._resolveCreateSessionPlan({ model: 'retired-unsupported-model' }), { code: 'MODEL_NOT_SUPPORTED_BY_PROVIDER' })
   })
   it('leaves non-Claude default and configured model choices intact', () => {
     const m = manager()

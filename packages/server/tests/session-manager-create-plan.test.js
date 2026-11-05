@@ -167,11 +167,21 @@ describe('SessionManager._resolveCreateSessionPlan (#6036)', () => {
     )
   })
 
-  it('soft-falls-back to null for an unsupported model on a Claude provider (#3403)', () => {
+  it('rejects an explicit malformed model on a Claude provider; restore still soft-falls-back to null (#7855/#3403)', () => {
+    assert.throws(
+      () => mgr._resolveCreateSessionPlan({ model: 'retired-model', provider: 'test-plan-fake-claude-6036' }),
+      ProviderModelNotSupportedError,
+    )
     const plan = mgr._resolveCreateSessionPlan({
       model: 'retired-model',
       provider: 'test-plan-fake-claude-6036',
+      isRestore: true,
     })
     assert.equal(plan.resolvedModel, null)
+  })
+
+  it('keeps a well-formed off-roster model on a Claude provider verbatim (#7855)', () => {
+    const plan = mgr._resolveCreateSessionPlan({ model: 'claude-sonnet-5', provider: 'test-plan-fake-claude-6036' })
+    assert.equal(plan.resolvedModel, 'claude-sonnet-5')
   })
 })

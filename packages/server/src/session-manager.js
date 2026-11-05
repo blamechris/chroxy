@@ -6,6 +6,7 @@ import { execFileSync } from 'child_process'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
 import { isClaudeProvider, CLAUDE_NEW_SESSION_DEFAULT_MODEL } from './models.js'
+import { classifyClaudeModelRequest } from './claude-model-request.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
@@ -1635,8 +1636,26 @@ export class SessionManager extends EventEmitter {
         // SdkSession and CliSession treat as "use the upstream default")
         // and log a warning so operators can spot the drift in logs (#3403).
         if (isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
-          log.warn(`Requested model '${resolvedModel}' is not in the current registry for provider '${resolvedProviderType}'; falling back to provider default. Supported: ${providerAllowedModels.slice(0, 8).join(', ')}${providerAllowedModels.length > 8 ? ', …' : ''}`)
-          resolvedModel = null
+          // #7855: an off-roster id is NOT a stale one. A well-formed Claude id
+          // the roster has not caught up with is forwarded verbatim (the CLI
+          // resolves it; the running model is confirmed from the native journal).
+          // Only an id that cannot be a Claude model at all is dropped, and only
+          // when nobody asked for it by name (a restored snapshot or a configured
+          // default, #3403). An explicit request for such an id is rejected
+          // instead of silently starting another model.
+          const request = classifyClaudeModelRequest(resolvedModel, providerAllowedModels)
+          if (request.kind === 'native') {
+            log.info(`Requested model '${resolvedModel}' is not in the current roster for provider '${resolvedProviderType}'; forwarding it verbatim to the native client`)
+          } else if (typeof model === 'string' && !isRestore) {
+            throw new ProviderModelNotSupportedError({
+              provider: resolvedProviderType,
+              model: resolvedModel,
+              supported: providerAllowedModels,
+            })
+          } else {
+            log.warn(`Model '${resolvedModel}' is not a valid Claude model id for provider '${resolvedProviderType}' and was not explicitly requested; falling back to provider default. Supported: ${providerAllowedModels.slice(0, 8).join(', ')}${providerAllowedModels.length > 8 ? ', …' : ''}`)
+            resolvedModel = null
+          }
         } else {
           // Non-Claude providers reaching HERE published an authoritative,
           // non-empty allowlist — strict rejection still applies because
