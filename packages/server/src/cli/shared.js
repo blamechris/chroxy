@@ -192,6 +192,55 @@ export function parseExtraOverrides(options) {
 }
 
 /**
+ * Defaults `chroxy start` merges under flag > env > config file. Shared with
+ * `resolveConfiguredPort` so `chroxy doctor` cannot drift from the port `start` binds.
+ */
+export const SERVER_CONFIG_DEFAULTS = Object.freeze({
+  port: 8765,
+  noAuth: false,
+})
+
+/**
+ * #8233: the port `chroxy start` would bind, for `chroxy doctor` to probe.
+ *
+ * Runs the SAME mergeConfig + defaults as loadAndMergeConfig (flag > env > config
+ * file > 8765), reading the file named by `-c/--config` (default: the
+ * CHROXY_CONFIG_DIR-aware config.json). Unlike `start`, a missing or unparseable
+ * config is not fatal here: doctor must still run on an uninitialised host. The
+ * file's own problems are surfaced by runDoctorChecks, which reads the SAME path
+ * (passed as `configFilePath`) and reports a Config row.
+ *
+ * A resolved port that is not an integer in 1-65535 (e.g. `"abc"`, which listen()
+ * would treat as a pipe path) is returned as `problem` instead of being probed.
+ *
+ * @param {{ config?: string, port?: string|number }} options - Commander options
+ * @returns {{ port: number, problem: string|null }}
+ */
+export function resolveConfiguredPort(options = {}) {
+  const path = options.config ?? configFile()
+  let fileConfig = {}
+  try {
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fileConfig = parsed
+    }
+  } catch {
+    fileConfig = {}
+  }
+  const cliOverrides = {}
+  const flagPort = options.port !== undefined ? parseInt(options.port, 10) : NaN
+  if (!Number.isNaN(flagPort)) cliOverrides.port = flagPort
+  const { port } = mergeConfig({ fileConfig, cliOverrides, defaults: SERVER_CONFIG_DEFAULTS })
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return {
+      port: SERVER_CONFIG_DEFAULTS.port,
+      problem: `invalid port ${JSON.stringify(port)} (must be an integer 1-65535)`,
+    }
+  }
+  return { port, problem: null }
+}
+
+/**
  * Load config file, build CLI overrides, merge, validate, and set env vars.
  *
  * @param {object} options - Commander options object
@@ -268,10 +317,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   // existing config.json files.
   if (options.dangerouslySkipPermissions) cliOverrides.dangerouslySkipPermissions = true
 
-  const defaults = {
-    port: 8765,
-    noAuth: false,
-  }
+  const defaults = SERVER_CONFIG_DEFAULTS
 
   const config = mergeConfig({
     fileConfig,

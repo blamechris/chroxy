@@ -1,3 +1,5 @@
+import { resolveConfiguredPort } from './shared.js'
+
 /**
  * chroxy doctor — Check dependencies and environment
  */
@@ -5,16 +7,18 @@ export function registerDoctorCommand(program) {
   program
     .command('doctor')
     .description('Check that all dependencies are installed and configured correctly')
-    .option('-p, --port <port>', 'Port to check availability (default: 8765)')
+    .option('-c, --config <path>', 'Path to config file (default: config.json in the config dir)')
+    .option('-p, --port <port>', 'Port to check availability (default: the configured port, else 8765)')
     .option('--provider <name>', 'Override provider(s) to preflight (comma-separated)')
     .action(async (options) => {
       const { runDoctorChecks } = await import('../doctor.js')
 
-      const port = options.port ? parseInt(options.port, 10) : undefined
+      // #8233: same flag > env > config file > 8765 precedence `chroxy start` uses.
+      const { port, problem: portProblem } = resolveConfiguredPort(options)
       const providers = options.provider
         ? options.provider.split(',').map(s => s.trim()).filter(Boolean)
         : undefined
-      const result = await runDoctorChecks({ port, providers, checkUserLevelHook: true })
+      const result = await runDoctorChecks({ port, portProblem, configFilePath: options.config, providers, checkUserLevelHook: true })
       const { checks, passed } = result
 
       console.log('\nChroxy Doctor\n')
