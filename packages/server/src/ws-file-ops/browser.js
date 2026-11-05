@@ -1,5 +1,6 @@
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
+import { claudeConfigDir } from '../utils/claude-config-dir.js'
 import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
@@ -539,7 +540,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     if (cwd) {
       await scanDir(join(cwd, '.claude', 'commands'), 'project')
     }
-    await scanDir(join(homedir(), '.claude', 'commands'), 'user')
+    await scanDir(join(claudeConfigDir(), 'commands'), 'user')
 
     // #6823: MCP-server prompts merged as `source: 'mcp'` slash commands
     // (`/mcp__<server>__<prompt>`). Added last so a same-named built-in / .md
@@ -618,7 +619,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     // the caller-supplied list when multiple providers are active (#2965).
     const userAgentsDirs = (Array.isArray(opts.userAgentsDirs) && opts.userAgentsDirs.length > 0)
       ? opts.userAgentsDirs
-      : [join(homedir(), '.claude', 'agents')]
+      : [join(claudeConfigDir(), 'agents')]
 
     // Phase 1: readdir project + all user dirs in parallel (#3024). Promise.all
     // preserves input order in the resolved array, so first-wins dedup below

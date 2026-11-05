@@ -1,6 +1,5 @@
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
-import { join } from 'path'
-import { homedir } from 'os'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
@@ -262,7 +261,7 @@ export class SdkSession extends BaseSession {
    * hardcoding the path.
    */
   static get dataDir() {
-    return join(homedir(), '.claude')
+    return claudeConfigDir()
   }
 
   static get capabilities() {

@@ -1,10 +1,9 @@
 import { readdir, stat, readFile, open } from 'fs/promises'
 import { join, basename } from 'path'
-import { homedir } from 'os'
+import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
 import { runWithConcurrency } from './utils/concurrency.js'
 
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const MIN_FILE_SIZE = 100
 const CONCURRENCY = 10
 const MAX_FILE_READ = 512 * 1024 // read up to 512KB per file for search
@@ -160,7 +159,7 @@ export async function searchConversations(query, opts = {}) {
   if (trimmed.length > MAX_QUERY_LENGTH) return []
 
   const queryLower = trimmed.toLowerCase()
-  const projectsDir = opts.projectsDir || PROJECTS_DIR
+  const projectsDir = opts.projectsDir || claudeProjectsDir()
   const maxResults = opts.maxResults || DEFAULT_MAX_RESULTS
 
   // Collect all JSONL files across projects

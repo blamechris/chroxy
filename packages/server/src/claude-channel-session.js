@@ -1,5 +1,4 @@
-import { homedir } from 'os'
-import { join } from 'path'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { CLAUDE_CHANNEL_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
@@ -56,7 +55,7 @@ export class ClaudeChannelSession extends BaseSession {
   }
 
   static get dataDir() {
-    return join(homedir(), '.claude')
+    return claudeConfigDir()
   }
 
   static get capabilities() {

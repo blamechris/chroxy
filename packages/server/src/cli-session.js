@@ -3,7 +3,8 @@ import { createInterface } from 'readline'
 import { randomBytes, randomUUID } from 'crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
-import { homedir, tmpdir } from 'os'
+import { tmpdir } from 'os'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
@@ -265,7 +266,7 @@ export class CliSession extends BaseSession {
    * hardcoding the path.
    */
   static get dataDir() {
-    return join(homedir(), '.claude')
+    return claudeConfigDir()
   }
 
   static get capabilities() {

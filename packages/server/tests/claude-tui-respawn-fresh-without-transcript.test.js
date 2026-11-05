@@ -36,7 +36,7 @@ beforeEach(() => {
   delete process.env.CLAUDE_CONFIG_DIR
   fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-8239-home-'))
   cwd = mkdtempSync(join(tmpdir(), 'chroxy-8239-cwd-'))
-  cwdReal = realpathSync(cwd)
+  cwdReal = realpathSync.native(cwd)
   process.env.HOME = fakeHome
   process.env.USERPROFILE = fakeHome
 })
@@ -234,7 +234,7 @@ describe('claude-tui respawn without a persisted transcript (#8239)', () => {
 
 describe('CLAUDE_CONFIG_DIR (#8239)', () => {
   let configDir
-  beforeEach(() => { configDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-config-')) })
+  beforeEach(() => { configDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-8239-config-'))) })
   afterEach(() => { rmSync(configDir, { recursive: true, force: true }) })
 
   function writeTranscriptUnder(root) {

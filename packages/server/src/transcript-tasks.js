@@ -95,7 +95,7 @@
 //     truncation) resets the scanner and re-reads from byte 0.
 
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
-import { homedir } from 'os'
+import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { join } from 'path'
 import { createLogger } from './logger.js'
 import { encodeProjectPath } from './jsonl-reader.js'
@@ -158,9 +158,10 @@ export const MAX_THINKING_BLOCK_CHARS = 1024 * 1024
  * Returns null on any failure (missing file, bad JSON, missing fields) —
  * callers treat null as "no transcript available, degrade to plain ready".
  * @param {string} sessionFilePath
+ * @param {Record<string, string|undefined>} [env] - env claude runs with (picks the projects root)
  * @returns {string|null}
  */
-export function transcriptPathForSessionFile(sessionFilePath) {
+export function transcriptPathForSessionFile(sessionFilePath, env = process.env) {
   try {
     const data = JSON.parse(readFileSync(sessionFilePath, 'utf8'))
     const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : null
@@ -169,7 +170,7 @@ export function transcriptPathForSessionFile(sessionFilePath) {
     // Defence-in-depth: the sessionId becomes a path segment. Real ids are
     // UUIDs; reject anything that could traverse out of the projects dir.
     if (!/^[A-Za-z0-9-]+$/.test(sessionId)) return null
-    return join(homedir(), '.claude', 'projects', encodeProjectPath(cwd), `${sessionId}.jsonl`)
+    return join(claudeProjectsDir(env), encodeProjectPath(cwd), `${sessionId}.jsonl`)
   } catch (err) {
     log.debug?.(`transcriptPathForSessionFile failed for ${sessionFilePath}: ${err.message}`)
     return null

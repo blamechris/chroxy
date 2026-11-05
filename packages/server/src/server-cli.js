@@ -70,6 +70,7 @@ import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
 import { StatusLineManager } from './statusline.js'
+import { warnIfClaudeConfigDirUnusable } from './utils/claude-config-dir.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -875,6 +876,9 @@ export async function startCliServer(config) {
   }
 
   const fileLogging = initFileLoggingFromConfig(config)
+
+  // #8270: say so once at startup when the claude data-dir override is unusable.
+  warnIfClaudeConfigDirUnusable()
 
   // #7162: under a service manager (CHROXY_DAEMON=1) the console streams are
   // captured to files nothing rotates (launchd StandardOutPath et al); the

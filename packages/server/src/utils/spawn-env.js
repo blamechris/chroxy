@@ -25,6 +25,7 @@
  */
 import { resolveCredential, isKnownCredentialKey } from '../credential-store.js'
 import { getChroxyHostEnv } from '../chroxy-host-metadata.js'
+import { sanitizeClaudeConfigDirEnv } from './claude-config-dir.js'
 
 // Standard vars every child process needs for its runtime to function.
 // Shell PATH, locale, TERM, TMPDIR, user/home identity.
@@ -232,7 +233,7 @@ export function stripParentClaudeSessionEnv(env) {
  * @returns {Record<string, string|undefined>} a new object
  */
 export function buildClaudeLaunchEnv(base = process.env) {
-  return stripParentClaudeSessionEnv({ ...base })
+  return sanitizeClaudeConfigDirEnv(stripParentClaudeSessionEnv({ ...base }))
 }
 
 const PROVIDERS = {
@@ -351,6 +352,9 @@ export function buildSpawnEnv(provider, extras = {}) {
   // #8262: denylist mode is the claude family (claude, claude-sdk); none may
   // look like a nested session.
   stripParentClaudeSessionEnv(parentEnv)
+  // #8270: claude and chroxy must use the same data dir, so a CLAUDE_CONFIG_DIR
+  // the shared resolver would reject is not handed to the child.
+  sanitizeClaudeConfigDirEnv(parentEnv)
   // #3855: inject ONLY this provider's own credential-store keys that the
   // shell did not export (e.g. CLAUDE_CODE_OAUTH_TOKEN for claude). Scoped via
   // the per-provider `storeInjectKeys` allowlist so other providers' stored
@@ -366,5 +370,13 @@ export function buildSpawnEnv(provider, extras = {}) {
     if (resolved.value) parentEnv[key] = resolved.value
   }
   // #6633: Chroxy host identity, computed and authoritative (see allowlist branch).
-  return { ...parentEnv, ...getChroxyHostEnv(), ...extras }
+  // `extras` may carry its own value; the same rule applies to it. An explicit
+  // unusable override means "fall back", so it must not let the parent's valid
+  // value take its place.
+  const safeExtras = { ...extras }
+  if (Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR') && safeExtras.CLAUDE_CONFIG_DIR !== undefined) {
+    sanitizeClaudeConfigDirEnv(safeExtras)
+    if (!Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR')) delete parentEnv.CLAUDE_CONFIG_DIR
+  }
+  return { ...parentEnv, ...getChroxyHostEnv(), ...safeExtras }
 }
