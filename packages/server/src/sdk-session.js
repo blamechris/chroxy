@@ -29,6 +29,7 @@ import { detectThinkingKeyword } from './detect-thinking-keyword.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { classifyAuthCause } from './utils/auth-cause.js'
 import { turnOutcomeField, outcomeFromSdkResult } from './turn-outcome.js'
 
 const log = createLogger('sdk')
@@ -56,6 +57,12 @@ const AUTH_REQUIRED_CONTAINER_MESSAGE = 'Claude authentication failed inside the
 // #8273: the session authenticates with ANTHROPIC_API_KEY, so a host login is not
 // the fix. Never interpolates the key.
 const AUTH_REQUIRED_API_KEY_MESSAGE = 'Claude authentication failed: the Anthropic API key (ANTHROPIC_API_KEY) was rejected. Check that it is correct and still active, or replace it, then retry.'
+// #8970: the other mechanisms a session can authenticate through. "Log in" is the
+// wrong advice for each of them, and none of these messages carries a value.
+const AUTH_REQUIRED_BEDROCK_MESSAGE = 'Claude authentication failed through Amazon Bedrock (CLAUDE_CODE_USE_BEDROCK is set). Check the AWS credentials, profile and region this host uses, refresh an expired AWS SSO session if you use one, and confirm the Bedrock model is enabled for the account, then retry.'
+const AUTH_REQUIRED_VERTEX_MESSAGE = 'Claude authentication failed through Google Vertex AI (CLAUDE_CODE_USE_VERTEX is set). Check the Google Cloud credentials, project and region this host uses (for example re-run gcloud auth application-default login), and confirm the Claude model is enabled in Vertex AI, then retry.'
+const AUTH_REQUIRED_AUTH_TOKEN_MESSAGE = 'Claude authentication failed: the bearer token (ANTHROPIC_AUTH_TOKEN) was rejected. Check that it is correct, unexpired and accepted by the endpoint it is sent to, then retry.'
+const AUTH_REQUIRED_API_KEY_HELPER_MESSAGE = 'Claude authentication failed: the key returned by the apiKeyHelper in your Claude settings was rejected, or the helper failed to run. Run the helper yourself to check that it prints a valid, current key, then retry.'
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -632,28 +639,29 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * #8273: which credential this session authenticates with, so the clients can
-   * name the real remedy. `container`: a host login never reaches the container.
-   * `api_key`: ANTHROPIC_API_KEY is in the spawn env (the CLI prefers it to a
-   * login, so logging in would not help). `login`: no env credential, so the SDK
-   * falls back to a host `claude auth login`. `undefined` (field omitted): only
+   * #8273 / #8970: which credential this session authenticates with, so the
+   * clients can name the real remedy. See `classifyAuthCause` for the precedence
+   * (container, Bedrock, Vertex, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY,
+   * apiKeyHelper, then a host login). `undefined` (field omitted): only
    * CLAUDE_CODE_OAUTH_TOKEN is set, where the source is ambiguous and the
    * combined message is kept.
-   * @returns {'container'|'api_key'|'login'|undefined}
+   * @returns {import('@chroxy/protocol').AuthRequiredCause | undefined}
    */
   _authCause() {
-    if (this.constructor.capabilities?.containerized) return 'container'
-    const env = buildSpawnEnv('claude-sdk')
-    if (env.ANTHROPIC_API_KEY) return 'api_key'
-    if (env.CLAUDE_CODE_OAUTH_TOKEN) return undefined
-    return 'login'
+    return classifyAuthCause(buildSpawnEnv('claude-sdk'), {
+      containerized: !!this.constructor.capabilities?.containerized,
+    })
   }
 
-  /** #8223: the AUTH_REQUIRED text for THIS session — container- and key-aware. */
+  /** #8223: the AUTH_REQUIRED text for THIS session — mechanism-aware. */
   _authRequiredMessage(authCause = this._authCause()) {
     switch (authCause) {
       case 'container': return AUTH_REQUIRED_CONTAINER_MESSAGE
       case 'api_key': return AUTH_REQUIRED_API_KEY_MESSAGE
+      case 'bedrock': return AUTH_REQUIRED_BEDROCK_MESSAGE
+      case 'vertex': return AUTH_REQUIRED_VERTEX_MESSAGE
+      case 'auth_token': return AUTH_REQUIRED_AUTH_TOKEN_MESSAGE
+      case 'api_key_helper': return AUTH_REQUIRED_API_KEY_HELPER_MESSAGE
       default: return AUTH_REQUIRED_MESSAGE
     }
   }
