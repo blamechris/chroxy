@@ -4111,7 +4111,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // Build the Alert body once so the permission-mode branch below and
       // the generic fallback both surface the partial-cost line.
       const alertBody = partialCostLine ? `${errMsg}\n\n${partialCostLine}` : errMsg;
-      console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+      // #8237: console.error/warn raise React Native's LogBox overlay in dev, a
+      // sticky toast over the composer that cannot be repositioned. Every error
+      // reaching this branch is already shown to the user by an Alert below (or a
+      // question card), so log at info level to report the event once.
+      console.log(`[ws] Server handler error [${errCode}]: ${errMsg}`);
 
       // #8470: the server dropped a question answer this client sent. The card was
       // marked answered on send; retract that, in place, so it reads "not
