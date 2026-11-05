@@ -6,7 +6,7 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
@@ -160,23 +160,63 @@ describe('#7828 provider-aware transcript resolution', () => {
       assert.deepEqual(texts(sends), [])
     })
 
-    it('truncated final record', async () => {
+    const fileOf = (id) => join(claudeProjects, PROJECT_KEY, `${id}.jsonl`)
+
+    it('an unterminated final record still replays everything before the cut', async () => {
       const id = '00000000-0000-0000-0000-00000000c0bb'
-      writeConv(claudeProjects, 'x', { id, raw: `${userLine('a')}\n${userLine('b').slice(0, 30)}` })
-      await assert.rejects(
-        readConversationTranscriptStrictAsync(join(claudeProjects, PROJECT_KEY, `${id}.jsonl`)),
-        (e) => e.name === 'TranscriptDataError' && e.code === 'corrupt',
-      )
+      writeConv(claudeProjects, 'x', { id, raw: `${userLine('a')}\n${userLine('b')}\n${userLine('c').slice(0, 30)}` })
+      const { messages } = await readConversationTranscriptStrictAsync(fileOf(id))
+      assert.deepEqual(messages.map((m) => m.content), ['a', 'b'])
     })
 
-    it('a tail-only read tolerates its own mid-record cut on line one', async () => {
+    it('a corrupt record in the middle still fails even when the file ends cleanly', async () => {
+      const id = '00000000-0000-0000-0000-00000000c0bd'
+      writeConv(claudeProjects, 'x', { id, raw: `${userLine('a')}\n${userLine('b').slice(0, 30)}\n${userLine('c')}\n` })
+      await assert.rejects(readConversationTranscriptStrictAsync(fileOf(id)), (e) => e.code === 'corrupt')
+    })
+
+    it('trailing whitespace-only and CRLF lines are not records', async () => {
+      const id = '00000000-0000-0000-0000-00000000c0be'
+      writeConv(claudeProjects, 'x', { id, raw: `${userLine('a')}\r\n${userLine('b')}\r\n   \r\n\n  \n` })
+      const { messages } = await readConversationTranscriptStrictAsync(fileOf(id))
+      assert.deepEqual(messages.map((m) => m.content), ['a', 'b'])
+    })
+
+    it('a tail-only read drops what lies before the cap and reports truncated', async () => {
       const id = '00000000-0000-0000-0000-00000000c0cc'
-      const lines = [userLine('aaaaaaaaaaaaaaaa'), userLine('b'), userLine('c')].join('\n')
-      writeConv(claudeProjects, 'x', { id, raw: lines })
-      const { messages, truncated } = await readConversationTranscriptStrictAsync(
-        join(claudeProjects, PROJECT_KEY, `${id}.jsonl`), lines.length - 40)
+      const lines = [userLine('EARLY'), userLine('b'), userLine('c')]
+      const raw = lines.join('\n')
+      writeConv(claudeProjects, 'x', { id, raw })
+      // Room for the last two records plus part of the first line's tail only.
+      const cap = lines[1].length + lines[2].length + 2
+      const { messages, truncated } = await readConversationTranscriptStrictAsync(fileOf(id), cap)
       assert.equal(truncated, true)
-      assert.ok(messages.length >= 1)
+      assert.deepEqual(messages.map((m) => m.content), ['b', 'c'])
+      assert.equal(messages.some((m) => m.content === 'EARLY'), false)
+    })
+
+    it('releases the file descriptor on success and on every error path', { skip: process.platform === 'win32' }, async () => {
+      const openFds = () => readdirSync('/dev/fd').length
+      const okId = '00000000-0000-0000-0000-00000000c0cc'
+      const badId = '00000000-0000-0000-0000-00000000c0bf'
+      writeConv(claudeProjects, 'x', { id: badId, raw: `{nope\n${userLine('a')}\n` })
+      const ident = (id) => {
+        const r = resolveTranscriptSource({
+          provider: 'claude', conversationId: id, sourceLocator: `${PROJECT_KEY}/${id}.jsonl`,
+          sources: [{ provider: 'claude', projectsDir: claudeProjects }],
+        })
+        return r.identity
+      }
+      const wrongIdentity = { dev: 0n, ino: 0n }
+      void ident
+      await readConversationTranscriptStrictAsync(fileOf(okId)) // warm up
+      const before = openFds()
+      for (let i = 0; i < 25; i++) {
+        await readConversationTranscriptStrictAsync(fileOf(okId))
+        await assert.rejects(readConversationTranscriptStrictAsync(fileOf(badId)))
+        await assert.rejects(readConversationTranscriptStrictAsync(fileOf(okId), undefined, { expectedIdentity: wrongIdentity }))
+      }
+      assert.equal(openFds(), before, 'no descriptor is left open by 75 reads across success, corrupt and identity-mismatch')
     })
 
     it('disallowed cwd for a bound client reads nothing', async () => {
@@ -245,7 +285,7 @@ describe('#7828 provider-aware transcript resolution', () => {
         sources: [{ provider: 'claude', projectsDir: claudeProjects }],
       })
       assert.equal(r.ok, true)
-      assert.ok(r.path.endsWith(`${PROJECT_KEY}/${ID}.jsonl`))
+      assert.ok(r.path.endsWith(join(PROJECT_KEY, `${ID}.jsonl`)))
     })
   })
 })

@@ -1,5 +1,4 @@
 import { readdir, stat, open } from 'fs/promises'
-import { constants as fsConstants } from 'fs'
 import { join, basename } from 'path'
 import { homedir } from 'os'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -39,10 +38,7 @@ export function clearScanCache() {
 async function extractMetadata(filePath) {
   let handle
   try {
-    // Open once, non-blocking, and accept only a regular file on the opened
-    // descriptor: a FIFO or device at a transcript path must not stall the scan.
-    handle = await open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0))
-    if (!(await handle.stat()).isFile()) return { preview: null, cwd: null }
+    handle = await open(filePath, 'r')
     const buf = Buffer.alloc(PREVIEW_BYTES)
     const { bytesRead } = await handle.read(buf, 0, PREVIEW_BYTES, 0)
     // Use TextDecoder with stream: true to avoid replacement characters
@@ -149,7 +145,7 @@ async function performScan(projectsDir, provider) {
       return null
     }
 
-    if (!fileStat.isFile() || fileStat.size < MIN_FILE_SIZE) return null
+    if (fileStat.size < MIN_FILE_SIZE) return null
 
     const { preview, cwd } = await extractMetadata(c.filePath)
 

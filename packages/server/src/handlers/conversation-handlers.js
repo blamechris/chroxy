@@ -214,7 +214,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   if (matches.length > 1) {
     const providers = new Set(matches.map((c) => c?.provider))
     fail(providers.size > 1
-      ? 'Conversation id exists under more than one provider; specify the provider'
+      ? 'This conversation id exists under more than one provider and cannot be opened unambiguously from here. Open it from its provider\'s own session list.'
       : 'Conversation id has more than one record for this provider, so it cannot be read unambiguously')
     return
   }
@@ -309,7 +309,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // #7828 — a missing/unreadable file or a corrupt record is a DATA error, not
     // an empty successful transcript: say so, and send no replay frames.
     log.warn(`Failed to read transcript for ${conversationId}: ${err.message}`)
-    fail(err?.name === 'TranscriptDataError' ? err.message : 'Transcript could not be read')
+    fail(err?.name === 'TranscriptDataError' ? err.message : 'Transcript could not be read. Try again.')
     return
   }
 

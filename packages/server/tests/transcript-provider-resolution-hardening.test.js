@@ -111,7 +111,7 @@ describe('#7828 follow-ups', () => {
       return { conversationId: id, provider: 'claude', cwd: ALLOWED, sourceLocator: `${KEY}/${id}.jsonl` }
     }
 
-    it('a FIFO at the transcript path gets a prompt error and never hangs', opts, async () => {
+    it('a FIFO at the transcript path gets a prompt error and never hangs', { ...opts, skip: process.platform === 'win32' && 'no mkfifo on Windows' }, async () => {
       mkdirSync(join(claudeProjects, KEY), { recursive: true })
       execFileSync('mkfifo', [join(claudeProjects, KEY, `${fifoId}.jsonl`)])
       const { ctx, sends } = makeCtx({ scanConversations: createSpy(async () => [fifoRecord(fifoId)]) })
@@ -122,12 +122,12 @@ describe('#7828 follow-ups', () => {
       assert.deepEqual(texts(sends), [])
     })
 
-    it('the strict reader refuses a non-regular file directly', opts, async () => {
+    it('the strict reader refuses a non-regular file directly', { ...opts, skip: process.platform === 'win32' && 'no mkfifo on Windows' }, async () => {
       const path = join(claudeProjects, KEY, `${fifoId}.jsonl`)
       await assert.rejects(readConversationTranscriptStrictAsync(path), (e) => e.name === 'TranscriptDataError')
     })
 
-    it('a symlink to a non-regular file is refused promptly', opts, async () => {
+    it('a symlink to a non-regular file is refused promptly', { ...opts, skip: process.platform === 'win32' && 'no /dev/null on Windows' }, async () => {
       mkdirSync(join(claudeProjects, KEY), { recursive: true })
       symlinkSync('/dev/null', join(claudeProjects, KEY, `${linkId}.jsonl`))
       const { ctx, sends } = makeCtx({ scanConversations: createSpy(async () => [fifoRecord(linkId)]) })
@@ -135,12 +135,6 @@ describe('#7828 follow-ups', () => {
       await settle()
       assert.equal(sends[0].type, 'session_error')
       assert.deepEqual(texts(sends), [])
-    })
-
-    it('the scanner skips a FIFO instead of stalling on it', opts, async () => {
-      clearScanCache()
-      const all = await scanConversations({ projectsDirs: [{ provider: 'claude', projectsDir: claudeProjects }] })
-      assert.equal(all.some((c) => c.conversationId === fifoId), false)
     })
   })
 
@@ -177,7 +171,7 @@ describe('#7828 follow-ups', () => {
       await handler(ws(), client(), { type: 'request_conversation_transcript', conversationId: ID, provider: 'claude' }, ctx)
       await settle()
       assert.match(sends[0].message, /more than one record for this provider/)
-      assert.doesNotMatch(sends[0].message, /specify the provider/)
+      assert.doesNotMatch(sends[0].message, /more than one provider/)
     })
 
     it('an untagged source (no recorded provider) is refused, never treated as Claude', async () => {

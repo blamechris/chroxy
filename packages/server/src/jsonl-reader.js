@@ -178,19 +178,25 @@ export function getJsonlMtime(filePath) {
  * @returns {{ messages: Array<object>, truncated: boolean }}
  */
 function parseJsonlContent(raw, { byteTruncated = false, strict = false } = {}) {
-  const lines = raw.split('\n').filter(Boolean)
+  const rawLines = raw.split('\n')
   const messages = []
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
+  for (let i = 0; i < rawLines.length; i++) {
+    // Blank and whitespace-only lines (including a CRLF `\r`) carry no record.
+    const line = rawLines[i].trim()
+    if (!line) continue
     let entry
     try {
       entry = JSON.parse(line)
     } catch {
-      // Strict (#7828): a record that does not parse is a DATA error, not an
-      // empty/shorter transcript. The one tolerated exception is the first line
-      // of a tail-only read, which is cut mid-record by construction.
-      if (strict && !(byteTruncated && i === 0)) {
+      // Strict (#7828): a record that does not parse in the MIDDLE of the file
+      // is a DATA error, not an empty/shorter transcript. Two cuts are normal
+      // and tolerated: the first line of a tail-only read (cut by construction)
+      // and an unterminated final line (a crash, a kill mid-write, or a session
+      // still being appended to) — everything before the cut still replays.
+      const tailCutFirstLine = byteTruncated && i === 0
+      const unterminatedFinalLine = i === rawLines.length - 1
+      if (strict && !tailCutFirstLine && !unterminatedFinalLine) {
         throw new TranscriptDataError('corrupt', `Transcript record ${i + 1} is not valid JSON (corrupt or truncated)`)
       }
       continue // skip malformed lines
@@ -361,7 +367,7 @@ export async function readConversationTranscriptStrictAsync(filePath, maxBytes =
     if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
       throw new TranscriptDataError('missing', 'Transcript file not found')
     }
-    throw new TranscriptDataError('unreadable', 'Transcript file could not be read')
+    throw new TranscriptDataError('unreadable', 'Transcript file could not be read; it may be in use or unreadable. Try again.')
   } finally {
     if (fh) await fh.close().catch(() => {})
   }
