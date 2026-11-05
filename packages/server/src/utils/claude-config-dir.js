@@ -29,16 +29,64 @@
  * This is claude's data dir only. chroxy's own `~/.chroxy` / `CHROXY_CONFIG_DIR`
  * are unrelated and untouched.
  */
-import { lstatSync, realpathSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
+import { homedir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('claude-config-dir')
 
-/** claude's default data dir, `~/.claude`. */
-export function defaultClaudeConfigDir() {
-  return join(homedir(), '.claude')
+/** The env key `os.homedir()` reads: `USERPROFILE` on Windows, `HOME` elsewhere. */
+function homeEnvKey(platform) {
+  return platform === 'win32' ? 'USERPROFILE' : 'HOME'
+}
+
+/**
+ * The acceptance policy for a home value taken from an env, mirroring what Node's
+ * `os.homedir()` accepts: a string that is non-empty, has no NUL and is absolute.
+ * `/` is allowed (containers and service users run with `HOME=/`, and claude
+ * itself would use it); the root/canonical checks apply only to the
+ * `CLAUDE_CONFIG_DIR` override, where containment matters. Returns the value as
+ * written, or null.
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function acceptClaudeHome(raw) {
+  return typeof raw === 'string' && raw !== '' && !raw.includes('\0') && isAbsolute(raw) ? raw : null
+}
+
+// The home a child resolves when its env carries no accepted home value: the
+// account's passwd entry (win32: os.homedir(), which reads the profile API).
+function accountHomeDir(platform) {
+  if (platform !== 'win32') {
+    try {
+      const h = userInfo().homedir
+      if (acceptClaudeHome(h) !== null) return h
+    } catch {
+      // no passwd entry: os.homedir() below
+    }
+  }
+  return homedir()
+}
+
+/**
+ * The home directory claude resolves for the process that runs with `env`: the
+ * env's `HOME` (`USERPROFILE` on Windows, never `HOME` there), the same value
+ * `os.homedir()` returns inside that child. When the env carries no accepted
+ * home, the account's passwd home (`os.userInfo().homedir`; on win32
+ * `os.homedir()`) is used. The child-env sanitiser removes the same unusable
+ * value, and a child with no HOME resolves that same passwd home (#8974).
+ * @param {Record<string, unknown> | NodeJS.ProcessEnv | null | undefined} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @returns {string}
+ */
+export function claudeHomeDir(env = process.env, platform = process.platform) {
+  return acceptClaudeHome(env?.[homeEnvKey(platform)]) ?? accountHomeDir(platform)
+}
+
+/** claude's default data dir, `<home>/.claude`. */
+export function defaultClaudeConfigDir(env = process.env) {
+  return join(claudeHomeDir(env), '.claude')
 }
 
 function isSymlink(p) {
@@ -97,12 +145,51 @@ export function resolveClaudeConfigDirOverride(raw) {
  * @returns {string} absolute, canonical path to claude's config dir
  */
 export function claudeConfigDir(env = process.env) {
-  return resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? defaultClaudeConfigDir()
+  return resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? defaultClaudeConfigDir(env)
 }
 
 /** `<claude config dir>/projects`. */
 export function claudeProjectsDir(env = process.env) {
   return join(claudeConfigDir(env), 'projects')
+}
+
+/**
+ * claude's global config file (OAuth account metadata, user and per-project MCP
+ * servers, workspace trust). claude picks ONE active file:
+ *   1. `<config dir>/.config.json` when it is a regular file that is non-empty,
+ *      or empty and writable while the modern file does not exist (legacy name);
+ *   2. otherwise `join(CLAUDE_CONFIG_DIR || home, '.claude.json')` — directly in
+ *      the override dir, but in the HOME directory (not `~/.claude/`) by default.
+ * This returns that same file, so a reader and a writer never use a different one
+ * than claude does (#8974). The override goes through the same acceptance policy
+ * as {@link claudeConfigDir}; home comes from the env (see {@link claudeHomeDir}).
+ * @param {Record<string, unknown> | NodeJS.ProcessEnv | null | undefined} [env] - env claude runs with
+ * @returns {string} absolute path
+ */
+export function claudeGlobalConfigPath(env = process.env) {
+  const override = resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR)
+  const modern = join(override ?? claudeHomeDir(env), '.claude.json')
+  const legacy = join(claudeConfigDir(env), '.config.json')
+  try {
+    // Exactly claude's rule: a regular legacy file that is non-empty, or that is
+    // empty but writable while no modern file exists. A directory never qualifies.
+    const st = statSync(legacy)
+    if (st.isFile() && (st.size > 0 || ((st.mode & 0o222) !== 0 && !existsSync(modern)))) return legacy
+  } catch {
+    // absent / unreadable: not the active file
+  }
+  return modern
+}
+
+/**
+ * Parse the text of claude's global config. Empty or whitespace-only content
+ * (a freshly created file) is `{}`; anything else is parsed strictly and a
+ * malformed non-empty file still throws, so a corrupt file is never clobbered.
+ * @param {string} text
+ * @returns {any}
+ */
+export function parseClaudeConfigText(text) {
+  return text.trim() === '' ? {} : JSON.parse(text)
 }
 
 const warned = new Set()
@@ -129,11 +216,24 @@ export function warnIfClaudeConfigDirUnusable(env = process.env) {
  * Make a claude child env agree with {@link claudeConfigDir}: when the env
  * carries a `CLAUDE_CONFIG_DIR` the resolver would reject, remove it (one
  * warning per distinct value) so claude falls back to `~/.claude` as chroxy does.
+ * An unusable home value (HOME, or USERPROFILE on Windows) is removed the same way.
  * Mutates and returns `env`.
  * @param {Record<string, unknown>} env
  */
-export function sanitizeClaudeConfigDirEnv(env) {
-  if (!env || !Object.hasOwn(env, 'CLAUDE_CONFIG_DIR') || env.CLAUDE_CONFIG_DIR === undefined) return env
+export function sanitizeClaudeConfigDirEnv(env, platform = process.platform) {
+  if (!env) return env
+  // The home value the child's os.homedir() reads: an unusable one is removed so
+  // the child falls back to the account's passwd home, the same account the
+  // daemon's claudeHomeDir() fallback names (#8974).
+  const homeKey = homeEnvKey(platform)
+  if (Object.hasOwn(env, homeKey) && env[homeKey] !== undefined && acceptClaudeHome(env[homeKey]) === null) {
+    if (!warned.has(`home:${String(env[homeKey])}`)) {
+      warned.add(`home:${String(env[homeKey])}`)
+      log.warn('Ignoring an unusable home directory in the claude child env; the account home is used')
+    }
+    delete env[homeKey]
+  }
+  if (!Object.hasOwn(env, 'CLAUDE_CONFIG_DIR') || env.CLAUDE_CONFIG_DIR === undefined) return env
   if (resolveClaudeConfigDirOverride(env.CLAUDE_CONFIG_DIR) !== null) return env
   const key = String(env.CLAUDE_CONFIG_DIR)
   if (!warned.has(key)) {

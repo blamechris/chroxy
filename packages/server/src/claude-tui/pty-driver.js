@@ -8,9 +8,9 @@
 // methods live on `PtyDriverMixin` and are copied onto ClaudeTuiSession.prototype
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
 // session instance and every `this._*` / static reference resolves as before.
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
-import { homedir } from 'os'
-import { dirname, join, resolve } from 'path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
+import { claudeGlobalConfigPath, parseClaudeConfigText } from '../utils/claude-config-dir.js'
+import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 // #7986 — the shared candidate list + resolver moved to utils/claude-binary.js
 // (the ONE copy). Re-exported below for back-compat: claude-tui-session.js and
@@ -238,14 +238,15 @@ export const AUTH_REQUIRED_MESSAGE = `Claude is not logged in on this host, or i
 // PTY would render "Is this a project you trust?" and wait for Enter.
 // Idempotent: if already trusted, no write.
 //
-// NOTE the path is `homedir()/.claude.json`, NOT `defaultClaudeConfigPath()`:
-// the point of this write is to be read by the `claude` binary we are about to
-// spawn, and it only ever reads `$HOME/.claude.json`. `CHROXY_CLAUDE_CONFIG`
-// redirects chroxy's own MCP-config reads, so honouring it here would silently
-// send the trust flags to a file claude never opens.
-export function ensureCwdTrusted(cwd) {
+// NOTE the path is `claudeGlobalConfigPath(env)` (`<CLAUDE_CONFIG_DIR>/.claude.json`,
+// else `$HOME/.claude.json`), NOT `defaultClaudeConfigPath()`: the point of this
+// write is to be read by the `claude` binary we are about to spawn, so it must
+// use the env that child runs with (#8974). `CHROXY_CLAUDE_CONFIG` redirects
+// chroxy's own MCP-config reads, so honouring it here would silently send the
+// trust flags to a file claude never opens.
+export function ensureCwdTrusted(cwd, env = process.env) {
   const realCwd = realpathSync(cwd)
-  const claudeConfig = join(homedir(), '.claude.json')
+  const claudeConfig = claudeGlobalConfigPath(env)
   let config = {}
   // #7046: PRESERVE the destination's permissions. This write used to call
   // `writeFileSync(tmp, ...)` with no `mode` and never chmod the sidecar, so the
@@ -256,10 +257,10 @@ export function ensureCwdTrusted(cwd) {
   let mode = null
   if (existsSync(claudeConfig)) {
     try {
-      config = JSON.parse(readFileSync(claudeConfig, 'utf8'))
+      config = parseClaudeConfigText(readFileSync(claudeConfig, 'utf8'))
       mode = statSync(claudeConfig).mode & 0o777
     } catch (err) {
-      log.warn(`~/.claude.json unreadable, skipping trust pre-write: ${err.message}`)
+      log.warn(`claude global config ${basename(claudeConfig)} unreadable, skipping trust pre-write: ${err.message}`)
       return
     }
   }
@@ -298,9 +299,13 @@ export function ensureCwdTrusted(cwd) {
   // is claude rendering its trust dialog; the alternative — destroying the link —
   // is strictly worse.
   try {
+    // A fresh CLAUDE_CONFIG_DIR override need not exist yet (the resolver accepts
+    // it). Create ONLY the validated destination's directory, private to the
+    // owner, so the first start does not fail with ENOENT (#8974).
+    mkdirSync(dirname(claudeConfig), { recursive: true, mode: 0o700 })
     writeClaudeConfigAtomic(claudeConfig, config, { mode })
   } catch (err) {
-    log.warn(`~/.claude.json not written, skipping trust pre-write: ${err.message}`)
+    log.warn(`claude global config ${basename(claudeConfig)} not written, skipping trust pre-write: ${err.message}`)
   }
 }
 

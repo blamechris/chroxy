@@ -1,17 +1,43 @@
 import { readFileSync, mkdirSync } from 'fs'
+import { randomUUID } from 'crypto'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { shellQuotePath } from './utils/verify-binary.js'
+import { claudeConfigDir } from './utils/claude-config-dir.js'
+import { resolveClaudeConfigWritePath } from './byok-mcp-config.js'
 
 const log = createLogger('permission-hook')
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-const DEFAULT_SETTINGS_PATH = resolve(homedir(), '.claude', 'settings.json')
+// The user-level settings file claude loads: `<claude config dir>/settings.json`.
+// Resolved per call (not at import) so a CLAUDE_CONFIG_DIR override in the
+// daemon env is honoured the same way the claude child sees it (#8974); an
+// unusable override falls back to `~/.claude`, exactly as claudeConfigDir does.
+function defaultSettingsPath() {
+  return resolve(claudeConfigDir(), 'settings.json')
+}
+
+/** The user-level settings.json claude loads for the daemon's env (doctor seam). */
+export function userSettingsPath() {
+  return defaultSettingsPath()
+}
+
+// Write settings.json atomically THROUGH a symlinked path (a dotfiles link is
+// kept, not replaced by a regular file) using a per-call sidecar name, so two
+// daemon processes never share a temp file. Refuses a link the shared resolver
+// refuses (dangling, non-regular, foreign uid).
+function writeSettingsFile(settingsPath, settings) {
+  const resolved = resolveClaudeConfigWritePath(settingsPath)
+  if (!resolved.ok) throw new Error(resolved.error)
+  writeFileRestricted(resolved.path, JSON.stringify(settings, null, 2) + '\n', {
+    tmpSuffix: `.chroxy.${randomUUID()}.tmp`,
+  })
+  return resolved.path
+}
 const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
 // Module-level, in-process lock for settings.json read-modify-write operations.
@@ -76,12 +102,12 @@ function _isChroxyHookEntry(entry) {
 /**
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
- * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [settingsPath] - Path to settings.json (defaults to <claude config dir>/settings.json)
  * @param {string} [hookScript] - Hook script path (defaults to the packaged script; a test seam
  *   so the written command can be checked against an install path that needs shell quoting)
  */
 function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
-  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
+  settingsPath = settingsPath || defaultSettingsPath()
 
   let settings = {}
   try {
@@ -129,16 +155,17 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
     ],
   })
 
-  writeFileRestricted(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+  const written = writeSettingsFile(settingsPath, settings)
   log.info(`Registered hook in ${settingsPath}`)
+  return written
 }
 
 /**
  * Remove the Chroxy permission hook from settings.json.
- * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [settingsPath] - Path to settings.json (defaults to <claude config dir>/settings.json)
  */
 function unregisterPermissionHookSync(settingsPath) {
-  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
+  settingsPath = settingsPath || defaultSettingsPath()
   let settings
   try {
     settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
@@ -161,7 +188,7 @@ function unregisterPermissionHookSync(settingsPath) {
     if (Object.keys(settings.hooks).length === 0) {
       delete settings.hooks
     }
-    writeFileRestricted(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+    writeSettingsFile(settingsPath, settings)
     log.info(`Unregistered hook from ${settingsPath}`)
   }
 }
@@ -174,7 +201,7 @@ function unregisterPermissionHookSync(settingsPath) {
  * @returns {{found: number, settingsPath: string, error?: string}}
  */
 export function countUserLevelChroxyHooks({ settingsPath } = {}) {
-  const target = settingsPath || DEFAULT_SETTINGS_PATH
+  const target = settingsPath || defaultSettingsPath()
   try {
     const settings = JSON.parse(readFileSync(target, 'utf-8'))
     const entries = settings?.hooks?.PreToolUse
@@ -202,6 +229,15 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
   // Tracks the most recent in-flight register() promise so destroy() can
   // chain unregister() after it, preventing a register-after-unregister race.
   let pendingRegister = null
+  // Pinned on first use: register, retry messages, unregister and cleanup all
+  // act on the SAME file, so an env change or a retargeted override link after
+  // registration cannot send cleanup to a different profile.
+  let pinnedPath = null
+  const targetPath = () => (pinnedPath ??= settingsPath || defaultSettingsPath())
+  // The file the registration actually landed in (a symlinked settings.json
+  // resolved to its target). Cleanup acts on THIS, so retargeting the link
+  // afterwards strands nothing and never touches the new target.
+  let registeredTarget = null
 
   function scheduleRetry() {
     if (destroying || registered) return
@@ -209,7 +245,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
 
     retryCount++
     if (retryCount > 3) {
-      const effectivePath = settingsPath || DEFAULT_SETTINGS_PATH
+      const effectivePath = targetPath()
       const errMsg = `Hook registration failed after 3 attempts. Please check ${effectivePath} and restart the server. Permissions will not work until this is fixed.`
       log.error(errMsg)
       emitter.emit('error', { message: errMsg })
@@ -237,7 +273,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
         return
       }
       try {
-        registerPermissionHookSync(settingsPath, hookScript)
+        registeredTarget = registerPermissionHookSync(targetPath(), hookScript)
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null
@@ -264,7 +300,8 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
   function unregister() {
     return withSettingsLock(() => {
       try {
-        unregisterPermissionHookSync(settingsPath)
+        unregisterPermissionHookSync(registeredTarget ?? targetPath())
+        registeredTarget = null
       } catch (err) {
         log.error(`Failed to unregister: ${err.message}`)
       }

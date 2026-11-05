@@ -64,7 +64,7 @@ test('parseStatusLineConfig floors a tiny refreshInterval', () => {
 // ---------------------------------------------------------------------------
 
 test('statusLineSettingsPaths lists project > user project-settings > user, highest first', () => {
-  const paths = statusLineSettingsPaths('/proj', '/home/u')
+  const paths = statusLineSettingsPaths('/proj', '/home/u/.claude')
   assert.deepEqual(paths, [
     '/proj/.claude/settings.json',
     '/home/u/.claude/project-settings.json',

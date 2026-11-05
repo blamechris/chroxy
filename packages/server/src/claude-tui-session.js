@@ -2614,7 +2614,7 @@ export class ClaudeTuiSession extends BaseSession {
   async start() {
     // Pre-flight: ensure cwd is trusted so the dialog doesn't block PTY spawns.
     try {
-      ensureCwdTrusted(this.cwd)
+      ensureCwdTrusted(this.cwd, this._claudeEnv())
     } catch (err) {
       log.warn(`trust pre-write failed (continuing): ${err.message}`)
     }

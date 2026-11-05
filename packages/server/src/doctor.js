@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, realpathSync } from 'fs'
 import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { createServer } from 'net'
@@ -32,7 +32,8 @@ import { applyStrandedAck, detectStrandedState } from './config-dir-migration.js
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { createLogger } from './logger.js'
-import { countUserLevelChroxyHooks } from './permission-hook.js'
+import { countUserLevelChroxyHooks, userSettingsPath } from './permission-hook.js'
+import { defaultClaudeConfigDir } from './utils/claude-config-dir.js'
 
 const log = createLogger('doctor')
 
@@ -558,6 +559,30 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
 }
 
 /**
+ * #8974: when a CLAUDE_CONFIG_DIR override is active, a chroxy permission-hook
+ * entry left in the DEFAULT `~/.claude/settings.json` (registered before the
+ * override was set, or by another daemon) is stranded: claude no longer loads
+ * that file for this profile. Report only; it is never removed here because
+ * another daemon may own it.
+ *
+ * @param {{activePath?: string, defaultPath?: string}} [deps]
+ * @returns {{ name: string, status: 'warn', message: string } | null}
+ */
+export function checkStrandedDefaultHook({ activePath, defaultPath } = {}) {
+  const active = activePath ?? userSettingsPath()
+  const fallback = defaultPath ?? join(defaultClaudeConfigDir(), 'settings.json')
+  const canon = (p) => { try { return realpathSync(p) } catch { return resolve(p) } }
+  if (canon(active) === canon(fallback)) return null
+  const { found, error } = countUserLevelChroxyHooks({ settingsPath: fallback })
+  if (error || found === 0) return null
+  return {
+    name: 'Stranded permission hook',
+    status: 'warn',
+    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${fallback}, which is not the active settings file (${active}) for this daemon's claude — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session of another daemon is using it)`,
+  }
+}
+
+/**
  * Run all preflight dependency checks and return results.
  *
  * Provider-aware: only runs the binary/credential checks for the
@@ -641,6 +666,7 @@ export async function runDoctorChecks({
   // `userHookSettingsPath` is the test seam for that read.
   checkUserLevelHook = false,
   userHookSettingsPath,
+  strandedHookSettingsPath,
 } = {}) {
   const checks = []
 
@@ -883,6 +909,11 @@ export async function runDoctorChecks({
   if (checkUserLevelHook) {
     const hookCheck = checkUserLevelChroxyHook({ settingsPath: userHookSettingsPath })
     if (hookCheck) checks.push(hookCheck)
+    // With a test-seamed user settings path and no stranded seam, skip: the
+    // fallback would read the developer's real ~/.claude.
+    const strandedCheck = (userHookSettingsPath === undefined || strandedHookSettingsPath !== undefined)
+      && checkStrandedDefaultHook({ activePath: userHookSettingsPath, defaultPath: strandedHookSettingsPath })
+    if (strandedCheck) checks.push(strandedCheck)
   }
 
   // 5.6 Tunnel routability (#5328 WP-5.6). For a configured NAMED tunnel, probe

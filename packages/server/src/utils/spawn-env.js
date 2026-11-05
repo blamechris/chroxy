@@ -374,9 +374,11 @@ export function buildSpawnEnv(provider, extras = {}) {
   // unusable override means "fall back", so it must not let the parent's valid
   // value take its place.
   const safeExtras = { ...extras }
-  if (Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR') && safeExtras.CLAUDE_CONFIG_DIR !== undefined) {
-    sanitizeClaudeConfigDirEnv(safeExtras)
-    if (!Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR')) delete parentEnv.CLAUDE_CONFIG_DIR
+  for (const key of ['CLAUDE_CONFIG_DIR', process.platform === 'win32' ? 'USERPROFILE' : 'HOME']) {
+    if (Object.hasOwn(safeExtras, key) && safeExtras[key] !== undefined) {
+      sanitizeClaudeConfigDirEnv(safeExtras)
+      if (!Object.hasOwn(safeExtras, key)) delete parentEnv[key]
+    }
   }
   return { ...parentEnv, ...getChroxyHostEnv(), ...safeExtras }
 }
