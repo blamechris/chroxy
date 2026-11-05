@@ -1023,6 +1023,22 @@ describe('setupForwarding', () => {
       assert.match(msg.message, /\(claude-tui\)/)
     })
 
+    it('queues one session_list AFTER the destroy that follows a create failure (#8981)', async () => {
+      let destroyed = false
+      const seenDestroyed = []
+      const broadcastSessionList = mock.fn(() => { seenDestroyed.push(destroyed) })
+      const ctx = makeCtx({ broadcastSessionList })
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_create_failed', { sessionId: 'sess-1', errorCode: 'START_FAILED', errorMessage: 'boom' })
+      assert.equal(broadcastSessionList.mock.callCount(), 0, 'not synchronously, before the session is destroyed')
+      destroyed = true // SessionManager.destroySession runs synchronously after the emit
+      await nextLoopTurn()
+
+      assert.equal(broadcastSessionList.mock.callCount(), 1, 'exactly one list')
+      assert.deepEqual(seenDestroyed, [true], 'the list was built after the destroy, so it omits the session')
+    })
+
     it('ignores a session_create_failed with no sessionId', () => {
       const ctx = makeCtx()
       setupForwarding(ctx)

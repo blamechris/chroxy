@@ -74,6 +74,7 @@
  */
 
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
+import { clearPendingCreateFailures } from './handlers/session-lifecycle'
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
@@ -687,6 +688,10 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   // #6808 — a parked checkpoint-restore notice is per-connection state: a fresh
   // auth must not inherit one.
   clearPendingRestoreNotices()
+  // #8981 — a parked create-failure belongs to the connection that reported it;
+  // a reconnect or host switch must not settle the old server's error into the
+  // new server's active session.
+  clearPendingCreateFailures()
   if (opts.clearCursors) _historyCursors.clear()
 }
 

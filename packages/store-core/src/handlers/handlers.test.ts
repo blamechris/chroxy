@@ -10699,6 +10699,11 @@ describe('settleCreateFailures (#8981)', () => {
     expect(settleCreateFailures([], null, has([]))).toEqual([])
     expect(settleCreateFailures([], null, has([]))).toEqual([])
   })
+  it('a parked entry does not survive resetReplayReconcile (fresh auth / reconnect / host switch)', () => {
+    stashCreateFailure('f', entry)
+    resetReplayReconcile()
+    expect(settleCreateFailures(['b'], 'b', has(['b']))).toEqual([])
+  })
   it('settles onto the session itself when a list still contains it, then clears the record', () => {
     stashCreateFailure('f', entry)
     expect(settleCreateFailures(['f', 'b'], 'b', has(['f', 'b']))).toEqual([{ sessionId: 'f', chatMessage: entry }])

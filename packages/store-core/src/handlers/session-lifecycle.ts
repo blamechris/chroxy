@@ -209,8 +209,10 @@ export function planCreateFailure(
   return { kind: 'none' }
 }
 
-// Entries parked until the session_list that removes their session. Module state
-// is per client bundle (the dashboard and the app each load their own copy).
+// Entries parked until the session_list that removes their session. Module
+// state is one set per client bundle, NOT per connection: it is cleared by
+// resetReplayReconcile (fresh auth, socket close/error, disconnect, host switch)
+// so a record never outlives the connection that reported it.
 const pendingCreateFailures = new Map<string, ChatMessage>()
 
 /** Park a create-failed entry for the failed session (see {@link planCreateFailure}). */

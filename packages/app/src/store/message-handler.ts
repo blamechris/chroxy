@@ -71,6 +71,7 @@ import {
   planCreateFailure,
   stashCreateFailure,
   settleCreateFailures,
+  clearPendingCreateFailures,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   // conversation_id migrated to the shared dispatch table (#5556)
@@ -2421,6 +2422,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // Auto-resume on server restart: if reconnecting and server has no sessions,
       // restore the last active conversation so user doesn't have to navigate History.
       if (sessionList.length === 0 && ctx.isReconnect) {
+        // This path returns before the roster is applied, so nothing settles a
+        // parked create-failure here; drop it (the Alert already surfaced it).
+        clearPendingCreateFailures();
         void (async () => {
           const snapSocket = ctx.socket;
           const lastId = await loadLastConversationId();

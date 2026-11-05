@@ -26,6 +26,7 @@ import {
   type ContractFixture,
   FakeHandshakeServer,
   FakeHandshakeClient,
+  clearPendingCreateFailures,
   type HandshakeStoreAdapter,
   type DriverMessage,
   type FixtureFieldMatcher,
@@ -209,6 +210,7 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
     clearDeltaBuffers()
     clearPermissionSplits()
     resetReplayFlags()
+    clearPendingCreateFailures()
     mockSocket = createMockSocket()
   })
 
