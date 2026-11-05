@@ -46,19 +46,28 @@ function makeHarness({ mapped = 's1', pendingId = 'req-hook' } = {}) {
   })
 
   // A hook-routed session: no in-process PermissionManager.
-  const sessions = new Map([['s1', { session: {}, name: 'S', cwd: '/tmp' }], ['s2', { session: {}, name: 'T', cwd: '/tmp' }]])
+  // Observable rule getters and persistence spies: if a legacy allowAlways ever
+  // reached the rules path, the getter would be called and the frame built.
+  const ruleSpies = {
+    getPersistentPermissionRules: mock.fn(() => [{ tool: 'Bash', decision: 'allow' }]),
+    getPermissionRules: mock.fn(() => []),
+    // No respondToPermission: a hook-routed session has no in-process manager.
+    setPermissionRules: mock.fn(),
+  }
+  const sessions = new Map([['s1', { session: { ...ruleSpies }, name: 'S', cwd: '/tmp' }], ['s2', { session: {}, name: 'T', cwd: '/tmp' }]])
   const broadcasts = []
+  const sessionBroadcasts = []
   const ctx = nsCtx({
     send: (ws, msg) => { ws.send(JSON.stringify(msg)) },
     broadcast: (msg, filter) => { broadcasts.push([msg, filter]) },
-    broadcastToSession: () => {},
+    broadcastToSession: (sid, msg) => { sessionBroadcasts.push([sid, msg]) },
     sessionManager: { getSession: (id) => sessions.get(id) },
     permissionSessionMap,
     pendingPermissions,
     permissionAudit: null,
     permissions: { resolvePermission: handler.resolvePermission },
   })
-  return { ctx, broadcasts, hookResolve, pendingPermissions, permissionSessionMap, httpBroadcast, handler }
+  return { ctx, broadcasts, sessionBroadcasts, ruleSpies, hookResolve, pendingPermissions, permissionSessionMap, httpBroadcast, handler }
 }
 
 const resolvedFrames = (broadcasts) => broadcasts.filter(([m]) => m.type === 'permission_resolved')
@@ -92,7 +101,20 @@ describe('#7858 mapped hook-routed WS decision is confirmed', () => {
     const h = makeHarness()
     settingsHandlers.permission_response(makeWs(), viewer(), { requestId: 'req-hook', decision: 'allowAlways' }, h.ctx)
     assert.equal(h.hookResolve.mock.callCount(), 1)
-    assert.equal(h.broadcasts.filter(([m]) => m.type === 'permission_rules_updated').length, 0)
+    assert.equal(resolvedFrames(h.broadcasts).length, 1, 'still confirmed as resolved')
+    assert.equal(h.ruleSpies.setPermissionRules.mock.callCount(), 0, 'no rule persisted')
+    assert.equal(h.ruleSpies.getPersistentPermissionRules.mock.callCount(), 0, 'the rules path was never consulted')
+    const rulesFrames = [...h.broadcasts.map(([m]) => m), ...h.sessionBroadcasts.map(([, m]) => m)]
+      .filter((m) => m.type === 'permission_rules_updated')
+    assert.equal(rulesFrames.length, 0, 'no permission_rules_updated on either broadcast surface')
+  })
+
+  it('carries the Allow for Session scope in the confirmation frame', () => {
+    const h = makeHarness()
+    settingsHandlers.permission_response(makeWs(), viewer(), { requestId: 'req-hook', decision: 'allow', scope: 'session' }, h.ctx)
+    const frames = resolvedFrames(h.broadcasts)
+    assert.equal(frames.length, 1)
+    assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', scope: 'session', sessionId: 's1' })
   })
 })
 
