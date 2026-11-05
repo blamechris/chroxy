@@ -201,7 +201,9 @@ function PlanApprovalCard({
  * the same remount Files -> Chat performed by hand.
  */
 /** How long the layout must be quiet before a freshly opened chat stops following (#8961). */
-const OPENING_SETTLE_MS = 1000;
+const OPENING_SETTLE_MS = 1500;
+/** Hard cap from the first size event, so a streaming chat cannot hold the opening open forever. */
+const OPENING_MAX_MS = 5000;
 
 export function ChatView(props: ChatViewProps) {
   const sessionId = useConnectionStore((s) => s.activeSessionId);
@@ -250,15 +252,23 @@ function ChatViewForSession({
   // `showScrollToBottomRef` and leave a freshly opened chat at its first message.
   const openingRef = useRef(true);
   const openingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hard cap, armed once at the first size event and never restarted: a chat
+  // that is streaming re-arms the quiet timer faster than it can expire.
+  const openingCapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endOpening = () => {
     openingRef.current = false;
     if (openingTimerRef.current != null) {
       clearTimeout(openingTimerRef.current);
       openingTimerRef.current = null;
     }
+    if (openingCapTimerRef.current != null) {
+      clearTimeout(openingCapTimerRef.current);
+      openingCapTimerRef.current = null;
+    }
   };
   useEffect(() => () => {
     if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
+    if (openingCapTimerRef.current != null) clearTimeout(openingCapTimerRef.current);
   }, []);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
@@ -656,6 +666,9 @@ function ChatViewForSession({
             scrollViewRef.current?.scrollToEnd({ animated: false });
             if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
             openingTimerRef.current = setTimeout(endOpening, OPENING_SETTLE_MS);
+            if (openingCapTimerRef.current == null) {
+              openingCapTimerRef.current = setTimeout(endOpening, OPENING_MAX_MS);
+            }
             return;
           }
           if (hasUnansweredPrompt) return;

@@ -135,13 +135,33 @@ describe('ChatView opens at the latest message (#8961)', () => {
     }
   });
 
+  it('stops following after the hard cap even if size events never go quiet (streaming)', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat, spy } = mount([reply('a'), reply('b')]);
+      // streamed deltas every 500 ms keep re-arming the quiet timer for 7 s
+      for (let i = 0; i < 14; i++) {
+        act(() => { flat().props.onContentSizeChange(400, 900 + i * 20); });
+        act(() => { jest.advanceTimersByTime(500); });
+      }
+      // a screen-reader / wheel scroll up: onScroll only, no drag-begin
+      act(() => { flat().props.onScroll(scrollEvent(100, 1200)); });
+      spy.mockClear();
+      act(() => { flat().props.onContentSizeChange(400, 1300); });
+      expect(spy).not.toHaveBeenCalled();
+      act(() => tree.unmount());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('clears the settle timer on unmount', () => {
     jest.useFakeTimers();
     try {
       const { tree, flat } = mount([reply('a')]);
       const setSpy = jest.spyOn(global, 'setTimeout');
       act(() => { flat().props.onContentSizeChange(400, 900); });
-      const settle = setSpy.mock.results[setSpy.mock.calls.findIndex((c) => c[1] === 1000)];
+      const settle = setSpy.mock.results[setSpy.mock.calls.findIndex((c) => c[1] === 1500)];
       expect(settle).toBeDefined();
       const clearSpy = jest.spyOn(global, 'clearTimeout');
       act(() => tree.unmount());
