@@ -492,7 +492,9 @@ describe('useChatMessages -- resolved permission prompt groups (#6894)', () => {
     const { result } = renderHook(() =>
       useChatMessages({ storeMessages: [rec('p1'), rec('p2')], streamingMessageId: null }),
     )
-    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1', 'p2'])
+    // #8937: the replayed expired records now also raise the end-of-turn summary row;
+    // this test is about grouping, so it looks at the records only.
+    expect(result.current.chatMessages.map((r) => r.id).filter((id) => !id.startsWith('permission-expired-summary-'))).toEqual(['p1', 'p2'])
     expect(result.current.permissionPromptGroups.size).toBe(0)
   })
 

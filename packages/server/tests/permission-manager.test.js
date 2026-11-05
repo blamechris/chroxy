@@ -307,6 +307,21 @@ describe('PermissionManager', () => {
       fastPm.destroy()
     })
 
+    it('an MCP trust prompt timing out resolves with the same requestId + reason "timeout" shape (#8937)', async () => {
+      // The clients map `permission_resolved { reason: 'timeout' }` to the
+      // `expired` record (store-core applyPermissionResolved), so every
+      // requestId-keyed timer must emit that exact shape or its card reads
+      // "Denied" for a prompt nobody refused.
+      const fastPm = createManager({ timeoutMs: 5 })
+      const events = []
+      fastPm.on('permission_resolved', (data) => events.push(data))
+      const promise = fastPm.requestMcpTrust({ name: 'slowmcp', command: '/usr/bin/true', args: [], envKeys: [] })
+      const requestId = Array.from(fastPm._pendingPermissions.keys())[0]
+      assert.equal(await promise, false)
+      assert.deepStrictEqual(events, [{ requestId, decision: 'deny', reason: 'timeout' }])
+      fastPm.destroy()
+    })
+
     it('emits unified permission_resolved payload on abort (#3048)', async () => {
       const events = []
       pm.on('permission_resolved', (data) => events.push(data))

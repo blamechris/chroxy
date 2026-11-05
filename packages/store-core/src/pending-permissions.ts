@@ -205,8 +205,12 @@ export function isExpiredUnansweredPermissionPrompt(m: ChatMessage, now: number)
   return (
     m.type === 'prompt' &&
     !!m.requestId &&
-    !!m.expiresAt &&
-    m.expiresAt <= now &&
+    // #8937: a record that SAYS it expired (`permissionOutcome: 'expired'`, set by a
+    // live timeout/abort or built from a replayed `permission_outcome`) counts on
+    // that alone. A replayed record is built with no `expiresAt` (it was never
+    // pending), so the clock test below cannot see it -- the summary vanished on
+    // reload. The clock test remains for the live card that expired locally.
+    (m.permissionOutcome === 'expired' || (!!m.expiresAt && m.expiresAt <= now)) &&
     !m.answered &&
     // #8374: a prompt the user stopped was not dropped by the clock -- it has its
     // own record, and counting it as "expired" would tell the user a permission
