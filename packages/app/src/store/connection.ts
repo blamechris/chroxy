@@ -616,6 +616,25 @@ function clearSessionRolesAcrossSessions(
   if (changed) set({ sessionStates: next });
 }
 
+/**
+ * #5725 / #8258 — leave the terminal `server_down` phase explicitly BEFORE
+ * dialing. connect() sets 'reconnecting' when re-dialing the same URL
+ * (isReconnect), and `server_down -> reconnecting` is an illegal FSM transition.
+ * Move to 'connecting' first; clearing the error keeps the stale "Server appears
+ * to be down" banner from leaking into the fresh attempt.
+ * #6286 — the FSM REJECTS illegal transitions, so this user-initiated terminal
+ * exit opts in via { force: true }: the ONLY deliberately-flagged way to leave a
+ * terminal phase. Shared by retryConnection() (banner Reconnect) and both
+ * "Connection Failed" alert Retry handlers so they cannot diverge.
+ */
+function leaveServerDown(): void {
+  const lifecycle = useConnectionLifecycleStore.getState();
+  if (lifecycle.connectionPhase === 'server_down') {
+    lifecycle.transitionPhase('connecting', { force: true });
+    lifecycle.setConnectionError(null, 0);
+  }
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   queuedMessageCount: 0,
@@ -1271,7 +1290,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             'The server is still restarting. Try again later.',
             [
               { text: 'OK' },
-              { text: 'Retry', onPress: () => get().connect(url, token) },
+              { text: 'Retry', onPress: () => { leaveServerDown(); void get().connect(url, token); } },
             ],
           );
         }
@@ -1303,7 +1322,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             [
               { text: 'OK' },
               { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
-              { text: 'Retry', onPress: () => get().connect(url, token) },
+              { text: 'Retry', onPress: () => { leaveServerDown(); void get().connect(url, token); } },
             ],
           );
         }
@@ -1770,19 +1789,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // dashboard's retryConnection (#5724).
   retryConnection: () => {
     resetReconnectAttempt();
+    leaveServerDown();
     const lifecycle = useConnectionLifecycleStore.getState();
-    // #5725 — leave the terminal server_down phase explicitly BEFORE dialing.
-    // connect() sets 'reconnecting' when re-dialing the same URL (isReconnect),
-    // and `server_down -> reconnecting` is an illegal FSM transition. Move to
-    // 'connecting' first; clearing the error here keeps the stale "Server
-    // appears to be down" banner from leaking into the fresh attempt.
-    // #6286 — the FSM now REJECTS illegal transitions instead of applying them,
-    // so this user-initiated terminal exit opts in via { force: true }: it is
-    // the ONLY deliberately-flagged way to leave a terminal phase.
-    if (lifecycle.connectionPhase === 'server_down') {
-      lifecycle.transitionPhase('connecting', { force: true });
-      lifecycle.setConnectionError(null, 0);
-    }
     const saved = lifecycle.savedConnection;
     if (saved?.url && saved?.token) {
       void get().connectAuto(saved, { silent: true });

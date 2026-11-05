@@ -13,10 +13,11 @@ jest.mock('expo-secure-store', () => ({
   setItemAsync: jest.fn(() => Promise.resolve()),
 }));
 
+import { Alert } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { resetReconnectAttempt, reconnectAttempt, nextReconnectAttempt } from '../../store/message-handler';
+import { resetReconnectAttempt, reconnectAttempt, nextReconnectAttempt, setLastConnectedUrl } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 function flushPromises(): Promise<void> {
@@ -94,6 +95,7 @@ beforeEach(() => {
 afterEach(() => {
   useConnectionStore.getState().disconnect();
   randomSpy.mockRestore();
+  setLastConnectedUrl(null);
   global.fetch = originalFetch;
   jest.useRealTimers();
 });
@@ -346,5 +348,57 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     expect(ws.instances.length).toBe(0);
 
     ws.restore();
+  });
+  // #8258 — the give-up alert's Retry redialed the daemon but connect() asks for
+  // server_down -> reconnecting (same URL = isReconnect), which the FSM rejects,
+  // so the UI stayed latched on "Server appears to be down". Both alerts must
+  // leave server_down the way the banner's retryConnection() does.
+  describe('#8258 alert Retry leaves server_down', () => {
+    async function giveUpAndGetRetry(
+      kind: 'probe' | 'restart',
+    ): Promise<() => void> {
+      // The real repro is a drop after a successful session: the last connected
+      // URL is this one, so the Retry re-dial takes connect()'s isReconnect path.
+      setLastConnectedUrl('wss://tunnel.example.com');
+      const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+      useConnectionLifecycleStore.setState({
+        savedConnection: { url: 'wss://tunnel.example.com', token: 'tok' },
+      });
+      (global.fetch as jest.Mock).mockImplementation(() =>
+        kind === 'probe'
+          ? Promise.reject(new Error('network unreachable'))
+          : Promise.resolve(mockResponse(200, { status: 'restarting', restartEtaMs: 5000 })),
+      );
+      useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok');
+      for (let i = 0; i < 12; i++) {
+        await flushPromises();
+        if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') break;
+        jest.advanceTimersByTime(15_000);
+      }
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      const call = alertSpy.mock.calls.find(([title]) => title === 'Connection Failed');
+      expect(call).toBeDefined();
+      const buttons = call![2] as Array<{ text: string; onPress?: () => void }>;
+      const retry = buttons.find((b) => b.text === 'Retry');
+      expect(retry?.onPress).toBeDefined();
+      alertSpy.mockRestore();
+      return retry!.onPress!;
+    }
+
+    it.each(['probe', 'restart'] as const)('%s give-up Retry dials and leaves server_down', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind);
+      // Daemon is back.
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(0);
+      expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
+      ws.restore();
+    });
   });
 });
