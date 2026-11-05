@@ -8,7 +8,7 @@
 // methods live on `PtyDriverMixin` and are copied onto ClaudeTuiSession.prototype
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
 // session instance and every `this._*` / static reference resolves as before.
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
 import { claudeGlobalConfigPath } from '../utils/claude-config-dir.js'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -299,6 +299,10 @@ export function ensureCwdTrusted(cwd, env = process.env) {
   // is claude rendering its trust dialog; the alternative — destroying the link —
   // is strictly worse.
   try {
+    // A fresh CLAUDE_CONFIG_DIR override need not exist yet (the resolver accepts
+    // it). Create ONLY the validated destination's directory, private to the
+    // owner, so the first start does not fail with ENOENT (#8974).
+    mkdirSync(dirname(claudeConfig), { recursive: true, mode: 0o700 })
     writeClaudeConfigAtomic(claudeConfig, config, { mode })
   } catch (err) {
     log.warn(`claude global config (.claude.json) not written, skipping trust pre-write: ${err.message}`)

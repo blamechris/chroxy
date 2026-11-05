@@ -29,16 +29,31 @@
  * This is claude's data dir only. chroxy's own `~/.chroxy` / `CHROXY_CONFIG_DIR`
  * are unrelated and untouched.
  */
-import { lstatSync, realpathSync } from 'node:fs'
+import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('claude-config-dir')
 
-/** claude's default data dir, `~/.claude`. */
-export function defaultClaudeConfigDir() {
-  return join(homedir(), '.claude')
+/**
+ * The home directory claude resolves for the process that runs with `env`:
+ * `HOME` (`USERPROFILE` on Windows), the same value `os.homedir()` returns inside
+ * that child. Falls back to the daemon's own home only when the env carries none
+ * (or a non-absolute one), so a per-connection child env with a different HOME is
+ * read and written where that child looks (#8974).
+ * @param {Record<string, unknown> | NodeJS.ProcessEnv | null | undefined} [env]
+ * @returns {string}
+ */
+export function claudeHomeDir(env = process.env) {
+  const raw = process.platform === 'win32' ? (env?.USERPROFILE || env?.HOME) : env?.HOME
+  if (typeof raw === 'string' && raw !== '' && !raw.includes('\0') && isAbsolute(raw)) return raw
+  return homedir()
+}
+
+/** claude's default data dir, `<home>/.claude`. */
+export function defaultClaudeConfigDir(env = process.env) {
+  return join(claudeHomeDir(env), '.claude')
 }
 
 function isSymlink(p) {
@@ -97,7 +112,7 @@ export function resolveClaudeConfigDirOverride(raw) {
  * @returns {string} absolute, canonical path to claude's config dir
  */
 export function claudeConfigDir(env = process.env) {
-  return resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? defaultClaudeConfigDir()
+  return resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? defaultClaudeConfigDir(env)
 }
 
 /** `<claude config dir>/projects`. */
@@ -106,18 +121,26 @@ export function claudeProjectsDir(env = process.env) {
 }
 
 /**
- * claude's global config file (`.claude.json`: OAuth account metadata, user and
- * per-project MCP servers, workspace trust). Unlike everything else under the
- * config dir, claude derives it as
- * `join(CLAUDE_CONFIG_DIR || homedir(), '.claude.json')` — directly in the
- * override dir, but in the HOME directory (not `~/.claude/`) by default (#8974).
- * The override goes through the same acceptance policy as {@link claudeConfigDir},
- * so an unusable one falls back to `~/.claude.json` like the sanitised child env.
+ * claude's global config file (OAuth account metadata, user and per-project MCP
+ * servers, workspace trust). claude picks ONE active file:
+ *   1. `<config dir>/.config.json` when it exists and is non-empty (legacy name);
+ *   2. otherwise `join(CLAUDE_CONFIG_DIR || home, '.claude.json')` — directly in
+ *      the override dir, but in the HOME directory (not `~/.claude/`) by default.
+ * This returns that same file, so a reader and a writer never use a different one
+ * than claude does (#8974). The override goes through the same acceptance policy
+ * as {@link claudeConfigDir}; home comes from the env (see {@link claudeHomeDir}).
  * @param {Record<string, unknown> | NodeJS.ProcessEnv | null | undefined} [env] - env claude runs with
  * @returns {string} absolute path
  */
 export function claudeGlobalConfigPath(env = process.env) {
-  return join(resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR) ?? homedir(), '.claude.json')
+  const legacy = join(claudeConfigDir(env), '.config.json')
+  try {
+    if (statSync(legacy).size > 0) return legacy
+  } catch {
+    // absent / unreadable: not the active file
+  }
+  const override = resolveClaudeConfigDirOverride(env?.CLAUDE_CONFIG_DIR)
+  return join(override ?? claudeHomeDir(env), '.claude.json')
 }
 
 const warned = new Set()

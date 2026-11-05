@@ -366,8 +366,8 @@ export class StatusLineManager extends EventEmitter {
   } = {}) {
     super()
     // The user-level dir follows CLAUDE_CONFIG_DIR (#8974). `claudeDir` pins it;
-    // a bare `homeDir` (test seam) means `<homeDir>/.claude`; neither resolves
-    // lazily from the daemon env.
+    // a bare `homeDir` (test seam) means `<homeDir>/.claude`; with neither, each
+    // resolveConfig() call resolves `claudeConfigDir()` from the daemon's process.env.
     this._claudeDir = claudeDir ?? (homeDir ? join(homeDir, '.claude') : null)
     this._readFileFn = readFileFn
     this._spawnFn = spawnFn
