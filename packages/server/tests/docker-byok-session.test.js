@@ -863,7 +863,9 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 1)
     // Cmd is the rg-or-grep wrapper so both binaries appear:
     assert.match(_dockerBackend.calls[0].cmd, /rg /)
-    assert.match(_dockerBackend.calls[0].cmd, /grep -r/)
+    // The fallback lists files (skipping hidden/ignored ones, #7981) and greps that list.
+    assert.match(_dockerBackend.calls[0].cmd, /grep -H/)
+    assert.match(_dockerBackend.calls[0].cmd, /else __gx_search "\$__cx_target"; fi/)
     // PR #5021 review fix (Copilot, comment id 3348029186): the
     // command is suffixed with `; true` so rg/grep's exit code 1
     // (no matches) doesn't bubble up to execInEnvironment's reject.
