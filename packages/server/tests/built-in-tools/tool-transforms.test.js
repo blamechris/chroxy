@@ -237,12 +237,12 @@ describe('buildConfinedContainerCommand (#7354)', () => {
 
 describe('buildGrepArgs', () => {
   it('defaults line numbers on, case-insensitive off, no glob', () => {
-    assert.deepEqual(buildGrepArgs({}), { ci: '', ln: '-n', globArg: '' })
+    assert.deepEqual(buildGrepArgs({}), { ci: '', ln: '-n', globArg: '', grepGlob: undefined })
   })
   it('honors -i, -n=false, and a glob filter', () => {
     assert.deepEqual(
       buildGrepArgs({ '-i': true, '-n': false, glob: '*.go' }),
-      { ci: '-i', ln: '', globArg: ` --glob='*.go'` },
+      { ci: '-i', ln: '', globArg: ` --glob='*.go'`, grepGlob: { args: ` --include='*.go'` } },
     )
   })
 
@@ -277,7 +277,7 @@ describe('buildGrepCommand', () => {
   })
 
   it('threads the glob arg into the rg command', () => {
-    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'` }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
+    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'`, grepGlob: { args: ` --include='*.md'` } }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
   })
 
   it('rootExpr substitutes a shell expression for the quoted root (#7354)', () => {

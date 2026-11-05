@@ -847,11 +847,13 @@ export function confinedContainerFailureMessage(label, reason, path) {
 /**
  * Derive the rg/grep flag fragments from a Grep tool input: case-insensitive
  * (`-i`), line numbers (`-n`, default on), and an optional `--glob` filter.
- * `--glob` is ripgrep-specific and is threaded only into `buildGrepCommand`'s
- * `rg` branch — the `grep -r` fallback (used when `rg` is absent) has no
- * `--glob` equivalent and silently ignores `globArg` (GNU grep's nearest
- * analog is `--include`, not implemented here); `ci`/`ln`/`pattern`/`root`
- * apply identically on both branches.
+ * `--glob` is ripgrep-specific, so `globArg` is threaded only into
+ * `buildGrepCommand`'s `rg` branch. The `grep -r` fallback (used when `rg` is
+ * absent, e.g. node:22-slim) gets `grepGlob` instead, from
+ * {@link translateGlobForGrep}: `--include=`/`--exclude=` where the glob is
+ * faithfully expressible, otherwise a refusal — never a silently unfiltered
+ * search (#7961). `ci`/`ln`/`pattern`/`root` apply identically on both
+ * branches.
  *
  * SECURITY (#7928): `glob` is model-controlled, same as `pattern`/`root`
  * (#7295) — but unlike those two, it is bound to a NAMED flag (`--glob`)
@@ -879,9 +881,79 @@ export function confinedContainerFailureMessage(label, reason, path) {
 export function buildGrepArgs(input) {
   const ci = input?.['-i'] === true ? '-i' : ''
   const ln = input?.['-n'] !== false ? '-n' : ''
-  const globArg = typeof input?.glob === 'string' && input.glob.length > 0
-    ? ` --glob=${shellQuote(input.glob)}` : ''
-  return { ci, ln, globArg }
+  const hasGlob = typeof input?.glob === 'string' && input.glob.length > 0
+  const globArg = hasGlob ? ` --glob=${shellQuote(input.glob)}` : ''
+  const grepGlob = hasGlob ? translateGlobForGrep(input.glob) : undefined
+  return { ci, ln, globArg, grepGlob }
+}
+
+const GREP_GLOB_MAX_EXPANSIONS = 32
+
+/**
+ * Expand non-nested `{a,b}` sets into the alternatives grep can take as
+ * repeated flags. Returns null for anything it cannot expand faithfully
+ * (nested, unbalanced, empty, or more than {@link GREP_GLOB_MAX_EXPANSIONS}).
+ */
+function expandSimpleBraces(glob) {
+  let results = ['']
+  let rest = glob
+  while (rest.length > 0) {
+    const open = rest.indexOf('{')
+    const closeFirst = rest.indexOf('}')
+    if (open === -1) {
+      if (closeFirst !== -1) return null
+      results = results.map((r) => r + rest)
+      break
+    }
+    if (closeFirst !== -1 && closeFirst < open) return null
+    const close = rest.indexOf('}', open)
+    if (close === -1) return null
+    const inner = rest.slice(open + 1, close)
+    if (inner.includes('{')) return null
+    const alts = inner.split(',')
+    const head = rest.slice(0, open)
+    const next = []
+    for (const r of results) for (const a of alts) next.push(r + head + a)
+    if (next.length > GREP_GLOB_MAX_EXPANSIONS) return null
+    results = next
+    rest = rest.slice(close + 1)
+  }
+  return results
+}
+
+/**
+ * Translate a Grep tool `glob` into the `grep -r` fallback's file filter
+ * (#7961). ripgrep's `--glob` is silently dropped by `grep -r`, which returned
+ * every file's matches as if the filter had been applied. Only globs whose
+ * grep form is equivalent are translated:
+ *
+ *   - a basename glob (`*.js`, `*.{ts,tsx}`) -> `--include=<g>` per brace
+ *     alternative (rg matches a slash-less glob against the basename at any
+ *     depth, which is what `--include` does)
+ *   - a negated basename glob (`!*.min.js`) -> `--exclude=<g>`
+ *
+ * Anything else (a `/` or `**` path glob, a backslash escape, nested or
+ * oversized braces, an empty negation) cannot be expressed with `--include`,
+ * so it returns `{ refusal }` and the command fails loudly rather than
+ * searching unfiltered. Every value is fused into one `--flag=<quoted>` token
+ * (argv-safety.js case 3), so a glob that begins with `-` is never an option.
+ *
+ * @param {string} glob
+ * @returns {{ args: string } | { refusal: string }}
+ */
+export function translateGlobForGrep(glob) {
+  const refuse = (why) => ({
+    refusal: `Grep failed: the glob ${JSON.stringify(glob)} cannot be applied because ripgrep is not installed in this environment and grep cannot express it (${why}); use a simple filename glob such as "*.js", or omit the glob`,
+  })
+  const negated = glob.startsWith('!')
+  const body = negated ? glob.slice(1) : glob
+  if (body.length === 0) return refuse('empty pattern')
+  if (body.includes('/') || body.includes('**') || body.includes('\\')) return refuse('path and escaped globs are not supported')
+  const alts = expandSimpleBraces(body)
+  if (!alts) return refuse('unsupported brace set')
+  if (alts.some((a) => a.length === 0)) return refuse('empty alternative')
+  const flag = negated ? '--exclude' : '--include'
+  return { args: alts.map((a) => ` ${flag}=${shellQuote(a)}`).join('') }
 }
 
 /**
@@ -950,12 +1022,22 @@ export function buildGrepArgs(input) {
  * `buildGrepArgs`'s own doc for the measurement (ripgrep 15.2.0, required-arg)
  * and why the fix does not rest on it.
  *
- * @param {{ pattern: string, root?: string, rootExpr?: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
+ * `grepGlob` (#7961) is the fallback's counterpart to `globArg`, from
+ * `buildGrepArgs`. It is REQUIRED whenever `globArg` is non-empty: a caller
+ * that forwards only `globArg` would reintroduce the silent unfiltered search,
+ * so that combination throws instead of degrading.
+ *
+ * @param {{ pattern: string, root?: string, rootExpr?: string, ci: string, ln: string, globArg: string, grepGlob?: { args: string } | { refusal: string }, maskExit?: boolean }} opts
  */
-export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, maskExit = false }) {
+export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, grepGlob, maskExit = false }) {
   const rootArg = typeof rootExpr === 'string' && rootExpr.length > 0 ? rootExpr : shellQuote(root)
+  if (globArg && !grepGlob) {
+    throw new Error('buildGrepCommand: globArg without grepGlob would leave the grep -r fallback unfiltered (#7961)')
+  }
   const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${rootArg}`
-  const grepCmd = `grep -r ${ci} ${ln} -e ${shellQuote(pattern)} -- ${rootArg}`
+  const grepCmd = grepGlob && 'refusal' in grepGlob
+    ? `printf '%s\\n' ${shellQuote(grepGlob.refusal)} >&2; (exit 2)`
+    : `grep -r ${ci} ${ln}${grepGlob?.args ?? ''} -e ${shellQuote(pattern)} -- ${rootArg}`
   const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
 }

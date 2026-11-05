@@ -2594,7 +2594,7 @@ export class DockerByokSession extends ClaudeByokSession {
     // non-zero exit, and both rg and grep -r exit 1 on "no matches" (PR #5021
     // review, Copilot comment 3348029186) — without the mask the legitimate
     // "No matches" branch below would be unreachable.
-    const { ci, ln, globArg } = buildGrepArgs(input)
+    const { ci, ln, globArg, grepGlob } = buildGrepArgs(input)
     // #7354 — the `path` route is shared with Read/Glob and is lexical, so
     // `{"path":"esc"}` searched `/etc` through a symlinked directory. Resolve
     // it in-container and search the RESOLVED root (`rootExpr`), which is what
@@ -2603,7 +2603,7 @@ export class DockerByokSession extends ClaudeByokSession {
     const cmd = buildConfinedContainerCommand({
       target: root,
       body: buildGrepCommand({
-        pattern, rootExpr: '"$__cx_target"', ci, ln, globArg, maskExit: true,
+        pattern, rootExpr: '"$__cx_target"', ci, ln, globArg, grepGlob, maskExit: true,
       }),
     })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
