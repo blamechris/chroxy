@@ -17,16 +17,17 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import '../src/claude-tui-session.js' // fixes the session<->driver import cycle order
-import { claudeGlobalConfigPath, claudeConfigDir } from '../src/utils/claude-config-dir.js'
+import { claudeGlobalConfigPath, claudeConfigDir, claudeHomeDir, sanitizeClaudeConfigDirEnv } from '../src/utils/claude-config-dir.js'
 import { createPermissionHookManager, countUserLevelChroxyHooks } from '../src/permission-hook.js'
 import { StatusLineManager } from '../src/statusline.js'
 import { hasClaudeOAuthCreds, resetCachesForTest } from '../src/auth-probes.js'
 import { defaultClaudeConfigPath } from '../src/byok-mcp-config.js'
 import { ensureCwdTrusted } from '../src/claude-tui/pty-driver.js'
+import { buildSpawnEnv, buildClaudeLaunchEnv } from '../src/utils/spawn-env.js'
 import { checkStrandedDefaultHook } from '../src/doctor.js'
 
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CLAUDE_KEYCHAIN', 'CHROXY_CONFIG_DIR']
@@ -270,7 +271,7 @@ describe('round 1 (#8974)', () => {
     writeFileSync(join(override, '.claude.json'), '{}')
     assert.equal(claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: override }), join(override, '.claude.json'))
     writeFileSync(join(override, '.config.json'), '')
-    assert.equal(claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: override }), join(override, '.claude.json'), 'empty legacy file is ignored')
+    assert.equal(claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: override }), join(override, '.claude.json'), 'empty writable legacy file is ignored when the modern file exists')
     writeFileSync(join(override, '.config.json'), '{"a":1}')
     assert.equal(claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: override }), join(override, '.config.json'))
     // default location: legacy lives in ~/.claude, current file in $HOME
@@ -333,5 +334,121 @@ describe('round 1 (#8974)', () => {
     assert.ok(warn.message.includes(stranded))
     assert.equal(checkStrandedDefaultHook({ activePath: stranded, defaultPath: stranded }), null)
     assert.ok(readFileSync(stranded, 'utf8').includes('_chroxy'), 'report only, never removed')
+  })
+})
+
+describe('round 2 (#8974)', () => {
+  const hookScript = '/opt/chroxy/hooks/permission-hook.sh'
+  const FLAGS = { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, projectOnboardingSeenCount: 0 }
+
+  it('one home policy: rejected homes fall back to the daemon home on the reader side', () => {
+    for (const bad of ['relative-profile', '', '/', '/tmp/..', '/tmp/../', ' /abs', 'a\0b']) {
+      assert.equal(claudeHomeDir({ HOME: bad }, 'linux'), claudeHomeDirDaemon(), JSON.stringify(bad))
+    }
+    const rootLink = join(root, 'rootlink')
+    symlinkSync('/', rootLink)
+    assert.equal(claudeHomeDir({ HOME: rootLink }, 'linux'), claudeHomeDirDaemon(), 'symlink to root')
+  })
+
+  function claudeHomeDirDaemon() { return claudeHomeDir({}, 'linux') }
+
+  it('the child-env sanitiser removes the same rejected homes', () => {
+    const rootLink = join(root, 'rootlink2')
+    symlinkSync('/', rootLink)
+    for (const bad of ['relative-profile', '', '/', '/tmp/../', rootLink]) {
+      const env = { HOME: bad, KEEP: '1' }
+      sanitizeClaudeConfigDirEnv(env, 'linux')
+      assert.ok(!Object.hasOwn(env, 'HOME'), JSON.stringify(bad))
+      assert.equal(env.KEEP, '1')
+    }
+    const good = { HOME: fakeHome }
+    sanitizeClaudeConfigDirEnv(good, 'linux')
+    assert.equal(good.HOME, fakeHome)
+  })
+
+  it('the claude-family env builders drop a rejected HOME', { skip: process.platform === 'win32' }, () => {
+    process.env.HOME = 'relative-profile'
+    assert.ok(!Object.hasOwn(buildSpawnEnv('claude'), 'HOME'))
+    assert.ok(!Object.hasOwn(buildClaudeLaunchEnv(), 'HOME'))
+    assert.ok(!Object.hasOwn(buildSpawnEnv('claude', { HOME: 'also/relative' }), 'HOME'))
+  })
+
+  // Why the reader's fallback (the daemon's os.homedir()) equals what a child with
+  // the rejected HOME removed resolves: with HOME unset, os.homedir() (libuv
+  // uv_os_homedir) reads the passwd entry of the process uid, and the child runs
+  // as the daemon's uid. A spawned-node check of this is not possible here: the
+  // test harness's spawn-home sandbox (tests/_setup.mjs, #7269) injects its own
+  // HOME into any child whose env lacks one.
+
+  it('on win32 only USERPROFILE counts, falling back to os.homedir() (never HOME)', () => {
+    assert.equal(claudeHomeDir({ USERPROFILE: root, HOME: fakeHome }, 'win32'), root)
+    assert.equal(claudeHomeDir({ HOME: join(root, 'zzz') }, 'win32'), homedir())
+  })
+
+  describe('legacy .config.json selection mirrors claude', () => {
+    const modern = () => join(override, '.claude.json')
+    const legacy = () => join(override, '.config.json')
+    const pick = () => claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: override })
+
+    it('a non-empty directory named .config.json selects the modern file', () => {
+      mkdirSync(legacy())
+      writeFileSync(join(legacy(), 'x'), 'y')
+      assert.equal(pick(), modern())
+    })
+    it('an empty writable regular legacy file with no modern file selects legacy', () => {
+      writeFileSync(legacy(), '')
+      assert.equal(pick(), legacy())
+    })
+    it('an empty writable legacy file with an existing modern file selects modern', () => {
+      writeFileSync(legacy(), '')
+      writeFileSync(modern(), '{}')
+      assert.equal(pick(), modern())
+    })
+    it('an empty read-only legacy file with no modern file selects modern', { skip: process.platform === 'win32' }, () => {
+      writeFileSync(legacy(), '')
+      chmodSync(legacy(), 0o444)
+      assert.equal(pick(), modern())
+    })
+    it('a non-empty legacy file selects legacy', () => {
+      writeFileSync(legacy(), '{"a":1}')
+      writeFileSync(modern(), '{}')
+      assert.equal(pick(), legacy())
+    })
+  })
+
+  describe('the trust pre-write sets all three flags in the selected file', () => {
+    let project
+    beforeEach(() => { project = join(root, 'project'); mkdirSync(project) })
+
+    it('override .claude.json', () => {
+      ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: override })
+      const got = JSON.parse(readFileSync(join(override, '.claude.json'), 'utf8')).projects[realpathSync(project)]
+      assert.deepEqual(got, FLAGS)
+    })
+    it('legacy .config.json', () => {
+      writeFileSync(join(override, '.config.json'), JSON.stringify({ projects: {} }))
+      ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: override })
+      const got = JSON.parse(readFileSync(join(override, '.config.json'), 'utf8')).projects[realpathSync(project)]
+      assert.deepEqual(got, FLAGS)
+      assert.ok(!existsSync(join(override, '.claude.json')))
+    })
+  })
+
+  it('cleanup acts on the registered target after the settings link is retargeted', async () => {
+    process.env.CLAUDE_CONFIG_DIR = override
+    const a = join(root, 'a-settings.json')
+    const b = join(root, 'b-settings.json')
+    writeFileSync(a, '{}')
+    writeFileSync(b, JSON.stringify({ hooks: { PreToolUse: [{ _chroxy: true, hooks: [] }] } }))
+    const link = join(override, 'settings.json')
+    symlinkSync(a, link)
+    const manager = createPermissionHookManager(new EventEmitter(), { hookScript })
+    await manager.register()
+    rmSync(link)
+    symlinkSync(b, link)
+    await manager.destroy()
+    const count = (f) => (JSON.parse(readFileSync(f, 'utf-8')).hooks?.PreToolUse ?? []).filter((e) => e._chroxy === true).length
+    assert.equal(count(a), 0, 'registered target cleaned')
+    assert.equal(count(b), 1, 'new target untouched')
   })
 })

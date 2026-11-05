@@ -36,6 +36,7 @@ function writeSettingsFile(settingsPath, settings) {
   writeFileRestricted(resolved.path, JSON.stringify(settings, null, 2) + '\n', {
     tmpSuffix: `.chroxy.${randomUUID()}.tmp`,
   })
+  return resolved.path
 }
 const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
@@ -154,8 +155,9 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
     ],
   })
 
-  writeSettingsFile(settingsPath, settings)
+  const written = writeSettingsFile(settingsPath, settings)
   log.info(`Registered hook in ${settingsPath}`)
+  return written
 }
 
 /**
@@ -232,6 +234,10 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
   // registration cannot send cleanup to a different profile.
   let pinnedPath = null
   const targetPath = () => (pinnedPath ??= settingsPath || defaultSettingsPath())
+  // The file the registration actually landed in (a symlinked settings.json
+  // resolved to its target). Cleanup acts on THIS, so retargeting the link
+  // afterwards strands nothing and never touches the new target.
+  let registeredTarget = null
 
   function scheduleRetry() {
     if (destroying || registered) return
@@ -267,7 +273,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
         return
       }
       try {
-        registerPermissionHookSync(targetPath(), hookScript)
+        registeredTarget = registerPermissionHookSync(targetPath(), hookScript)
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null
@@ -294,7 +300,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
   function unregister() {
     return withSettingsLock(() => {
       try {
-        unregisterPermissionHookSync(targetPath())
+        unregisterPermissionHookSync(registeredTarget ?? targetPath())
       } catch (err) {
         log.error(`Failed to unregister: ${err.message}`)
       }

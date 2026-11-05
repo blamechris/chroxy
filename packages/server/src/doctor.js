@@ -578,7 +578,7 @@ export function checkStrandedDefaultHook({ activePath, defaultPath } = {}) {
   return {
     name: 'Stranded permission hook',
     status: 'warn',
-    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${fallback}, which claude does not load while CLAUDE_CONFIG_DIR points at ${active} — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session of another daemon is using it)`,
+    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${fallback}, which is not the active settings file (${active}) for this daemon's claude — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session of another daemon is using it)`,
   }
 }
 
