@@ -202,7 +202,8 @@ function PlanApprovalCard({
  */
 export function ChatView(props: ChatViewProps) {
   const sessionId = useConnectionStore((s) => s.activeSessionId);
-  return <ChatViewForSession key={sessionId ?? 'no-session'} {...props} />;
+  // Namespaced so no real session id can equal the no-session key.
+  return <ChatViewForSession key={sessionId == null ? 'none' : `session:${sessionId}`} {...props} />;
 }
 
 function ChatViewForSession({

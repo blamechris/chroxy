@@ -76,6 +76,21 @@ describe('ChatView is one list per session (#8953)', () => {
     act(() => tree.unmount());
   });
 
+  it('mounts a fresh list when moving from no session to a session whose id matches the no-session key', () => {
+    mockActiveSessionId = null;
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(element([])); });
+    for (const id of ['none', 'no-session']) {
+      const before = list(tree);
+      mockActiveSessionId = id;
+      act(() => tree.update(element([reply('x1', id)])));
+      expect(list(tree)).not.toBe(before);
+      mockActiveSessionId = null;
+      act(() => tree.update(element([])));
+    }
+    act(() => tree.unmount());
+  });
+
   it('keeps the same list when the same session re-renders with more messages', () => {
     mockActiveSessionId = 's1';
     let tree!: renderer.ReactTestRenderer;
