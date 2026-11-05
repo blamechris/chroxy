@@ -160,7 +160,10 @@ describe('ChatView virtualization (#5517)', () => {
   it('still auto-scrolls to bottom when content grows (sticky streaming)', () => {
     // FlatList exposes scrollToEnd just like ScrollView; the onContentSizeChange
     // → scrollToEnd path that keeps the latest message visible must survive.
-    expect(source).toMatch(/onContentSizeChange=\{[\s\S]{0,900}scrollToEnd/);
+    // The follow now runs one frame later through followEnd (#8961); the
+    // behaviour itself is pinned in ChatView.opensAtLatest.test.tsx.
+    expect(/onContentSizeChange=\{[\s\S]{0,1900}followEnd\(\)/.test(source)).toBe(true);
+    expect(/const followEnd = [\s\S]{0,500}scrollToEnd\(/.test(source)).toBe(true);
   });
 
   it('still pauses auto-scroll while selecting or an unanswered prompt is up', () => {

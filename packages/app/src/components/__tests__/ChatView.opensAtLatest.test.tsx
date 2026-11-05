@@ -60,6 +60,33 @@ const scrollEvent = (offsetY: number, contentH: number, layoutH = 600) => ({
   },
 });
 
+// Frames are driven by hand. The follow runs on the NEXT frame, not inside
+// onContentSizeChange: on the device a scrollToEnd issued from the size callback
+// of a remounted list produced no scroll event at all (the chat stayed at offset
+// 0), while the same call one frame later landed at the end.
+let frames: Map<number, () => void>;
+let nextFrame: number;
+beforeEach(() => {
+  frames = new Map();
+  nextFrame = 1;
+  jest.spyOn(global, 'requestAnimationFrame').mockImplementation(((cb: () => void) => {
+    frames.set(nextFrame, cb);
+    return nextFrame++;
+  }) as never);
+  jest.spyOn(global, 'cancelAnimationFrame').mockImplementation(((id: number) => {
+    frames.delete(id);
+  }) as never);
+});
+afterEach(() => {
+  (global.requestAnimationFrame as unknown as jest.SpyInstance).mockRestore();
+  (global.cancelAnimationFrame as unknown as jest.SpyInstance).mockRestore();
+});
+const frame = () => {
+  const pending = [...frames.values()];
+  frames.clear();
+  act(() => { pending.forEach((cb) => cb()); });
+};
+
 function mount(messages: ChatMessage[]) {
   let tree!: renderer.ReactTestRenderer;
   act(() => { tree = renderer.create(element(messages)); });
@@ -69,9 +96,11 @@ function mount(messages: ChatMessage[]) {
 }
 
 describe('ChatView opens at the latest message (#8961)', () => {
-  it('scrolls to the end, unanimated, on the first content size event', () => {
+  it('scrolls to the end, unanimated, one frame after the first content size event -- never inside it', () => {
     const { tree, flat, spy } = mount([reply('a'), reply('b')]);
     act(() => { flat().props.onContentSizeChange(400, 900); });
+    expect(spy).not.toHaveBeenCalled(); // the device dropped a scrollToEnd issued here
+    frame();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith({ animated: false });
     act(() => tree.unmount());
@@ -84,7 +113,8 @@ describe('ChatView opens at the latest message (#8961)', () => {
     act(() => { flat().props.onScroll(scrollEvent(0, 900)); });
     // rows measure taller than estimated; content grows again
     act(() => { flat().props.onContentSizeChange(400, 1500); });
-    expect(spy).toHaveBeenCalledTimes(2);
+    frame();
+    expect(spy).toHaveBeenCalledTimes(1); // the two size events share one pending frame
     expect(spy).toHaveBeenLastCalledWith({ animated: false });
     act(() => tree.unmount());
   });
@@ -96,6 +126,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
     act(() => { flat().props.onScrollBeginDrag(); });
     act(() => { flat().props.onScroll(scrollEvent(100, 900)); });
     act(() => { flat().props.onContentSizeChange(400, 1000); });
+    frame();
     expect(spy).not.toHaveBeenCalled();
     act(() => tree.unmount());
   });
@@ -110,6 +141,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
       act(() => { flat().props.onScroll(scrollEvent(100, 900)); });
       spy.mockClear();
       act(() => { flat().props.onContentSizeChange(400, 1000); });
+      frame();
       expect(spy).not.toHaveBeenCalled();
       act(() => tree.unmount());
     } finally {
@@ -128,6 +160,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
       act(() => { flat().props.onScroll(scrollEvent(0, 1500)); });
       spy.mockClear();
       act(() => { flat().props.onContentSizeChange(400, 1600); });
+      frame();
       expect(spy).toHaveBeenCalledTimes(1);
       act(() => tree.unmount());
     } finally {
@@ -148,6 +181,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
       act(() => { flat().props.onScroll(scrollEvent(100, 1200)); });
       spy.mockClear();
       act(() => { flat().props.onContentSizeChange(400, 1300); });
+      frame();
       expect(spy).not.toHaveBeenCalled();
       act(() => tree.unmount());
     } finally {
@@ -180,6 +214,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
     const prompt = { id: 'p1', type: 'prompt', content: 'Pick one', timestamp: 1000, options: [{ label: 'x', value: 'x' }] } as unknown as ChatMessage;
     const { tree, flat, spy } = mount([reply('a'), prompt]);
     act(() => { flat().props.onContentSizeChange(400, 900); });
+    frame();
     expect(spy).toHaveBeenCalledWith({ animated: false });
     act(() => tree.unmount());
   });
@@ -190,6 +225,7 @@ describe('ChatView opens at the latest message (#8961)', () => {
     act(() => { tree = renderer.create(React.cloneElement(el, { isSelecting: true, isSelectingRef: { current: true } })); });
     const spy = jest.spyOn(tree.root.findByType(FlatList).instance, 'scrollToEnd').mockImplementation(() => {});
     act(() => { tree.root.findByType(FlatList).props.onContentSizeChange(400, 900); });
+    frame();
     expect(spy).not.toHaveBeenCalled();
     act(() => tree.unmount());
   });
@@ -200,7 +236,51 @@ describe('ChatView opens at the latest message (#8961)', () => {
     act(() => { flat().props.onScroll(scrollEvent(300, 900)); }); // at bottom
     spy.mockClear();
     act(() => { flat().props.onContentSizeChange(400, 1000); });
+    expect(spy).not.toHaveBeenCalled();
+    frame();
+    // unanimated: an animated follow lags a fast-growing reply, the lag reads as
+    // "scrolled up" in handleScroll and latches the follow off mid-stream
     expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({ animated: false });
     act(() => tree.unmount());
+  });
+
+  it('device sequence: a remounted list gets ONE size event and no scroll event, and still ends at the end', () => {
+    const { tree, flat, spy } = mount([reply('a'), reply('b'), reply('c')]);
+    act(() => { flat().props.onContentSizeChange(400, 2748); });
+    expect(spy).not.toHaveBeenCalled();
+    frame();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({ animated: false });
+    act(() => tree.unmount());
+  });
+
+  it('follows a reply that grows by hundreds of points at once, without latching off', () => {
+    const { tree, flat, spy } = mount([reply('a')]);
+    act(() => { flat().props.onScrollBeginDrag(); });
+    act(() => { flat().props.onScroll(scrollEvent(300, 900)); }); // at bottom
+    for (const h of [1245, 1845, 2748]) {
+      act(() => { flat().props.onContentSizeChange(400, h); });
+      frame();
+    }
+    expect(spy).toHaveBeenCalledTimes(3);
+    act(() => tree.unmount());
+  });
+
+  it('a drag between the size event and the frame cancels the queued follow', () => {
+    const { tree, flat, spy } = mount([reply('a')]);
+    act(() => { flat().props.onContentSizeChange(400, 900); });
+    act(() => { flat().props.onScrollBeginDrag(); });
+    frame();
+    expect(spy).not.toHaveBeenCalled();
+    act(() => tree.unmount());
+  });
+
+  it('cancels the queued follow frame on unmount', () => {
+    const { tree, flat } = mount([reply('a')]);
+    act(() => { flat().props.onContentSizeChange(400, 900); });
+    expect(frames.size).toBe(1);
+    act(() => tree.unmount());
+    expect(frames.size).toBe(0);
   });
 });

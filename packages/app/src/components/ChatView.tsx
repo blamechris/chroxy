@@ -255,8 +255,35 @@ function ChatViewForSession({
   // Hard cap, armed once at the first size event and never restarted: a chat
   // that is streaming re-arms the quiet timer faster than it can expire.
   const openingCapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The end-follow runs on the next frame, never inside the size callback, and
+  // unanimated. A scrollToEnd issued from onContentSizeChange is computed against
+  // metrics the native scroll view has not committed yet and is dropped (device
+  // log: the remounted list got one size event, one sync scrollToEnd, and zero
+  // scroll events -- it stayed at offset 0). An ANIMATED end-follow lags a fast
+  // growing reply, the lag reads as "scrolled up" in handleScroll and latches
+  // the follow off while the reply is still streaming. One pending frame is
+  // enough: it scrolls to wherever the end is by then.
+  const followRafRef = useRef<number | null>(null);
+  const followEnd = () => {
+    if (followRafRef.current != null) return;
+    followRafRef.current = requestAnimationFrame(() => {
+      followRafRef.current = null;
+      if (isSelectingRef.current) return;
+      // Re-check the reader's position: a scroll-up reported between the size
+      // event and this frame must not be yanked back.
+      if (!openingRef.current && showScrollToBottomRef.current) return;
+      scrollViewRef.current?.scrollToEnd({ animated: false });
+    });
+  };
+  const cancelFollow = () => {
+    if (followRafRef.current != null) {
+      cancelAnimationFrame(followRafRef.current);
+      followRafRef.current = null;
+    }
+  };
   const endOpening = () => {
     openingRef.current = false;
+    cancelFollow(); // a takeover (drag, search, jump-to-top) must not be yanked by a queued frame
     if (openingTimerRef.current != null) {
       clearTimeout(openingTimerRef.current);
       openingTimerRef.current = null;
@@ -267,6 +294,7 @@ function ChatViewForSession({
     }
   };
   useEffect(() => () => {
+    cancelFollow();
     if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
     if (openingCapTimerRef.current != null) clearTimeout(openingCapTimerRef.current);
   }, []);
@@ -663,7 +691,7 @@ function ChatViewForSession({
           if (openingRef.current) {
             // The end is the right place even with an unanswered prompt: it is
             // the last row. Each size event restarts the settle window.
-            scrollViewRef.current?.scrollToEnd({ animated: false });
+            followEnd();
             if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
             openingTimerRef.current = setTimeout(endOpening, OPENING_SETTLE_MS);
             if (openingCapTimerRef.current == null) {
@@ -673,7 +701,7 @@ function ChatViewForSession({
           }
           if (hasUnansweredPrompt) return;
           if (!showScrollToBottomRef.current) {
-            scrollViewRef.current?.scrollToEnd();
+            followEnd();
           }
         }}
         onScrollBeginDrag={handleScrollBeginDrag}
