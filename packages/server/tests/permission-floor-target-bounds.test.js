@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs, { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
@@ -55,6 +55,28 @@ const countNormalizes = (fn) => {
   } finally {
     String.prototype.normalize = original
   }
+}
+
+// Both counts of one call: names folded and filesystem calls made.
+const measure = (fn) => {
+  const { value, total, calls } = countFsCalls(() => countNormalizes(fn))
+  return { value: value.value, normalizes: value.normalizes, total, calls }
+}
+
+// The filesystem work of a call grows linearly with its targets: a third run
+// gives the cost of one more target, and the many-target call stays within 10%
+// (plus a few calls of slack) of the first call plus that cost per extra target.
+// A walk that grows with the targets already walked (or re-resolves the base
+// per component) overshoots by orders of magnitude, not by the 10%.
+// `maxPerTarget` also caps that cost in absolute terms (about one call per path component walked), so a
+// walk repeated a fixed number of times per target fails too.
+const assertLinearFsCalls = (run, one, many, maxPerTarget) => {
+  const three = run(3)
+  const perTarget = (three.total - one.total) / 2
+  const extraTargets = (FLOOR_MAX_CALL_TARGETS - 1) - 1
+  const allowed = one.total + perTarget * extraTargets * 1.1 + 10
+  assert.ok(perTarget <= maxPerTarget, `${perTarget} filesystem calls per further target, more than ${maxPerTarget}`)
+  assert.ok(many.total <= allowed, `${many.total} filesystem calls for ${FLOOR_MAX_CALL_TARGETS - 1} targets; ${one.total} for one, ${perTarget} per further target`)
 }
 
 // Under the component bound but over the byte bound: 250-byte names.
@@ -234,7 +256,8 @@ describe('floor: one call\'s filesystem work is bounded', () => {
   let root
 
   before(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
+    // native: expands the 8.3 short names of a Windows runner's tmpdir, which the floor floors
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
   })
 
   after(() => {
@@ -284,7 +307,7 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     symlinkSync(dir, join(root, 'L'))
     const run = (n) => {
       const changes = Array.from({ length: n }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
-      return countNormalizes(() => isFlooredTarget('Read', { path: 'L', changes }, root))
+      return measure(() => isFlooredTarget('Read', { path: 'L', changes }, root))
     }
     // The three long names are folded once each, however many targets walk them.
     const one = run(1)
@@ -292,6 +315,7 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     assert.equal(many.value, false)
     assert.ok(one.normalizes >= 3, `premise: a walk folds the directory's names (${one.normalizes})`)
     assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
+    assertLinearFsCalls(run, one, many, dir.split(sep).length + 2)
   })
 
   it('many targets above a long cwd fold its names once', () => {
@@ -299,13 +323,15 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     mkdirSync(cwd, { recursive: true })
     const run = (n) => {
       const changes = Array.from({ length: n }, (_, i) => ({ path: `../x${i}`, kind: 'update' }))
-      return countNormalizes(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
+      return measure(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
     }
     const one = run(1)
     const many = run(FLOOR_MAX_CALL_TARGETS - 1)
     assert.equal(many.value, false)
-    assert.ok(one.normalizes >= 3,`premise: a walk folds the cwd's names (${one.normalizes})`)
+    assert.ok(one.normalizes >= 3, `premise: a walk folds the cwd's names (${one.normalizes})`)
     assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
+    // `../xN` from the cwd: a lstat for `..` and for `xN`.
+    assertLinearFsCalls(run, one, many, 2)
   })
 
   it('a long name a target resolves to floors', { skip: SKIP_NO_SYMLINK }, () => {
