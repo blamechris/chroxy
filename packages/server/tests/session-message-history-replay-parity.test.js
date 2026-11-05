@@ -320,6 +320,15 @@ describe('message-wire builders (#6630)', () => {
     assert.ok(!('timeoutMs' in buildErrorWire({ message: 'm', code: 'stream_stall', timeoutMs: -1 })))
     assert.ok(!('timeoutMs' in buildErrorWire({ message: 'm', code: 'other', timeoutMs: 5 })))
   })
+
+  it('buildErrorWire carries the auth cause only on AUTH_REQUIRED, and only a known value (#8273)', () => {
+    for (const authCause of ['login', 'api_key', 'container']) {
+      assert.equal(buildErrorWire({ message: 'm', code: 'AUTH_REQUIRED', authCause }).authCause, authCause)
+    }
+    assert.ok(!('authCause' in buildErrorWire({ message: 'm', code: 'AUTH_REQUIRED' })))
+    assert.ok(!('authCause' in buildErrorWire({ message: 'm', code: 'AUTH_REQUIRED', authCause: 'sk-ant-secret' })))
+    assert.ok(!('authCause' in buildErrorWire({ message: 'm', code: 'stream_stall', authCause: 'api_key' })))
+  })
 })
 
 // Every SessionManager here uses a temp stateFilePath (#4633).

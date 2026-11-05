@@ -162,6 +162,7 @@ const MODEL_FIELDS = [
   'code',
   'attemptedResumeId',
   'timeoutMs',
+  'authCause',
   'compactMetadata',
   'mcpPromptExpansion',
   'thinkingStreaming',

@@ -504,7 +504,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     // signs in on the host — so the chip shows the registry headline, the
     // server's message, and the command that fixes it.
     if (storeMsg.type === 'error' && storeMsg.code === 'AUTH_REQUIRED') {
-      return <AuthRequiredChip errorText={storeMsg.content} />
+      return <AuthRequiredChip errorText={storeMsg.content} authCause={storeMsg.authCause} />
     }
 
     // Default rendering

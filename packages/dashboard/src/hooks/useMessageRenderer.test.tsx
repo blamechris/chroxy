@@ -151,13 +151,14 @@ describe('useMessageRenderer — retryable AskUserQuestion errors (#5793)', () =
 
 // #8223: AUTH_REQUIRED gets its own chip (no Retry), not the generic bubble.
 describe('useMessageRenderer — AUTH_REQUIRED routing (#8223)', () => {
-  function renderAuth(code: string, id = 'a1') {
+  function renderAuth(code: string, id = 'a1', authCause?: ChatMessage['authCause']) {
     const err = {
       id,
       type: 'error',
       content: 'Claude is not logged in on this host, or its login expired.',
       timestamp: 0,
       code,
+      ...(authCause ? { authCause } : {}),
     } as ChatMessage
     const args = makeArgs({
       storeMsgMap: new Map([[id, err]]),
@@ -177,6 +178,12 @@ describe('useMessageRenderer — AUTH_REQUIRED routing (#8223)', () => {
     // It is not one of the stall chips, and does not offer a retry.
     expect(screen.queryByTestId('stream-stall-chip')).toBeNull()
     expect(screen.queryByTestId('stream-stall-chip-retry')).toBeNull()
+  })
+
+  it('passes the server\'s authCause to the chip (#8273)', () => {
+    renderAuth('AUTH_REQUIRED', 'a2', 'api_key')
+    expect(screen.getByTestId('auth-required-chip-headline').textContent).toBe('Your Anthropic API key was rejected')
+    expect(screen.queryByTestId('auth-required-chip-command')).toBeNull()
   })
 
   it('does not claim other error codes', () => {

@@ -18,6 +18,7 @@ import { endsAtSentenceBoundary } from '../sentence-boundary'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
+import { parseAuthCause } from '../error-presentation'
 import type { SessionPatch } from './_shared'
 import { handleContainerLost } from './session-lifecycle'
 import { readResultTurnOutcome } from '../turn-outcome-marker'
@@ -472,6 +473,12 @@ export function handleMessage(
     Number.isInteger(msg.timeoutMs) &&
     msg.timeoutMs > 0
       ? { timeoutMs: msg.timeoutMs }
+      : {}),
+    // #8273: preserve which credential an AUTH_REQUIRED failure concerns so the
+    // sign-in chip names the real remedy. Gated on `error` + `AUTH_REQUIRED` and on
+    // the known values; anything else is dropped and the chip shows the login remedy.
+    ...(msgType === 'error' && msg.code === 'AUTH_REQUIRED' && parseAuthCause(msg.authCause)
+      ? { authCause: parseAuthCause(msg.authCause) }
       : {}),
     // #6768: preserve the structured compaction-boundary marker so
     // renderers can show a distinct "Context compacted" callout instead of

@@ -501,7 +501,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // so a dedicated chip shows the headline, the server's message and the command
   // that fixes it (selectable, to copy into a host terminal).
   if (isError && message.code === 'AUTH_REQUIRED') {
-    return <AuthRequiredChip errorText={message.content ?? ''} />;
+    return <AuthRequiredChip errorText={message.content ?? ''} authCause={message.authCause} />;
   }
 
   // #8348: a permission prompt that has ENDED, rebuilt from the server's durable

@@ -34,8 +34,8 @@ describe('AuthRequiredChip (#8223)', () => {
     }
   });
 
-  function render(errorText: string): renderer.ReactTestRenderer {
-    act(() => { tree = renderer.create(<AuthRequiredChip errorText={errorText} />); });
+  function render(errorText: string, authCause?: string): renderer.ReactTestRenderer {
+    act(() => { tree = renderer.create(<AuthRequiredChip errorText={errorText} authCause={authCause} />); });
     return tree!;
   }
 
@@ -75,5 +75,32 @@ describe('AuthRequiredChip (#8223)', () => {
     const t = render('   ');
     expect(t.root.findAllByProps({ testID: 'auth-required-chip-body' })).toHaveLength(0);
     expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-command' }))).toBe('claude auth login');
+  });
+
+  // #8273: the chip names the cause the server knows, not always a host login.
+  describe('authCause (#8273)', () => {
+    it.each([['login'], [undefined], ['a_cause_a_newer_server_adds']])(
+      'authCause=%s keeps the login headline and command',
+      (authCause) => {
+        const t = render(SERVER_TEXT, authCause);
+        expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-headline' })))
+          .toBe('Claude is not signed in on this host');
+        expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-command' }))).toBe('claude auth login');
+      },
+    );
+
+    it('api_key: says the key was rejected and shows no login command', () => {
+      const t = render('Claude authentication failed: the Anthropic API key (ANTHROPIC_API_KEY) was rejected.', 'api_key');
+      expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-headline' })))
+        .toBe('Your Anthropic API key was rejected');
+      expect(t.root.findAllByProps({ testID: 'auth-required-chip-command' })).toHaveLength(0);
+    });
+
+    it('container: names ANTHROPIC_API_KEY and shows no host login command', () => {
+      const t = render('Claude authentication failed inside the session container.', 'container');
+      expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-headline' })))
+        .toBe('The session container needs ANTHROPIC_API_KEY');
+      expect(t.root.findAllByProps({ testID: 'auth-required-chip-command' })).toHaveLength(0);
+    });
   });
 });

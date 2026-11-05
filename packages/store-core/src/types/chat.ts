@@ -201,6 +201,15 @@ export interface ChatMessage {
    * the `auth_ok` value.
    */
   timeoutMs?: number;
+  /**
+   * #8273: only set on `type: 'error'` bubbles whose `code` is `'AUTH_REQUIRED'`.
+   * Which credential the failure concerns, so the sign-in chip names the real
+   * remedy: `login` (a host `claude auth login`), `api_key` (ANTHROPIC_API_KEY was
+   * rejected) or `container` (the session container needs ANTHROPIC_API_KEY).
+   * Undefined for older servers and where the cause is unknown; renderers then
+   * show the login remedy.
+   */
+  authCause?: 'login' | 'api_key' | 'container';
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**

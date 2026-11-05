@@ -106,3 +106,51 @@ export function getErrorPresentation(
   if (isRetryableAskUserQuestionError(code)) return QUESTION_PRESENTATION
   return PRESENTATION_BY_CODE[code] ?? GENERIC_PRESENTATION
 }
+
+/** #8273: why a session reported `AUTH_REQUIRED`, as the server tags it on the wire. */
+export type AuthRequiredCause = 'login' | 'api_key' | 'container'
+
+const AUTH_REQUIRED_CAUSES: readonly string[] = ['login', 'api_key', 'container']
+
+/** Narrow an untrusted wire value to a known cause; anything else is `undefined`. */
+export function parseAuthCause(value: unknown): AuthRequiredCause | undefined {
+  return typeof value === 'string' && AUTH_REQUIRED_CAUSES.includes(value)
+    ? (value as AuthRequiredCause)
+    : undefined
+}
+
+export interface AuthRequiredPresentation {
+  readonly role: 'alert'
+  readonly headline: string
+  /** Whether the host `claude auth login` command row applies to this cause. */
+  readonly showLoginCommand: boolean
+}
+
+const AUTH_LOGIN_PRESENTATION: AuthRequiredPresentation = {
+  role: 'alert',
+  headline: getErrorPresentation('AUTH_REQUIRED').headline,
+  showLoginCommand: true,
+}
+
+const AUTH_PRESENTATION_BY_CAUSE: Readonly<Record<AuthRequiredCause, AuthRequiredPresentation>> = {
+  login: AUTH_LOGIN_PRESENTATION,
+  // The session authenticates with ANTHROPIC_API_KEY, so signing in is not the fix.
+  api_key: { role: 'alert', headline: 'Your Anthropic API key was rejected', showLoginCommand: false },
+  // A host login does not reach the container; its credential is its env.
+  container: {
+    role: 'alert',
+    headline: 'The session container needs ANTHROPIC_API_KEY',
+    showLoginCommand: false,
+  },
+}
+
+/**
+ * Presentation of an `AUTH_REQUIRED` chip for the server's `authCause`. An absent
+ * or unrecognised cause (an older server, or one the server could not determine)
+ * gets the login presentation, which is what the chip showed before the cause
+ * existed. Never throws.
+ */
+export function getAuthRequiredPresentation(cause: unknown): AuthRequiredPresentation {
+  const known = parseAuthCause(cause)
+  return known ? AUTH_PRESENTATION_BY_CAUSE[known] : AUTH_LOGIN_PRESENTATION
+}
