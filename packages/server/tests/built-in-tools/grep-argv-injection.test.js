@@ -191,8 +191,8 @@ const POSIX_ONLY = { skip: process.platform === 'win32' ? 'POSIX shell required 
 
 /** Build exactly what `runGrep` / the container Grep build for this pattern. */
 function build(pattern, root, input = {}) {
-  const { ci, ln, globArg } = buildGrepArgs(input)
-  return buildGrepCommand({ pattern, root, ci, ln, globArg })
+  const { ci, ln, globArg, grepGlob } = buildGrepArgs(input)
+  return buildGrepCommand({ pattern, root, ci, ln, globArg, grepGlob })
 }
 
 /**

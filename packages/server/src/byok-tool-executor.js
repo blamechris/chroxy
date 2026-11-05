@@ -2753,8 +2753,8 @@ async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // under grep (Copilot review on #4060). executeBash captures the exit code
   // (doesn't reject), so no `; true` mask is needed here. Builders are shared
   // with the docker-byok container Grep (#5882).
-  const { ci, ln, globArg } = buildGrepArgs(input)
-  const cmd = buildGrepCommand({ pattern, root: realRoot, ci, ln, globArg })
+  const { ci, ln, globArg, grepGlob } = buildGrepArgs(input)
+  const cmd = buildGrepCommand({ pattern, root: realRoot, ci, ln, globArg, grepGlob })
 
   const result = await executeBash({
     command: cmd,

@@ -247,8 +247,8 @@ export const AUDITED_SINKS = [
   // ── built-in-tools/tool-transforms.js ──
   {
     file: 'built-in-tools/tool-transforms.js',
-    match: 'return { ci, ln, globArg }',
-    reason: 'not actually an argv-returning function despite the *Args name match — it returns { ci, ln, globArg } string fragments consumed by a shell-command-string builder (buildGrepCommand), out of this lint scope by design (see the exec()/execSync() scope note above). pattern/root are already hardened behind -e / a -- terminator (#7295); the --glob fragment is shell-quoted via shellQuote() but its rg/grep-side arity is unverified — tracked as a follow-on rather than fixed here.',
+    match: 'return { ci, ln, globArg, grepGlob }',
+    reason: 'not actually an argv-returning function despite the *Args name match — it returns { ci, ln, globArg, grepGlob } string fragments consumed by a shell-command-string builder (buildGrepCommand), out of this lint scope by design (see the exec()/execSync() scope note above). pattern/root are already hardened behind -e / a -- terminator (#7295); the --glob fragment and the grep-fallback --include=/--exclude= fragments (#7961) are each shell-quoted via shellQuote() and fused into one --flag=<value> token, so a value beginning with - is never a separate argv element.',
   },
 
   // ── byok-mcp-client.js ──
