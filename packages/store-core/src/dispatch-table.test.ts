@@ -3264,6 +3264,34 @@ describe('model_changed keeps the session-list entry in step (#8962)', () => {
     expect(env.flat.sessions).toBeUndefined()
   })
 
+  it('uses the roster id when a row has no separate fullId (codex/gemini shape)', () => {
+    const codexList = [{ sessionId: 's1', name: 'One', model: 'gpt-6.1', provider: 'codex' }] as SessionInfo[]
+    const env = makeAdapter({
+      activeSessionId: 's1',
+      sessions: { s1: { sessionId: 's1', messages: [], activeModel: 'gpt-6.1' } },
+      sessionList: codexList,
+      flat: { modelsByProvider: { codex: { models: [{ id: 'gpt-6.1-sol', label: 'Sol' }], defaultModelId: null } } },
+    })
+    dispatch(env, { type: 'model_changed', sessionId: 's1', model: 'gpt-6.1-sol' })
+    expect((env.flat.sessions as SessionInfo[])[0]!.model).toBe('gpt-6.1-sol')
+  })
+
+  it('prefers an exact id match over another row whose fullId equals the alias', () => {
+    const env = mk({
+      modelsByProvider: {
+        'claude-sdk': {
+          models: [
+            { id: 'opus-legacy', label: 'Old', fullId: 'opus' },
+            { id: 'opus', label: 'Opus', fullId: 'claude-opus-5-5' },
+          ],
+          defaultModelId: null,
+        },
+      },
+    })
+    dispatch(env, { type: 'model_changed', sessionId: 's1', model: 'opus' })
+    expect((env.flat.sessions as SessionInfo[]).find((s) => s.sessionId === 's1')!.model).toBe('claude-opus-5-5')
+  })
+
   it('writes nothing to the list for an unknown session or a null model', () => {
     const env = mk()
     dispatch(env, { type: 'model_changed', sessionId: 'ghost', model: 'haiku' })

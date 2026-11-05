@@ -196,6 +196,7 @@ import {
 import { applyInputAcknowledgement, isRetrySafeNotDispatched, type InputDeliveryMap } from './input-delivery'
 import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 import { parseDevPreviewStatus } from './handlers/dev-preview'
+import { findModelEntry } from './model-display'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -1216,7 +1217,10 @@ function dispatchModelChanged<S extends DispatchSessionBase>(
       (flat as { modelsByProvider?: ModelsByProvider }).modelsByProvider,
       entry.provider ?? null,
     ).models
-    const fullId = roster.find((m) => m.id === model || m.fullId === model)?.fullId
+    // Same lookup the labels use (exact id first, then fullId). A roster row with
+    // no separate fullId (e.g. a codex/gemini model) is its own full id.
+    const row = findModelEntry(roster, model)
+    const fullId = row ? (row.fullId || row.id) : undefined
     if (!fullId || fullId === entry.model) return {}
     return {
       sessions: sessions.map((s) => (s.sessionId === sessionId ? { ...s, model: fullId } : s)),
