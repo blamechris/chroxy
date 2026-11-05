@@ -155,17 +155,20 @@ describe('ChatView opens at the latest message (#8961)', () => {
     }
   });
 
-  it('clears the settle timer on unmount', () => {
+  it('clears the settle timer and the opening cap timer on unmount', () => {
     jest.useFakeTimers();
     try {
       const { tree, flat } = mount([reply('a')]);
       const setSpy = jest.spyOn(global, 'setTimeout');
       act(() => { flat().props.onContentSizeChange(400, 900); });
       const settle = setSpy.mock.results[setSpy.mock.calls.findIndex((c) => c[1] === 1500)];
+      const cap = setSpy.mock.results[setSpy.mock.calls.findIndex((c) => c[1] === 5000)];
       expect(settle).toBeDefined();
+      expect(cap).toBeDefined();
       const clearSpy = jest.spyOn(global, 'clearTimeout');
       act(() => tree.unmount());
       expect(clearSpy).toHaveBeenCalledWith(settle.value);
+      expect(clearSpy).toHaveBeenCalledWith(cap.value);
       setSpy.mockRestore();
       clearSpy.mockRestore();
     } finally {
