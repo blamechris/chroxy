@@ -318,18 +318,49 @@ describe('runDoctorChecks', () => {
     })
   })
 
+  // freePort() releases the port before doctor probes it, so another process
+  // can take it in between. Retry with a fresh port when the probe reports it
+  // in use: a real regression (doctor never reporting pass) still fails every
+  // attempt, while a lost race does not red the run.
+  const runWithFreePort = async (attempts = 3) => {
+    let last
+    for (let i = 0; i < attempts; i++) {
+      const port = await freePort()
+      const result = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = result.checks.find(c => c.name === 'Port')
+      last = { port, portCheck, ...result }
+      if (portCheck?.status === 'pass') return last
+    }
+    return last
+  }
+
   it('accepts custom port', async () => {
-    const port = await freePort()
-    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
-    const portCheck = checks.find(c => c.name === 'Port')
+    const { port, portCheck } = await runWithFreePort()
     assert.ok(portCheck)
     assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('warns when the custom port is held', async () => {
+    const srv = createServer()
+    await new Promise((resolve, reject) => {
+      srv.once('error', reject)
+      srv.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = srv.address()
+    try {
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.ok(portCheck.message.includes(String(port)))
+      assert.equal(portCheck.status, 'warn')
+    } finally {
+      await new Promise(resolve => srv.close(resolve))
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const port = await freePort()
-    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+    const { passed, checks } = await runWithFreePort()
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
