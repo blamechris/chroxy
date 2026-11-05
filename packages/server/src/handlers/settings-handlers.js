@@ -26,7 +26,6 @@ import {
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from '../providers.js'
 import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
-import { isBoundClient } from '../environments/authority.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
@@ -36,7 +35,7 @@ import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
 } from '../per-session-settings.js'
-import { createPermissionResolver, resolveOriginSessionId } from '../permission-resolver.js'
+import { createPermissionResolver, resolveOriginSessionId, buildLegacyResolvedBroadcast } from '../permission-resolver.js'
 import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from '../redaction.js'
 // #6605 — SINGLE source of truth for the rule-eligibility sets. These used to be
 // a duplicate hard-coded copy here, which silently drifted from
@@ -484,6 +483,17 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   if (!client.boundSessionId && originSessionId) {
     if (!isSessionViewer(client, originSessionId)) {
       sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
+      // #7858: answer with the SAME correlated negative a never-registered id gets
+      // (the caller's OWN active session, never the request's), so the caller sees
+      // an outcome instead of waiting out a timeout, and cannot tell "exists in a
+      // session I don't view" from "does not exist". The decision was NOT routed
+      // and the mapping is untouched.
+      ctx.transport.send(ws, {
+        type: 'permission_expired',
+        requestId,
+        ...(typeof client.activeSessionId === 'string' && client.activeSessionId.length > 0 ? { sessionId: client.activeSessionId } : {}),
+        message: 'This permission request has expired or was already handled',
+      })
       return
     }
   }
@@ -590,40 +600,16 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // the resolver fills `sessionId` from `client.activeSessionId` (dispatch
   // fallback), so keying on it dropped the frame whenever the answering client had
   // an active session (#8359). Mirrors POST /permission-response (ws-permissions.js).
-  if (result.via === 'legacy') {
-    if (result.mapped) {
-      // #7976: a hook-routed prompt (claude-tui / claude-cli / claude-channel) maps
-      // to its owning session but has NO PermissionManager, so the resolver
-      // dispatched it through the legacy store and nothing else will announce the
-      // resolution. Without this, every OTHER client keeps a stale Allow/Deny card
-      // (and agent-control reports `uncertain`) until the prompt expires or they
-      // reload.
-      //
-      // Gated on `via === 'legacy'`: an in-process (SDK/BYOK) answer already
-      // broadcasts through the unified pipeline (#3048), so adding it here would
-      // double-deliver. No filter, as on the request side (the hook prompt was sent
-      // to every client); a session-bound client still only receives its own
-      // session's frames because the broadcaster checks the frame's sessionId at
-      // delivery (#8342). Includes the resolver (#6590).
-      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, ...(result.scope ? { scope: result.scope } : {}), sessionId: result.sessionId })
-    } else {
-      // #6590: broadcast to ALL clients INCLUDING the resolver (no `c.id !==
-      // client.id` exclusion). The resolving client needs its own
-      // `permission_resolved` to prune `permissionInputs[requestId]` (#6559) —
-      // append-only otherwise, so on this legacy path the entry used to linger
-      // until disconnect. Echoing to the resolver is SAFE to re-apply: the
-      // `permissionInputs` prune is a guarded copy-delete, the notification
-      // read-stamp only touches not-yet-acked rows, and re-marking the
-      // already-answered prompt is functionally inert (its label reads from
-      // `resolvedPermissions`, and the pending-count only checks that `answered`
-      // is truthy — only `answeredAt` is refreshed to the server-confirmed time).
-      // The frame carries no sessionId (the request maps to no session — a
-      // fallback-filled `result.sessionId` is the answerer's, not the prompt's), so
-      // it goes to unbound clients only; a session-bound client has no session to
-      // match (#8342).
-      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, ...(result.scope ? { scope: result.scope } : {}) }, (c) => !isBoundClient(c))
-    }
-  }
+  // #7858: the legacy announcement is built once in permission-resolver.js and
+  // shared with POST /permission-response. Mapped (#7976): a hook-routed prompt
+  // (claude-tui / claude-cli / claude-channel) has NO PermissionManager, so
+  // nothing else announces its resolution — without this every other client keeps
+  // a stale card and agent-control reports `uncertain`. Unmapped (#6590): echoed to
+  // the resolver too, which needs it to prune `permissionInputs[requestId]`
+  // (#6559); re-applying it is inert. The resolver's own frame is therefore the
+  // success confirmation for BOTH, correlated by requestId + decision.
+  const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, decision)
+  if (legacyBroadcast) ctx.transport.broadcast(legacyBroadcast.frame, legacyBroadcast.filter)
 
   // #6771 — an `allowAlways` that resolved on an in-process session just
   // persisted a durable project rule (permission-manager.js). Broadcast the
