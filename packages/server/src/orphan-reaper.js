@@ -209,7 +209,7 @@ function defaultCwdOf(pids, deps = {}) {
   const lsofPath = resolveLsofBinary(deps)
   if (!lsofPath) {
     throw Object.assign(
-      new Error('lsof not found (checked /usr/sbin/lsof, /usr/bin/lsof, PATH)'),
+      new Error('lsof not found (checked /usr/sbin/lsof, /usr/bin/lsof, PATH) — install lsof, or add /usr/sbin to the service PATH'),
       { code: 'LSOF_NOT_FOUND' },
     )
   }
