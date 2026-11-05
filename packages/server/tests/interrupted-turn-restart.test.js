@@ -1,6 +1,6 @@
 import { describe, it, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SessionManager, withRetainedPermissionOutcomes } from '../src/session-manager.js'
@@ -35,6 +35,14 @@ class FakeTurnSession extends BaseSession {
       return
     }
     this._isBusy = true
+  }
+
+  /**
+   * A subprocess provider (codex, gemini) emits its terminal result and keeps the turn
+   * busy until the child process closes: the outcome is out, the process is alive.
+   */
+  emitResultKeepBusy() {
+    this.emit('result', { cost: 0.01, duration: 5 })
   }
 
   /** Turn end: the provider emits its result, then BaseSession clears busy and flushes the queue. */
@@ -138,6 +146,58 @@ describe('interrupted turn after a restart (#8259)', () => {
     assert.equal(markers(after.mgr, after.sid).length, 1)
   })
 
+  it('does not mark a turn whose result was emitted while the provider process stayed busy', () => {
+    const ctx = boot()
+    prompt(ctx.mgr, ctx.sid, 'A')
+    ctx.session.sendMessage('A')
+    ctx.session.emitResultKeepBusy()
+    assert.equal(ctx.session.turnActive, true, 'the premise: the child has not closed yet')
+    const after = restart(ctx)
+    assert.equal(markers(after.mgr, after.sid).length, 0)
+  })
+
+  it('does not mark a turn the user stopped (stopped is terminal)', () => {
+    const ctx = boot()
+    prompt(ctx.mgr, ctx.sid, 'A')
+    ctx.session.sendMessage('A')
+    ctx.session.emit('stopped')
+    const after = restart(ctx)
+    assert.equal(markers(after.mgr, after.sid).length, 0)
+  })
+
+  it('writes the in-flight flag to the state FILE at each edge, with no manual flush', () => {
+    const ctx = boot()
+    const flag = () => JSON.parse(readFileSync(ctx.stateFilePath, 'utf-8')).sessions[0].turnInFlight === true
+    ctx.session.sendMessage('A')
+    assert.equal(flag(), true, 'set on dispatch')
+    ctx.session.completeTurn()
+    assert.equal(flag(), false, 'cleared when the turn ends')
+  })
+
+  it('writes the flag when busy flips even with no outcome event (the busy edge flushes by itself)', () => {
+    const ctx = boot()
+    const flag = () => JSON.parse(readFileSync(ctx.stateFilePath, 'utf-8')).sessions[0].turnInFlight === true
+    ctx.session.sendMessage('A')
+    ctx.session._isBusy = false
+    assert.equal(flag(), false)
+  })
+
+  it('does not rewrite the state file when a session being destroyed drops busy (teardown guard)', () => {
+    const ctx = boot()
+    ctx.session.sendMessage('A')
+    const before = readFileSync(ctx.stateFilePath, 'utf-8')
+    ctx.mgr._destroying = true // what destroyAll sets before it tears the sessions down
+    ctx.session._isBusy = false
+    assert.equal(ctx.mgr._sessions.get(ctx.sid).turnInFlight, true, 'the flag is not cleared by a teardown flip')
+    assert.equal(readFileSync(ctx.stateFilePath, 'utf-8'), before)
+    ctx.mgr._destroying = false
+    ctx.mgr.destroyAll()
+    const afterDestroy = readFileSync(ctx.stateFilePath, 'utf-8')
+    ctx.session._isBusy = true
+    ctx.session._isBusy = false
+    assert.equal(readFileSync(ctx.stateFilePath, 'utf-8'), afterDestroy, 'nothing is written once the manager is destroyed')
+  })
+
   it('is idempotent across two restarts', () => {
     const ctx = boot()
     prompt(ctx.mgr, ctx.sid, 'A')
@@ -147,18 +207,60 @@ describe('interrupted turn after a restart (#8259)', () => {
     assert.equal(markers(twice.mgr, twice.sid).length, 1)
   })
 
-  it('delivers the marker to a client whose cursor outran the persisted seq (crash window)', () => {
+  /** A crash: a NEW manager restores from the file as it stands, with no final flush. */
+  function crash(ctx) {
+    const mgr = start(ctx.stateFilePath)
+    const sid = mgr.restoreState()
+    assert.ok(sid, 'restored')
+    return { ...ctx, mgr, sid, session: mgr._sessions.get(sid).session }
+  }
+  const record = (ctx, count) => {
+    for (let i = 0; i < count; i++) {
+      ctx.mgr._history.recordHistory(ctx.sid, 'message', { type: 'response', content: `partial ${i}`, timestamp: Date.now() })
+    }
+  }
+  const stateSession = (ctx) => JSON.parse(readFileSync(ctx.stateFilePath, 'utf-8')).sessions[0]
+
+  it('numbers the marker above every seq the crashed process issued, however far persistence lagged', () => {
     const ctx = boot()
     prompt(ctx.mgr, ctx.sid, 'A')
     ctx.session.sendMessage('A')
-    const persistedLast = ctx.mgr._history.getLastIssuedSeq(ctx.sid)
-    // entries recorded after the last write: a client applied them, the file never saw them
-    const clientCursor = persistedLast + 4
-    const after = restart(ctx)
+    record(ctx, 2500) // a long streaming turn: the debounced write never ran
+    const highest = ctx.mgr._history.getLastIssuedSeq(ctx.sid)
+    assert.ok(stateSession(ctx).historyLastSeq < highest, 'the premise: the file lags what clients saw')
+    const after = crash(ctx)
     const history = after.mgr.getHistory(after.sid)
-    const plan = resolveReplayPlan(after.mgr, history, after.sid, clientCursor, after.mgr.getLatestHistorySeq(after.sid))
+    const marker = history.find((e) => e.turnOutcome === 'interrupted')
+    assert.ok(marker._seq > highest, `marker seq ${marker._seq} is above the highest issued ${highest}`)
+    // a client holding the crashed process's newest cursor still gets a delta that has it
+    const plan = resolveReplayPlan(after.mgr, history, after.sid, highest, after.mgr.getLatestHistorySeq(after.sid))
     assert.equal(plan.fullHistory, false)
-    assert.ok(history.slice(plan.startOffset).some((e) => e.turnOutcome === 'interrupted'), 'the client receives the marker')
+    assert.ok(history.slice(plan.startOffset).some((e) => e.turnOutcome === 'interrupted'), 'the marker is delivered')
+  })
+
+  it('extends and persists the reservation before the next seq is issued', () => {
+    const ctx = boot()
+    prompt(ctx.mgr, ctx.sid, 'A')
+    const first = stateSession(ctx).seqReservedThrough
+    assert.ok(first > 0, 'the first entry reserved a range')
+    record(ctx, 1500)
+    const second = stateSession(ctx).seqReservedThrough
+    assert.ok(second > first, 'the reservation moved on')
+    assert.ok(second >= ctx.mgr._history.getLastIssuedSeq(ctx.sid) - 1000, 'it never trails what was issued by more than the step')
+  })
+
+  it('restores a state file with no reservation (falls back to the gap)', () => {
+    const ctx = boot()
+    prompt(ctx.mgr, ctx.sid, 'A')
+    ctx.session.sendMessage('A')
+    ctx.mgr._flushPersist()
+    const state = JSON.parse(readFileSync(ctx.stateFilePath, 'utf-8'))
+    for (const sess of state.sessions) delete sess.seqReservedThrough
+    writeFileSync(ctx.stateFilePath, JSON.stringify(state))
+    const after = crash(ctx)
+    const marker = after.mgr.getHistory(after.sid).find((e) => e.turnOutcome === 'interrupted')
+    assert.ok(marker, 'still marked')
+    assert.ok(marker._seq > state.sessions[0].historyLastSeq, 'numbered past the persisted seq')
   })
 })
 

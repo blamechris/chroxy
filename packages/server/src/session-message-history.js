@@ -6,7 +6,19 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 
-/** #8259: seq headroom a restore leaves before the interrupted-turn marker. See recordInterruptedTurn. */
+/**
+ * #8259: how far past the seq being issued a persisted reservation reaches. See
+ * `_nextSeq`: it bounds how often the state file is rewritten for reservations
+ * (once per this many entries per session), not how far a cursor can run ahead.
+ */
+export const SEQ_RESERVATION_STEP = 1000
+
+/**
+ * #8259: fallback only. A state file written before reservations existed has no
+ * persisted high-water mark, so the marker is numbered this far past the last
+ * persisted seq (best effort, NOT a guarantee). Files written by this build
+ * always carry the reservation.
+ */
 export const RESTART_SEQ_GAP = 100000
 
 const log = createLogger('session-message-history')
@@ -197,6 +209,10 @@ export class SessionMessageHistory extends EventEmitter {
     // seq is server-internal bookkeeping; the wire only exposes it as
     // `historySeq` on replayed entries (see ws-history.js).
     this._seqCounters = new Map()        // sessionId -> next seq to assign (>= 1)
+    // #8259: sessionId -> highest seq this process may issue, already handed to the
+    // reservation handler (the SessionManager persists it synchronously).
+    this._seqReserved = new Map()
+    this._onSeqReservation = null
   }
 
   /**
@@ -206,8 +222,45 @@ export class SessionMessageHistory extends EventEmitter {
    */
   _nextSeq(sessionId) {
     const next = this._seqCounters.get(sessionId) || 1
+    // #8259 RESERVATION INVARIANT: no seq above `_seqReserved` is ever issued
+    // before the reservation covering it has been handed to the handler, which
+    // persists it synchronously. So the persisted `seqReservedThrough` is >= every
+    // seq this process ever gave a client, whatever the lazy state-file debounce
+    // has or has not written. A restart numbers new entries above it, so a cursor
+    // a client took from the previous process can never equal or exceed them.
+    // The persist runs here (once per SEQ_RESERVATION_STEP entries), before the
+    // counter moves.
+    if (next > (this._seqReserved.get(sessionId) || 0)) {
+      this._seqReserved.set(sessionId, next + SEQ_RESERVATION_STEP)
+      if (this._onSeqReservation) {
+        try { this._onSeqReservation(sessionId) } catch (err) { log.warn(`seq reservation handler failed for ${sessionId}: ${err?.message || err}`) }
+      }
+    }
     this._seqCounters.set(sessionId, next + 1)
     return next
+  }
+
+  /** #8259: install the callback that persists a seq reservation synchronously. */
+  setSeqReservationHandler(fn) {
+    this._onSeqReservation = typeof fn === 'function' ? fn : null
+  }
+
+  /** #8259: the persisted-or-persisting high-water mark for a session, or 0 when none. */
+  getSeqReservedThrough(sessionId) {
+    return this._seqReserved.get(sessionId) || 0
+  }
+
+  /**
+   * #8259: adopt the previous process's reservation on restore and move the
+   * counter above it, so nothing this process issues can reuse a seq a client
+   * holds. Returns false (and changes nothing) for a state file without a usable
+   * value, which then falls back to the best-effort gap.
+   */
+  restoreSeqReservation(sessionId, reservedThrough) {
+    if (!Number.isSafeInteger(reservedThrough) || reservedThrough < 1) return false
+    this._seqReserved.set(sessionId, reservedThrough)
+    this._seqCounters.set(sessionId, Math.max(this._seqCounters.get(sessionId) || 1, reservedThrough + 1))
+    return true
   }
 
   /**
@@ -592,17 +645,15 @@ export class SessionMessageHistory extends EventEmitter {
    * ended. Appends a `result` carrying the `interrupted` turn outcome, the SAME
    * marker path (`turnOutcome` on a `result`) a stopped or truncated turn uses.
    *
-   * DELIVERY. The marker is numbered `RESTART_SEQ_GAP` past the last seq the
-   * previous process is known to have issued. A client's cursor comes from that
-   * process, and the state file is written on a debounce (2 s) and at turn
-   * start/end, so a crash can leave the persisted `historyLastSeq` a few entries
-   * behind what a client saw. Numbering the marker right after it could reuse a
-   * seq the client already holds, and the delta replay (strictly newer than the
-   * cursor) would skip it. A turn records tens of entries at most (deltas are
-   * coalesced at stream_end), so a gap of 100000 is beyond any cursor the
-   * previous process could have issued: every such cursor falls below the marker
-   * and the oldest retained entry is not past it, so the delta replay honours
-   * the cursor and sends the marker.
+   * DELIVERY. A client's cursor comes from the previous process, and the state
+   * file's `historyLastSeq` can lag it without bound (the write is debounced and
+   * the debounce restarts on every append). What does not lag is the seq
+   * RESERVATION (see `_nextSeq`): it is persisted before any seq under it is
+   * issued, so `seqReservedThrough` is >= every seq the previous process gave a
+   * client. Restore moves the counter above it, so the marker is numbered strictly
+   * past every possible cursor: the delta replay (strictly newer than the cursor)
+   * honours the cursor and sends it. A state file without a reservation (written
+   * before this existed) falls back to `RESTART_SEQ_GAP`, best effort.
    *
    * The timestamp is clamped to one past the newest entry, like the synthetic
    * tool_result of `sweepUnresolvedToolStarts`, so the marker never sorts before
@@ -626,7 +677,11 @@ export class SessionMessageHistory extends EventEmitter {
     for (const e of history) {
       if (e && Number.isFinite(e.timestamp) && e.timestamp > lastTs) lastTs = e.timestamp
     }
-    this._seqCounters.set(sessionId, (this._seqCounters.get(sessionId) || 1) + RESTART_SEQ_GAP)
+    // With a restored reservation the counter is already above it (restoreSeqReservation);
+    // only a pre-reservation state file needs the best-effort gap.
+    if (!this._seqReserved.has(sessionId)) {
+      this._seqCounters.set(sessionId, (this._seqCounters.get(sessionId) || 1) + RESTART_SEQ_GAP)
+    }
     const marker = { type: 'result', turnOutcome: 'interrupted', timestamp: Math.max(now, lastTs + 1) }
     this._pushHistory(history, marker, sessionId)
     return marker
@@ -1070,6 +1125,7 @@ export class SessionMessageHistory extends EventEmitter {
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
     this._seqCounters.delete(sessionId)
+    this._seqReserved.delete(sessionId)
 
     // Clean up pending stream state (composite keys: `${sessionId}:messageId`)
     const prefix = sessionId + ':'
@@ -1100,5 +1156,6 @@ export class SessionMessageHistory extends EventEmitter {
     this._streamKinds.clear()
     this._streamPrecedes.clear()
     this._seqCounters.clear()
+    this._seqReserved.clear()
   }
 }
