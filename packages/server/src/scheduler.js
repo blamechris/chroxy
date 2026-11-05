@@ -388,6 +388,7 @@ export class SchedulerEngine extends EventEmitter {
     this._running = new Set()
     /** @type {Map<string,string>} taskId -> sessionId, so a recurring task RESUMES its session. */
     this._sessionByTask = new Map()
+    this._staleModelWarned = new Set()
     /**
      * @type {Set<string>} task ids whose outcome could not be persisted. Recording
      * the run is what advances nextRun, so a task we cannot record would stay
@@ -932,7 +933,7 @@ export class SchedulerEngine extends EventEmitter {
       name: task.name || `Scheduled: ${task.id.slice(0, 8)}`,
       ...(target.cwd ? { cwd: target.cwd } : {}),
       ...(target.provider ? { provider: target.provider } : {}),
-      ...(target.model ? { model: target.model } : {}),
+      ...(target.model ? { model: target.model, modelSource: 'replay' } : {}),
       // The clamped floor — never the task's raw value (see resolveScheduledPermissionMode).
       permissionMode: ctx.permissionMode,
       // EXPLICIT false so an unattended run can never inherit the server-wide
@@ -943,6 +944,13 @@ export class SchedulerEngine extends EventEmitter {
     // Trust nothing: verify the freshly-created session really came up at the
     // clamped mode rather than assuming createSession honoured the option.
     const created = this._sm.getSession?.(sessionId)
+    // #7855: a saved model id that is no longer usable runs on the default instead of
+    // failing every fire; say so once per task, naming it, so the owner can fix it.
+    if (target.model && created?.session && (created.session.model ?? null) !== target.model
+        && !this._staleModelWarned.has(task.id)) {
+      this._staleModelWarned.add(task.id)
+      this._log.warn(`Scheduled task ${task.id}${task.name ? ` (${task.name})` : ''}: saved model '${target.model}' is not usable; running on the provider default. Edit the task's model to fix.`)
+    }
     if (created?.session) this._assertPermissionMode(created.session, ctx.permissionMode, sessionId)
     this._sessionByTask.set(task.id, sessionId)
     return sessionId

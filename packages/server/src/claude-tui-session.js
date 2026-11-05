@@ -1901,10 +1901,11 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {string|null} observedModel
    */
   _adoptObservedModel(observedModel) {
-    if (typeof observedModel === 'string' && observedModel && observedModel !== this.bootedModel) {
-      this.bootedModel = observedModel
-      this._observedModelAt = Date.now()
-    }
+    if (typeof observedModel !== 'string' || !observedModel) return
+    if (observedModel !== this.bootedModel) this.bootedModel = observedModel
+    // Every successful observation refreshes the evidence, including one that
+    // confirms a restored bootedModel (which only then counts as observed).
+    this._observedModelAt = Date.now()
   }
 
   /**
@@ -1934,8 +1935,8 @@ export class ClaudeTuiSession extends BaseSession {
     const key = `${evidence.requested}->${evidence.observed}`
     if (this._reportedMismatchKey === key) return
     this._reportedMismatchKey = key
-    const message = `Requested model '${evidence.requested}' but the native client is running '${evidence.observed}' (seen in its conversation journal). ` +
-      'The request was not honoured; switch the model in the native client or start a new session.'
+    const message = `Session is running '${evidence.observed}' (seen in its conversation journal); requested '${evidence.requested}'. ` +
+      'It may have been switched in the native client.'
     ;(this._log || log).warn(`model mismatch (#7855): ${message}`)
     this.emit('error', { code: MODEL_MISMATCH_CODE, message })
   }

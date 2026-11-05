@@ -16,11 +16,13 @@
 // It also owns the requested-vs-observed comparison. A requested value is a
 // configuration, not evidence of what is running.
 
+import { resolvePricingKey } from './claude-model-catalog.js'
+
 /** Error code carried by the non-fatal mismatch notice a session emits. */
 export const MODEL_MISMATCH_CODE = 'MODEL_MISMATCH'
 
-// Short aliases the claude CLI resolves itself.
-const NATIVE_ALIASES = new Set(['default', 'best', 'sonnet', 'opus', 'haiku', 'opusplan'])
+// Short aliases the claude CLI resolves itself (the family heads of the roster).
+const NATIVE_ALIASES = new Set(['default', 'best', 'sonnet', 'opus', 'haiku', 'fable', 'opusplan'])
 const ONE_M = '[1m]'
 const MAX_MODEL_ID_LENGTH = 100
 // `claude-` + family/version/date segments. Starts with a letter or digit so the
@@ -71,8 +73,14 @@ export function claudeModelMatchesRequest(requested, observed) {
     if (want === 'opusplan') return /^claude-(opus|sonnet)-/.test(got)
     return got.startsWith(`claude-${want}-`)
   }
+  // A roster short id (`sonnet-5-5`) names its catalog full id (`claude-sonnet-5-5`);
+  // compare against that, not a hand-prefixed guess.
+  const full = want.startsWith('claude-') ? want : resolvePricingKey(want)
+  if (!full) return false
+  const fullBase = stripOneM(full)
+  if (fullBase === got) return true
   // `claude-sonnet-5` vs `claude-sonnet-5-20261001`: only a pure date pin counts.
-  return got.startsWith(`${want}-`) && /^\d{8,}$/.test(got.slice(want.length + 1))
+  return got.startsWith(`${fullBase}-`) && /^\d{8,}$/.test(got.slice(fullBase.length + 1))
 }
 
 /**

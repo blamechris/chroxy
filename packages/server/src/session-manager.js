@@ -1507,7 +1507,7 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
-  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false, modelSource = 'explicit' } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1646,7 +1646,7 @@ export class SessionManager extends EventEmitter {
           const request = classifyClaudeModelRequest(resolvedModel, providerAllowedModels)
           if (request.kind === 'native') {
             log.info(`Requested model '${resolvedModel}' is not in the current roster for provider '${resolvedProviderType}'; forwarding it verbatim to the native client`)
-          } else if (typeof model === 'string' && !isRestore) {
+          } else if (typeof model === 'string' && !isRestore && modelSource !== 'replay') {
             throw new ProviderModelNotSupportedError({
               provider: resolvedProviderType,
               model: resolvedModel,
@@ -1885,6 +1885,10 @@ export class SessionManager extends EventEmitter {
    *   so callers can safely pass any value. Primary use: `restoreState` reusing the
    *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
    *   after a daemon restart (#4983).
+   * @param {'explicit'|'replay'} [options.modelSource] - #7855: `replay` marks `model` as
+   *   read back from saved state (an archive, a scheduled task) rather than asked for now.
+   *   An unusable replayed id falls back to the provider default instead of failing create.
+   *   Omitted means `explicit`.
    * @param {boolean} [options.isRestore] - Internal (#5316): marks a session created by
    *   `restoreState()`. When a provider's start() rejects ASYNCHRONOUSLY, the rejection
    *   handler preserves the restored history + worktree (registers a failed-restore)
@@ -1898,7 +1902,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false, modelSource } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1922,6 +1926,7 @@ export class SessionManager extends EventEmitter {
       preserveId,
       resumeSessionId,
       isRestore,
+      modelSource,
     })
     const {
       sessionId,
@@ -4716,6 +4721,9 @@ export class SessionManager extends EventEmitter {
             name: `${baseName} (continued)`,
             cwd: saved.cwd,
             model: saved.model || undefined,
+            // #7855: a model read back from a saved record is a replay, not a request
+            // someone just made; a since-retired id degrades to the default (#3403).
+            modelSource: 'replay',
             provider: saved.provider || undefined,
             connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
               ? saved.agentConnection.id

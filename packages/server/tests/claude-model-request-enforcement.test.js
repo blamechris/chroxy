@@ -66,6 +66,18 @@ describe('claudeModelMatchesRequest (#7855)', () => {
     assert.equal(claudeModelMatchesRequest('opus[1m]', 'claude-opus-5'), true)
   })
 
+  it('resolves roster short ids through the catalog, not a hand-prefix (S1)', () => {
+    assert.equal(claudeModelMatchesRequest('sonnet-5-5', 'claude-sonnet-5-5'), true)
+    assert.equal(claudeModelMatchesRequest('fable-5-1', 'claude-fable-5-1'), true)
+    assert.equal(claudeModelMatchesRequest('fable', 'claude-fable-5'), true)
+    assert.equal(claudeModelMatchesRequest('fable[1m]', 'claude-fable-5[1m]'), true)
+    assert.equal(claudeModelMatchesRequest('opus-5-5[1m]', 'claude-opus-5-5'), true)
+    assert.equal(claudeModelMatchesRequest('sonnet-5-5', 'claude-sonnet-5-5-20261001'), true)
+    assert.equal(claudeModelMatchesRequest('sonnet-5-5', 'claude-opus-5-5'), false)
+    assert.equal(claudeModelMatchesRequest('fable-5-1', 'claude-fable-5'), false)
+    assert.equal(classifyClaudeModelRequest('fable', []).kind, 'native')
+  })
+
   it('rejects a different model, including a longer id that merely shares a prefix', () => {
     assert.equal(claudeModelMatchesRequest('claude-sonnet-5', 'claude-opus-5[1m]'), false)
     assert.equal(claudeModelMatchesRequest('sonnet', 'claude-opus-5'), false)
@@ -176,7 +188,8 @@ describe('ClaudeTuiSession requested vs observed model (#7855)', () => {
     else delete process.env.HOME
     if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile
     else delete process.env.USERPROFILE
-    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
+    if (__sandboxConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     rmSync(fakeHome, { recursive: true, force: true })
     rmSync(skillsDir, { recursive: true, force: true })
   })
@@ -259,6 +272,38 @@ describe('ClaudeTuiSession requested vs observed model (#7855)', () => {
     assert.equal(notices.length, 1, 'a steady mismatch is reported once, not every turn')
     assert.match(notices[0].message, /claude-sonnet-5/)
     assert.match(notices[0].message, /claude-opus-5/)
+  })
+
+  it('a short roster id request does not raise a spurious mismatch (S1)', () => {
+    const { s, errors } = make({ model: 'sonnet-5-5' })
+    journal('claude-sonnet-5-5')
+    s._clearTurnEndState()
+    assert.equal(s.modelEvidence.status, 'match')
+    assert.equal(errors.length, 0)
+  })
+
+  it('a restored bootedModel later confirmed by the journal becomes observed, and stays fresh (Copilot)', () => {
+    const { s } = make({ model: 'claude-sonnet-5' })
+    s.bootedModel = 'claude-sonnet-5'
+    assert.equal(s.modelEvidence.status, 'unobserved')
+    journal('claude-sonnet-5')
+    s._clearTurnEndState()
+    assert.equal(s.modelEvidence.status, 'match', 'same string as the restored value, now journal-confirmed')
+    const first = s._observedModelAt
+    s._observedModelAt = first - 5000
+    s._adoptObservedModel('claude-sonnet-5')
+    assert.ok(s._observedModelAt > first - 5000, 'a repeat observation refreshes the freshness stamp')
+    s._adoptObservedModel(null)
+    assert.equal(s.bootedModel, 'claude-sonnet-5', 'a falsy observation never clobbers bootedModel')
+  })
+
+  it('the mismatch message does not blame the request (S3)', () => {
+    const { s, errors } = make({ model: 'claude-sonnet-5' })
+    journal('claude-opus-5[1m]')
+    s._clearTurnEndState()
+    const n = errors.find((x) => x.code === MODEL_MISMATCH_CODE)
+    assert.doesNotMatch(n.message, /not honoured/)
+    assert.match(n.message, /running 'claude-opus-5\[1m\]'/)
   })
 
   it('no requested model: an observation is just an observation', () => {
