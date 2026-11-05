@@ -13,10 +13,11 @@ jest.mock('expo-secure-store', () => ({
   setItemAsync: jest.fn(() => Promise.resolve()),
 }));
 
+import { Alert } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { resetReconnectAttempt, reconnectAttempt, nextReconnectAttempt } from '../../store/message-handler';
+import { resetReconnectAttempt, reconnectAttempt, nextReconnectAttempt, setLastConnectedUrl } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 function flushPromises(): Promise<void> {
@@ -94,6 +95,7 @@ beforeEach(() => {
 afterEach(() => {
   useConnectionStore.getState().disconnect();
   randomSpy.mockRestore();
+  setLastConnectedUrl(null);
   global.fetch = originalFetch;
   jest.useRealTimers();
 });
@@ -165,9 +167,8 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     // …and a fresh dial was attempted (connectAuto → connect → WebSocket).
     expect(ws.instances.length).toBeGreaterThan(before);
     // #6296 — and the terminal phase was actually left: retryConnection's
-    // `transitionPhase('connecting', { force: true })` exit is a whitelisted
-    // forceable edge (server_down → connecting), so the FSM applied it rather
-    // than rejecting it. (Tightening force to a whitelist must not wedge here.)
+    // `transitionPhase('connecting')` exit is a legal edge (server_down →
+    // connecting), so the FSM applied it rather than rejecting it.
     expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
 
     ws.restore();
@@ -346,5 +347,116 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     expect(ws.instances.length).toBe(0);
 
     ws.restore();
+  });
+  // #8258 — the give-up alert's Retry redialed the daemon but connect() asks for
+  // server_down -> reconnecting (same URL = isReconnect), which the FSM rejects,
+  // so the UI stayed latched on "Server appears to be down". Both alerts must
+  // leave server_down the way the banner's retryConnection() does.
+  describe('#8258 alert Retry leaves server_down', () => {
+    async function giveUpAndGetRetry(
+      kind: 'probe' | 'restart',
+      hasSaved = true,
+    ): Promise<() => void> {
+      // The real repro is a drop after a successful session: the last connected
+      // URL is this one, so the Retry re-dial takes connect()'s isReconnect path.
+      setLastConnectedUrl('wss://tunnel.example.com');
+      const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+      useConnectionLifecycleStore.setState({
+        savedConnection: hasSaved ? { url: 'wss://tunnel.example.com', token: 'tok' } : null,
+      });
+      (global.fetch as jest.Mock).mockImplementation(() =>
+        kind === 'probe'
+          ? Promise.reject(new Error('network unreachable'))
+          : Promise.resolve(mockResponse(200, { status: 'restarting', restartEtaMs: 5000 })),
+      );
+      useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok');
+      for (let i = 0; i < 12; i++) {
+        await flushPromises();
+        if (useConnectionLifecycleStore.getState().connectionPhase === (hasSaved ? 'server_down' : 'disconnected')) break;
+        jest.advanceTimersByTime(15_000);
+      }
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe(hasSaved ? 'server_down' : 'disconnected');
+      const call = alertSpy.mock.calls.find(([title]) => title === 'Connection Failed');
+      expect(call).toBeDefined();
+      const buttons = call![2] as Array<{ text: string; onPress?: () => void }>;
+      const retry = buttons.find((b) => b.text === 'Retry');
+      expect(retry?.onPress).toBeDefined();
+      alertSpy.mockRestore();
+      return retry!.onPress!;
+    }
+
+    it.each(['probe', 'restart'] as const)('%s give-up Retry dials and leaves server_down', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind);
+      // Daemon is back.
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(0);
+      expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
+      ws.restore();
+    });
+
+    // With NO saved connection the give-up lands in 'disconnected' (the connect
+    // form); the alert Retry must still dial from there.
+    it('alert Retry dials from disconnected (give-up with no saved connection)', async () => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry('probe', false);
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+      const before = ws.instances.length;
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(before);
+      ws.restore();
+    });
+
+    // A stale alert (app already recovered some other way) must not retire the
+    // healthy socket.
+    it.each(['probe', 'restart'] as const)('%s alert Retry is a no-op once the connection recovered', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind);
+      useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+      const before = ws.instances.length;
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBe(before);
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+      ws.restore();
+    });
+
+    // Copilot (#8921): the close/error ladder counter is the module-level
+    // reconnectAttempt. If alert Retry left it maxed, the first socket close after
+    // the redial would give up again and re-latch server_down.
+    it('alert Retry rewinds an exhausted close ladder so one more close reconnects', async () => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry('probe');
+      for (let i = 0; i < 20; i++) nextReconnectAttempt(); // ladder exhausted
+      expect(reconnectAttempt).toBeGreaterThanOrEqual(20);
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+      expect(reconnectAttempt).toBe(0);
+      expect(ws.instances.length).toBeGreaterThan(0);
+
+      ws.instances[ws.instances.length - 1].onclose?.({ code: 1006 });
+      await flushPromises();
+      expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
+      ws.restore();
+    });
   });
 });

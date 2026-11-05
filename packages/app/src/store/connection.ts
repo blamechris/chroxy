@@ -616,6 +616,43 @@ function clearSessionRolesAcrossSessions(
   if (changed) set({ sessionStates: next });
 }
 
+/**
+ * #5725 / #8258 — leave the terminal `server_down` phase explicitly BEFORE
+ * dialing. connect() sets 'reconnecting' when re-dialing the same URL
+ * (isReconnect), and `server_down -> reconnecting` is an illegal FSM transition.
+ * Move to 'connecting' first; clearing the error keeps the stale "Server appears
+ * to be down" banner from leaking into the fresh attempt.
+ * `server_down -> connecting` is a legal edge in VALID_TRANSITIONS, so no
+ * `force` is needed. Shared by retryConnection() (banner Reconnect) and both
+ * "Connection Failed" alert Retry handlers so they cannot diverge.
+ */
+function leaveServerDown(): void {
+  // Rewind the close/error backoff ladder first: a still-maxed counter would
+  // re-exhaust on the first failure of the fresh attempt and give up again.
+  resetReconnectAttempt();
+  const lifecycle = useConnectionLifecycleStore.getState();
+  if (lifecycle.connectionPhase === 'server_down') {
+    lifecycle.transitionPhase('connecting');
+    lifecycle.setConnectionError(null, 0);
+  }
+}
+
+/**
+ * #8258 — Retry on a "Connection Failed" alert. The alert can outlive the
+ * give-up (app resume / network change may already have recovered through
+ * retryConnection()), and a connect() then would retire the healthy socket and
+ * redial. Only act while the connection is still down.
+ */
+function retryFromGiveUpAlert(redial: () => void): void {
+  const phase = useConnectionLifecycleStore.getState().connectionPhase;
+  // Deliberate no-op in any other phase, including 'connecting': a background
+  // retry already has a dial in flight, and if it fails the give-up latches
+  // 'server_down' again, where Retry works.
+  if (phase !== 'server_down' && phase !== 'disconnected') return;
+  leaveServerDown();
+  redial();
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   queuedMessageCount: 0,
@@ -1271,7 +1308,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             'The server is still restarting. Try again later.',
             [
               { text: 'OK' },
-              { text: 'Retry', onPress: () => get().connect(url, token) },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
             ],
           );
         }
@@ -1303,7 +1340,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             [
               { text: 'OK' },
               { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
-              { text: 'Retry', onPress: () => get().connect(url, token) },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
             ],
           );
         }
@@ -1769,20 +1806,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // (connectAuto re-resolves the freshest LAN/tunnel endpoint). Mirrors the
   // dashboard's retryConnection (#5724).
   retryConnection: () => {
-    resetReconnectAttempt();
+    leaveServerDown();
     const lifecycle = useConnectionLifecycleStore.getState();
-    // #5725 — leave the terminal server_down phase explicitly BEFORE dialing.
-    // connect() sets 'reconnecting' when re-dialing the same URL (isReconnect),
-    // and `server_down -> reconnecting` is an illegal FSM transition. Move to
-    // 'connecting' first; clearing the error here keeps the stale "Server
-    // appears to be down" banner from leaking into the fresh attempt.
-    // #6286 — the FSM now REJECTS illegal transitions instead of applying them,
-    // so this user-initiated terminal exit opts in via { force: true }: it is
-    // the ONLY deliberately-flagged way to leave a terminal phase.
-    if (lifecycle.connectionPhase === 'server_down') {
-      lifecycle.transitionPhase('connecting', { force: true });
-      lifecycle.setConnectionError(null, 0);
-    }
     const saved = lifecycle.savedConnection;
     if (saved?.url && saved?.token) {
       void get().connectAuto(saved, { silent: true });
