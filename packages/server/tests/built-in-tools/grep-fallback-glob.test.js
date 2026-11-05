@@ -34,10 +34,35 @@ function findOnPath(name) {
 const GREP = findOnPath('grep')
 const BASH = findOnPath('bash')
 
+/**
+ * Capability probe for the real-bash tests. Returns a skip reason, or null when
+ * the host can run them. Probed by capability (a runnable bash, a grep binary,
+ * a creatable symlink), never by platform name: a host that HAS all three must
+ * run the tests, and any unexpected error propagates instead of skipping.
+ */
+function probeRealBash() {
+  if (!BASH) return 'bash is not on PATH'
+  if (!GREP) return 'grep is not on PATH'
+  const v = spawnSync(BASH, ['--version'], { encoding: 'utf8', timeout: 10_000 })
+  if (v.error || v.status !== 0) return 'bash is present but not runnable'
+  const dir = mkdtempSync(path.join(tmpdir(), 'grep-glob-probe-'))
+  try {
+    symlinkSync(GREP, path.join(dir, 'grep'))
+  } catch (err) {
+    if (err && (err.code === 'EPERM' || err.code === 'ENOSYS' || err.code === 'EACCES')) {
+      return `symlinks cannot be created (${err.code})`
+    }
+    throw err
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return null
+}
+const SKIP_REAL_BASH = probeRealBash()
+
 let root
 let bin
-before(() => {
-  assert.ok(GREP && BASH, 'grep and bash are required')
+function setupFixture() {
   const base = mkdtempSync(path.join(tmpdir(), 'grep-glob-'))
   root = path.join(base, 'ws')
   bin = path.join(base, 'bin')
@@ -50,8 +75,9 @@ before(() => {
   writeFileSync(path.join(root, 'd.min.js'), 'NEEDLE min\n')
   writeFileSync(path.join(root, 'src', 'e.js'), 'NEEDLE nested\n')
   writeFileSync(path.join(root, '-x.js'), 'NEEDLE dash\n')
-})
-after(() => rmSync(path.dirname(root), { recursive: true, force: true }))
+  mkdirSync(path.join(root, 'skipme'))
+  writeFileSync(path.join(root, 'skipme', 'f.txt'), 'NEEDLE in excluded dir\n')
+}
 
 function run(input, extra = {}) {
   const args = buildGrepArgs(input)
@@ -61,11 +87,14 @@ function run(input, extra = {}) {
   return { ...r, files }
 }
 
-describe('Grep grep -r fallback honours glob (#7961)', () => {
+describe('Grep grep -r fallback honours glob (#7961)', { skip: SKIP_REAL_BASH || false }, () => {
+  before(setupFixture)
+  after(() => rmSync(path.dirname(root), { recursive: true, force: true }))
+
   it('with no glob, searches every file (unchanged behaviour)', () => {
     const r = run({})
     assert.equal(r.status, 0)
-    assert.deepEqual(r.files, ['-x.js', 'a.js', 'b.ts', 'c.tsx', 'd.min.js', 'src/e.js'])
+    assert.deepEqual(r.files, ['-x.js', 'a.js', 'b.ts', 'c.tsx', 'd.min.js', 'skipme/f.txt', 'src/e.js'])
   })
 
   it('a simple *.js glob returns only matching files', () => {
@@ -79,7 +108,14 @@ describe('Grep grep -r fallback honours glob (#7961)', () => {
   })
 
   it('a negated basename glob excludes', () => {
-    assert.deepEqual(run({ glob: '!*.min.js' }).files, ['-x.js', 'a.js', 'b.ts', 'c.tsx', 'src/e.js'])
+    assert.deepEqual(run({ glob: '!*.min.js' }).files, ['-x.js', 'a.js', 'b.ts', 'c.tsx', 'skipme/f.txt', 'src/e.js'])
+  })
+
+  it('a negated glob also excludes a directory of that name (rg parity)', () => {
+    const r = run({ glob: '!skipme' })
+    assert.equal(r.status, 0)
+    assert.ok(!r.files.some((f) => f.startsWith('skipme/')), r.files.join(','))
+    assert.ok(r.files.includes('a.js'))
   })
 
   it('a glob beginning with "-" is a value, not an option', () => {
@@ -114,11 +150,34 @@ describe('translateGlobForGrep', () => {
   it('translates and refuses as documented', () => {
     assert.deepEqual(translateGlobForGrep('*.js'), { args: " --include='*.js'" })
     assert.deepEqual(translateGlobForGrep('*.{a,b}'), { args: " --include='*.a' --include='*.b'" })
-    assert.deepEqual(translateGlobForGrep('!*.log'), { args: " --exclude='*.log'" })
+    assert.deepEqual(translateGlobForGrep('!*.log'), { args: " --exclude='*.log' --exclude-dir='*.log'" })
     assert.deepEqual(translateGlobForGrep('--include=x'), { args: " --include='--include=x'" })
     for (const g of ['a/b', '**', '!', '*.{a,{b,c}}', '*.{a', 'a}', '{,a}', '*.\\*']) {
       assert.ok('refusal' in translateGlobForGrep(g), g)
     }
+  })
+
+  it('refuses an oversized glob before expanding anything', () => {
+    // The reason names the early length check, not a later brace/byte one.
+    assert.ok(translateGlobForGrep('x'.repeat(100000) + '{a,b,c,d}{e,f,g,h}{i,j}').refusal.includes('too long'))
+    assert.ok(translateGlobForGrep('x'.repeat(2000)).refusal.includes('too long'))
+  })
+
+  it('refuses a brace product as soon as it would exceed the cap (no full expansion)', () => {
+    // 4^400 entries if built in full; must return at once.
+    assert.ok(translateGlobForGrep('{a,b,c,d}'.repeat(100)).refusal.includes('brace'))
+    // One wide set under the input cap: 500 alternatives > the 32 cap.
+    assert.ok(translateGlobForGrep('{' + 'a,'.repeat(499) + 'a}').refusal.includes('brace'))
+  })
+
+  it('caps the total bytes of generated flags', () => {
+    // 32 expansions of a ~400-byte glob: under the input cap, over the flag cap.
+    const g = 'z'.repeat(400) + '{a,b}'.repeat(5)
+    assert.ok(g.length < 1024)
+    const r = translateGlobForGrep(g)
+    assert.ok('refusal' in r)
+    assert.ok(r.refusal.includes('too many bytes'))
+    assert.ok('args' in translateGlobForGrep('z'.repeat(100) + '{a,b}'))
   })
 
   it('caps brace expansion', () => {

@@ -888,6 +888,10 @@ export function buildGrepArgs(input) {
 }
 
 const GREP_GLOB_MAX_EXPANSIONS = 32
+// Bounds on the work/size one glob may cause (Codex review of #7961): the raw
+// glob, and the total bytes of generated --include/--exclude flags.
+const GREP_GLOB_MAX_INPUT = 1024
+const GREP_GLOB_MAX_FLAG_BYTES = 8192
 
 /**
  * Expand non-nested `{a,b}` sets into the alternatives grep can take as
@@ -912,9 +916,10 @@ function expandSimpleBraces(glob) {
     if (inner.includes('{')) return null
     const alts = inner.split(',')
     const head = rest.slice(0, open)
+    // Check cardinality BEFORE building the product, not after.
+    if (results.length * alts.length > GREP_GLOB_MAX_EXPANSIONS) return null
     const next = []
     for (const r of results) for (const a of alts) next.push(r + head + a)
-    if (next.length > GREP_GLOB_MAX_EXPANSIONS) return null
     results = next
     rest = rest.slice(close + 1)
   }
@@ -948,12 +953,17 @@ export function translateGlobForGrep(glob) {
   const negated = glob.startsWith('!')
   const body = negated ? glob.slice(1) : glob
   if (body.length === 0) return refuse('empty pattern')
+  if (body.length > GREP_GLOB_MAX_INPUT) return refuse('glob too long')
   if (body.includes('/') || body.includes('**') || body.includes('\\')) return refuse('path and escaped globs are not supported')
   const alts = expandSimpleBraces(body)
   if (!alts) return refuse('unsupported brace set')
   if (alts.some((a) => a.length === 0)) return refuse('empty alternative')
-  const flag = negated ? '--exclude' : '--include'
-  return { args: alts.map((a) => ` ${flag}=${shellQuote(a)}`).join('') }
+  // rg's negated glob also excludes a DIRECTORY of that name (and its
+  // descendants); grep needs --exclude-dir alongside --exclude to match.
+  const flags = negated ? ['--exclude', '--exclude-dir'] : ['--include']
+  const args = alts.flatMap((a) => flags.map((f) => ` ${f}=${shellQuote(a)}`)).join('')
+  if (args.length > GREP_GLOB_MAX_FLAG_BYTES) return refuse('glob expands to too many bytes')
+  return { args }
 }
 
 /**
