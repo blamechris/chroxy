@@ -6,7 +6,7 @@
 // still ~/.claude, and that odd values cannot move a containment root somewhere
 // dangerous.
 
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
@@ -192,19 +192,48 @@ describe('canonical root and reader/child agreement (#8270 review)', () => {
     assert.equal(resolveClaudeConfigDirOverride(join(alias, '.')), null)
   })
 
-  it('a link whose target is missing, or whose target walks up to the root, is not accepted', { skip: SKIP_NO_SYMLINK }, () => {
+  it('a link whose target is missing is not accepted', { skip: SKIP_NO_SYMLINK }, () => {
     const missing = join(root, 'no-such-dir')
-    // The link text is `<missing>/..`: it only looks like a parent of an existing
-    // dir if the missing component is skipped over. Built by concatenation so
-    // path.join does not collapse the `..`.
-    const dangling = join(root, 'dangling')
-    symlinkSync(`${missing}${sep}..`, dangling, 'dir')
-    // a plain dangling link to a missing sibling is unusable as well
     const plain = join(root, 'plain-dangling')
-    symlinkSync(missing, plain, 'dir')
-    for (const link of [dangling, plain, join(dangling, 'sub'), join(plain, 'a', 'b')]) {
+    symlinkSync(join(missing, 'sub'), plain, 'dir')
+    for (const link of [plain, join(plain, 'a', 'b')]) {
       assert.equal(resolveClaudeConfigDirOverride(link), null, link)
       assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: link }), REAL_DEFAULT)
+    }
+  })
+
+  it('a link whose text is `<missing>/..` never yields a root or anything above its own directory', { skip: SKIP_NO_SYMLINK }, () => {
+    const missing = join(root, 'no-such-dir')
+    // Built by concatenation so path.join does not collapse the `..`.
+    const dangling = join(root, 'dangling')
+    symlinkSync(`${missing}${sep}..`, dangling, 'dir')
+    const got = resolveClaudeConfigDirOverride(dangling)
+    if (process.platform === 'win32') {
+      // Windows resolves the text lexically: the link points at its own parent,
+      // which exists. The safety property is what must hold there.
+      assert.ok(got === null || (!isFilesystemRoot(got) && (got === root || got.startsWith(root + sep))), `got ${got}`)
+    } else {
+      assert.equal(got, null)
+    }
+  })
+
+  it('canonicalises with the native realpath (the one the file-ops roots use)', { skip: SKIP_NO_SYMLINK }, () => {
+    const real = join(root, 'parity-real')
+    const link = join(root, 'parity-link')
+    mkdirSync(real)
+    symlinkSync(real, link, 'dir')
+    const dir = join(link, 'sub')
+    const expected = join(realpathSync.native(link), 'sub')
+    assert.equal(resolveClaudeConfigDirOverride(dir), expected)
+    // On POSIX the JS and native realpath agree for this input, so also pin the
+    // call itself: a regression to the JS implementation (which does not expand
+    // Windows 8.3 short names) never calls native.
+    const spy = mock.method(realpathSync, 'native')
+    try {
+      resolveClaudeConfigDirOverride(dir)
+      assert.ok(spy.mock.calls.length > 0, 'resolver used realpathSync.native')
+    } finally {
+      spy.mock.restore()
     }
   })
 

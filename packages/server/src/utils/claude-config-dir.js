@@ -56,7 +56,7 @@ function canonicalize(absPath) {
   const tail = []
   for (;;) {
     try {
-      const real = realpathSync(current)
+      const real = realpathSync.native(current)
       return tail.length ? join(real, ...tail.reverse()) : real
     } catch (err) {
       if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') throw err
