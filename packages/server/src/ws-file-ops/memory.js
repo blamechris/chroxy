@@ -3,10 +3,14 @@ import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { claudeConfigDir, isFilesystemRoot } from '../utils/claude-config-dir.js'
-import { realpathOfDeepestAncestor, isConfigDirOrDirectChild } from './common.js'
+import { realpathOfDeepestAncestor, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError } from './common.js'
+import { createLogger } from '../logger.js'
+
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
+
+const log = createLogger('ws')
 
 /** stat-size ceiling before attempting a read (matches readFileContent) */
 const MAX_FILE_SIZE = 512 * 1024
@@ -217,7 +221,8 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
     fileStat = await stat(resolvedPath)
   } catch (err) {
     if (err.code === 'ENOENT') return { ...base, exists: false }
-    return { ...base, error: err.code === 'EACCES' ? 'Permission denied' : (err.message || 'Unknown error') }
+    log.error(`memory file stat failed: ${err.message}`)
+    return { ...base, error: fileOpErrorMessage(err) }
   }
 
   if (!fileStat.isFile()) {
@@ -244,7 +249,7 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
     // no error. Same text as the pre-open refusal above.
     const fhStat = await fh.stat()
     if (!fhStat.isFile()) {
-      throw new Error('Not a regular file')
+      throw clientSafeError('Not a regular file')
     }
     buf = await fh.readFile()
   } catch (err) {
@@ -252,7 +257,8 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
       // Symlink appeared at the canonical path after validation — reject.
       return { ...base, exists: true, skipped: true, error: 'Access denied: possible symlink race — read skipped' }
     }
-    return { ...base, exists: true, error: err.message || 'Unknown error' }
+    log.error(`memory file read failed: ${err.message}`)
+    return { ...base, exists: true, error: fileOpErrorMessage(err) }
   } finally {
     await fh?.close()
   }
@@ -375,7 +381,8 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     try {
       cwdReal = await resolveSessionCwd(sessionCwd)
     } catch (err) {
-      send({ type: 'memory_stack_result', entries: [], memoryFile: null, error: err.message || 'Failed to resolve session directory' })
+      log.error(`memory stack cwd resolve failed: ${err.message}`)
+      send({ type: 'memory_stack_result', entries: [], memoryFile: null, error: fileOpErrorMessage(err, 'Failed to resolve session directory') })
       return
     }
 

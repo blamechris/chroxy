@@ -9,7 +9,7 @@ import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
-import { unresolvablePathError, isConfigDirOrDirectChild, CONFIG_DIR_REFUSAL } from './common.js'
+import { unresolvablePathError, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError, CONFIG_DIR_REFUSAL } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -365,7 +365,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           const fhStat = await fh.stat()
           if (!fhStat.isFile()) {
             // No path in the text: this reaches the client verbatim.
-            throw new Error('Not a regular file')
+            throw clientSafeError('Not a regular file')
           }
           buf = await fh.readFile()
         } catch (openErr) {
@@ -439,10 +439,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         error: null,
       })
     } catch (err) {
-      let errorMessage
-      if (err.code === 'ENOENT') errorMessage = 'File not found'
-      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else errorMessage = err.message || 'Unknown error'
+      log.error(`read_file failed: ${truncateForLog(err.message)}`)
+      const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'File not found' })
 
       send({
         type: 'file_content',
@@ -610,9 +608,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         error: null,
       })
     } catch (err) {
-      let errorMessage
-      if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else errorMessage = err.message || 'Unknown error'
+      log.error(`write_file failed: ${truncateForLog(err.message)}`)
+      const errorMessage = fileOpErrorMessage(err)
 
       sendFn(ws, {
         type: 'write_file_result',
@@ -673,7 +670,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         fileExists = true
       } catch (err) {
         if (err.code === 'ENOENT') {
-          if (filename === 'AGENTS.md') throw new Error('Authored project memory AGENTS.md is missing')
+          if (filename === 'AGENTS.md') throw clientSafeError('Authored project memory AGENTS.md is missing')
           resolvedTarget = target
         } else {
           // #8016 — a CLAUDE.md link whose target cannot be resolved: same
@@ -761,7 +758,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ENOENT' && filename === 'AGENTS.md') {
-            throw new Error('Authored project memory AGENTS.md is missing')
+            throw clientSafeError('Authored project memory AGENTS.md is missing')
           }
           if (openErr.code === 'ELOOP') {
             sendFn(ws, {
@@ -780,9 +777,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       sendFn(ws, { type: 'append_memory_result', path: absPath, created: !fileExists, error: null })
     } catch (err) {
-      let errorMessage
-      if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else errorMessage = err.message || 'Unknown error'
+      log.error(`append_memory failed: ${truncateForLog(err.message)}`)
+      const errorMessage = fileOpErrorMessage(err)
       sendFn(ws, { type: 'append_memory_result', path: absPath, created: false, error: errorMessage })
     }
   }

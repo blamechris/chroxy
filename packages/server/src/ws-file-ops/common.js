@@ -246,6 +246,61 @@ export async function unresolvablePathError(err, absPath, rootReal, reasons, den
   return (await isUnresolvablePathWithin(absPath, rootReal)) ? reasons[err.code] : denial
 }
 
+/**
+ * #8018 — short, path-free client text by Node error code, for the failures an
+ * in-project operation can hit AFTER containment has passed (open, mkdir, write,
+ * stat, git). The SINGLE table: handlers pass their own wording through
+ * `fileOpErrorMessage`'s `overrides`, they do not grow a second map.
+ */
+const FILE_OP_ERROR_MESSAGES = {
+  ENOENT: 'Not found',
+  EACCES: 'Permission denied',
+  EPERM: 'Operation not permitted',
+  EISDIR: 'Is a directory',
+  ENOTDIR: 'Not a directory',
+  EEXIST: 'Already exists',
+  ENOSPC: 'No space left on device',
+  EROFS: 'Read-only file system',
+  EBUSY: 'Resource busy',
+  EMFILE: 'Too many open files',
+  ENAMETOOLONG: 'Name too long',
+  ELOOP: 'Too many levels of symbolic links',
+}
+
+/**
+ * #8018 — an Error whose message is written for the client and carries no path
+ * or Node text, so `fileOpErrorMessage` passes it through verbatim. Every other
+ * error is reduced to a code-keyed message. Mark an error ONLY with a literal.
+ *
+ * @param {string} message - Fixed client-facing text (never interpolate a path)
+ * @param {object} [props] - Extra fields, e.g. `code`
+ * @returns {Error}
+ */
+export function clientSafeError(message, props = {}) {
+  return Object.assign(new Error(message), props, { clientSafe: true })
+}
+
+/**
+ * #8018 — the text a handler's OUTER catch sends the client. `err.message` is
+ * never used: Node's carries its code and the server's absolute path, and an
+ * `execFile` failure carries the command line and stderr. The full error stays
+ * in the server log (the caller logs it); the client gets a short reason by
+ * `err.code`, a handler-specific override when it has one, else `fallback`.
+ *
+ * @param {NodeJS.ErrnoException} err
+ * @param {string} [fallback] - Generic text for an unmapped code
+ * @param {Record<string, string>} [overrides] - Handler wording by error code
+ * @returns {string}
+ */
+export function fileOpErrorMessage(err, fallback = 'Operation failed', overrides = {}) {
+  const code = err?.code
+  if (err?.clientSafe === true) return err.message
+  if (typeof code !== 'string') return fallback
+  if (Object.hasOwn(overrides, code)) return overrides[code]
+  if (Object.hasOwn(FILE_OP_ERROR_MESSAGES, code)) return FILE_OP_ERROR_MESSAGES[code]
+  return fallback
+}
+
 // #6923/#6928 — the async component-wise resolver (and its separator-agnostic
 // split + MAXSYMLINKS cap) moved to `utils/componentwise-resolver.js`, the SINGLE
 // SOURCE shared with the sync protected-path floor (`permission-manager.js`), so
@@ -471,10 +526,7 @@ export async function validateGitPath(repoPath, workspaceRoot) {
   const absRepoPath = resolve(repoPath)
   const resolvedRepo = await realpathOfDeepestAncestor(absRepoPath)
   if (!isPathWithin(resolvedRepo, resolvedRoot)) {
-    throw Object.assign(
-      new Error(`Access denied: git operations are restricted to the workspace directory`),
-      { code: 'EACCES' }
-    )
+    throw clientSafeError('Access denied: git operations are restricted to the workspace directory', { code: 'EACCES' })
   }
   return resolvedRepo
 }
