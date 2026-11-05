@@ -8,7 +8,7 @@ import { truncateForLog } from './reader.js'
 import { createLogger } from '../logger.js'
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { encodeProjectPath } from '../jsonl-reader.js'
+import { projectSlug } from '../jsonl-reader.js'
 
 const log = createLogger('ws')
 
@@ -422,7 +422,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     // Auto-generated project memory (MEMORY.md) — restricted to the
     // claude config dir root only (it never lives under the session cwd), and
     // its resolved target must be markdown like every other read here.
-    const encoded = encodeProjectPath(cwdReal)
+    const encoded = projectSlug(cwdReal)
     const memoryFilePath = resolve(claudeHomeReal, 'projects', encoded, 'memory', 'MEMORY.md')
     const memoryFile = await readConfinedMemoryFile(memoryFilePath, claudeRootUsable ? [claudeHomeReal] : [], { requireMarkdownExt: true })
 
