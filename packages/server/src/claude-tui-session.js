@@ -2421,6 +2421,15 @@ export class ClaudeTuiSession extends BaseSession {
   // transitions are sub-second once the session is up.
   static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
   static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
+  // #8979: how long to wait for the SessionStart hook to write the native-route
+  // marker. The hook is a node process claude launches AFTER its session file
+  // reports non-busy, so the warmup probe can return before it has run — a
+  // live cold start lost the race at 307 ms. A cold node + claude start on a
+  // fresh keychain can take a few seconds, so 5 s (the same budget as a
+  // per-turn prompt wait, a third of the spawn warmup) covers it while a host
+  // where the hook never runs is still stopped promptly.
+  static get NATIVE_ROUTE_MARKER_WAIT_MS() { return 5_000 }
+  static get NATIVE_ROUTE_MARKER_POLL_MS() { return 50 }
   // #6601: how long PTY output must be quiet before the composer counts as ready
   // when no session file resolves (current claude's INTERACTIVE TUI writes none,
   // so the file probe never resolves and the caller used to burn the full
@@ -3492,6 +3501,14 @@ export class ClaudeTuiSession extends BaseSession {
     throw err
   }
 
+  _cancelNativeRouteMarkerWait() {
+    if (this._nativeRouteMarkerTimer) clearTimeout(this._nativeRouteMarkerTimer)
+    this._nativeRouteMarkerTimer = null
+    const wake = this._nativeRouteMarkerWake
+    this._nativeRouteMarkerWake = null
+    if (wake) wake()
+  }
+
   _beginNativeRouteVerification() {
     if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
     this.agentConnection.readiness = {
@@ -3514,14 +3531,38 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
-  _verifyNativeRouteMarker(nonce) {
+  /**
+   * #8979: wait (bounded) for the SessionStart hook's marker, then validate it.
+   * Resolves once a parseable marker passes validation; throws
+   * NATIVE_ENDPOINT_ROUTE_MISMATCH at once for a parseable marker that fails
+   * it (waiting cannot change a verdict the hook already wrote), and
+   * NATIVE_ENDPOINT_UNVERIFIED if no parseable marker appears before the
+   * deadline (or the PTY/session went away first). An unparseable file is
+   * treated as not-yet-written: the hook's write is not atomic.
+   */
+  async _verifyNativeRouteMarker(nonce) {
     if (this._connectionAuthRoute !== 'native') return
     const markerPath = join(this._sinkDir, 'native-route.json')
+    const waitMs = this._nativeRouteMarkerWaitMs ?? ClaudeTuiSession.NATIVE_ROUTE_MARKER_WAIT_MS
+    const pollMs = ClaudeTuiSession.NATIVE_ROUTE_MARKER_POLL_MS
+    const deadline = Date.now() + waitMs
     let marker
-    try {
-      marker = JSON.parse(readFileSync(markerPath, 'utf8'))
-      rmSync(markerPath, { force: true })
-    } catch {
+    for (;;) {
+      try {
+        marker = JSON.parse(readFileSync(markerPath, 'utf8'))
+        rmSync(markerPath, { force: true })
+        break
+      } catch {
+        marker = undefined
+      }
+      if (this._destroying || this._ptyExited || Date.now() >= deadline) break
+      await new Promise((resolve) => {
+        this._nativeRouteMarkerWake = resolve
+        this._nativeRouteMarkerTimer = setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now())))
+      })
+      this._cancelNativeRouteMarkerWait()
+    }
+    if (marker === undefined) {
       throw nativeConnectionError(
         'NATIVE_ENDPOINT_UNVERIFIED',
         'Claude Code did not expose its effective endpoint route at startup, so this native connection was stopped.',
@@ -3948,7 +3989,7 @@ export class ClaudeTuiSession extends BaseSession {
     }
     if (nativeRouteNonce && !this._ptyExited) {
       try {
-        this._verifyNativeRouteMarker(nativeRouteNonce)
+        await this._verifyNativeRouteMarker(nativeRouteNonce)
       } catch (err) {
         // #8057: the SessionStart route marker is the native route's last
         // verdict — a custom endpoint / token / gateway / cloud selector
@@ -6917,6 +6958,7 @@ export class ClaudeTuiSession extends BaseSession {
 
   async destroy() {
     this._destroying = true
+    this._cancelNativeRouteMarkerWait() // #8979
     this._processReady = false
     this._isBusy = false
     this._disposeThinking() // #7393

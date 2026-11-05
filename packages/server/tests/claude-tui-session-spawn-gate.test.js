@@ -561,6 +561,7 @@ describe('ClaudeTuiSession — native endpoint-marker refusal on a respawn (#805
       },
     }
     session._sessionId = 'fixture-uuid-8057'
+    session._nativeRouteMarkerWaitMs = 150 // #8979: the 'missing' case waits out this deadline
     session._sinkDir = sinkDir
     session._settingsPath = join(sinkDir, 'settings.json')
     session._resumedFromPersisted = true

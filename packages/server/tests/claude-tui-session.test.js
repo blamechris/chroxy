@@ -780,6 +780,136 @@ describe('ClaudeTuiSession', () => {
       await candidate.destroy()
     })
 
+    describe('#8979 bounded wait for the SessionStart marker', () => {
+      const makeCandidate = (sink, waitMs) => {
+        const candidate = new ClaudeTuiSession({
+          cwd: '/tmp',
+          skillsDir: emptySkillsDir,
+          repoSkillsDir: null,
+          connectionAuthRoute: 'native',
+          connectionChildEnv: { PATH: process.env.PATH },
+          connectionVerifiedBinary: '/fixture/claude',
+          connectionRuntimePreflight: () => '/fixture/claude',
+          connectionAuthStatusRunner: async () => ({
+            status: 0,
+            stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+          }),
+        })
+        candidate._sessionId = 'native-marker-wait'
+        candidate.agentConnection = {
+          authentication: { requested: 'native', observed: 'native' },
+          entitlement: { route: 'subscription', status: 'unknown' },
+          readiness: { state: 'unknown', reasonCode: null, message: 'pending', recoveryAction: null },
+          provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+        }
+        candidate._sinkDir = sink
+        candidate._nativeRouteMarkerWaitMs = waitMs
+        candidate._waitForPrompt = async () => true
+        const holder = { killed: false, nonce: null }
+        candidate._ptyModOverride = {
+          spawn: () => {
+            const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+            holder.nonce = settings.hooks.SessionStart[0].hooks[0].args[2]
+            return { pid: 123, kill: () => { holder.killed = true }, onData: () => {}, onExit: () => {}, on: () => {} }
+          },
+        }
+        return { candidate, holder }
+      }
+      const good = (nonce) => JSON.stringify({ version: 1, nonce, safe: true, firstPartyEndpoint: true, blockedKeys: [] })
+
+      it('proceeds when the marker lands after the first read but inside the deadline', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-late-'))
+        const { candidate, holder } = makeCandidate(sink, 5000)
+        const timer = setTimeout(() => writeFileSync(join(sink, 'native-route.json'), good(holder.nonce)), 300)
+        try {
+          const started = Date.now()
+          await origSpawnPty.call(candidate, false)
+          assert.ok(Date.now() - started >= 250, 'it actually waited for the late marker')
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+          assert.equal(candidate.agentConnection.readiness.state, 'ready')
+          assert.equal(existsSync(join(sink, 'native-route.json')), false, 'marker consumed')
+          assert.equal(holder.killed, false)
+          assert.equal(candidate._nativeRouteMarkerTimer, null, 'no timer left behind')
+        } finally {
+          clearTimeout(timer)
+          candidate._term = null
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('tolerates a half-written (unparseable) marker and verifies once it completes', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-partial-'))
+        const { candidate, holder } = makeCandidate(sink, 5000)
+        const t1 = setTimeout(() => writeFileSync(join(sink, 'native-route.json'), '{"version":1,'), 100)
+        const t2 = setTimeout(() => writeFileSync(join(sink, 'native-route.json'), good(holder.nonce)), 300)
+        try {
+          await origSpawnPty.call(candidate, false)
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+        } finally {
+          clearTimeout(t1)
+          clearTimeout(t2)
+          candidate._term = null
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('stops with NATIVE_ENDPOINT_UNVERIFIED only once the deadline passes', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-never-'))
+        const { candidate, holder } = makeCandidate(sink, 400)
+        try {
+          const started = Date.now()
+          await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === 'NATIVE_ENDPOINT_UNVERIFIED')
+          assert.ok(Date.now() - started >= 380, 'waited out the deadline before refusing')
+          assert.equal(holder.killed, true)
+          assert.equal(candidate._nativeRouteMarkerTimer, null, 'no timer left behind')
+        } finally {
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('refuses a late marker with invalid content immediately, without waiting out the deadline', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-bad-'))
+        const { candidate } = makeCandidate(sink, 5000)
+        const timer = setTimeout(() => writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+          version: 1, nonce: 'wrong', safe: true, firstPartyEndpoint: true, blockedKeys: [],
+        })), 200)
+        try {
+          const started = Date.now()
+          await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === 'NATIVE_ENDPOINT_ROUTE_MISMATCH')
+          assert.ok(Date.now() - started < 3000, 'a wrong verdict is not retried until the deadline')
+        } finally {
+          clearTimeout(timer)
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+
+      it('destroy() during the wait ends it promptly and leaves no timer', async () => {
+        ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+        const sink = mkdtempSync(join(fakeHome, 'marker-destroy-'))
+        const { candidate } = makeCandidate(sink, 30000)
+        try {
+          const pending = origSpawnPty.call(candidate, false).catch((e) => e)
+          await new Promise((r) => setTimeout(r, 150))
+          const started = Date.now()
+          await candidate.destroy()
+          const err = await pending
+          assert.equal(err.code, 'NATIVE_ENDPOINT_UNVERIFIED')
+          assert.ok(Date.now() - started < 2000, 'destroy did not wait out the 30 s deadline')
+          assert.equal(candidate._nativeRouteMarkerTimer, null)
+        } finally {
+          rmSync(sink, { recursive: true, force: true })
+        }
+      })
+    })
+
     it('fails closed after TUI warmup when the effective-route marker is missing or stale', async (t) => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       for (const stale of [false, true]) {
@@ -809,6 +939,7 @@ describe('ClaudeTuiSession', () => {
           })
           let killed = false
           candidate._sessionId = 'native-marker-failure'
+          candidate._nativeRouteMarkerWaitMs = 150 // #8979: keep the missing case quick
           candidate._sinkDir = sink
           candidate.agentConnection = {
             authentication: { requested: 'native', observed: 'native' },
