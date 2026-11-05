@@ -332,6 +332,13 @@ process.env.CHROXY_DISABLE_KEYCHAIN = '1'
 // `session-manager.js`'s fix for the identical pattern (#6952).
 process.env.CHROXY_DISABLE_UPDATE_CHECK = '1'
 
+// --- Disable the session-less Claude model refresh ----------------------------
+// #8275: a connecting client / daemon boot triggers a prompt-less SDK query()
+// against the installed `claude`. No test may spawn the developer's real
+// binary, so the harness switches it off; the refresh module's own tests
+// inject a query stub, which is exempt.
+process.env.CHROXY_DISABLE_MODEL_REFRESH = '1'
+
 // --- Scrub Discord webhook env -------------------------------------------------
 // #5413: PushManager always registers a DiscordWebhookSink that activates the
 // moment a webhook URL resolves. A developer with the webhook exported in

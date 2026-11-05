@@ -1,3 +1,4 @@
+import { refreshClaudeModels } from './claude-model-refresh.js'
 import { randomBytes, randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import {
@@ -321,6 +322,19 @@ export class ClaudeTuiSession extends BaseSession {
    */
   static get resolvedBinary() {
     return resolveClaudeBinary()
+  }
+
+  /**
+   * #8275 — a claude-tui daemon never starts an SDK session, so nothing else
+   * feeds the Claude picker the live list. `SessionManager` calls this once a
+   * user-created claude-tui session has started (never at boot or on connect:
+   * the probe launches `claude` with the user's configuration, which is only
+   * acceptable beside a launch the user asked for) and broadcasts the result
+   * as `models_updated`. Not named `refreshModels`: that name marks a
+   * catalog-source registry (#7776, #7731), which the Claude registry is not.
+   */
+  static refreshLiveModels(deps = {}) {
+    return refreshClaudeModels(deps)
   }
 
   static get preflight() {

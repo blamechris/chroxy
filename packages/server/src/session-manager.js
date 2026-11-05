@@ -56,6 +56,7 @@ import { forgetSurveyKey } from './handlers/survey-throttle.js'
 import { busyStateOf } from './session-busy-state.js'
 import { pageHistory } from './history-page.js'
 import { SessionArchive } from './session-archive.js'
+import { stopClaudeModelRefresh, resumeClaudeModelRefresh } from './claude-model-refresh.js'
 
 /**
  * Session events that `_wireSessionEvents` forwards to clients AND records to
@@ -754,6 +755,12 @@ export class SessionManager extends EventEmitter {
     this._port = port || null
     this._apiToken = apiToken || null
     this._skipPreflight = skipPreflight
+    // #8275: a new manager is a new daemon lifetime for the session-less model
+    // refresh. destroyAll() latches it off for shutdown; a manager built later in
+    // the same process (a test, an in-process restart) must be able to refresh.
+    resumeClaudeModelRefresh()
+    // Test seam: extra deps (queryFn, spawnFn, managedDir, now, ...) for that refresh.
+    this._modelRefreshDeps = opts.modelRefreshDeps ?? null
     // #7552: null when container environments are disabled — every call site
     // is optional-chained rather than branched.
     this._environmentManager = environmentManager || null
@@ -1434,6 +1441,32 @@ export class SessionManager extends EventEmitter {
       throw err
     }
     return result.binaryPath
+  }
+
+  /**
+   * #8275 — once a USER-CREATED session of a provider that exposes
+   * `refreshLiveModels` (claude-tui) has started, refresh the Claude picker from
+   * the installed claude and announce it exactly as the SDK's in-session
+   * `_fetchSupportedModels` does: a `models_updated` session event, which
+   * ws-forwarding turns into the per-recipient `available_models` broadcast.
+   * Fire-and-forget: it never delays or fails the session, and it is a no-op for
+   * every other provider. The daemon never runs it on its own (boot, client
+   * connect, restore); it rides on a launch the user asked for.
+   */
+  _refreshLiveModelsAfterStart(sessionId, session, entry) {
+    const ProviderClass = session?.constructor
+    if (typeof ProviderClass?.refreshLiveModels !== 'function') return
+    Promise.resolve()
+      .then(() => ProviderClass.refreshLiveModels({
+        bin: () => this.verifyOneShotExecutable(ProviderClass),
+        ...(this._modelRefreshDeps || {}),
+      }))
+      .then((models) => {
+        if (!Array.isArray(models) || models.length === 0) return
+        if (this._sessions.get(sessionId) !== entry || entry._destroying) return
+        session.emit('models_updated', { models })
+      })
+      .catch((err) => log.debug(`Live model refresh after session start failed: ${getErrorMessage(err, 'unknown error')}`))
   }
 
   /**
@@ -2307,6 +2340,7 @@ export class SessionManager extends EventEmitter {
           // nothing to announce.
           if (this._sessions.get(sessionId) === entry && !entry._destroying) {
             this.emit('session_start_settled', { sessionId })
+            if (!isRestore) this._refreshLiveModelsAfterStart(sessionId, session, entry)
           }
           return { ok: true }
         }
@@ -3339,6 +3373,11 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopSessionTimeouts()
+    // #8275: the session-less Claude model refresh owns a child `claude` that no
+    // session tracks. Every shutdown path ends here, so cancel it (SIGKILL, and a
+    // latch against a client connecting mid-shutdown) before the process exits.
+    // Fire-and-forget: destroyAll is synchronous and the kill is already sent.
+    stopClaudeModelRefresh().catch(() => {})
     // #8348: a permission prompt still open at shutdown can never be answered --
     // its hook is denied and its in-process request is cleared -- and the sessions
     // are about to be serialized and torn down with their listeners removed, so
