@@ -520,7 +520,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     expect(isLivePermissionPrompt(next, NOW + 1)).toBe(false)
   })
 
-  it('CONTROL: only the stop and abort reasons are no-decision; a user/absent reason keeps the deny', () => {
+  it('CONTROL: only the stop, abort and timeout reasons are no-decision; a user/absent reason keeps the deny', () => {
     for (const reason of ['user', undefined]) {
       const next = applyPermissionResolved(livePending(), resolved(reason ? { reason } : {}), NOW)
       expect(next.answered).toBe('deny')
