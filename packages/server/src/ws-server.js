@@ -37,7 +37,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
-import { getProviderDataDirs, resolveDaemonDefaultProvider } from './providers.js'
+import { getProviderDataDirs, getProviderTranscriptSources, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
@@ -1007,6 +1007,9 @@ export class WsServer {
         // Multi-provider data dirs (#2965): computed fresh each access so new
         // provider registrations are reflected without restarting the server.
         get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
+        // #7828: the same dirs, TAGGED with the provider that owns each, so a
+        // discovered conversation carries its provider instead of being assumed Claude.
+        get transcriptSources() { return getProviderTranscriptSources() },
         get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
         // #3637: stable per-session auto-evaluator iteration counter (#3186).
         // See WsServer constructor for the lifecycle rationale.

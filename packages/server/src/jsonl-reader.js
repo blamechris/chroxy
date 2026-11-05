@@ -175,15 +175,22 @@ export function getJsonlMtime(filePath) {
  * @param {{ byteTruncated?: boolean }} [opts]
  * @returns {{ messages: Array<object>, truncated: boolean }}
  */
-function parseJsonlContent(raw, { byteTruncated = false } = {}) {
+function parseJsonlContent(raw, { byteTruncated = false, strict = false } = {}) {
   const lines = raw.split('\n').filter(Boolean)
   const messages = []
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     let entry
     try {
       entry = JSON.parse(line)
     } catch {
+      // Strict (#7828): a record that does not parse is a DATA error, not an
+      // empty/shorter transcript. The one tolerated exception is the first line
+      // of a tail-only read, which is cut mid-record by construction.
+      if (strict && !(byteTruncated && i === 0)) {
+        throw new TranscriptDataError('corrupt', `Transcript record ${i + 1} is not valid JSON (corrupt or truncated)`)
+      }
       continue // skip malformed lines
     }
 
@@ -290,6 +297,46 @@ export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = 
   }
 
   return parseJsonlContent(raw, { byteTruncated })
+}
+
+/**
+ * A transcript that cannot be served as data: absent, unreadable or corrupt.
+ * Distinct from an empty transcript, which is a successful read (#7828).
+ */
+export class TranscriptDataError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'TranscriptDataError'
+    this.code = code // 'missing' | 'unreadable' | 'corrupt'
+  }
+}
+
+/**
+ * Strict sibling of readConversationHistoryWithMetaAsync for the read-only
+ * transcript endpoint (#7828): same byte cap, same tail read, same message cap
+ * and parser, but a missing/unreadable file or a corrupt record THROWS a
+ * TranscriptDataError instead of reading as an empty successful transcript.
+ *
+ * @param {string} filePath
+ * @param {number} [maxBytes]
+ * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
+ */
+export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
+  let raw
+  let byteTruncated = false
+  try {
+    const { size } = await stat(filePath)
+    byteTruncated = size > maxBytes
+    raw = byteTruncated
+      ? await readTailBytesAsync(filePath, maxBytes)
+      : await readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      throw new TranscriptDataError('missing', 'Transcript file not found')
+    }
+    throw new TranscriptDataError('unreadable', 'Transcript file could not be read')
+  }
+  return parseJsonlContent(raw, { byteTruncated, strict: true })
 }
 
 /**

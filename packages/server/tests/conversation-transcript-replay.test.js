@@ -61,7 +61,7 @@ function build(transcript, { ws = makeOpenWs(), readerResult, reader } = {}) {
     ...makeSessionIndexCtx(),
     reseedActiveAgents: createSpy((_ws, sid) => reseeds.push(sid)),
     resendPendingQuestions: createSpy(), // #7457
-    scanConversations: createSpy(async () => [{ conversationId: CONV_ID, cwd: CONV_CWD }]),
+    scanConversations: createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: CONV_CWD }]),
     ...(readerFn ? { readConversationTranscript: readerFn } : {}),
     sessionManager: {
       getSession: createSpy(() => undefined),
@@ -391,21 +391,19 @@ describe('#7501 — the transcript replay reports the truncation of the slice it
     assert.equal(sends[sends.length - 1].type, 'history_replay_end')
   })
 
-  it('an UNREADABLE transcript is not truncated — nothing was dropped from a slice that does not exist', async () => {
-    // jsonl-reader takes the same position on its own catch: claiming
-    // truncation here would put a permanent "history incomplete" banner in
-    // front of every conversation whose file has gone.
+  it('an UNREADABLE transcript is a data error, not an empty successful replay (#7828)', async () => {
+    // This used to read as an empty, non-truncated transcript. A missing or
+    // corrupt file is now an error with NO replay frames, so the viewer cannot
+    // mistake "could not read" for "empty conversation".
     const { ctx, sends, ws } = build(null, {
       reader: createSpy(async () => { throw new Error('ENOENT') }),
     })
     await handler(ws, client(), request(), ctx)
     await turn(5)
 
-    const start = sends.find(m => m.type === 'history_replay_start')
-    assert.equal(start.truncated, false)
-    assert.equal(sends.filter(m => m.type === 'message').length, 0)
-    assert.equal(sends[sends.length - 1].type, 'history_replay_end',
-      'positive control: the handler really did run its replay to completion, so the 0 above is not an early return')
+    assert.equal(sends.length, 1)
+    assert.equal(sends[0].type, 'session_error')
+    assert.equal(sends.some(m => m.type === 'history_replay_start' || m.type === 'history_replay_end'), false)
   })
 })
 
