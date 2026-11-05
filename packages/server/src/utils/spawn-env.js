@@ -199,6 +199,12 @@ export const CLAUDE_PARENT_SESSION_ENV = [
   'CLAUDE_CODE_SESSION_ATTENDED',
   'CLAUDE_CODE_MESSAGING_SOCKET',
   'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  // The parent's worktree and its write fence would otherwise confine an
+  // independent child's file writes to the parent's worktree.
+  'CLAUDE_CODE_HOST_WORKTREE',
+  'CLAUDE_CODE_HOST_WORKTREE_FENCE',
+  'CLAUDE_PID',
 ]
 
 /**
@@ -214,6 +220,19 @@ export function stripParentClaudeSessionEnv(env) {
     delete env[key]
   }
   return env
+}
+
+/**
+ * A sanitized COPY of `base` for a host-side `claude` launch that has no other
+ * env builder (one-shot probes, `claude --remote`, `chroxy resume`, ...): the
+ * parent-session markers are removed so the launched claude is a top-level
+ * session. Same single roster as every other launch path.
+ *
+ * @param {Record<string, string|undefined>} [base=process.env]
+ * @returns {Record<string, string|undefined>} a new object
+ */
+export function buildClaudeLaunchEnv(base = process.env) {
+  return stripParentClaudeSessionEnv({ ...base })
 }
 
 const PROVIDERS = {

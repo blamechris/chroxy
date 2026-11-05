@@ -39,7 +39,7 @@ import {
   formatWriteConfirmation,
 } from './built-in-tools/tool-transforms.js'
 import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from './utils/spawn-env.js'
 // #4186: SSRF block-list lives in its own module so the (ip, expected)
 // table can grow without bloating this file's WebFetch integration tests.
 // The exported helpers retain the same names as the original locals so
@@ -260,6 +260,7 @@ export function buildSafeBashEnv() {
     out[k] = v
   }
   stripInheritedChroxySecrets(out)
+  stripParentClaudeSessionEnv(out) // #8262
   return out
 }
 

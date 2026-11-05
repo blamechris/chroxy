@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 import { isBlockedMetadataHost } from './byok-mcp-config.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from './utils/spawn-env.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import * as realOAuthFlow from './byok-mcp-oauth.js'
 import * as realOAuthStore from './byok-mcp-oauth-store.js'
@@ -222,6 +222,7 @@ export class MCPClient extends EventEmitter {
       delete env[key]
     }
     stripInheritedChroxySecrets(env)
+    stripParentClaudeSessionEnv(env) // #8262
     return env
   }
 

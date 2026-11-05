@@ -34,7 +34,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from './utils/spawn-env.js'
 
 const log = createLogger('statusline')
 
@@ -163,6 +163,7 @@ export function defaultBuildEnv() {
   const env = { ...process.env }
   for (const key of [...CHROXY_SECRET_DENYLIST, 'ANTHROPIC_API_KEY']) delete env[key]
   stripInheritedChroxySecrets(env)
+  stripParentClaudeSessionEnv(env) // #8262
   env.COLUMNS = '80'
   env.LINES = '1'
   return env

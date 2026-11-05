@@ -34,7 +34,7 @@
 
 import { spawn } from 'node:child_process'
 import { forceKill, killProcessTree } from '../platform.js'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from '../utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets, stripParentClaudeSessionEnv } from '../utils/spawn-env.js'
 
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000
 export const DEFAULT_BASH_MAX_OUTPUT_BYTES = 1_000_000 // 1 MB
@@ -70,6 +70,7 @@ function defaultChildEnv() {
   const out = { ...process.env }
   for (const key of CHROXY_SECRET_DENYLIST) delete out[key]
   stripInheritedChroxySecrets(out)
+  stripParentClaudeSessionEnv(out) // #8262
   return out
 }
 

@@ -23,6 +23,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { extractSearchableText } from './conversation-search.js'
 import { createLogger } from './logger.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 
 const log = createLogger('summarize')
 
@@ -233,6 +234,10 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
     // that binary is absent — point it at the installed CLI, same as the
     // chat-turn SDK provider, on every install.
     pathToClaudeCodeExecutable: executable,
+    // #8262: without `env` the SDK copies process.env wholesale. Use the same
+    // builder the chat-turn SDK provider does, so a one-shot summary claude is a
+    // top-level session and no parent-session markers are inherited.
+    env: buildSpawnEnv('claude-sdk'),
   }
   if (typeof cwd === 'string' && cwd) options.cwd = cwd
   if (typeof model === 'string' && model) options.model = model
