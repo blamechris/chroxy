@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { createServer } from 'node:net'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
@@ -304,17 +305,62 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
+  // doctor's Port check probes 127.0.0.1 (checkPortAvailable), so a port that is
+  // free HERE is bound on the same interface, read back, then released. A
+  // hardcoded literal is only "probably free" and reds whenever the runner
+  // holds it (#7815).
+  const freePort = () => new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address()
+      srv.close((err) => (err ? reject(err) : resolve(port)))
+    })
+  })
+
+  // freePort() releases the port before doctor probes it, so another process
+  // can take it in between. Retry with a fresh port when the probe reports it
+  // in use: a real regression (doctor never reporting pass) still fails every
+  // attempt, while a lost race does not red the run.
+  const runWithFreePort = async (attempts = 3) => {
+    let last
+    for (let i = 0; i < attempts; i++) {
+      const port = await freePort()
+      const result = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = result.checks.find(c => c.name === 'Port')
+      last = { port, portCheck, ...result }
+      if (portCheck?.status === 'pass') return last
+    }
+    return last
+  }
+
   it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
-    const portCheck = checks.find(c => c.name === 'Port')
+    const { port, portCheck } = await runWithFreePort()
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('warns when the custom port is held', async () => {
+    const srv = createServer()
+    await new Promise((resolve, reject) => {
+      srv.once('error', reject)
+      srv.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = srv.address()
+    try {
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.ok(portCheck.message.includes(String(port)))
+      assert.equal(portCheck.status, 'warn')
+    } finally {
+      await new Promise(resolve => srv.close(resolve))
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+    const { passed, checks } = await runWithFreePort()
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
