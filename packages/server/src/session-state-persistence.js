@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { performance } from 'perf_hooks'
 import { dirname } from 'path'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
@@ -23,14 +24,18 @@ export class SessionStatePersistence {
    * @param {number} [options.stateTtlMs=86400000] - Max age of persisted state before discard (default: 24 hours)
    * @param {number} [options.persistDebounceMs=2000] - Debounce interval for state file writes
    * @param {number} [options.persistMaxWaitMs=10000] - Upper bound on how long a pending write may be postponed by a continuous stream of schedulePersist calls
+   * @param {() => number} [options.now] - Monotonic millisecond clock for the max-wait window (default: performance.now). Must not be wall-clock time: setTimeout is monotonic, so a wall-clock rollback would otherwise stretch the window
    * @param {boolean} [options.isWindowsOverride] - Test-only: force Windows-specific branches regardless of host platform
    */
-  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000, persistMaxWaitMs = 10_000, isWindowsOverride } = {}) {
+  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000, persistMaxWaitMs = 10_000, now = () => performance.now(), isWindowsOverride } = {}) {
     this._stateFilePath = stateFilePath
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000
     this._persistDebounceMs = persistDebounceMs
     this._persistMaxWaitMs = persistMaxWaitMs
+    this._now = now
     this._persistTimer = null
+    /** @type {number|null} monotonic time at which the armed timer is due */
+    this._persistDueAt = null
     /** @type {number|null} when the oldest unwritten schedulePersist call arrived (max-wait anchor) */
     this._persistPendingSince = null
     this._isWindows = isWindowsOverride ?? isWindows
@@ -297,20 +302,35 @@ export class SessionStatePersistence {
    *
    * Implemented with a single timer (delay = min(debounce, time left until the
    * max-wait deadline)), so clearing `_persistTimer` cancels everything.
+   * Elapsed time comes from a MONOTONIC clock (`now`), the same time base as
+   * setTimeout, so a wall-clock rollback cannot stretch the window. A timer
+   * that is already due is never cancelled and re-armed: a call that runs
+   * before the overdue callback would otherwise keep pushing it back by Node's
+   * minimum delay and starve the write.
+   *
+   * The max-wait bounds postponement BY SCHEDULING CALLS only. It is not an
+   * absolute data-loss bound: the write still depends on the event loop running
+   * the callback and on serializeFn succeeding.
    *
    * @param {() => void} serializeFn - Function to call when the debounce fires
    */
   schedulePersist(serializeFn) {
-    const now = Date.now()
+    const now = this._now()
     if (this._persistTimer === null || this._persistPendingSince === null) {
       this._persistPendingSince = now
+      this._persistDueAt = null
     }
+    // Already due (or due at/after the deadline): leave it alone.
+    if (this._persistTimer !== null && this._persistDueAt !== null && this._persistDueAt <= now) return
+    const deadline = this._persistPendingSince + this._persistMaxWaitMs
+    if (this._persistTimer !== null && now >= deadline) return
     clearTimeout(this._persistTimer)
-    const remaining = Math.max(0, this._persistPendingSince + this._persistMaxWaitMs - now)
-    const delay = Math.min(this._persistDebounceMs, remaining)
+    const delay = Math.max(0, Math.min(this._persistDebounceMs, deadline - now))
+    this._persistDueAt = now + delay
     this._persistTimer = setTimeout(() => {
       this._persistTimer = null
       this._persistPendingSince = null
+      this._persistDueAt = null
       try {
         serializeFn()
       } catch (err) {
@@ -326,6 +346,7 @@ export class SessionStatePersistence {
     clearTimeout(this._persistTimer)
     this._persistTimer = null
     this._persistPendingSince = null
+    this._persistDueAt = null
   }
 
   /**

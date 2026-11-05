@@ -829,7 +829,20 @@ describe('SessionStatePersistence rename-failure cleanup (regression: #2909)', (
 // #8954 — the debounce used to reset on every call, so a continuously active
 // turn postponed the write for its whole duration.
 describe('SessionStatePersistence.schedulePersist max-wait (#8954)', () => {
-  const make = (opts) => new SessionStatePersistence({ stateFilePath: join(tmpdir(), 'chroxy-persist-maxwait-test.json'), ...opts })
+  // The mocked-timer tests below drive the clock through mocked Date; the
+  // real-timer tests at the end use the default (monotonic) clock.
+  const make = (opts) => new SessionStatePersistence({ stateFilePath: join(tmpdir(), 'chroxy-persist-maxwait-test.json'), now: () => Date.now(), ...opts })
+  const makeReal = (opts) => new SessionStatePersistence({ stateFilePath: join(tmpdir(), 'chroxy-persist-maxwait-test.json'), ...opts })
+  // Deadline-based wait (never a tick count): resolves true as soon as pred()
+  // holds, false once `ms` of real time has passed.
+  const waitFor = async (pred, ms) => {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      if (pred()) return true
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    return pred()
+  }
 
   it('writes by persistMaxWaitMs while calls keep arriving faster than the debounce', () => {
     mock.timers.enable({ apis: ['setTimeout', 'Date'] })
@@ -931,5 +944,67 @@ describe('SessionStatePersistence.schedulePersist max-wait (#8954)', () => {
   it('is configurable and defaults to 10s', () => {
     assert.equal(make()._persistMaxWaitMs, 10_000)
     assert.equal(make({ persistMaxWaitMs: 3000 })._persistMaxWaitMs, 3000)
+  })
+
+  it('still writes by max-wait when the wall clock jumps backwards mid-stream', async () => {
+    const p = makeReal({ persistDebounceMs: 60, persistMaxWaitMs: 150 })
+    const realNow = Date.now.bind(Date)
+    let writes = 0
+    const fn = () => { writes++ }
+    let ticker
+    try {
+      p.schedulePersist(fn)
+      // Wall clock rolls back a minute; timers (monotonic) are unaffected.
+      mock.method(Date, 'now', () => realNow() - 60_000)
+      ticker = setInterval(() => p.schedulePersist(fn), 20)
+      assert.ok(await waitFor(() => writes >= 1, 3000), 'a write must land by max-wait despite the rollback')
+    } finally {
+      clearInterval(ticker)
+      mock.restoreAll()
+      p.destroy()
+    }
+  })
+
+  it('does not cancel and re-arm a timer that is already overdue', () => {
+    // Injected monotonic clock + mocked timers: the clock is moved past the
+    // deadline WITHOUT running the pending callback, which is exactly "a
+    // scheduling call runs before the overdue timer callback".
+    mock.timers.enable({ apis: ['setTimeout'] })
+    let clock = 0
+    const p = makeReal({ persistDebounceMs: 5, persistMaxWaitMs: 20, now: () => clock })
+    try {
+      let writes = 0
+      const fn = () => { writes++ }
+      p.schedulePersist(fn)
+      const armed = p._persistTimer
+      clock = 25 // past the deadline, timer callback has not run yet
+      for (let i = 0; i < 50; i++) { clock += 1; p.schedulePersist(fn) }
+      assert.equal(p._persistTimer, armed, 'the overdue timer must be left alone')
+      mock.timers.tick(5)
+      assert.equal(writes, 1, 'the overdue timer fires and writes once')
+      assert.equal(p._persistTimer, null)
+    } finally {
+      p.destroy()
+      mock.timers.reset()
+    }
+  })
+
+  it('end to end: writes even when scheduling calls run before the overdue timer callback every time', async () => {
+    const p = makeReal({ persistDebounceMs: 5, persistMaxWaitMs: 20 })
+    let writes = 0
+    const fn = () => { writes++ }
+    let stop = false
+    const pump = () => {
+      if (stop) return
+      p.schedulePersist(fn)
+      setImmediate(pump)
+    }
+    try {
+      pump()
+      assert.ok(await waitFor(() => writes >= 1, 3000), 'an overdue timer must not be cancelled and re-armed forever')
+    } finally {
+      stop = true
+      p.destroy()
+    }
   })
 })
