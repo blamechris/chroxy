@@ -16,13 +16,13 @@
 // It also owns the requested-vs-observed comparison. A requested value is a
 // configuration, not evidence of what is running.
 
-import { resolvePricingKey } from './claude-model-catalog.js'
+import { resolvePricingKey, CLAUDE_CLI_MODEL_ALIASES } from './claude-model-catalog.js'
 
 /** Error code carried by the non-fatal mismatch notice a session emits. */
 export const MODEL_MISMATCH_CODE = 'MODEL_MISMATCH'
 
-// Short aliases the claude CLI resolves itself (the family heads of the roster).
-const NATIVE_ALIASES = new Set(['default', 'best', 'sonnet', 'opus', 'haiku', 'fable', 'opusplan'])
+// Short aliases the claude CLI resolves itself: one set, owned by the catalog.
+const NATIVE_ALIASES = CLAUDE_CLI_MODEL_ALIASES
 const ONE_M = '[1m]'
 const MAX_MODEL_ID_LENGTH = 100
 // `claude-` + family/version/date segments. Starts with a letter or digit so the

@@ -36,9 +36,10 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { CLAUDE_TUI_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { buildModelEvidence, MODEL_MISMATCH_CODE } from './claude-model-request.js'
-import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata, resolveClaudeCliModelId } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { classifyUsageLimit } from './claude-tui/usage-limit.js'
+import { classifyModelError } from './claude-tui/model-error.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
@@ -3740,7 +3741,22 @@ export class ClaudeTuiSession extends BaseSession {
       // claude TUI accepts --model (verified against `claude --help`). Without
       // this the requested model was silently dropped, leaving ready.model
       // disagreeing with the actual model the TUI booted on (#3921).
-      args.push('--model', this.model)
+      //
+      // #8934: only the argv spelling is resolved. A roster short id
+      // (`haiku-5-5`) is Chroxy's, not the CLI's, and the CLI rejects it on the
+      // first prompt; `this.model` stays what the user asked for.
+      const cliModel = resolveClaudeCliModelId(this.model)
+      // Validate the RESOLVED value: the create-time allowlist is bypassed when an
+      // operator opts the provider into allowAnyModel, and the two-token
+      // `--model <v>` form option-parses a value that starts with `-`. Refuse
+      // rather than fall back to the default model.
+      try {
+        assertSafeArgvValue(cliModel, 'model')
+      } catch (err) {
+        this.emit('error', { code: 'invalid_model', message: `Refusing to spawn claude TUI: ${err.message}` })
+        return
+      }
+      args.push('--model', cliModel)
     }
     // Inject the append-bucket skills text via --append-system-prompt at
     // spawn time so the TUI sees it as part of the system prompt — same
@@ -6540,6 +6556,22 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #8934 — at the first-output watchdog: did the TUI print its "issue with the
+   * selected model" screen for THIS session's model? Only the post-prompt PTY
+   * output is read, and only the screen naming exactly the id we passed to
+   * `--model` counts. The sentence is plain text, so the TUI's own echo of a
+   * typed prompt (or a quoted reply) can contain it; naming a different model
+   * is therefore not evidence about ours. No live scan: a classification made
+   * mid-turn would kill healthy turns that merely quote the sentence.
+   * @returns {{ code: string, model: string, message: string }|null}
+   */
+  _detectRejectedModel() {
+    if (!this.model) return null
+    const found = classifyModelError(this._outputSinceBytes(this._limitScanFromBytes))
+    return found && found.model === resolveClaudeCliModelId(this.model) ? found : null
+  }
+
+  /**
    * #8223 — the transcript says this turn's API call failed authentication:
    * tear the turn down now with AUTH_REQUIRED instead of letting it sit until the
    * first-output watchdog. Same `_teardownTurn` shape as `_handleFirstOutputTimeout`
@@ -6617,6 +6649,8 @@ export class ClaudeTuiSession extends BaseSession {
     const authFail = this._scanTurnOutputForAuthFailure()
     // #8400: silence that is really a usage limit says so (retrying cannot help).
     const limit = authFail ? null : this._detectTurnUsageLimit()
+    // #8934: and a model the CLI rejected says so, naming it.
+    const modelErr = authFail || limit ? null : this._detectRejectedModel()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
     // the same fan-out it already handles for the inter-stream stall.
@@ -6626,6 +6660,8 @@ export class ClaudeTuiSession extends BaseSession {
         ? { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE }
         : limit
           ? this._usageLimitPayload(limit)
+          : modelErr
+            ? { code: modelErr.code, message: modelErr.message, model: modelErr.model }
           : {
             code: 'stream_stall',
             message: `No response from claude TUI within ${friendly}. Try sending again.`,
