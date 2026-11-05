@@ -6,6 +6,7 @@ import WebSocket from 'ws'
 import { createLogger } from '../../logger.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 import { assertSafeArgvValue } from '../../utils/argv-safety.js'
+import { remapClaudeSpawn } from './container-claude-spawn.js'
 
 const log = createLogger('k8s-backend')
 
@@ -1658,13 +1659,13 @@ export class K8sBackend {
       || this._agentTokens.get(podName)
       || this._readAgentToken(podName, ns)
 
-    // Remap host cli.js path to container path, mirroring DockerBackend.
-    const containerArgs = [...args]
-    if (containerArgs.length > 0 &&
-        typeof containerArgs[0] === 'string' &&
-        containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
-      log.info(`Remapped CLI path: ${containerArgs[0]} -> ${containerCliPath}`)
-      containerArgs[0] = containerCliPath
+    // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the
+    // Pod's claude, mirroring DockerBackend (#8027).
+    const remap = remapClaudeSpawn({ cmd, args, containerCliPath })
+    const containerCmd = remap.cmd
+    const containerArgs = remap.args
+    if (remap.remapped) {
+      log.info(`Remapped claude spawn: ${cmd} ${args[0] ?? ''} -> ${containerCmd} ${containerArgs[0] ?? ''}`)
     }
 
     // Remap host cwd to /workspace inside the Pod when provided.
@@ -1729,7 +1730,7 @@ export class K8sBackend {
       }
 
       _wireWsToProc(ws, proc, {
-        cmd, args: containerArgs, env, cwd: containerCwd, signal, cleanup,
+        cmd: containerCmd, args: containerArgs, env, cwd: containerCwd, signal, cleanup,
       })
     }).catch((err) => {
       log.warn(`streamCliInEnvironment dial failed for ${podName}: ${err.message}`)

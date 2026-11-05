@@ -2,6 +2,7 @@ import { execFile, spawn } from 'child_process'
 import { createLogger } from '../../logger.js'
 import { VALID_USERNAME_RE } from '../../utils/validation-patterns.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
+import { remapClaudeSpawn } from './container-claude-spawn.js'
 
 const log = createLogger('docker-backend')
 
@@ -528,18 +529,18 @@ export class DockerBackend {
     dockerArgs.push('--env', `HOME=/home/${containerUser}`)
     dockerArgs.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
 
-    // Remap host cli.js path to container path (SDK passes host's absolute path).
-    const containerArgs = [...args]
-    if (containerArgs.length > 0 &&
-        typeof containerArgs[0] === 'string' &&
-        containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
-      log.info(`Remapped CLI path: ${containerArgs[0]} -> ${containerCliPath}`)
-      containerArgs[0] = containerCliPath
+    // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the
+    // container's claude (#8027).
+    const remap = remapClaudeSpawn({ cmd, args, containerCliPath })
+    const containerCmd = remap.cmd
+    const containerArgs = remap.args
+    if (remap.remapped) {
+      log.info(`Remapped claude spawn: ${cmd} ${args[0] ?? ''} -> ${containerCmd} ${containerArgs[0] ?? ''}`)
     }
 
-    dockerArgs.push(containerId, cmd, ...containerArgs)
+    dockerArgs.push(containerId, containerCmd, ...containerArgs)
 
-    log.info(`docker exec stream: ${containerId.slice(0, 12)} ${cmd} ${containerArgs.slice(0, 2).join(' ')}`)
+    log.info(`docker exec stream: ${containerId.slice(0, 12)} ${containerCmd} ${containerArgs.slice(0, 2).join(' ')}`)
 
     const child = (this._spawn || spawn)('docker', dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
