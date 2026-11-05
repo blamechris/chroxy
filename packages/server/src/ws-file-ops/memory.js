@@ -2,7 +2,7 @@ import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
-import { claudeConfigDir } from '../utils/claude-config-dir.js'
+import { claudeConfigDir, isFilesystemRoot } from '../utils/claude-config-dir.js'
 import { realpathOfDeepestAncestor, isConfigDirOrDirectChild } from './common.js'
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
@@ -389,7 +389,11 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
       claudeHomeReal = normalize(claudeHome)
     }
 
-    const allowedRoots = [cwdReal, claudeHomeReal]
+    // Use-site check: the dir was validated earlier, but it is resolved again
+    // here (async), and a filesystem root must never become a containment root.
+    // Treat the global memory root as unavailable instead of installing it.
+    const claudeRootUsable = !isFilesystemRoot(claudeHomeReal)
+    const allowedRoots = claudeRootUsable ? [cwdReal, claudeHomeReal] : [cwdReal]
     const visited = new Set()
     const entries = []
 
@@ -413,7 +417,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     // its resolved target must be markdown like every other read here.
     const encoded = encodeProjectPath(cwdReal)
     const memoryFilePath = resolve(claudeHomeReal, 'projects', encoded, 'memory', 'MEMORY.md')
-    const memoryFile = await readConfinedMemoryFile(memoryFilePath, [claudeHomeReal], { requireMarkdownExt: true })
+    const memoryFile = await readConfinedMemoryFile(memoryFilePath, claudeRootUsable ? [claudeHomeReal] : [], { requireMarkdownExt: true })
 
     send({ type: 'memory_stack_result', entries, memoryFile, error: null })
   }

@@ -29,7 +29,7 @@
  * This is claude's data dir only. chroxy's own `~/.chroxy` / `CHROXY_CONFIG_DIR`
  * are unrelated and untouched.
  */
-import { realpathSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
@@ -39,6 +39,14 @@ const log = createLogger('claude-config-dir')
 /** claude's default data dir, `~/.claude`. */
 export function defaultClaudeConfigDir() {
   return join(homedir(), '.claude')
+}
+
+function isSymlink(p) {
+  try {
+    return lstatSync(p).isSymbolicLink()
+  } catch {
+    return false
+  }
 }
 
 // realpath of the deepest EXISTING ancestor plus the not-yet-created tail, so a
@@ -52,6 +60,10 @@ function canonicalize(absPath) {
       return tail.length ? join(real, ...tail.reverse()) : real
     } catch (err) {
       if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') throw err
+      // A component that IS a symlink whose target is missing (dangling) is not
+      // "a directory that does not exist yet": following its text could land
+      // anywhere. Treat the whole value as unusable instead of walking past it.
+      if (isSymlink(current)) throw err
       const parent = dirname(current)
       if (parent === current) throw err
       tail.push(basename(current))
@@ -94,6 +106,24 @@ export function claudeProjectsDir(env = process.env) {
 }
 
 const warned = new Set()
+
+/** Is `p` a filesystem root (`/`, `C:\`)? For use sites that install a resolved dir as a containment root. */
+export function isFilesystemRoot(p) {
+  return typeof p === 'string' && p !== '' && parse(p).root === p
+}
+
+/**
+ * Startup check: warn once (constant text, no path) when `CLAUDE_CONFIG_DIR` is
+ * set but not usable. Does not modify `env`.
+ * @param {Record<string, unknown>} [env]
+ * @returns {boolean} true when a warning was due
+ */
+export function warnIfClaudeConfigDirUnusable(env = process.env) {
+  if (env?.CLAUDE_CONFIG_DIR === undefined) return false
+  const before = Object.hasOwn(env, 'CLAUDE_CONFIG_DIR')
+  const copy = sanitizeClaudeConfigDirEnv({ CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR })
+  return before && !Object.hasOwn(copy, 'CLAUDE_CONFIG_DIR')
+}
 
 /**
  * Make a claude child env agree with {@link claudeConfigDir}: when the env

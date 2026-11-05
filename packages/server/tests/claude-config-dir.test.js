@@ -11,8 +11,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join, sep, parse } from 'node:path'
-import { claudeConfigDir, claudeProjectsDir, resolveClaudeConfigDirOverride, sanitizeClaudeConfigDirEnv } from '../src/utils/claude-config-dir.js'
-import { buildSpawnEnv } from '../src/utils/spawn-env.js'
+import { claudeConfigDir, claudeProjectsDir, resolveClaudeConfigDirOverride, sanitizeClaudeConfigDirEnv, warnIfClaudeConfigDirUnusable, isFilesystemRoot } from '../src/utils/claude-config-dir.js'
+import { buildSpawnEnv, buildClaudeLaunchEnv } from '../src/utils/spawn-env.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { resolveJsonlPath, resolveClaudeProjectsDir, encodeProjectPath } from '../src/jsonl-reader.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { CliSession } from '../src/cli-session.js'
@@ -182,29 +183,58 @@ describe('containment still holds under an override (#8270)', () => {
 })
 
 describe('canonical root and reader/child agreement (#8270 review)', () => {
-  it('an alias that resolves to the filesystem root is not accepted', () => {
+  it('an alias that resolves to the filesystem root is not accepted', { skip: SKIP_NO_SYMLINK }, () => {
     const fsRoot = parse(root).root
     const alias = join(root, 'alias-to-root')
-    try {
-      symlinkSync(fsRoot, alias, 'dir')
-    } catch {
-      return // symlink creation not permitted on this host
-    }
+    symlinkSync(fsRoot, alias, 'dir')
     assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: alias }), REAL_DEFAULT)
     assert.equal(resolveClaudeConfigDirOverride(alias), null)
     assert.equal(resolveClaudeConfigDirOverride(join(alias, '.')), null)
   })
 
-  it('a symlinked config dir is returned in canonical form', () => {
+  it('a link whose target is missing, or whose target walks up to the root, is not accepted', { skip: SKIP_NO_SYMLINK }, () => {
+    const missing = join(root, 'no-such-dir')
+    // The link text is `<missing>/..`: it only looks like a parent of an existing
+    // dir if the missing component is skipped over. Built by concatenation so
+    // path.join does not collapse the `..`.
+    const dangling = join(root, 'dangling')
+    symlinkSync(`${missing}${sep}..`, dangling, 'dir')
+    // a plain dangling link to a missing sibling is unusable as well
+    const plain = join(root, 'plain-dangling')
+    symlinkSync(missing, plain, 'dir')
+    for (const link of [dangling, plain, join(dangling, 'sub'), join(plain, 'a', 'b')]) {
+      assert.equal(resolveClaudeConfigDirOverride(link), null, link)
+      assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: link }), REAL_DEFAULT)
+    }
+  })
+
+  it('a symlinked config dir is returned in canonical form', { skip: SKIP_NO_SYMLINK }, () => {
     const real = join(root, 'real-cfg')
     const link = join(root, 'link-cfg')
     mkdirSync(real)
-    try {
-      symlinkSync(real, link, 'dir')
-    } catch {
-      return
-    }
+    symlinkSync(real, link, 'dir')
     assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: link }), real)
+  })
+
+  it('an explicit unusable override in the extras wins over a valid parent value', () => {
+    process.env.CLAUDE_CONFIG_DIR = root
+    assert.equal(Object.hasOwn(buildSpawnEnv('claude', { CLAUDE_CONFIG_DIR: 'rel/cfg' }), 'CLAUDE_CONFIG_DIR'), false)
+    assert.equal(buildSpawnEnv('claude', { CLAUDE_CONFIG_DIR: root }).CLAUDE_CONFIG_DIR, root)
+    assert.equal(buildSpawnEnv('claude').CLAUDE_CONFIG_DIR, root)
+  })
+
+  it('the launch env used by resume and doctor applies the same rule', () => {
+    assert.equal(Object.hasOwn(buildClaudeLaunchEnv({ CLAUDE_CONFIG_DIR: ` ${root}` }), 'CLAUDE_CONFIG_DIR'), false)
+    assert.equal(buildClaudeLaunchEnv({ CLAUDE_CONFIG_DIR: root }).CLAUDE_CONFIG_DIR, root)
+  })
+
+  it('the startup check reports an unusable value and stays quiet for a usable or unset one', () => {
+    assert.equal(warnIfClaudeConfigDirUnusable({}), false)
+    assert.equal(warnIfClaudeConfigDirUnusable({ CLAUDE_CONFIG_DIR: root }), false)
+    assert.equal(warnIfClaudeConfigDirUnusable({ CLAUDE_CONFIG_DIR: 'rel/cfg' }), true)
+    const env = { CLAUDE_CONFIG_DIR: 'rel/cfg' }
+    warnIfClaudeConfigDirUnusable(env)
+    assert.equal(env.CLAUDE_CONFIG_DIR, 'rel/cfg', 'the check does not modify the env')
   })
 
   it('the child env and the reader agree on every spelling', () => {
@@ -233,6 +263,13 @@ describe('canonical root and reader/child agreement (#8270 review)', () => {
     assert.equal(buildSpawnEnv('claude').CLAUDE_CONFIG_DIR, root)
   })
 
+  it('isFilesystemRoot recognises a root and nothing else', () => {
+    assert.equal(isFilesystemRoot(parse(root).root), true)
+    assert.equal(isFilesystemRoot(root), false)
+    assert.equal(isFilesystemRoot(''), false)
+    assert.equal(isFilesystemRoot(null), false)
+  })
+
   it('the TUI pty env applies the same rule', () => {
     const bad = new ClaudeTuiSession({ cwd: root, connectionChildEnv: { CLAUDE_CONFIG_DIR: 'rel/cfg' } })
     assert.equal(Object.hasOwn(bad._buildPtyEnv(false), 'CLAUDE_CONFIG_DIR'), false)
@@ -242,7 +279,7 @@ describe('canonical root and reader/child agreement (#8270 review)', () => {
 })
 
 describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
-  it('the MEMORY.md read only follows a markdown target', async () => {
+  it('the MEMORY.md read only follows a markdown target', { skip: SKIP_NO_SYMLINK }, async () => {
     const { createFileOps } = await import('../src/ws-file-ops/index.js')
     const cfg = join(root, 'cfg2')
     const cwd = join(root, 'work2')
@@ -251,11 +288,7 @@ describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
     writeFileSync(join(cfg, 'notes.txt'), 'plain-text-target')
     const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync(cwd)), 'memory')
     mkdirSync(memDir, { recursive: true })
-    try {
-      symlinkSync(join(cfg, 'notes.txt'), join(memDir, 'MEMORY.md'), 'file')
-    } catch {
-      return
-    }
+    symlinkSync(join(cfg, 'notes.txt'), join(memDir, 'MEMORY.md'), 'file')
     process.env.CLAUDE_CONFIG_DIR = cfg
     const out = []
     await createFileOps((_ws, msg) => out.push(msg)).readMemory({}, cwd)

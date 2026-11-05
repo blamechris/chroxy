@@ -11,7 +11,7 @@
  * same-id file under a different provider is never consulted.
  */
 import { realpathSync, statSync } from 'fs'
-import { join, isAbsolute } from 'path'
+import { join, isAbsolute, parse } from 'path'
 import { isPathWithin } from './utils/path-containment.js'
 import { resolveJsonlPath } from './jsonl-reader.js'
 
@@ -81,6 +81,9 @@ export function resolveTranscriptSource({ provider, conversationId, cwd = null, 
   // point the read outside the provider's root (shared helper, #7287).
   try {
     const realRoot = realpathSync(root)
+    if (parse(realRoot).root === realRoot) {
+      return { ok: false, code: 'source_unavailable', reason: `No ${provider} transcript store is registered` }
+    }
     const realFile = realpathSync(candidate)
     if (!isPathWithin(realFile, realRoot)) {
       return { ok: false, code: 'invalid_source', reason: 'Transcript source is outside the provider store' }

@@ -233,7 +233,7 @@ export function stripParentClaudeSessionEnv(env) {
  * @returns {Record<string, string|undefined>} a new object
  */
 export function buildClaudeLaunchEnv(base = process.env) {
-  return stripParentClaudeSessionEnv({ ...base })
+  return sanitizeClaudeConfigDirEnv(stripParentClaudeSessionEnv({ ...base }))
 }
 
 const PROVIDERS = {
@@ -370,7 +370,13 @@ export function buildSpawnEnv(provider, extras = {}) {
     if (resolved.value) parentEnv[key] = resolved.value
   }
   // #6633: Chroxy host identity, computed and authoritative (see allowlist branch).
-  // `extras` may carry its own value; the same rule applies to it.
-  const safeExtras = sanitizeClaudeConfigDirEnv({ ...extras })
+  // `extras` may carry its own value; the same rule applies to it. An explicit
+  // unusable override means "fall back", so it must not let the parent's valid
+  // value take its place.
+  const safeExtras = { ...extras }
+  if (Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR') && safeExtras.CLAUDE_CONFIG_DIR !== undefined) {
+    sanitizeClaudeConfigDirEnv(safeExtras)
+    if (!Object.hasOwn(safeExtras, 'CLAUDE_CONFIG_DIR')) delete parentEnv.CLAUDE_CONFIG_DIR
+  }
   return { ...parentEnv, ...getChroxyHostEnv(), ...safeExtras }
 }
