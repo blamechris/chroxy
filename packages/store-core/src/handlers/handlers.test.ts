@@ -6917,6 +6917,42 @@ describe('handleMessage', () => {
     })
   })
 
+  // #7881: a stall whose delivery is uncertain (first-output timeout) carries
+  // `retrySafe: false` so the chip drops the one-tap resend.
+  describe('retrySafe / delivery preservation on stream_stall (#7881)', () => {
+    const stall = (extra: Record<string, unknown>, messageType = 'error', code: string | undefined = 'stream_stall') =>
+      handleMessage(
+        { messageType, content: 'No response from claude TUI.', ...(code ? { code } : {}), timestamp: 100, ...extra },
+        'sess-active',
+        false,
+        [],
+      )
+
+    it('preserves retrySafe:false and delivery on a stream_stall error', () => {
+      const out = stall({ retrySafe: false, delivery: 'uncertain' })
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.retrySafe).toBe(false)
+        expect(out.chatMessage.delivery).toBe('uncertain')
+      }
+    })
+
+    it('leaves both undefined for older servers, and drops a non-boolean retrySafe', () => {
+      for (const extra of [{}, { retrySafe: 'false' }, { retrySafe: 0 }]) {
+        const out = stall(extra)
+        expect(out.shouldDispatch).toBe(true)
+        if (out.shouldDispatch) expect(out.chatMessage.retrySafe).toBeUndefined()
+      }
+    })
+
+    it('drops them on another error code or a non-error envelope', () => {
+      const other = stall({ retrySafe: false }, 'error', 'AUTH_REQUIRED')
+      if (other.shouldDispatch) expect(other.chatMessage.retrySafe).toBeUndefined()
+      const notError = stall({ retrySafe: false }, 'response')
+      if (notError.shouldDispatch) expect(notError.chatMessage.retrySafe).toBeUndefined()
+    })
+  })
+
   // #8273: the server tags an AUTH_REQUIRED error with the credential it concerns so
   // the chip can name the real remedy.
   describe('authCause preservation on AUTH_REQUIRED (#8273)', () => {

@@ -49,6 +49,19 @@ function render(message: ChatMessage, onRetryStreamStall?: () => void) {
   return tree;
 }
 
+describe('MessageBubble stream-stall retrySafe gate (#7881)', () => {
+  it('retrySafe:false on the message withholds Retry even with onRetryStreamStall wired', () => {
+    const msg = { ...makeStallMessage(), retrySafe: false, delivery: 'uncertain' } as ChatMessage;
+    const tree = render(msg, jest.fn());
+    expect(tree.root.findAllByProps({ testID: 'stream-stall-chip-retry' })).toHaveLength(0);
+  });
+
+  it('without retrySafe the wired Retry is still shown', () => {
+    const tree = render(makeStallMessage(), jest.fn());
+    expect(tree.root.findAllByProps({ testID: 'stream-stall-chip-retry' }).length).toBeGreaterThan(0);
+  });
+});
+
 describe('MessageBubble stream-stall handling (#4496)', () => {
   it('renders the StreamStallChip for error{code: "stream_stall"}', () => {
     const tree = render(makeStallMessage());

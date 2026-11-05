@@ -111,6 +111,8 @@ export declare const ServerMessageSchema: z.ZodObject<{
     stdout: z.ZodOptional<z.ZodString>;
     stderr: z.ZodOptional<z.ZodString>;
     timeoutMs: z.ZodOptional<z.ZodNumber>;
+    delivery: z.ZodOptional<z.ZodString>;
+    retrySafe: z.ZodOptional<z.ZodBoolean>;
     authCause: z.ZodOptional<z.ZodString>;
     kind: z.ZodOptional<z.ZodString>;
     thinkingDurationMs: z.ZodOptional<z.ZodNumber>;

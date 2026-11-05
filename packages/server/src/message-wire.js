@@ -278,6 +278,7 @@ const ERROR_CODE_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/
  * the code-specific chips).
  *
  * @param {{ message: string, code?: string, attemptedResumeId?: string, timeoutMs?: number,
+ *   retrySafe?: boolean, delivery?: string,
  *   stdout?: string, stderr?: string }} data
  * @returns {object}
  */
@@ -341,6 +342,15 @@ export function buildErrorWire(data) {
   // is dropped so the clients fall back to their `auth_ok` value.
   if (code === 'stream_stall' && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0) {
     msg.timeoutMs = data.timeoutMs
+  }
+  // #7881: forward whether a resend is safe on a `stream_stall` (claude-tui's
+  // first-output timeout cannot say whether the written prompt was received), so
+  // the clients drop the one-tap Retry. `retrySafe` is boolean-only and
+  // `delivery` a short lowercase identifier; anything else is dropped and the
+  // chips keep today's behaviour.
+  if (code === 'stream_stall') {
+    if (typeof data.retrySafe === 'boolean') msg.retrySafe = data.retrySafe
+    if (typeof data.delivery === 'string' && /^[a-z_]{1,32}$/.test(data.delivery)) msg.delivery = data.delivery
   }
   // #8273: forward which credential an AUTH_REQUIRED failure concerns, so the
   // clients show the matching remedy (a host login, a rejected API key, a

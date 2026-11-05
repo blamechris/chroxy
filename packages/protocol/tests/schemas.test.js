@@ -965,6 +965,24 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.timeoutMs, 90_000, 'timeoutMs must survive the parse')
   })
 
+  // #7881: zod strips unknown keys, so omitting these would drop them on parse.
+  it('ServerMessageSchema keeps retrySafe and delivery on a stream_stall error (#7881)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'error',
+      content: 'No response from claude TUI.',
+      timestamp: Date.now(),
+      code: 'stream_stall',
+      timeoutMs: 90_000,
+      retrySafe: false,
+      delivery: 'uncertain',
+    })
+    assert.ok(result.success, 'Should validate a message carrying retrySafe/delivery')
+    assert.equal(result.data.retrySafe, false)
+    assert.equal(result.data.delivery, 'uncertain')
+  })
+
   it('ServerMessageSchema stays valid without timeoutMs (older servers)', async () => {
     const { ServerMessageSchema } = await import('../src/schemas/server.ts')
     const result = ServerMessageSchema.safeParse({

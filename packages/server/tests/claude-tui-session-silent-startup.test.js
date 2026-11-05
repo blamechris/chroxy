@@ -16,6 +16,13 @@ import { ClaudeTuiSession, STARTUP_NO_OUTPUT_CODE } from '../src/claude-tui-sess
  */
 
 const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+const __origHome = process.env.HOME
+
+// Assigning undefined to process.env stores the string "undefined"; delete instead.
+function restoreEnv(name, saved) {
+  if (saved === undefined) delete process.env[name]
+  else process.env[name] = saved
+}
 const WARMUP_MS = 300
 
 async function waitUntil(predicate, label, deadlineMs = 5000) {
@@ -38,7 +45,6 @@ describe('ClaudeTuiSession — silent child at startup (#7881)', () => {
   beforeEach(() => {
     fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-home-'))
     writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
-    process.env._ORIG_HOME = process.env.HOME
     process.env.HOME = fakeHome
     process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
     skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-skills-'))
@@ -53,8 +59,8 @@ describe('ClaudeTuiSession — silent child at startup (#7881)', () => {
     Object.defineProperty(ClaudeTuiSession, 'SPAWN_WARMUP_MAX_MS', warmupDescriptor)
     Object.defineProperty(ClaudeTuiSession, 'SINK_BASE', sinkDescriptor)
     if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
-    if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
-    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
+    restoreEnv('HOME', __origHome)
+    restoreEnv('CHROXY_CONFIG_DIR', __sandboxConfigDir)
     for (const d of [fakeHome, skillsDir, sinkBase]) rmSync(d, { recursive: true, force: true })
   })
 
@@ -132,6 +138,116 @@ describe('ClaudeTuiSession — silent child at startup (#7881)', () => {
   })
 })
 
+describe('ClaudeTuiSession — silent child: spawn-in-flight, terminal input, respawn (#7881)', () => {
+  let fakeHome
+  let skillsDir
+  let sinkBase
+  let session
+  let sinkDescriptor
+
+  beforeEach(() => {
+    fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-b-home-'))
+    writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+    process.env.HOME = fakeHome
+    process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
+    skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-b-skills-'))
+    sinkBase = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-b-sink-'))
+    sinkDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'SINK_BASE')
+    Object.defineProperty(ClaudeTuiSession, 'SINK_BASE', { get: () => sinkBase, configurable: true })
+  })
+
+  afterEach(async () => {
+    Object.defineProperty(ClaudeTuiSession, 'SINK_BASE', sinkDescriptor)
+    if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+    restoreEnv('HOME', __origHome)
+    restoreEnv('CHROXY_CONFIG_DIR', __sandboxConfigDir)
+    for (const d of [fakeHome, skillsDir, sinkBase]) rmSync(d, { recursive: true, force: true })
+  })
+
+  function make() {
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', port: 12382, skillsDir, repoSkillsDir: null,
+      loginProbeRunner: async () => ({ status: 0, stdout: '{"loggedIn":true}', stderr: '' }),
+    })
+    const writes = []
+    const fake = { pid: 2 ** 30, write: (d) => writes.push(d), kill() {}, on() {}, onData() {}, onExit() {} }
+    const log = []
+    session.on('ready', () => log.push('ready'))
+    session.on('error', (e) => log.push(`error:${e.code || e.message}`))
+    return { s: session, fake, log, writes }
+  }
+
+  // Stand-in for _spawnPty that ends the way a silent child's warmup does (live
+  // PTY, latch set), but lets a test land a byte / a verdict while the spawn is
+  // still "in flight" (the native-route marker wait sits there in the real method).
+  function stubSpawn(s, fake, midSpawn) {
+    s._spawnPty = async function () {
+      this._term = fake
+      this._ptyExited = false
+      this._startupNoOutput = true
+      this._sawFirstOutput = false
+      await midSpawn(this)
+    }
+  }
+
+  it('a byte landing while the spawn is in flight yields exactly one ready, after the spawn returns', async () => {
+    const { s, fake, log } = make()
+    let spawnReturned = false
+    stubSpawn(s, fake, async (self) => {
+      await new Promise((r) => setTimeout(r, 20))
+      self._appendToOutputTail('late byte during the marker wait')
+      assert.deepEqual(log, [], 'no ready emitted from inside the spawn')
+      await new Promise((r) => setTimeout(r, 20))
+      spawnReturned = true
+    })
+    s.on('ready', () => assert.equal(spawnReturned, true, 'ready only after _spawnPty returned'))
+    await s.start()
+    assert.deepEqual(log.filter((e) => e === 'ready'), ['ready'], 'exactly one ready')
+    assert.equal(log.some((e) => e.startsWith('error:STARTUP_NO_OUTPUT')), false, 'no silent-child diagnostic once bytes arrived')
+    assert.equal(s._processReady, true)
+  })
+
+  it('a byte during the spawn, then the spawn throwing (marker verdict), yields no ready at all', async () => {
+    const { s, fake, log } = make()
+    stubSpawn(s, fake, async (self) => {
+      self._appendToOutputTail('byte')
+      throw Object.assign(new Error('marker mismatch'), { code: 'NATIVE_ENDPOINT_UNVERIFIED' })
+    })
+    await assert.rejects(s.start(), (err) => err.code === 'NATIVE_ENDPOINT_UNVERIFIED')
+    assert.deepEqual(log.filter((e) => e === 'ready'), [])
+    assert.equal(s._processReady, false)
+  })
+
+  it('terminal input is refused while the child is silent, and does not reach the PTY', async () => {
+    const { s, fake, writes } = make()
+    stubSpawn(s, fake, async () => {})
+    await s.start()
+    assert.equal(s._startupNoOutput, true, 'precondition: start() withheld ready')
+    assert.equal(s.writeTerminalInput('abc'), false)
+    assert.deepEqual(writes, [], 'nothing written to the wedged child')
+    s._appendToOutputTail('claude is up')
+    assert.equal(s.writeTerminalInput('abc'), true, 'accepted once the child has produced output')
+    assert.deepEqual(writes, ['abc'])
+  })
+
+  it('a silent respawn withholds ready and keeps the retry budget; a late byte then makes it ready once', async () => {
+    const { s, fake, log } = make()
+    s._respawnCount = 3
+    stubSpawn(s, fake, async () => {})
+    log.length = 0
+    await s._respawnPty()
+    assert.equal(log.includes('ready'), false, 'no ready for a silent respawn')
+    assert.equal(log.includes('error:STARTUP_NO_OUTPUT'), true, 'coded diagnostic')
+    assert.equal(s._respawnCount, 3, 'retry budget untouched by an unproven respawn')
+    assert.equal(s._processReady, false)
+    s._appendToOutputTail('back')
+    s._appendToOutputTail('more')
+    assert.equal(log.filter((e) => e === 'ready').length, 1, 'ready exactly once on the late byte')
+    assert.equal(s._respawnCount, 0, 'budget reset once it proved alive')
+    assert.equal(s._processReady, true)
+  })
+})
+
 describe('ClaudeTuiSession — first-output timeout is not a retry invitation (#7881)', () => {
   let fakeHome
   let skillsDir
@@ -140,7 +256,6 @@ describe('ClaudeTuiSession — first-output timeout is not a retry invitation (#
 
   beforeEach(() => {
     fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-turn-'))
-    process.env._ORIG_HOME = process.env.HOME
     process.env.HOME = fakeHome
     process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
     skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-7881-skills-'))
@@ -149,8 +264,8 @@ describe('ClaudeTuiSession — first-output timeout is not a retry invitation (#
 
   afterEach(async () => {
     if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
-    if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
-    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
+    restoreEnv('HOME', __origHome)
+    restoreEnv('CHROXY_CONFIG_DIR', __sandboxConfigDir)
     for (const d of [fakeHome, skillsDir, sinkBase]) rmSync(d, { recursive: true, force: true })
   })
 

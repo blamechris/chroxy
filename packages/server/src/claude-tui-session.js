@@ -709,6 +709,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #7881: warmup expired with a live child that printed nothing and gave no
     // readiness signal; `ready` is withheld until output arrives.
     this._startupNoOutput = false
+    // #7881: true while start()/_respawnPty is inside _spawnPty.
+    this._spawnInFlight = false
     // #8324: monotonic time of the last byte `writeTerminalInput` wrote (null =
     // never). See getRestartBlockers.
     this._lastTerminalInputMs = null
@@ -2727,7 +2729,7 @@ export class ClaudeTuiSession extends BaseSession {
 
     // Spawn node-pty + wait for TUI warmup. Extracted so tests can stub
     // the prototype method instead of mocking node-pty at the module level.
-    await this._spawnPty(permissionsEnabled)
+    await this._spawnPtyTracked(permissionsEnabled)
 
     // #5316 (WP-2.2) — never resolve start() (and never emit `ready` / set
     // `_processReady`) when the PTY failed to come up. Before this, start()
@@ -2804,6 +2806,21 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
     this._emitConfiguredMcpServers()
+  }
+
+  /**
+   * #7881: `_spawnPty` with `_spawnInFlight` held for its whole run (including the
+   * native-route marker wait). A byte landing inside that window only clears the
+   * silent-child latch; the caller's own post-spawn path then declares `ready`
+   * exactly once, after the marker verdict and the wiped-conversation notice.
+   */
+  async _spawnPtyTracked(permissionsEnabled) {
+    this._spawnInFlight = true
+    try {
+      await this._spawnPty(permissionsEnabled)
+    } finally {
+      this._spawnInFlight = false
+    }
   }
 
   /**
@@ -3238,7 +3255,7 @@ export class ClaudeTuiSession extends BaseSession {
     // hook secret are still in place from the original start.
     const permissionsEnabled = !!(this._port && this._hookSecret) && !this.skipPermissions
     try {
-      await this._spawnPty(permissionsEnabled)
+      await this._spawnPtyTracked(permissionsEnabled)
     } catch (err) {
       this._respawning = false
       // #8038: a binary-gate refusal is NOT "the PTY died" — nothing was
@@ -4323,7 +4340,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._lastOutputMs = this._nowMonotonic()
     this._sawFirstOutput = true
     // #7881: output after a silent warmup — a slow start, now provably alive.
-    if (this._startupNoOutput) this._declareReadyAfterSilentStart()
+    if (this._startupNoOutput) {
+      if (this._spawnInFlight) this._startupNoOutput = false // the spawn caller declares ready
+      else this._declareReadyAfterSilentStart()
+    }
     const rawStr = String(data)
     const chunk = Buffer.from(rawStr, 'utf8')
     // #5794/#5809: monotonic total — never capped, so the nudge's progress check
@@ -4499,6 +4519,12 @@ export class ClaudeTuiSession extends BaseSession {
     if (typeof data !== 'string' || data.length === 0) return false
     if (!this._term || this._ptyExited || this._destroying) return false
     if (this._connectionAuthRoute === 'native' && !this._nativeRouteVerifiedForSpawn) return false
+    // #7881: kernel echo of keys typed into a wedged child would count as output
+    // and falsely declare ready, so a silent child takes no terminal input.
+    // The refusal is the existing `false` return (callers report not-written);
+    // the coded STARTUP_NO_OUTPUT error was already emitted once at startup, and
+    // re-emitting per keystroke would flood clients.
+    if (this._startupNoOutput) return false
     try {
       this._term.write(data)
       this._lastTerminalInputMs = this._nowMonotonic()

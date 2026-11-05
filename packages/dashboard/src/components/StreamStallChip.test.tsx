@@ -12,6 +12,21 @@ import { StreamStallChip } from './StreamStallChip'
 
 afterEach(cleanup)
 
+describe('StreamStallChip retrySafe gate (#7881)', () => {
+  it('retrySafe:false hides Retry even when onRetry is wired, and says delivery is unconfirmed', () => {
+    const onRetry = vi.fn()
+    render(<StreamStallChip errorText="x" onRetry={onRetry} retrySafe={false} timeoutMs={90_000} />)
+    expect(screen.queryByTestId('stream-stall-chip-retry')).toBeNull()
+    expect(screen.getByTestId('stream-stall-chip').textContent).toMatch(/Delivery unconfirmed/)
+    expect(onRetry).not.toHaveBeenCalled()
+  })
+
+  it.each([true, undefined])('retrySafe:%s keeps the Retry button (older servers unchanged)', (v) => {
+    render(<StreamStallChip errorText="x" onRetry={vi.fn()} retrySafe={v} />)
+    expect(screen.getByTestId('stream-stall-chip-retry')).toBeInTheDocument()
+  })
+})
+
 describe('StreamStallChip (#4476)', () => {
   it('renders the chip text', () => {
     render(<StreamStallChip errorText="Stream stalled — no response for 5 minutes" />)

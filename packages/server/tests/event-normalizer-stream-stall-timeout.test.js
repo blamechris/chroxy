@@ -17,7 +17,7 @@ describe('EventNormalizer error mapping — stream_stall timeoutMs (#8223)', () 
   const wire = (data) => new EventNormalizer().normalize('error', data, ctx).messages[0].msg
 
   it('forwards timeoutMs on a stream_stall error', () => {
-    const msg = wire({ code: 'stream_stall', message: 'No response from claude TUI within 90 seconds. Try sending again.', timeoutMs: 90_000 })
+    const msg = wire({ code: 'stream_stall', message: 'No response from claude TUI within 90 seconds. The message was written but unconfirmed; check the session before sending it again.', timeoutMs: 90_000 })
     assert.equal(msg.code, 'stream_stall')
     assert.equal(msg.timeoutMs, 90_000)
   })
@@ -35,5 +35,30 @@ describe('EventNormalizer error mapping — stream_stall timeoutMs (#8223)', () 
   it('does not put timeoutMs on an error that is not a stream_stall', () => {
     assert.equal('timeoutMs' in wire({ code: 'AUTH_REQUIRED', message: 'x', timeoutMs: 90_000 }), false)
     assert.equal('timeoutMs' in wire({ message: 'x', timeoutMs: 90_000 }), false)
+  })
+
+  // #7881: a first-output timeout cannot say whether the written prompt was
+  // received, so the wire carries "a resend is not safe" for the chips.
+  describe('retrySafe / delivery (#7881)', () => {
+    it('forwards retrySafe:false and delivery on a stream_stall error', () => {
+      const msg = wire({ code: 'stream_stall', message: 'stalled', timeoutMs: 90_000, retrySafe: false, delivery: 'uncertain' })
+      assert.equal(msg.retrySafe, false)
+      assert.equal(msg.delivery, 'uncertain')
+    })
+
+    it('omits both when the producer sent none (older producers, cli/sdk stalls)', () => {
+      const msg = wire({ code: 'stream_stall', message: 'stalled' })
+      assert.equal('retrySafe' in msg, false)
+      assert.equal('delivery' in msg, false)
+    })
+
+    it('drops malformed values and never forwards them on another code', () => {
+      const bad = wire({ code: 'stream_stall', message: 'x', retrySafe: 'false', delivery: 'Un certain!' })
+      assert.equal('retrySafe' in bad, false)
+      assert.equal('delivery' in bad, false)
+      const other = wire({ code: 'AUTH_REQUIRED', message: 'x', retrySafe: false, delivery: 'uncertain' })
+      assert.equal('retrySafe' in other, false)
+      assert.equal('delivery' in other, false)
+    })
   })
 })
