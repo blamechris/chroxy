@@ -7,6 +7,7 @@ import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { realpathOfDeepestAncestor, unresolvablePathError, fileOpErrorMessage } from './common.js'
+import { truncateForLog } from './reader.js'
 
 const log = createLogger('ws')
 
@@ -110,7 +111,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         error: null,
       })
     } catch (err) {
-      log.error(`browse_files failed: ${err.message}`)
+      log.error(`list_directory failed: ${truncateForLog(err.message)}`)
       const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
       sendFn(ws, {
@@ -206,7 +207,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         error: null,
       })
     } catch (err) {
-      log.error(`browse_files failed: ${err.message}`)
+      log.error(`browse_files failed: ${truncateForLog(err.message)}`)
       const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
       sendFn(ws, {

@@ -44,6 +44,7 @@ import { tmpdir } from 'os'
 import { randomBytes } from 'crypto'
 import { GIT } from '../git.js'
 import { validateGitPath, unresolvablePathError, fileOpErrorMessage } from './common.js'
+import { truncateForLog } from './reader.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { createLogger } from '../logger.js'
 
@@ -487,7 +488,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         error: null,
       })
     } catch (err) {
-      log.error(`git_status failed: ${err.message}`)
+      log.error(`git_status failed: ${truncateForLog(err.message)}`)
       sendFn(ws, {
         type: 'git_status_result',
         branch: null,
@@ -554,7 +555,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         error: null,
       })
     } catch (err) {
-      log.error(`git_branches failed: ${err.message}`)
+      log.error(`git_branches failed: ${truncateForLog(err.message)}`)
       sendFn(ws, {
         type: 'git_branches_result',
         branches: [],
@@ -620,7 +621,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       })
       sendFn(ws, { type: 'git_stage_result', error: null })
     } catch (err) {
-      log.error(`git_stage failed: ${err.message}`)
+      log.error(`git_stage failed: ${truncateForLog(err.message)}`)
       sendFn(ws, { type: 'git_stage_result', error: fileOpErrorMessage(err, 'Failed to stage files') })
     }
   }
@@ -681,7 +682,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       })
       sendFn(ws, { type: 'git_unstage_result', error: null })
     } catch (err) {
-      log.error(`git_unstage failed: ${err.message}`)
+      log.error(`git_unstage failed: ${truncateForLog(err.message)}`)
       sendFn(ws, { type: 'git_unstage_result', error: fileOpErrorMessage(err, 'Failed to unstage files') })
     }
   }

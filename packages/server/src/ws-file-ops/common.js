@@ -267,6 +267,8 @@ const FILE_OP_ERROR_MESSAGES = {
   ELOOP: 'Too many levels of symbolic links',
 }
 
+const CLIENT_SAFE = new WeakSet()
+
 /**
  * #8018 — an Error whose message is written for the client and carries no path
  * or Node text, so `fileOpErrorMessage` passes it through verbatim. Every other
@@ -277,7 +279,9 @@ const FILE_OP_ERROR_MESSAGES = {
  * @returns {Error}
  */
 export function clientSafeError(message, props = {}) {
-  return Object.assign(new Error(message), props, { clientSafe: true })
+  const err = Object.assign(new Error(message), props)
+  CLIENT_SAFE.add(err)
+  return err
 }
 
 /**
@@ -294,7 +298,7 @@ export function clientSafeError(message, props = {}) {
  */
 export function fileOpErrorMessage(err, fallback = 'Operation failed', overrides = {}) {
   const code = err?.code
-  if (err?.clientSafe === true) return err.message
+  if (err && typeof err === 'object' && CLIENT_SAFE.has(err)) return err.message
   if (typeof code !== 'string') return fallback
   if (Object.hasOwn(overrides, code)) return overrides[code]
   if (Object.hasOwn(FILE_OP_ERROR_MESSAGES, code)) return FILE_OP_ERROR_MESSAGES[code]

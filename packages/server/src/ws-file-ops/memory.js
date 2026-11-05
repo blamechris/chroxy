@@ -4,8 +4,8 @@ import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { claudeConfigDir, isFilesystemRoot } from '../utils/claude-config-dir.js'
 import { realpathOfDeepestAncestor, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError } from './common.js'
+import { truncateForLog } from './reader.js'
 import { createLogger } from '../logger.js'
-
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
@@ -221,7 +221,7 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
     fileStat = await stat(resolvedPath)
   } catch (err) {
     if (err.code === 'ENOENT') return { ...base, exists: false }
-    log.error(`memory file stat failed: ${err.message}`)
+    log.error(`memory file stat failed: ${truncateForLog(err.message)}`)
     return { ...base, error: fileOpErrorMessage(err) }
   }
 
@@ -257,7 +257,7 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
       // Symlink appeared at the canonical path after validation — reject.
       return { ...base, exists: true, skipped: true, error: 'Access denied: possible symlink race — read skipped' }
     }
-    log.error(`memory file read failed: ${err.message}`)
+    log.error(`memory file read failed: ${truncateForLog(err.message)}`)
     return { ...base, exists: true, error: fileOpErrorMessage(err) }
   } finally {
     await fh?.close()
@@ -381,7 +381,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     try {
       cwdReal = await resolveSessionCwd(sessionCwd)
     } catch (err) {
-      log.error(`memory stack cwd resolve failed: ${err.message}`)
+      log.error(`memory stack cwd resolve failed: ${truncateForLog(err.message)}`)
       send({ type: 'memory_stack_result', entries: [], memoryFile: null, error: fileOpErrorMessage(err, 'Failed to resolve session directory') })
       return
     }

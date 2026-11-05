@@ -201,6 +201,17 @@ describe('fileOpErrorMessage (#8018)', () => {
     assert.equal(fileOpErrorMessage(Object.assign(new Error('Access denied: x'), { code: 'EACCES' })), 'Permission denied')
   })
 
+  it('a hand-set or copied clientSafe marker does not pass the message through', () => {
+    const handSet = Object.assign(new Error("EISDIR: x, open '/srv/secret'"), { code: 'EISDIR', clientSafe: true })
+    assert.equal(fileOpErrorMessage(handSet), 'Is a directory')
+    const marked = clientSafeError('Fixed text', { code: 'EACCES' })
+    const copied = Object.assign(new Error("EACCES: x, open '/srv/secret'"), marked)
+    assert.equal(fileOpErrorMessage(copied), 'Permission denied')
+    const spread = Object.assign(new Error('/srv/secret'), { ...marked, code: 'EWEIRD' })
+    assert.equal(fileOpErrorMessage(spread), 'Operation failed')
+    assert.equal(fileOpErrorMessage(marked), 'Fixed text')
+  })
+
   it('does not read inherited keys as codes', () => {
     const err = Object.assign(new Error('x'), { code: 'constructor' })
     assert.equal(fileOpErrorMessage(err), 'Operation failed')
