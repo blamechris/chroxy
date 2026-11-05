@@ -400,5 +400,28 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
       ws.restore();
     });
+
+    // Copilot (#8921): the close/error ladder counter is the module-level
+    // reconnectAttempt. If alert Retry left it maxed, the first socket close after
+    // the redial would give up again and re-latch server_down.
+    it('alert Retry rewinds an exhausted close ladder so one more close reconnects', async () => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry('probe');
+      for (let i = 0; i < 20; i++) nextReconnectAttempt(); // ladder exhausted
+      expect(reconnectAttempt).toBeGreaterThanOrEqual(20);
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+      expect(reconnectAttempt).toBe(0);
+      expect(ws.instances.length).toBeGreaterThan(0);
+
+      ws.instances[ws.instances.length - 1].onclose?.({ code: 1006 });
+      await flushPromises();
+      expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
+      ws.restore();
+    });
   });
 });

@@ -628,6 +628,9 @@ function clearSessionRolesAcrossSessions(
  * "Connection Failed" alert Retry handlers so they cannot diverge.
  */
 function leaveServerDown(): void {
+  // Rewind the close/error backoff ladder first: a still-maxed counter would
+  // re-exhaust on the first failure of the fresh attempt and give up again.
+  resetReconnectAttempt();
   const lifecycle = useConnectionLifecycleStore.getState();
   if (lifecycle.connectionPhase === 'server_down') {
     lifecycle.transitionPhase('connecting', { force: true });
@@ -1788,7 +1791,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // (connectAuto re-resolves the freshest LAN/tunnel endpoint). Mirrors the
   // dashboard's retryConnection (#5724).
   retryConnection: () => {
-    resetReconnectAttempt();
     leaveServerDown();
     const lifecycle = useConnectionLifecycleStore.getState();
     const saved = lifecycle.savedConnection;
