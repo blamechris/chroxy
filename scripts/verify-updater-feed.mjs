@@ -23,12 +23,12 @@ import {verifyTauriSignature, trustedCommentVersion} from './lib/minisign-verify
 
 function usage(msg) {
   if (msg) stderr.write(`error: ${msg}\n`)
-  stderr.write('usage: verify-updater-feed.mjs --feed PATH (--pubkey-from tauri.conf.json | --pubkey B64) --assets DIR [--expect-version V]\n')
+  stderr.write('usage: verify-updater-feed.mjs --feed PATH (--pubkey-from tauri.conf.json | --pubkey B64) --assets DIR [--expect-version V] [--require-platform KEY]... [--expect-url-prefix P] [--require-signed-version]\n')
   exit(2)
 }
 
 function parseArgs(args) {
-  const o = {feed: null, pubkeyFrom: null, pubkey: null, assets: null, expectVersion: null}
+  const o = {feed: null, pubkeyFrom: null, pubkey: null, assets: null, expectVersion: null, requirePlatforms: [], urlPrefix: null, requireSignedVersion: false}
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
     const value = () => {
@@ -41,6 +41,9 @@ function parseArgs(args) {
     else if (a === '--pubkey') o.pubkey = value()
     else if (a === '--assets') o.assets = value()
     else if (a === '--expect-version') o.expectVersion = value()
+    else if (a === '--require-platform') o.requirePlatforms.push(value())
+    else if (a === '--expect-url-prefix') o.urlPrefix = value()
+    else if (a === '--require-signed-version') o.requireSignedVersion = true
     else usage(`unknown argument: ${a}`)
   }
   if (!o.feed) usage('--feed is required')
@@ -74,7 +77,6 @@ function listFiles(dir) {
 
 function urlBasename(url) {
   let path = String(url).split(/[?#]/)[0]
-  path = path.replace(/\/+$/, '')
   const name = path.slice(path.lastIndexOf('/') + 1)
   try {
     return decodeURIComponent(name)
@@ -109,6 +111,10 @@ function main() {
     failures.push(`feed: version "${feed.version}" does not match expected "${o.expectVersion}"`)
   }
 
+  for (const required of o.requirePlatforms) {
+    if (!Object.hasOwn(platforms, required)) failures.push(`${required}: required platform is missing from the feed`)
+  }
+
   let files
   try {
     files = listFiles(o.assets)
@@ -128,6 +134,17 @@ function main() {
       continue
     }
     const name = urlBasename(entry.url)
+    if (o.urlPrefix !== null) {
+      const rest = entry.url.startsWith(o.urlPrefix) ? entry.url.slice(o.urlPrefix.length) : null
+      if (rest === null) {
+        failures.push(`${key}: url "${entry.url}" does not start with expected prefix "${o.urlPrefix}"`)
+        continue
+      }
+      if (rest === '' || rest !== name || rest.includes('/')) {
+        failures.push(`${key}: url "${entry.url}" must be the prefix followed by exactly the asset name`)
+        continue
+      }
+    }
     const matches = files.filter((f) => f.name === name)
     if (matches.length === 0) {
       failures.push(`${key}: no asset named "${name}" under ${o.assets}`)
@@ -143,6 +160,10 @@ function main() {
       continue
     }
     const signedVersion = trustedCommentVersion(result.trustedComment)
+    if (signedVersion === null && o.requireSignedVersion) {
+      failures.push(`${key}: ${name}: signature carries no signed version but --require-signed-version was given`)
+      continue
+    }
     if (signedVersion !== null && signedVersion !== feed.version) {
       failures.push(`${key}: ${name}: signed for version "${signedVersion}" but the feed says "${feed.version}"`)
       continue

@@ -1838,7 +1838,10 @@ jobs:
         # build-updater-feed.mjs and refuses to publish unless verify-updater-feed.mjs
         # (via lib/minisign-verify.mjs) proves every entry verifies against the
         # committed pubkey. Fixtures are real `cargo tauri signer` output.
-        run: node scripts/__tests__/updater-feed.test.mjs
+        run: |
+          set -o pipefail
+          node scripts/__tests__/updater-feed.test.mjs | tee /tmp/chroxy-updater-feed.tap
+          node scripts/lib/assert-test-count.mjs --min 48 cat /tmp/chroxy-updater-feed.tap > /dev/null
 
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs

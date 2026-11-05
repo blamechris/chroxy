@@ -5,8 +5,17 @@
  * hands the box text around base64-encoded twice over: `plugins.updater.pubkey`
  * in tauri.conf.json is base64(public key box), and a `.sig` file (and the
  * `signature` field of `latest.json`) is base64(signature box). This module
- * checks exactly what the Tauri updater client checks, so a release can refuse
- * to publish a feed that installed clients would reject (#8906, #8917).
+ * is a release gate (#8906, #8917): it NEVER accepts a signature the Tauri
+ * updater client (minisign-verify + base64 STANDARD + strict UTF-8) rejects.
+ * It is deliberately STRICTER than the client in three ways:
+ *   - only the prehashed `ED` signature algorithm is accepted (the client
+ *     also takes legacy `Ed`), and the public key algorithm must be `Ed`;
+ *   - the `untrusted comment:` / `trusted comment: ` prefixes are required;
+ *   - an identity or all-zero public key is refused up front.
+ * Encoding is parsed the way the client does and no looser: base64 must be
+ * canonical (no whitespace, no non-zero trailing bits, correct padding), text
+ * must be strict UTF-8, lines split like Rust `str::lines()`, and blank lines
+ * are NEVER skipped because the fields are positional.
  *
  * Box layouts (minisign):
  *   public key : "untrusted comment: ..." \n base64( 'Ed' | keyId[8] | pk[32] )
@@ -14,48 +23,71 @@
  *                "trusted comment: <text>" \n base64( globalSig[64] )
  *   `sig` signs BLAKE2b-512(payload); `globalSig` signs sig ‖ trustedComment.
  *
- * Only the `ED` (prehashed) algorithm is accepted: it is the one tauri's
- * signer emits, and the one the committed fixtures exercise. Anything else is
- * rejected with an explicit reason rather than handled by an untested branch.
- *
  * Never throws on malformed input: returns {ok:false, reason}.
  */
 
 import {createHash, createPublicKey, verify} from 'node:crypto'
 
 const SPKI_ED25519_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
-const STRICT_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
 const TRUSTED_PREFIX = 'trusted comment: '
+const UNTRUSTED_PREFIX = 'untrusted comment:'
+const UTF8 = new TextDecoder('utf-8', {fatal: true})
 
+/** Canonical base64 only: whitespace, bad padding and non-zero trailing bits all fail the round trip. */
 function decodeBase64(text) {
-  if (typeof text !== 'string') return null
-  const t = text.trim()
-  if (t === '' || t.length % 4 !== 0 || !STRICT_BASE64.test(t)) return null
-  return Buffer.from(t, 'base64')
+  if (typeof text !== 'string' || text === '') return null
+  const buf = Buffer.from(text, 'base64')
+  return buf.toString('base64') === text ? buf : null
 }
 
+/** Strict UTF-8 decode; null when the bytes are not valid UTF-8. */
+function decodeUtf8(buf) {
+  try {
+    return UTF8.decode(buf)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Split like Rust `str::lines()`: on `\n`, one trailing `\r` stripped from each
+ * newline-terminated line, a single trailing empty element dropped, blank
+ * lines kept (positions matter).
+ */
 function boxLines(text) {
-  return text.split(/\r?\n/).filter((l) => l !== '')
+  const parts = text.split('\n')
+  const terminated = parts.length - 1
+  if (parts[parts.length - 1] === '') parts.pop()
+  return parts.map((l, i) => (i < terminated && l.endsWith('\r') ? l.slice(0, -1) : l))
 }
 
 function parsePublicKey(pubkeyB64) {
   const raw = decodeBase64(pubkeyB64)
-  if (!raw) return {reason: 'public key is not valid base64'}
-  const lines = boxLines(raw.toString('utf8'))
-  if (lines.length < 2 || !lines[0].startsWith('untrusted comment:')) {
+  if (!raw) return {reason: 'public key is not canonical base64'}
+  const text = decodeUtf8(raw)
+  if (text === null) return {reason: 'public key box is not valid UTF-8'}
+  const lines = boxLines(text)
+  if (lines.length < 2 || !lines[0].startsWith(UNTRUSTED_PREFIX)) {
     return {reason: 'public key box is malformed'}
   }
   const body = decodeBase64(lines[1])
   if (!body || body.length !== 42) return {reason: 'public key body must be 42 bytes'}
   if (body.toString('latin1', 0, 2) !== 'Ed') return {reason: 'public key algorithm is not Ed'}
-  return {keyId: body.subarray(2, 10), key: body.subarray(10, 42)}
+  const key = body.subarray(10, 42)
+  // all-zero, or the Ed25519 identity point (y = 1): degenerate keys that must never anchor trust
+  if (key.subarray(1).every((b) => b === 0) && (key[0] === 0 || key[0] === 1)) {
+    return {reason: 'public key is a degenerate (identity or all-zero) key'}
+  }
+  return {keyId: body.subarray(2, 10), key}
 }
 
 function parseSignature(signatureB64) {
   const raw = decodeBase64(signatureB64)
-  if (!raw) return {reason: 'signature is not valid base64'}
-  const lines = boxLines(raw.toString('utf8'))
-  if (lines.length < 4 || !lines[0].startsWith('untrusted comment:') || !lines[2].startsWith(TRUSTED_PREFIX)) {
+  if (!raw) return {reason: 'signature is not canonical base64'}
+  const text = decodeUtf8(raw)
+  if (text === null) return {reason: 'signature box is not valid UTF-8'}
+  const lines = boxLines(text)
+  if (lines.length < 4 || !lines[0].startsWith(UNTRUSTED_PREFIX) || !lines[2].startsWith(TRUSTED_PREFIX)) {
     return {reason: 'signature box is malformed'}
   }
   const body = decodeBase64(lines[1])

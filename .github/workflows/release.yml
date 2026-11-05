@@ -359,6 +359,26 @@ jobs:
             echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID + APPLE_ID + APPLE_PASSWORD + APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD all set)"
           fi
 
+      - name: Detect signed-version support (tauri signer)
+        shell: bash
+        run: |
+          # tauri-cli >= 2.12 binds the app version into the signature's trusted
+          # comment, and `tauri signer sign` only keeps that binding when given
+          # --app-version. Probe the installed CLI once; the feed checks below
+          # require a signed version only when the CLI can produce one. Captured
+          # into a variable and matched with `case` (no pipe into grep -q).
+          HELP=$(cargo tauri signer sign --help 2>&1 || true)
+          case "$HELP" in
+            *--app-version*)
+              echo "SIGNED_VERSION_SUPPORTED=true" >> "$GITHUB_ENV"
+              echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+              ;;
+            *)
+              echo "SIGNED_VERSION_SUPPORTED=false" >> "$GITHUB_ENV"
+              echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
+              ;;
+          esac
+
       - name: Build Tauri app (universal)
         shell: bash
         env:
@@ -403,16 +423,24 @@ jobs:
             exit 1
           fi
           VERSION=$(node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version")
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
           node scripts/build-updater-feed.mjs \
             --version "$VERSION" \
-            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}" \
+            --base-url "$BASE_URL" \
             --platform "darwin-aarch64=${PAYLOADS[0]}" \
             --platform "darwin-x86_64=${PAYLOADS[0]}" \
             --output "$BUNDLE_DIR/latest.json"
+          EXTRA=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            EXTRA+=(--require-signed-version)
+          fi
           node scripts/verify-updater-feed.mjs \
             --feed "$BUNDLE_DIR/latest.json" \
             --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
-            --assets "$BUNDLE_DIR"
+            --assets "$BUNDLE_DIR" \
+            --expect-version "$VERSION" \
+            --expect-url-prefix "${BASE_URL}/" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -522,6 +550,26 @@ jobs:
             echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY and/or TAURI_SIGNING_PRIVATE_KEY_PASSWORD not configured) — createUpdaterArtifacts overridden to false"
           fi
 
+      - name: Detect signed-version support (tauri signer)
+        shell: bash
+        run: |
+          # tauri-cli >= 2.12 binds the app version into the signature's trusted
+          # comment, and `tauri signer sign` only keeps that binding when given
+          # --app-version. Probe the installed CLI once; the feed checks below
+          # require a signed version only when the CLI can produce one. Captured
+          # into a variable and matched with `case` (no pipe into grep -q).
+          HELP=$(cargo tauri signer sign --help 2>&1 || true)
+          case "$HELP" in
+            *--app-version*)
+              echo "SIGNED_VERSION_SUPPORTED=true" >> "$GITHUB_ENV"
+              echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+              ;;
+            *)
+              echo "SIGNED_VERSION_SUPPORTED=false" >> "$GITHUB_ENV"
+              echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
+              ;;
+          esac
+
       - name: Build Tauri app (MSI)
         shell: bash
         working-directory: packages/desktop
@@ -588,7 +636,13 @@ jobs:
             echo "Expected exactly one .msi, found ${#MSIS[@]}" >&2
             exit 1
           fi
-          cargo tauri signer sign "${MSIS[0]}"
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          SIGN_ARGS=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            # keep the version binding the build's own signature carried
+            SIGN_ARGS+=(--app-version "$VERSION")
+          fi
+          cargo tauri signer sign ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} "${MSIS[0]}"
 
       - name: Write and verify updater feed (Windows)
         if: env.UPDATER_SIGN_ENABLED == 'true'
@@ -604,15 +658,23 @@ jobs:
             exit 1
           fi
           VERSION=$(node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version")
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
           node scripts/build-updater-feed.mjs \
             --version "$VERSION" \
-            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}" \
+            --base-url "$BASE_URL" \
             --platform "windows-x86_64=${MSIS[0]}" \
             --output "$BUNDLE_DIR/latest.json"
+          EXTRA=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            EXTRA+=(--require-signed-version)
+          fi
           node scripts/verify-updater-feed.mjs \
             --feed "$BUNDLE_DIR/latest.json" \
             --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
-            --assets "$BUNDLE_DIR"
+            --assets "$BUNDLE_DIR" \
+            --expect-version "$VERSION" \
+            --expect-url-prefix "${BASE_URL}/" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -690,20 +752,43 @@ jobs:
 
       - name: Verify merged updater feed
         shell: bash
+        env:
+          # Read only to decide whether updater signing was configured for this
+          # release (same pattern as the desktop jobs); never echoed.
+          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           # Release gate (#8917): every platform entry must name an asset that is
           # in this release and verify against the pubkey committed in
           # tauri.conf.json, exactly as an installed client will check it. A feed
           # clients would reject fails the release instead of shipping.
-          if [ ! -f artifacts/updater/latest.json ]; then
-            echo "::notice::No merged updater feed — nothing to verify"
+          #
+          # Fail closed: when updater signing is configured, the desktop jobs
+          # MUST have produced a feed covering every platform, so a missing or
+          # partial feed is an error. Without signing configured, there is
+          # legitimately no feed and the step is a notice.
+          EXTRA=()
+          if [ -n "$TAURI_KEY" ] && [ -n "$TAURI_PWD" ]; then
+            if [ ! -f artifacts/updater/latest.json ]; then
+              echo "::error::Updater signing is configured but no merged updater feed exists (artifacts/updater/latest.json)"
+              exit 1
+            fi
+            EXTRA=(
+              --require-platform darwin-aarch64
+              --require-platform darwin-x86_64
+              --require-platform windows-x86_64
+              --expect-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
+            )
+          elif [ ! -f artifacts/updater/latest.json ]; then
+            echo "::notice::No merged updater feed (updater signing not configured) — nothing to verify"
             exit 0
           fi
           node scripts/verify-updater-feed.mjs \
             --feed artifacts/updater/latest.json \
             --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
             --assets artifacts \
-            --expect-version "${GITHUB_REF_NAME#v}"
+            --expect-version "${GITHUB_REF_NAME#v}" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

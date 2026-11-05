@@ -30,7 +30,20 @@ There is no `.msi.zip` (that is the `"v1Compatible"` layout). A `.sig` file is t
 
 ### Release-time verification gate
 
-`scripts/verify-updater-feed.mjs` checks a feed the way an installed client does: for every `platforms` entry it finds the asset the URL names (exactly one match), then verifies the embedded signature over those bytes against the `plugins.updater.pubkey` committed in `tauri.conf.json`, using `scripts/lib/minisign-verify.mjs` (pure Node, prehashed `ED` minisign signatures only). It also checks the trusted-comment signature, and that any signed `version:` equals the feed version. It runs twice: in each desktop job right after the fragment is written, and in `github-release` on the merged feed with `--expect-version` set to the tag. Any failure fails the release, so a feed that clients would reject is never published. Tests: `scripts/__tests__/updater-feed.test.mjs`, against signatures produced by `cargo tauri signer`.
+`scripts/verify-updater-feed.mjs` checks a feed the way an installed client does: for every `platforms` entry it finds the asset the URL names (exactly one match by file name), then verifies the embedded signature over those bytes against the `plugins.updater.pubkey` committed in `tauri.conf.json`, using `scripts/lib/minisign-verify.mjs` (pure Node). It also checks the trusted-comment signature.
+
+The verifier **never accepts a signature the Tauri updater client rejects**. It parses encodings exactly as strictly as the client: canonical base64 only (no whitespace, no non-zero trailing bits, correct padding), strict UTF-8, Rust `lines()` splitting with blank lines never skipped (fields are positional). It is **deliberately stricter** than the client in three ways: only the prehashed `ED` signature algorithm is accepted (the client also takes legacy `Ed`), the `untrusted comment:` / `trusted comment: ` prefixes are required, and an identity or all-zero public key is refused. It does not claim to be "exactly what the client checks"; the differential check against the client's own crates lives in the PR evidence, and the unit tests pin each strictness.
+
+Options used by the release:
+
+- `--require-platform KEY` (repeatable): the feed must contain that platform. The release job requires `darwin-aarch64`, `darwin-x86_64` and `windows-x86_64`, so a feed that silently lost a platform fails.
+- `--expect-url-prefix P`: every url must be `P` followed by exactly the asset name (no further `/`, query or fragment). The desktop jobs pin `https://github.com/<repo>/releases/download/v<version>/`; the release job pins the same with the tag.
+- `--expect-version V`: the feed `version` must equal it (the release job passes the tag without the `v`).
+- `--require-signed-version`: the signature's trusted comment must carry `version:<feed version>`.
+
+**Version binding.** tauri-cli 2.12 and later write `version:<app version>` into the signature's trusted comment, which stops a validly signed old payload from being replayed under a new version number. `cargo tauri signer sign` drops it unless given `--app-version`. Each desktop job probes the installed CLI once (`Detect signed-version support`), records `SIGNED_VERSION_SUPPORTED`, passes `--app-version` to the Windows re-sign when supported, and adds `--require-signed-version` to its in-job verification only when supported. With an older CLI the signature carries no signed version and the check is skipped (the feed version is still compared to the tag).
+
+**Fail closed.** In `github-release`, when `TAURI_SIGNING_PRIVATE_KEY` and its password are both configured, a missing merged `latest.json` is an error (not a notice) and the verify step adds the required platforms and URL prefix above. Without those secrets there legitimately is no feed, and the step stays a notice. The verification runs in each desktop job right after the fragment is written, and again on the merged feed before the release is created (`scripts/__tests__/updater-feed.test.mjs`, with wiring pinned by `packages/server/tests/release-updater-feed-wiring.test.js`).
 
 ### Generating a new key
 
@@ -129,7 +142,7 @@ raw `.msi`, so Authenticode signing (which rewrites the file) must come *before*
 updater signature is final. The job therefore runs: build (minisigns the `.msi`) ->
 `Sign MSI (Azure Trusted Signing)` -> `Re-sign MSI for the updater`
 (`cargo tauri signer sign` overwrites `.msi.sig` over the Authenticode-signed bytes)
--> write and verify the feed. The re-sign step runs only when both updater signing and
+-> write and verify the feed (the re-sign passes `--app-version` when the CLI supports it). The re-sign step runs only when both updater signing and
 Authenticode signing are enabled; if only updater signing is on, the build's signature
 is already correct. The in-job verification fails the job if the `.msi` in the feed does
 not match its signature (the failure #8906 describes).

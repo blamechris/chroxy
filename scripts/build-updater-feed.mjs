@@ -67,12 +67,14 @@ function main() {
   const baseUrl = opts.baseUrl.replace(/\/+$/, '')
   const platforms = {}
   const problems = []
+  const seen = new Set()
 
   for (const [key, payloadPath] of opts.platforms) {
-    if (platforms[key]) {
+    if (seen.has(key)) {
       problems.push(`${key}: platform given more than once`)
       continue
     }
+    seen.add(key)
     const name = basename(payloadPath)
     if (!SAFE_BASENAME.test(name)) {
       problems.push(`${key}: payload name "${name}" has characters outside [A-Za-z0-9._-]; GitHub would rename the asset and the URL would 404`)
