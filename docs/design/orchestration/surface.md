@@ -20,7 +20,7 @@ Scope: client-facing slice only (protocol messages, lint compliance, dashboard p
 - Deep-link precedent confirmed: `CrossSessionMissionControl` takes `onJumpToSession?: (sessionId) => void`; `ControlRoomView.tsx:366` wires it to `switchSession(sessionId)`.
 - `SessionInfo` (`schemas/server/session.ts:136-199`) is `.passthrough()` with many documented optional fields — safe place for run-membership badge fields. `CumulativeUsageSchema` (:105) is reusable for run usage rollups.
 - Protocol dist trap confirmed: `.gitignore:13` has `dist/`; 54 files under `packages/protocol/dist` are force-tracked — a NEW schema file's `dist/schemas/server/orchestration.{js,d.ts}` will need `git add -f` (#6333).
-- Bearer doc confirmed: HTTP `_validateBearerAuth` (any valid token, incl. pairing-bound) vs `_validatePrimaryBearerAuth` (primary only, 403 `primary_token_required`); WS host-authority = unbound (`!client.boundSessionId`); strict-primary WS gate `client.isPrimaryToken` exists for code-execution-grade capabilities.
+- Bearer doc confirmed: HTTP `_validateBearerAuth` (any valid token except a session-scoped pairing token, unless the route opts in) vs `_validatePrimaryBearerAuth` (primary only, 403 `primary_token_required`); WS host-authority = unbound (`!client.boundSessionId`); strict-primary WS gate `client.isPrimaryToken` exists for code-execution-grade capabilities.
 
 ---
 
@@ -364,7 +364,7 @@ Recommended split (rationale in §1.6): state lives in the dashboard Zustand `Co
 
 **WS-only in v1.** All panel needs are served by the two snapshots + delta; no polling endpoint is required.
 
-Pinned now for the dogfood fast-follow: `GET /api/orchestration/runs/:runId/export` (JSON: full run record incl. unbounded timeline + per-role/per-model usage for the delegated-vs-monolithic cost comparison). Token class: **primary-only via `_validatePrimaryBearerAuth`** (`ws-server.js`, bearer doc §"HTTP endpoints a bound token must NOT reach"). Justification: run records are host-wide cross-session content (plans, review bodies, repo paths across every worker session); `_validateBearerAuth` accepts pairing-bound tokens, and HTTP has no `boundSessionId` analog short of the primary gate — same reasoning that put `DELETE /api/snapshots/:slug` on primary. The dashboard already holds the primary token (`getAuthToken()`), so no client friction.
+Pinned now for the dogfood fast-follow: `GET /api/orchestration/runs/:runId/export` (JSON: full run record incl. unbounded timeline + per-role/per-model usage for the delegated-vs-monolithic cost comparison). Token class: **primary-only via `_validatePrimaryBearerAuth`** (`ws-server.js`, bearer doc §"HTTP endpoints a bound token must NOT reach"). Justification: run records are host-wide cross-session content (plans, review bodies, repo paths across every worker session); `_validateBearerAuth` is not a host-authority gate (unbound pairing tokens pass it), and HTTP has no `boundSessionId` analog short of the primary gate — same reasoning that put `DELETE /api/snapshots/:slug` on primary. The dashboard already holds the primary token (`getAuthToken()`), so no client friction.
 
 ## 5. Build order + test strategy
 

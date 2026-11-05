@@ -2002,3 +2002,31 @@ describe('handlePairMessage scope agreement', () => {
     assert.equal(client.boundSessionId, 'sess-A')
   })
 })
+
+describe('handleAuthMessage scope and refusal ordering', () => {
+  const scopedManager = (id = 'sess-A') => ({
+    getSessionIdForToken: () => id,
+    isSessionTokenValid: () => true,
+  })
+
+  it('a refused protocol version leaves the connection unauthenticated', () => {
+    const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
+      isTokenValid: () => true,
+      pairingManager: scopedManager(),
+      minProtocolVersion: 2,
+    })
+    handleAuthMessage(ctx, ws, { type: 'auth', token: 'tok', protocolVersion: 1 })
+    assert.equal(client.authenticated, false)
+    assert.equal(onAuthSuccess.callCount, 0)
+    assert.equal(ws.closed, true)
+  })
+
+  it('a stored empty-string session id still scopes the connection', () => {
+    const { ctx, ws, client } = makeAuthCtx({
+      isTokenValid: () => true,
+      pairingManager: scopedManager(''),
+    })
+    handleAuthMessage(ctx, ws, { type: 'auth', token: 'tok' })
+    assert.equal(client.boundSessionId, '')
+  })
+})

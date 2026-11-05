@@ -74,7 +74,7 @@ The implementation files are:
 
 ## 3. Primary API Token — Full Session Authority
 
-`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). There is **no session scoping at this layer**. A request that presents a valid primary token can:
+`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). Token validity itself carries no session scoping; the primary token is unscoped. `_validateBearerAuth` additionally refuses session-scoped pairing tokens by default (§4). A request that presents a valid primary token can:
 
 - Subscribe to events from any session (`subscribe_session` / `subscribedSessionIds`)
 - List and switch the active session (`set_active_session`)
@@ -128,7 +128,7 @@ When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` o
 
 - History (`ws-history.js`) restricts session lists, fetches, and resumes to `boundSessionId` only
 - Broadcasts (`ws-server.js` — `_broadcastToSession`, `_subscribeAllClientsToSession`) skip bound clients whose binding does not match
-- HTTP routes behind `_validateBearerAuth` refuse a session-scoped token (403 + `session_scoped_token`) unless the route opts in with `{ allowScoped: true }` and limits the request to the token's bound session. Opted in: `POST /permission-response` (answers only the bound session's permissions). The dashboard shell and the hook-auth fallback also refuse scoped tokens.
+- HTTP routes behind `_validateBearerAuth` refuse a session-scoped token (403 + `session_scoped_token`) unless the route opts in with `{ allowScoped: true }` and limits the request to the token's bound session. Opted in: `POST /permission-response` (answers only the bound session's permissions). The dashboard shell and the hook-auth fallback also refuse scoped tokens. Unbound pairing tokens (linking-mode and host-approved) are host-level and keep the host read routes (`/version`, `/metrics`, `/diagnostics`, snapshots, pool stats). A token whose stored session id is anything other than null/undefined is treated as scoped.
 - HTTP `/permission-response` (`handlePermissionResponseHttp()` in [`ws-permissions.js`](../../packages/server/src/ws-permissions.js)) requires `originSessionId === callerBoundSessionId`; mismatch returns 403 + the unified `SESSION_TOKEN_MISMATCH` payload
 - The session list returned in `auth_ok` is filtered to the bound session ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 534)
 
@@ -247,7 +247,7 @@ User-shell sessions are additionally gated by the `userShell.enabled` config fla
 
 Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.js`](../../packages/server/src/cli-session.js) ~line 193) and exports it to the spawned `claude` CLI subprocess as `CHROXY_HOOK_SECRET`. The CLI uses it on outbound `POST /permission` callbacks.
 
-`_validateHookAuth` ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 882) checks the bearer token against the registered set of hook secrets only — it never accepts the primary API token when at least one hook secret is registered. The fallback to `_isTokenValid` exists for legacy single-session setups and tests where no hook secret was registered; it is not reached in normal multi-session operation.
+`_validateHookAuth` ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 882) checks the bearer token against the registered set of hook secrets only — it never accepts the primary API token when at least one hook secret is registered. The fallback to `_isTokenValid` exists for legacy single-session setups and tests where no hook secret was registered; it is not reached in normal multi-session operation. That fallback also refuses session-scoped pairing tokens, and a permission handler constructed without a hook validator refuses rather than falling back to the bearer check.
 
 Hook secrets are in-process only. They are never persisted, never sent over the user-facing WebSocket, and never appear in QR codes.
 

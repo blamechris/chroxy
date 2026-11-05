@@ -1767,8 +1767,12 @@ export class WsServer {
    */
   _isSessionScopedToken(token) {
     const pm = this._pairingManager
-    if (!pm || !token || typeof pm.getSessionIdForToken !== 'function') return false
-    return !!pm.getSessionIdForToken(token)
+    if (!pm || !token) return false
+    // Fail closed: a manager that cannot report a token's binding is treated
+    // as having bound it. Any stored session id (including an empty string)
+    // counts as bound; only null/undefined is unscoped.
+    if (typeof pm.getSessionIdForToken !== 'function') return true
+    return pm.getSessionIdForToken(token) != null
   }
 
   /**
@@ -2363,6 +2367,9 @@ export class WsServer {
         : null
 
       ws.on('message', (raw) => {
+        // Once a close has begun (e.g. after an auth failure) frames already in
+        // flight must not be dispatched.
+        if (ws.readyState !== 1) return
         let msg
         try {
           msg = JSON.parse(raw.toString())

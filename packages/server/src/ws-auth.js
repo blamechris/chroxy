@@ -139,6 +139,20 @@ export function handleAuthMessage(ctx, ws, msg) {
   }
 
   if (!authRequired || isTokenValid(msg.token)) {
+    // Refuse an unsupported protocol version BEFORE the connection is marked
+    // authenticated, so a connection that is being closed never carries an
+    // authenticated-but-unscoped state.
+    const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
+    const clientVersion = hasVersion ? msg.protocolVersion : null
+
+    if (clientVersion !== null && clientVersion < minProtocolVersion) {
+      send(ws, { type: 'auth_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${minProtocolVersion})` })
+      ws.close()
+      return true
+    }
+
+    // Scope and authenticate together (scope first), before anything else runs.
+    applySessionScope(client, pairingManager, msg.token)
     client.authenticated = true
     client.authTime = Date.now()
     // #6004 — remember the exact token this connection authed with so the
@@ -149,15 +163,6 @@ export function handleAuthMessage(ctx, ws, msg) {
     // shell gate's current-token check is skipped (no TokenManager).
     client.authToken = msg.token
     authFailures.delete(rateLimitKey)
-
-    const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
-    const clientVersion = hasVersion ? msg.protocolVersion : null
-
-    if (clientVersion !== null && clientVersion < minProtocolVersion) {
-      send(ws, { type: 'auth_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${minProtocolVersion})` })
-      ws.close()
-      return true
-    }
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
@@ -172,10 +177,8 @@ export function handleAuthMessage(ctx, ws, msg) {
       }
     }
 
-    // If this token was issued via pairing, bind the client to the session
-    // that was active at pairing time (if any). This prevents a valid
-    // session token from being used to attach to an unrelated session.
-    applySessionScope(client, pairingManager, msg.token)
+    // (Session scope for a pairing-issued token was applied above, together
+    // with authentication.)
 
     // #5985b (epic #5982) — the WS analog of the HTTP-only
     // `_validatePrimaryBearerAuth`. The WS layer previously could not tell the
@@ -263,10 +266,10 @@ export function handleAuthMessage(ctx, ws, msg) {
  */
 function applySessionScope(client, pairingManager, token, expectedSessionId) {
   const fromToken = (pairingManager && token)
-    ? (pairingManager.getSessionIdForToken(token) || null)
+    ? (pairingManager.getSessionIdForToken(token) ?? null)
     : null
-  if (expectedSessionId !== undefined && (expectedSessionId || null) !== fromToken) return false
-  if (fromToken) {
+  if (expectedSessionId !== undefined && (expectedSessionId ?? null) !== fromToken) return false
+  if (fromToken != null) {
     client.boundSessionId = fromToken
   }
   return true
@@ -359,8 +362,9 @@ export function handlePairMessage(ctx, ws, msg) {
     // list and subscriptions. The scope validatePairing reported and the
     // token's own binding must agree; if they do not, refuse the connection.
     if (!applySessionScope(client, pairingManager, result.sessionToken, result.sessionId ?? null)) {
-      log.error('Pairing scope mismatch between redemption result and issued token')
-      send(ws, { type: 'pair_fail', reason: 'invalid_message' })
+      log.error(`Pairing ${JSON.stringify(msg.pairingId)} not completed: redemption result and issued token disagree on session`)
+      try { pairingManager.revokeSessionToken?.(result.sessionToken) } catch { /* best effort */ }
+      send(ws, { type: 'pair_fail', reason: 'pairing_unavailable' })
       ws.close()
       return true
     }

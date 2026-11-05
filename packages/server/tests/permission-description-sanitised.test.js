@@ -350,6 +350,7 @@ describe('hook-routed producer: ws-permissions.js (claude-cli, claude-tui) (#838
       sendFn: mock.fn(),
       broadcastFn,
       validateBearerAuth: mock.fn(() => true),
+      validateHookAuth: mock.fn(() => true),
       pushManager: null,
       pendingPermissions,
       permissionSessionMap: new Map(),
