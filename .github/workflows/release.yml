@@ -332,10 +332,12 @@ jobs:
               echo "TAURI_KEY_EOF"
               echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
               echo "TAURI_CONFIG_OVERRIDE={}"
+              echo "UPDATER_SIGN_ENABLED=true"
             } >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing enabled"
           else
             echo 'TAURI_CONFIG_OVERRIDE={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+            echo "UPDATER_SIGN_ENABLED=false" >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY and/or TAURI_SIGNING_PRIVATE_KEY_PASSWORD not configured) — createUpdaterArtifacts overridden to false"
           fi
 
@@ -355,6 +357,38 @@ jobs:
             echo "::notice::Apple notarization enabled"
           else
             echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID + APPLE_ID + APPLE_PASSWORD + APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD all set)"
+          fi
+
+      - name: Detect signed-version support (tauri signer)
+        shell: bash
+        run: |
+          # tauri-cli >= 2.12 binds the app version into the signature's trusted
+          # comment, and `tauri signer sign` only keeps that binding when given
+          # --app-version. Probe the installed CLI once; the feed checks below
+          # require a signed version only when the CLI can produce one. Captured
+          # into a variable and matched with `case` (no pipe into grep -q).
+          #
+          # clap prints the CURRENT value of an `env =` option in --help, so the
+          # signing variables are unset in a subshell: otherwise a password that
+          # happens to contain "--app-version" would flip the probe. Only an
+          # option DECLARATION line (first token `--app-version`) counts.
+          HELP=$( (unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH; cargo tauri signer sign --help 2>&1) ) || true
+          SUPPORTED=false
+          while IFS= read -r LINE; do
+            case "$LINE" in
+              *[![:space:]]*)
+                TRIMMED="${LINE#"${LINE%%[![:space:]]*}"}"
+                case "$TRIMMED" in
+                  --app-version|--app-version\ *|--app-version=*) SUPPORTED=true ;;
+                esac
+                ;;
+            esac
+          done <<< "$HELP"
+          echo "SIGNED_VERSION_SUPPORTED=$SUPPORTED" >> "$GITHUB_ENV"
+          if [ "$SUPPORTED" = "true" ]; then
+            echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+          else
+            echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
           fi
 
       - name: Build Tauri app (universal)
@@ -384,6 +418,41 @@ jobs:
           fi
           echo "Verifying entitlements on $APP_PATH"
           bash scripts/verify-entitlements.sh "$APP_PATH"
+
+      - name: Write and verify updater feed (macOS)
+        if: env.UPDATER_SIGN_ENABLED == 'true'
+        shell: bash
+        run: |
+          # `cargo tauri build` writes the .app.tar.gz + .sig but never a
+          # latest.json (#8917), so build this job's fragment here. Both darwin
+          # keys point at the one universal archive. The in-job verification
+          # fails the build now rather than at github-release.
+          BUNDLE_DIR=packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          shopt -s nullglob
+          PAYLOADS=("$BUNDLE_DIR"/*.app.tar.gz)
+          if [ "${#PAYLOADS[@]}" -ne 1 ]; then
+            echo "Expected exactly one *.app.tar.gz in $BUNDLE_DIR, found ${#PAYLOADS[@]}" >&2
+            exit 1
+          fi
+          VERSION=$(node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version")
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          node scripts/build-updater-feed.mjs \
+            --version "$VERSION" \
+            --base-url "$BASE_URL" \
+            --platform "darwin-aarch64=${PAYLOADS[0]}" \
+            --platform "darwin-x86_64=${PAYLOADS[0]}" \
+            --output "$BUNDLE_DIR/latest.json"
+          EXTRA=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            EXTRA+=(--require-signed-version)
+          fi
+          node scripts/verify-updater-feed.mjs \
+            --feed "$BUNDLE_DIR/latest.json" \
+            --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
+            --assets "$BUNDLE_DIR" \
+            --expect-version "$VERSION" \
+            --expect-url-prefix "${BASE_URL}/" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -484,11 +553,45 @@ jobs:
               echo "TAURI_KEY_EOF"
               echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
               echo "TAURI_CONFIG_OVERRIDE={}"
+              echo "UPDATER_SIGN_ENABLED=true"
             } >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing enabled"
           else
             echo 'TAURI_CONFIG_OVERRIDE={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+            echo "UPDATER_SIGN_ENABLED=false" >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY and/or TAURI_SIGNING_PRIVATE_KEY_PASSWORD not configured) — createUpdaterArtifacts overridden to false"
+          fi
+
+      - name: Detect signed-version support (tauri signer)
+        shell: bash
+        run: |
+          # tauri-cli >= 2.12 binds the app version into the signature's trusted
+          # comment, and `tauri signer sign` only keeps that binding when given
+          # --app-version. Probe the installed CLI once; the feed checks below
+          # require a signed version only when the CLI can produce one. Captured
+          # into a variable and matched with `case` (no pipe into grep -q).
+          #
+          # clap prints the CURRENT value of an `env =` option in --help, so the
+          # signing variables are unset in a subshell: otherwise a password that
+          # happens to contain "--app-version" would flip the probe. Only an
+          # option DECLARATION line (first token `--app-version`) counts.
+          HELP=$( (unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH; cargo tauri signer sign --help 2>&1) ) || true
+          SUPPORTED=false
+          while IFS= read -r LINE; do
+            case "$LINE" in
+              *[![:space:]]*)
+                TRIMMED="${LINE#"${LINE%%[![:space:]]*}"}"
+                case "$TRIMMED" in
+                  --app-version|--app-version\ *|--app-version=*) SUPPORTED=true ;;
+                esac
+                ;;
+            esac
+          done <<< "$HELP"
+          echo "SIGNED_VERSION_SUPPORTED=$SUPPORTED" >> "$GITHUB_ENV"
+          if [ "$SUPPORTED" = "true" ]; then
+            echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+          else
+            echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
           fi
 
       - name: Build Tauri app (MSI)
@@ -524,10 +627,11 @@ jobs:
 
       - name: Sign MSI (Azure Trusted Signing)
         if: env.SIGN_ENABLED == 'true'
-        # Signs the standalone .msi in place before upload, so the installer users
-        # download is Authenticode-trusted. The updater payload (.msi.zip) was zipped
-        # during the build step and keeps its minisign signature only — see the
-        # "Windows Authenticode code signing" section of docs/release-signing.md.
+        # Signs the .msi in place before upload, so the installer users download is
+        # Authenticode-trusted. With createUpdaterArtifacts:true the updater payload
+        # IS this raw .msi, and this step changes its bytes after the build already
+        # minisigned it — so the next step re-signs it (#8906). See the "Windows
+        # Authenticode code signing" section of docs/release-signing.md.
         # Intentionally NOT continue-on-error: if signing was meant to happen
         # (SIGN_ENABLED) but fails, fail the release rather than ship an unsigned MSI.
         uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
@@ -542,14 +646,67 @@ jobs:
           files-folder-filter: msi
           files-folder-recurse: false
 
+      - name: Re-sign MSI for the updater (after Authenticode)
+        if: env.UPDATER_SIGN_ENABLED == 'true' && env.SIGN_ENABLED == 'true'
+        shell: bash
+        working-directory: packages/desktop
+        run: |
+          # The Authenticode step rewrote the .msi, so the .msi.sig the build wrote
+          # no longer matches it. Overwrite it so the updater signature covers the
+          # exact bytes that are uploaded (key + password come from GITHUB_ENV).
+          shopt -s nullglob
+          MSIS=(src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi)
+          if [ "${#MSIS[@]}" -ne 1 ]; then
+            echo "Expected exactly one .msi, found ${#MSIS[@]}" >&2
+            exit 1
+          fi
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          SIGN_ARGS=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            # keep the version binding the build's own signature carried
+            SIGN_ARGS+=(--app-version "$VERSION")
+          fi
+          cargo tauri signer sign ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} "${MSIS[0]}"
+
+      - name: Write and verify updater feed (Windows)
+        if: env.UPDATER_SIGN_ENABLED == 'true'
+        shell: bash
+        run: |
+          # No latest.json comes out of `cargo tauri build` (#8917); build this
+          # job's fragment, then verify it against the committed pubkey in-job.
+          BUNDLE_DIR=packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi
+          shopt -s nullglob
+          MSIS=("$BUNDLE_DIR"/*.msi)
+          if [ "${#MSIS[@]}" -ne 1 ]; then
+            echo "Expected exactly one .msi in $BUNDLE_DIR, found ${#MSIS[@]}" >&2
+            exit 1
+          fi
+          VERSION=$(node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version")
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          node scripts/build-updater-feed.mjs \
+            --version "$VERSION" \
+            --base-url "$BASE_URL" \
+            --platform "windows-x86_64=${MSIS[0]}" \
+            --output "$BUNDLE_DIR/latest.json"
+          EXTRA=()
+          if [ "${SIGNED_VERSION_SUPPORTED:-false}" = "true" ]; then
+            EXTRA+=(--require-signed-version)
+          fi
+          node scripts/verify-updater-feed.mjs \
+            --feed "$BUNDLE_DIR/latest.json" \
+            --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
+            --assets "$BUNDLE_DIR" \
+            --expect-version "$VERSION" \
+            --expect-url-prefix "${BASE_URL}/" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chroxy-windows
           path: |
             packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip
-            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip.sig
+            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig
             packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/latest.json
 
   github-release:
@@ -617,6 +774,45 @@ jobs:
           node scripts/merge-updater-feeds.mjs --output artifacts/updater/latest.json $FEEDS
           cat artifacts/updater/latest.json
 
+      - name: Verify merged updater feed
+        shell: bash
+        env:
+          # A boolean, never the secrets themselves: the step only needs to know
+          # whether updater signing was configured for this release.
+          UPDATER_SIGNING_CONFIGURED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
+        run: |
+          # Release gate (#8917): every platform entry must name an asset that is
+          # in this release and verify against the pubkey committed in
+          # tauri.conf.json, exactly as an installed client will check it. A feed
+          # clients would reject fails the release instead of shipping.
+          #
+          # Fail closed: when updater signing is configured, the desktop jobs
+          # MUST have produced a feed covering every platform, so a missing or
+          # partial feed is an error. Without signing configured, there is
+          # legitimately no feed and the step is a notice.
+          EXTRA=()
+          if [ "$UPDATER_SIGNING_CONFIGURED" = "true" ]; then
+            if [ ! -f artifacts/updater/latest.json ]; then
+              echo "::error::Updater signing is configured but no merged updater feed exists (artifacts/updater/latest.json)"
+              exit 1
+            fi
+            EXTRA=(
+              --require-platform darwin-aarch64
+              --require-platform darwin-x86_64
+              --require-platform windows-x86_64
+              --expect-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
+            )
+          elif [ ! -f artifacts/updater/latest.json ]; then
+            echo "::notice::No merged updater feed (updater signing not configured) — nothing to verify"
+            exit 0
+          fi
+          node scripts/verify-updater-feed.mjs \
+            --feed artifacts/updater/latest.json \
+            --pubkey-from packages/desktop/src-tauri/tauri.conf.json \
+            --assets artifacts \
+            --expect-version "${GITHUB_REF_NAME#v}" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -624,7 +820,6 @@ jobs:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.msi
-            artifacts/**/*.msi.zip
             artifacts/**/*.tar.gz
             artifacts/**/*.sig
             artifacts/updater/latest.json

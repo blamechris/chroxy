@@ -1,0 +1,2 @@
+# Signed test fixtures: any byte normalization breaks their signatures.
+* -text
