@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs, { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   isFlooredTarget, FLOOR_MAX_TARGET_BYTES, FLOOR_MAX_TARGET_COMPONENTS, FLOOR_MAX_CALL_TARGETS, FLOOR_MAX_CALL_COMPONENTS,
@@ -21,7 +21,6 @@ import {
 
 const CWD = '/work/project'
 const floored = (tool, file_path) => isFlooredTarget(tool, { file_path }, CWD)
-const time = (fn) => { const t0 = Date.now(); const value = fn(); return { value, ms: Date.now() - t0 } }
 
 // The filesystem calls the floor makes while `fn` runs, by function. The floor
 // imports these by name, so the counting wrappers reach it through
@@ -41,6 +40,43 @@ const countFsCalls = (fn) => {
     FS_CALLS.forEach((name, k) => { fs[name] = originals[k] })
     syncBuiltinESMExports()
   }
+}
+
+// The times a name was Unicode-normalized while `fn` runs. The floor does that
+// once per distinct non-ASCII name in a call (the canonical-name memo), so the
+// count is the number of names folded, whatever the number of targets.
+const countNormalizes = (fn) => {
+  const original = String.prototype.normalize
+  let normalizes = 0
+  String.prototype.normalize = function (...args) { normalizes++; return original.apply(this, args) }
+  try {
+    const value = fn()
+    return { value, normalizes }
+  } finally {
+    String.prototype.normalize = original
+  }
+}
+
+// Both counts of one call: names folded and filesystem calls made.
+const measure = (fn) => {
+  const { value, total, calls } = countFsCalls(() => countNormalizes(fn))
+  return { value: value.value, normalizes: value.normalizes, total, calls }
+}
+
+// The filesystem work of a call grows linearly with its targets: a third run
+// gives the cost of one more target, and the many-target call stays within 10%
+// (plus a few calls of slack) of the first call plus that cost per extra target.
+// A walk that grows with the targets already walked (or re-resolves the base
+// per component) overshoots by orders of magnitude, not by the 10%.
+// `maxPerTarget` also caps that cost in absolute terms (about one call per path component walked), so a
+// walk repeated a fixed number of times per target fails too.
+const assertLinearFsCalls = (run, one, many, maxPerTarget) => {
+  const three = run(3)
+  const perTarget = (three.total - one.total) / 2
+  const extraTargets = (FLOOR_MAX_CALL_TARGETS - 1) - 1
+  const allowed = one.total + perTarget * extraTargets * 1.1 + 10
+  assert.ok(perTarget <= maxPerTarget, `${perTarget} filesystem calls per further target, more than ${maxPerTarget}`)
+  assert.ok(many.total <= allowed, `${many.total} filesystem calls for ${FLOOR_MAX_CALL_TARGETS - 1} targets; ${one.total} for one, ${perTarget} per further target`)
 }
 
 // Under the component bound but over the byte bound: 250-byte names.
@@ -80,12 +116,16 @@ describe('floor: a target over the size bounds floors', () => {
     assert.equal(isFlooredTarget('apply_patch', { file_path: CWD, changes: [{ path: 'src/a.js', kind: 'update' }, { path: big, kind: 'update' }] }, CWD), true)
   })
 
-  it('a large over-bound target is decided quickly', () => {
+  it('a large over-bound target is floored before any filesystem call', () => {
+    // Over the bound the verdict is decided on the target's size alone, so a
+    // huge target costs no resolution and no walk.
     for (const target of ['a/'.repeat(32_000), 'a/../'.repeat(16_000) + 'x', longNames(4_000)]) {
-      const { value, ms } = time(() => floored('Write', target))
+      const { value, calls, total } = countFsCalls(() => floored('Write', target))
       assert.equal(value, true)
-      assert.ok(ms < 500, `took ${ms} ms for a ${target.length}-character target`)
+      assert.equal(total, 0, `filesystem calls for a ${target.length}-character target: ${JSON.stringify(calls)}`)
     }
+    // Control: a target within the bounds is resolved, so the counter sees calls.
+    assert.ok(countFsCalls(() => floored('Write', 'a/b.js')).total > 0, 'premise: a target within the bound is walked')
   })
 })
 
@@ -189,11 +229,14 @@ describe('floor: one call\'s targets share a budget', () => {
     assert.equal(isFlooredTarget('apply_patch', patch(names), CWD), false)
   })
 
-  it('a very large changes[] is decided quickly', () => {
+  it('a very large changes[] is floored before any filesystem call', () => {
     const paths = Array.from({ length: 40_000 }, (_, i) => `src/f${i}.js`)
-    const { value, ms } = time(() => isFlooredTarget('apply_patch', patch(paths), CWD))
+    const { value, calls, total } = countFsCalls(() => isFlooredTarget('apply_patch', patch(paths), CWD))
     assert.equal(value, true)
-    assert.ok(ms < 200, `took ${ms} ms`)
+    assert.equal(total, 0, `filesystem calls for ${paths.length} targets: ${JSON.stringify(calls)}`)
+    // Control: within the target budget the same paths are walked.
+    const within = paths.slice(0, FLOOR_MAX_CALL_TARGETS - 1)
+    assert.ok(countFsCalls(() => isFlooredTarget('apply_patch', patch(within), CWD)).total > 0, 'premise: targets within the budget are walked')
   })
 
   it('positive control: a thousand-file patch of absolute paths is not floored', () => {
@@ -210,13 +253,11 @@ describe('floor: one call\'s targets share a budget', () => {
 })
 
 describe('floor: one call\'s filesystem work is bounded', () => {
-  // These two time the name comparison over a thousand walks; on Windows the
-  // walks' filesystem calls alone take longer than the bound.
-  const SKIP_WIN32_TIMING = process.platform === 'win32' && 'filesystem calls dominate this timing on Windows; it runs on POSIX CI'
   let root
 
   before(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
+    // native: expands the 8.3 short names of a Windows runner's tmpdir, which the floor floors
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-floor-call-')))
   })
 
   after(() => {
@@ -260,23 +301,44 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     assert.ok(countFsCalls(() => isFlooredTarget('apply_patch', { changes: changes.slice(0, 1) }, root)).total > 0, 'premise: a walked target is counted')
   })
 
-  it('many targets resolving through one long real directory are decided quickly', { skip: SKIP_NO_SYMLINK || SKIP_WIN32_TIMING }, () => {
+  it('many targets resolving through one long real directory fold its names once', { skip: SKIP_NO_SYMLINK }, () => {
     const dir = join(root, ...Array.from({ length: 3 }, (_, k) => `${k}` + '\uFDFA'.repeat(80)))
     mkdirSync(dir, { recursive: true })
     symlinkSync(dir, join(root, 'L'))
-    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
-    const { value, ms } = time(() => isFlooredTarget('Read', { path: 'L', changes }, root))
-    assert.equal(value, false)
-    assert.ok(ms < 150, `took ${ms} ms`)
+    const run = (n) => {
+      const changes = Array.from({ length: n }, (_, i) => ({ path: `L/x${i}`, kind: 'update' }))
+      return measure(() => isFlooredTarget('Read', { path: 'L', changes }, root))
+    }
+    // The three long names are folded once each, however many targets walk them.
+    const one = run(1)
+    const many = run(FLOOR_MAX_CALL_TARGETS - 1)
+    assert.equal(many.value, false)
+    assert.ok(one.normalizes >= 3, `premise: a walk folds the directory's names (${one.normalizes})`)
+    assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
+    // Per target: lstat + readlink of `L`, one lstat per component of the real
+    // directory, lstat of `xN` (= components + 2 today). Two calls of slack keep
+    // an innocent extra stat from reading as a regression; walking a target
+    // twice costs another `components + 2` and still fails.
+    assertLinearFsCalls(run, one, many, dir.split(sep).length + 4)
   })
 
-  it('many targets above a long cwd are decided quickly', { skip: SKIP_WIN32_TIMING }, () => {
+  it('many targets above a long cwd fold its names once', () => {
     const cwd = join(root, ...Array.from({ length: 4 }, (_, k) => `${k}` + '\uFDFA'.repeat(70)))
     mkdirSync(cwd, { recursive: true })
-    const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `../x${i}`, kind: 'update' }))
-    const { value, ms } = time(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
-    assert.equal(value, false)
-    assert.ok(ms < 200, `took ${ms} ms`)
+    const run = (n) => {
+      const changes = Array.from({ length: n }, (_, i) => ({ path: `../x${i}`, kind: 'update' }))
+      return measure(() => isFlooredTarget('apply_patch', { file_path: cwd, changes }, cwd))
+    }
+    const one = run(1)
+    const many = run(FLOOR_MAX_CALL_TARGETS - 1)
+    assert.equal(many.value, false)
+    assert.ok(one.normalizes >= 3, `premise: a walk folds the cwd's names (${one.normalizes})`)
+    assert.equal(many.normalizes, one.normalizes, `${many.normalizes} folds for ${FLOOR_MAX_CALL_TARGETS - 1} targets, ${one.normalizes} for one`)
+    // `../xN` from the cwd: `..` is consumed lexically (no stat), so the two calls
+    // are the lstat of `xN` and `_hasOtherHardLinks`'s lstat of the resolved
+    // target, which runs because `apply_patch` writes. A read-only tool would cost
+    // one call per target, so this cap is tied to the tool above.
+    assertLinearFsCalls(run, one, many, 2)
   })
 
   it('a long name a target resolves to floors', { skip: SKIP_NO_SYMLINK }, () => {
