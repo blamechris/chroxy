@@ -691,7 +691,7 @@ describe('ClaudeTuiSession', () => {
       const strictRunner = async ({ args }) => {
         const unknown = args.slice(2).filter((a) => !['--json', '--text', '--help', '-h'].includes(a))
         if (unknown.length) return { status: 1, stdout: '', stderr: `error: unknown option '${unknown[0]}'` }
-        return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }) }
+        return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }), stderr: '' }
       }
       const candidate = new ClaudeTuiSession({
         cwd: '/tmp',

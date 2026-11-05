@@ -268,7 +268,7 @@ export const AUDITED_SINKS = [
     // source text changes upstream of this cut point, this entry goes stale
     // and must be re-derived against the new truncation.
     match: "execFile(binary, args, { cwd, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true, }, (err, stdout, stderr) => { if (err && typeof err.code !== 'number') { reject(err) retur",
-    reason: "runClaudeAuthStatus's two call sites (_verifyNativeConnectionRoute, _probeLoginBeforeFirstSpawn) pass claudeAuthStatusArgs(), a constant ['auth','status','--json'] array — no interpolated value, never client text.",
+    reason: "runClaudeAuthStatus's two call sites (_verifyNativeConnectionRoute, _probeLoginBeforeFirstSpawn) pass claudeAuthStatusArgs(), a copy of the frozen static argv ['auth','status','--json'] — no interpolated value, never client text.",
   },
   // #7935 — `_spawnPty`'s node-pty `ptyMod.spawn(attemptedBinary, args, {...})`
   // became a scanned sink once the lint learned to recognise node-pty

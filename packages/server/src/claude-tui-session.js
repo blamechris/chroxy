@@ -129,10 +129,12 @@ function latchNodePtyImportFailure(session, err) {
  * `--json`/`--text`/`--help` — `--settings` is rejected ("unknown option": exit 1,
  * empty stdout), which the native route read as NATIVE_LOGIN_REQUIRED on a logged-in
  * host and the pre-spawn probe (#8223) read as an inconclusive no-op. Both callers
- * build their argv here so neither can re-add it.
+ * take their argv from this one frozen list; each call gets a copy, so a caller
+ * that appends to its own argv cannot change the shared base.
  */
+const CLAUDE_AUTH_STATUS_ARGS = Object.freeze(['auth', 'status', '--json'])
 function claudeAuthStatusArgs() {
-  return ['auth', 'status', '--json']
+  return [...CLAUDE_AUTH_STATUS_ARGS]
 }
 
 function runClaudeAuthStatus({ binary, args, cwd, env }) {
