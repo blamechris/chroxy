@@ -200,6 +200,9 @@ function PlanApprovalCard({
  * the active session id gives each session fresh list, scroll and expand state —
  * the same remount Files -> Chat performed by hand.
  */
+/** How long the layout must be quiet before a freshly opened chat stops following (#8961). */
+const OPENING_SETTLE_MS = 1000;
+
 export function ChatView(props: ChatViewProps) {
   const sessionId = useConnectionStore((s) => s.activeSessionId);
   // Namespaced so no real session id can equal the no-session key.
@@ -237,12 +240,26 @@ function ChatViewForSession({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const showScrollToBottomRef = useRef(false);
-  // #8961: true from mount until the reader takes the list over (drag, jump to
-  // top, search jump). While true the list follows its content to the end even
+  // #8961: true from mount until the layout settles (OPENING_SETTLE_MS after the
+  // last content size event) or the reader takes the list over (drag, jump to
+  // top, search jump). The settle bound matters for scroll paths that fire no
+  // drag-begin (VoiceOver/TalkBack gestures, a wheel, programmatic scrolls): they
+  // must not be yanked back to the end by later streamed growth. While true the list follows its content to the end even
   // though the mount's own first scroll events read "scrolled up" (offset 0 on
   // estimated, still-unmeasured rows), which would otherwise latch
   // `showScrollToBottomRef` and leave a freshly opened chat at its first message.
   const openingRef = useRef(true);
+  const openingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const endOpening = () => {
+    openingRef.current = false;
+    if (openingTimerRef.current != null) {
+      clearTimeout(openingTimerRef.current);
+      openingTimerRef.current = null;
+    }
+  };
+  useEffect(() => () => {
+    if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
+  }, []);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
@@ -298,7 +315,7 @@ function ChatViewForSession({
     if (!currentMatchId) return;
     const index = groupIndexByMessageIdRef.current.get(currentMatchId);
     if (index != null) {
-      openingRef.current = false; // the search jump takes the list over (#8961)
+      endOpening(); // the search jump takes the list over (#8961)
       scrollViewRef.current?.scrollToIndex({
         index,
         animated: true,
@@ -439,11 +456,11 @@ function ChatViewForSession({
   // Only a finger starts a drag; programmatic scrolls never fire this, so it is
   // the unambiguous "the reader took over" signal.
   const handleScrollBeginDrag = () => {
-    openingRef.current = false;
+    endOpening();
   };
 
   const scrollToTop = () => {
-    openingRef.current = false;
+    endOpening();
     scrollViewRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
@@ -632,10 +649,17 @@ function ChatViewForSession({
         // estimate -> measured corrections) to the end, unanimated, and ignore
         // the scrolled-up latch the mount's own scroll events set.
         onContentSizeChange={() => {
-          if (isSelectingRef.current || hasUnansweredPrompt) return;
+          if (isSelectingRef.current) return;
           if (openingRef.current) {
+            // The end is the right place even with an unanswered prompt: it is
+            // the last row. Each size event restarts the settle window.
             scrollViewRef.current?.scrollToEnd({ animated: false });
-          } else if (!showScrollToBottomRef.current) {
+            if (openingTimerRef.current != null) clearTimeout(openingTimerRef.current);
+            openingTimerRef.current = setTimeout(endOpening, OPENING_SETTLE_MS);
+            return;
+          }
+          if (hasUnansweredPrompt) return;
+          if (!showScrollToBottomRef.current) {
             scrollViewRef.current?.scrollToEnd();
           }
         }}

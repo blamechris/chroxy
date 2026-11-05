@@ -160,17 +160,17 @@ describe('ChatView virtualization (#5517)', () => {
   it('still auto-scrolls to bottom when content grows (sticky streaming)', () => {
     // FlatList exposes scrollToEnd just like ScrollView; the onContentSizeChange
     // → scrollToEnd path that keeps the latest message visible must survive.
-    expect(source).toMatch(/onContentSizeChange[\s\S]{0,200}scrollToEnd/);
+    expect(source).toMatch(/onContentSizeChange=\{[\s\S]{0,900}scrollToEnd/);
   });
 
   it('still pauses auto-scroll while selecting or an unanswered prompt is up', () => {
-    expect(source).toMatch(/isSelectingRef\.current[\s\S]{0,120}hasUnansweredPrompt/);
+    expect(source).toMatch(/isSelectingRef\.current\) return[\s\S]{0,900}hasUnansweredPrompt\) return/);
   });
 
   it('does not yank a scrolled-up reader to the bottom on content-size churn', () => {
     // FlatList fires onContentSizeChange on windowing too, so the auto-scroll
     // must also gate on showScrollToBottomRef (user is near the bottom).
-    expect(source).toMatch(/onContentSizeChange[\s\S]{0,400}showScrollToBottomRef\.current/);
+    expect(source).toMatch(/onContentSizeChange=\{[\s\S]{0,1400}showScrollToBottomRef\.current/);
   });
 
   it('keeps keyboard auto-scroll wiring', () => {

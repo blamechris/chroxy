@@ -100,6 +100,77 @@ describe('ChatView opens at the latest message (#8961)', () => {
     act(() => tree.unmount());
   });
 
+  it('stops following once the layout has settled, so a reader who scrolls with no drag is not yanked', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat, spy } = mount([reply('a'), reply('b')]);
+      act(() => { flat().props.onContentSizeChange(400, 900); });
+      act(() => { jest.advanceTimersByTime(1500); });
+      // a VoiceOver / wheel / programmatic scroll up: onScroll only, no drag-begin
+      act(() => { flat().props.onScroll(scrollEvent(100, 900)); });
+      spy.mockClear();
+      act(() => { flat().props.onContentSizeChange(400, 1000); });
+      expect(spy).not.toHaveBeenCalled();
+      act(() => tree.unmount());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('extends the opening while size events keep arriving inside the settle window', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat, spy } = mount([reply('a'), reply('b')]);
+      for (let h = 900; h <= 1500; h += 200) {
+        act(() => { flat().props.onContentSizeChange(400, h); });
+        act(() => { jest.advanceTimersByTime(600); });
+      }
+      act(() => { flat().props.onScroll(scrollEvent(0, 1500)); });
+      spy.mockClear();
+      act(() => { flat().props.onContentSizeChange(400, 1600); });
+      expect(spy).toHaveBeenCalledTimes(1);
+      act(() => tree.unmount());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('clears the settle timer on unmount', () => {
+    jest.useFakeTimers();
+    try {
+      const { tree, flat } = mount([reply('a')]);
+      const setSpy = jest.spyOn(global, 'setTimeout');
+      act(() => { flat().props.onContentSizeChange(400, 900); });
+      const settle = setSpy.mock.results[setSpy.mock.calls.findIndex((c) => c[1] === 1000)];
+      expect(settle).toBeDefined();
+      const clearSpy = jest.spyOn(global, 'clearTimeout');
+      act(() => tree.unmount());
+      expect(clearSpy).toHaveBeenCalledWith(settle.value);
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('opens at the end even when the session has an unanswered prompt', () => {
+    const prompt = { id: 'p1', type: 'prompt', content: 'Pick one', timestamp: 1000, options: [{ label: 'x', value: 'x' }] } as unknown as ChatMessage;
+    const { tree, flat, spy } = mount([reply('a'), prompt]);
+    act(() => { flat().props.onContentSizeChange(400, 900); });
+    expect(spy).toHaveBeenCalledWith({ animated: false });
+    act(() => tree.unmount());
+  });
+
+  it('does not follow in selection mode while opening', () => {
+    let tree!: renderer.ReactTestRenderer;
+    const el = element([reply('a')]);
+    act(() => { tree = renderer.create(React.cloneElement(el, { isSelecting: true, isSelectingRef: { current: true } })); });
+    const spy = jest.spyOn(tree.root.findByType(FlatList).instance, 'scrollToEnd').mockImplementation(() => {});
+    act(() => { tree.root.findByType(FlatList).props.onContentSizeChange(400, 900); });
+    expect(spy).not.toHaveBeenCalled();
+    act(() => tree.unmount());
+  });
+
   it('still follows the end for a reader who dragged and is back at the bottom', () => {
     const { tree, flat, spy } = mount([reply('a'), reply('b')]);
     act(() => { flat().props.onScrollBeginDrag(); });
