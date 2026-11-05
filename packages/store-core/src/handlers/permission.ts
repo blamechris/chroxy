@@ -192,6 +192,16 @@ export const PERMISSION_STOPPED_REASON = 'stopped'
 export const PERMISSION_ABORTED_REASON = 'aborted'
 
 /**
+ * #8937: the `permission_resolved` reason for a prompt whose per-request timer
+ * (5 minutes) ran out. The in-process providers (claude-sdk, BYOK, codex
+ * app-server) resolve it as a deny so the SDK gets a verdict, and say so ONLY
+ * here -- they never raise `permission_expired`. Nobody refused it, so it is the
+ * `expired` record history journals it as (`permissionOutcomeForEvent`), and the
+ * one the #7365 end-of-turn summary counts.
+ */
+export const PERMISSION_TIMEOUT_REASON = 'timeout'
+
+/**
  * #8470: the `permission_resolved` reason for a QUESTION a newer question
  * replaced. Unlike the two above it is acted on only on the question variant
  * (`toolUseId`, no `requestId`).
@@ -213,6 +223,7 @@ export const QUESTION_SUPERSEDED_REASON = 'superseded'
  *     no-decision shape, as an `expired` record -- what history journals for it,
  *     so the live card and its replay agree. Before this it was stamped as an
  *     answered deny and read "Denied" live but "expired" after a switch.
+ *   - A timer that ran out (`reason: 'timeout'`, #8937): the same `expired` record.
  *   - anything else: the decision is the answer, exactly as before -- except that an
  *     `allow` never overwrites the `allowSession` / `allowAlways` this client already
  *     recorded, and one carrying `scope: 'session'` is `allowSession` (#8517).
@@ -226,7 +237,7 @@ export function applyPermissionResolved(
 ): ChatMessage {
   const noDecision =
     resolved.reason === PERMISSION_STOPPED_REASON ? 'stopped'
-      : resolved.reason === PERMISSION_ABORTED_REASON ? 'expired'
+      : resolved.reason === PERMISSION_ABORTED_REASON || resolved.reason === PERMISSION_TIMEOUT_REASON ? 'expired'
         : null
   if (noDecision) {
     return {
