@@ -12500,7 +12500,8 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
-.turn-outcome-marker-truncated {
+.turn-outcome-marker-truncated,
+.turn-outcome-marker-interrupted {
   color: var(--accent-orange);
   border-color: color-mix(in srgb, var(--accent-orange) 40%, transparent);
   background: color-mix(in srgb, var(--accent-orange) 12%, transparent);

@@ -21,11 +21,15 @@
  *  - `truncated` -- cut short by a limit (tokens, turns, budget, context).
  *  - `refused`   -- the model declined to answer.
  *  - `stopped`   -- the turn was cancelled.
+ *  - `interrupted` -- the turn was lost: the daemon went down (or restarted)
+ *                    under it, so no provider ever ended it (#8259). Written by
+ *                    the server's restore-time history sweep, not mapped from a
+ *                    provider signal.
  *
  * Append-only: every value is a wire contract. An absent field means the
  * provider did not say, which clients treat like `completed`: no marker.
  */
-export const TURN_OUTCOMES = ['completed', 'truncated', 'refused', 'stopped'] as const
+export const TURN_OUTCOMES = ['completed', 'truncated', 'refused', 'stopped', 'interrupted'] as const
 
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number]
 
@@ -68,6 +72,10 @@ const DESCRIPTIONS: Record<MarkedTurnOutcome, TurnOutcomeDescription> = {
   stopped: {
     label: 'Stopped',
     detail: 'This turn was stopped before it finished.',
+  },
+  interrupted: {
+    label: 'Interrupted: connection lost',
+    detail: 'The connection to the server was lost before this turn finished, so the reply is incomplete. Send your message again to retry.',
   },
 }
 

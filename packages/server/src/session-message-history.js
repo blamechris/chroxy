@@ -582,6 +582,41 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #8259: close a turn the daemon went down under. A turn that was streaming at
+   * shutdown has a `user_input` message and no `result` after it: the partial reply was
+   * only ever in memory, so no client could ever be told how it ended, and the
+   * prompt showed no reply and no error. Append a synthetic `result` carrying
+   * the `interrupted` turn outcome, the SAME marker path (`turnOutcome` on a
+   * `result`, rendered by every client's TurnOutcomeMarker) a stopped or
+   * truncated turn already uses, so a live client, a delta replay and a full
+   * rebuild all show it.
+   *
+   * Appended at the tail (like #8336's re-delivered question) so a reconnecting
+   * client whose cursor sits inside the restored range receives it. An `error`
+   * entry after the last prompt also ends the turn. Returns the input unchanged
+   * (same reference) when there is nothing to close, and is idempotent: once
+   * the `result` is there, a later restart adds nothing. The input is not
+   * mutated.
+   *
+   * @param {Array} history
+   * @param {number} [now] - injectable for tests
+   * @returns {Array}
+   */
+  static markInterruptedTurn(history, now = Date.now()) {
+    if (!Array.isArray(history) || history.length === 0) return history
+    let lastPrompt = -1
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i] && history[i].type === 'message' && history[i].messageType === 'user_input') { lastPrompt = i; break }
+    }
+    if (lastPrompt === -1) return history
+    for (let i = lastPrompt + 1; i < history.length; i++) {
+      const t = history[i] && history[i].type
+      if (t === 'result' || t === 'error') return history
+    }
+    return [...history, { type: 'result', turnOutcome: 'interrupted', timestamp: now }]
+  }
+
+  /**
    * Record a user input message in the session's history ring buffer.
    * On the first non-empty input, emits auto_label if the session qualifies.
    *

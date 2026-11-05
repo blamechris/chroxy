@@ -94,7 +94,7 @@ describe('provider signal -> turn outcome (#7326)', () => {
   })
 
   it('shares the protocol vocabulary rather than keeping a second list', () => {
-    assert.deepEqual([...TURN_OUTCOMES], ['completed', 'truncated', 'refused', 'stopped'])
+    assert.deepEqual([...TURN_OUTCOMES], ['completed', 'truncated', 'refused', 'stopped', 'interrupted'])
     assert.ok(isTurnOutcome('truncated') && !isTurnOutcome('refusal'))
   })
 })

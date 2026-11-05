@@ -282,8 +282,8 @@ export declare const ServerMessageDequeuedSchema: z.ZodObject<{
     clientMessageId: z.ZodOptional<z.ZodString>;
     queueLength: z.ZodNumber;
     reason: z.ZodEnum<{
-        flush: "flush";
         interrupted: "interrupted";
+        flush: "flush";
         cancelled: "cancelled";
     }>;
 }, z.core.$loose>;

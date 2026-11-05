@@ -3976,7 +3976,11 @@ export class SessionManager extends EventEmitter {
       // before shutdown re-enters `activeTools` on replay and never gets
       // cleared — the footer shows "Running X · Nh Mm" forever.
       if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
-        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+        // #8259: a trailing turn with no result was cut off by the shutdown; close it
+        // so clients show it as interrupted rather than a prompt with no reply.
+        const swept = SessionMessageHistory.markInterruptedTurn(
+          SessionMessageHistory.sweepUnresolvedToolStarts(saved.history),
+        )
         // #8336: carry the previous run's numbering across the restart. The
         // persisted entries were contiguous and ended at `historyLastSeq`, so the
         // first one had `historyLastSeq - length + 1`; a state file without the

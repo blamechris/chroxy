@@ -110,9 +110,9 @@ export declare const RunNodeSchema: z.ZodObject<{
     model: z.ZodNullable<z.ZodString>;
     status: z.ZodEnum<{
         pending: "pending";
+        interrupted: "interrupted";
         done: "done";
         failed: "failed";
-        interrupted: "interrupted";
         cancelled: "cancelled";
         skipped: "skipped";
         escalated: "escalated";
@@ -281,9 +281,9 @@ export declare const RunDetailSchema: z.ZodObject<{
         model: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
             pending: "pending";
+            interrupted: "interrupted";
             done: "done";
             failed: "failed";
-            interrupted: "interrupted";
             cancelled: "cancelled";
             skipped: "skipped";
             escalated: "escalated";
@@ -531,9 +531,9 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             model: z.ZodNullable<z.ZodString>;
             status: z.ZodEnum<{
                 pending: "pending";
+                interrupted: "interrupted";
                 done: "done";
                 failed: "failed";
-                interrupted: "interrupted";
                 cancelled: "cancelled";
                 skipped: "skipped";
                 escalated: "escalated";
@@ -723,9 +723,9 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
         model: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
             pending: "pending";
+            interrupted: "interrupted";
             done: "done";
             failed: "failed";
-            interrupted: "interrupted";
             cancelled: "cancelled";
             skipped: "skipped";
             escalated: "escalated";
