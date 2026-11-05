@@ -188,7 +188,7 @@ import {
   isQuestionNoAnswerToken,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
-import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
+import { mergeModelsByProvider, selectModelsForProvider, type ModelsByProvider } from './models-by-provider'
 import {
   mergePermissionModesByProvider,
   type PermissionModesByProvider,
@@ -196,6 +196,7 @@ import {
 import { applyInputAcknowledgement, isRetrySafeNotDispatched, type InputDeliveryMap } from './input-delivery'
 import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 import { parseDevPreviewStatus } from './handlers/dev-preview'
+import { findModelEntry } from './model-display'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -1186,6 +1187,45 @@ function dispatchSessionUpdated<S extends DispatchSessionBase>(
   if (updated) {
     adapter.setState({ sessions: updated } as Record<string, SessionInfo[]>)
   }
+}
+
+/**
+ * `model_changed` — set the session's live `activeModel` AND mirror the model
+ * onto its session-list entry (#8962). The session tab chip renders the list
+ * entry's `model`, which only `session_list` otherwise refreshed, so the chip
+ * kept the old model until a reload. Unknown sessions and a null model (the
+ * provider-default marker) leave the list untouched.
+ */
+function dispatchModelChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['model_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleModelChangedPatch(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!sessionId || !adapter.hasSession(sessionId)) return
+  adapter.updateSession(sessionId, () => patch as Partial<S>)
+  const model = (patch as { activeModel: string | null }).activeModel
+  if (!model) return
+  const sessions = adapter.getSessions()
+  const entry = sessions.find((s) => s.sessionId === sessionId)
+  if (!entry) return
+  // The wire carries the SHORT id (`haiku`); `session_list` entries carry the
+  // FULL id (`claude-haiku-4-5`). Keep the list in the session_list shape by
+  // resolving through the provider roster, and leave the entry untouched when
+  // the roster cannot resolve it rather than write a different shape.
+  adapter.updateState((flat) => {
+    const roster = selectModelsForProvider(
+      (flat as { modelsByProvider?: ModelsByProvider }).modelsByProvider,
+      entry.provider ?? null,
+    ).models
+    // Same lookup the labels use (exact id first, then fullId). A roster row with
+    // no separate fullId (e.g. a codex/gemini model) is its own full id.
+    const row = findModelEntry(roster, model)
+    const fullId = row ? (row.fullId || row.id) : undefined
+    if (!fullId || fullId === entry.model) return {}
+    return {
+      sessions: sessions.map((s) => (s.sessionId === sessionId ? { ...s, model: fullId } : s)),
+    }
+  })
 }
 
 /** `agent_busy` — flip the target session to non-idle when it exists locally. */
@@ -2737,7 +2777,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     statusline_output: sessionPatchDispatcher<S>(handleStatuslineOutput),
-    model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
+    model_changed: dispatchModelChanged,
     // #7807 — migrated from the dashboard's dashboard-local HANDLERS-map entry;
     // the app gains coverage via runDispatch for free.
     thinking_level_changed: sessionPatchDispatcher<S>(handleThinkingLevelChangedPatch),

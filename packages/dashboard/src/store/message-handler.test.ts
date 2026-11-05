@@ -1231,6 +1231,35 @@ describe('dashboard message-handler dispatch', () => {
       })
     })
 
+    // #8962 — the session tab chip renders the `sessions` list entry's model;
+    // a header model switch must update that entry, not only activeModel.
+    describe('model_changed updates the session-list entry (#8962)', () => {
+      it('the tab chip source (sessions[].model) follows the switch without a session_list', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [
+              { sessionId: 's1', name: 'One', cwd: '/a', provider: 'claude-sdk', model: 'claude-sonnet-5-5' } as any,
+              { sessionId: 's2', name: 'Two', cwd: '/b', provider: 'claude-sdk', model: 'claude-sonnet-5-5' } as any,
+            ],
+            modelsByProvider: { 'claude-sdk': { models: [{ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5' }], defaultModelId: null } },
+            sessionStates: {
+              s1: { ...createEmptySessionState(), activeModel: 'claude-sonnet-5-5' },
+              s2: { ...createEmptySessionState(), activeModel: 'claude-sonnet-5-5' },
+            },
+          }),
+        )
+        setStore(store)
+
+        handleMessage({ type: 'model_changed', sessionId: 's1', model: 'haiku' }, ctx() as any)
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.activeModel).toBe('haiku')
+        expect(state.sessions.find((s: any) => s.sessionId === 's1').model).toBe('claude-haiku-4-5')
+        expect(state.sessions.find((s: any) => s.sessionId === 's2').model).toBe('claude-sonnet-5-5')
+      })
+    })
+
     // #7807 — thinking_level_changed migrated from a dashboard-local
     // HANDLERS-map entry into the shared store-core dispatch table
     // (handleThinkingLevelChangedPatch, mirroring model_changed's
