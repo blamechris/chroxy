@@ -6917,6 +6917,45 @@ describe('handleMessage', () => {
     })
   })
 
+  // #8273: the server tags an AUTH_REQUIRED error with the credential it concerns so
+  // the chip can name the real remedy.
+  describe('authCause preservation on AUTH_REQUIRED (#8273)', () => {
+    const auth = (extra: Record<string, unknown>, messageType = 'error', code: string | undefined = 'AUTH_REQUIRED') =>
+      handleMessage(
+        { messageType, content: 'Claude authentication failed.', ...(code ? { code } : {}), timestamp: 100, ...extra },
+        'sess-active',
+        false,
+        [],
+      )
+
+    it.each(['login', 'api_key', 'container'])('preserves a known cause (%s)', (cause) => {
+      const out = auth({ authCause: cause })
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.authCause).toBe(cause)
+    })
+
+    it.each(['sk-ant-whatever', '', 7, null, 'API_KEY'])('drops an unknown or malformed cause (%p)', (bad) => {
+      const out = auth({ authCause: bad })
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.authCause).toBeUndefined()
+    })
+
+    it('leaves it undefined for an older server', () => {
+      const out = auth({})
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.authCause).toBeUndefined()
+    })
+
+    it('drops it on another code or a non-error envelope', () => {
+      const other = auth({ authCause: 'api_key' }, 'error', 'stream_stall')
+      expect(other.shouldDispatch).toBe(true)
+      if (other.shouldDispatch) expect(other.chatMessage.authCause).toBeUndefined()
+      const notError = auth({ authCause: 'api_key' }, 'response')
+      expect(notError.shouldDispatch).toBe(true)
+      if (notError.shouldDispatch) expect(notError.chatMessage.authCause).toBeUndefined()
+    })
+  })
+
   describe('attemptedResumeId preservation (#4947)', () => {
     it('preserves a string attemptedResumeId on the ChatMessage', () => {
       const out = handleMessage(

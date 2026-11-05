@@ -262,6 +262,9 @@ function errorMessageText(message) {
   return redactAndClip(String(message), ERROR_TEXT_MAX, ERROR_TRUNCATION_MARKER)
 }
 
+/** #8273: the credential causes an AUTH_REQUIRED error may name on the wire. */
+const AUTH_CAUSES = new Set(['login', 'api_key', 'container'])
+
 /**
  * Longest `code` a client will chip on. A code is an identifier (`stream_stall`,
  * `HTTP_429`, `ECONNRESET`, `invalid_api_key`); anything else a provider put there
@@ -338,6 +341,14 @@ export function buildErrorWire(data) {
   // is dropped so the clients fall back to their `auth_ok` value.
   if (code === 'stream_stall' && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0) {
     msg.timeoutMs = data.timeoutMs
+  }
+  // #8273: forward which credential an AUTH_REQUIRED failure concerns, so the
+  // clients show the matching remedy (a host login, a rejected API key, a
+  // container's env) rather than always the host login command. Gated on the
+  // code and on the known values: anything else is dropped and the clients fall
+  // back to the login wording.
+  if (code === 'AUTH_REQUIRED' && AUTH_CAUSES.has(data.authCause)) {
+    msg.authCause = data.authCause
   }
   // #5067: forward captured `stdout` / `stderr` on docker-byok
   // postCreateCommand failures so the operator can diagnose without

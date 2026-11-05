@@ -374,7 +374,7 @@ function _isSecureRequest(req) {
  *   { type: 'tunnel_url_changed', url, previousUrl? } — #5555 (sub-item 7): quick-tunnel recovery rotated the public URL; clients repoint their stored endpoint. Best-effort for tunnel-connected clients (their socket rode the now-dead old tunnel); durable recovery is auth_bootstrap.tunnelUrl on reconnect
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
- *   { type: 'message', messageType, content, tool?, options?, timestamp, code?, subtype?, compactMetadata?, mcpPromptExpansion?, attemptedResumeId?, stdout?, stderr?, timeoutMs?, kind?, thinkingDurationMs?, thinkingTokens?, thinkingPrecedes?, historySeq? }                     — parsed chat message
+ *   { type: 'message', messageType, content, tool?, options?, timestamp, code?, subtype?, compactMetadata?, mcpPromptExpansion?, attemptedResumeId?, authCause?, stdout?, stderr?, timeoutMs?, kind?, thinkingDurationMs?, thinkingTokens?, thinkingPrecedes?, historySeq? }                     — parsed chat message
  *   { type: 'input_ack', sessionId, clientMessageId, status, delivery, retrySafe, retentionExpiresAt?, dedupScope, acceptedAt?, reason?, message?, context? } — #7822 correlated input validation/queue acceptance; never provider completion
  *   { type: 'stream_start', messageId: '...', serverTs?, thinking?, thinkingPrecedes? }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta, serverTs?, thinking? }         — token-by-token text

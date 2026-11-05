@@ -2788,6 +2788,71 @@ describe('SdkSession', () => {
         assert.ok(!/claude auth login/.test(message), message)
         assert.match(message, /ANTHROPIC_API_KEY/)
       })
+
+      // #8273: the typed cause the chip switches on, per path.
+      describe('authCause (#8273)', () => {
+        let savedKey, savedToken
+        beforeEach(() => {
+          savedKey = process.env.ANTHROPIC_API_KEY
+          savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
+          delete process.env.ANTHROPIC_API_KEY
+          delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+        })
+        afterEach(() => {
+          if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY
+          else process.env.ANTHROPIC_API_KEY = savedKey
+          if (savedToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+          else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken
+        })
+
+        it('is login when the session has no env credential (it falls back to a host login)', async () => {
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { yield authAssistantMsg; yield resultMsg })())
+          s.destroy()
+          assert.equal(errors[0].authCause, 'login')
+          assert.match(errors[0].message, /claude auth login/)
+        })
+
+        it('is api_key when ANTHROPIC_API_KEY is set, with a message that does not send the user to log in', async () => {
+          process.env.ANTHROPIC_API_KEY = 'sk-ant-test-not-a-real-key-123456'
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { yield authAssistantMsg; yield resultMsg })())
+          s.destroy()
+          assert.equal(errors[0].code, 'AUTH_REQUIRED')
+          assert.equal(errors[0].authCause, 'api_key')
+          assert.ok(!/claude auth login/.test(errors[0].message), errors[0].message)
+          assert.match(errors[0].message, /ANTHROPIC_API_KEY/)
+          assert.ok(!errors[0].message.includes('sk-ant'), 'the key must never be echoed')
+        })
+
+        it('is api_key on the thrown path too', async () => {
+          process.env.ANTHROPIC_API_KEY = 'sk-ant-test-not-a-real-key-123456'
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { throw new Error(OAUTH_EXPIRED) })())
+          s.destroy()
+          assert.equal(errors[0].authCause, 'api_key')
+        })
+
+        it('is omitted when only an OAuth token is set (the source is ambiguous)', async () => {
+          process.env.CLAUDE_CODE_OAUTH_TOKEN = 'tok-test'
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { yield authAssistantMsg; yield resultMsg })())
+          s.destroy()
+          assert.equal(errors[0].code, 'AUTH_REQUIRED')
+          assert.ok(!('authCause' in errors[0]))
+        })
+
+        it('is container for a containerised session, even with a host API key set', () => {
+          process.env.ANTHROPIC_API_KEY = 'sk-ant-test-not-a-real-key-123456'
+          class ContainerSdk extends SdkSession {
+            static get capabilities() { return { ...SdkSession.capabilities, containerized: true } }
+          }
+          const c = new ContainerSdk({ cwd: '/tmp' })
+          const cause = c._authCause()
+          c.destroy()
+          assert.equal(cause, 'container')
+        })
+      })
     })
 
     it('emits stream_end when error occurs after streaming started', async () => {

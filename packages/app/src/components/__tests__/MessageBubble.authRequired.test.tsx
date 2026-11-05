@@ -50,6 +50,13 @@ describe('MessageBubble AUTH_REQUIRED handling (#8223)', () => {
       .toBe('claude auth login');
   });
 
+  it('passes the server\'s authCause to the chip (#8273)', () => {
+    const tree = render(makeMessage({ authCause: 'container' }));
+    expect(tree.root.findByProps({ testID: 'auth-required-chip-headline' }).props.children)
+      .toBe('The session container needs ANTHROPIC_API_KEY');
+    expect(tree.root.findAllByProps({ testID: 'auth-required-chip-command' })).toHaveLength(0);
+  });
+
   it('does not offer the stall chip\'s Retry even when a retry handler is wired', () => {
     const tree = render(makeMessage(), jest.fn());
     expect(tree.root.findAllByProps({ testID: 'stream-stall-chip' })).toHaveLength(0);

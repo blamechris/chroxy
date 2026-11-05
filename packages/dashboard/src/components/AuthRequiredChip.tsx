@@ -7,7 +7,9 @@
  * claude-sdk's `authentication_failed`). Retrying cannot help — someone has to
  * sign in on the host — so unlike the stall chips this carries no Retry button;
  * it says what is wrong, what the server told the operator, and the one command
- * that fixes it.
+ * that fixes it. #8273: that command only applies to a host login; a rejected
+ * API key or a container (a host login does not reach it) gets its own headline
+ * and no command row, chosen by the server's `authCause`.
  *
  * The command runs on the HOST, not in this browser, so the Copy button is a
  * convenience for pasting it into a host terminal; the raw server text stays in
@@ -18,7 +20,7 @@
  * mobile app cannot drift.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getErrorPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core'
+import { getAuthRequiredPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core'
 import { writeText } from '../utils/clipboard'
 
 // How long the "Copied" confirmation stays before it clears.
@@ -27,10 +29,15 @@ const COPIED_FEEDBACK_MS = 2000
 export interface AuthRequiredChipProps {
   /** The server's message — shown as the body and kept verbatim in the title tooltip. */
   errorText: string
+  /**
+   * #8273: which credential the failure concerns (`login` | `api_key` |
+   * `container`). Absent or unrecognised (an older server) shows the login remedy.
+   */
+  authCause?: string
 }
 
-export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
-  const presentation = getErrorPresentation('AUTH_REQUIRED')
+export function AuthRequiredChip({ errorText, authCause }: AuthRequiredChipProps) {
+  const presentation = getAuthRequiredPresentation(authCause)
   const [copied, setCopied] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -72,30 +79,32 @@ export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
           </span>
         )}
       </div>
-      <span className="auth-required-chip-command-row">
-        <code className="auth-required-chip-command" data-testid="auth-required-chip-command">
-          {CLAUDE_LOGIN_COMMAND}
-        </code>
-        <button
-          type="button"
-          className="auth-required-chip-copy"
-          data-testid="auth-required-chip-copy"
-          aria-label={`Copy ${CLAUDE_LOGIN_COMMAND}`}
-          onClick={handleCopy}
-        >
-          Copy
-        </button>
-        {/* Always mounted (a live region must exist before its text changes to be
-            announced); empty until a copy succeeds, then a polite "Copied". */}
-        <span
-          className="auth-required-chip-copied"
-          data-testid="auth-required-chip-copied"
-          role="status"
-          aria-live="polite"
-        >
-          {copied ? 'Copied' : ''}
+      {presentation.showLoginCommand && (
+        <span className="auth-required-chip-command-row">
+          <code className="auth-required-chip-command" data-testid="auth-required-chip-command">
+            {CLAUDE_LOGIN_COMMAND}
+          </code>
+          <button
+            type="button"
+            className="auth-required-chip-copy"
+            data-testid="auth-required-chip-copy"
+            aria-label={`Copy ${CLAUDE_LOGIN_COMMAND}`}
+            onClick={handleCopy}
+          >
+            Copy
+          </button>
+          {/* Always mounted (a live region must exist before its text changes to be
+              announced); empty until a copy succeeds, then a polite "Copied". */}
+          <span
+            className="auth-required-chip-copied"
+            data-testid="auth-required-chip-copied"
+            role="status"
+            aria-live="polite"
+          >
+            {copied ? 'Copied' : ''}
+          </span>
         </span>
-      </span>
+      )}
     </div>
   )
 }

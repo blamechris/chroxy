@@ -14,7 +14,7 @@
  * cannot drift. Palette follows ResumeUnknownChip / StreamStallChip.
  */
 import { Platform, StyleSheet, Text, View } from 'react-native';
-import { getErrorPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core';
+import { getAuthRequiredPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface AuthRequiredChipProps {
@@ -23,10 +23,16 @@ export interface AuthRequiredChipProps {
    * `accessibilityHint` for assistive-tech triage.
    */
   errorText: string;
+  /**
+   * #8273: which credential the failure concerns (`login` | `api_key` |
+   * `container`). Absent or unrecognised (an older server) shows the login remedy;
+   * the command row only applies to a host login.
+   */
+  authCause?: string;
 }
 
-export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
-  const { headline, role } = getErrorPresentation('AUTH_REQUIRED');
+export function AuthRequiredChip({ errorText, authCause }: AuthRequiredChipProps) {
+  const { headline, role, showLoginCommand } = getAuthRequiredPresentation(authCause);
   // #6429: politeness derived from the registry role (AUTH_REQUIRED is `alert`).
   const liveRegion = role === 'alert' ? 'assertive' : 'polite';
   const body = typeof errorText === 'string' ? errorText.trim() : '';
@@ -49,9 +55,11 @@ export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
           {body}
         </Text>
       )}
-      <Text testID="auth-required-chip-command" style={styles.command} selectable>
-        {CLAUDE_LOGIN_COMMAND}
-      </Text>
+      {showLoginCommand && (
+        <Text testID="auth-required-chip-command" style={styles.command} selectable>
+          {CLAUDE_LOGIN_COMMAND}
+        </Text>
+      )}
     </View>
   );
 }

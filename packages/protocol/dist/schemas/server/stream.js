@@ -222,6 +222,16 @@ export const ServerMessageSchema = z.object({
     // zod strips unknown keys, so a schema that omits it would drop it silently.
     // Optional so older servers' envelopes stay valid.
     timeoutMs: z.number().int().positive().optional(),
+    // #8273: which credential an `AUTH_REQUIRED` error concerns, so the clients show
+    // the matching remedy: `login` (a host `claude auth login`), `api_key` (the
+    // ANTHROPIC_API_KEY was rejected) or `container` (the session container needs
+    // ANTHROPIC_API_KEY; a host login does not reach it). Only set on
+    // `messageType: 'error'` envelopes whose `code` is `'AUTH_REQUIRED'`, by the same
+    // producer convention as `timeoutMs` above. Absent from older servers and where
+    // the cause is unknown, and clients then show the login remedy. A plain string
+    // (not an enum) so a cause a newer server adds does not make an older client
+    // reject the whole frame; clients ignore a value they do not know.
+    authCause: z.string().max(32).optional(),
     // #6630 / #8282: present on a REPLAYED `messageType: 'response'` frame that was a
     // reasoning (extended-thinking) stream rather than a reply. A live reasoning
     // stream is its own `thinking: true` stream_start/_delta/_end, which the

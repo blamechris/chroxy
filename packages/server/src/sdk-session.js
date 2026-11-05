@@ -54,6 +54,9 @@ const AUTH_REQUIRED_MESSAGE = `Claude authentication failed on this host. If you
 // A containerised session has no login command to run (see
 // DockerSdkSession.preflight): its credentials are the container's env.
 const AUTH_REQUIRED_CONTAINER_MESSAGE = 'Claude authentication failed inside the session container. Check that ANTHROPIC_API_KEY is set for it, then retry.'
+// #8273: the session authenticates with ANTHROPIC_API_KEY, so a host login is not
+// the fix. Never interpolates the key.
+const AUTH_REQUIRED_API_KEY_MESSAGE = 'Claude authentication failed: the Anthropic API key (ANTHROPIC_API_KEY) was rejected. Check that it is correct and still active, or replace it, then retry.'
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -629,11 +632,41 @@ export class SdkSession extends BaseSession {
     return { message: raw }
   }
 
-  /** #8223: the AUTH_REQUIRED text for THIS session — container-aware. */
-  _authRequiredMessage() {
-    return this.constructor.capabilities?.containerized
-      ? AUTH_REQUIRED_CONTAINER_MESSAGE
-      : AUTH_REQUIRED_MESSAGE
+  /**
+   * #8273: which credential this session authenticates with, so the clients can
+   * name the real remedy. `container`: a host login never reaches the container.
+   * `api_key`: ANTHROPIC_API_KEY is in the spawn env (the CLI prefers it to a
+   * login, so logging in would not help). `login`: no env credential, so the SDK
+   * falls back to a host `claude auth login`. `undefined` (field omitted): only
+   * CLAUDE_CODE_OAUTH_TOKEN is set, where the source is ambiguous and the
+   * combined message is kept.
+   * @returns {'container'|'api_key'|'login'|undefined}
+   */
+  _authCause() {
+    if (this.constructor.capabilities?.containerized) return 'container'
+    const env = buildSpawnEnv('claude-sdk')
+    if (env.ANTHROPIC_API_KEY) return 'api_key'
+    if (env.CLAUDE_CODE_OAUTH_TOKEN) return undefined
+    return 'login'
+  }
+
+  /** #8223: the AUTH_REQUIRED text for THIS session — container- and key-aware. */
+  _authRequiredMessage(authCause = this._authCause()) {
+    switch (authCause) {
+      case 'container': return AUTH_REQUIRED_CONTAINER_MESSAGE
+      case 'api_key': return AUTH_REQUIRED_API_KEY_MESSAGE
+      default: return AUTH_REQUIRED_MESSAGE
+    }
+  }
+
+  /** #8273: the `error` event payload for an auth failure on THIS session. */
+  _authRequiredPayload() {
+    const authCause = this._authCause()
+    return {
+      code: AUTH_REQUIRED_CODE,
+      message: this._authRequiredMessage(authCause),
+      ...(authCause ? { authCause } : {}),
+    }
   }
 
   get thinkingLevel() { return this._thinkingLevel }
@@ -2059,7 +2092,7 @@ export class SdkSession extends BaseSession {
               if (!authRequiredEmitted) {
                 authRequiredEmitted = true
                 ;(this._log || log).warn('Assistant message reported authentication_failed')
-                this.emit('error', { code: AUTH_REQUIRED_CODE, message: this._authRequiredMessage() })
+                this.emit('error', this._authRequiredPayload())
               }
               break
             }
@@ -2305,7 +2338,7 @@ export class SdkSession extends BaseSession {
             if (classified.code === AUTH_REQUIRED_CODE) {
               if (!authRequiredEmitted) {
                 authRequiredEmitted = true
-                this.emit('error', { code: AUTH_REQUIRED_CODE, message: this._authRequiredMessage() })
+                this.emit('error', this._authRequiredPayload())
               }
             } else {
               this.emit('error', { message: classified.message })

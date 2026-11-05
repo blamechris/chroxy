@@ -100,3 +100,39 @@ describe('AuthRequiredChip (#8223)', () => {
     expect(screen.getByTestId('auth-required-chip-copied').textContent).toBe('')
   })
 })
+
+// #8273: the chip names the cause the server knows, not always a host login.
+describe('AuthRequiredChip authCause (#8273)', () => {
+  const KEY_TEXT = 'Claude authentication failed: the Anthropic API key (ANTHROPIC_API_KEY) was rejected.'
+  const CONTAINER_TEXT = 'Claude authentication failed inside the session container. Check that ANTHROPIC_API_KEY is set for it, then retry.'
+
+  it.each([['login'], [undefined], ['a_cause_a_newer_server_adds']])(
+    'authCause=%s keeps the login headline and the copy row (the pre-#8273 chip)',
+    (authCause) => {
+      render(<AuthRequiredChip errorText={SERVER_TEXT} authCause={authCause} />)
+      expect(screen.getByTestId('auth-required-chip-headline').textContent)
+        .toBe('Claude is not signed in on this host')
+      expect(screen.getByTestId('auth-required-chip-command').textContent).toBe('claude auth login')
+      expect(screen.getByTestId('auth-required-chip-copy')).toBeTruthy()
+    },
+  )
+
+  it('api_key: says the key was rejected and offers no login command or Copy button', () => {
+    render(<AuthRequiredChip errorText={KEY_TEXT} authCause="api_key" />)
+    expect(screen.getByTestId('auth-required-chip-headline').textContent)
+      .toBe('Your Anthropic API key was rejected')
+    expect(screen.getByTestId('auth-required-chip-body').textContent).toBe(KEY_TEXT)
+    expect(screen.queryByTestId('auth-required-chip-command')).toBeNull()
+    expect(screen.queryByTestId('auth-required-chip-copy')).toBeNull()
+    expect(screen.queryByText(/claude auth login/)).toBeNull()
+  })
+
+  it('container: names ANTHROPIC_API_KEY and offers no host login command or Copy button', () => {
+    render(<AuthRequiredChip errorText={CONTAINER_TEXT} authCause="container" />)
+    expect(screen.getByTestId('auth-required-chip-headline').textContent)
+      .toBe('The session container needs ANTHROPIC_API_KEY')
+    expect(screen.queryByTestId('auth-required-chip-command')).toBeNull()
+    expect(screen.queryByTestId('auth-required-chip-copy')).toBeNull()
+    expect(screen.queryByText(/claude auth login/)).toBeNull()
+  })
+})

@@ -984,6 +984,20 @@ describe('@chroxy/protocol schemas', () => {
     }
   })
 
+  it('ServerMessageSchema keeps authCause on an AUTH_REQUIRED error and stays valid without it (#8273)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const base = { type: 'message', messageType: 'error', content: 'x', timestamp: 1, code: 'AUTH_REQUIRED' }
+    for (const authCause of ['login', 'api_key', 'container', 'a_cause_a_newer_server_adds']) {
+      const result = ServerMessageSchema.safeParse({ ...base, authCause })
+      assert.ok(result.success, `must accept authCause=${authCause}`)
+      assert.equal(result.data.authCause, authCause, 'authCause must survive the parse')
+    }
+    const older = ServerMessageSchema.safeParse(base)
+    assert.ok(older.success, 'an older server omits it')
+    assert.equal(older.data.authCause, undefined)
+    assert.ok(!ServerMessageSchema.safeParse({ ...base, authCause: 7 }).success, 'a non-string cause is rejected')
+  })
+
   it('validates ServerProviderListSchema with capabilities', async () => {
     const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
     const result = ServerProviderListSchema.safeParse({

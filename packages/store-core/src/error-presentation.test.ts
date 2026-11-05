@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getErrorPresentation, CLAUDE_LOGIN_COMMAND, type ErrorKind } from './error-presentation'
+import { getErrorPresentation, getAuthRequiredPresentation, parseAuthCause, CLAUDE_LOGIN_COMMAND, type ErrorKind } from './error-presentation'
 import { RETRYABLE_ASK_USER_QUESTION_ERROR_CODES } from './ask-user-question-errors'
 
 describe('getErrorPresentation', () => {
@@ -70,5 +70,46 @@ describe('getErrorPresentation', () => {
     for (const code of known) {
       expect(getErrorPresentation(code).headline.length).toBeGreaterThan(0)
     }
+  })
+})
+
+// #8273: the AUTH_REQUIRED chip names the cause the server knows, not always a host login.
+describe('getAuthRequiredPresentation', () => {
+  it('login: the existing headline and the host login command', () => {
+    const p = getAuthRequiredPresentation('login')
+    expect(p.headline).toBe('Claude is not signed in on this host')
+    expect(p.showLoginCommand).toBe(true)
+  })
+
+  it('an absent or unknown cause falls back to the login presentation (older servers)', () => {
+    for (const cause of [undefined, null, '', 'something_new']) {
+      expect(getAuthRequiredPresentation(cause)).toEqual(getAuthRequiredPresentation('login'))
+    }
+  })
+
+  it('api_key: says the key was rejected and offers no login command', () => {
+    const p = getAuthRequiredPresentation('api_key')
+    expect(p.headline).toBe('Your Anthropic API key was rejected')
+    expect(p.showLoginCommand).toBe(false)
+  })
+
+  it('container: says the container needs ANTHROPIC_API_KEY and offers no host login command', () => {
+    const p = getAuthRequiredPresentation('container')
+    expect(p.headline).toMatch(/container/i)
+    expect(p.headline).toMatch(/ANTHROPIC_API_KEY/)
+    expect(p.showLoginCommand).toBe(false)
+  })
+
+  it('keeps the alert role for every cause', () => {
+    for (const cause of ['login', 'api_key', 'container', undefined]) {
+      expect(getAuthRequiredPresentation(cause).role).toBe('alert')
+    }
+  })
+})
+
+describe('parseAuthCause', () => {
+  it('accepts exactly the three known causes', () => {
+    expect(['login', 'api_key', 'container'].map(parseAuthCause)).toEqual(['login', 'api_key', 'container'])
+    for (const bad of ['', 'API_KEY', 'sk-ant-x', 7, null, undefined, {}]) expect(parseAuthCause(bad)).toBeUndefined()
   })
 })
