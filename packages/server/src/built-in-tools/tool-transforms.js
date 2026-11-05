@@ -888,8 +888,9 @@ export function buildGrepArgs(input) {
 }
 
 const GREP_GLOB_MAX_EXPANSIONS = 32
+const GREP_EXCLUDE_ROOT_REFUSAL = 'Grep failed: this exclusion glob would also exclude the search directory itself, which grep cannot search correctly because ripgrep is not installed in this environment; use a more specific glob or omit it'
 // Bounds on the work/size one glob may cause (Codex review of #7961): the raw
-// glob, and the total bytes of generated --include/--exclude flags.
+// glob, and the total length (in characters) of generated --include/--exclude flags.
 const GREP_GLOB_MAX_INPUT = 1024
 const GREP_GLOB_MAX_FLAG_BYTES = 8192
 
@@ -948,7 +949,7 @@ function expandSimpleBraces(glob) {
  */
 export function translateGlobForGrep(glob) {
   const refuse = (why) => ({
-    refusal: `Grep failed: the glob ${JSON.stringify(glob)} cannot be applied because ripgrep is not installed in this environment and grep cannot express it (${why}); use a simple filename glob such as "*.js", or omit the glob`,
+    refusal: `Grep failed: the glob ${JSON.stringify(glob.length > 200 ? `${glob.slice(0, 200)}...` : glob)} cannot be applied because ripgrep is not installed in this environment and grep cannot express it (${why}); use a simple filename glob such as "*.js", or omit the glob`,
   })
   const negated = glob.startsWith('!')
   const body = negated ? glob.slice(1) : glob
@@ -962,8 +963,12 @@ export function translateGlobForGrep(glob) {
   // descendants); grep needs --exclude-dir alongside --exclude to match.
   const flags = negated ? ['--exclude', '--exclude-dir'] : ['--include']
   const args = alts.flatMap((a) => flags.map((f) => ` ${f}=${shellQuote(a)}`)).join('')
-  if (args.length > GREP_GLOB_MAX_FLAG_BYTES) return refuse('glob expands to too many bytes')
-  return { args }
+  if (args.length > GREP_GLOB_MAX_FLAG_BYTES) return refuse('glob expands to too many characters of grep flags')
+  // grep applies --exclude-dir to the COMMAND-LINE root too (GNU: any suffix of
+  // the argument after a '/'), so an exclusion that matches the root would make
+  // the whole search come back empty. buildGrepCommand tests these against the
+  // root in the shell and refuses instead.
+  return negated ? { args, excludeDirs: alts } : { args }
 }
 
 /**
@@ -1045,9 +1050,15 @@ export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, gre
     throw new Error('buildGrepCommand: globArg without grepGlob would leave the grep -r fallback unfiltered (#7961)')
   }
   const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${rootArg}`
+  const refuseCmd = (msg) => `printf '%s\\n' ${shellQuote(msg)} >&2; (exit 2)`
+  // `case $__p in $1)` treats the VALUE of $1 as a pattern with no further
+  // parsing, so a model-supplied alternative is data here, never shell text.
+  const rootOverlap = grepGlob?.excludeDirs?.length
+    ? `__gx_hits() { __p=$2; while :; do case $__p in $1) return 0;; esac; case $__p in */*) __p=${'$'}{__p#*/};; *) return 1;; esac; done; }; __gx_root=${rootArg}; if ${grepGlob.excludeDirs.map((a) => `__gx_hits ${shellQuote(a)} "$__gx_root"`).join(' || ')}; then ${refuseCmd(GREP_EXCLUDE_ROOT_REFUSAL)}; else `
+    : ''
   const grepCmd = grepGlob && 'refusal' in grepGlob
-    ? `printf '%s\\n' ${shellQuote(grepGlob.refusal)} >&2; (exit 2)`
-    : `grep -r ${ci} ${ln}${grepGlob?.args ?? ''} -e ${shellQuote(pattern)} -- ${rootArg}`
+    ? refuseCmd(grepGlob.refusal)
+    : `${rootOverlap}grep -r ${ci} ${ln}${grepGlob?.args ?? ''} -e ${shellQuote(pattern)} -- ${rootArg}${rootOverlap ? '; fi' : ''}`
   const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
 }
