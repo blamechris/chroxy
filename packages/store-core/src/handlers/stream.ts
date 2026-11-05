@@ -478,6 +478,15 @@ export function handleMessage(
     msg.timeoutMs > 0
       ? { timeoutMs: msg.timeoutMs }
       : {}),
+    // #7881: preserve "a resend is not safe" on a stall so the chip withholds the
+    // one-tap Retry. Boolean-only, stream_stall-only; anything else is dropped and
+    // the chip keeps today's behaviour.
+    ...(msgType === 'error' && msg.code === 'stream_stall' && typeof msg.retrySafe === 'boolean'
+      ? { retrySafe: msg.retrySafe }
+      : {}),
+    ...(msgType === 'error' && msg.code === 'stream_stall' && typeof msg.delivery === 'string'
+      ? { delivery: msg.delivery.slice(0, 32) }
+      : {}),
     // #8273: preserve which credential an AUTH_REQUIRED failure concerns so the
     // sign-in chip names the real remedy. Gated on `error` + `AUTH_REQUIRED` and on
     // the known values; anything else is dropped and the chip shows the login remedy.

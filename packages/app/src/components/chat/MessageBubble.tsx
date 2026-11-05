@@ -454,6 +454,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
         // watchdog is 90s). Only on a real stall — the AskUserQuestion codes
         // routed through this chip carry no window and keep their own headline.
         timeoutMs={message.code === 'stream_stall' ? message.timeoutMs : undefined}
+        retrySafe={message.code === 'stream_stall' ? message.retrySafe : undefined}
         // #5793 / #6392: the AskUserQuestion teardown codes are a question-
         // delivery failure, not a stream stall — source the copy from the shared
         // error-presentation registry (single source cross-surface). stream_stall

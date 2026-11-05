@@ -202,6 +202,15 @@ export interface ChatMessage {
    */
   timeoutMs?: number;
   /**
+   * #7881: only set on `stream_stall` error bubbles. `false` means a resend is
+   * not safe (the prompt was written and nothing confirmed it was received), so
+   * the stall chip offers no one-tap Retry. Undefined for older servers: the chip
+   * keeps its plain retry affordance.
+   */
+  retrySafe?: boolean;
+  /** #7881: `'uncertain'` alongside `retrySafe: false`; informational for renderers. */
+  delivery?: string;
+  /**
    * #8273: only set on `type: 'error'` bubbles whose `code` is `'AUTH_REQUIRED'`.
    * Which credential the failure concerns, so the sign-in chip names the real
    * remedy: `login` (a host `claude auth login`), `api_key` (ANTHROPIC_API_KEY was

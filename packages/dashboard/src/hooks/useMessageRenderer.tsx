@@ -443,6 +443,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           timeoutMs={storeMsg.timeoutMs ?? streamStallTimeoutMs ?? undefined}
           provider={activeSessionProvider ?? undefined}
           onViewLogs={isTail ? () => setViewMode('system') : undefined}
+          retrySafe={storeMsg.retrySafe}
         />
       )
     }

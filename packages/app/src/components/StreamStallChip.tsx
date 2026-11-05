@@ -19,7 +19,7 @@
  */
 import React, { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { formatDurationVerbose, getErrorPresentation } from '@chroxy/store-core';
+import { formatDurationVerbose, getErrorPresentation, STREAM_STALL_DELIVERY_UNCONFIRMED_HEADLINE } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface StreamStallChipProps {
@@ -51,6 +51,12 @@ export interface StreamStallChipProps {
    * servers omit the field).
    */
   timeoutMs?: number;
+  /**
+   * #7881 — `false` when the server says a resend is not safe (delivery
+   * unconfirmed). The chip then shows the delivery-unconfirmed copy and no Retry
+   * button. `undefined` (older servers) and `true` keep the plain retry.
+   */
+  retrySafe?: boolean;
 }
 
 export function StreamStallChip({
@@ -58,11 +64,14 @@ export function StreamStallChip({
   onRetry,
   headline,
   timeoutMs,
+  retrySafe,
 }: StreamStallChipProps) {
+  const resendUnsafe = retrySafe === false;
   // #6392: the default stream-stall copy is single-sourced from the shared
   // error-presentation registry (callers override for the AskUserQuestion family).
   // #8223: a usable `timeoutMs` makes the default say how long this stall waited.
   const resolvedHeadline = headline ?? (
+    resendUnsafe ? STREAM_STALL_DELIVERY_UNCONFIRMED_HEADLINE :
     typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? `No response for ${formatDurationVerbose(timeoutMs)} — retry?`
       : getErrorPresentation('stream_stall').headline
@@ -98,7 +107,7 @@ export function StreamStallChip({
     >
       <View style={styles.dot} />
       <Text style={styles.label}>{resolvedHeadline}</Text>
-      {onRetry && (
+      {onRetry && !resendUnsafe && (
         <Pressable
           testID="stream-stall-chip-retry"
           accessibilityRole="button"

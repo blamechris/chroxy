@@ -17,7 +17,7 @@
  * wires it to `setViewMode('system')`).
  */
 import { useCallback } from 'react'
-import { formatDurationVerbose, getProviderInfo, getErrorPresentation } from '@chroxy/store-core'
+import { formatDurationVerbose, getProviderInfo, getErrorPresentation, STREAM_STALL_DELIVERY_UNCONFIRMED_HEADLINE } from '@chroxy/store-core'
 import { ChatErrorFrame } from './ChatErrorFrame'
 
 export interface StreamStallChipProps {
@@ -73,6 +73,13 @@ export interface StreamStallChipProps {
    * without a logs view).
    */
   onViewLogs?: () => void
+  /**
+   * #7881 — `false` when the server says a resend is not safe (the prompt was
+   * written to the provider and nothing confirmed it was received). The chip then
+   * shows the delivery-unconfirmed copy and NO Retry button. `undefined` (older
+   * servers) and `true` keep the plain retry affordance.
+   */
+  retrySafe?: boolean
 }
 
 // #4497 — verbose duration humaniser tailored for the stall headline copy.
@@ -86,6 +93,7 @@ export function StreamStallChip({
   timeoutMs,
   provider,
   onViewLogs,
+  retrySafe,
 }: StreamStallChipProps) {
   const handleRetry = useCallback(() => {
     onRetry?.()
@@ -115,7 +123,9 @@ export function StreamStallChip({
     typeof provider === 'string' && provider.trim().length > 0
       ? getProviderInfo(provider.trim()).short
       : null
-  const headline = providerShort ? `${providerShort} · ${body}` : body
+  const resendUnsafe = retrySafe === false
+  const text = resendUnsafe ? STREAM_STALL_DELIVERY_UNCONFIRMED_HEADLINE : body
+  const headline = providerShort ? `${providerShort} · ${text}` : text
 
   return (
     <ChatErrorFrame
@@ -124,7 +134,7 @@ export function StreamStallChip({
       title={errorText}
       headline={headline}
     >
-      {onRetry && (
+      {onRetry && !resendUnsafe && (
         <button
           type="button"
           className="stream-stall-chip-retry"

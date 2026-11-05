@@ -53,6 +53,24 @@ describe('StreamStallChip (#4496)', () => {
     return tree;
   }
 
+  // #7881: delivery-unconfirmed stalls must not offer the one-tap resend.
+  it('retrySafe:false hides Retry even when onRetry is wired, and says delivery is unconfirmed', () => {
+    const tree = render(
+      <StreamStallChip errorText="x" onRetry={jest.fn()} retrySafe={false} timeoutMs={90_000} />,
+    );
+    expect(tree.root.findAllByProps({ testID: 'stream-stall-chip-retry' })).toHaveLength(0);
+    expect(collectVisibleText(tree.root)).toMatch(/Delivery unconfirmed/);
+  });
+
+  it('retrySafe true or absent keeps the Retry button', () => {
+    for (const v of [true, undefined]) {
+      const tree = render(<StreamStallChip errorText="x" onRetry={jest.fn()} retrySafe={v} />);
+      expect(tree.root.findAllByProps({ testID: 'stream-stall-chip-retry' }).length).toBeGreaterThan(0);
+      act(() => { tree.unmount(); });
+      activeTree = null;
+    }
+  });
+
   it('renders the chip headline', () => {
     const tree = render(
       <StreamStallChip errorText="Stream stalled — no response for 5 minutes" />,

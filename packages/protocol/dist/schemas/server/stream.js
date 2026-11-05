@@ -222,6 +222,15 @@ export const ServerMessageSchema = z.object({
     // zod strips unknown keys, so a schema that omits it would drop it silently.
     // Optional so older servers' envelopes stay valid.
     timeoutMs: z.number().int().positive().optional(),
+    // #7881: on a `stream_stall` error, whether re-sending the same input is safe.
+    // `retrySafe: false` + `delivery: 'uncertain'` mean the prompt was written to
+    // the provider and nothing confirmed it was received (claude-tui's first-output
+    // watchdog), so a one-tap resend could duplicate a turn. Same producer
+    // convention as `timeoutMs`: no cross-validation with `code`. A plain string for
+    // `delivery` so a value a newer server adds does not reject the frame. Absent
+    // from older servers, and clients then keep the plain retry affordance.
+    delivery: z.string().max(32).optional(),
+    retrySafe: z.boolean().optional(),
     // #8273: which credential an `AUTH_REQUIRED` error concerns, so the clients show
     // the matching remedy: `login` (a host `claude auth login`), `api_key` (the
     // ANTHROPIC_API_KEY was rejected) or `container` (the session container needs

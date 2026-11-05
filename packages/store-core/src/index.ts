@@ -382,6 +382,9 @@ export type { ErrorPartialCost } from './cost-format'
 // "No response for 5 minutes"). Single-sourced here to stop both surfaces
 // re-inlining the same two registers.
 export { formatDurationTerse, formatDurationVerbose } from './duration'
+// #7881: stall-chip copy when a resend is not safe (delivery unconfirmed). Shared so
+// the dashboard and the mobile app say the same thing.
+export const STREAM_STALL_DELIVERY_UNCONFIRMED_HEADLINE = 'Delivery unconfirmed — check the session before sending again'
 
 // #6201: shared elapsed-time formatters. `formatElapsedAgo` (the fine-grained
 // "Ns ago" form) was duplicated in the app + dashboard ActivityIndicator;

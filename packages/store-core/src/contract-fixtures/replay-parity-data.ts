@@ -1222,7 +1222,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           {
             "message": "No response for 90 seconds",
             "code": "stream_stall",
-            "timeoutMs": 90000
+            "timeoutMs": 90000,
+            "retrySafe": false,
+            "delivery": "uncertain"
           }
         ],
         [
@@ -1248,6 +1250,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "timestamp": 1700000000000,
           "code": "stream_stall",
           "timeoutMs": 90000,
+          "retrySafe": false,
+          "delivery": "uncertain",
           "sessionId": "s1"
         },
         {
@@ -1275,6 +1279,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "timestamp": 1700000000000,
           "code": "stream_stall",
           "timeoutMs": 90000,
+          "retrySafe": false,
+          "delivery": "uncertain",
           "sessionId": "s1",
           "historySeq": 1
         },

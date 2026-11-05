@@ -232,6 +232,34 @@ describe('useMessageRenderer — stream_stall headline window (#8223)', () => {
   })
 })
 
+// #7881: a stall whose delivery is uncertain must not offer the one-tap resend,
+// even on the tail message where a retry is normally wired.
+describe('useMessageRenderer — stream_stall retrySafe gate (#7881)', () => {
+  function renderStall(extra: Record<string, unknown>) {
+    const err = {
+      id: 's1', type: 'error', content: 'No response from claude TUI.', timestamp: 0, code: 'stream_stall', ...extra,
+    } as ChatMessage
+    const user = { id: 'u1', type: 'user_input', content: 'hello', timestamp: 0 } as ChatMessage
+    const args = makeArgs({
+      storeMsgMap: new Map([['s1', err]]),
+      chatTailMessageId: 's1',
+      storeMessages: [user, err],
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: 's1', type: 'error', content: err.content, timestamp: 0, code: 'stream_stall' } as ChatViewMessage)}</>)
+  }
+
+  it('retrySafe:false on the tail stall shows no Retry', () => {
+    renderStall({ retrySafe: false, delivery: 'uncertain' })
+    expect(screen.queryByTestId('stream-stall-chip-retry')).toBeNull()
+  })
+
+  it('without retrySafe the tail stall keeps its Retry (older servers)', () => {
+    renderStall({})
+    expect(screen.getByTestId('stream-stall-chip-retry')).toBeInTheDocument()
+  })
+})
+
 describe('permissionPromptDescription — strip the composed tool prefix (#6626)', () => {
   it('strips the redundant leading "<tool>: " so the raw description survives', () => {
     // message-handler composes content as `"${tool}: ${description}"`; the raw
