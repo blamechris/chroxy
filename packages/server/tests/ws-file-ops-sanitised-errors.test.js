@@ -16,6 +16,13 @@ import { POSIX_PERM_SKIP } from './test-helpers.js'
 // failed: <git binary> ..." line. The client now gets a short reason by error
 // code; the raw text goes to the server log only.
 
+// Windows reports different error codes for some of these operations (a file
+// used as a directory is ENOENT there, writing onto a directory is not EISDIR),
+// so the mapped text differs. The property under test, that no server path or
+// raw Node error text reaches the client, is asserted on every platform; the
+// exact POSIX wording only off win32.
+const IS_WIN = process.platform === 'win32'
+
 describe('ws-file-ops in-project failures carry no absolute server path (#8018)', () => {
   let tmp
   let sent
@@ -48,7 +55,7 @@ describe('ws-file-ops in-project failures carry no absolute server path (#8018)'
     await ops.writeFile(ws, 'adir', 'x', tmp)
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'write_file_result')
-    assert.equal(sent[0].error, 'Is a directory')
+    if (!IS_WIN) assert.equal(sent[0].error, 'Is a directory')
     assertNoServerPaths(sent[0].error, 'write_file')
   })
 
@@ -100,7 +107,7 @@ describe('ws-file-ops in-project failures carry no absolute server path (#8018)'
   it('browse_files / list_directory on a file keep short messages', async () => {
     writeFileSync(join(tmp, 'afile.txt'), 'x')
     await ops.browseFiles(ws, 'afile.txt/sub', tmp)
-    assert.equal(sent[0].error, 'Not a directory')
+    if (!IS_WIN) assert.equal(sent[0].error, 'Not a directory')
     assertNoServerPaths(sent[0].error, 'browse_files')
   })
 
@@ -115,8 +122,13 @@ describe('ws-file-ops in-project failures carry no absolute server path (#8018)'
   it('memory file stat through a file-as-directory carries no server path (ENOTDIR)', async () => {
     writeFileSync(join(tmp, 'present.txt'), 'x')
     const res = await readResolvedMemoryFile(join(tmp, 'present.txt', 'CLAUDE.md'))
-    assert.equal(res.error, 'Not a directory')
-    assertNoServerPaths(res.error, 'memory stat')
+    if (IS_WIN) {
+      // ENOENT on Windows: the reader treats it as a missing file, no error.
+      if (res.error !== undefined) assertNoServerPaths(res.error, 'memory stat')
+    } else {
+      assert.equal(res.error, 'Not a directory')
+      assertNoServerPaths(res.error, 'memory stat')
+    }
   })
 
   it('memory file open failure keeps "Permission denied" (EACCES)', { skip: POSIX_PERM_SKIP }, async () => {
