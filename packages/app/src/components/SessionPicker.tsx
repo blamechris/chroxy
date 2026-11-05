@@ -37,7 +37,7 @@ function PulsingDot() {
     return () => anim.stop();
   }, [opacity]);
 
-  return <Animated.View style={[styles.busyDot, { opacity }]} />;
+  return <Animated.View testID="session-busy-dot" style={[styles.busyDot, { opacity }]} />;
 }
 
 /** Small notification count badge */
