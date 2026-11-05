@@ -367,17 +367,29 @@ jobs:
           # --app-version. Probe the installed CLI once; the feed checks below
           # require a signed version only when the CLI can produce one. Captured
           # into a variable and matched with `case` (no pipe into grep -q).
-          HELP=$(cargo tauri signer sign --help 2>&1 || true)
-          case "$HELP" in
-            *--app-version*)
-              echo "SIGNED_VERSION_SUPPORTED=true" >> "$GITHUB_ENV"
-              echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
-              ;;
-            *)
-              echo "SIGNED_VERSION_SUPPORTED=false" >> "$GITHUB_ENV"
-              echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
-              ;;
-          esac
+          #
+          # clap prints the CURRENT value of an `env =` option in --help, so the
+          # signing variables are unset in a subshell: otherwise a password that
+          # happens to contain "--app-version" would flip the probe. Only an
+          # option DECLARATION line (first token `--app-version`) counts.
+          HELP=$( (unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH; cargo tauri signer sign --help 2>&1) ) || true
+          SUPPORTED=false
+          while IFS= read -r LINE; do
+            case "$LINE" in
+              *[![:space:]]*)
+                TRIMMED="${LINE#"${LINE%%[![:space:]]*}"}"
+                case "$TRIMMED" in
+                  --app-version|--app-version\ *|--app-version=*) SUPPORTED=true ;;
+                esac
+                ;;
+            esac
+          done <<< "$HELP"
+          echo "SIGNED_VERSION_SUPPORTED=$SUPPORTED" >> "$GITHUB_ENV"
+          if [ "$SUPPORTED" = "true" ]; then
+            echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+          else
+            echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
+          fi
 
       - name: Build Tauri app (universal)
         shell: bash
@@ -558,17 +570,29 @@ jobs:
           # --app-version. Probe the installed CLI once; the feed checks below
           # require a signed version only when the CLI can produce one. Captured
           # into a variable and matched with `case` (no pipe into grep -q).
-          HELP=$(cargo tauri signer sign --help 2>&1 || true)
-          case "$HELP" in
-            *--app-version*)
-              echo "SIGNED_VERSION_SUPPORTED=true" >> "$GITHUB_ENV"
-              echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
-              ;;
-            *)
-              echo "SIGNED_VERSION_SUPPORTED=false" >> "$GITHUB_ENV"
-              echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
-              ;;
-          esac
+          #
+          # clap prints the CURRENT value of an `env =` option in --help, so the
+          # signing variables are unset in a subshell: otherwise a password that
+          # happens to contain "--app-version" would flip the probe. Only an
+          # option DECLARATION line (first token `--app-version`) counts.
+          HELP=$( (unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH; cargo tauri signer sign --help 2>&1) ) || true
+          SUPPORTED=false
+          while IFS= read -r LINE; do
+            case "$LINE" in
+              *[![:space:]]*)
+                TRIMMED="${LINE#"${LINE%%[![:space:]]*}"}"
+                case "$TRIMMED" in
+                  --app-version|--app-version\ *|--app-version=*) SUPPORTED=true ;;
+                esac
+                ;;
+            esac
+          done <<< "$HELP"
+          echo "SIGNED_VERSION_SUPPORTED=$SUPPORTED" >> "$GITHUB_ENV"
+          if [ "$SUPPORTED" = "true" ]; then
+            echo "::notice::tauri signer supports --app-version: updater signatures will be version-bound"
+          else
+            echo "::notice::tauri signer has no --app-version: updater signatures carry no signed version"
+          fi
 
       - name: Build Tauri app (MSI)
         shell: bash
@@ -753,10 +777,9 @@ jobs:
       - name: Verify merged updater feed
         shell: bash
         env:
-          # Read only to decide whether updater signing was configured for this
-          # release (same pattern as the desktop jobs); never echoed.
-          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # A boolean, never the secrets themselves: the step only needs to know
+          # whether updater signing was configured for this release.
+          UPDATER_SIGNING_CONFIGURED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
         run: |
           # Release gate (#8917): every platform entry must name an asset that is
           # in this release and verify against the pubkey committed in
@@ -768,7 +791,7 @@ jobs:
           # partial feed is an error. Without signing configured, there is
           # legitimately no feed and the step is a notice.
           EXTRA=()
-          if [ -n "$TAURI_KEY" ] && [ -n "$TAURI_PWD" ]; then
+          if [ "$UPDATER_SIGNING_CONFIGURED" = "true" ]; then
             if [ ! -f artifacts/updater/latest.json ]; then
               echo "::error::Updater signing is configured but no merged updater feed exists (artifacts/updater/latest.json)"
               exit 1

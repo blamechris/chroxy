@@ -1841,7 +1841,7 @@ jobs:
         run: |
           set -o pipefail
           node scripts/__tests__/updater-feed.test.mjs | tee /tmp/chroxy-updater-feed.tap
-          node scripts/lib/assert-test-count.mjs --min 48 cat /tmp/chroxy-updater-feed.tap > /dev/null
+          node scripts/lib/assert-test-count.mjs --min 50 cat /tmp/chroxy-updater-feed.tap > /dev/null
 
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs

@@ -11,7 +11,7 @@
  *   - only the prehashed `ED` signature algorithm is accepted (the client
  *     also takes legacy `Ed`), and the public key algorithm must be `Ed`;
  *   - the `untrusted comment:` / `trusted comment: ` prefixes are required;
- *   - an identity or all-zero public key is refused up front.
+ *   - any small-order public key (identity, all-zero, ...) is refused up front.
  * Encoding is parsed the way the client does and no looser: base64 must be
  * canonical (no whitespace, no non-zero trailing bits, correct padding), text
  * must be strict UTF-8, lines split like Rust `str::lines()`, and blank lines
@@ -61,6 +61,25 @@ function boxLines(text) {
   return parts.map((l, i) => (i < terminated && l.endsWith('\r') ? l.slice(0, -1) : l))
 }
 
+// Encodings (little-endian y, sign bit cleared) of every Ed25519 point of order dividing 8,
+// libsodium's blocklist: y = 0, 1, p-1, the two order-8 y values, and the non-canonical
+// y = p and y = p+1. The unit test re-derives these with the group law.
+const SMALL_ORDER_Y = [
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  '0100000000000000000000000000000000000000000000000000000000000000',
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+  'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+].map((h) => Buffer.from(h, 'hex'))
+
+function isSmallOrderKey(key) {
+  const masked = Buffer.from(key)
+  masked[31] &= 0x7f
+  return SMALL_ORDER_Y.some((y) => y.equals(masked))
+}
+
 function parsePublicKey(pubkeyB64) {
   const raw = decodeBase64(pubkeyB64)
   if (!raw) return {reason: 'public key is not canonical base64'}
@@ -74,10 +93,10 @@ function parsePublicKey(pubkeyB64) {
   if (!body || body.length !== 42) return {reason: 'public key body must be 42 bytes'}
   if (body.toString('latin1', 0, 2) !== 'Ed') return {reason: 'public key algorithm is not Ed'}
   const key = body.subarray(10, 42)
-  // all-zero, or the Ed25519 identity point (y = 1): degenerate keys that must never anchor trust
-  if (key.subarray(1).every((b) => b === 0) && (key[0] === 0 || key[0] === 1)) {
-    return {reason: 'public key is a degenerate (identity or all-zero) key'}
-  }
+  // Small-order points (order dividing 8, including non-canonical y >= p) make every
+  // identity-point "signature" verify, so they must never anchor trust. The client masks
+  // the sign bit before its identity test, so the comparison here masks it too.
+  if (isSmallOrderKey(key)) return {reason: 'public key is a degenerate (small-order) key'}
   return {keyId: body.subarray(2, 10), key}
 }
 

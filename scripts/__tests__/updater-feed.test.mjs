@@ -165,9 +165,56 @@ const withAlg = (b64s, alg) => Buffer.concat([Buffer.from(alg, 'latin1'), body(b
 const sigWith = (...replacements) => b64(SL.map((l, i) => (i in Object.fromEntries(replacements) ? Object.fromEntries(replacements)[i] : l)).join('\n'))
 const pubWith = (...replacements) => b64(PL.map((l, i) => (i in Object.fromEntries(replacements) ? Object.fromEntries(replacements)[i] : l)).join('\n'))
 const withBytes = (bytes) => Buffer.from(bytes).toString('base64')
-const identityKey = Buffer.concat([Buffer.from('Ed'), body(PL[1]).subarray(2, 10), Buffer.from([1]), Buffer.alloc(31)]).toString('base64')
-const zeroKey = Buffer.concat([Buffer.from('Ed'), body(PL[1]).subarray(2, 10), Buffer.alloc(32)]).toString('base64')
+const keyWith = (raw32) => Buffer.concat([Buffer.from('Ed'), body(PL[1]).subarray(2, 10), raw32]).toString('base64')
 const invalidUtf8 = (line1, rest) => Buffer.concat([Buffer.from(line1), Buffer.from([0xff, 0xfe]), Buffer.from('\n' + rest)]).toString('base64')
+
+// ---- small-order Ed25519 points, derived here with the group law (not copied from the verifier) ----
+const P = (1n << 255n) - 19n
+const mod = (a) => ((a % P) + P) % P
+const powmod = (b, e) => { let r = 1n; b = mod(b); while (e > 0n) { if (e & 1n) r = mod(r * b); b = mod(b * b); e >>= 1n } return r }
+const inv = (a) => powmod(a, P - 2n)
+const D = mod(-121665n * inv(121666n))
+const SQRT_M1 = powmod(2n, (P - 1n) / 4n)
+function sqrt(a) {
+  let r = powmod(a, (P + 3n) / 8n)
+  if (mod(r * r) !== mod(a)) r = mod(r * SQRT_M1)
+  return mod(r * r) === mod(a) ? r : null
+}
+function add([x1, y1], [x2, y2]) {
+  const t = mod(D * x1 * x2 * y1 * y2)
+  return [mod((x1 * y2 + x2 * y1) * inv(1n + t)), mod((y1 * y2 + x1 * x2) * inv(1n - t))]
+}
+function mul(k, pt) {
+  let acc = [0n, 1n]
+  while (k > 0n) { if (k & 1n) acc = add(acc, pt); pt = add(pt, pt); k >>= 1n }
+  return acc
+}
+const L = (1n << 252n) + 27742317777372353535851937790883648493n
+function deriveTorsion() {
+  const found = new Map()
+  for (let y = 2n; y < 60n && found.size < 8; y++) {
+    const x2 = mod((y * y - 1n) * inv(D * y * y + 1n))
+    const x = sqrt(x2)
+    if (x === null) continue
+    const t = mul(L, [x, y]) // the cofactor part of an arbitrary curve point
+    let q = [0n, 1n]
+    for (let k = 0; k < 8; k++) { found.set(`${q[0]},${q[1]}`, q); q = add(q, t) }
+  }
+  return [...found.values()]
+}
+const le32 = (n) => Buffer.from(n.toString(16).padStart(64, '0'), 'hex').reverse()
+const TORSION = deriveTorsion()
+const TORSION_Y = [...new Set(TORSION.map(([, y]) => y))]
+// canonical y of every small-order point, plus the non-canonical y = p and y = p + 1
+const SMALL_ORDER_ENCODINGS = [
+  ...TORSION_Y.map((y) => [`y=${y.toString(16).slice(0, 8)}`, le32(y)]),
+  ['y=p (non-canonical)', le32(P)],
+  ['y=p+1 (non-canonical)', le32(P + 1n)],
+].flatMap(([label, raw]) => {
+  const signed = Buffer.from(raw)
+  signed[31] |= 0x80
+  return [[label, raw], [`${label} with sign bit`, signed]]
+})
 
 // [label, pubkey, signature, expected reason]. Every row must be refused for ITS reason.
 const REJECTS = [
@@ -223,8 +270,7 @@ const REJECTS = [
   ['sig: legacy Ed algorithm', PUB_A, sigWith([1, withAlg(SL[1], 'Ed')]), /unsupported signature algorithm "Ed"/],
   ['sig: unknown algorithm', PUB_A, sigWith([1, withAlg(SL[1], 'XX')]), /unsupported signature algorithm "XX"/],
   ['pub: ED algorithm', pubWith([1, withAlg(PL[1], 'ED')]), SIG, /public key algorithm is not Ed/],
-  ['pub: identity key', pubWith([1, identityKey]), SIG, /degenerate/],
-  ['pub: all-zero key', pubWith([1, zeroKey]), SIG, /degenerate/],
+  ...SMALL_ORDER_ENCODINGS.map(([label, raw]) => [`pub: small-order key ${label}`, pubWith([1, keyWith(raw)]), SIG, /degenerate \(small-order\)/]),
   ['pub: other key pair', PUB_B, SIG, /key id/],
   ['sig: trusted comment emptied', PUB_A, sigWith([2, 'trusted comment: ']), /trusted comment signature/],
 ]
@@ -236,6 +282,39 @@ test('verify: every malformed or non-canonical input is rejected for its own rea
     assert.equal(r.ok, false, `${label} was accepted`)
     assert.ok(reason.test(r.reason), `${label}: reason "${r.reason}" does not match ${reason}`)
   }
+})
+
+test('small-order set: exactly 8 torsion points with 5 distinct y values, all refused', () => {
+  assert.equal(TORSION.length, 8)
+  assert.equal(TORSION_Y.length, 5) // y = 0, 1, p-1 and the two order-8 values
+  for (const [x, y] of TORSION) {
+    assert.deepEqual(mul(8n, [x, y]), [0n, 1n])
+  }
+  assert.equal(SMALL_ORDER_ENCODINGS.length, (5 + 2) * 2)
+  for (const [label, raw] of SMALL_ORDER_ENCODINGS) {
+    const r = verifyTauriSignature(b64([PL[0], keyWith(raw)].join('\n')), SIG, PAYLOAD)
+    assert.equal(r.ok, false, label)
+    assert.ok(/small-order/.test(r.reason), `${label}: ${r.reason}`)
+  }
+})
+
+test('verify: forged identity-point signatures under a sign-bit identity key are refused', () => {
+  const idSigned = Buffer.alloc(32)
+  idSigned[0] = 1
+  idSigned[31] = 0x80
+  const kid = body(PL[1]).subarray(2, 10)
+  const comment = 'timestamp:1\tfile:x.msi'
+  const forged = Buffer.concat([Buffer.from('ED'), kid, Buffer.from([1]), Buffer.alloc(63)]) // R = identity, S = 0
+  const globalSig = Buffer.concat([Buffer.from([1]), Buffer.alloc(63)])
+  const sig = rebox([
+    'untrusted comment: forged',
+    forged.toString('base64'),
+    `trusted comment: ${comment}`,
+    globalSig.toString('base64'),
+  ])
+  const r = verifyTauriSignature(b64([PL[0], keyWith(idSigned)].join('\n')), sig, PAYLOAD)
+  assert.equal(r.ok, false)
+  assert.ok(/degenerate \(small-order\)/.test(r.reason), r.reason)
 })
 
 test('verify: a non-Buffer payload is refused with its own reason', () => {

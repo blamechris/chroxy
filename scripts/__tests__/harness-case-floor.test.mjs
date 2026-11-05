@@ -198,7 +198,7 @@ const EXCLUDED_HARNESSES = [
   // its TAP summary with assert-test-count.mjs (minimum 27 cases).
   'scripts/__tests__/report-coverage.test.mjs',
   // node:test owns this suite's verdict. The named Scripts Tests job checks
-  // its TAP summary with assert-test-count.mjs (minimum 48 cases).
+  // its TAP summary with assert-test-count.mjs (the --min floor there is the source of truth for the case count).
   'scripts/__tests__/updater-feed.test.mjs',
 ]
 
