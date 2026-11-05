@@ -50,7 +50,19 @@ describe('classifyAuthCause (#8970)', () => {
     assert.equal(classifyAuthCause({ CLAUDE_CODE_USE_BEDROCK: '1' }, { settings: { env: { CLAUDE_CODE_USE_VERTEX: '1' } } }), 'bedrock')
   })
 
+  it('a key or OAuth token set only in settings.json env is still seen', () => {
+    assert.equal(classifyAuthCause({}, { settings: { env: { ANTHROPIC_API_KEY: 'k' } } }), 'api_key')
+    assert.equal(classifyAuthCause({}, { settings: { env: { CLAUDE_CODE_OAUTH_TOKEN: 't' } } }), undefined)
+  })
+
   describe('reading the active settings file', () => {
+    it('honours the env block read from the file itself', () => {
+      writeFileSync(join(dir, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: 'k' } }))
+      assert.equal(classifyAuthCause({ CLAUDE_CONFIG_DIR: dir }), 'api_key')
+      writeFileSync(join(dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }))
+      assert.equal(classifyAuthCause({ CLAUDE_CONFIG_DIR: dir }), 'bedrock')
+    })
+
     let dir
     beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'chroxy-authcause-')) })
     afterEach(() => { rmSync(dir, { recursive: true, force: true }) })

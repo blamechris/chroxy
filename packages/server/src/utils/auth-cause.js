@@ -1,8 +1,10 @@
 /**
  * #8970: classify HOW a Claude session authenticates, so an AUTH_REQUIRED error
  * can name the remedy that applies. Pure given its inputs; the only I/O is one
- * read of the active Claude `settings.json` (apiKeyHelper, `env` block), located
- * with the shared `claudeConfigDir` resolver.
+ * read of the USER-LEVEL `<claudeConfigDir>/settings.json` (apiKeyHelper, `env`
+ * block), located with the shared `claudeConfigDir` resolver. Project
+ * `.claude/settings.json`, `settings.local.json` and managed settings are NOT
+ * consulted yet.
  *
  * Precedence mirrors Claude Code's own credential order:
  *   cloud provider (Bedrock / Vertex) > ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY
@@ -51,8 +53,8 @@ export function classifyAuthCause(env, { containerized = false, settings } = {})
   if (truthy(get('CLAUDE_CODE_USE_BEDROCK'))) return 'bedrock'
   if (truthy(get('CLAUDE_CODE_USE_VERTEX'))) return 'vertex'
   if (present(get('ANTHROPIC_AUTH_TOKEN'))) return 'auth_token'
-  if (present(env.ANTHROPIC_API_KEY)) return 'api_key'
+  if (present(get('ANTHROPIC_API_KEY'))) return 'api_key'
   if (present(cfg.apiKeyHelper)) return 'api_key_helper'
-  if (present(env.CLAUDE_CODE_OAUTH_TOKEN)) return undefined
+  if (present(get('CLAUDE_CODE_OAUTH_TOKEN'))) return undefined
   return 'login'
 }
