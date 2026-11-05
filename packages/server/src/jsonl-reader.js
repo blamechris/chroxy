@@ -70,6 +70,8 @@ export function decodeProjectPath(encoded) {
  * Resolve the JSONL file path for a conversation.
  * @param {string} cwd - Working directory the conversation was started in
  * @param {string} conversationId - UUID of the conversation
+ * @param {Record<string, string|undefined>} [env] - env claude runs with; its
+ *   `CLAUDE_CONFIG_DIR` (when valid) picks the projects root, else `~/.claude`
  * @returns {string} Absolute path to the JSONL file
  */
 export function resolveJsonlPath(cwd, conversationId, env = process.env) {

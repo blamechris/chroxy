@@ -333,7 +333,8 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
    * https://code.claude.com/docs/en/memory ("content is ordered from the
    * filesystem root down to your working directory"; within one directory,
    * CLAUDE.local.md is read right after that directory's CLAUDE.md):
-   *   1. global  — ~/.claude/CLAUDE.md          (loaded first, lowest precedence)
+   *   1. global  — <claude config dir>/CLAUDE.md (loaded first, lowest precedence;
+   *      the dir is CLAUDE_CONFIG_DIR when valid, else ~/.claude)
    *   2. project — <sessionCwd>/CLAUDE.md
    *   3. local   — <sessionCwd>/CLAUDE.local.md  (loaded last, highest precedence)
    * Managed/enterprise policy memory is out of scope — chroxy has no managed-
@@ -347,7 +348,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
    * design), so there is no client-controlled traversal surface for the three
    * root files. The ONLY variable input is @import references found INSIDE
    * those files' own content, which are confined to the same two roots
-   * (session cwd, user's ~/.claude) via `readConfinedMemoryFile` AND restricted
+   * (session cwd, claude's config dir) via `readConfinedMemoryFile` AND restricted
    * to markdown targets (`.md`/`.markdown`) — an import resolving outside both
    * roots, or to a non-markdown file (e.g. `~/.claude/.credentials.json`), is
    * reported (for provenance/transparency) with `skipped: true` and is never
@@ -378,11 +379,14 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
       return
     }
 
+    // Resolved once. claudeConfigDir() is already canonical and never the
+    // filesystem root, so it is safe as a containment root.
+    const claudeHome = claudeConfigDir()
     let claudeHomeReal
     try {
-      claudeHomeReal = await realpathOfDeepestAncestor(claudeConfigDir())
+      claudeHomeReal = await realpathOfDeepestAncestor(claudeHome)
     } catch {
-      claudeHomeReal = normalize(claudeConfigDir())
+      claudeHomeReal = normalize(claudeHome)
     }
 
     const allowedRoots = [cwdReal, claudeHomeReal]
@@ -405,10 +409,11 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     }
 
     // Auto-generated project memory (MEMORY.md) — restricted to the
-    // ~/.claude root only (it never lives under the session cwd).
+    // claude config dir root only (it never lives under the session cwd), and
+    // its resolved target must be markdown like every other read here.
     const encoded = encodeProjectPath(cwdReal)
     const memoryFilePath = resolve(claudeHomeReal, 'projects', encoded, 'memory', 'MEMORY.md')
-    const memoryFile = await readConfinedMemoryFile(memoryFilePath, [claudeHomeReal])
+    const memoryFile = await readConfinedMemoryFile(memoryFilePath, [claudeHomeReal], { requireMarkdownExt: true })
 
     send({ type: 'memory_stack_result', entries, memoryFile, error: null })
   }

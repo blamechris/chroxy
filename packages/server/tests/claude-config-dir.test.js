@@ -8,10 +8,11 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
-import { join, sep } from 'node:path'
-import { claudeConfigDir, claudeProjectsDir } from '../src/utils/claude-config-dir.js'
+import { join, sep, parse } from 'node:path'
+import { claudeConfigDir, claudeProjectsDir, resolveClaudeConfigDirOverride, sanitizeClaudeConfigDirEnv } from '../src/utils/claude-config-dir.js'
+import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 import { resolveJsonlPath, resolveClaudeProjectsDir, encodeProjectPath } from '../src/jsonl-reader.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { CliSession } from '../src/cli-session.js'
@@ -160,13 +161,13 @@ describe('containment still holds under an override (#8270)', () => {
   it('a sourceLocator cannot escape the CLAUDE_CONFIG_DIR projects root', () => {
     const projects = join(root, 'projects')
     mkdirSync(join(projects, 'p'), { recursive: true })
-    writeFileSync(join(root, 'secret.jsonl'), 'x')
+    writeFileSync(join(root, 'outside.jsonl'), 'x')
     const sources = [{ provider: 'claude', projectsDir: claudeProjectsDir({ CLAUDE_CONFIG_DIR: root }) }]
     const id = 'aaaaaaaa-1111-2222-3333-444444444444'
     writeFileSync(join(projects, 'p', `${id}.jsonl`), '{}\n')
     const ok = resolveTranscriptSource({ provider: 'claude', conversationId: id, sourceLocator: `p/${id}.jsonl`, sources })
     assert.equal(ok.ok, true)
-    for (const bad of ['../secret', `../${id}.jsonl`, `../../${id}.jsonl`, `p/../${id}.jsonl`]) {
+    for (const bad of ['../outside', `../${id}.jsonl`, `../../${id}.jsonl`, `p/../${id}.jsonl`]) {
       const r = resolveTranscriptSource({ provider: 'claude', conversationId: id, sourceLocator: bad, sources })
       assert.equal(r.ok, false, `refused ${bad}`)
     }
@@ -180,19 +181,101 @@ describe('containment still holds under an override (#8270)', () => {
   })
 })
 
+describe('canonical root and reader/child agreement (#8270 review)', () => {
+  it('an alias that resolves to the filesystem root is not accepted', () => {
+    const fsRoot = parse(root).root
+    const alias = join(root, 'alias-to-root')
+    try {
+      symlinkSync(fsRoot, alias, 'dir')
+    } catch {
+      return // symlink creation not permitted on this host
+    }
+    assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: alias }), REAL_DEFAULT)
+    assert.equal(resolveClaudeConfigDirOverride(alias), null)
+    assert.equal(resolveClaudeConfigDirOverride(join(alias, '.')), null)
+  })
+
+  it('a symlinked config dir is returned in canonical form', () => {
+    const real = join(root, 'real-cfg')
+    const link = join(root, 'link-cfg')
+    mkdirSync(real)
+    try {
+      symlinkSync(real, link, 'dir')
+    } catch {
+      return
+    }
+    assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: link }), real)
+  })
+
+  it('the child env and the reader agree on every spelling', () => {
+    const cases = {
+      valid: root,
+      relative: 'rel/cfg',
+      padded: ` ${root} `,
+      root: parse(root).root,
+    }
+    for (const [label, value] of Object.entries(cases)) {
+      const readerDir = claudeConfigDir({ CLAUDE_CONFIG_DIR: value })
+      const child = sanitizeClaudeConfigDirEnv({ CLAUDE_CONFIG_DIR: value })
+      // What claude would use: the child's variable when present, else ~/.claude.
+      const childDir = child.CLAUDE_CONFIG_DIR ?? REAL_DEFAULT
+      assert.equal(childDir, readerDir, `${label}: child and reader use the same dir`)
+    }
+    assert.equal(sanitizeClaudeConfigDirEnv({ CLAUDE_CONFIG_DIR: root }).CLAUDE_CONFIG_DIR, root)
+    assert.equal(Object.hasOwn(sanitizeClaudeConfigDirEnv({ CLAUDE_CONFIG_DIR: 'rel/cfg' }), 'CLAUDE_CONFIG_DIR'), false)
+  })
+
+  it('buildSpawnEnv for the claude family applies the same rule', () => {
+    process.env.CLAUDE_CONFIG_DIR = ` ${root}`
+    assert.equal(Object.hasOwn(buildSpawnEnv('claude'), 'CLAUDE_CONFIG_DIR'), false)
+    assert.equal(Object.hasOwn(buildSpawnEnv('claude-sdk'), 'CLAUDE_CONFIG_DIR'), false)
+    process.env.CLAUDE_CONFIG_DIR = root
+    assert.equal(buildSpawnEnv('claude').CLAUDE_CONFIG_DIR, root)
+  })
+
+  it('the TUI pty env applies the same rule', () => {
+    const bad = new ClaudeTuiSession({ cwd: root, connectionChildEnv: { CLAUDE_CONFIG_DIR: 'rel/cfg' } })
+    assert.equal(Object.hasOwn(bad._buildPtyEnv(false), 'CLAUDE_CONFIG_DIR'), false)
+    const good = new ClaudeTuiSession({ cwd: root, connectionChildEnv: { CLAUDE_CONFIG_DIR: root } })
+    assert.equal(good._buildPtyEnv(false).CLAUDE_CONFIG_DIR, root)
+  })
+})
+
 describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
-  it('reads the global CLAUDE.md and MEMORY.md from the override and never returns a credentials file there', async () => {
+  it('the MEMORY.md read only follows a markdown target', async () => {
+    const { createFileOps } = await import('../src/ws-file-ops/index.js')
+    const cfg = join(root, 'cfg2')
+    const cwd = join(root, 'work2')
+    mkdirSync(cfg, { recursive: true })
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cfg, 'notes.txt'), 'plain-text-target')
+    const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync(cwd)), 'memory')
+    mkdirSync(memDir, { recursive: true })
+    try {
+      symlinkSync(join(cfg, 'notes.txt'), join(memDir, 'MEMORY.md'), 'file')
+    } catch {
+      return
+    }
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    const out = []
+    await createFileOps((_ws, msg) => out.push(msg)).readMemory({}, cwd)
+    assert.equal(out[0].memoryFile.skipped, true)
+    assert.equal(out[0].memoryFile.content, null)
+    assert.ok(!JSON.stringify(out[0]).includes('plain-text-target'))
+  })
+
+  it('reads the global CLAUDE.md and MEMORY.md from the override and applies the markdown-only restriction to imports there', async () => {
     const { createFileOps } = await import('../src/ws-file-ops/index.js')
     const cfg = join(root, 'cfg')
     const cwd = join(root, 'work')
     mkdirSync(cfg, { recursive: true })
     mkdirSync(cwd, { recursive: true })
     writeFileSync(join(cfg, 'CLAUDE.md'), 'global-from-override')
-    writeFileSync(join(cfg, '.credentials.json'), '{"token":"s3cret"}')
+    writeFileSync(join(cfg, 'not-markdown.json'), '{"token":"non-markdown-body"}')
     const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync(cwd)), 'memory')
     mkdirSync(memDir, { recursive: true })
     writeFileSync(join(memDir, 'MEMORY.md'), 'memory-from-override')
-    writeFileSync(join(cwd, 'CLAUDE.md'), '@' + join(cfg, '.credentials.json'))
+    writeFileSync(join(cwd, 'CLAUDE.md'), '@' + join(cfg, 'not-markdown.json'))
     process.env.CLAUDE_CONFIG_DIR = cfg
     const out = []
     await createFileOps((_ws, msg) => out.push(msg)).readMemory({}, cwd)
@@ -201,6 +284,6 @@ describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
     const global = res.entries.find((e) => e.scope === 'global')
     assert.equal(global.content, 'global-from-override')
     assert.equal(res.memoryFile.content, 'memory-from-override')
-    assert.ok(!JSON.stringify(res).includes('s3cret'), 'credentials file under the override is never returned')
+    assert.ok(!JSON.stringify(res).includes('non-markdown-body'), 'non-markdown import under the override is not returned')
   })
 })

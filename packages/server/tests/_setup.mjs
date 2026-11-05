@@ -204,6 +204,13 @@ export const {
     `  See packages/server/tests/_setup.mjs and issue #4633.`,
 })
 
+// --- Start every test process without CLAUDE_CONFIG_DIR (#8270) ---------------
+// A variable exported in the developer's shell would move every claude-data
+// lookup away from the fake HOME most tests set up. Each test process is its
+// own child (`node --test` runs one per file), so dropping it here gives every
+// file a clean start; a test that needs it sets it explicitly and restores it.
+delete process.env.CLAUDE_CONFIG_DIR
+
 // --- Redirect CHROXY_CONFIG_DIR to a per-process tmp dir ----------------------
 // Production helpers (models.js, connection-info.js, checkpoint-manager.js)
 // already honour `CHROXY_CONFIG_DIR`. Pointing it at a tmp dir up-front means

@@ -20,7 +20,7 @@ import {
 // event loop — which would freeze EVERY claude-tui session (the default provider).
 import { lstat, open, readdir, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
-import { claudeConfigDir } from './utils/claude-config-dir.js'
+import { claudeConfigDir, sanitizeClaudeConfigDirEnv } from './utils/claude-config-dir.js'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -3314,6 +3314,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #8262: a parent Claude session's markers make this child a "nested"
     // session and turn transcript saving off, which breaks --resume.
     stripParentClaudeSessionEnv(env)
+    // #8270: same data-dir policy as the readers (see claude-config-dir.js).
+    sanitizeClaudeConfigDirEnv(env)
     env.TERM = 'xterm-256color'
 
     // permission-hook.sh reads these to phone home to /permission on the
@@ -3988,7 +3990,7 @@ export class ClaudeTuiSession extends BaseSession {
     const pid = this._term && this._term.pid
     const pidNote = Number.isInteger(pid) && pid > 0 ? ` (pty pid ${pid})` : ''
     const idNote = this._sessionId ? ` sessionId ${this._sessionId}` : ' (no sessionId)'
-    return ` — no session file for${idNote} found under ~/.claude/sessions${pidNote}; claude may be running under a different pid or a different ~/.claude (a wrapper shim that forks node without exec, or a redirected HOME), so the readiness probe can't resolve its state and readiness gating is effectively disabled for this session`
+    return ` — no session file for${idNote} found under ${join(claudeConfigDir(this._claudeEnv()), 'sessions')}${pidNote}; claude may be running under a different pid or a different claude config dir (a wrapper shim that forks node without exec, or a redirected HOME), so the readiness probe can't resolve its state and readiness gating is effectively disabled for this session`
   }
 
   /**

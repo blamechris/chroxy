@@ -234,7 +234,7 @@ describe('claude-tui respawn without a persisted transcript (#8239)', () => {
 
 describe('CLAUDE_CONFIG_DIR (#8239)', () => {
   let configDir
-  beforeEach(() => { configDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-config-')) })
+  beforeEach(() => { configDir = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-8239-config-'))) })
   afterEach(() => { rmSync(configDir, { recursive: true, force: true }) })
 
   function writeTranscriptUnder(root) {
