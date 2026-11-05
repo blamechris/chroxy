@@ -3,7 +3,7 @@ import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
-import { createPermissionResolver } from './permission-resolver.js'
+import { createPermissionResolver, buildLegacyResolvedBroadcast } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { sanitizeToolInput, describeByNamedField, describeToolInput } from './redaction.js'
 // #7004: the protected-path / secret-read FLOOR. Imported from permission-floor.js
@@ -762,16 +762,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           // (PermissionManager → SdkSession → SessionManager → broadcast). The
           // legacy branch has no PermissionManager, so it keeps the inline
           // broadcast (#2905) — sessionId included only when the request was mapped.
-          if (result.via === 'legacy') {
-            broadcastFn({
-              type: 'permission_resolved',
-              requestId,
-              decision,
-              // #8517: the "Allow for Session" label, when the caller sent it beside an allow.
-              ...(result.scope ? { scope: result.scope } : {}),
-              ...(result.sessionId ? { sessionId: result.sessionId } : {}),
-            }, result.sessionId ? undefined : unboundOnly)
-          }
+          const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, decision)
+          if (legacyBroadcast) broadcastFn(legacyBroadcast.frame, legacyBroadcast.filter)
           // #6771 — an allowAlways over the HTTP fallback (iOS notification
           // action) just persisted a durable project rule on the in-process
           // session. Broadcast the updated rule sets so clients' rules surfaces

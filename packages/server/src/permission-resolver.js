@@ -37,6 +37,44 @@
 import { normalizeProjectKey } from './permission-rule-store.js'
 import { EditedInputRefusedError } from './edited-input.js'
 import { permissionScope, permissionDecisionToken } from './permission-scope.js'
+import { isBoundClient } from './environments/authority.js'
+
+const unboundOnly = (client) => !isBoundClient(client)
+
+/**
+ * The `permission_resolved` announcement for a request that resolved through the
+ * LEGACY store (#7858) — the one definition WS (settings-handlers.js) and HTTP
+ * (ws-permissions.js) both broadcast, so the two transports cannot drift on what
+ * a resolved hook-routed answer means.
+ *
+ * An in-process (`via: 'sdk'`) answer returns null: the unified pipeline
+ * (PermissionManager -> SdkSession -> SessionManager -> broadcast, #3048) already
+ * announces it, so a second frame would double-deliver.
+ *
+ * Whether the frame may NAME a session is decided by `result.mapped` (the
+ * request's own mapping), never by `result.sessionId`, which the WS dispatch
+ * fallback also fills for an unmapped prompt (#8359).
+ *   - mapped   -> carries the owning sessionId, no recipient filter (the broadcaster
+ *                 still checks the frame's sessionId at delivery for a bound
+ *                 client, #8342). Includes the resolver (#6590).
+ *   - unmapped -> no sessionId, so only unbound clients receive it.
+ *
+ * @returns {{ frame: object, filter: ((client: object) => boolean) | undefined } | null}
+ */
+export function buildLegacyResolvedBroadcast(result, requestId, decision) {
+  if (!result || result.kind !== 'resolved' || result.via !== 'legacy') return null
+  return {
+    frame: {
+      type: 'permission_resolved',
+      requestId,
+      decision,
+      // #8517: the "Allow for Session" label, when the caller sent it beside an allow.
+      ...(result.scope ? { scope: result.scope } : {}),
+      ...(result.mapped ? { sessionId: result.sessionId } : {}),
+    },
+    filter: result.mapped ? undefined : unboundOnly,
+  }
+}
 
 /**
  * #6030: the single source of truth for the permission "dispatch origin"
