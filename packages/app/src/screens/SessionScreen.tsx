@@ -1620,6 +1620,7 @@ export function SessionScreen() {
             modelSwitchSupported={providerCaps.modelSwitchSupported}
             permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
             codexSandbox={activeSessionCodexSandbox}
+            rejectedModelIds={activeProviderRuntimeInfo?.rejectedModels}
             thinkingLevelEffectiveSupported={providerCaps.thinkingLevelEffectiveSupported}
             thinkingLevel={activeThinkingLevel}
             effectiveThinkingLevel={activeEffectiveThinkingLevel}

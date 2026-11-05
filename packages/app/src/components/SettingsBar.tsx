@@ -134,6 +134,10 @@ export interface SettingsBarProps {
   // once at thread start, so changing it needs a new session. `null`/`undefined`
   // (every non-codex session) renders nothing.
   codexSandbox?: CodexSandboxMode | null;
+  // #8915 — model ids the backend refused for the client this session launched
+  // (`providerRuntimeInfo.rejectedModels`, #8909). Matching chips (by `id` or
+  // `fullId`) render disabled and marked; absent or empty changes nothing.
+  rejectedModelIds?: readonly string[] | null;
   // #8700 — read-only "Effort" readout. The app has no thinking-level control;
   // for a provider that REPORTS the level it applied (capabilities
   // `thinkingLevel` AND `thinkingLevelEffective` — the claude-sdk family) the
@@ -322,6 +326,7 @@ export function SettingsBar({
   modelSwitchSupported = true,
   permissionModeSwitchSupported = true,
   codexSandbox = null,
+  rejectedModelIds = null,
   thinkingLevelEffectiveSupported = false,
   thinkingLevel,
   effectiveThinkingLevel,
@@ -466,6 +471,7 @@ export function SettingsBar({
   }
 
   const choices = modelChoices(availableModels);
+  const rejectedSet = new Set(rejectedModelIds ?? []);
   const defaultEntry = findModelEntry(availableModels, defaultModelId);
   const activeEntry = findModelEntry(availableModels, resolveCurrentModel(activeModel, defaultModelId, provider));
   const displayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId, provider);
@@ -600,19 +606,26 @@ export function SettingsBar({
                 <View style={styles.chipRow}>
                   {choices.map((m) => {
                     const isActive = activeEntry != null && (m.fullId || m.id) === (activeEntry.fullId || activeEntry.id);
+                    const rejected = rejectedSet.has(m.id) || (m.fullId != null && rejectedSet.has(m.fullId));
                     return (
                       <TouchableOpacity
                         key={m.id}
-                        style={[styles.chip, isActive && styles.chipActive]}
-                        onPress={() => setModel(m.id)}
+                        style={[styles.chip, isActive && styles.chipActive, rejected && styles.chipDisabled]}
+                        onPress={() => {
+                          if (!rejected) setModel(m.id);
+                        }}
+                        disabled={rejected}
                         testID={`settings-model-${m.id}`}
                         accessibilityRole="button"
-                        accessibilityState={{ selected: isActive }}
-                        accessibilityHint={`Model target: ${m.fullId || m.id}`}
+                        accessibilityState={{ selected: isActive, disabled: rejected }}
+                        accessibilityHint={rejected
+                          ? `The backend refused ${m.fullId || m.id} for the client this session launched, so it cannot be used here.`
+                          : `Model target: ${m.fullId || m.id}`}
                         activeOpacity={0.7}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
                           {isActive || (m.fullId || m.id) === (defaultEntry?.fullId || defaultEntry?.id) ? formatActiveModelLabel(availableModels, m.id, defaultModelId, provider) : m.label}
+                          {rejected ? ' · refused by this session\'s client' : ''}
                         </Text>
                       </TouchableOpacity>
                     );
