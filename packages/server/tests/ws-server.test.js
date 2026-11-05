@@ -2038,26 +2038,6 @@ describe('encryption integration (end-to-end)', () => {
     ws.send(JSON.stringify(envelope))
   }
 
-  /**
-   * Helper: wait for an encrypted message, decrypt it, and return the plaintext.
-   * Encrypted messages arrive as { type: 'encrypted', d: '...', n: N }.
-   */
-  async function waitForEncryptedMessage(messages, clientEncryption, timeout = 2000) {
-    await waitFor(
-      () => messages.find(m => m.type === 'encrypted'),
-      { timeoutMs: timeout, label: 'encrypted message' }
-    )
-
-    const encrypted = messages.find(m => m.type === 'encrypted')
-    // Remove the encrypted envelope from messages array to allow finding subsequent ones
-    const idx = messages.indexOf(encrypted)
-    if (idx !== -1) messages.splice(idx, 1)
-
-    const decrypted = decrypt(encrypted, clientEncryption.sharedKey, clientEncryption.recvNonce, DIRECTION_SERVER)
-    clientEncryption.recvNonce++
-    return decrypted
-  }
-
   async function waitForEncryptedMessageType(messages, clientEncryption, type, timeout = 2000) {
     return waitFor(() => {
       const decrypted = drainEncryptedMessages(messages, clientEncryption)
@@ -2249,17 +2229,18 @@ describe('encryption integration (end-to-end)', () => {
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
 
-    // Wait for 3 encrypted responses
-    await waitFor(() => messages.filter(m => m.type === 'encrypted').length >= 3, { label: '3 encrypted pong responses' })
+    // Decrypt EVERY encrypted frame in arrival order (drainEncryptedMessages
+    // advances recvNonce per frame, so a skipped or reordered frame fails
+    // decryption), then wait for the pong COUNT. Other encrypted broadcasts
+    // (e.g. a log_entry) may legitimately interleave with the pongs (#8005).
+    const decrypted = []
+    await waitFor(() => {
+      decrypted.push(...drainEncryptedMessages(messages, clientEncryption))
+      return decrypted.filter(m => m.type === 'pong').length >= 3
+    }, { label: '3 decrypted pong responses' })
 
-    // Decrypt all pong responses — nonce sequence must be continuous
-    const pong1 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
-    const pong2 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
-    const pong3 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
-
-    assert.equal(pong1.type, 'pong', 'First pong should decrypt correctly')
-    assert.equal(pong2.type, 'pong', 'Second pong should decrypt correctly')
-    assert.equal(pong3.type, 'pong', 'Third pong should decrypt correctly')
+    const pongs = decrypted.filter(m => m.type === 'pong')
+    assert.equal(pongs.length, 3, 'All three pongs should decrypt correctly in nonce order')
 
     ws.close()
   })
