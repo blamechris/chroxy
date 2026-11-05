@@ -26,12 +26,13 @@ const ICON: Record<MarkedTurnOutcome, string> = {
   truncated: '✂',
   refused: '⊘',
   stopped: '■',
+  interrupted: '⚡',
 };
 
 export function TurnOutcomeMarker({ outcome }: TurnOutcomeMarkerProps) {
   const description = describeTurnOutcome(outcome);
   if (!description) return null;
-  const tone = outcome === 'truncated' ? styles.truncated : outcome === 'refused' ? styles.refused : styles.stopped;
+  const tone = outcome === 'truncated' || outcome === 'interrupted' ? styles.truncated : outcome === 'refused' ? styles.refused : styles.stopped;
   return (
     <View
       testID={TURN_OUTCOME_MARKER_TESTID}

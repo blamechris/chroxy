@@ -133,3 +133,41 @@ describe('turn outcome on the mobile app (#7326)', () => {
     expect(markers(read())).toHaveLength(0);
   });
 });
+
+// #8259 -- a turn the daemon restart cut off. The server closes it at restore time
+// with a `result` carrying `turnOutcome: 'interrupted'` (the phone's partial text
+// never reached its history), so the marker rides the same path as the rest.
+describe('a turn interrupted by a daemon restart (#8259)', () => {
+  const INTERRUPTED_TS = 1700000009000;
+  const interruptedResult = (): ReplayParityFrame => ({
+    type: 'result',
+    sessionId: SID,
+    turnOutcome: 'interrupted',
+    timestamp: INTERRUPTED_TS,
+  } as ReplayParityFrame);
+  const prompt = (historySeq: number): ReplayParityFrame => ({
+    type: 'message', sessionId: SID, messageType: 'user_input', content: 'tell a story', timestamp: 1, historySeq,
+  } as ReplayParityFrame);
+
+  it('the reconnect delta replay marks the cut-off turn after its partial text', () => {
+    const { read, send } = boot();
+    send(prompt(1));
+    send({ type: 'stream_start', sessionId: SID, messageId: 'm1' } as ReplayParityFrame);
+    send({ type: 'stream_delta', sessionId: SID, messageId: 'm1', delta: 'Captain Elena had pil' } as ReplayParityFrame);
+    replayAll(send, [{ ...interruptedResult(), historySeq: 3 }], false);
+    const found = markers(read());
+    expect(found.map((m) => [m.turnOutcome, m.content])).toEqual([['interrupted', 'Interrupted: connection lost']]);
+    const all = read();
+    expect(all.some((m) => String(m.content).includes('Captain Elena had pil'))).toBe(true);
+    expect(all[all.length - 1]).toBe(found[0]);
+  });
+
+  it('survives the tab round trip: a full rebuild keeps one marker, never a silent prompt', () => {
+    const { read, send } = boot();
+    const frames = [prompt(1), { ...interruptedResult(), historySeq: 2 }];
+    replayAll(send, frames, true);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
+    replayAll(send, frames, true);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
+  });
+});

@@ -550,7 +550,7 @@ export class BaseSession extends EventEmitter {
       sources: [], rules: [], includedRequiredRuleIds: [],
     }
 
-    this._isBusy = false
+    this._busyFlag = false
     this._processReady = false
     // #8743: when the provider last produced output, on the monotonic
     // `_providerActivityClock()`. null until it first does. See noteProviderActivity.
@@ -958,6 +958,27 @@ export class BaseSession extends EventEmitter {
    */
   deactivateSkill(skillName) {
     return this._skillsManager.deactivateSkill(skillName)
+  }
+
+  /**
+   * #8259: the model is mid-turn. Every provider assigns `_isBusy = true` when it
+   * dispatches a turn to its backend (including a queued follow-up when the queue
+   * flushes) and BaseSession clears it at every turn end, so this accessor is the
+   * ONE place a turn starting or ending is observable. A change emits
+   * `turn_state` `{ active }` (internal: not in the proxied event list) so the
+   * SessionManager can persist "a turn was in flight" and, after a daemon
+   * restart, tell a turn that was cut off from one that merely has no `result`
+   * in its history.
+   */
+  get _isBusy() {
+    return this._busyFlag === true
+  }
+
+  set _isBusy(value) {
+    const next = !!value
+    if (this._busyFlag === next) return
+    this._busyFlag = next
+    this.emit('turn_state', { active: next })
   }
 
   /**

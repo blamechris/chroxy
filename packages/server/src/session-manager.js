@@ -425,12 +425,17 @@ function describePermissionForOutcome(tool, description, input, recordDescriptio
  * @param {boolean} truncated whether the slice is a truncated tail
  * @returns {Array}
  */
-function withRetainedPermissionOutcomes(transcript, ring, truncated) {
+export function withRetainedPermissionOutcomes(transcript, ring, truncated) {
   const seen = new Set()
   let outcomes = []
   for (const entry of ring) {
-    if (!entry || entry.type !== 'permission_outcome' || seen.has(entry.requestId)) continue
-    seen.add(entry.requestId)
+    // #8259: an interrupted turn's marker is daemon-written too (the provider's own
+    // transcript never saw the turn end), so it is retained the same way.
+    const isInterrupted = !!entry && entry.type === 'result' && entry.turnOutcome === 'interrupted'
+    if (!entry || (entry.type !== 'permission_outcome' && !isInterrupted)) continue
+    const key = isInterrupted ? `interrupted:${entry.timestamp}` : entry.requestId
+    if (seen.has(key)) continue
+    seen.add(key)
     const { _seq: _ringSeq, ...copy } = entry
     outcomes.push(copy)
   }
@@ -983,6 +988,14 @@ export class SessionManager extends EventEmitter {
 
     // Message history (delegated to SessionMessageHistory)
     this._history = new SessionMessageHistory({ maxMessages: maxMessages ?? maxHistory, maxToolInput })
+    // #8259: persist a seq reservation synchronously, before a seq above the previous one
+    // is issued (see SessionMessageHistory#_nextSeq). Not during teardown, nor while a
+    // restore is still seeding sessions (a mid-restore write would drop the sessions not
+    // yet restored); the restore's own final write carries the reservation.
+    this._history.setSeqReservationHandler((sessionId) => {
+      if (this._destroying || this._restoringHistory || !this._sessions.has(sessionId)) return
+      this._flushPersistOrWarn(sessionId)
+    })
     // #8348: open permission prompts, requestId -> { sessionId, tool, description }.
     // The end-of-prompt events carry only the requestId, so what the transcript
     // should say about the prompt is kept from the moment it was raised.
@@ -3591,6 +3604,12 @@ export class SessionManager extends EventEmitter {
         // keeps numbering past this value so that cursor still means what it did
         // (see SessionMessageHistory#setHistory). Absent on older state files.
         historyLastSeq: this._history.getLastIssuedSeq(id),
+        // #8259: highest seq this run may issue; persisted BEFORE any seq under it is
+        // handed out, so a restart numbers past every cursor a client could hold.
+        ...(this._history.getSeqReservedThrough(id) > 0 ? { seqReservedThrough: this._history.getSeqReservedThrough(id) } : {}),
+        // #8259: a turn was dispatched to the provider and has not ended. Written only
+        // when true (absent otherwise), so ordinary state files are unchanged.
+        ...(entry.turnInFlight === true ? { turnInFlight: true } : {}),
         // #4664: persist per-session toggle/string settings via the
         // shared registry — each entry's coerce produces the same
         // strict-boolean/string-default shape the pre-refactor per-knob
@@ -3987,6 +4006,22 @@ export class SessionManager extends EventEmitter {
           : undefined
         this._history.setHistory(sessionId, swept, { firstSeq })
       }
+      // #8259: close a turn the previous process was running when it went down. Driven
+      // by the persisted in-flight flag (set when a turn is dispatched to the
+      // provider, cleared when it ends), NOT by the shape of the history: a queued
+      // follow-up, an evaluator-held draft, an errored turn and a cap-evicted prompt
+      // all defeat any reading of the history. The flag was cleared on the live
+      // entry by createSession, so the next serialize records it as handled and a
+      // second restart adds nothing.
+      this._restoringHistory = (this._restoringHistory || 0) + 1
+      try {
+        this._history.restoreSeqReservation(sessionId, saved.seqReservedThrough)
+        if (saved.turnInFlight === true) {
+          this._history.recordInterruptedTurn(sessionId)
+        }
+      } finally {
+        this._restoringHistory -= 1
+      }
       if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
         this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
       }
@@ -4058,6 +4093,10 @@ export class SessionManager extends EventEmitter {
     let firstId = null
     let anyFailure = false
     const oldToNew = new Map() // old serialized session ID → new session ID
+    // #8259: no seq-reservation write while sessions are still being restored (it would
+    // drop the ones not yet restored); the flush after the loop carries the reservations.
+    this._restoringHistory = (this._restoringHistory || 0) + 1
+    try {
     for (const saved of state.sessions) {
       try {
         const sessionId = this._attemptRestoreOne(saved, hasVersion)
@@ -4088,6 +4127,9 @@ export class SessionManager extends EventEmitter {
           historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
         })
       }
+    }
+    } finally {
+      this._restoringHistory -= 1
     }
 
     // #7627 — the sessions the 24h staleness filter set aside. They are NOT
@@ -5651,6 +5693,35 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8259: set or clear the persisted "a turn is in flight" flag and persist it at
+   * once (not on the debounce), so a crash right after either edge leaves the state
+   * file telling the truth.
+   *
+   * CONTRACT: the flag means "input was accepted and has not been answered". It is
+   * set when a provider marks the session busy for a turn, which for claude-tui is
+   * before it awaits prompt readiness and for byok before MCP prompt expansion, so a
+   * restart in those awaits marks input that never reached the model. That is
+   * accurate from the user's side (they sent input and got no answer; sending again
+   * is the right advice) and is accepted. A turn typed directly into the claude-tui
+   * terminal never sets busy and is not covered.
+   *
+   * Ignored during teardown: a session being destroyed flips busy off, and that is
+   * not its turn ending.
+   */
+  _setTurnInFlight(sessionId, session, next) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry.session !== session || this._destroying || entry._destroying) return
+    if ((entry.turnInFlight === true) === next) return
+    entry.turnInFlight = next
+    this._flushPersistOrWarn(sessionId)
+  }
+
+  /** #8259: the turn's terminal outcome (result, error, stopped) was emitted. */
+  _noteTurnEnded(sessionId, session) {
+    this._setTurnInFlight(sessionId, session, false)
+  }
+
+  /**
    * Wire session events to unified session_event emission.
    * Handles both CliSession and PtySession events.
    */
@@ -5718,6 +5789,16 @@ export class SessionManager extends EventEmitter {
       })
     }
 
+    // #8259: BaseSession's `_isBusy` accessor reports a turn starting (input dispatched
+    // to the provider, including a queued follow-up when it flushes) and ending
+    // (result, error, stop, abort: every end reaches the same clear). Persist both
+    // edges at once rather than on the 2 s debounce, so a crash right after either
+    // leaves the state file saying the truth. Ignored during teardown: a session
+    // being destroyed flips busy off, and that is not its turn ending.
+    session.on('turn_state', ({ active } = {}) => this._setTurnInFlight(sessionId, session, active === true))
+    // A user Stop is a terminal outcome too (cli/tui emit it instead of a result).
+    session.on('stopped', () => this._noteTurnEnded(sessionId, session))
+
     for (const event of PROXIED_EVENTS) {
       session.on(event, (emitted) => {
         // #6630: an `error` carries no time of its own, and its wire frame and its
@@ -5732,6 +5813,15 @@ export class SessionManager extends EventEmitter {
         // activity: it must not push the idle timeout back.
         if (ACTIVITY_EVENTS.has(event) && data?.late !== true) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
+        // #8259: the turn's terminal outcome has been emitted. Clear the persisted
+        // in-flight flag HERE, whatever the provider process does next: a subprocess
+        // provider emits its result and keeps `_isBusy` true until the child closes,
+        // and a restart in that window must not call a finished turn interrupted. Every
+        // provider's outcome passes this listener. A recoverable error (a rejected
+        // follow-up, say) does not end the turn.
+        if (event === 'result' || (event === 'error' && data?.recoverable !== true)) {
+          this._noteTurnEnded(sessionId, session)
+        }
         this.emit('session_event', { sessionId, event, data })
         if (LOGGED_EVENTS.has(event)) {
           const detail = event === 'error' ? `: ${data?.message || ''}` : ''

@@ -21,11 +21,15 @@
  *  - `truncated` -- cut short by a limit (tokens, turns, budget, context).
  *  - `refused`   -- the model declined to answer.
  *  - `stopped`   -- the turn was cancelled.
+ *  - `interrupted` -- the turn was lost: the daemon went down (or restarted)
+ *                    under it, so no provider ever ended it (#8259). Written by
+ *                    the server's restore-time history sweep, not mapped from a
+ *                    provider signal.
  *
  * Append-only: every value is a wire contract. An absent field means the
  * provider did not say, which clients treat like `completed`: no marker.
  */
-export declare const TURN_OUTCOMES: readonly ["completed", "truncated", "refused", "stopped"];
+export declare const TURN_OUTCOMES: readonly ["completed", "truncated", "refused", "stopped", "interrupted"];
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 /** The outcomes a client marks in the transcript. `completed` is not one. */
 export type MarkedTurnOutcome = Exclude<TurnOutcome, 'completed'>;

@@ -1014,4 +1014,39 @@ describe('SessionMessageHistory', () => {
       assert.equal(history.getHistory('s1')[0]._seq, 1)
     })
   })
+  // #8259 — recordInterruptedTurn closes a turn the daemon went down under.
+  describe('recordInterruptedTurn (#8259)', () => {
+    it('appends an interrupted result that replays as a literal result frame', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 100 }])
+      const entry = h.recordInterruptedTurn('s1', 5000)
+      assert.equal(entry.turnOutcome, 'interrupted')
+      const frames = []
+      for (const e of h.getHistory('s1')) sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', e)
+      const result = frames.find((f) => f.type === 'result')
+      assert.equal(result.turnOutcome, 'interrupted')
+      assert.equal(result.timestamp, 5000)
+    })
+
+    it('clamps the timestamp to one past the newest entry (clock behind the persisted history)', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 9000 }])
+      assert.equal(h.recordInterruptedTurn('s1', 10).timestamp, 9001)
+    })
+
+    it('numbers the marker past any cursor the previous process could have issued (crash window)', () => {
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      // the state file said historyLastSeq 20, but a client had already applied seq 25
+      h.setHistory('s1', [{ type: 'message', messageType: 'user_input', content: 'q', timestamp: 1 }], { firstSeq: 20 })
+      h.recordInterruptedTurn('s1', 5000)
+      const history = h.getHistory('s1')
+      const plan = resolveReplayPlan(
+        { getLatestHistorySeq: (id) => h.getLatestSeq(id), getOldestHistorySeq: (id) => h.getOldestSeq(id) },
+        history, 's1', 25, h.getLatestSeq('s1'),
+      )
+      assert.equal(plan.fullHistory, false, 'the cursor is still honoured')
+      const sent = history.slice(plan.startOffset)
+      assert.deepEqual(sent.map((e) => e.turnOutcome), ['interrupted'], 'the client at seq 25 still receives the marker')
+    })
+  })
 })

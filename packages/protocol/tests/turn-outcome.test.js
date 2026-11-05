@@ -37,11 +37,11 @@ describe('ServerResultSchema.turnOutcome (#7326)', () => {
 })
 
 describe('turn outcome vocabulary (#7326)', () => {
-  it('is exactly the four values that are a wire contract', () => {
-    assert.deepEqual([...TURN_OUTCOMES], ['completed', 'truncated', 'refused', 'stopped'])
+  it('is exactly the five values that are a wire contract', () => {
+    assert.deepEqual([...TURN_OUTCOMES], ['completed', 'truncated', 'refused', 'stopped', 'interrupted'])
   })
 
-  it('isTurnOutcome accepts the four and nothing else', () => {
+  it('isTurnOutcome accepts the five and nothing else', () => {
     for (const v of TURN_OUTCOMES) assert.ok(isTurnOutcome(v), v)
     for (const v of ['end_turn', 'refusal', 'cancelled', 'Truncated', '', null, undefined, 3, {}]) {
       assert.equal(isTurnOutcome(v), false, String(v))
@@ -50,7 +50,7 @@ describe('turn outcome vocabulary (#7326)', () => {
 
   it('isMarkedTurnOutcome excludes completed: a finished turn gets no marker', () => {
     assert.equal(isMarkedTurnOutcome('completed'), false)
-    for (const v of ['truncated', 'refused', 'stopped']) assert.ok(isMarkedTurnOutcome(v), v)
+    for (const v of ['truncated', 'refused', 'stopped', 'interrupted']) assert.ok(isMarkedTurnOutcome(v), v)
     assert.equal(isMarkedTurnOutcome('something-newer'), false)
   })
 
@@ -58,6 +58,7 @@ describe('turn outcome vocabulary (#7326)', () => {
     assert.equal(describeTurnOutcome('truncated').label, 'Reply cut off')
     assert.equal(describeTurnOutcome('refused').label, 'The model declined')
     assert.equal(describeTurnOutcome('stopped').label, 'Stopped')
+    assert.equal(describeTurnOutcome('interrupted').label, 'Interrupted: connection lost')
     for (const marked of ['truncated', 'refused', 'stopped']) {
       assert.ok(describeTurnOutcome(marked).detail.length > 0, `${marked}: a sentence for the tooltip`)
     }

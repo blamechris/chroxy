@@ -218,6 +218,7 @@ export declare const ServerResultSchema: z.ZodObject<{
         truncated: "truncated";
         refused: "refused";
         stopped: "stopped";
+        interrupted: "interrupted";
     }>>;
     timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
