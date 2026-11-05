@@ -16,7 +16,7 @@ let root
 let savedEnv
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'memory-root-use-site-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'memory-root-use-site-')))
   savedEnv = process.env.CLAUDE_CONFIG_DIR
 })
 

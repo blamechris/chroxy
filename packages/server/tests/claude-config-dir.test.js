@@ -29,7 +29,7 @@ let root
 let savedEnv
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'claude-config-dir-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'claude-config-dir-')))
   savedEnv = process.env.CLAUDE_CONFIG_DIR
   delete process.env.CLAUDE_CONFIG_DIR
 })
@@ -315,7 +315,7 @@ describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
     mkdirSync(cfg, { recursive: true })
     mkdirSync(cwd, { recursive: true })
     writeFileSync(join(cfg, 'notes.txt'), 'plain-text-target')
-    const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync(cwd)), 'memory')
+    const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync.native(cwd)), 'memory')
     mkdirSync(memDir, { recursive: true })
     symlinkSync(join(cfg, 'notes.txt'), join(memDir, 'MEMORY.md'), 'file')
     process.env.CLAUDE_CONFIG_DIR = cfg
@@ -334,7 +334,7 @@ describe('memory_read honours CLAUDE_CONFIG_DIR (#8270)', () => {
     mkdirSync(cwd, { recursive: true })
     writeFileSync(join(cfg, 'CLAUDE.md'), 'global-from-override')
     writeFileSync(join(cfg, 'not-markdown.json'), '{"token":"non-markdown-body"}')
-    const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync(cwd)), 'memory')
+    const memDir = join(cfg, 'projects', encodeProjectPath(realpathSync.native(cwd)), 'memory')
     mkdirSync(memDir, { recursive: true })
     writeFileSync(join(memDir, 'MEMORY.md'), 'memory-from-override')
     writeFileSync(join(cwd, 'CLAUDE.md'), '@' + join(cfg, 'not-markdown.json'))
