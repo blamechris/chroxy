@@ -10,7 +10,7 @@
  * root is a refusal. No refusal falls back to another provider's source, and a
  * same-id file under a different provider is never consulted.
  */
-import { realpathSync } from 'fs'
+import { realpathSync, statSync } from 'fs'
 import { join, isAbsolute } from 'path'
 import { isPathWithin } from './utils/path-containment.js'
 import { resolveJsonlPath } from './jsonl-reader.js'
@@ -53,7 +53,7 @@ function locatorMatches(locator, conversationId) {
  */
 export function resolveTranscriptSource({ provider, conversationId, cwd = null, sourceLocator = null, sources = null }) {
   if (typeof provider !== 'string' || !Object.hasOwn(ADAPTERS, provider)) {
-    return { ok: false, code: 'unknown_provider', reason: `Unknown transcript provider: ${typeof provider === 'string' ? provider : 'none'}` }
+    return { ok: false, code: 'unknown_provider', reason: typeof provider === 'string' ? `Unknown transcript provider: ${provider}` : 'This conversation has no recorded provider, so its transcript cannot be located' }
   }
   const adapter = ADAPTERS[provider]
   if (adapter.unsupported) {
@@ -85,7 +85,10 @@ export function resolveTranscriptSource({ provider, conversationId, cwd = null, 
     if (!isPathWithin(realFile, realRoot)) {
       return { ok: false, code: 'invalid_source', reason: 'Transcript source is outside the provider store' }
     }
-    return { ok: true, provider, path: realFile }
+    // The identity of the contained file; the reader refuses an opened file
+    // that is not this exact object.
+    const st = statSync(realFile, { bigint: true })
+    return { ok: true, provider, path: realFile, identity: { dev: st.dev, ino: st.ino } }
   } catch (err) {
     if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
       return { ok: false, code: 'source_unavailable', reason: 'Transcript file not found' }

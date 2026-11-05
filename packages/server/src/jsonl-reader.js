@@ -2,6 +2,8 @@ import { statSync, existsSync, readdirSync } from 'fs'
 import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
+import { constants as fsConstants } from 'fs'
+import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 
 // Wire cap for a transcript read: the MOST RECENT 500 parsed messages. This is
 // the JSONL path's OWN truncation, entirely separate from the ring buffer's
@@ -317,24 +319,51 @@ export class TranscriptDataError extends Error {
  * and parser, but a missing/unreadable file or a corrupt record THROWS a
  * TranscriptDataError instead of reading as an empty successful transcript.
  *
+ * The file is opened ONCE through the shared no-follow opener, and everything
+ * after that (identity check, size, bytes) goes through that one descriptor, so
+ * the object that was checked is the object that is read. When the caller
+ * resolved and contained the path beforehand it passes that file's identity
+ * (`expectedIdentity`, bigint dev + ino); an opened file with a different
+ * identity is refused rather than read.
+ *
  * @param {string} filePath
  * @param {number} [maxBytes]
+ * @param {{ expectedIdentity?: { dev: bigint, ino: bigint } }} [opts]
  * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
  */
-export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
+export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, { expectedIdentity } = {}) {
   let raw
   let byteTruncated = false
+  let fh
   try {
-    const { size } = await stat(filePath)
+    fh = await openNoFollow(filePath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0))
+    const st = await fh.stat({ bigint: true })
+    if (!st.isFile()) {
+      throw new TranscriptDataError('unreadable', 'Transcript source is not a regular file')
+    }
+    if (expectedIdentity && (st.dev !== expectedIdentity.dev || st.ino !== expectedIdentity.ino)) {
+      throw new TranscriptDataError('unreadable', 'Transcript file changed after it was resolved')
+    }
+    const size = Number(st.size)
     byteTruncated = size > maxBytes
-    raw = byteTruncated
-      ? await readTailBytesAsync(filePath, maxBytes)
-      : await readFile(filePath, 'utf-8')
+    const start = byteTruncated ? size - maxBytes : 0
+    const length = size - start
+    const buf = Buffer.alloc(length)
+    let off = 0
+    while (off < length) {
+      const { bytesRead } = await fh.read(buf, off, length - off, start + off)
+      if (bytesRead === 0) break
+      off += bytesRead
+    }
+    raw = new TextDecoder('utf-8', { fatal: false }).decode(buf.subarray(0, off))
   } catch (err) {
+    if (err instanceof TranscriptDataError) throw err
     if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
       throw new TranscriptDataError('missing', 'Transcript file not found')
     }
     throw new TranscriptDataError('unreadable', 'Transcript file could not be read')
+  } finally {
+    if (fh) await fh.close().catch(() => {})
   }
   return parseJsonlContent(raw, { byteTruncated, strict: true })
 }

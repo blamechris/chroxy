@@ -136,12 +136,17 @@ describe('#7828 provider-aware transcript resolution', () => {
       assert.deepEqual(texts(sends), [])
     })
 
-    it('missing file: error, and a same-id Claude file is not substituted for a Codex-less lookup', async () => {
+    it('missing file: error, and a same-id file under another project dir is not substituted', async () => {
       const gone = '00000000-0000-0000-0000-00000000dead'
+      // The same UUID exists in a DIFFERENT project dir and under the other
+      // provider; the record's locator points at a file that is not there.
+      writeConv(claudeProjects, 'ALTERNATE-CLAUDE', { id: gone, key: '-tmp-other-project' })
+      writeConv(codexProjects, 'ALTERNATE-CODEX', { id: gone })
       const scan = createSpy(async () => [{ conversationId: gone, provider: 'claude', cwd: PROJECT, sourceLocator: `${PROJECT_KEY}/${gone}.jsonl` }])
       const { sends } = await run({ conversationId: gone }, sources(), { scanConversations: scan })
       assert.equal(sends[0].type, 'session_error')
       assert.match(sends[0].message, /not found/)
+      assert.deepEqual(texts(sends), [])
       assert.equal(sends.some((m) => m.type === 'history_replay_start'), false)
     })
 

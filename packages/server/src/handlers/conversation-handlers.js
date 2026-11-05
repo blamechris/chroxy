@@ -170,6 +170,16 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     return
   }
 
+  // Every failure from here on names the conversation it answers, with a
+  // stable code, so a viewer waiting on THIS conversation can settle on the
+  // reason instead of waiting out its inactivity timer.
+  const fail = (message) => ctx.transport.send(ws, {
+    type: 'session_error',
+    message,
+    code: 'TRANSCRIPT_UNAVAILABLE',
+    conversationId,
+  })
+
   // Resolve the conversation's recorded cwd authoritatively from the persisted
   // store (the scanner reads the same JSONL layer list_conversations does). Only
   // fall back to a client-provided cwd hint when the scan can't find it (e.g. a
@@ -189,9 +199,23 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     log.warn(`Transcript scan failed for ${conversationId}: ${err.message}`)
   }
   const wantedProvider = typeof msg.provider === 'string' && msg.provider ? msg.provider : null
+  // Authorization comes BEFORE any answer that depends on how many records
+  // exist or which providers hold them: a bound client is shown only the
+  // records it may see, and when every record is outside its scope it gets the
+  // same response a single out-of-scope record always got.
+  if (matches.length > 0) {
+    matches = scopeConversationsToClient(matches, client, ctx)
+    if (matches.length === 0) {
+      fail('Not authorized to view this conversation')
+      return
+    }
+  }
   if (wantedProvider) matches = matches.filter((c) => c?.provider === wantedProvider)
   if (matches.length > 1) {
-    sendSessionError(ws, ctx, 'Conversation id exists under more than one provider; specify the provider')
+    const providers = new Set(matches.map((c) => c?.provider))
+    fail(providers.size > 1
+      ? 'Conversation id exists under more than one provider; specify the provider'
+      : 'Conversation id has more than one record for this provider, so it cannot be read unambiguously')
     return
   }
   const conv = matches[0] || null
@@ -202,7 +226,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // create/resume paths enforce before trusting it to resolve a filesystem path.
     const cwdError = validateCwdAllowed(msg.cwd, ctx.services.config)
     if (cwdError) {
-      sendSessionError(ws, ctx, cwdError)
+      fail(cwdError)
       return
     }
     // Defense-in-depth: validateCwdAllowed already resolved + vetted the realpath
@@ -212,13 +236,13 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     try {
       cwd = realpathSync(msg.cwd)
     } catch {
-      sendSessionError(ws, ctx, `Cannot resolve path: ${msg.cwd}`)
+      fail(`Cannot resolve path: ${msg.cwd}`)
       return
     }
   }
 
   if (!cwd) {
-    sendSessionError(ws, ctx, `Conversation not found: ${conversationId}`)
+    fail(`Conversation not found: ${conversationId}`)
     return
   }
 
@@ -226,7 +250,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   // use. A bound client that can't see this cwd gets an empty set → reject.
   const scoped = scopeConversationsToClient([{ conversationId, cwd }], client, ctx)
   if (scoped.length === 0) {
-    sendSessionError(ws, ctx, 'Not authorized to view this conversation')
+    fail('Not authorized to view this conversation')
     return
   }
 
@@ -257,14 +281,14 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     sources: ctx.runtime.transcriptSources,
   })
   if (!source.ok) {
-    sendSessionError(ws, ctx, source.reason)
+    fail(source.reason)
     return
   }
   const readTranscript = ctx.readConversationTranscript || defaultReadConversationTranscript
   let messages = []
   let truncated = false
   try {
-    const read = await readTranscript(source.path)
+    const read = await readTranscript(source.path, undefined, { expectedIdentity: source.identity })
     if (Array.isArray(read)) {
       // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a
       // TEST-ONLY injection seam — nothing in production injects it, so this
@@ -285,7 +309,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // #7828 — a missing/unreadable file or a corrupt record is a DATA error, not
     // an empty successful transcript: say so, and send no replay frames.
     log.warn(`Failed to read transcript for ${conversationId}: ${err.message}`)
-    sendSessionError(ws, ctx, err?.name === 'TranscriptDataError' ? err.message : 'Transcript could not be read')
+    fail(err?.name === 'TranscriptDataError' ? err.message : 'Transcript could not be read')
     return
   }
 
