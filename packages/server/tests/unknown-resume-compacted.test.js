@@ -27,9 +27,19 @@ describe('stderrIndicatesUnknownResumeCompacted (#7847)', () => {
     assert.equal(stderrIndicatesUnknownResumeCompacted(lines), true)
   })
 
-  it('does not match fragments spread wider than the window', () => {
-    const lines = ['Noconvers', 'ation', 'foundwith', 'session', ...Array.from({ length: 10 }, (_, i) => `x${i}`), `ID:${UUID}`]
+  it('does not match unrelated text between the phrase and the id', () => {
+    const lines = ['Noconvers', 'ation', 'foundwith', 'session', 'x0', `ID:${UUID}`]
     assert.equal(stderrIndicatesUnknownResumeCompacted(lines), false)
+  })
+
+  // Pins the window from ABOVE: a complete rejection, nothing in between, split
+  // into one character per line so it spans far more than the window. It must
+  // not match at the default, and must match once the window covers it, so
+  // removing or inflating the bound turns this red.
+  it('does not match a complete rejection spread over more lines than the window', () => {
+    const lines = [...`NoconversationfoundwithsessionID:${UUID}`]
+    assert.equal(stderrIndicatesUnknownResumeCompacted(lines), false)
+    assert.equal(stderrIndicatesUnknownResumeCompacted(lines, lines.length), true)
   })
 
   it('tolerates empty and non-array input', () => {

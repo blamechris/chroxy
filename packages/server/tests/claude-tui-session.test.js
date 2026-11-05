@@ -3102,7 +3102,7 @@ describe('ClaudeTuiSession', () => {
         session = makeSession()
         const filler = Array.from({ length: 12 }, (_, i) => `unrelated line ${i}`).join('\r\n')
         session._appendToOutputTail(`Noconvers\r\nation\r\nfoundwith\r\nsession\r\n${filler}\r\nID:00000000-0000-4000-8000-000000000000\r\n`)
-        assert.equal(session._scanOutputForUnknownResume(), false, 'phrase and id more than 10 lines apart')
+        assert.equal(session._scanOutputForUnknownResume(), false, 'unrelated lines between the phrase and the id never match')
       })
 
       it('does not match transcript text merely discussing resume/session/conversation errors (#7847)', () => {
