@@ -206,11 +206,15 @@ export const SERVER_CONFIG_DEFAULTS = Object.freeze({
  * Runs the SAME mergeConfig + defaults as loadAndMergeConfig (flag > env > config
  * file > 8765), reading the file named by `-c/--config` (default: the
  * CHROXY_CONFIG_DIR-aware config.json). Unlike `start`, a missing or unparseable
- * config is not fatal: doctor must still run on an uninitialised host, and its
- * Config check reports the file's own problems.
+ * config is not fatal here: doctor must still run on an uninitialised host. The
+ * file's own problems are surfaced by runDoctorChecks, which reads the SAME path
+ * (passed as `configFilePath`) and reports a Config row.
+ *
+ * A resolved port that is not an integer in 1-65535 (e.g. `"abc"`, which listen()
+ * would treat as a pipe path) is returned as `problem` instead of being probed.
  *
  * @param {{ config?: string, port?: string|number }} options - Commander options
- * @returns {number}
+ * @returns {{ port: number, problem: string|null }}
  */
 export function resolveConfiguredPort(options = {}) {
   const path = options.config ?? configFile()
@@ -226,8 +230,14 @@ export function resolveConfiguredPort(options = {}) {
   const cliOverrides = {}
   const flagPort = options.port !== undefined ? parseInt(options.port, 10) : NaN
   if (!Number.isNaN(flagPort)) cliOverrides.port = flagPort
-  const merged = mergeConfig({ fileConfig, cliOverrides, defaults: SERVER_CONFIG_DEFAULTS })
-  return merged.port || SERVER_CONFIG_DEFAULTS.port
+  const { port } = mergeConfig({ fileConfig, cliOverrides, defaults: SERVER_CONFIG_DEFAULTS })
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return {
+      port: SERVER_CONFIG_DEFAULTS.port,
+      problem: `invalid port ${JSON.stringify(port)} (must be an integer 1-65535)`,
+    }
+  }
+  return { port, problem: null }
 }
 
 /**

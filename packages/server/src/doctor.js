@@ -583,7 +583,7 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
 export async function runDoctorChecks({
-  port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
+  port, portProblem, configFilePath, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
   tunnelProbe, detectStranded = detectStrandedState, platform = process.platform,
   // #8116 — same seam shape as #8074's binaryProvenanceMode / #8115's
   // providers: `undefined` (the default) means "read the named-tunnel
@@ -670,10 +670,14 @@ export async function runDoctorChecks({
   // `binaryProvenance` key as gate-off, matching every other check in this
   // function's existing "a corrupt config degrades gracefully" behaviour
   // rather than hard-failing doctor itself.
+  // #8233: `-c <path>` (configFilePath) replaces the default config.json for every
+  // check below that reads config.
+  const explicitConfig = typeof configFilePath === 'string' && configFilePath !== ''
+  const cfgFile = explicitConfig ? configFilePath : configFile()
   let parsedConfig = null
-  if (existsSync(configFile())) {
+  if (existsSync(cfgFile)) {
     try {
-      const config = JSON.parse(readFileSync(configFile(), 'utf-8'))
+      const config = JSON.parse(readFileSync(cfgFile, 'utf-8'))
       parsedConfig = config
       // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
       // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
@@ -700,17 +704,20 @@ export async function runDoctorChecks({
       registerOpenAiCompatibleProviders(config)
       const { valid, warnings } = validateConfig(config)
       if (valid) {
-        configCheck = { name: 'Config', status: 'pass', message: configFile() }
+        configCheck = { name: 'Config', status: 'pass', message: cfgFile }
       } else {
-        configCheck = { name: 'Config', status: 'warn', message: `${configFile()} — ${warnings.join('; ')}` }
+        configCheck = { name: 'Config', status: 'warn', message: `${cfgFile} — ${warnings.join('; ')}` }
       }
     } catch (err) {
       if (err instanceof SyntaxError) {
-        configCheck = { name: 'Config', status: 'fail', message: `${configFile()} — invalid JSON: ${err.message}` }
+        configCheck = { name: 'Config', status: 'fail', message: `${cfgFile} — invalid JSON: ${err.message}` }
       } else {
-        configCheck = { name: 'Config', status: 'fail', message: `${configFile()} — ${err.message}` }
+        configCheck = { name: 'Config', status: 'fail', message: `${cfgFile} — ${err.message}` }
       }
     }
+  } else if (explicitConfig) {
+    // `-c <path>` named a file that does not exist: fail naming THAT path, as `start` does.
+    configCheck = { name: 'Config', status: 'fail', message: `${cfgFile} — config file not found` }
   } else {
     configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'chroxy init' to create` }
   }
@@ -1012,7 +1019,10 @@ export async function runDoctorChecks({
 
   // 7. Port availability
   const checkPort = port || 8765
-  try {
+  if (portProblem) {
+    // A non-integer / out-of-range port must not reach listen(), which treats a string as a pipe path.
+    checks.push({ name: 'Port', status: 'fail', message: portProblem })
+  } else try {
     await checkPortAvailable(checkPort)
     checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
   } catch {

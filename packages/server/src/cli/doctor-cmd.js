@@ -14,11 +14,11 @@ export function registerDoctorCommand(program) {
       const { runDoctorChecks } = await import('../doctor.js')
 
       // #8233: same flag > env > config file > 8765 precedence `chroxy start` uses.
-      const port = resolveConfiguredPort(options)
+      const { port, problem: portProblem } = resolveConfiguredPort(options)
       const providers = options.provider
         ? options.provider.split(',').map(s => s.trim()).filter(Boolean)
         : undefined
-      const result = await runDoctorChecks({ port, providers, checkUserLevelHook: true })
+      const result = await runDoctorChecks({ port, portProblem, configFilePath: options.config, providers, checkUserLevelHook: true })
       const { checks, passed } = result
 
       console.log('\nChroxy Doctor\n')

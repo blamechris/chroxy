@@ -114,6 +114,30 @@ describe('chroxy doctor — configured port (#8233)', () => {
     const r = await doctor([], { CHROXY_CONFIG_DIR: dir })
     assert.ok(portRow(r.stdout).includes(`${port} is in use`), r.stdout)
   })
+
+  const configRow = (stdout) => stdout.split('\n').find((l) => /\bConfig\b/.test(l) && !/state root/.test(l)) || ''
+
+  it('-c pointing at invalid JSON fails the Config row naming that path', async () => {
+    const bad = join(home, 'bad.json')
+    writeFileSync(bad, '{ not json')
+    const r = await doctor(['-c', bad])
+    const row = configRow(r.stdout)
+    assert.ok(row.includes('FAIL') && row.includes(bad) && row.includes('invalid JSON'), r.stdout)
+  })
+
+  it('-c pointing at a missing file fails the Config row naming that path', async () => {
+    const missing = join(home, 'nope', 'missing.json')
+    const r = await doctor(['-c', missing])
+    const row = configRow(r.stdout)
+    assert.ok(row.includes('FAIL') && row.includes(missing), r.stdout)
+  })
+
+  it('a non-numeric configured port fails the Port row without probing it', async () => {
+    writeConfig(join(home, '.chroxy'), { port: 'abc' })
+    const r = await doctor([])
+    const row = portRow(r.stdout)
+    assert.ok(row.includes('FAIL') && row.includes('abc') && !row.includes('is available'), r.stdout)
+  })
 })
 
 describe('resolveConfiguredPort (#8233)', () => {
@@ -132,27 +156,38 @@ describe('resolveConfiguredPort (#8233)', () => {
 
   it('defaults to 8765 with no flag, env or config file', () => {
     withEnvPort(undefined, () => {
-      assert.equal(resolveConfiguredPort({ config: join(home, 'missing.json') }), 8765)
+      assert.equal(resolveConfiguredPort({ config: join(home, 'missing.json') }).port, 8765)
     })
   })
 
   it('reads the config-file port', () => {
     writeFileSync(file, JSON.stringify({ port: 8794 }))
-    withEnvPort(undefined, () => assert.equal(resolveConfiguredPort({ config: file }), 8794))
+    withEnvPort(undefined, () => assert.equal(resolveConfiguredPort({ config: file }).port, 8794))
   })
 
   it('env beats the config file', () => {
     writeFileSync(file, JSON.stringify({ port: 8794 }))
-    withEnvPort('8801', () => assert.equal(resolveConfiguredPort({ config: file }), 8801))
+    withEnvPort('8801', () => assert.equal(resolveConfiguredPort({ config: file }).port, 8801))
   })
 
   it('flag beats env and config file', () => {
     writeFileSync(file, JSON.stringify({ port: 8794 }))
-    withEnvPort('8801', () => assert.equal(resolveConfiguredPort({ config: file, port: '8802' }), 8802))
+    withEnvPort('8801', () => assert.equal(resolveConfiguredPort({ config: file, port: '8802' }).port, 8802))
   })
 
   it('ignores an unparseable flag and an unparseable config file', () => {
     writeFileSync(file, '{ not json')
-    withEnvPort(undefined, () => assert.equal(resolveConfiguredPort({ config: file, port: 'abc' }), 8765))
+    withEnvPort(undefined, () => assert.equal(resolveConfiguredPort({ config: file, port: 'abc' }).port, 8765))
+  })
+
+  it('reports a non-numeric or out-of-range port as a problem instead of a port', () => {
+    writeFileSync(file, JSON.stringify({ port: 'abc' }))
+    withEnvPort(undefined, () => {
+      const r = resolveConfiguredPort({ config: file })
+      assert.ok(r.problem && r.problem.includes('abc'), String(r.problem))
+    })
+    writeFileSync(file, JSON.stringify({ port: 8794 }))
+    withEnvPort('abc', () => assert.ok(resolveConfiguredPort({ config: file }).problem))
+    withEnvPort('70000', () => assert.ok(resolveConfiguredPort({ config: file }).problem))
   })
 })
