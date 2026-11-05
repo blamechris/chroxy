@@ -394,6 +394,10 @@ export function handleMessage(
     ? parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
     : undefined
   const replayedThinkingTokens = isReplayedThinking ? parseFiniteNonNegIntField(msg, 'thinkingTokens') : undefined
+  // #8273: which credential an AUTH_REQUIRED failure concerns (known values only).
+  const authCause = msgType === 'error' && msg.code === 'AUTH_REQUIRED'
+    ? parseAuthCause(msg.authCause)
+    : undefined
 
   const chatMessage: ChatMessage = {
     id: resolvedMessageId,
@@ -477,9 +481,7 @@ export function handleMessage(
     // #8273: preserve which credential an AUTH_REQUIRED failure concerns so the
     // sign-in chip names the real remedy. Gated on `error` + `AUTH_REQUIRED` and on
     // the known values; anything else is dropped and the chip shows the login remedy.
-    ...(msgType === 'error' && msg.code === 'AUTH_REQUIRED' && parseAuthCause(msg.authCause)
-      ? { authCause: parseAuthCause(msg.authCause) }
-      : {}),
+    ...(authCause ? { authCause } : {}),
     // #6768: preserve the structured compaction-boundary marker so
     // renderers can show a distinct "Context compacted" callout instead of
     // the generic muted system bubble. Gated on `msgType === 'system'` +

@@ -650,8 +650,8 @@ export class SdkSession extends BaseSession {
   }
 
   /** #8223: the AUTH_REQUIRED text for THIS session — container- and key-aware. */
-  _authRequiredMessage() {
-    switch (this._authCause()) {
+  _authRequiredMessage(authCause = this._authCause()) {
+    switch (authCause) {
       case 'container': return AUTH_REQUIRED_CONTAINER_MESSAGE
       case 'api_key': return AUTH_REQUIRED_API_KEY_MESSAGE
       default: return AUTH_REQUIRED_MESSAGE
@@ -663,7 +663,7 @@ export class SdkSession extends BaseSession {
     const authCause = this._authCause()
     return {
       code: AUTH_REQUIRED_CODE,
-      message: this._authRequiredMessage(),
+      message: this._authRequiredMessage(authCause),
       ...(authCause ? { authCause } : {}),
     }
   }
