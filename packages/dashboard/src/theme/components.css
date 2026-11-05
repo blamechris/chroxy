@@ -1550,6 +1550,12 @@ a.dev-preview-chip__link:focus-visible {
   color: var(--text-secondary);
 }
 
+.sidebar-token-view-untracked-note {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .sidebar-token-view-section-header {
   color: var(--text-muted);
   font-size: 11px;

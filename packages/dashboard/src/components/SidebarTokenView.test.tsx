@@ -399,6 +399,61 @@ describe('SidebarTokenView (#4303 v0)', () => {
     })
   })
 
+  describe('untracked headline totals (#8255)', () => {
+    it('aggregateUsage reports trackedSessions and allUntracked', () => {
+      const tuiOnly = aggregateUsage([makeSession('tui', 'claude-tui', makeUsage(0, 0))])
+      expect(tuiOnly.trackedSessions).toBe(0)
+      expect(tuiOnly.allUntracked).toBe(true)
+      const mixed = aggregateUsage([
+        makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+        makeSession('sdk', 'claude-sdk', makeUsage(0, 0)),
+      ])
+      expect(mixed.trackedSessions).toBe(1)
+      expect(mixed.allUntracked).toBe(false)
+      // No sessions at all is "nothing yet", not "untracked".
+      expect(aggregateUsage([]).allUntracked).toBe(false)
+    })
+
+    it('all-TUI workspace reads "not tracked", never 0', () => {
+      render(<SidebarTokenView sessions={[makeSession('tui', 'claude-tui', makeUsage(0, 0))]} />)
+      const today = screen.getByTestId('sidebar-token-view-today-total')
+      expect(today).toHaveTextContent('—')
+      expect(today.textContent).not.toMatch(/0 tokens/)
+      expect(screen.getByTestId('sidebar-token-view-io-total')).toHaveTextContent('—')
+      expect(screen.getByTestId('sidebar-token-view-io-total').textContent).not.toMatch(/0/)
+      expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
+        /does not report tokens/i,
+      )
+    })
+
+    it('measured zero on a tracked provider still reads 0', () => {
+      render(<SidebarTokenView sessions={[makeSession('sdk', 'claude-sdk', makeUsage(0, 0))]} />)
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('0 tokens')
+      expect(screen.queryByTestId('sidebar-token-view-untracked-note')).toBeNull()
+    })
+
+    it('mixed workspace shows the tracked sum plus an exclusion note', () => {
+      render(
+        <SidebarTokenView
+          sessions={[
+            makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+            makeSession('sdk', 'claude-sdk', makeUsage(1000, 500)),
+          ]}
+        />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('1.5K tokens')
+      expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
+        /excluded/i,
+      )
+    })
+
+    it('collapsed metric reads "not tracked" for an all-TUI workspace', () => {
+      expect(tokenViewCollapsedMetric([makeSession('tui', 'claude-tui', makeUsage(0, 0))])).toBe(
+        'not tracked',
+      )
+    })
+  })
+
   describe('render', () => {
     it('renders empty-state when no sessions', () => {
       render(<SidebarTokenView sessions={[]} />)

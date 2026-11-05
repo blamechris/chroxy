@@ -121,6 +121,14 @@ export interface AggregateTotals {
   totalSessions: number
   /** Whether any untracked-provider session is present (used for UI tooltip). */
   hasUntracked: boolean
+  /** Sessions whose provider reports usage (feeds `totals`). */
+  trackedSessions: number
+  /**
+   * #8255: true when sessions exist but NONE reported usage — the headline
+   * totals are then "not tracked", not a measured 0. False for an empty
+   * workspace ("nothing yet") and for a measured zero on a tracked provider.
+   */
+  allUntracked: boolean
 }
 
 const EMPTY_USAGE: CumulativeUsage = {
@@ -182,6 +190,7 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
   let crossTotal = EMPTY_USAGE
   let totalSessions = 0
   let hasUntracked = false
+  let trackedSessions = 0
 
   for (const session of sessions) {
     totalSessions += 1
@@ -220,6 +229,7 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     // that it doesn't pretend to be a number, so untracked sessions should not
     // pull the overall total toward zero.
     if (!untracked) {
+      trackedSessions += 1
       crossTotal = addUsage(crossTotal, usage)
     }
   }
@@ -244,6 +254,8 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     byBillingClass,
     totalSessions,
     hasUntracked,
+    trackedSessions,
+    allUntracked: totalSessions > 0 && trackedSessions === 0,
   }
 }
 
@@ -408,6 +420,12 @@ function InfoDisclosure({
 const TUI_UNTRACKED_EXPLANATION =
   'Token count not exposed by claude TUI (PTY-only interface)'
 
+// #8255: visible (not tooltip-only) copy under the headline totals.
+const ALL_UNTRACKED_NOTE =
+  'Not tracked: the Claude Code (TUI) provider does not report tokens.'
+const MIXED_UNTRACKED_NOTE =
+  'Claude Code (TUI) sessions are excluded: that provider does not report tokens.'
+
 export interface SidebarTokenViewProps {
   /** All known sessions across active + resumable + background. */
   sessions: SessionInfo[]
@@ -501,15 +519,28 @@ export function SidebarTokenView({
             className="sidebar-token-view-value"
             data-testid="sidebar-token-view-today-total"
           >
-            {formatTokens(totalTokens)} tokens
+            {agg.allUntracked ? '—' : `${formatTokens(totalTokens)} tokens`}
           </span>
         </div>
         <div className="sidebar-token-view-aggregate-row">
           <span className="sidebar-token-view-label">Input · Output</span>
-          <span className="sidebar-token-view-value-secondary">
-            {formatTokens(agg.totals.inputTokens)} · {formatTokens(agg.totals.outputTokens)}
+          <span
+            className="sidebar-token-view-value-secondary"
+            data-testid="sidebar-token-view-io-total"
+          >
+            {agg.allUntracked
+              ? '—'
+              : `${formatTokens(agg.totals.inputTokens)} · ${formatTokens(agg.totals.outputTokens)}`}
           </span>
         </div>
+        {agg.hasUntracked && (
+          <div
+            className="sidebar-token-view-untracked-note"
+            data-testid="sidebar-token-view-untracked-note"
+          >
+            {agg.allUntracked ? ALL_UNTRACKED_NOTE : MIXED_UNTRACKED_NOTE}
+          </div>
+        )}
         {hitRatio !== null && (
           <div className="sidebar-token-view-aggregate-row">
             <span className="sidebar-token-view-label">Cache hit</span>
@@ -771,6 +802,7 @@ export function SidebarTokenView({
  */
 export function tokenViewCollapsedMetric(sessions: SessionInfo[]): string {
   const agg = aggregateUsage(sessions)
+  if (agg.allUntracked) return 'not tracked'
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
   return `${formatTokens(totalTokens)} tokens`
 }
