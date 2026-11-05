@@ -1773,3 +1773,105 @@ describe('WsServer session scope of a redeemed pairing', () => {
     ws.close()
   })
 })
+
+describe('WsServer HTTP routes and session-scoped tokens', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function start() {
+    const { PairingManager } = await import('../src/pairing.js')
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const { manager } = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' },
+      { id: 'session-2', name: 'Project 2', cwd: '/tmp/project-2' },
+    ])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'primary-tok',
+      sessionManager: manager,
+      authRequired: true,
+      pairingManager: pm,
+    })
+    const port = await startServerAndGetPort(server)
+    const scoped = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const linking = pm.validatePairing(pm.currentPairingId).sessionToken
+    return { port, tokens: { primary: 'primary-tok', scoped, linking } }
+  }
+
+  async function get(port, path, token, method = 'GET') {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    let body = null
+    try { body = await res.json() } catch { /* non-JSON body */ }
+    return { status: res.status, body }
+  }
+
+  const HOST_WIDE = ['/version', '/metrics', '/diagnostics', '/api/snapshots', '/api/pool/stats']
+
+  for (const path of HOST_WIDE) {
+    it(`${path} refuses a session-scoped token and serves the other token classes`, async () => {
+      const { port, tokens } = await start()
+      const scoped = await get(port, path, tokens.scoped)
+      assert.equal(scoped.status, 403)
+      assert.equal(scoped.body?.error, 'session_scoped_token')
+      for (const cls of ['primary', 'linking']) {
+        const r = await get(port, path, tokens[cls])
+        assert.notEqual(r.status, 403, `${cls} token must still be accepted on ${path}`)
+      }
+    })
+  }
+
+  it('/diagnostics with a session-scoped token does not list sibling sessions', async () => {
+    const { port, tokens } = await start()
+    const scoped = await get(port, '/diagnostics', tokens.scoped)
+    assert.equal(JSON.stringify(scoped.body ?? {}).includes('project-2'), false)
+    const primary = await get(port, '/diagnostics', tokens.primary)
+    assert.equal(primary.status, 200)
+  })
+
+  it('/permission-response still accepts a session-scoped token (the route limits it to its session)', async () => {
+    const { port, tokens } = await start()
+    const scoped = await get(port, '/permission-response', tokens.scoped, 'POST')
+    assert.notEqual(scoped.body?.error, 'session_scoped_token')
+    assert.notEqual(scoped.status, 403)
+  })
+
+  it('the dashboard shell refuses a session-scoped token and accepts the other classes', async () => {
+    const { port, tokens } = await start()
+    const fetchDash = async (token) => (await fetch(`http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}`)).status
+    assert.equal(await fetchDash(tokens.scoped), 403)
+    assert.notEqual(await fetchDash(tokens.primary), 403)
+    assert.notEqual(await fetchDash(tokens.linking), 403)
+  })
+
+  it('the hook-auth fallback refuses a session-scoped token', async () => {
+    const { tokens } = await start()
+    const run = (token) => {
+      let status = null
+      const res = { writeHead: (s) => { status = s }, end: () => {} }
+      const ok = server._validateHookAuth({ headers: { authorization: `Bearer ${token}` } }, res)
+      return { ok, status }
+    }
+    assert.equal(run(tokens.scoped).ok, false)
+    assert.equal(run(tokens.primary).ok, true)
+    assert.equal(run(tokens.linking).ok, true)
+  })
+
+  it('a pair frame pipelined with an unbound-only request is scoped before the request runs', async () => {
+    const { port } = await start()
+    const { pairingId } = pm.generateBoundPairing('session-1')
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'pair', pairingId }))
+    ws.send(JSON.stringify({ type: 'set_permission_rules', requestId: 'r1', rules: [{ tool: 'Write', decision: 'allow' }] }))
+    const err = await waitForMessage(messages, 'error')
+    assert.equal(err.code, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT')
+    ws.close()
+  })
+})

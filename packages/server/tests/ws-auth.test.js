@@ -1976,3 +1976,29 @@ describe('handlePairMessage session scope', () => {
     pairingManager.destroy()
   })
 })
+
+describe('handlePairMessage scope agreement', () => {
+  it('refuses the connection when the redemption result and the issued token disagree on scope', () => {
+    const pairingManager = {
+      validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok', sessionId: 'sess-A' })),
+      getSessionIdForToken: () => 'sess-B',
+    }
+    const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager })
+    handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+    assert.equal(client.authenticated, false)
+    assert.equal(client.boundSessionId, undefined)
+    assert.equal(onAuthSuccess.callCount, 0)
+    assert.equal(ws.closed, true)
+  })
+
+  it('applies the scope the redemption result reports when the token agrees', () => {
+    const pairingManager = {
+      validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok', sessionId: 'sess-A' })),
+      getSessionIdForToken: () => 'sess-A',
+    }
+    const { ctx, ws, client } = makePairCtx({ pairingManager })
+    handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+    assert.equal(client.authenticated, true)
+    assert.equal(client.boundSessionId, 'sess-A')
+  })
+})

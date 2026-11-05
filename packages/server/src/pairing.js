@@ -381,7 +381,7 @@ export class PairingManager extends EventEmitter {
       }
     }
 
-    return { valid: true, sessionToken }
+    return { valid: true, sessionToken, sessionId: effectiveSessionId }
   }
 
   /**

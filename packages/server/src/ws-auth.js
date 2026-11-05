@@ -255,13 +255,21 @@ export function handleAuthMessage(ctx, ws, msg) {
  * session binding (linking-mode pairing, primary token) leaves the connection
  * unscoped. Must run before `onAuthSuccess`, which builds the session list and
  * subscriptions from `client.boundSessionId`.
+ *
+ * When `expectedSessionId` is given (pairing redemption passes the session id
+ * validatePairing reported), the token's binding must agree with it; on a
+ * disagreement nothing is applied and false is returned so the caller refuses
+ * the connection.
  */
-function applySessionScope(client, pairingManager, token) {
-  if (!pairingManager || !token) return
-  const boundSessionId = pairingManager.getSessionIdForToken(token)
-  if (boundSessionId) {
-    client.boundSessionId = boundSessionId
+function applySessionScope(client, pairingManager, token, expectedSessionId) {
+  const fromToken = (pairingManager && token)
+    ? (pairingManager.getSessionIdForToken(token) || null)
+    : null
+  if (expectedSessionId !== undefined && (expectedSessionId || null) !== fromToken) return false
+  if (fromToken) {
+    client.boundSessionId = fromToken
   }
+  return true
 }
 
 /**
@@ -346,12 +354,20 @@ export function handlePairMessage(ctx, ws, msg) {
       return true
     }
 
+    // Scope the connection to the session the issued token is bound to, before
+    // it is marked authenticated and before onAuthSuccess builds the session
+    // list and subscriptions. The scope validatePairing reported and the
+    // token's own binding must agree; if they do not, refuse the connection.
+    if (!applySessionScope(client, pairingManager, result.sessionToken, result.sessionId ?? null)) {
+      log.error('Pairing scope mismatch between redemption result and issued token')
+      send(ws, { type: 'pair_fail', reason: 'invalid_message' })
+      ws.close()
+      return true
+    }
+
     client.authenticated = true
     client.authTime = Date.now()
     client.pairedWith = msg.pairingId
-    // Scope the connection to the session the issued token is bound to, before
-    // onAuthSuccess builds the session list and subscriptions.
-    applySessionScope(client, pairingManager, result.sessionToken)
     authFailures.delete(rateLimitKey)
     if (benignPairAttempts) benignPairAttempts.delete(rateLimitKey)
 
