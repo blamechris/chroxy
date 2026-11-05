@@ -31,7 +31,7 @@ import { existsSync, readFileSync, statSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { join } from 'path'
 import { homedir } from 'os'
-import { claudeConfigDir, claudeGlobalConfigPath } from './utils/claude-config-dir.js'
+import { claudeConfigDir, claudeGlobalConfigPath, parseClaudeConfigText } from './utils/claude-config-dir.js'
 import { configPath } from './config-dir.js'
 
 /**
@@ -93,7 +93,7 @@ function probeClaudeOAuthCreds() {
             : claudeGlobalConfigPath())
     if (existsSync(globalConfig)) {
       try {
-        const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))
+        const parsed = parseClaudeConfigText(readFileSync(globalConfig, 'utf-8'))
         // `claudeAiOauth` is the older shape; current Claude Code writes
         // `oauthAccount` here instead (#7331). Accept either.
         if (parsed && typeof parsed === 'object' && (parsed.claudeAiOauth || parsed.oauthAccount)) {

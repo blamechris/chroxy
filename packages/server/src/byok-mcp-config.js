@@ -27,7 +27,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { claudeGlobalConfigPath } from './utils/claude-config-dir.js'
+import { claudeGlobalConfigPath, parseClaudeConfigText } from './utils/claude-config-dir.js'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 import {
   MCP_SERVER_NAME_RE,
@@ -507,7 +507,7 @@ export function loadClaudeMcpConfig(filePath = defaultClaudeConfigPath()) {
       console.warn(`[byok-mcp-config] ${warning}`)
       return { servers: [], warnings: [warning], missing: false }
     }
-    const raw = JSON.parse(readFileSync(filePath, 'utf8'))
+    const raw = parseClaudeConfigText(readFileSync(filePath, 'utf8'))
     return { ...parseClaudeMcpConfig(raw), missing: false }
   } catch (err) {
     return {
@@ -750,7 +750,7 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
         )
         return null
       }
-      return JSON.parse(readFileSync(filePath, 'utf8'))
+      return parseClaudeConfigText(readFileSync(filePath, 'utf8'))
     } catch (err) {
       warnings.push(`Failed to parse MCP config ${filePath} (${source}): ${err?.message || String(err)}`)
       return null
@@ -1103,7 +1103,7 @@ export function readClaudeConfigForMutation(filePath) {
   }
   let raw
   try {
-    raw = JSON.parse(text)
+    raw = parseClaudeConfigText(text)
   } catch {
     // The parser's message can quote surrounding bytes (which may include a
     // token from elsewhere in the file), so it is deliberately NOT echoed.

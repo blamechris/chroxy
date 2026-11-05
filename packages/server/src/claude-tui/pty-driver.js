@@ -9,8 +9,8 @@
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
 // session instance and every `this._*` / static reference resolves as before.
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
-import { claudeGlobalConfigPath } from '../utils/claude-config-dir.js'
-import { dirname, join, resolve } from 'path'
+import { claudeGlobalConfigPath, parseClaudeConfigText } from '../utils/claude-config-dir.js'
+import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 // #7986 — the shared candidate list + resolver moved to utils/claude-binary.js
 // (the ONE copy). Re-exported below for back-compat: claude-tui-session.js and
@@ -257,10 +257,10 @@ export function ensureCwdTrusted(cwd, env = process.env) {
   let mode = null
   if (existsSync(claudeConfig)) {
     try {
-      config = JSON.parse(readFileSync(claudeConfig, 'utf8'))
+      config = parseClaudeConfigText(readFileSync(claudeConfig, 'utf8'))
       mode = statSync(claudeConfig).mode & 0o777
     } catch (err) {
-      log.warn(`claude global config (.claude.json) unreadable, skipping trust pre-write: ${err.message}`)
+      log.warn(`claude global config ${basename(claudeConfig)} unreadable, skipping trust pre-write: ${err.message}`)
       return
     }
   }
@@ -305,7 +305,7 @@ export function ensureCwdTrusted(cwd, env = process.env) {
     mkdirSync(dirname(claudeConfig), { recursive: true, mode: 0o700 })
     writeClaudeConfigAtomic(claudeConfig, config, { mode })
   } catch (err) {
-    log.warn(`claude global config (.claude.json) not written, skipping trust pre-write: ${err.message}`)
+    log.warn(`claude global config ${basename(claudeConfig)} not written, skipping trust pre-write: ${err.message}`)
   }
 }
 

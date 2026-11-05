@@ -301,6 +301,7 @@ export function createPermissionHookManager(emitter, { settingsPath, hookScript 
     return withSettingsLock(() => {
       try {
         unregisterPermissionHookSync(registeredTarget ?? targetPath())
+        registeredTarget = null
       } catch (err) {
         log.error(`Failed to unregister: ${err.message}`)
       }

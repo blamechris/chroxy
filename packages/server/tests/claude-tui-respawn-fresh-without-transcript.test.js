@@ -245,14 +245,14 @@ describe('CLAUDE_CONFIG_DIR (#8239)', () => {
 
   it('resolves the projects root from the override, else ~/.claude', () => {
     assert.equal(resolveClaudeProjectsDir({ CLAUDE_CONFIG_DIR: configDir }), join(configDir, 'projects'))
-    assert.equal(resolveClaudeProjectsDir({}), join(fakeHome, '.claude', 'projects'))
-    assert.equal(resolveClaudeProjectsDir({ CLAUDE_CONFIG_DIR: '' }), join(fakeHome, '.claude', 'projects'))
+    assert.equal(resolveClaudeProjectsDir({ HOME: fakeHome }), join(fakeHome, '.claude', 'projects'))
+    assert.equal(resolveClaudeProjectsDir({ HOME: fakeHome, CLAUDE_CONFIG_DIR: '' }), join(fakeHome, '.claude', 'projects'))
   })
 
   it('the probe finds a transcript that lives under the override, not ~/.claude', () => {
     writeTranscriptUnder(configDir)
     assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, { CLAUDE_CONFIG_DIR: configDir }), true)
-    assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, {}), false, 'with no override ~/.claude is searched, and it is empty')
+    assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, { HOME: fakeHome }), false, 'with no override ~/.claude is searched, and it is empty')
   })
 
   it('with the override set, a transcript under ~/.claude is NOT what claude would resume', () => {

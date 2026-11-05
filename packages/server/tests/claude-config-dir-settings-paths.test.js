@@ -18,7 +18,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { tmpdir, homedir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import '../src/claude-tui-session.js' // fixes the session<->driver import cycle order
 import { claudeGlobalConfigPath, claudeConfigDir, claudeHomeDir, sanitizeClaudeConfigDirEnv } from '../src/utils/claude-config-dir.js'
@@ -33,6 +33,7 @@ import { checkStrandedDefaultHook } from '../src/doctor.js'
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CLAUDE_KEYCHAIN', 'CHROXY_CONFIG_DIR']
 
 let root
+const withHome = (home, extra = {}) => ({ HOME: home, USERPROFILE: home, ...extra })
 let fakeHome
 let override
 let saved
@@ -67,7 +68,7 @@ afterEach(() => {
 
 describe('claudeGlobalConfigPath (#8974)', () => {
   it('is $HOME/.claude.json when CLAUDE_CONFIG_DIR is unset', () => {
-    assert.equal(claudeGlobalConfigPath({}), join(fakeHome, '.claude.json'))
+    assert.equal(claudeGlobalConfigPath(withHome(fakeHome)), join(fakeHome, '.claude.json'))
     assert.equal(claudeGlobalConfigPath(), join(fakeHome, '.claude.json'))
   })
 
@@ -82,7 +83,7 @@ describe('claudeGlobalConfigPath (#8974)', () => {
 
   it('falls back to $HOME/.claude.json for an override the resolver rejects', () => {
     for (const bad of ['', 'relative/dir', '~/x', '/', ` ${override}`]) {
-      assert.equal(claudeGlobalConfigPath({ CLAUDE_CONFIG_DIR: bad }), join(fakeHome, '.claude.json'), JSON.stringify(bad))
+      assert.equal(claudeGlobalConfigPath(withHome(fakeHome, { CLAUDE_CONFIG_DIR: bad })), join(fakeHome, '.claude.json'), JSON.stringify(bad))
     }
   })
 })
@@ -215,13 +216,13 @@ describe('workspace trust pre-write (#8974)', () => {
   })
 
   it('writes to $HOME/.claude.json when the env carries no override', () => {
-    ensureCwdTrusted(project, {})
+    ensureCwdTrusted(project, withHome(fakeHome))
     const written = JSON.parse(readFileSync(join(fakeHome, '.claude.json'), 'utf8'))
     assert.equal(written.projects[realpathSync(project)].hasTrustDialogAccepted, true)
   })
 
   it('falls back to $HOME/.claude.json for an unusable override', () => {
-    ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: 'relative/profile' })
+    ensureCwdTrusted(project, withHome(fakeHome, { CLAUDE_CONFIG_DIR: 'relative/profile' }))
     assert.ok(existsSync(join(fakeHome, '.claude.json')))
   })
 })
@@ -237,8 +238,8 @@ describe('round 1 (#8974)', () => {
     assert.equal(claudeConfigDir({ HOME: childHome, USERPROFILE: childHome }), join(childHome, '.claude'))
     // an override the resolver rejects still falls back to the CHILD home
     assert.equal(claudeGlobalConfigPath({ HOME: childHome, USERPROFILE: childHome, CLAUDE_CONFIG_DIR: 'rel' }), join(childHome, '.claude.json'))
-    // no HOME in the env -> the daemon's
-    assert.equal(claudeGlobalConfigPath({}), join(fakeHome, '.claude.json'))
+    // no HOME in the env -> the account's passwd home, which a HOME-less child resolves too
+    assert.equal(claudeGlobalConfigPath({}), join(userInfo().homedir, '.claude.json'))
   })
 
   it('on POSIX HOME wins over USERPROFILE', { skip: process.platform === 'win32' }, () => {
@@ -277,7 +278,7 @@ describe('round 1 (#8974)', () => {
     // default location: legacy lives in ~/.claude, current file in $HOME
     mkdirSync(join(fakeHome, '.claude'))
     writeFileSync(join(fakeHome, '.claude', '.config.json'), '{"a":1}')
-    assert.equal(claudeGlobalConfigPath({}), join(fakeHome, '.claude', '.config.json'))
+    assert.equal(claudeGlobalConfigPath(withHome(fakeHome)), join(fakeHome, '.claude', '.config.json'))
   })
 
   it('trust pre-write targets the active (legacy) file and does not create the other', () => {
@@ -341,21 +342,25 @@ describe('round 2 (#8974)', () => {
   const hookScript = '/opt/chroxy/hooks/permission-hook.sh'
   const FLAGS = { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, projectOnboardingSeenCount: 0 }
 
-  it('one home policy: rejected homes fall back to the daemon home on the reader side', () => {
-    for (const bad of ['relative-profile', '', '/', '/tmp/..', '/tmp/../', ' /abs', 'a\0b']) {
-      assert.equal(claudeHomeDir({ HOME: bad }, 'linux'), claudeHomeDirDaemon(), JSON.stringify(bad))
+  const accountHome = userInfo().homedir
+
+  it('one home policy: rejected homes fall back to the account (passwd) home on the reader side', () => {
+    for (const bad of ['relative-profile', '', 'a\0b']) {
+      assert.equal(claudeHomeDir({ HOME: bad }, 'linux'), accountHome, JSON.stringify(bad))
     }
-    const rootLink = join(root, 'rootlink')
-    symlinkSync('/', rootLink)
-    assert.equal(claudeHomeDir({ HOME: rootLink }, 'linux'), claudeHomeDirDaemon(), 'symlink to root')
+    assert.equal(claudeHomeDir({}, 'linux'), accountHome)
   })
 
-  function claudeHomeDirDaemon() { return claudeHomeDir({}, 'linux') }
+  it('HOME=/ (a container or service user) is accepted by the reader and kept in the child env', () => {
+    assert.equal(claudeHomeDir({ HOME: '/' }, 'linux'), '/')
+    assert.equal(claudeGlobalConfigPath({ HOME: '/' }), '/.claude.json')
+    const env = { HOME: '/' }
+    sanitizeClaudeConfigDirEnv(env, 'linux')
+    assert.equal(env.HOME, '/')
+  })
 
-  it('the child-env sanitiser removes the same rejected homes', () => {
-    const rootLink = join(root, 'rootlink2')
-    symlinkSync('/', rootLink)
-    for (const bad of ['relative-profile', '', '/', '/tmp/../', rootLink]) {
+  it('the child-env sanitiser removes exactly the rejected homes', () => {
+    for (const bad of ['relative-profile', '', 'a\0b']) {
       const env = { HOME: bad, KEEP: '1' }
       sanitizeClaudeConfigDirEnv(env, 'linux')
       assert.ok(!Object.hasOwn(env, 'HOME'), JSON.stringify(bad))
@@ -366,8 +371,9 @@ describe('round 2 (#8974)', () => {
     assert.equal(good.HOME, fakeHome)
   })
 
-  it('the claude-family env builders drop a rejected HOME', { skip: process.platform === 'win32' }, () => {
+  it('a relative daemon HOME: the reader uses the passwd home and the child HOME is deleted', { skip: process.platform === 'win32' }, () => {
     process.env.HOME = 'relative-profile'
+    assert.equal(claudeGlobalConfigPath(), join(accountHome, '.claude.json'))
     assert.ok(!Object.hasOwn(buildSpawnEnv('claude'), 'HOME'))
     assert.ok(!Object.hasOwn(buildClaudeLaunchEnv(), 'HOME'))
     assert.ok(!Object.hasOwn(buildSpawnEnv('claude', { HOME: 'also/relative' }), 'HOME'))
@@ -431,6 +437,21 @@ describe('round 2 (#8974)', () => {
       const got = JSON.parse(readFileSync(join(override, '.config.json'), 'utf8')).projects[realpathSync(project)]
       assert.deepEqual(got, FLAGS)
       assert.ok(!existsSync(join(override, '.claude.json')))
+    })
+    it('an empty writable legacy file (no modern file) receives all three flags', () => {
+      writeFileSync(join(override, '.config.json'), '')
+      ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: override })
+      const got = JSON.parse(readFileSync(join(override, '.config.json'), 'utf8')).projects[realpathSync(project)]
+      assert.deepEqual(got, FLAGS)
+      assert.ok(!existsSync(join(override, '.claude.json')))
+    })
+    it('a whitespace-only file is treated as empty, but malformed non-empty JSON is never overwritten', () => {
+      writeFileSync(join(override, '.config.json'), '  \n')
+      ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: override })
+      assert.equal(JSON.parse(readFileSync(join(override, '.config.json'), 'utf8')).projects[realpathSync(project)].hasTrustDialogAccepted, true)
+      writeFileSync(join(override, '.config.json'), '{ not json')
+      ensureCwdTrusted(project, { CLAUDE_CONFIG_DIR: override })
+      assert.equal(readFileSync(join(override, '.config.json'), 'utf8'), '{ not json')
     })
   })
 
