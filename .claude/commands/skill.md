@@ -122,12 +122,16 @@ note in the report that hashes may be stale. Record which source you used.
      the customized output. A guard miss means customization stripped a load-bearing
      section; restore it. (These are the content checks ported from `sync.sh`.)
    - If any check fails, fix and re-check before writing. Never write defective output.
-5. **Write + stamp.** Create `.claude/commands/` if absent, strip any pre-existing
-   `<!-- skill-templates: … -->` lines from the body, then write to
+5. **Write + stamp.** This writes into the repo's shared working copy, which another
+   session may have moved to its own branch since this one started — so re-check first:
+   `git branch --show-current`. If it is not the branch you started on, STOP and tell the
+   user rather than writing; a skill install landing on someone else's branch is how it
+   gets swept into their commit. Then create `.claude/commands/` if absent, strip any
+   pre-existing `<!-- skill-templates: … -->` lines from the body, and write to
    `.claude/commands/<name>.md` ending with exactly:
    `<!-- skill-templates: <name> <hash> <date> -->` (today's date, `YYYY-MM-DD`).
 6. **Lint (deterministic gate).** Run the registry's mechanical linter on the file just
-   written — it re-checks markers, attribution, the stamp, and guards independently of
+   written — it re-checks markers, attribution, the stamp, guards, and the posture pin independently of
    the agent's judgment. From a **local clone** (the preferred path):
    `"$REG/scripts/skill-lint.sh" <name> .claude/commands/<name>.md`
    (where `$REG` is the resolved registry clone). If it exits non-zero, fix the reported
@@ -177,17 +181,17 @@ note in the report that hashes may be stale. Record which source you used.
    markers** — `ERROR:` is printed for an unknown skill *and* then followed by
    findings at exit 1, and a usage error exits 2 printing no marker at all. Only
    `~` is exclusive to exit 2.
-   - **exit 0** (`✓`) — clean, all four checks passed.
+   - **exit 0** (`✓`) — clean, every check passed.
    - **exit 1** (`✗`) — real findings. Fix and re-lint; never lock. This includes a
      file that is **stamped but absent from the index**: a stamp is proof of a
      registry install, so an index that has never heard of the skill means a stale
      clone, a renamed or retired skill, a typo'd `<name>`, or the wrong
      `registry.json` — and its guards went unapplied. The reported findings name
      which, and the stamp checks are applied on this path too.
-   - **exit 2** — could not be fully verified. Five causes, and only one is benign:
+   - **exit 2** — could not be fully verified. Six causes, and only one is benign:
      an **unstamped** skill absent from the index (the `~` line — a repo-only skill,
      with genuinely nothing to verify), plus missing registry file, missing
-     `python3`, unreadable skill file, and usage error. The last four are
+     `python3`, unreadable skill file, an explicitly passed profile that cannot be read, and usage error. The last five are
      environment breakage.
 
    For `skill add`, exit 2 is always a failure: `add` stops before writing if the
@@ -333,4 +337,4 @@ Report what was removed.
 - **Self-contained on first use.** `/skill` needs no customization to work — it ships
   with sane registry defaults so it can bootstrap a repo that has nothing else installed.
 
-<!-- skill-templates: skill 7b4d37f 2026-07-30 -->
+<!-- skill-templates: skill af9c1e4 2026-11-03 -->

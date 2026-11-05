@@ -10,7 +10,7 @@ Run an automated visual smoke test of the application using Playwright. Launches
   - `--headed` — Show the browser window (useful for debugging)
   - `--keep-screenshots` — Don't clean up screenshots after the run
   - `--preview <preview.json>` — Smoke an already-running preview daemon described by that record (`{port, configDir, …}`) instead of starting one in step 1
-  - If empty, starts its own throwaway daemon, runs headless and cleans up screenshots
+  - If empty, runs headless and cleans up screenshots
 
 The skill never attaches to a daemon it did not start or was not handed. `tests/smoke-test.mjs` has no default target (#8225): it exits 2 with usage when none is given and refuses port 8765 and a `~/.chroxy` config dir (exit 3). Never pass `--i-mean-production` from this skill.
 
@@ -18,7 +18,13 @@ The skill never attaches to a daemon it did not start or was not handed. `tests/
 
 ### 0. Prerequisites
 
-Verify Playwright is installed and the test script exists:
+Verify Playwright is installed and the test script exists.
+
+**A missing script is not a dead end — it is the cue to write one.** If the script
+does not exist yet, the failure message MUST point at the "Writing the Smoke Test
+Script" section below, which is the recipe for creating it. A bare "not found" +
+`exit 1` makes this skill unusable in every repo that has not written the script
+yet, which is exactly the repo that needs the recipe most.
 
 ```bash
 # Check Playwright is available
@@ -28,16 +34,24 @@ node -e "require('playwright')" 2>/dev/null || {
   npx playwright install chromium
 }
 
-# Check smoke test script exists
-test -f packages/server/tests/smoke-test.mjs || {
-  echo "Error: smoke test script not found at packages/server/tests/smoke-test.mjs"
+# Check the smoke test script exists. Customize only the path — keep the message
+# actionable, pointing at "Writing the Smoke Test Script" below.
+SMOKE_SCRIPT="packages/server/tests/smoke-test.mjs"
+test -f "$SMOKE_SCRIPT" || {
+  echo "Smoke test script not found at $SMOKE_SCRIPT."
+  echo "This is expected on first run. Write it now: follow the 'Writing the Smoke"
+  echo "Test Script' section of this skill (script structure, check patterns,"
+  echo "selector strategy, connection handling), save it to the path above, then"
+  echo "re-run /smoke-test."
   exit 1
 }
 ```
 
-### 1. Start an Isolated Application
+### 1. Ensure Application is Running
 
-The smoke test drives a running application, and the application must be one this skill owns. Do NOT probe ports and do NOT run `npx chroxy start` with the operator's config: that attaches to the daily daemon with the real token (#8225). If `--preview <preview.json>` was passed, use that record and skip to step 2. Otherwise start a throwaway daemon with its own config dir, its own token and a free port:
+The smoke test connects to a running application instance. Check if one is already running, or start one:
+
+The application must be one this skill owns, so for this repo "start one" is the only path: Do NOT probe ports and do NOT run `npx chroxy start` with the operator's config: that attaches to the daily daemon with the real token (#8225). If `--preview <preview.json>` was passed, use that record and skip to step 2. Otherwise start a throwaway daemon with its own config dir, its own token and a free port:
 
 ```bash
 # Scratch dir: absolute, directly under $HOME (a relative CHROXY_CONFIG_DIR is refused
@@ -131,7 +145,8 @@ The test script should:
 After the test runs, read each screenshot to visually verify the UI:
 
 ```bash
-# Screenshots are saved to packages/server/tests/screenshots/
+# Screenshots are saved to a temporary directory
+# Here: packages/server/tests/screenshots/
 ls -la packages/server/tests/screenshots/
 ```
 
@@ -173,6 +188,8 @@ if [ "$KEEP_SCREENSHOTS" != "true" ]; then
 fi
 ```
 
+If the application was started by this skill (not already running), stop it.
+
 Stop the daemon this skill started (step 1) and remove its scratch directory, which holds the token. Skip this when `--preview` was passed: that daemon belongs to whoever started it.
 
 ```bash
@@ -190,7 +207,9 @@ rm -rf -- "$SMOKE"
 
 ## Writing the Smoke Test Script
 
-If the test script doesn't exist yet, create it following these patterns:
+This is where step 0 sends you when the script is missing. If the test script
+doesn't exist yet, create it following these patterns, save it at the path step 0
+checks, then re-run the skill from step 0:
 
 ### Script Structure
 
@@ -257,6 +276,7 @@ Many apps need a backend connection before the full UI renders. Always wait for 
 ```javascript
 // Wait for app to be fully loaded and connected
 await page.waitForFunction(() => {
+  // App-specific readiness check
   // Check that page does NOT contain "Disconnected" or "Connecting..."
   const body = document.body.innerText
   return !body.includes('Disconnected') && !body.includes('Connecting...')

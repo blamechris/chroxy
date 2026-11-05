@@ -2,16 +2,26 @@
   "registry": "blamechris/skill-templates",
   "skills": {
     "agent-review": {
-      "hash": "5c35725",
-      "installed": "2026-07-30"
+      "hash": "81d191b",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "agentic-audit": {
-      "hash": "a09dcc2",
-      "installed": "2026-07-30"
+      "hash": "a0b98e6",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "autonomous-dev-flow": {
-      "hash": "84fe5f4",
-      "installed": "2026-10-28",
+      "hash": "bcb8822",
+      "installed": "2026-11-03",
       "profileHash": "b97f5ac",
       "targets": [
         "claude",
@@ -23,36 +33,71 @@
       "installed": "2026-07-30"
     },
     "bug-hunt": {
-      "hash": "a09dcc2",
-      "installed": "2026-07-30"
+      "hash": "600c374",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "catchup": {
       "hash": "3f7f775",
       "installed": "2026-07-30"
     },
     "check-pr": {
-      "hash": "cc062bc",
-      "installed": "2026-06-03"
+      "hash": "bcb8822",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "create-issue": {
-      "hash": "12b011f",
-      "installed": "2026-07-30"
+      "hash": "881d289",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "create-pr": {
-      "hash": "12b011f",
-      "installed": "2026-07-30"
+      "hash": "37866a5",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "decompose-issue": {
-      "hash": "b4268c2",
-      "installed": "2026-07-30"
+      "hash": "699a5ca",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "fix-ci": {
-      "hash": "3768ea6",
-      "installed": "2026-07-30"
+      "hash": "bcb8822",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "full-review": {
-      "hash": "1e5962e",
-      "installed": "2026-07-30"
+      "hash": "37866a5",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "learn": {
       "hash": "df2de5e",
@@ -63,12 +108,22 @@
       "installed": "2026-07-30"
     },
     "merge": {
-      "hash": "d34b05d",
-      "installed": "2026-07-30"
+      "hash": "37866a5",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "parallel-dev": {
-      "hash": "a09dcc2",
-      "installed": "2026-07-30"
+      "hash": "37866a5",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "prime-directive": {
       "hash": "84fe5f4",
@@ -80,16 +135,26 @@
       ]
     },
     "project-audit": {
-      "hash": "a09dcc2",
-      "installed": "2026-07-30"
+      "hash": "600c374",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "recon": {
-      "hash": "7f5fa28",
-      "installed": "2026-07-30"
+      "hash": "af9c1e4",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "session-lifecycle": {
-      "hash": "e3a4b43",
-      "installed": "2026-10-28",
+      "hash": "bcb8822",
+      "installed": "2026-11-03",
       "profileHash": "b97f5ac",
       "targets": [
         "claude",
@@ -97,25 +162,44 @@
       ]
     },
     "skill": {
-      "hash": "7b4d37f",
-      "installed": "2026-07-30"
+      "hash": "af9c1e4",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "smoke-form": {
-      "hash": "eb1a1e5",
-      "installed": "2026-07-30",
-      "profileHash": "57b5312"
+      "hash": "4a39c94",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "smoke-test": {
-      "hash": "21fa678",
-      "installed": "2026-06-03"
+      "hash": "8913398",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "start-working": {
       "hash": "5df829a",
       "installed": "2026-07-30"
     },
     "swarm-audit": {
-      "hash": "a09dcc2",
-      "installed": "2026-07-30"
+      "hash": "a0b98e6",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "tackle-issues": {
       "hash": "84fe5f4",
@@ -131,9 +215,13 @@
       "installed": "2026-07-30"
     },
     "visual-brief": {
-      "hash": "a85c799",
-      "installed": "2026-07-30",
-      "profileHash": "57b5312"
+      "hash": "4a39c94",
+      "installed": "2026-11-03",
+      "profileHash": "b97f5ac",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "decide": {
       "hash": "84fe5f4",

@@ -98,7 +98,7 @@ Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceili
 - **Panel agents run at the workhorse tier by default.** Audit breadth is workhorse work. Do not spawn panel agents at the ceiling; the orchestrator's synthesis (step 6) is where the expensive judgment lives.
 - **Pre-filter at the mechanical tier.** Any triage/classification pre-pass (e.g. deciding which files or sections are in scope before the panel reads them) runs at the mechanical tier at low effort.
 - **Sample-verify instead of up-tiering everything.** If panel output quality is in doubt, have a stronger tier re-check a ~10% sample of findings rather than re-running the whole panel up-tier.
-- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents (the panel); mechanical-tier pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification recorded in the master assessment. The 10-agent panel maximum sits comfortably inside this budget.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents (the panel); mechanical-tier pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 requires an explicit one-line justification recorded in the master assessment; **20 is a hard ceiling that includes every refute/verify agent, and no justification lifts it** (≤3 refuters per finding — queue rounds rather than widen). The 10-agent panel maximum sits comfortably inside this budget.
 
 ### 5. Write Individual Reports
 
@@ -163,10 +163,19 @@ Table linking to each individual report file.
 
 ### 7. Commit Results
 
-Stage and commit all audit files:
+Stage and commit the audit files **by name**.
+
+**Stage explicit paths.** `git status --short` first, then `git add` each report you just wrote.
+Never `git add -A`, `git add .`, `git add -u`, `git add <dir>/`, or `git commit -a`. A
+trailing-slash directory add is a bulk add: the working copy is shared with concurrent sessions,
+so the audit directory may also hold a stale report from another run or a file that is not yours.
+`-u` is not the safe one: it restages every *tracked* file whose worktree copy differs, including
+files a clean/smudge filter rewrote without you touching them — that is how `git add -u` turned a
+tracked 21KB `.docx` into a git-lfs pointer and committed it as an edit.
 
 ```bash
-git add <audit-results-directory>/
+git status --short <audit-results-directory>
+git add <audit-results-directory>/<agent-1>.md <audit-results-directory>/<agent-2>.md <audit-results-directory>/master-assessment.md
 git commit -m "docs: swarm audit of <target> (<N> agents)
 
 Aggregate rating: X.X/5. Key findings: <top 3 consensus items>.
