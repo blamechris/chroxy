@@ -2796,10 +2796,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
             ? msg.latestSeq
             : undefined;
         if (endTargetId && get().sessionStates[endTargetId]) {
+          const endSession = get().sessionStates[endTargetId]!;
+          // #8960 — hand over the live stream id so the swap keeps a response
+          // that is still streaming (it is not in server history yet).
           const { swappedMessages } = reconcileReplayEnd(
             endTargetId,
-            get().sessionStates[endTargetId]!.messages,
+            endSession.messages,
             endLatestSeq,
+            { streamingMessageId: endSession.streamingMessageId },
           );
           if (swappedMessages) {
             updateSession(endTargetId, () => ({

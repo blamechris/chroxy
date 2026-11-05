@@ -1129,6 +1129,7 @@ export function reconcileReplayEnd(
   sessionId: string | null,
   messages: readonly unknown[],
   latestSeq?: unknown,
+  live: ReplayEndLiveState = {},
 ): { swappedMessages: unknown[] | null } {
   if (sessionId && typeof latestSeq === 'number' && Number.isFinite(latestSeq)) {
     recordHistorySeq(sessionId, latestSeq)
@@ -1166,10 +1167,65 @@ export function reconcileReplayEnd(
   // same run). An under-counted record leaves `start` past the cut and the tail
   // is returned in array order, which is precisely the pre-#7519 behaviour.
   const start = provenanceStart(baseline, messages)
-  if (start !== null && start === cut && baseline.appends !== null) {
-    return { swappedMessages: orderByProvenance(tail, baseline.appends) }
+  const ordered =
+    start !== null && start === cut && baseline.appends !== null
+      ? orderByProvenance(tail, baseline.appends)
+      : tail
+  // #8960 — an in-flight response is not in server history, so the replay never
+  // re-delivers it and the cut above would discard it with the prefix.
+  const carried = carriedLiveMessages(messages.slice(0, cut), ordered, live)
+  return { swappedMessages: carried.length === 0 ? ordered : [...ordered, ...carried] }
+}
+
+/**
+ * What the caller knows about the turn that is live at `history_replay_end`.
+ * Only the caller holds it (session state, not messages).
+ */
+export interface ReplayEndLiveState {
+  /**
+   * The session's `streamingMessageId` — the id of the response still receiving
+   * `stream_delta`s. `null`/absent/`'pending'` (no response exists yet) carries
+   * no RESPONSE; a thinking bubble still flagged `thinkingStreaming` is carried
+   * regardless, since its liveness is on the row itself.
+   */
+  streamingMessageId?: string | null
+}
+
+/**
+ * Prefix messages the swap must NOT discard because they are still streaming
+ * (#8960): the response named by `streamingMessageId`, and any thinking bubble
+ * still flagged `thinkingStreaming`. Later `stream_delta` / `tool_result`
+ * frames patch these in place by id, so dropping them loses the received text
+ * and strands the deltas.
+ *
+ * An id the replayed tail already holds is NOT carried: the replay is then the
+ * authoritative copy and carrying it would duplicate the row. That relies on a
+ * server invariant: history only ever holds a COMPLETED response (the entry is
+ * pushed at `stream_end` with its full content; deltas only accumulate in the
+ * server's pending stream), so a replayed same-id copy is never a partial one
+ * that would be poorer than the live copy we drop. Live last, as in
+ * {@link orderByProvenance}, since an in-flight response is newer than history.
+ */
+function carriedLiveMessages(
+  discardedPrefix: readonly unknown[],
+  kept: readonly unknown[],
+  live: ReplayEndLiveState,
+): unknown[] {
+  const streamingId = live.streamingMessageId
+  const keptIds = new Set<string>()
+  for (const m of kept) {
+    const id = idOf(m)
+    if (id !== null) keptIds.add(id)
   }
-  return { swappedMessages: tail }
+  const carried: unknown[] = []
+  for (const m of discardedPrefix) {
+    const id = idOf(m)
+    if (id === null || keptIds.has(id)) continue
+    const { type, thinkingStreaming } = m as { type?: unknown; thinkingStreaming?: unknown }
+    const isStreamingResponse = type === 'response' && typeof streamingId === 'string' && id === streamingId
+    if (isStreamingResponse || (type === 'thinking' && thinkingStreaming === true)) carried.push(m)
+  }
+  return carried
 }
 
 // ---------------------------------------------------------------------------
