@@ -1,12 +1,16 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, mkdtempSync, rmSync } from 'fs'
+import { writeFileSync, mkdtempSync, rmSync, realpathSync } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import {
   encodeProjectPath,
   decodeProjectPath,
   resolveJsonlPath,
+  hasPersistedTranscript,
+  projectSlug,
+  canonicalProjectCwd,
+  PROJECT_CWD_REALPATH,
   getJsonlMtime,
   readConversationHistoryWithMetaAsync,
   MAX_TRANSCRIPT_BYTES,
@@ -77,6 +81,65 @@ describe('encodeProjectPath', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('projectSlug — 8.3 short names (#8978)', () => {
+  const SHORT = 'C:\\WINDOWS\\SERVIC~1\\proj'
+  const LONG = 'C:\\WINDOWS\\ServiceProfiles\\proj'
+  // Stand-in for the native realpath: expands the short form, passes the rest through.
+  const fakeNative = (p) => (p === SHORT ? LONG : p)
+
+  it('a short-form and a long-form cwd produce the same slug on win32', () => {
+    const opts = { platform: 'win32', realpath: fakeNative }
+    assert.equal(projectSlug(SHORT, opts), projectSlug(LONG, opts))
+    assert.equal(projectSlug(SHORT, opts), encodeProjectPath(LONG))
+    assert.notEqual(encodeProjectPath(SHORT), encodeProjectPath(LONG))
+  })
+
+  it('the default resolver is the native realpath, not the JS one', () => {
+    assert.equal(PROJECT_CWD_REALPATH, realpathSync.native)
+    assert.notEqual(PROJECT_CWD_REALPATH, realpathSync)
+  })
+
+  it('resolveJsonlPath: short and long cwd give the same transcript path', () => {
+    const opts = { platform: 'win32', realpath: fakeNative }
+    const env = { CLAUDE_CONFIG_DIR: join(tmpdir(), 'claude-cfg-8978') }
+    assert.equal(resolveJsonlPath(SHORT, 'abc', env, opts), resolveJsonlPath(LONG, 'abc', env, opts))
+    assert.ok(resolveJsonlPath(SHORT, 'abc', env, opts).includes(encodeProjectPath(LONG)))
+  })
+
+  it('hasPersistedTranscript derives its slug through the resolver', () => {
+    const cfg = mkdtempSync(join(tmpdir(), 'claude-cfg-8978-'))
+    try {
+      const seen = []
+      const realpath = (p) => { seen.push(p); return fakeNative(p) }
+      hasPersistedTranscript(SHORT, 'abc', { CLAUDE_CONFIG_DIR: cfg }, { platform: 'win32', realpath })
+      assert.deepEqual(seen, [SHORT])
+    } finally {
+      rmSync(cfg, { recursive: true, force: true })
+    }
+  })
+
+  it('does not resolve on other platforms (behaviour unchanged)', () => {
+    const opts = { platform: 'darwin', realpath: fakeNative }
+    assert.equal(canonicalProjectCwd(SHORT, opts), SHORT)
+    assert.equal(projectSlug('/a/b', opts), encodeProjectPath('/a/b'))
+  })
+
+  it('falls back to the given path when it cannot be resolved', () => {
+    const boom = () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }) }
+    assert.equal(canonicalProjectCwd(SHORT, { platform: 'win32', realpath: boom }), SHORT)
+  })
+
+  it('still throws for a non-string cwd', () => {
+    assert.throws(() => projectSlug(null, { platform: 'win32' }))
+  })
+
+  it('real Windows tmpdir: short and native forms share a slug', { skip: process.platform !== 'win32' }, () => {
+    const native = realpathSync.native(tmpdir())
+    assert.equal(projectSlug(tmpdir()), projectSlug(native))
+    assert.equal(projectSlug(tmpdir()), encodeProjectPath(native))
   })
 })
 

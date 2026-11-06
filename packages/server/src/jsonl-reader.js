@@ -1,4 +1,4 @@
-import { statSync, existsSync, readdirSync } from 'fs'
+import { statSync, existsSync, readdirSync, realpathSync } from 'fs'
 import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
@@ -50,6 +50,44 @@ export function encodeProjectPath(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
+// The NATIVE realpath, never the JS one (#8978). Exported so a test can pin it.
+export const PROJECT_CWD_REALPATH = realpathSync.native
+
+/**
+ * The form of `cwd` claude records when it names a project directory (#8978).
+ *
+ * On Windows the JS `realpathSync` keeps 8.3 short names
+ * (`C:\WINDOWS\SERVIC~1\...`) while claude records the long form, so encoding
+ * a short-form cwd names a project directory that does not exist. The native
+ * realpath expands them. On other platforms the path is returned unchanged:
+ * this must not start resolving symlinks that claude's own key does not.
+ * A path that cannot be resolved (missing, unreadable) is returned as given.
+ *
+ * @param {string} cwd
+ * @param {{ realpath?: (p: string) => string, platform?: string }} [opts]
+ * @returns {string}
+ */
+export function canonicalProjectCwd(cwd, { realpath = PROJECT_CWD_REALPATH, platform = process.platform } = {}) {
+  if (platform !== 'win32' || typeof cwd !== 'string') return cwd
+  try {
+    return realpath(cwd)
+  } catch {
+    return cwd
+  }
+}
+
+/**
+ * The project directory name for `cwd`: its canonical form (see
+ * {@link canonicalProjectCwd}) run through {@link encodeProjectPath}. Use this
+ * wherever a slug is derived from a path that may be an 8.3 short form.
+ * @param {string} cwd
+ * @param {Parameters<typeof canonicalProjectCwd>[1]} [opts]
+ * @returns {string}
+ */
+export function projectSlug(cwd, opts) {
+  return encodeProjectPath(canonicalProjectCwd(cwd, opts))
+}
+
 /**
  * Best-effort decode of a project directory name back to a filesystem path.
  * LOSSY: `-` stands for any non-alphanumeric character (see encodeProjectPath),
@@ -72,10 +110,11 @@ export function decodeProjectPath(encoded) {
  * @param {string} conversationId - UUID of the conversation
  * @param {Record<string, string|undefined>} [env] - env claude runs with; its
  *   `CLAUDE_CONFIG_DIR` (when valid) picks the projects root, else `~/.claude`
+ * @param {Parameters<typeof canonicalProjectCwd>[1]} [slugOpts] - test seam for the cwd canonicaliser
  * @returns {string} Absolute path to the JSONL file
  */
-export function resolveJsonlPath(cwd, conversationId, env = process.env) {
-  const encoded = encodeProjectPath(cwd)
+export function resolveJsonlPath(cwd, conversationId, env = process.env, slugOpts) {
+  const encoded = projectSlug(cwd, slugOpts)
   return join(claudeProjectsDir(env), encoded, `${conversationId}.jsonl`)
 }
 
@@ -117,9 +156,10 @@ export function resolveClaudeProjectsDir(env = process.env) {
  * @param {string} cwd - the directory claude was launched in (real path)
  * @param {string} conversationId
  * @param {Record<string, string|undefined>} [env] - env claude runs with
+ * @param {Parameters<typeof canonicalProjectCwd>[1]} [slugOpts] - test seam for the cwd canonicaliser
  * @returns {boolean}
  */
-export function hasPersistedTranscript(cwd, conversationId, env = process.env) {
+export function hasPersistedTranscript(cwd, conversationId, env = process.env, slugOpts) {
   // The id becomes a path segment; real ids are UUIDs. Anything else cannot be
   // looked up safely, so do not claim the transcript is absent.
   if (typeof conversationId !== 'string' || !/^[A-Za-z0-9-]+$/.test(conversationId)) return true
@@ -127,7 +167,7 @@ export function hasPersistedTranscript(cwd, conversationId, env = process.env) {
   const fileName = `${conversationId}.jsonl`
   const projectsDir = resolveClaudeProjectsDir(env)
   try {
-    statSync(join(projectsDir, encodeProjectPath(cwd), fileName))
+    statSync(join(projectsDir, projectSlug(cwd, slugOpts), fileName))
     return true
   } catch (err) {
     if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') return true
