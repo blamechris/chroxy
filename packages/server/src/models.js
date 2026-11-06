@@ -762,7 +762,7 @@ export function createModelsRegistry(hooks = {}) {
         out.add(toFullIdMap.get(id) ?? id)
       }
     } catch (err) {
-      log.debug(`in-use models provider threw (ignored): ${err?.message || err}`)
+      log.warn(`in-use models provider threw (ignored): ${err?.message || err}`)
     }
     return out
   }
@@ -1061,7 +1061,10 @@ export function createModelsRegistry(hooks = {}) {
    * other side.
    */
   function persistableModels() {
-    return activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId))
+    // #8967: `offered` is a runtime-only marker; it never reaches the cache.
+    return activeModels
+      .filter((m) => !isUnpersistableDeclaredRow(m.fullId))
+      .map(({ offered: _offered, ...row }) => row)
   }
 
   /**
@@ -1365,6 +1368,7 @@ export function createModelsRegistry(hooks = {}) {
       if (isClaudeRegistry) {
         const inUse = inUseModelFullIds()
         for (const m of activeModels) {
+          // (holds for cache rows too: `loadCache` stamps them into providerReportedFullIds)
           if (fresh.has(m.fullId) || !providerReportedFullIds.has(m.fullId)) continue
           if (liveReportedFullIds.has(m.fullId)) {
             reported.set(m.fullId, m)
@@ -1568,7 +1572,9 @@ export function createModelsRegistry(hooks = {}) {
       // reconciled provider rows (never declaration-only rows); other providers
       // retain the raw replacement snapshot. Re-derive against the new overlay.
       lastSdkModels = isClaudeRegistry
-        ? converted.filter(m => providerReportedFullIds.has(m.fullId)).map(m => ({
+        // #8967: only LIVE-reported rows are replayed by applyOverlay; a kept
+        // in-use cache row must not be laundered into a live observation.
+        ? converted.filter(m => providerReportedFullIds.has(m.fullId) && liveReportedFullIds.has(m.fullId)).map(m => ({
           ...m, value: m.fullId, displayName: m.id === nextDefault ? `Default (${m.label})` : m.label,
         }))
         : sdkModels

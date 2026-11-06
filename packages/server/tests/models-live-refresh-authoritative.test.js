@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry } from '../src/models.js'
@@ -84,4 +84,28 @@ describe('live refresh is authoritative over the cache (#8967)', () => {
     for (const l of earlier) assert.ok(ids.includes(l.value), l.value)
     assert.equal(ids[0], earlier[0].value)
   })
+
+  it('applyOverlay does not launder a kept in-use row into a live row', () => withDir((dir) => {
+    const r = cachedRegistry(dir)
+    let inUse = ['claude-opus-4-1']
+    r.setInUseModelsProvider(() => inUse)
+    r.updateModels(LIVE.slice(0, 2))
+    r.applyOverlay(new Map())
+    assert.equal(r.getModels().find(m => m.fullId === 'claude-opus-4-1')?.offered, false)
+    inUse = []
+    r.updateModels([LIVE[0]])
+    assert.ok(!r.getModels().some(m => m.fullId === 'claude-opus-4-1'), 'row never retired')
+  }))
+
+  it('does not persist the runtime-only offered marker', () => withDir((dir) => {
+    const r = cachedRegistry(dir)
+    r.setInUseModelsProvider(() => ['claude-opus-4-1'])
+    r.updateModels(LIVE)
+    assert.equal(r.getModels().find(m => m.fullId === 'claude-opus-4-1').offered, false)
+    const out = join(dir, 'saved.json')
+    assert.equal(r.saveCache(out), true)
+    const saved = JSON.parse(readFileSync(out, 'utf-8')).models
+    assert.ok(saved.some(m => m.fullId === 'claude-opus-4-1'))
+    assert.ok(saved.every(m => !('offered' in m)))
+  }))
 })
