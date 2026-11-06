@@ -18,6 +18,7 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
+import { refuseBoundMessage } from './bound-client-policy.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
@@ -2778,6 +2779,16 @@ export class WsServer {
         this._sendPreviewRefusal(ws, msg, 'Preview request was not admitted. Wait for the message limit to reset, then request a new preview')
         return
       }
+    }
+
+    // A session-scoped connection's refused request gets its refusal whatever the
+    // request's shape or the server's state (draining, no session manager): the
+    // decision is not left to schema validation or to a handler. Applied before
+    // both, so a malformed or unknown type is refused, not answered with a
+    // schema error. (The dispatcher applies the same gate again.)
+    if (isBoundClient(client) && typeof msg.type === 'string' &&
+        refuseBoundMessage(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId))) {
+      return
     }
 
     // During drain, only allow permission_response and user_question_response

@@ -191,4 +191,63 @@ describe('session-scoped connection over a real socket', () => {
       primary.ws.close()
     })
   }
+
+  // Issue #9039: a refused request always gets the one refusal reply, whatever
+  // its shape or the server's state, and the refusal does nothing.
+  async function scopedClient() {
+    const port = await start()
+    const scopedToken = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    return authed(port, scopedToken)
+  }
+  const refusalFor = (c, type) => waitFor(
+    () => c.messages.find((m) => m.type === 'session_error' && m.requestType === type),
+    { label: `refusal of ${type}` },
+  )
+
+  it('replies to a scoped revoke_token with a refusal and does not revoke', async () => {
+    let revoked = 0
+    const scoped = await scopedClient()
+    server._tokenManager = { revoke: () => { revoked++ } }
+    scoped.ws.send(JSON.stringify({ type: 'revoke_token', requestId: 'rv1' }))
+    const refusal = await refusalFor(scoped, 'revoke_token')
+    assert.equal(refusal.message, 'Not available to a session-scoped connection')
+    assert.equal(refusal.code, 'SESSION_TOKEN_MISMATCH')
+    assert.equal(refusal.requestId, 'rv1')
+    assert.equal(revoked, 0)
+    scoped.ws.close()
+  })
+
+  it('refuses every denied type with the same reply even when the request is malformed', async () => {
+    const scoped = await scopedClient()
+    for (const type of denied) {
+      scoped.ws.send(JSON.stringify({ type, requestId: `bare-${type}` }))
+    }
+    for (const type of denied) {
+      const refusal = await refusalFor(scoped, type)
+      assert.equal(refusal.message, 'Not available to a session-scoped connection', type)
+      assert.equal(refusal.requestId, `bare-${type}`)
+    }
+    assert.equal(scoped.messages.some((m) => m.type === 'error' && m.code === 'INVALID_MESSAGE'), false)
+    scoped.ws.close()
+  })
+
+  it('refuses an unknown type, and the refusal names only the connection\'s own session', async () => {
+    const scoped = await scopedClient()
+    scoped.ws.send(JSON.stringify({ type: 'zz_not_a_real_type' }))
+    const refusal = await refusalFor(scoped, 'zz_not_a_real_type')
+    assert.equal(refusal.boundSessionId, 'session-1')
+    const text = JSON.stringify(refusal)
+    assert.equal(text.includes('session-2'), false)
+    assert.equal(text.includes('Two'), false)
+    scoped.ws.close()
+  })
+
+  it('still replies with the refusal while the server is draining', async () => {
+    const scoped = await scopedClient()
+    server.setDraining(true)
+    scoped.ws.send(JSON.stringify({ type: 'revoke_token', requestId: 'dr1' }))
+    const refusal = await refusalFor(scoped, 'revoke_token')
+    assert.equal(refusal.requestId, 'dr1')
+    scoped.ws.close()
+  })
 })

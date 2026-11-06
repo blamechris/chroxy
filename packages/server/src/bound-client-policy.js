@@ -27,6 +27,12 @@
  * and every name listed here is a real handler.
  */
 
+import { createLogger } from './logger.js'
+import { isBoundClient } from './environments/authority.js'
+import { buildSessionTokenMismatchPayload } from './handler-utils.js'
+
+const log = createLogger('bound-client-policy')
+
 /** @type {Readonly<Record<string, string>>} */
 export const BOUND_ALLOWED_MESSAGE_TYPES = Object.freeze({
   // -- session-local: input and control of the connection's own session --
@@ -213,4 +219,43 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
  */
 export function isBoundAllowedMessageType(type) {
   return typeof type === 'string' && Object.hasOwn(BOUND_ALLOWED_MESSAGE_TYPES, type)
+}
+
+/** The one refusal text for a request a session-scoped connection may not make. */
+export const BOUND_REFUSAL_MESSAGE = 'Not available to a session-scoped connection'
+
+const MAX_ECHOED_LENGTH = 128
+
+/**
+ * The single place a session-scoped connection is refused. Returns true when
+ * `msg` was refused (and replied to), false when the connection may use it.
+ *
+ * Every refused type gets the same `session_error` reply, whatever its shape:
+ * ws-server calls this before schema validation so a malformed denied request
+ * is refused rather than answered with a schema error, and handleSessionMessage
+ * calls it again as the dispatch gate. The reply names only the connection's
+ * own session and echoes the request's type and id; the refusal has no other
+ * effect and says nothing about other sessions.
+ *
+ * @param {WebSocket} ws
+ * @param {object} client
+ * @param {object} msg
+ * @param {object} ctx
+ * @returns {boolean}
+ */
+export function refuseBoundMessage(ws, client, msg, ctx) {
+  if (!isBoundClient(client) || isBoundAllowedMessageType(msg?.type)) return false
+  const type = msg?.type
+  log.info(`Session-scoped client ${client?.id} refused message type ${typeof type === 'string' ? type.slice(0, MAX_ECHOED_LENGTH) : typeof type}`)
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    ...buildSessionTokenMismatchPayload({
+      sessionManager: ctx.sessions?.sessionManager,
+      boundSessionId: client?.boundSessionId,
+      message: BOUND_REFUSAL_MESSAGE,
+    }),
+    ...(typeof type === 'string' && type.length <= MAX_ECHOED_LENGTH ? { requestType: type } : {}),
+    ...(typeof msg?.requestId === 'string' && msg.requestId.length <= MAX_ECHOED_LENGTH ? { requestId: msg.requestId } : {}),
+  })
+  return true
 }
