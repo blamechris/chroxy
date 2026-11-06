@@ -338,6 +338,15 @@ export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
 export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_superseded_v1'
 
 /**
+ * #9022: the client capability that says "the text an open stream has produced so far
+ * may be replayed to me as an unnumbered `response` entry". A client build from before
+ * it reconciles that entry by id only: after a tool split it keeps the snapshot AND
+ * its own live `-cont-` bubble, and shows the text twice. It keeps main's behaviour
+ * (no snapshot) instead.
+ */
+export const CAPABILITY_HISTORY_INFLIGHT_REPLY = 'history_inflight_reply_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -1921,7 +1930,9 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // streamed so far in, at its place in the transcript. The position matters for a
   // DELTA replay, which appends in arrival order; a full replay's provenance sort
   // puts the (unnumbered) snapshot after the numbered entries (#9024).
-  const pending = pendingStreamEntries(sessionManager, sessionId)
+  const pending = client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_INFLIGHT_REPLY)
+    ? pendingStreamEntries(sessionManager, sessionId)
+    : []
   const replayEntries = pending.length > 0
     ? spliceInPendingStreams(history.slice(startOffset), pending)
     : history

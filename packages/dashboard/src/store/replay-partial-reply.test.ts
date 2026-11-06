@@ -188,6 +188,13 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(count('STREAM-LINE 3')).toBe(1)
     })
 
+    it('S-B: the live stream stays live (streamingMessageId kept) across the reconnect', () => {
+      heldStream('STREAM-LINE 1\n')
+      expect(store.getState().sessionStates[SID]!.streamingMessageId).toBe('m1')
+      deltaReplay('STREAM-LINE 1\nSTREAM-LINE 2\n')
+      expect(store.getState().sessionStates[SID]!.streamingMessageId).toBe('m1')
+    })
+
     it('does not duplicate a reply the client already holds whole', () => {
       heldStream('STREAM-LINE 1\n', 'STREAM-LINE 2\n')
       deltaReplay('STREAM-LINE 1\nSTREAM-LINE 2\n')

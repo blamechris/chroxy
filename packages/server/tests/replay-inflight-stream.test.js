@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
-import { replayHistory } from '../src/ws-history.js'
+import { replayHistory, CAPABILITY_HISTORY_INFLIGHT_REPLY } from '../src/ws-history.js'
 
 /**
  * #9022 -- a reply is recorded in history only when its stream closes, so a turn
@@ -36,6 +36,28 @@ describe('SessionMessageHistory#getPendingResponseStreams (#9022)', () => {
     assert.equal(only.messageId, 'm1')
     assert.equal(only.content, 'line 1\nline 2\n')
     assert.equal(only.startSeq, 2, 'the seq the next entry took when the first text arrived')
+  })
+
+  it('N-B: an EMPTY first delta stamps nothing; the first real text does', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '' })
+    h.recordHistory('s1', 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'hi' })
+    const [only] = h.getPendingResponseStreams('s1')
+    assert.equal(only.startSeq, 2, 'after user_input, not at the empty delta')
+  })
+
+  it('S-A: later deltas never move where the reply began', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'before' })
+    h.recordHistory('s1', 'tool_start', { messageId: 't1', toolUseId: 't1', tool: 'Bash', input: null })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: ' after' })
+    const [only] = h.getPendingResponseStreams('s1')
+    assert.equal(only.startSeq, 2, 'where the first text arrived, before the tool')
+    assert.equal(only.content, 'before after')
   })
 
   it('stamps where the FIRST TEXT arrived, not where the stream opened (stream opens before the input is recorded)', () => {
@@ -87,7 +109,7 @@ async function replay(mgr, sessionId, clientRecord, opts) {
   const ws = { readyState: 1, send() {}, close() {} }
   const ctx = {
     sessionManager: mgr,
-    clients: new Map([[ws, { id: 'c1', activeSessionId: sessionId, ...clientRecord }]]),
+    clients: new Map([[ws, { id: 'c1', activeSessionId: sessionId, clientCapabilities: new Set([CAPABILITY_HISTORY_INFLIGHT_REPLY]), ...clientRecord }]]),
     send: (_ws, payload) => sent.push(payload),
     permissions: null,
   }
@@ -167,6 +189,36 @@ describe('a replay carries the reply text streamed so far (#9022)', () => {
     assert.equal(sent[0].fullHistory, false)
     assert.deepEqual(sent.filter((m) => m.type === 'message').map((m) => m.messageType), ['response'])
   }))
+
+  it('S-A: text, tool, then more text: the delta replay keeps the reply before the tool', withManager(async (mgr, sid) => {
+    mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'first', timestamp: 0 })
+    mgr._recordHistory(sid, 'stream_start', { messageId: 'm1' })
+    mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
+    mgr._recordHistory(sid, 'stream_delta', { messageId: 'm1', delta: 'BEFORE ' })
+    mgr._recordHistory(sid, 'tool_start', { messageId: 'toolu_1', toolUseId: 'toolu_1', tool: 'Bash', input: null })
+    mgr._recordHistory(sid, 'stream_delta', { messageId: 'm1', delta: 'AFTER' })
+    const sent = await replay(mgr, sid, { historyCursors: { [sid]: 1 } })
+    const order = sent.filter((m) => m.type === 'message' || m.type === 'tool_start').map((m) => m.messageType || m.type)
+    assert.deepEqual(order, ['user_input', 'response', 'tool_start'])
+  }))
+
+  it('C-A: a client that did not advertise history_inflight_reply_v1 gets no snapshot (main behaviour)', withManager(async (mgr, sid) => {
+    pausedTurn(mgr, sid)
+    for (const mode of [{ forceFull: true }, {}]) {
+      const sent = await replay(mgr, sid, { clientCapabilities: new Set(), historyCursors: { [sid]: 1 } }, mode)
+      assert.equal(sent.filter((m) => m.messageType === 'response').length, 0)
+      assert.ok(sent.some((m) => m.type === 'tool_start'), 'the rest of the replay is unchanged')
+    }
+    // and a client with no capability set at all
+    const sent = await replay(mgr, sid, { clientCapabilities: undefined }, { forceFull: true })
+    assert.equal(sent.filter((m) => m.messageType === 'response').length, 0)
+  }))
+
+  it('C-A: both stock clients advertise the capability', async () => {
+    const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
+    assert.ok(CLIENT_CAPABILITIES.desktop.includes(CAPABILITY_HISTORY_INFLIGHT_REPLY))
+    assert.ok(CLIENT_CAPABILITIES.mobile.includes(CAPABILITY_HISTORY_INFLIGHT_REPLY))
+  })
 
   it('once the stream closes the recorded entry replaces it: still one reply', withManager(async (mgr, sid) => {
     pausedTurn(mgr, sid)

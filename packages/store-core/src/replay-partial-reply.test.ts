@@ -142,6 +142,19 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
     ])
   })
 
+  it('N-A: a stream id that is only a PREFIX of another (m1 / m10) is not its family', () => {
+    // m10 is a different stream: its bubbles are neither dropped for m1's sake nor joined into it.
+    const before: ChatMessage[] = [
+      userInput('u-1'),
+      response('m1', 'STREAM-LINE 1\n'),
+      response('m10', 'ten'),
+      response('m10-cont-5', 'ten more'),
+    ]
+    const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm10-cont-5', turnInFlight: true })
+    expect(swapped.filter((m) => m.type === 'response').map((m) => m.id).sort()).toEqual(['m1', 'm10-cont-5'])
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
+  })
+
   it('a finished stream is the recorded entry\'s to say: no live gate, no freshening', () => {
     // Not live (no streamingMessageId, no open stream in the ledger): even a live-looking
     // longer row does not overwrite the replayed one.

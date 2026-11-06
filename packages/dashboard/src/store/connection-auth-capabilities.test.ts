@@ -78,6 +78,7 @@ describe('the dashboard auth frame advertises the stopped-outcome capability (#8
     expect(auth!.capabilities as string[]).toContain('history_error_replay_v1')
     expect(auth!.capabilities as string[]).toContain('history_thinking_replay_v1')
     expect(auth!.capabilities as string[]).toContain('history_question_superseded_v1')
+    expect(auth!.capabilities as string[]).toContain('history_inflight_reply_v1')
   })
 
   // The pair branch is a SECOND handshake frame, and the server records an EMPTY
