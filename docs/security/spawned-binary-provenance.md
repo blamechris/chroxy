@@ -790,6 +790,11 @@ way, and it is never exec'd. The probe itself
 unchanged binary don't — the same shared identity helper the #8030 hash/
 signature caches above now use.
 
+For a provider without `requiresDirectExec`, the probe runs a Windows
+`.cmd`/`.bat` shim under `cmd.exe` through `prepareSpawn` (#8032) — the same
+quoting `chroxy doctor` and the provider spawns use. Provenance hashes the shim
+file itself, not the script it launches.
+
 **The desktop bundle no longer ships the SDK platform binary.** The prior
 model bundled `@anthropic-ai/claude-agent-sdk-darwin-arm64` (and friends) so
 `claude-sdk` worked without a separate `claude` install; that package is now

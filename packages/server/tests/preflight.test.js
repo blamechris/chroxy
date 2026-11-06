@@ -13,7 +13,7 @@ import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CLAUDE_SDK_MIN_CLI_VERSION, sdkClaudeCodeVersion, _resetAgentSdkVersionCacheForTest } from '../src/utils/agent-sdk-version.js'
-import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
+import { resolveDeclaredMinVersion, probeBinaryVersion, _resetProbeCacheForTest } from '../src/utils/binary-version.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
@@ -988,6 +988,80 @@ describe('runProviderPreflight — direct-exec shim refusal (#7986 review S2)', 
         probeVersion: () => '2.1.200',
       }),
     )
+  })
+})
+
+// #8032 — the REAL probeBinaryVersion (fs/exec seams injected) is driven through
+// runProviderPreflight, so the platform preflight is given must reach
+// prepareSpawn. Before the fix the probe spawned the `.cmd` directly and read
+// "unreadable" on Windows for every npm shim.
+describe('runProviderPreflight — version probe routes through prepareSpawn (#8032)', () => {
+  const CMD = 'C:\\npm\\claude.cmd'
+  const okVerifyCmd = () => ({ ok: true, status: BINARY_STATUS.OK, path: CMD, quarantine: null })
+  const statSeam = () => ({ dev: 1, ino: 2, size: 3, mtimeMs: 4, ctimeMs: 5 })
+
+  function makeFloorProvider({ requiresDirectExec } = {}) {
+    return makeProvider({
+      preflight: {
+        label: 'Floor',
+        binary: {
+          name: 'claude',
+          candidates: [],
+          minVersion: '2.1.80',
+          ...(requiresDirectExec ? { requiresDirectExec: true } : {}),
+        },
+      },
+    })
+  }
+
+  function recordingProbe(spawnCalls) {
+    _resetProbeCacheForTest()
+    return (path, args, opts) => probeBinaryVersion(path, args, {
+      ...opts,
+      statSync: statSeam,
+      spawnSync: (command, spawnArgs, options) => {
+        spawnCalls.push({ command, args: spawnArgs, options })
+        return { error: undefined, status: 0, signal: null, stdout: '2.1.200 (Claude Code)', stderr: '' }
+      },
+    })
+  }
+
+  it('a win32 .cmd for a floor provider WITHOUT requiresDirectExec is probed via cmd.exe and passes', () => {
+    const calls = []
+    assert.doesNotThrow(() => runProviderPreflight(makeFloorProvider(), {
+      env: {},
+      platform: 'win32',
+      verifyBinary: okVerifyCmd,
+      probeVersion: recordingProbe(calls),
+    }))
+    assert.equal(calls.length, 1)
+    assert.ok(/cmd\.exe$/i.test(calls[0].command), 'the shim is run under cmd.exe, not exec-ed directly')
+    assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c'])
+    assert.equal(calls[0].options.windowsVerbatimArguments, true)
+    assert.ok(calls[0].args[3].includes('claude.cmd'))
+  })
+
+  it('a win32 .cmd for a requiresDirectExec provider is still refused and never probed', () => {
+    const calls = []
+    assert.throws(() => runProviderPreflight(makeFloorProvider({ requiresDirectExec: true }), {
+      env: {},
+      platform: 'win32',
+      verifyBinary: okVerifyCmd,
+      probeVersion: recordingProbe(calls),
+    }), ProviderBinaryUnsupportedError)
+    assert.equal(calls.length, 0)
+  })
+
+  it('off win32 the probe spawns the path verbatim', () => {
+    const calls = []
+    runProviderPreflight(makeFloorProvider(), {
+      env: {},
+      platform: 'linux',
+      verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: '/usr/bin/claude', quarantine: null }),
+      probeVersion: recordingProbe(calls),
+    })
+    assert.equal(calls[0].command, '/usr/bin/claude')
+    assert.deepEqual(calls[0].args, ['--version'])
   })
 })
 

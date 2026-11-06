@@ -41,6 +41,7 @@ import { spawnSync } from 'child_process'
 import { buildClaudeLaunchEnv } from './spawn-env.js'
 import { statSync as fsStatSync } from 'fs'
 import { statIdentity } from './stat-identity.js'
+import { prepareSpawn } from './win-spawn.js'
 
 // Generous enough for a slow-starting binary under load, short enough that a
 // hung/misbehaving binary can't stall session creation indefinitely. Matches
@@ -54,7 +55,9 @@ const PROBE_TIMEOUT_MS = 5_000
 // Only successful reads are stored. Module-level so it survives across
 // preflight calls within one daemon process. Keyed by path so a path holds at
 // most one entry: each `claude update` replaces the previous identity rather
-// than leaving a dead key behind (#8030 review).
+// than leaving a dead key behind (#8030 review). The cache is keyed by path
+// plus stat identity and ignores `platform` (#8032): production always uses
+// process.platform, so the same path never probes under two platforms.
 const versionCache = new Map()
 
 /**
@@ -154,12 +157,15 @@ export function resolveDeclaredMinVersion(declared) {
  * @param {object} [seams]
  * @param {Function} [seams.spawnSync] - injected in tests.
  * @param {Function} [seams.statSync] - injected in tests.
+ * @param {string} [seams.platform] - defaults to `process.platform`; forwarded
+ *   to `prepareSpawn` so tests can drive the Windows `.cmd` path (#8032).
  * @returns {string|null} the parsed version string, or null when the probe
  *   failed to run or produced no parseable version ("unreadable").
  */
 export function probeBinaryVersion(path, args = ['--version'], {
   spawnSync: spawnFn = spawnSync,
   statSync: statFn = fsStatSync,
+  platform = process.platform,
 } = {}) {
   const identity = statIdentity(path, statFn)
   const cached = versionCache.get(path)
@@ -169,7 +175,14 @@ export function probeBinaryVersion(path, args = ['--version'], {
 
   let result
   try {
-    result = spawnFn(path, args, {
+    // #8032: route through prepareSpawn like every other provider spawn, so a
+    // Windows `.cmd`/`.bat` npm shim runs under cmd.exe instead of failing with
+    // EINVAL (read as "unreadable"). No-op for a `.exe` and on POSIX. A
+    // `requiresDirectExec` provider's shim never reaches here: preflight
+    // refuses it first.
+    const spawnSpec = prepareSpawn(path, args, { platform })
+    result = spawnFn(spawnSpec.command, spawnSpec.args, {
+      ...spawnSpec.options,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: PROBE_TIMEOUT_MS,

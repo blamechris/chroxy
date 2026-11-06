@@ -84,6 +84,16 @@ describe('Windows .cmd routing — call sites invoke prepareSpawn (#6484)', () =
     assert.match(s, /prepareSpawn\(resolved, args\)[\s\S]*?execFileSync\(spawnSpec\.command, spawnSpec\.args/, 'checkBinary routed')
   })
 
+  // #8032 — the preflight version probe is a spawn site too; a floor provider
+  // without requiresDirectExec reaches it with a `.cmd` shim.
+  it('binary-version.js (preflight version probe) spawns prepareSpawn output', () => {
+    const s = src('utils/binary-version.js')
+    assert.ok(/import \{ prepareSpawn \} from '\.\/win-spawn\.js'/.test(s), 'imports prepareSpawn')
+    assert.ok(/prepareSpawn\(path, args, \{ platform \}\)/.test(s), 'routes the probed path')
+    assert.ok(/spawnFn\(spawnSpec\.command, spawnSpec\.args/.test(s), 'spawns spawnSpec.command/.args')
+    assert.ok(/\.\.\.spawnSpec\.options/.test(s), 'spreads spawnSpec.options')
+  })
+
   // #6504 — the MCP server command comes from USER config (not resolve-binary), so
   // a .cmd/.bat shim (common for npm-installed MCP servers on Windows) hits the same
   // Node-24 EINVAL. Route it through prepareSpawn like the provider spawn sites.
