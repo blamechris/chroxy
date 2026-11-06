@@ -781,6 +781,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // New clients must gate context sends on this flag; old clients omit the
     // envelope and continue through the legacy input path.
     inputContextV1: true,
+    // #7977 — `create_session` accepts a client `requestId` and echoes it on the
+    // create-confirm `session_switched` and every error for that create. A client
+    // that needs the correlation (agent-control) must refuse to create on a daemon
+    // that lacks this flag: an older daemon would create the session and never
+    // echo, orphaning it behind a timeout.
+    createRequestIdV1: true,
     // #5986 (epic #5982) — the embedded user-shell terminal is available to THIS
     // client: the server has it enabled (userShell.enabled) AND this connection
     // holds the primary token. Both conditions of the create gate are reflected

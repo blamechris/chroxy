@@ -69,6 +69,7 @@ export class ShellApprovalStore {
    * @param {string} [req.tokenClass] - for the post-create audit record
    * @param {string} [req.deviceName] - for the audit + `shell list`
    * @param {string} [req.hint] - human-facing label surfaced to the client/log
+   * @param {string|null} [req.requestId] - the held `create_session`'s client correlation id (#7977), echoed on the post-approval `session_switched` and on a denial `session_error`
    * @returns {{ approvalId: string, expiresAt: number }}
    */
   createPendingApproval({ clientId, createSessionOptions, tokenClass = null, deviceName = null, hint = null, requestId = null } = {}) {

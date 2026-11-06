@@ -720,6 +720,7 @@ describe('create_session serial-op correlation scoping', () => {
     // _pendingSerialOp matching logic in _processReadyMessage.
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true })
     client._state = 'ready'
+    client._daemonMeta = { capabilities: { createRequestIdV1: true } }
     let sent
     client._send = (payload) => { sent = payload }
     client._ensureSubscribed = async () => {}
@@ -745,6 +746,7 @@ describe('create_session serial-op correlation scoping', () => {
   it('an UNSCOPED session_error still rejects create_session promptly (the real handleCreateSession failure shape)', async () => {
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true })
     client._state = 'ready'
+    client._daemonMeta = { capabilities: { createRequestIdV1: true } }
     let sent
     client._send = (payload) => { sent = payload }
     client.listSessions = async () => ({ sessions: [] })
@@ -764,12 +766,24 @@ describe('create_session requestId correlation (#7977)', () => {
   function readyClient() {
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true, requestTimeoutMs: 200 })
     client._state = 'ready'
+    client._daemonMeta = { capabilities: { createRequestIdV1: true } }
     client.sent = []
     client._send = (payload) => { client.sent.push(payload) }
     client._ensureSubscribed = async () => {}
     client.listSessions = async () => ({ sessions: [] })
     return client
   }
+
+  it('refuses before sending when the daemon does not advertise createRequestIdV1', async () => {
+    const client = readyClient()
+    client._daemonMeta = { capabilities: { inputContextV1: true } }
+    await assert.rejects(() => client.createSession({ name: 'x' }), (err) => err.code === 'CREATE_REQUEST_ID_UNSUPPORTED')
+    assert.equal(client.sent.length, 0, 'nothing may reach the wire')
+    client._daemonMeta = null
+    await assert.rejects(() => client.createSession({ name: 'x' }), (err) => err.code === 'CREATE_REQUEST_ID_UNSUPPORTED')
+    assert.equal(client.sent.length, 0)
+    await client.close()
+  })
 
   it('sends a fresh requestId on every create_session', async () => {
     const client = readyClient()

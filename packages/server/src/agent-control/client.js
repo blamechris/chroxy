@@ -503,6 +503,7 @@ export class AgentControlClient extends EventEmitter {
       connectedClients: typeof authOk.connectedClients === 'number' && Number.isFinite(authOk.connectedClients) ? authOk.connectedClients : null,
       capabilities: {
         inputContextV1: rawCaps.inputContextV1 === true,
+        createRequestIdV1: rawCaps.createRequestIdV1 === true,
       },
     }
   }
@@ -560,6 +561,16 @@ export class AgentControlClient extends EventEmitter {
     const permissionMode = typeof opts.permissionMode === 'string' && opts.permissionMode.trim() ? opts.permissionMode.trim() : 'approve'
     if (permissionMode === 'auto') {
       throw new Error("createSession: permissionMode 'auto' is not permitted through agent-control")
+    }
+
+    // #7977: ownership is minted only from a reply echoing our requestId. A
+    // daemon that predates the echo would still CREATE the session (it ignores
+    // the unknown field), never answer with the id, and leave us timed out with
+    // an orphan that a retry would duplicate. Refuse before anything is sent.
+    if (this._daemonMeta?.capabilities?.createRequestIdV1 !== true) {
+      const err = new Error('createSession: this daemon does not advertise create_session requestId support (auth_ok.capabilities.createRequestIdV1), so the create reply cannot be correlated — refusing to create rather than risk an orphaned session. Upgrade the daemon.')
+      err.code = 'CREATE_REQUEST_ID_UNSUPPORTED'
+      throw err
     }
 
     const payload = {

@@ -739,6 +739,7 @@ export declare const SandboxSchema: z.ZodObject<{
     }, z.core.$loose>>;
     autoAllowBashIfSandboxed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>;
+export declare const CreateSessionRequestIdSchema: z.ZodString;
 export declare const CreateSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"create_session">;
     requestId: z.ZodOptional<z.ZodString>;

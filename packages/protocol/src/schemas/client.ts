@@ -796,6 +796,10 @@ export const SandboxSchema = z.object({
   autoAllowBashIfSandboxed: z.boolean().optional(),
 }).passthrough()
 
+// #7977: the correlation id a client may attach to `create_session`; the server
+// echoes it (same constraints, shared so the two directions cannot drift).
+export const CreateSessionRequestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/)
+
 export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
   // #7977: optional client-chosen correlation id. The server echoes it on the
@@ -803,7 +807,7 @@ export const CreateSessionSchema = z.object({
   // create, so a client can tell its own reply from the id-less `session_switched`
   // the daemon also sends when it re-homes a client. Optional both ways: an old
   // client omits it, and an old daemon ignores it.
-  requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  requestId: CreateSessionRequestIdSchema.optional(),
   connectionId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/).optional(),
   name: z.string().max(200).optional(),
   cwd: z.string().max(4096).optional(),

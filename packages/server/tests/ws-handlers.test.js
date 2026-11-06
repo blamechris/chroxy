@@ -210,9 +210,13 @@ describe('WS handler: create_session requestId correlation (#7977)', () => {
   it('rejects a malformed requestId at the schema', async () => {
     const { ws, messages } = await setup()
     send(ws, { type: 'create_session', name: 'x', requestId: 'bad id!' })
-    await new Promise(r => setTimeout(r, 150))
-    assert.equal(messages.some(m => m.type === 'session_switched'), false)
-    ws.close()
+    try {
+      const rejection = await waitForMessage(messages, 'error')
+      assert.equal(rejection.code, 'INVALID_MESSAGE')
+      assert.equal(messages.some(m => m.type === 'session_switched'), false)
+    } finally {
+      ws.close()
+    }
   })
 })
 

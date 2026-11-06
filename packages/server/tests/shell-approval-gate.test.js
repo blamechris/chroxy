@@ -85,6 +85,25 @@ describe('user-shell approval gate (#6277)', () => {
     assert.ok(ws._messages.some((m) => m.type === 'session_error'), 'sends a session_error, never silently allows')
   })
 
+  it('echoes the requestId on the worktree-without-cwd, env-manager-disabled and approval-unavailable errors (#7977)', () => {
+    const createSession = createSpy(() => 'sess-1')
+    const errorFor = (msg, opts) => {
+      const ws = makeWs()
+      sessionHandlers.create_session(ws, primaryClient(), { ...msg, requestId: 'ac-req-20' }, gateCtx({ createSession, ...opts }))
+      return ws._messages.find((m) => m.type === 'session_error')
+    }
+    const worktree = errorFor({ worktree: true }, { requireApproval: false, store: new ShellApprovalStore() })
+    assert.match(worktree.message, /Worktree requires/)
+    assert.equal(worktree.requestId, 'ac-req-20')
+    const env = errorFor({ environmentId: 'env-1' }, { requireApproval: false, store: new ShellApprovalStore() })
+    assert.match(env.message, /Environment management is not enabled/)
+    assert.equal(env.requestId, 'ac-req-20')
+    const unavailable = errorFor({ provider: 'user-shell' }, { requireApproval: true, store: undefined })
+    assert.match(unavailable.message, /approval service is unavailable/)
+    assert.equal(unavailable.requestId, 'ac-req-20')
+    assert.equal(createSession.callCount, 0)
+  })
+
   it('does NOT hold when user-shell is disabled (no doomed approval; create rejects upstream)', () => {
     const store = new ShellApprovalStore()
     const createSession = createSpy(() => 'sess-1')
