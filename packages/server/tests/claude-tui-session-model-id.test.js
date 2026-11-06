@@ -182,11 +182,13 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
 
   const screenFor = (id) => `⏺ There's an issue with the selected model (${id}). It may not exist or you may not have access to it. Run /model to pick a different model.`
 
-  function turnSession({ reply = '', echo = '' } = {}) {
+  // firstOutputTimeoutMs stays short for the tests ABOUT that watchdog; the rest pass a
+  // generous value so a slow runner cannot trip it.
+  function turnSession({ reply = '', echo = '', firstOutputTimeoutMs = 600 } = {}) {
     session = new ClaudeTuiSession({
       cwd: '/tmp', skillsDir, repoSkillsDir: null, model: 'haiku-5-5',
       loginProbeRunner: async () => ({ status: 0, stdout: '{"loggedIn":true}', stderr: '' }),
-      resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000, firstOutputTimeoutMs: 600,
+      resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000, firstOutputTimeoutMs,
     })
     const s = session
     s._processReady = true
@@ -239,7 +241,7 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
   })
 
   it('an assistant reply quoting the sentence (even for the session\'s own model) with no hook, then Stop, completes normally', async () => {
-    const { s, events } = turnSession({ reply: `The CLI says "${screenFor(OWN)}" when the id is wrong.` })
+    const { s, events } = turnSession({ firstOutputTimeoutMs: 4000, reply: `The CLI says "${screenFor(OWN)}" when the id is wrong.` })
     const turn = s.sendMessage('explain that error')
     await new Promise((r) => setTimeout(r, 300))
     assert.equal(s._isBusy, true, 'quoted text did not tear the turn down')
