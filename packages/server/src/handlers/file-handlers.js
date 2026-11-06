@@ -112,7 +112,7 @@ function handleMemoryRead(ws, client, msg, ctx) {
   // MEMORY.md descriptor. Read-only: no mutation gate needed (a bound/
   // share-a-session client may read memory, matching read_file/get_diff).
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.readMemory(ws, entry?.cwd || null, msg.requestId)
+  ctx.services.fileOps.readMemory(ws, entry?.cwd || null, msg.requestId, { confineToProject: isBoundClient(client) })
 }
 
 function handleGetDiff(ws, client, msg, ctx) {

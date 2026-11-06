@@ -79,6 +79,9 @@ async function fetchWithRetry(url, options) {
 // Exported for testing (re-exported from push.js for existing importers)
 export { fetchWithRetry, FETCH_TIMEOUT_MS, MAX_RETRIES, BACKOFF_BASE_MS }
 
+// The owner recorded for a registration restored from disk (see _loadFromDisk).
+const RESTORED_OWNER = Symbol('restored-registration')
+
 export class ExpoPushSink extends NotificationSink {
   constructor({ storagePath } = {}) {
     super({ name: 'expo-push' })
@@ -114,6 +117,10 @@ export class ExpoPushSink extends NotificationSink {
       for (const token of pushTokens) {
         if (typeof token === 'string' && token.length > 0) {
           this.tokens.add(token)
+          // A destination restored from disk was registered unscoped, by the host.
+          // Record that as an owner so a session-scoped registration of the same
+          // token can neither narrow it nor remove it when that connection leaves.
+          this._tokenOwners.set(token, new Set([RESTORED_OWNER]))
         }
       }
       for (const token of laTokens) {

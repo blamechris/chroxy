@@ -8,22 +8,20 @@
 import { realpathSync } from 'fs'
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { readConversationTranscriptStrictAsync as defaultReadConversationTranscript } from '../jsonl-reader.js'
+import { readConversationTranscriptStrictAsync as defaultReadConversationTranscript, transcriptReadLimiter } from '../jsonl-reader.js'
 import { resolveTranscriptSource } from '../transcript-sources.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient, boundConversationId } from '../conversation-scope.js'
 import { isBoundClient } from '../environments/authority.js'
-import { createReadLimiter, ReadLimitError, ReadCancelledError } from '../utils/read-limiter.js'
+import { ReadLimitError, ReadCancelledError } from '../utils/read-limiter.js'
 import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
-// Transcript reads can each buffer tens of megabytes, and message dispatch is
-// concurrent, so reads are admitted through one daemon-wide limiter: a few at a
-// time overall, a couple per connection, a bounded queue behind them, duplicate
-// in-flight reads shared, and a read dropped when its connection goes away.
-const defaultTranscriptReadLimiter = createReadLimiter({ maxConcurrent: 4, maxPerClient: 2, maxQueued: 32 })
+// Transcript reads are admitted through the one limiter that sits under every
+// transcript reader (jsonl-reader.js `transcriptReadLimiter`).
+const defaultTranscriptReadLimiter = transcriptReadLimiter
 
 // An AbortSignal that fires when `ws` closes. `dispose` removes the listener.
 function signalOnClose(ws) {
@@ -71,16 +69,29 @@ async function handleListConversations(ws, client, msg, ctx) {
 async function handleSearchConversations(ws, client, msg, ctx) {
   const { query, maxResults } = msg
   const search = ctx.searchConversations || defaultSearchConversations
+  const closing = signalOnClose(ws)
   try {
-    const all = await search(query, { maxResults })
-    // Adversary A8: scope the search result set to the bound session's
-    // cwd. Without this, a mobile client could substring-grep every
-    // JSONL on disk for secrets-in-transcripts.
+    // A session-scoped connection searches only the conversation its own session
+    // is running: the source is chosen BEFORE anything is read, ranked or
+    // truncated, so what other conversations contain cannot change the answer.
+    const scoped = isBoundClient(client)
+    const own = scoped ? boundConversationId(client, ctx) : null
+    const searchOpts = scoped ? { maxResults, conversationId: own } : { maxResults }
+    const all = scoped && !own
+      ? []
+      : await (ctx.transcriptReadLimiter || defaultTranscriptReadLimiter).submit(
+        { key: `search\0${query}\0${maxResults ?? ''}\0${own ?? ''}`, clientKey: String(client?.id ?? ''), signal: closing.signal },
+        () => search(query, searchOpts),
+      )
+    // The cwd check still applies to what comes back.
     const results = scopeConversationsToClient(all, client, ctx)
     ctx.transport.send(ws, { type: 'search_results', query, results })
   } catch (err) {
+    if (err instanceof ReadCancelledError) return
     log.warn(`Failed to search conversations: ${err.message}`)
     ctx.transport.send(ws, { type: 'search_results', query, results: [] })
+  } finally {
+    closing.dispose()
   }
 }
 
@@ -331,7 +342,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     const readKey = `${source.path}\0${source.identity ? `${source.identity.dev}:${source.identity.ino}` : ''}`
     const read = await limiter.submit(
       { key: readKey, clientKey: String(client?.id ?? ''), signal: closing.signal },
-      (signal) => readTranscript(source.path, undefined, { expectedIdentity: source.identity, signal }),
+      (signal) => readTranscript(source.path, undefined, { expectedIdentity: source.identity, signal, admitted: true }),
     )
     if (Array.isArray(read)) {
       // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a
@@ -431,7 +442,16 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     return
   }
   const sessionManager = ctx.sessions.sessionManager
-  const history = await sessionManager.getFullHistoryAsync(targetId)
+  // Same admission as the strict transcript endpoint: the read is capped
+  // daemon-wide and per connection, and stops when the connection closes.
+  const closing = signalOnClose(ws)
+  let history
+  try {
+    history = await sessionManager.getFullHistoryAsync(targetId, { clientKey: String(client?.id ?? ''), signal: closing.signal })
+  } finally {
+    closing.dispose()
+  }
+  if (closing.signal.aborted) return
   // #7484 — `getFullHistoryAsync` returns a descriptor: WHICH source it read
   // (the on-disk JSONL transcript or the ring buffer) alongside the entries and
   // that source's own truncation. Both decisions below turn on it, and neither

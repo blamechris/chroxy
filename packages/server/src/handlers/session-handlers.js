@@ -19,7 +19,7 @@ const log = createLogger('ws')
 
 function handleListSessions(ws, client, _msg, ctx) {
   let sessions = ctx.sessions.sessionManager.listSessions()
-  if (client.boundSessionId) {
+  if (isBoundClient(client)) {
     sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
   }
   ctx.transport.send(ws, { type: 'session_list', sessions })

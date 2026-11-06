@@ -1,10 +1,10 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { openRegularFile, readRegularFileHead } from '../src/utils/regular-file.js'
+import { readRegularFileHead } from '../src/utils/regular-file.js'
 import { scanConversations, clearScanCache } from '../src/conversation-scanner.js'
 import { searchConversations } from '../src/conversation-search.js'
 
@@ -39,11 +39,15 @@ describe('regular-file open', { skip: !POSIX && 'needs mkfifo' }, () => {
     assert.equal(text, 'hello world')
   })
 
-  it('refuses a FIFO promptly instead of waiting for a writer', async () => {
-    await assert.rejects(
-      within(2000, openRegularFile(join(dir, 'pipe.jsonl')), 'open of a FIFO'),
-      (e) => e.code === 'ENOTREG',
-    )
+  it('refuses a FIFO promptly instead of waiting for a writer', () => {
+    // In a child process with a hard timeout: if the open blocked, the child
+    // would hang (and, in-process, so would the threadpool thread), so a broken
+    // guard fails here quickly and legibly instead of wedging the run.
+    const mod = new URL('../src/utils/regular-file.js', import.meta.url).href
+    const code = `import(${JSON.stringify(mod)}).then(async (m) => { try { await m.openRegularFile(${JSON.stringify(join(dir, 'pipe.jsonl'))}); console.log('OPENED') } catch (e) { console.log(e.code) } })`
+    const r = spawnSync(process.execPath, ['-e', code], { timeout: 4000, encoding: 'utf8' })
+    assert.equal(r.error, undefined, `the open did not return: ${r.error?.message}`)
+    assert.equal(r.stdout.trim(), 'ENOTREG')
   })
 
   it('a project directory holding a FIFO does not stall a scan or a search', async () => {

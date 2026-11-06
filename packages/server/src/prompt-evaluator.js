@@ -17,6 +17,7 @@
  * Claude Code's OAuth credentials here — a Step 1.5 follow-up can add that
  * if missing-key turns out to be the dominant friction point.
  */
+import { isSafeRegexSource } from './utils/safe-regex.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { createLogger } from './logger.js'
 
@@ -136,6 +137,10 @@ function _compileSkipPattern(source) {
   if (_skipPatternCache.has(source)) return _skipPatternCache.get(source)
   let compiled = null
   try {
+    // Screened before it is compiled: `.test()` cannot be interrupted, and a
+    // pattern with a repeated group that can match one text several ways blocks
+    // the whole process on a short input (utils/safe-regex.js).
+    if (!isSafeRegexSource(source)) throw new Error('unsafe pattern')
     compiled = new RegExp(source, 'i')
   } catch {
     log.warn('Invalid promptEvaluatorSkipPattern (rejected source); falling back to default skip pattern only')

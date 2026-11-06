@@ -42,8 +42,8 @@ export class ReadCancelledError extends Error {
 /**
  * @param {{ maxConcurrent?: number, maxPerClient?: number, maxQueued?: number }} [opts]
  */
-export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueued = 32 } = {}) {
-  for (const [name, v] of Object.entries({ maxConcurrent, maxPerClient, maxQueued })) {
+export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueued = 32, maxWaitersPerJob = 64 } = {}) {
+  for (const [name, v] of Object.entries({ maxConcurrent, maxPerClient, maxQueued, maxWaitersPerJob })) {
     if (!Number.isInteger(v) || v < 1) throw new RangeError(`createReadLimiter: ${name} must be a positive integer`)
   }
 
@@ -57,7 +57,7 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
    * @typedef {object} Job
    * @property {string} key
    * @property {(signal: AbortSignal) => Promise<any>} run
-   * @property {Set<string>} clients  client keys with a waiter on this job
+   * @property {Map<string, number>} clients  client key -> its waiters on this job
    * @property {number} waiters       callers still waiting
    * @property {AbortController} abort
    * @property {Promise<any>} promise
@@ -105,7 +105,10 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
       jobs.set(key, job)
       queue.push(job)
     }
-    job.clients.add(clientKey)
+    if (job.waiters >= maxWaitersPerJob) {
+      return Promise.reject(new ReadLimitError('queue', 'Too many transcript requests are in progress'))
+    }
+    job.clients.set(clientKey, (job.clients.get(clientKey) || 0) + 1)
     job.waiters++
     const j = job
     pump()
@@ -117,6 +120,10 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
         settled = true
         signal?.removeEventListener('abort', onAbort)
         j.waiters--
+        // This caller no longer counts against its client's outstanding reads.
+        const left = (j.clients.get(clientKey) || 1) - 1
+        if (left > 0) j.clients.set(clientKey, left)
+        else j.clients.delete(clientKey)
         if (j.waiters === 0) {
           // Nobody is waiting: a queued read never starts, a running one is told to stop.
           if (!j.started) {
@@ -147,7 +154,7 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
   function createJob(key, run) {
     const abort = new AbortController()
     /** @type {Job} */
-    const job = { key, run, clients: new Set(), waiters: 0, abort, started: false, done: false, promise: null, start: null }
+    const job = { key, run, clients: new Map(), waiters: 0, abort, started: false, done: false, promise: null, start: null }
     job.promise = new Promise((resolve, reject) => {
       job.start = () => {
         Promise.resolve()

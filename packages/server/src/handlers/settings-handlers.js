@@ -4,6 +4,7 @@
  * Handles: set_model, set_permission_mode, permission_response,
  *          query_permission_audit, list_providers, set_permission_rules
  */
+import { isSafeRegexSource } from '../utils/safe-regex.js'
 import { getErrorMessage } from '../utils/error-message.js'
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import { buildThinkingLevelChanged } from '../thinking-level-wire.js'
@@ -957,6 +958,10 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // malformed regex (setter also returns false). Without this distinction
   // the operator gets no feedback when their pattern is broken.
   if (typeof msg.value === 'string' && msg.value.length > 0) {
+    if (!isSafeRegexSource(msg.value)) {
+      sendSessionError(ws, ctx, 'Invalid pattern: too long or too complex (no repeated groups containing repeats or alternation, no backreferences or lookaround)')
+      return
+    }
     try {
       new RegExp(msg.value, 'i')
     } catch (err) {

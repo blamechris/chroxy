@@ -141,6 +141,31 @@ describe('read limiter', () => {
     assert.equal(await lim.submit({ key: 'next', clientKey: 'A' }, async () => 'ok'), 'ok')
   })
 
+  it('a caller that has finished or left no longer counts against its client', async () => {
+    const lim = createReadLimiter({ maxConcurrent: 1, maxPerClient: 1, maxQueued: 4 })
+    const g = gate()
+    const ac = new AbortController()
+    const running = lim.submit({ key: 'shared', clientKey: 'A', signal: ac.signal }, () => g.done)
+    const other = lim.submit({ key: 'shared', clientKey: 'B' }, () => g.done)
+    await tick()
+    ac.abort()
+    await assert.rejects(running, (e) => e instanceof ReadCancelledError)
+    // A left a read that B is still waiting on; A may start its own now.
+    const mine = lim.submit({ key: 'mine', clientKey: 'A' }, async () => 'ok')
+    g.release()
+    assert.equal(await other, undefined)
+    assert.equal(await mine, 'ok')
+  })
+
+  it('refuses another waiter on a read that already has maxWaitersPerJob', async () => {
+    const lim = createReadLimiter({ maxConcurrent: 1, maxPerClient: 100, maxQueued: 4, maxWaitersPerJob: 3 })
+    const g = gate()
+    const waiters = [0, 1, 2].map((i) => lim.submit({ key: 'k', clientKey: `c${i}` }, () => g.done))
+    await assert.rejects(lim.submit({ key: 'k', clientKey: 'c3' }, () => g.done), (e) => e instanceof ReadLimitError)
+    g.release()
+    await Promise.all(waiters)
+  })
+
   it('rejects invalid limits', () => {
     for (const bad of [0, -1, 1.5, NaN, '2']) {
       assert.throws(() => createReadLimiter({ maxConcurrent: bad }), RangeError)

@@ -132,6 +132,7 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
  * @param {Object} [opts] - Options
  * @param {string} [opts.projectsDir] - Root directory to scan
  * @param {number} [opts.maxResults] - Maximum results to return (default 50)
+ * @param {string} [opts.conversationId] - Search only this conversation's file
  * @returns {Promise<Array<{
  *   conversationId: string,
  *   projectName: string,
@@ -176,6 +177,9 @@ export async function searchConversations(query, opts = {}) {
     }
 
     for (const file of files.filter((f) => f.endsWith('.jsonl'))) {
+      // Restricted to one conversation: every other file is skipped BEFORE it is
+      // read, so what is ranked and truncated below is only what the caller may see.
+      if (opts.conversationId && file !== `${opts.conversationId}.jsonl`) continue
       candidates.push({
         filePath: join(dirPath, file),
         conversationId: file.replace('.jsonl', ''),

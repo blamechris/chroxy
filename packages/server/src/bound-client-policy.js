@@ -57,7 +57,6 @@ export const BOUND_ALLOWED_MESSAGE_TYPES = Object.freeze({
   set_thinking_level: 'session-local: resolves the bound session or refuses',
   set_permission_mode: 'guarded: bound session only, and the unattended mode is refused',
   set_prompt_evaluator: 'session-local: resolves the bound session or refuses',
-  set_prompt_evaluator_skip_pattern: 'session-local: resolves the bound session or refuses',
   set_chroxy_context_hint: 'session-local: resolves the bound session or refuses',
   set_session_preamble: 'session-local: resolves the bound session or refuses',
   set_mcp_server_enabled: 'guarded: per-session toggle, bound session only',
@@ -119,6 +118,7 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
 
   // -- host-wide configuration and credentials --
   set_permission_rules: 'standing rules shared across sessions',
+  set_prompt_evaluator_skip_pattern: 'a pattern the daemon runs on its own event loop for every input',
   add_mcp_server: 'host-wide server configuration',
   remove_mcp_server: 'host-wide server configuration',
   submit_mcp_auth_code: 'stores a credential shared by every session using the server',

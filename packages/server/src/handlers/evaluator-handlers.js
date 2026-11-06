@@ -12,7 +12,8 @@
  *   - propagate the requestId so the dashboard can correlate
  */
 import { createLogger } from '../logger.js'
-import { resolveSession } from '../handler-utils.js'
+import { resolveSession, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { isBoundClient } from '../environments/authority.js'
 import { evaluateDraft as defaultEvaluateDraft } from '../prompt-evaluator.js'
 
 const log = createLogger('ws')
@@ -51,6 +52,18 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
   // ambiguity in the project context. Evaluation works without it; if there's
   // no session bound, we just skip the cwd field.
   const entry = resolveSession(ctx, msg, client)
+  // A session-scoped connection whose session does not resolve (a different one
+  // named, or none) gets no standalone evaluation run on its behalf.
+  if (isBoundClient(client) && !entry) {
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions?.sessionManager,
+        boundSessionId: client?.boundSessionId,
+      }),
+    })
+    return
+  }
   const cwd = entry?.session?.cwd || null
 
   // Tests can inject `ctx.evaluateDraft` to stub the network call without

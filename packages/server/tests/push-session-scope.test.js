@@ -1,6 +1,6 @@
 import { describe, it, afterEach, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PushManager } from '../src/push.js'
@@ -100,6 +100,26 @@ describe('push destinations registered for one session', () => {
   it('needs an owner', () => {
     assert.equal(manager.registerToken(GUEST, null, { sessionId: 'sess-a' }), false)
     assert.equal(manager.tokens.has(GUEST), false)
+  })
+})
+
+describe('a destination restored from disk', () => {
+  it('stays unscoped and stays registered when a session-scoped connection registers and leaves', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'push-restored-'))
+    try {
+      writeFileSync(join(dir, 'tokens.json'), JSON.stringify({ tokens: [PHONE], liveActivityTokens: [] }))
+      const manager = new PushManager({ storagePath: join(dir, 'tokens.json') })
+      manager.registerToken(PHONE, 'conn-1', { sessionId: 'sess-a' })
+      const spy = fetchSpy()
+      globalThis.fetch = spy
+      await manager.send('permission', 'T', 'B', { sessionId: 'sess-b' })
+      assert.deepEqual(recipients(spy), [PHONE], "the host's destination still receives every session")
+      manager.releaseTokenOwner(PHONE, 'conn-1')
+      assert.equal(manager.tokens.has(PHONE), true, 'and is not removed when that connection leaves')
+    } finally {
+      mock.restoreAll()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

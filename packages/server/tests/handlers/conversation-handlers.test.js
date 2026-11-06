@@ -223,6 +223,45 @@ describe('conversation-handlers', () => {
     })
   })
 
+  describe('search_conversations source selection', () => {
+    function boundSearchCtx(own) {
+      const sessions = new Map()
+      const bound = createMockSession()
+      if (own) bound.resumeSessionId = own
+      sessions.set('bound-1', { session: bound, name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      return makeCtx(sessions)
+    }
+    const guest = () => makeClient({ boundSessionId: 'bound-1' })
+
+    it("a session-scoped client's search is restricted to its own conversation BEFORE reading or ranking", async () => {
+      const ctx = boundSearchCtx('own-conv')
+      ctx.searchConversations = createSpy(async (_q, opts) => {
+        // What the real search does with a restriction: only that file is read.
+        return opts.conversationId === 'own-conv'
+          ? [{ conversationId: 'own-conv', cwd: '/home/dev/Projects/chroxy', snippet: 'x' }]
+          : [{ conversationId: 'sibling', cwd: '/home/dev/Projects/chroxy', snippet: 'higher ranked' }]
+      })
+      await conversationHandlers.search_conversations(makeWs(), guest(), { query: 'x', maxResults: 1 }, ctx)
+      assert.equal(ctx.searchConversations.calls[0][1].conversationId, 'own-conv')
+      assert.deepEqual(ctx._sent[0].results.map((r) => r.conversationId), ['own-conv'])
+    })
+
+    it('with no known conversation nothing is searched at all', async () => {
+      const ctx = boundSearchCtx(null)
+      ctx.searchConversations = createSpy(async () => [{ conversationId: 'sibling', cwd: '/home/dev/Projects/chroxy' }])
+      await conversationHandlers.search_conversations(makeWs(), guest(), { query: 'x' }, ctx)
+      assert.equal(ctx.searchConversations.callCount, 0)
+      assert.deepEqual(ctx._sent[0].results, [])
+    })
+
+    it("an unscoped client's search is not restricted", async () => {
+      const ctx = makeCtx()
+      ctx.searchConversations = createSpy(async () => [])
+      await conversationHandlers.search_conversations(makeWs(), makeClient(), { query: 'x' }, ctx)
+      assert.equal('conversationId' in ctx.searchConversations.calls[0][1], false)
+    })
+  })
+
   describe('resume_conversation', () => {
     it('sends session_error for invalid conversationId format', async () => {
       const ctx = makeCtx()

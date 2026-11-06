@@ -13,7 +13,8 @@ import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFo
 import { GIT } from './git.js'
 import { isGitRepoSync } from './utils/git-repo.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
-import { resolveJsonlPath, hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { resolveTranscriptSource } from './transcript-sources.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
 import { buildContinuationSeed, coerceContinuationSeed, continuationSeedItem, sanitizeSeedText } from './archive-continuation.js'
 import { readSessionContext } from './session-context.js'
@@ -5340,7 +5341,7 @@ export class SessionManager extends EventEmitter {
    *
    * @returns {Promise<{ entries: Array<{ type, content, tool?, timestamp, messageId? }>, source: 'jsonl'|'ring', truncated: boolean }>}
    */
-  async getFullHistoryAsync(sessionId) {
+  async getFullHistoryAsync(sessionId, readOpts = {}) {
     const entry = this._sessions.get(sessionId)
     // No session (or one being torn down) read NEITHER source. Labelled 'ring'
     // because that is the slice a caller would have got — an empty one — and
@@ -5350,8 +5351,16 @@ export class SessionManager extends EventEmitter {
     const conversationId = entry.session.resumeSessionId
     if (conversationId && entry.session.constructor.nativeResumeDriver !== NATIVE_RESUME_DRIVER) {
       try {
-        const filePath = resolveJsonlPath(entry.cwd, conversationId)
-        const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
+        // Resolved inside the provider store with real-path containment and the
+        // file's identity, like every other transcript read; the reader then
+        // admits it through the shared limiter and checks the opened descriptor.
+        const src = resolveTranscriptSource({ provider: 'claude', conversationId, cwd: entry.cwd })
+        if (!src.ok) throw new Error(src.reason)
+        const { messages, truncated } = await readConversationHistoryWithMetaAsync(src.path, undefined, {
+          expectedIdentity: src.identity,
+          clientKey: readOpts.clientKey,
+          signal: readOpts.signal,
+        })
         if (messages.length > 0) {
           return {
             entries: withRetainedPermissionOutcomes(messages, this.getHistory(sessionId), truncated),

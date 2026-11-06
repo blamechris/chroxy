@@ -49,7 +49,7 @@ describe('session-scoped message classification', () => {
       'list_repos', 'add_repo', 'remove_repo', 'list_directory', 'test_credential', 'list_providers',
       'get_credentials_status', 'byok_get_credentials_status', 'github_webhook_config_request',
       'set_permission_rules', 'create_session', 'resume_conversation', 'write_file', 'git_commit',
-      'host_status_request', 'revoke_token', 'pair_approve', 'daemon_update_action',
+      'host_status_request', 'revoke_token', 'pair_approve', 'daemon_update_action', 'set_prompt_evaluator_skip_pattern',
     ]
     for (const t of MUST_BE_UNAVAILABLE) {
       assert.equal(isBoundAllowedMessageType(t), false, `${t} must not be available to a session-scoped connection`)

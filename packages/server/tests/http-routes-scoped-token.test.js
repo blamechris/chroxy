@@ -63,6 +63,15 @@ describe('HTTP routes and a session-scoped bearer token', () => {
       `http-routes.js has ${matchers.length} route matchers; classify each in ROUTES (found ${ROUTES.length})`)
   })
 
+  it('every classified route is a path the router actually matches (and the reverse by count)', () => {
+    const src = readFileSync(join(SRC, 'http-routes.js'), 'utf8')
+    for (const r of ROUTES) {
+      if (r.p === '/anything') continue // OPTIONS is matched by method alone
+      const needle = r.p === '/mcp/oauth/callback' ? 'MCP_OAUTH_CALLBACK_PATH' : r.p.replace(/\/(some-slug|x|session-2|xterm\.js)$/, '')
+      assert.ok(src.includes(`'${needle}`) || src.includes(`${needle}'`) || src.includes(needle), `${r.m} ${r.p}: no matcher for ${needle} in http-routes.js`)
+    }
+  })
+
   it('only one place opts a route in to scoped tokens', () => {
     const hits = []
     const walk = (dir) => {

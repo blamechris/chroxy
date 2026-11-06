@@ -27,7 +27,7 @@ import { getDashboardBuildId } from './dashboard-build.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
-import { broadcastEnvironmentList } from './environments/authority.js'
+import { broadcastEnvironmentList, isBoundClient } from './environments/authority.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
@@ -37,6 +37,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
+import { frameForBoundClient } from './outgoing-policy.js'
 import { getProviderDataDirs, getProviderTranscriptSources, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
@@ -3346,6 +3347,13 @@ export class WsServer {
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
+    // The one outgoing choke point: a session-scoped connection is sent no
+    // host-wide frame and has host-wide fields removed from the rest.
+    if (client && isBoundClient(client)) {
+      const frame = frameForBoundClient(message)
+      if (frame === null) return true
+      message = frame
+    }
     // #5721: propagate the delivery boolean so callers gating crypto state on a
     // frame reaching the wire (the eager handshake's auth_ok) can observe a
     // swallowed send failure. Other callers ignore the return, unchanged.

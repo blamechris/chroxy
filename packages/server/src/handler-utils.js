@@ -5,7 +5,8 @@
  * import from ws-message-handlers.js or any handler module to avoid
  * circular dependencies.
  */
-import fs, { statSync, realpathSync, readFileSync } from 'fs'
+import fs, { statSync, realpathSync } from 'fs'
+import { readRegularFileSync } from './utils/regular-file.js'
 import { homedir } from 'os'
 import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
@@ -239,12 +240,21 @@ export function resolveFileRefAttachments(attachments, cwd) {
       }
     }
     try {
-      const stat = statSync(absPath)
-      if (stat.size > MAX_FILE_REF_SIZE) {
-        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(stat.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
+      // Read through one non-blocking descriptor that is checked to be a regular
+      // file: a stat of the path followed by a read of the path would wait forever
+      // on a FIFO planted at the name, with the whole process stalled behind it.
+      let raw
+      try {
+        raw = readRegularFileSync(absPath, MAX_FILE_REF_SIZE)
+      } catch (err) {
+        if (err?.code === 'EFBIG') {
+          return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(err.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
+        }
+        if (err?.code === 'ENOTREG') {
+          return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: not a regular file: ${att.path}]`).toString('base64'), name: att.name || att.path }
+        }
+        throw err
       }
-      // Detect binary files by checking for null bytes in the first 8KB
-      const raw = readFileSync(absPath)
       const sample = raw.subarray(0, 8192)
       if (sample.includes(0)) {
         return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: binary file not supported: ${att.path}]`).toString('base64'), name: att.name || att.path }
@@ -854,7 +864,7 @@ export function resolveSession(ctx, msg, client) {
 
   // Enforce session token binding: a bound client can only resolve its own
   // session. If a specific sid was requested and it doesn't match, reject.
-  if (sid && client?.boundSessionId && client.boundSessionId !== sid) {
+  if (sid && client && isBoundClient(client) && client.boundSessionId !== sid) {
     return null
   }
 
