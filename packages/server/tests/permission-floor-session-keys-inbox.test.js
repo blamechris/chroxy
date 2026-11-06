@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -236,7 +236,7 @@ describe('a search with no path starts from the session cwd', () => {
   })
 
   it('leaves a search from an ordinary cwd alone', async () => {
-    for (const cwd of [project, '/tmp', '/tmp/other', '/tmp/cc-socks-other', home]) {
+    for (const cwd of [project, '/tmp', '/tmp/other', '/tmp/cc-socks-other']) {
       for (const [tool, input] of SEARCHES) await assertBoth(tool, input, false, `ordinary cwd ${cwd}`, cwd)
     }
   })
@@ -290,7 +290,6 @@ describe('protected roots that are links, or not created yet', () => {
     assert.equal(hits(join(missing, 'a1.sock'), [missing]), true, 'a root not created yet names itself')
     assert.equal(hits(join(sandbox, 'not-yet', 'other', 'a1.sock'), [missing]), false, 'and floors nothing else')
     assert.equal(hits(join(sandbox, 'unrelated', 'a1.sock'), [missing]), false, 'control')
-    assert.equal(hits('/anywhere/else/a1.sock', ['relative/cc-socks']), true, 'a root that cannot be resolved fails closed')
   })
 
   it('does not floor everything when the config dir does not exist yet', async () => {
@@ -312,10 +311,35 @@ describe('a Grep from the config dir or above', () => {
     await assertBoth('Grep', { path: join(cfg, 'projects') }, false, 'sibling directory')
   })
 
-  it('does not floor from $HOME when the config dir is hidden below it', async () => {
-    await assertBoth('Grep', { path: home }, false, 'home search')
-    await assertBoth('Grep', { pattern: '.' }, false, 'cwd is home', home)
+  it('floors from $HOME and from any ancestor of the default config dir', async () => {
+    await assertBoth('Grep', { path: home }, true, 'home search')
+    await assertBoth('Grep', { pattern: '.' }, true, 'cwd is home', home)
+    await assertBoth('Grep', { path: sandbox }, true, 'directory above home')
+    await assertBoth('Grep', { path: home, glob: '*.js' }, false, 'fixed other extension')
+    await assertBoth('Glob', { path: home, pattern: '**/*' }, false, 'glob names only')
     await assertBoth('Grep', { path: project }, false, 'project search')
+  })
+
+  it('is only switched off by a glob that cannot select a .key file', async () => {
+    const cfg = join(home, '.claude')
+    for (const glob of ['*.js', 'src/**/*.{js,ts}', '*.md, *.txt', '*.JS']) {
+      await assertBoth('Grep', { path: cfg, glob }, false, `glob ${glob}`)
+      await assertBoth('Grep', { path: home, glob }, false, `glob ${glob} from home`)
+    }
+    for (const glob of ['sessions/123*', '*', '**', '**/*.key', 'sessions/**', '*.{js,key}', '{sessions/1*,*.js}',
+      '*.js sessions/12*', '*.js,sessions/12*', '!*.key', '*.k*', '*.?ey', 'sessions/', '[a]*.js', '*.KEY', '*.js\\', '']) {
+      await assertBoth('Grep', { path: cfg, glob }, true, `glob ${JSON.stringify(glob)}`)
+      await assertBoth('Grep', { path: home, glob }, true, `glob ${JSON.stringify(glob)} from home`)
+    }
+  })
+
+  it('classifies globs the same way directly', () => {
+    const avoids = (g) => floorInternalsForTest.globAvoidsKeyFiles(g)
+    assert.equal(avoids('*.js'), true)
+    assert.equal(avoids('sessions/123*'), false)
+    assert.equal(avoids('!*.js'), false)
+    assert.equal(avoids(undefined), false)
+    assert.equal(avoids(5), false)
   })
 
   it('floors from a directory above a non-hidden override, but not from elsewhere', async () => {
@@ -344,5 +368,97 @@ describe('the hook pre-filter', () => {
     for (const tool of SEARCH_ROOT_TOOLS) {
       assert.ok(hook.includes(`*'"${tool}"'*`), `permission-hook.sh must match "${tool}"`)
     }
+  })
+})
+
+describe('a root at a shallow resolved path', () => {
+  it('matches a root that resolves to a single component', () => {
+    const v = (target) => floorInternalsForTest.protectedRootVerdicts(target, {
+      configDirFn: () => '/cfg', inboxDirs: ['/tmp/cc-socks'], resolveRootFn: (p) => (p === '/tmp/cc-socks' ? '/sockets' : p),
+    })
+    assert.equal(v('/sockets').inbox, true, 'the root itself')
+    assert.equal(v('/sockets/a1.sock').inbox, true, 'below it')
+    assert.equal(v('/other').inbox, false, 'control')
+    assert.equal(v('/').inbox, false, 'the filesystem root')
+  })
+})
+
+describe('a config dir that cannot be resolved does not floor ordinary access', () => {
+  const posix = process.platform !== 'win32'
+  const root = posix && process.getuid?.() !== 0
+
+  async function assertOrdinaryUnaffected(label) {
+    await assertBoth('Read', { file_path: join(project, 'src', 'a.js') }, false, `${label}: read`)
+    await assertBoth('Edit', { file_path: join(project, 'src', 'a.js') }, false, `${label}: edit`)
+    await assertBoth('Grep', { path: project }, false, `${label}: grep`)
+    await assertBoth('Grep', { pattern: '.' }, false, `${label}: pathless grep`)
+    await assertBoth('Glob', { path: project, pattern: '*' }, false, `${label}: glob`)
+    await assertBoth('Glob', { pattern: '*' }, false, `${label}: pathless glob`)
+  }
+
+  it('.claude is a regular file', async () => {
+    const fileHome = join(sandbox, 'home-file')
+    mkdirSync(fileHome, { recursive: true })
+    writeFileSync(join(fileHome, '.claude'), 'x')
+    process.env.HOME = fileHome
+    process.env.USERPROFILE = fileHome
+    await assertOrdinaryUnaffected('file')
+    await assertBoth('Grep', { path: join(fileHome, '.claude', 'sessions') }, true, 'the sessions path under it still floors')
+  })
+
+  it('CLAUDE_CONFIG_DIR is a regular file', async () => {
+    const file = join(sandbox, 'cfg-is-a-file')
+    writeFileSync(file, 'x')
+    process.env.CLAUDE_CONFIG_DIR = file
+    await assertOrdinaryUnaffected('override file')
+    await assertBoth('Grep', { path: join(file, 'sessions') }, true, 'the sessions path under it still floors')
+  })
+
+  it('.claude is unreadable (mode 000)', { skip: root ? false : 'needs a non-root POSIX user' }, async () => {
+    const lockedHome = join(sandbox, 'home-locked')
+    mkdirSync(join(lockedHome, '.claude', 'sessions'), { recursive: true })
+    chmodSync(join(lockedHome, '.claude'), 0o000)
+    process.env.HOME = lockedHome
+    process.env.USERPROFILE = lockedHome
+    try {
+      await assertOrdinaryUnaffected('locked')
+      await assertBoth('Grep', { path: join(lockedHome, '.claude', 'sessions') }, true, 'the sessions path under it floors')
+    } finally {
+      chmodSync(join(lockedHome, '.claude'), 0o700)
+    }
+  })
+
+  it('a sessions root that fails to resolve floors only at or under its written path', () => {
+    const fail = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) }
+    const v = (target, extra = {}) => floorInternalsForTest.protectedRootVerdicts(target, {
+      configDirFn: () => '/cfg', inboxDirs: ['/tmp/cc-socks'], resolveRootFn: (p) => (p === '/cfg/sessions' ? fail() : p), ...extra,
+    })
+    assert.equal(v('/cfg/sessions').sessionsDir, true, 'the directory')
+    assert.equal(v('/cfg/sessions/123.json').sessionsDir, true, 'a file inside it')
+    assert.equal(v('/cfg').reaches, true, 'a search reaching it')
+    assert.equal(v('/cfg/projects/x').sessionsDir, false, 'control: elsewhere in the config dir')
+    assert.equal(v('/work/project/a.js').sessionsDir, false, 'control: an ordinary target')
+    assert.equal(v('/work/project').reaches, false, 'control: an ordinary search')
+    assert.equal(v('/tmp/cc-socks/a').inbox, true, 'the inbox root is unaffected')
+    assert.equal(v('/work/project/a.js').inbox, false, 'and floors nothing else')
+  })
+
+  it('an inbox root that fails to resolve does not affect the sessions rule', () => {
+    const fail = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) }
+    const v = (target) => floorInternalsForTest.protectedRootVerdicts(target, {
+      configDirFn: () => '/cfg', inboxDirs: ['/tmp/cc-socks'], resolveRootFn: (p) => (p === '/tmp/cc-socks' ? fail() : p),
+    })
+    assert.equal(v('/cfg/sessions').sessionsDir, true)
+    assert.equal(v('/cfg/sessions/123.json').sessionsDir, false, 'a file there is judged by its name')
+    assert.equal(v('/tmp/cc-socks/a').inbox, true, 'the failed inbox root still floors at or under its written path')
+    assert.equal(v('/work/project/a.js').inbox, false)
+  })
+
+  it('a path under a non-directory resolves like a missing one', () => {
+    const v = (target) => floorInternalsForTest.protectedRootVerdicts(target, {
+      configDirFn: () => join(sandbox, 'cfg-is-a-file', 'nested'), inboxDirs: [],
+    })
+    assert.equal(v(join(sandbox, 'cfg-is-a-file', 'nested', 'sessions')).sessionsDir, true)
+    assert.equal(v(join(sandbox, 'cfg-is-a-file', 'nested', 'sessions', 'x')).sessionsDir, false, 'resolved, not failed')
   })
 })

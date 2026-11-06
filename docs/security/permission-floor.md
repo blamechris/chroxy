@@ -306,14 +306,21 @@ Two path families are floored for reads (and writes) on top of the name rules:
   `CLAUDE_CONFIG_DIR` override. What the name rule could not see is a *search*, so
   the following floor too:
   - a `Grep` or `Glob` whose `path` is exactly `<claude config dir>/sessions`;
-  - a `Grep` rooted at the config directory, or at an ancestor of it, with no
-    narrowing `glob`, when a recursive search from there reaches `sessions`.
-    **`$HOME` choice:** ripgrep skips hidden directories, so a route that passes
-    through a dot-named directory does not count. A `Grep` from `$HOME` therefore
-    does *not* floor for the default `~/.claude`, and does floor for a non-hidden
-    override such as `/data/claude-data` (from it, from `/data`, or from `/`). A
-    `Grep` from the config directory itself always floors. A search from a
-    directory that does not contain the config dir is unaffected;
+  - a `Grep` rooted at the config directory, or at any ancestor of it (`$HOME`,
+    `/`), unless its `glob` provably cannot select a `.key` file. Claude Code's
+    Grep passes `--hidden`, so a route through a dot-named directory counts: a
+    `Grep` from `$HOME` reaches `~/.claude/sessions/*.key` and floors. A search from
+    a directory that does not contain the config dir is unaffected. This is a
+    separate rule from the non-`.claude`-named config-root rule in §1a
+    (`_searchReachToConfigRoot`), which guards `settings*.json`, skips a
+    `.claude`-named root, and is switched off by any include glob. The `sessions`
+    rule applies to the default `~/.claude` as well. **The glob rule:** the rule is
+    switched off only when the glob has an include and every include (under both
+    readings of the field) stays inside the analysable grammar and ends in a fixed
+    extension other than `key`, such as `*.js` or `src/**/*.{js,ts}`. Everything
+    else keeps the floor: `*`, `**`, `sessions/123*`, `sessions/**`, `**/*.key`,
+    `*.{js,key}`, `*.k*`, a class or escape, a directory, and a glob that only
+    excludes. The glob's own secret analysis (§ Grep `glob`) still applies on top;
   - a `Grep` or `Glob` with **no path field**, which searches from the session
     cwd: the cwd stands in for the missing root, for all the rules here. A pathless
     search from an ordinary cwd is unchanged;
@@ -327,9 +334,14 @@ Two path families are floored for reads (and writes) on top of the name rules:
 The protected directories are themselves resolved: `<config>/sessions` and the two
 socket paths each match in their written spelling and their symlink-resolved one, so
 a directory that is a link, or reached through one, is recognised from either side.
-A directory that does not exist yet resolves through its deepest existing ancestor
-and names only itself; one that cannot be resolved floors (fail closed). The
-config directory is matched case-insensitively.
+A directory that does not exist yet, or sits below a path component that is not a
+directory, resolves through its deepest existing ancestor and names only itself.
+The sessions directory and the inbox directories are resolved independently. One
+that cannot be resolved at all (for example `EACCES` on a parent) floors every
+target at or under its *written* path and every search reaching it, and nothing
+else: ordinary reads and searches are unaffected, and the other directory is
+unaffected. A config directory that cannot be determined at all names no sessions
+directory here; §1a's rule decides that case. Matching is case-insensitive.
 
 The rules live in `_scanResolvedTarget` (`_hitsInboxSocketDir`, `_isSessionsDir`)
 and `_searchRootFloored`, reached through `isFlooredTarget`, so both pipelines share
