@@ -16,6 +16,7 @@
  *   - a backreference (`\1`, `\k<name>`) or a lookaround group;
  *   - a group repeated without a bound (`*`, `+`, `{n,}`) whose body contains
  *     any quantifier (including `?` and `{n,m}`) or an alternation;
+ *   - a bounded repeat of a group that contains an unbounded repeat (`(.*a){12}`);
  *   - two unbounded repeats (`*`, `+`, `{n,}`) with nothing mandatory between
  *     them (optional items in between do not count as mandatory): `a*a*`,
  *     `\s*\s*x`, `a+b*c+`.
@@ -75,15 +76,17 @@ function parseAlternation(src, start, depth) {
   let i = start
   let busy = false // body contains a quantifier or an alternation
   let pending = false // an unbounded repeat with nothing mandatory since
+  let unbounded = false // body contains an unbounded repeat
   while (i < src.length) {
     const c = src[i]
     if (c === ')') {
       if (depth === 0) throw new Refused()
-      return { i, busy }
+      return { i, busy, unbounded }
     }
     if (c === '|') { busy = true; pending = false; i++; continue }
     // One atom.
     let atomBusy = false
+    let atomUnbounded = false
     if (c === '(') {
       let j = i + 1
       if (src[j] === '?') {
@@ -95,6 +98,7 @@ function parseAlternation(src, start, depth) {
       const inner = parseAlternation(src, j, depth + 1)
       if (src[inner.i] !== ')') throw new Refused()
       atomBusy = inner.busy
+      atomUnbounded = inner.unbounded
       i = inner.i + 1
     } else if (c === '[') {
       let j = i + 1
@@ -110,15 +114,20 @@ function parseAlternation(src, start, depth) {
     const q = parseQuantifier(src, i)
     if (q.any) busy = true
     if (q.unbounded && atomBusy) throw new Refused()
+    // A bounded repeat of a group that itself holds an unbounded repeat multiplies
+    // the work per iteration: `(.*a){12}$`.
+    if (q.any && !q.unbounded && c === '(' && atomUnbounded) throw new Refused()
     if (q.unbounded) {
+      unbounded = true
       if (pending) throw new Refused()
       pending = true
     } else if (!q.optional && !(c === '^' || c === '$')) {
       pending = false
     }
     if (atomBusy) busy = true
+    if (atomUnbounded) unbounded = true
     i = q.next
   }
   if (depth !== 0) throw new Refused()
-  return { i, busy }
+  return { i, busy, unbounded }
 }

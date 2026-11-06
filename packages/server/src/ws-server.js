@@ -27,7 +27,7 @@ import { getDashboardBuildId } from './dashboard-build.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
-import { broadcastEnvironmentList, isBoundClient, isBoundToOtherSession } from './environments/authority.js'
+import { broadcastEnvironmentList, isBoundClient, isBoundToOtherSession, CONVERSATION_FRAME } from './environments/authority.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
@@ -1706,7 +1706,9 @@ export class WsServer {
             // and de-auths instead, so a compromised connection can't gain
             // currency this way. Unencrypted clients get no token, so theirs
             // stays stale (they must reconnect) — handled by the else branch.
-            client.authToken = newToken
+            // A session-scoped connection was not sent the token (see
+            // outgoing-policy.js), so its recorded credential stays its own.
+            if (!isBoundClient(client)) client.authToken = newToken
             encrypted++
           } else {
             this._send(ws, { type: 'token_rotated', expiresAt, reason: 'scheduled' })
@@ -3352,7 +3354,7 @@ export class WsServer {
     if (client && isBoundClient(client)) {
       // A frame tagged with another session is not for this connection, on a
       // direct send as on a broadcast.
-      if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) return true
+      if (message?.[CONVERSATION_FRAME] !== true && typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) return true
       const frame = frameForBoundClient(message)
       if (frame === null) return true
       message = frame

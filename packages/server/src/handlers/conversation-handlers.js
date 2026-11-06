@@ -13,7 +13,7 @@ import { resolveTranscriptSource } from '../transcript-sources.js'
 import { projectSlug } from '../jsonl-reader.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient, boundConversationId } from '../conversation-scope.js'
-import { isBoundClient } from '../environments/authority.js'
+import { isBoundClient, markConversationFrame } from '../environments/authority.js'
 import { ReadLimitError, ReadCancelledError, admissionFor } from '../utils/read-limiter.js'
 import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -61,7 +61,7 @@ async function handleListConversations(ws, client, msg, ctx) {
     const closing = signalOnClose(ws)
     let all
     try {
-      all = await defaultTranscriptReadLimiter.submit(
+      all = await (ctx.transcriptReadLimiter || defaultTranscriptReadLimiter).submit(
         { key: `scan\0${JSON.stringify(scanOpts)}`, ...admissionFor(client, isBoundClient), signal: closing.signal },
         () => scan(scanOpts),
       )
@@ -74,6 +74,10 @@ async function handleListConversations(ws, client, msg, ctx) {
     ctx.transport.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
     if (err instanceof ReadCancelledError) return
+    if (err instanceof ReadLimitError) {
+      sendSessionError(ws, ctx, `${err.message}. Try again shortly.`)
+      return
+    }
     log.warn(`Failed to scan conversations: ${err.message}`)
     ctx.transport.send(ws, { type: 'conversations_list', conversations: [] })
   }
@@ -106,6 +110,10 @@ async function handleSearchConversations(ws, client, msg, ctx) {
     ctx.transport.send(ws, { type: 'search_results', query, results })
   } catch (err) {
     if (err instanceof ReadCancelledError) return
+    if (err instanceof ReadLimitError) {
+      sendSessionError(ws, ctx, `${err.message}. Try again shortly.`)
+      return
+    }
     log.warn(`Failed to search conversations: ${err.message}`)
     ctx.transport.send(ws, { type: 'search_results', query, results: [] })
   } finally {
@@ -400,7 +408,10 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   //
   // Route through ctx.transport so a method-style sender keeps its receiver;
   // the shared loop only ever needs a (ws, payload) callable.
-  const send = (target, payload) => ctx.transport.send(target, payload)
+  // Frames of this replay name the conversation in `sessionId`; the conversation
+  // was authorised above, so they are marked as conversation frames (see
+  // markConversationFrame) and the delivery rule for other-session tags skips them.
+  const send = (target, payload) => ctx.transport.send(target, markConversationFrame(payload))
 
   // #7501 — `truncated` describes the collection ACTUALLY SENT, and is emitted
   // unconditionally: absence reads to a client exactly like `truncated: false`,

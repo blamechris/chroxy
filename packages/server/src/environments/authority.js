@@ -77,3 +77,19 @@ export function canSeePeer(recipient, peer) {
 export function broadcastEnvironmentList(broadcast, environments) {
   broadcast({ type: 'environment_list', environments }, (client) => !isBoundClient(client))
 }
+
+/**
+ * A transcript replay frame names a CONVERSATION in its `sessionId` field (there
+ * is no live session behind a closed conversation), so the "tagged with another
+ * session" delivery rule must not read it as a session id. The handler that
+ * produced it, after authorising the conversation, marks the frame with this
+ * symbol (not serialised, not settable from the wire) and the delivery check
+ * skips the tag test for it.
+ */
+export const CONVERSATION_FRAME = Symbol('conversation-frame')
+
+/** @template T @param {T} frame @returns {T} */
+export function markConversationFrame(frame) {
+  Object.defineProperty(frame, CONVERSATION_FRAME, { value: true, enumerable: false })
+  return frame
+}

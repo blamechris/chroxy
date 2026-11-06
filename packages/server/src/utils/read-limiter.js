@@ -117,11 +117,12 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
       jobs.set(key, job)
       queue.push(job)
     }
-    // An unrestricted caller joining a restricted read lifts the restriction.
-    if (!restricted) job.restricted = false
     if (job.waiters >= maxWaitersPerJob) {
       return Promise.reject(new ReadLimitError('queue', 'Too many transcript requests are in progress'))
     }
+    // An unrestricted caller joining a restricted read lifts the restriction (only
+    // once it has been admitted).
+    if (!restricted) job.restricted = false
     job.clients.set(clientKey, (job.clients.get(clientKey) || 0) + 1)
     job.waiters++
     const j = job

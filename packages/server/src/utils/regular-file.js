@@ -9,7 +9,7 @@
  * object. A symlink to a regular file is followed, as a plain open does.
  */
 import { constants as fsConstants, openSync, fstatSync, readSync, closeSync, lstatSync } from 'fs'
-import { relative, join, sep, isAbsolute } from 'path'
+import { relative, join, sep, isAbsolute, parse } from 'path'
 import { open, lstat } from 'fs/promises'
 import { openNoFollow } from '../ws-file-ops/open-nofollow.js'
 
@@ -108,6 +108,29 @@ function componentsBelow(root, absPath) {
 }
 
 /**
+ * Every directory that must be a real directory (not a link) for `absPath` to be
+ * the file it appears to be: the filesystem root, each ancestor of `root`, `root`
+ * itself, and each directory between `root` and the file. The chain starts at the
+ * top, not at `root`: a swap of the root or of one of its ancestors changes what
+ * every name beneath it denotes.
+ */
+function directoryChain(root, comps) {
+  const dirs = []
+  const { root: top } = parse(root)
+  let cur = top
+  dirs.push(cur)
+  for (const part of root.slice(top.length).split(sep).filter(Boolean)) {
+    cur = join(cur, part)
+    dirs.push(cur)
+  }
+  for (const comp of comps.slice(0, -1)) {
+    cur = join(cur, comp)
+    dirs.push(cur)
+  }
+  return dirs
+}
+
+/**
  * Read at most `size` bytes from an open handle in bounded steps, never more
  * than `maxBytes`.
  */
@@ -138,6 +161,9 @@ async function readHandleBounded(fh, size, maxBytes) {
  * directory again, so the identity comparison fails. What is read is always the
  * descriptor, so nothing swapped in afterwards is read.
  *
+ * A hard link to the same file inside the root is the same object and is not
+ * distinguishable by identity; containment does not defend against one.
+ *
  * `deps` is a test seam: `beforeOpen` / `afterOpen` run at those two points so a
  * test can schedule a filesystem change there.
  *
@@ -160,11 +186,8 @@ export async function readContainedBytes(absPath, root, maxBytes, { head = false
     const st = await fh.stat({ bigint: true })
     if (!st.isFile()) return null
     if (!head && st.size > BigInt(maxBytes)) return null
-    let cur = root
-    for (const comp of comps.slice(0, -1)) {
-      cur = join(cur, comp)
-      const l = await lstat(cur)
-      if (!l.isDirectory()) return null
+    for (const dir of directoryChain(root, comps)) {
+      if (!(await lstat(dir)).isDirectory()) return null
     }
     const fin = await lstat(absPath, { bigint: true })
     if (!fin.isFile() || fin.dev !== st.dev || fin.ino !== st.ino) return null
@@ -186,19 +209,19 @@ export async function readContainedTextFile(absPath, root, maxBytes, opts) {
  * Synchronous {@link readContainedBytes}, for a caller that cannot be async.
  * Same identity-based containment; a FIFO or device is refused, not waited on.
  */
-export function readContainedBytesSync(absPath, root, maxBytes, { head = false, report = {} } = {}) {
+export function readContainedBytesSync(absPath, root, maxBytes, { head = false, report = {}, deps = {} } = {}) {
   const comps = componentsBelow(root, absPath)
   if (!comps) { report.reason = 'outside'; return null }
   let fd
   try {
+    deps.beforeOpen?.()
     fd = openSync(absPath, READ_FLAGS | (fsConstants.O_NOFOLLOW || 0))
+    deps.afterOpen?.()
     const st = fstatSync(fd, { bigint: true })
     if (!st.isFile()) { report.reason = 'not-regular'; return null }
     if (!head && st.size > BigInt(maxBytes)) { report.reason = 'too-large'; report.size = Number(st.size); return null }
-    let cur = root
-    for (const comp of comps.slice(0, -1)) {
-      cur = join(cur, comp)
-      if (!lstatSync(cur).isDirectory()) { report.reason = 'outside'; return null }
+    for (const dir of directoryChain(root, comps)) {
+      if (!lstatSync(dir).isDirectory()) { report.reason = 'outside'; return null }
     }
     const fin = lstatSync(absPath, { bigint: true })
     if (!fin.isFile() || fin.dev !== st.dev || fin.ino !== st.ino) { report.reason = 'changed'; return null }
@@ -237,10 +260,8 @@ export async function readPinnedHandle(fh, absPath, root, maxBytes) {
   if (st.size > BigInt(maxBytes)) throw fail('EFBIG', 'File too large')
   const comps = componentsBelow(root, absPath)
   if (!comps) throw fail('EACCES', 'outside')
-  let cur = root
-  for (const comp of comps.slice(0, -1)) {
-    cur = join(cur, comp)
-    if (!(await lstat(cur)).isDirectory()) throw fail('EACCES', 'outside')
+  for (const dir of directoryChain(root, comps)) {
+    if (!(await lstat(dir)).isDirectory()) throw fail('EACCES', 'outside')
   }
   const fin = await lstat(absPath, { bigint: true })
   if (!fin.isFile() || fin.dev !== st.dev || fin.ino !== st.ino) throw fail('EACCES', 'changed')

@@ -47,7 +47,7 @@ export const BOUND_OUTGOING_DENIED = Object.freeze([
 ])
 
 /** @type {readonly string[]} */
-export const BOUND_OUTGOING_REDACTED = Object.freeze(['auth_bootstrap', 'auth_ok', 'mcp_servers'])
+export const BOUND_OUTGOING_REDACTED = Object.freeze(['auth_bootstrap', 'auth_ok', 'cost_update', 'mcp_servers'])
 
 /** @type {readonly string[]} */
 export const BOUND_OUTGOING_ALLOWED = Object.freeze([
@@ -56,7 +56,7 @@ export const BOUND_OUTGOING_ALLOWED = Object.freeze([
   'background_work_changed', 'budget_exceeded', 'budget_resume_ack', 'budget_warning',
   'cancel_activity_ack', 'checkpoint_created', 'checkpoint_list', 'checkpoint_restored',
   'chroxy_context_hint_changed', 'claude_ready', 'client_focus_changed', 'client_joined',
-  'client_left', 'code_search_results', 'conversation_id', 'cost_update', 'dev_preview_status',
+  'client_left', 'code_search_results', 'conversation_id', 'dev_preview_status',
   'diff_result', 'error', 'evaluate_draft_result', 'evaluator_clarify', 'evaluator_rewrite',
   'extension_message', 'file_content', 'git_branches_result', 'git_stage_result',
   'git_status_result', 'git_unstage_result', 'inactivity_warning', 'input_ack', 'key_exchange_ok',
@@ -145,6 +145,11 @@ export function frameForBoundClient(message) {
           return rest
         }),
       }
+    }
+    if (type === 'cost_update') {
+      // The host-wide running total is not this session's cost.
+      const { totalCost: _t, ...rest } = message
+      return rest
     }
     if (type === 'auth_ok') {
       // Host-wide fields: the billing snapshot, the host's feature flags and its
