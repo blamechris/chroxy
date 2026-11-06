@@ -61,7 +61,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-thinking-level-roster.sh"
 
 # Asserted EQUAL, not -ge, so removing a case is as loud as skipping one.
-EXPECTED_CASES=19
+EXPECTED_CASES=21
 
 PASS=0
 FAIL=0
@@ -253,7 +253,17 @@ check "LINT_THINKING_MIN_FILES alone is ignored without --test" 1 "$(prod_actual
 prod_out="$(cd "$PROD" && LINT_THINKING_SCAN_DIR="$BIG" bash scripts/lint-thinking-level-roster.sh 2>&1; echo "RC=$?")"
 check "LINT_THINKING_SCAN_DIR alone is ignored without --test" 1 "$(prod_actual "scanned only 1 files (floor: 900)" "$prod_out")"
 
-# Cases 17-18 — the module extensions .mts / .cts are in scope.
+# Case 19 — the warning for an ignored env hook is actually printed. Cases 15-16
+# assert only the exit code and the floor, so dropping the warning stayed green.
+prod_out="$(cd "$PROD" && LINT_THINKING_MIN_FILES=1 bash scripts/lint-thinking-level-roster.sh 2>&1; echo "RC=$?")"
+check "an env hook set without --test prints the ::warning::" 1 "$(prod_actual "::warning::LINT_THINKING_MIN_FILES" "$prod_out")"
+
+# Case 20 — an unknown argument is refused, by name. A silent `*) ;;` would
+# turn a typo'd flag into a normal run.
+bogus_out="$(bash "$LINT" --bogus 2>&1; echo "RC=$?")"
+check "an unknown argument exits 1 with ::error:: naming it" 1 "$(prod_actual "::error::lint-thinking-level-roster.sh: unknown argument '--bogus'" "$bogus_out")"
+
+# Cases 17-18— the module extensions .mts / .cts are in scope.
 MX="$TMP/mx"; mkdir -p "$MX/src"
 printf "export const A = 1\n" > "$MX/src/a.ts"
 printf "export const L = ['default', 'high', 'max']\n" > "$MX/src/roster.mts"
