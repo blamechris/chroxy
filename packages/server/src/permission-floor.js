@@ -689,7 +689,63 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
   }
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
     _matchesProtectedSegments(canonical, start, secretsOnly) ||
-    _hitsConfigRoot(resolved, secretsOnly, call)
+    _hitsConfigRoot(resolved, secretsOnly, call) ||
+    _hitsInboxSocketDir(resolved, call) ||
+    _isSessionsDir(resolved, call)
+}
+
+// Claude Code's inbox sockets live under this directory. It is matched by its
+// absolute spelling, with and without the macOS `/private` prefix, and as a
+// prefix: every path at or below it floors, under both floors. The real-path
+// pass resolves `/tmp` to `/private/tmp` on macOS, so the second spelling is
+// what a symlinked or relative route arrives as; on other hosts it is a literal.
+const INBOX_SOCKET_DIR = 'cc-socks'
+const INBOX_SOCKET_PREFIXES = [['tmp', INBOX_SOCKET_DIR], ['private', 'tmp', INBOX_SOCKET_DIR]]
+
+/**
+ * Is the absolute `resolved` at or below an inbox socket directory? Compared
+ * case-insensitively, in both the lowercased and the canonical spelling of each
+ * name. A name that cannot be canonicalised floors, as everywhere in the scan.
+ * @param {string} resolved
+ * @param {object} call
+ * @returns {boolean}
+ */
+function _hitsInboxSocketDir(resolved, call) {
+  const raw = resolved.split(/[/\\]+/).filter((s) => s.length > 0 && s !== '..')
+  // A Windows drive (`C:`) is the root, not a directory name.
+  if (sep === '\\' && /^[A-Za-z]:$/.test(raw[0] ?? '')) raw.shift()
+  const pieces = raw.map(segmentName)
+  if (pieces.length < 2) return false
+  const lowered = pieces.map((p) => p.toLowerCase())
+  const canonical = []
+  for (const name of pieces) {
+    const form = _canonicalNameIn(name, call)
+    if (form === null) return true
+    canonical.push(form)
+  }
+  return INBOX_SOCKET_PREFIXES.some((prefix) =>
+    [lowered, canonical].some((names) => prefix.every((name, i) => names[i] === name)))
+}
+
+const CLAUDE_SESSIONS_DIR = 'sessions'
+
+/**
+ * Is `resolved` the `sessions` directory of the configured Claude config
+ * directory itself? A search rooted there reaches every key file inside it,
+ * which the file-name rule alone does not see. A file inside it is judged by its
+ * own name, so ordinary files there are unaffected. Fails closed when the config
+ * directory cannot be resolved.
+ * @param {string} resolved
+ * @param {object} call
+ * @returns {boolean}
+ */
+function _isSessionsDir(resolved, call) {
+  try {
+    const root = (call.configDirFn ?? claudeConfigDir)()
+    return pathPiecesUnder(join(root, CLAUDE_SESSIONS_DIR), resolved, path)?.length === 0
+  } catch {
+    return true
+  }
 }
 
 /**

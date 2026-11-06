@@ -25,6 +25,8 @@ providers in #7004.
 | `.git/config`, `.git/credentials`, `.config/git/{config,credentials}`, `.claude/settings*.json` | floored (credential-dense) | floored |
 | Anything else inside `.git/`, `.claude/`, `.vscode/`, `.config/git/` | **not** floored — reading a config file is benign | floored |
 | Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
+| `<claude config dir>/sessions/*.key` (the `*.key` rule above, in the configured directory), and a `Grep` / `Glob` rooted at that `sessions/` directory itself | floored | floored |
+| Anything at or below `/tmp/cc-socks` or `/private/tmp/cc-socks` (Claude Code's inbox sockets), in any letter case | floored | floored |
 | Ordinary project files | not floored | not floored |
 
 Matching is per path segment, on the target **resolved against the session cwd** —
@@ -294,6 +296,32 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
   not identity-checked. A bind mount of only a descendant of the directory is not
   recognised. The floor is path-based, so the time between check and use remains
   (see the TOCTOU note above).
+
+### 1b. Claude Code session keys and inbox sockets
+
+Two path families are floored for reads (and writes) on top of the name rules:
+
+- **Session key files.** `<claude config dir>/sessions/*.key`. The `.key` extension
+  rule already floors every such file, in the default `~/.claude` and under any
+  `CLAUDE_CONFIG_DIR` override. What the name rule could not see is a *search*
+  rooted at the directory, so a `Grep` or `Glob` whose `path` is exactly
+  `<claude config dir>/sessions` floors too. The directory is the one
+  `claudeConfigDir()` returns (canonical, symlink-resolved), compared
+  case-insensitively against both the written and the symlink-resolved target. A
+  non-key file inside it (`sessions/<pid>.json`), the rest of the config
+  directory, and a `sessions` directory elsewhere are not floored.
+- **Inbox sockets.** Any path at or below `/tmp/cc-socks` or `/private/tmp/cc-socks`,
+  matched on the resolved absolute path (written and symlink-resolved), so a relative
+  path, a `..` route, a symlink into it, and either spelling of `/tmp` on macOS all
+  floor. `/tmp/cc-socks-other`, `/var/tmp/cc-socks` and the same name elsewhere do not.
+
+Both live in `_scanResolvedTarget` (`_hitsInboxSocketDir`, `_isSessionsDir`), the one
+scan both floors and both pipelines share. Tests:
+`permission-floor-session-keys-inbox.test.js`.
+
+**Not covered.** A `Glob` `pattern` is not a path field, so a pattern that names the
+directory (`<claude config dir>/sessions/*.key` with no `path`) is not inspected.
+`Bash` reaches both families, as it does `.env` (see Known limits).
 
 ## 2. Precedence — the floor beats every lenient mode
 
