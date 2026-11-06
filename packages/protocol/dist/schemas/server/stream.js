@@ -1144,6 +1144,8 @@ export const ServerShellPendingApprovalSchema = z.object({
     type: z.literal('shell_pending_approval'),
     approvalId: z.string(),
     hint: z.string().optional(),
+    // #7977: echo of the held `create_session`'s correlation id, when it sent one.
+    requestId: z.string().optional(),
 });
 // #6323 (batch 1 of #6314): the live PTY mirror channel (#5835). `terminal_output`
 // is raw coalesced ANSI bytes (transient — no history/replay); `terminal_size` is

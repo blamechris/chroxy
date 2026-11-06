@@ -741,6 +741,7 @@ export declare const SandboxSchema: z.ZodObject<{
 }, z.core.$loose>;
 export declare const CreateSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"create_session">;
+    requestId: z.ZodOptional<z.ZodString>;
     connectionId: z.ZodOptional<z.ZodString>;
     name: z.ZodOptional<z.ZodString>;
     cwd: z.ZodOptional<z.ZodString>;
@@ -1742,6 +1743,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"create_session">;
+    requestId: z.ZodOptional<z.ZodString>;
     connectionId: z.ZodOptional<z.ZodString>;
     name: z.ZodOptional<z.ZodString>;
     cwd: z.ZodOptional<z.ZodString>;

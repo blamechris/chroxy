@@ -54,6 +54,23 @@ describe('user-shell approval gate (#6277)', () => {
     assert.ok(typeof pending.approvalId === 'string' && pending.approvalId.length > 0)
   })
 
+  it('echoes the create requestId on the held reply, the stored entry, and the token-class refusal (#7977)', () => {
+    const store = new ShellApprovalStore()
+    const createSession = createSpy(() => 'sess-1')
+    const ws = makeWs()
+    sessionHandlers.create_session(ws, primaryClient(), { provider: 'user-shell', requestId: 'ac-req-9' }, gateCtx({ requireApproval: true, store, createSession }))
+    const pending = ws._messages.find((m) => m.type === 'shell_pending_approval')
+    assert.equal(pending.requestId, 'ac-req-9')
+    assert.equal(store.approve(pending.approvalId).entry.requestId, 'ac-req-9', 'the deferred create can echo it on approval')
+
+    const ws2 = makeWs()
+    const paired = { ...primaryClient(), isPrimaryToken: false }
+    sessionHandlers.create_session(ws2, paired, { provider: 'user-shell', requestId: 'ac-req-10' }, gateCtx({ requireApproval: false, store, createSession }))
+    const err = ws2._messages.find((m) => m.type === 'session_error')
+    assert.equal(err.code, 'PRIMARY_TOKEN_REQUIRED')
+    assert.equal(err.requestId, 'ac-req-10')
+  })
+
   it('proceeds synchronously when requireApproval is off (backward-compat)', () => {
     const createSession = createSpy(() => 'sess-1')
     sessionHandlers.create_session(makeWs(), primaryClient(), { provider: 'user-shell' }, gateCtx({ requireApproval: false, store: new ShellApprovalStore(), createSession }))

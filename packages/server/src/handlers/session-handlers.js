@@ -108,6 +108,14 @@ function handleSwitchSession(ws, client, msg, ctx) {
 }
 
 function handleCreateSession(ws, client, msg, ctx) {
+  // #7977: an optional client-supplied correlation id, echoed on EVERY reply to
+  // this create (success, shell-pending, and each error path). It is the only
+  // thing that tells a create reply from the `session_switched` the daemon also
+  // sends when it re-homes a client — which never carries one. Absent for old
+  // clients; the reply is then byte-identical to before.
+  const requestId = (typeof msg.requestId === 'string' && msg.requestId) ? msg.requestId : undefined
+  const rid = requestId !== undefined ? { requestId } : {}
+  const sendError = (message) => ctx.transport.send(ws, { type: 'session_error', message, ...rid })
   if (client.boundSessionId) {
     // Enrich the error with the bound session's name so the client can render
     // a remediation hint ("This device is paired to session X — disconnect to
@@ -123,6 +131,7 @@ function handleCreateSession(ws, client, msg, ctx) {
         boundSessionId: client.boundSessionId,
         message: 'Not authorized: client is bound to a specific session',
       }),
+      ...rid,
     })
     return
   }
@@ -159,14 +168,14 @@ function handleCreateSession(ws, client, msg, ctx) {
   // from the actual session state (provider capabilities, worktree, sandbox).
 
   if (worktree && !cwd) {
-    sendSessionError(ws, ctx, 'Worktree requires an explicit CWD')
+    sendError('Worktree requires an explicit CWD')
     return
   }
 
   if (cwd) {
     const cwdError = validateCwdAllowed(cwd, ctx.services.config)
     if (cwdError) {
-      sendSessionError(ws, ctx, cwdError)
+      sendError(cwdError)
       return
     }
   }
@@ -183,6 +192,7 @@ function handleCreateSession(ws, client, msg, ctx) {
       type: 'session_error',
       code: 'PRIMARY_TOKEN_REQUIRED',
       message: 'A user-shell session requires the primary token. Pairing-issued tokens (paired devices) cannot create a shell.',
+      ...rid,
     })
     return
   }
@@ -206,6 +216,7 @@ function handleCreateSession(ws, client, msg, ctx) {
         type: 'session_error',
         code: 'CURRENT_TOKEN_REQUIRED',
         message: 'A user-shell session requires the current token. The token was rotated — reconnect with the new token to open a shell.',
+        ...rid,
       })
       return
     }
@@ -215,7 +226,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   let envOpts = {}
   if (environmentId) {
     if (!ctx.services.environmentManager) {
-      sendSessionError(ws, ctx, 'Environment management is not enabled')
+      sendError('Environment management is not enabled')
       return
     }
     try {
@@ -235,7 +246,7 @@ function handleCreateSession(ws, client, msg, ctx) {
         containerCliPath: info.containerCliPath,
       }
     } catch (err) {
-      sendSessionError(ws, ctx, err.message)
+      sendError(err.message)
       return
     }
   }
@@ -253,6 +264,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     tokenClass: client.isPrimaryToken === true ? 'primary' : 'pairing',
     deviceName: client.deviceInfo?.deviceName,
     clientId: client.id,
+    requestId,
   }
 
   // #6277 — host-local per-spawn approval gate. When `userShell.requireApproval`
@@ -269,7 +281,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     const store = ctx.services?.shellApprovalStore
     if (!store) {
       // Fail-closed: approval is required but the service isn't wired.
-      sendSessionError(ws, ctx, 'User-shell approval is required but the approval service is unavailable')
+      sendError('User-shell approval is required but the approval service is unavailable')
       return
     }
     const { approvalId } = store.createPendingApproval({
@@ -278,9 +290,10 @@ function handleCreateSession(ws, client, msg, ctx) {
       tokenClass: audit.tokenClass,
       deviceName: audit.deviceName,
       hint: cwd || name || null,
+      requestId,
     })
     log.warn(`[shell-approval] user-shell spawn HELD pending host approval — id=${approvalId} client=${client.id} cwd=${cwd || '(default)'} device=${audit.deviceName || '(unknown)'}. Approve on the host with: chroxy shell approve ${approvalId}`)
-    ctx.transport.send(ws, { type: 'shell_pending_approval', approvalId, hint: cwd || name || undefined })
+    ctx.transport.send(ws, { type: 'shell_pending_approval', approvalId, hint: cwd || name || undefined, ...rid })
     return
   }
 
@@ -290,7 +303,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     // Surface error code (e.g. PROVIDER_BINARY_NOT_FOUND,
     // PROVIDER_CREDENTIAL_MISSING) so the client can render an actionable
     // hint instead of an opaque message. See #2962.
-    const payload = { type: 'session_error', message: err.message }
+    const payload = { type: 'session_error', message: err.message, ...rid }
     if (err.code) payload.code = err.code
     ctx.transport.send(ws, payload)
   }
@@ -349,6 +362,9 @@ export function finalizeShellCreate(ws, client, createOptions, ctx, audit) {
     conversationId: entry.session.resumeSessionId || null,
     agentConnection: entry.agentConnection,
   }
+  // #7977: echo the create's correlation id. Only this create-confirm carries
+  // one; every re-home/switch `session_switched` stays id-less by construction.
+  if (audit.requestId) sessionSwitched.requestId = audit.requestId
   const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
     ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
     : null

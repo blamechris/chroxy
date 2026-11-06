@@ -71,7 +71,7 @@ export class ShellApprovalStore {
    * @param {string} [req.hint] - human-facing label surfaced to the client/log
    * @returns {{ approvalId: string, expiresAt: number }}
    */
-  createPendingApproval({ clientId, createSessionOptions, tokenClass = null, deviceName = null, hint = null } = {}) {
+  createPendingApproval({ clientId, createSessionOptions, tokenClass = null, deviceName = null, hint = null, requestId = null } = {}) {
     this._sweepExpired()
     // FIFO-evict the oldest while at/over the cap (a fresh request shouldn't be
     // refused; the oldest held approval is the most likely to be abandoned).
@@ -96,6 +96,7 @@ export class ShellApprovalStore {
       tokenClass,
       deviceName,
       hint,
+      requestId,
       requestedAt,
       expiresAt,
     })

@@ -720,7 +720,8 @@ describe('create_session serial-op correlation scoping', () => {
     // _pendingSerialOp matching logic in _processReadyMessage.
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true })
     client._state = 'ready'
-    client._send = () => {}
+    let sent
+    client._send = (payload) => { sent = payload }
     client._ensureSubscribed = async () => {}
     client.listSessions = async () => ({ sessions: [] })
     let settled = false
@@ -733,7 +734,7 @@ describe('create_session serial-op correlation scoping', () => {
       client._processReadyMessage({ type: 'session_error', sessionId: 'other-session', message: 'unrelated interrupt failed' })
       await new Promise((resolve) => setImmediate(resolve))
       assert.equal(settled, false, 'a scoped sibling session_error must not complete this pending create')
-      client._processReadyMessage({ type: 'session_switched', sessionId: 'created-session', name: 'fixture' })
+      client._processReadyMessage({ type: 'session_switched', sessionId: 'created-session', name: 'fixture', requestId: sent.requestId })
       assert.equal((await creating).sessionId, 'created-session')
     } finally {
       await client.close()
@@ -744,19 +745,70 @@ describe('create_session serial-op correlation scoping', () => {
   it('an UNSCOPED session_error still rejects create_session promptly (the real handleCreateSession failure shape)', async () => {
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true })
     client._state = 'ready'
-    client._send = () => {}
-    // createSession's pre-create snapshot (the re-home filter) — stubbed like
-    // the sibling test above, so the op under test is create_session itself.
+    let sent
+    client._send = (payload) => { sent = payload }
     client.listSessions = async () => ({ sessions: [] })
     const creating = client.createSession({ name: 'fixture' })
     const assertion = assert.rejects(creating, /creation failed/)
     try {
       await new Promise((resolve) => setImmediate(resolve))
-      client._processReadyMessage({ type: 'session_error', message: 'creation failed' })
+      client._processReadyMessage({ type: 'session_error', message: 'creation failed', requestId: sent.requestId })
       await assertion
     } finally {
       await client.close()
     }
+  })
+})
+
+describe('create_session requestId correlation (#7977)', () => {
+  function readyClient() {
+    const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true, requestTimeoutMs: 200 })
+    client._state = 'ready'
+    client.sent = []
+    client._send = (payload) => { client.sent.push(payload) }
+    client._ensureSubscribed = async () => {}
+    client.listSessions = async () => ({ sessions: [] })
+    return client
+  }
+
+  it('sends a fresh requestId on every create_session', async () => {
+    const client = readyClient()
+    const a = client.createSession({ name: 'a' })
+    await new Promise((resolve) => setImmediate(resolve))
+    client._processReadyMessage({ type: 'session_switched', sessionId: 's1', requestId: client.sent[0].requestId })
+    await a
+    const b = client.createSession({ name: 'b' })
+    await new Promise((resolve) => setImmediate(resolve))
+    client._processReadyMessage({ type: 'session_switched', sessionId: 's2', requestId: client.sent[1].requestId })
+    await b
+    assert.ok(/^[A-Za-z0-9_-]{1,128}$/.test(client.sent[0].requestId), 'wire-valid id')
+    assert.notEqual(client.sent[0].requestId, client.sent[1].requestId)
+    await client.close()
+  })
+
+  it('a session_switched with NO requestId, or someone else\'s, never mints ownership', async () => {
+    const client = readyClient()
+    const creating = client.createSession({ name: 'x' })
+    const assertion = assert.rejects(creating)
+    await new Promise((resolve) => setImmediate(resolve))
+    // A re-home onto a session this client never created, and a stranger's create reply.
+    client._processReadyMessage({ type: 'session_switched', sessionId: 'human-session' })
+    client._processReadyMessage({ type: 'session_switched', sessionId: 'other-session', requestId: 'someone-elses' })
+    await assertion
+    assert.equal(client._ownedSessions.has('human-session'), false)
+    assert.equal(client._ownedSessions.has('other-session'), false)
+    await client.close()
+  })
+
+  it('an id-less or foreign unscoped session_error does not fail the create', async () => {
+    const client = readyClient()
+    const creating = client.createSession({ name: 'x' })
+    await new Promise((resolve) => setImmediate(resolve))
+    client._processReadyMessage({ type: 'session_error', message: 'someone else failed' })
+    client._processReadyMessage({ type: 'session_error', message: 'foreign', requestId: 'not-ours' })
+    client._processReadyMessage({ type: 'session_switched', sessionId: 'mine', requestId: client.sent[0].requestId })
+    assert.equal((await creating).sessionId, 'mine')
+    await client.close()
   })
 })
 

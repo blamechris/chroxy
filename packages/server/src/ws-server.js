@@ -418,7 +418,7 @@ function _isSecureRequest(req) {
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
  *   { type: 'available_permission_modes', modes: [...], provider? } — permission modes for ONE provider (#8224: `provider` names it; clients file the roster under it and derive the active session's picker, so a session of a provider that has no roster yet never inherits another provider's "Plan (unavailable)"). Sent with the connect burst and by `sendSessionInfo` for every session surfaced to a client
  *   { type: 'session_list', sessions: [...] }         — all sessions
- *   { type: 'session_switched', sessionId, name, cwd, conversationId?, agentConnection?, sessionPreset? } — switched active session. On a fresh create-confirm `sessionPreset` (#5553) discloses the resolved per-repo preset (length-only preamble — the text is already folded into the prompt server-side — plus the seed staged editable into the composer + trust metadata); omitted when the session has no preset.
+ *   { type: 'session_switched', sessionId, name, cwd, conversationId?, agentConnection?, sessionPreset?, requestId? } — switched active session. #7977: the create-confirm echoes the `create_session` `requestId` when one was sent; a re-home/switch never carries one. On a fresh create-confirm `sessionPreset` (#5553) discloses the resolved per-repo preset (length-only preamble — the text is already folded into the prompt server-side — plus the seed staged editable into the composer + trust metadata); omitted when the session has no preset.
  *   { type: 'session_destroyed', sessionId }          — session removed
  *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast; #8497: on a turn that ended without a `result` the server follows it with `agent_idle` and a `session_activity` isBusy=false so the client leaves busy
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength?, agentConnection? }
@@ -514,7 +514,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_completed', sessionId, toolUseId }    — that subagent reached a terminal state: the provider's own terminal signal (the CLI/SDK `task_notification`, byok's child returning, or a cancel), or turn end, whichever comes first. Turn end completes every tracked subagent EXCEPT one whose backgrounding the provider itself confirmed (#7340) — those outlive their turn deliberately, and `task_notification` is then their only finalizer. The exemption applies on the claude-cli path only, where a persistent child can still deliver it; see `_clearMessageState` in base-session.js.
  *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
  *   { type: 'background_work_changed', sessionId, pending, busyReason?, backgroundShellCount? } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`; #8302: `busyReason` is `'turn'` | `'background-shells'` | `null` and `backgroundShellCount` is the tracker size, quiesced shells included — both omitted when the session cannot be resolved)
- *   { type: 'shell_pending_approval', approvalId, hint? } — #6277 host-local user-shell approval: a requested user-shell spawn is HELD pending the host operator's out-of-band approval (`chroxy shell approve <id>`). Informational; dashboard-only banner for v1. The normal `session_switched` confirms on approval, a `session_error` (SHELL_APPROVAL_DENIED) on deny.
+ *   { type: 'shell_pending_approval', approvalId, hint?, requestId? } — #6277 host-local user-shell approval: a requested user-shell spawn is HELD pending the host operator's out-of-band approval (`chroxy shell approve <id>`). Informational; dashboard-only banner for v1. The normal `session_switched` confirms on approval, a `session_error` (SHELL_APPROVAL_DENIED) on deny.
  *   { type: 'activity_snapshot', sessionId, schemaVersion, entries } — Control Room full activity tree for a session, on subscribe/resync (#5161 schema; emitter #5160; `entries: [{ id, kind, label, status, startedAt, endedAt?, parentId?, outputRef? }, …]`)
  *   { type: 'activity_delta', sessionId, schemaVersion, op, entry } — Control Room incremental activity-entry change (#5161 schema; emitter #5160; `op` is one of `started` / `updated` / `ended`; `entry` is the full node)
  *   { type: 'cancel_activity_ack', activityId, sessionId?, requestId? } — positive ack for a `cancel_activity`, echoing the activity (scoped by sessionId, #5277) and the request id so the dashboard can correlate the click; failures arrive as a `CANCEL_ACTIVITY_FAILED` session_error
@@ -1910,6 +1910,7 @@ export class WsServer {
       tokenClass: entry.tokenClass || 'primary',
       deviceName: entry.deviceName,
       clientId: entry.clientId,
+      requestId: entry.requestId || undefined,
     })
   }
 
@@ -1925,6 +1926,7 @@ export class WsServer {
           type: 'session_error',
           code: 'SHELL_APPROVAL_DENIED',
           message: 'The host operator declined this shell.',
+          ...(entry.requestId ? { requestId: entry.requestId } : {}),
         })
         break
       }
