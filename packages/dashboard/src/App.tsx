@@ -56,7 +56,7 @@ import { toWireAttachments } from './utils/attachment-utils'
 import { toMessageAttachments } from './utils/attachment-preview'
 import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession, withDecisionCounts } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
-import { getAuthToken } from './utils/auth'
+import { getLocalConnectionToken } from './utils/local-auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { formatTranscript } from './lib/transcript'
 import { extractRowSearchText } from './lib/transcriptSearch'
@@ -141,6 +141,8 @@ import { SetupWizard } from './components/SetupWizard'
 interface ChroxyConfig {
   port: number
   noEncrypt: boolean
+  /** false when the daemon runs with --no-auth (#9033); absent on older servers */
+  authRequired?: boolean
 }
 
 declare const __APP_VERSION__: string
@@ -1507,8 +1509,9 @@ export function App() {
   // local "home" daemon; a manual Retry resumes whatever you were connected to.
   // The two don't collide in practice — connectLocal nulls activeServerId.
   useEffect(() => {
-    const token = getAuthToken()
-    if (token) {
+    // #9033 — '' (not null) when the daemon runs with --no-auth: no token is needed.
+    const token = getLocalConnectionToken()
+    if (token !== null) {
       // Served by a local daemon — connect to "this machine" (scope null).
       useConnectionStore.getState().connectLocal()
       return

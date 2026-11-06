@@ -1385,7 +1385,7 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
       const indexPath = join(distDir, 'index.html')
       if (existsSync(indexPath)) {
         let html = readFileSync(indexPath, 'utf-8')
-        const escaped = JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled}).replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const escaped = JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled, authRequired: server.authRequired !== false}).replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         const configMeta = `<meta name="chroxy-config" content='${escaped}'>`
         // #8268 — the id of the bundle THIS page loaded, hashed from the pristine
         // file (before the per-request config above is spliced in). The client
