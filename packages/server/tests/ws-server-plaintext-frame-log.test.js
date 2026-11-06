@@ -11,16 +11,12 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, waitFor } from './test-helpers.js'
-import { setLogListener, addLogListener, removeLogListener } from '../src/logger.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import WebSocket from 'ws'
 
 class WsServer extends _WsServer {
   constructor(opts = {}) {
     super({ noEncrypt: true, ...opts })
-  }
-  start(...args) {
-    super.start(...args)
-    setLogListener(null)
   }
 }
 
