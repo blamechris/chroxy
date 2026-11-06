@@ -64,7 +64,7 @@ const ROUTES = [
     name: 'POST /permission-response',
     path: '/permission-response',
     tokens: ['pairing', 'primary'],
-    prep: (b) => { server._permissionSessionMap.set('req-1', 'session-1') },
+    prep: () => { server._permissionSessionMap.set('req-1', 'session-1') },
     body: JSON.stringify({ requestId: 'req-1', decision: 'allow' }),
     effects: (b) => b.answers.length,
   },

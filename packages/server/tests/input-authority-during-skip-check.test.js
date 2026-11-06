@@ -34,7 +34,7 @@ after(() => boundedRegex.close())
 let server, pm, tm
 afterEach(() => { if (server) { server.close(); server = null } if (pm) { pm.destroy(); pm = null } if (tm) { tm.destroy(); tm = null } })
 
-async function boot({ ttl, onPersist, skip } = {}) {
+async function boot({ ttl, onPersist } = {}) {
   pm = new PairingManager({ wsUrl: 'wss://example.com', ...(ttl ? { sessionTokenTtlMs: ttl } : {}) })
   tm = new TokenManager({ token: 'primary-tok', graceMs: 5000, onPersist })
   const recordUserInput = createSpy()
