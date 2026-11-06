@@ -910,6 +910,7 @@ describe('doctor and preflight agree on a win32 .cmd shim (#8032)', () => {
     const { checks } = await runDoctorChecks({ providers: ['test-8032-shell-ok'], platform: 'win32' })
     const row = checks.find((c) => c.provider === 'test-8032-shell-ok' && c.name === 'node')
     assert.doesNotMatch(row.message, /without a shell/)
+    assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
   })
 })
 

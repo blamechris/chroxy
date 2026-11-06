@@ -55,7 +55,9 @@ const PROBE_TIMEOUT_MS = 5_000
 // Only successful reads are stored. Module-level so it survives across
 // preflight calls within one daemon process. Keyed by path so a path holds at
 // most one entry: each `claude update` replaces the previous identity rather
-// than leaving a dead key behind (#8030 review).
+// than leaving a dead key behind (#8030 review). The cache is keyed by path
+// plus stat identity and ignores `platform` (#8032): production always uses
+// process.platform, so the same path never probes under two platforms.
 const versionCache = new Map()
 
 /**
