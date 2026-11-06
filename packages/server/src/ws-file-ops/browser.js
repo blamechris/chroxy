@@ -524,6 +524,10 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         // the project (a link out to the user-level catalog is not the project's).
         if (projectOnly && source === 'project' && !(await isInsideProject(cwd, dirReal))) return
         const entries = await readdir(dirReal, { withFileTypes: true })
+        // The listing was read from the path as it was a moment ago: check that the
+        // directory still resolves there, so names read through a link swapped in
+        // between are not returned.
+        if (projectOnly && source === 'project' && (await realpath(dir)) !== dirReal) return
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
           if (entry.name.includes('/') || entry.name.includes('\\')) continue
@@ -621,12 +625,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
      * the others (#3024).
      */
     const listDir = async (dir, source) => {
+      const dirArg = dir
       try {
         dir = await realpath(dir)
         if (opts.projectOnly && source === 'project' && !(await isInsideProject(cwd, dir))) {
           return { dir, source, filenames: [] }
         }
         const entries = await readdir(dir, { withFileTypes: true })
+        if (opts.projectOnly && source === 'project' && (await realpath(dirArg)) !== dir) {
+          return { dir, source, filenames: [] }
+        }
         const filenames = entries
           .filter(e => e.isFile() && e.name.endsWith('.md'))
           .filter(e => !e.name.includes('/') && !e.name.includes('\\'))

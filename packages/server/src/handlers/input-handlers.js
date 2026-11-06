@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { InputContextEnvelopeSchema } from '@chroxy/protocol/schemas'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
-import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluatorAsync } from '../prompt-evaluator.js'
+import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator, shouldSkipEvaluatorAsync } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { isBoundClient } from '../environments/authority.js'
 import { createLogger, sessionLogger } from '../logger.js'
@@ -54,9 +54,13 @@ function _getEvaluatorIterations(ctx) {
 // We reject the second concurrent draft with the same input_conflict
 // category the user already understands — not queue it — so callers retry
 // rather than silently waiting on an unbounded queue.
+//
+// The map lives on `ctx.runtime` (like the iteration counter above), NOT on the
+// ctx itself: the ctx is spread per message, so a property set directly on it
+// would be a fresh, empty map for every message and the lock would never be seen.
 function _getEvaluatorAwaits(ctx) {
-  if (!ctx._pendingEvaluatorAwaits) ctx._pendingEvaluatorAwaits = new Map()
-  return ctx._pendingEvaluatorAwaits
+  if (!ctx.runtime.pendingEvaluatorAwaits) ctx.runtime.pendingEvaluatorAwaits = new Map()
+  return ctx.runtime.pendingEvaluatorAwaits
 }
 
 // #3665 — build the history text appended for a recorded user input.
@@ -697,7 +701,10 @@ async function handleInput(ws, client, msg, ctx) {
   // the evaluator promise below, or released on the skip / cap / error paths.
   let skipLock = null
   let skipDecision = true
-  if (entry.session.promptEvaluator === true && trimmed.length > 0) {
+  // The default (synchronous) rules decide first: a trivial ack never waits and
+  // never takes the lock. Only a draft that a configured pattern must still judge,
+  // or that the evaluator will run on, holds it.
+  if (entry.session.promptEvaluator === true && trimmed.length > 0 && !shouldSkipEvaluator(trimmed)) {
     skipLock = Promise.resolve()
     _pendingAwaits.set(targetSessionId, skipLock)
     try {

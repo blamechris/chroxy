@@ -39,7 +39,7 @@ import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
 import { frameForBoundClient } from './outgoing-policy.js'
 import { getProviderDataDirs, getProviderTranscriptSources, resolveDaemonDefaultProvider } from './providers.js'
-import { assertCtxShape } from './ws-handler-context.js'
+import { assertCtxShape, buildMessageCtx } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
@@ -773,6 +773,10 @@ export class WsServer {
     // would never fire in production. Cleaned up by `_sessionDestroyedHandler`
     // so a long-running server doesn't leak entries for destroyed sessions.
     this._evaluatorIterations = new Map() // sessionId -> iteration count
+    // Per-session evaluator-await lock (#3636/#3666). Lives here for the same
+    // reason as the counter above: the handler ctx is spread per message, so a
+    // lock stored on the ctx itself would be a fresh, empty one every time.
+    this._pendingEvaluatorAwaits = new Map() // sessionId -> in-flight promise
     // #7822: bounded process-local input acceptance records. The handler scopes
     // these by session and clientMessageId; session destruction drops the whole
     // bucket. They are intentionally not persisted, so acks describe process
@@ -1020,6 +1024,7 @@ export class WsServer {
         // #3637: stable per-session auto-evaluator iteration counter (#3186).
         // See WsServer constructor for the lifecycle rationale.
         evaluatorIterations: this._evaluatorIterations,
+        pendingEvaluatorAwaits: this._pendingEvaluatorAwaits,
         inputDedupRecords: this._inputDedupRecords,
       },
     }
@@ -2741,7 +2746,7 @@ export class WsServer {
     log.debug(`[${correlationId}] Handling ${validatedMsg.type} from ${client.id}`)
 
     // Route based on server mode — pass correlationId in context
-    const ctx = { ...this._handlerCtx, correlationId }
+    const ctx = buildMessageCtx(this._handlerCtx, correlationId)
     try {
       if (this.sessionManager) {
         await handleSessionMessage(ws, client, validatedMsg, ctx)

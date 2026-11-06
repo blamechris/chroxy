@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { projectSlug } from '../src/jsonl-reader.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -34,11 +34,12 @@ describe('the project memory directory when its name is a link', { skip: SKIP_NO
     rmSync(root, { recursive: true, force: true })
   })
 
-  async function confinedRead(cwd) {
+  async function readOf(cwd, confine) {
     out.length = 0
-    await createFileOps(send, root).readMemory({}, cwd, 'r1', { confineToProject: true })
+    await createFileOps(send, root).readMemory({}, cwd, 'r1', { confineToProject: confine })
     return JSON.stringify(out[out.length - 1])
   }
+  const confinedRead = (cwd) => readOf(cwd, true)
 
   it('a link to the config directory itself is not followed', async () => {
     const cwd = join(root, 'work', 'selflink')
@@ -49,13 +50,31 @@ describe('the project memory directory when its name is a link', { skip: SKIP_NO
     assert.equal(t.includes('USER-LEVEL-MEMORY-MARKER'), false)
   })
 
-  it('a link to another directory under projects/ is followed', async () => {
+  it('a link to projects/ itself is not followed: another project\'s memory is not read, imported or not', async () => {
+    const cwd = join(root, 'work', 'projlink')
+    mkdirSync(cwd, { recursive: true })
+    mkdirSync(join(cfg, 'projects', 'other-proj', 'memory'), { recursive: true })
+    writeFileSync(join(cfg, 'projects', 'other-proj', 'memory', 'notes.md'), 'OTHER-PROJECT-NOTES\n')
+    // A memory file directly under projects/ is what a followed link would read as this project's.
+    mkdirSync(join(cfg, 'projects', 'memory'), { recursive: true })
+    writeFileSync(join(cfg, 'projects', 'memory', 'MEMORY.md'), 'PROJECTS-LEVEL-MEMORY\n')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `rules\n@${relative(cwd, join(cfg, 'projects', 'other-proj', 'memory', 'notes.md')).split(/[\\/]/).join('/')}\n`)
+    symlinkSync(join(cfg, 'projects'), join(cfg, 'projects', projectSlug(cwd)))
+    assert.equal((await confinedRead(cwd)).includes('PROJECTS-LEVEL-MEMORY'), false, 'the link to projects/ is not the project\'s memory')
+    assert.equal((await confinedRead(cwd)).includes('OTHER-PROJECT-NOTES'), false, 'a confined read does not follow the import either')
+  })
+
+  it('a confined read does not follow a link to another project\'s directory', async () => {
     const cwd = join(root, 'work', 'moved')
     mkdirSync(cwd, { recursive: true })
     mkdirSync(join(cfg, 'projects', 'real-store', 'memory'), { recursive: true })
     writeFileSync(join(cfg, 'projects', 'real-store', 'memory', 'MEMORY.md'), 'MOVED-PROJECT-MEMORY\n')
     symlinkSync(join(cfg, 'projects', 'real-store'), join(cfg, 'projects', projectSlug(cwd)))
-    const t = await confinedRead(cwd)
-    assert.ok(t.includes('MOVED-PROJECT-MEMORY'), 'the in-tree link still resolves to the project memory')
+    assert.equal((await readOf(cwd, true)).includes('MOVED-PROJECT-MEMORY'), false)
+  })
+
+  it('an unconfined read still follows a link to another directory under projects/', async () => {
+    const cwd = join(root, 'work', 'moved')
+    assert.ok((await readOf(cwd, false)).includes('MOVED-PROJECT-MEMORY'))
   })
 })

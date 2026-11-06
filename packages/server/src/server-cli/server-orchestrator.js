@@ -20,6 +20,7 @@
 //     so tests can drive shutdown + onFatal without killing the test process.
 
 import { exitAfterPreviewCleanup } from './preview-shutdown.js'
+import { boundedRegex } from '../utils/bounded-regex.js'
 import { removeConnectionInfo as defaultRemoveConnectionInfo } from '../connection-info.js'
 import { getSharedPool as defaultGetSharedPool, isPoolEnabled as defaultIsPoolEnabled } from '../docker-byok-pool.js'
 
@@ -154,6 +155,7 @@ export class ServerOrchestrator {
     try { this._sessionManager.serializeState() } catch (err) {
       log.error(`Failed to serialize session state: ${err?.message || err}`)
     }
+    try { boundedRegex.close() } catch {}
     this._sessionManager.destroyAll()
     // #5042: drain the docker-byok across-session pool so the `sleep
     // infinity` containers it holds don't outlive the server. Default-OFF
