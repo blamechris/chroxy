@@ -207,6 +207,7 @@ const ALL_BASE_SESSION_STATE_KEYS = {
   lastResultDuration: true,
   sessionCost: true,
   cumulativeUsage: true,
+  declaredStatus: true,
   costThresholdWarning: true,
   isIdle: true,
   lastClientActivityAt: true,

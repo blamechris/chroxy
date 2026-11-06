@@ -437,6 +437,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
  */
 const ALL_SESSION_STATE_KEYS = {
   providerRuntimeInfo: true,
+  declaredStatus: true,
   // BaseSessionState fields
   messages: true,
   streamingMessageId: true,

@@ -360,7 +360,9 @@ export function handleMessage(
           patch: continuation ? {} : { content: completion.content },
           ...(completion.moveToEnd ? { moveToEnd: true } : null),
           ...(continuation ? { append: [continuation] } : null),
-          endedStreamBubbleIds: completion.streamBubbleIds,
+          // The snapshot of a stream that is STILL OPEN carries no historySeq: it is not
+          // the stream ending, so it must not clear the live stream marker (#9022).
+          ...(isReplayedEntry ? { endedStreamBubbleIds: completion.streamBubbleIds } : null),
         },
       }
     }

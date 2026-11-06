@@ -56,7 +56,7 @@ export const ACTIVITY_SCHEMA_VERSION = 1;
  * Declared as a named enum (not inlined) so #5162/#5163 can import it for
  * exhaustive switch handling.
  */
-export const ActivityKindSchema = z.enum(['agent', 'shell', 'tool']);
+export const ActivityKindSchema = z.enum(['agent', 'shell', 'tool', 'decision']);
 /**
  * Lifecycle status of an activity entry:
  *   - `'running'` — actively executing.

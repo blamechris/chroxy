@@ -2,6 +2,8 @@ import { readFileSync, existsSync, statSync } from 'fs'
 import { join, resolve, dirname, relative, sep, isAbsolute } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
+import { DeclaredStatusInputSchema } from '@chroxy/protocol'
+import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { readConnectionInfo } from './connection-info.js'
 import { isLoopbackPeer } from './connection-locality.js'
 import { computeDaemonIdleState } from './daemon-idle-state.js'
@@ -563,6 +565,43 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
     // and returns them as a newest-first array. The dashboard polls this
     // on its SnapshotsPanel.
     const snapPath = (req.url ?? '').split('?')[0]
+
+    // Bounded session intent writes share the existing bearer classes.
+    const statusMatch = /^\/api\/sessions\/([^/]+)\/status$/.exec(snapPath)
+    if (req.method === 'POST' && statusMatch) {
+      if (!server._validateBearerAuth(req, res, { allowScoped: true })) return
+      const sessionId = statusMatch[1]
+      const token = (req.headers.authorization || '').slice(7)
+      const pairing = server._pairingManager
+      const isPairing = pairing?.isSessionTokenValid(token) === true
+      const bound = isPairing ? pairing.getSessionIdForToken(token) : null
+      // Only primary or a token explicitly bound to THIS session may write.
+      if (isPairing && bound !== sessionId) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        const mismatch = buildSessionTokenMismatchPayload({ sessionManager: server.sessionManager, boundSessionId: bound })
+        res.end(JSON.stringify({ error: mismatch.message, ...mismatch }))
+        return
+      }
+      const body = await readJsonBodyCapped(req, res, 4096)
+      if (body === null) return
+      // Reading the body was a wait: the bearer may have been revoked or expired meanwhile.
+      const stillValid = isPairing ? pairing.isSessionTokenLive(token) === true : server._isTokenValid(token) === true
+      if (!stillValid) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const parsed = DeclaredStatusInputSchema.safeParse(body)
+      if (!parsed.success) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid status' }))
+        return
+      }
+      const status = server.sessionManager?.setDeclaredStatus(sessionId, parsed.data, 'api')
+      res.writeHead(status ? 200 : 404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(status ? { ok: true, declaredStatus: status } : { error: 'session not found' }))
+      return
+    }
 
     // External event ingest (#5413 Phase 3). Accepts ONLY the daemon-level
     // ingest secret (never the primary token — see

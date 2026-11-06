@@ -26,7 +26,9 @@
  * Tests inject `settingsPath` — never the real ~/.claude/settings.json.
  */
 
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -221,20 +223,16 @@ export function addOwnHooks(settings, { nodePath, binPath } = {}) {
   return out
 }
 
-function readSettings(settingsPath) {
-  let raw
-  try {
-    raw = readFileSync(settingsPath, 'utf-8')
-  } catch (err) {
-    if (err.code === 'ENOENT') return {}
-    throw new Error(`Cannot read ${settingsPath}: ${err.message}`)
-  }
+/**
+ * Parse settings.json text. Empty/whitespace is empty settings; anything that
+ * is not a JSON object aborts (NEVER overwrite a file we cannot parse).
+ */
+function parseSettings(raw, settingsPath) {
   if (raw.trim().length === 0) return {}
   let parsed
   try {
     parsed = JSON.parse(raw)
   } catch {
-    // NEVER overwrite a file we cannot parse — the user fixes it first.
     throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run`)
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -243,69 +241,224 @@ function readSettings(settingsPath) {
   return parsed
 }
 
-function writeSettingsAtomic(settingsPath, settings) {
-  mkdirSync(dirname(settingsPath), { recursive: true })
-
-  // If settings.json is a symlink (dotfile managers: stow, chezmoi, yadm),
-  // resolve to the real target BEFORE the temp+rename so the write lands at
-  // the link target and the user's symlink is preserved. realpathSync throws
-  // ENOENT for a brand-new file (or a dangling link) — fall back to the path
-  // as given. We resolve the parent dir + basename separately so a NEW file
-  // inside a symlinked DIRECTORY still resolves correctly.
-  let realPath = settingsPath
+/** Read the file's current text, or null when it does not exist. */
+function readRawOrNull(path) {
   try {
-    realPath = realpathSync(settingsPath)
+    return readFileSync(path, 'utf-8')
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw new Error(`Cannot read ${path}: ${err.message}`)
+  }
+}
+
+const sha256 = (raw) => (raw === null ? null : createHash('sha256').update(raw).digest('hex'))
+
+/**
+ * Where a write for `settingsPath` lands, fully canonicalised: the PARENT
+ * directory is realpath'd (a symlinked directory is followed), and a symlinked
+ * settings.json (dotfile managers: stow, chezmoi, yadm) is written THROUGH to
+ * its target so the link survives — but only when the target resolves, is a
+ * regular file, and is owned by the uid we run as. Mirrors the server's
+ * resolveClaudeConfigWritePath. The temp file is always created in the
+ * directory of the returned path, so create, rename and cleanup agree.
+ */
+function resolveSettingsWritePath(settingsPath, { getuid }) {
+  let candidate = settingsPath
+  try {
+    candidate = join(realpathSync(dirname(settingsPath)), basename(settingsPath))
   } catch {
+    // Parent does not exist yet (first write): the path as given.
+  }
+  let link
+  try {
+    link = lstatSync(candidate)
+  } catch {
+    return candidate // missing: first write
+  }
+  if (!link.isSymbolicLink()) return candidate
+  let resolved
+  try {
+    resolved = realpathSync(candidate)
+  } catch (err) {
+    throw new Error(`${settingsPath} is a symlink whose target cannot be resolved (${err?.code || err?.message}); refusing to replace the link with a regular file`)
+  }
+  const target = lstatSync(resolved)
+  if (!target.isFile()) {
+    throw new Error(`${settingsPath} is a symlink to ${resolved}, which is not a regular file; refusing to write through it`)
+  }
+  const uid = typeof getuid === 'function' ? getuid() : null
+  if (uid !== null && target.uid !== uid) {
+    throw new Error(`${settingsPath} is a symlink to ${resolved}, which is owned by uid ${target.uid} rather than uid ${uid}; refusing to write through it`)
+  }
+  return resolved
+}
+
+const WIN_SYSTEM32 = `${process.env.SystemRoot || process.env.windir || 'C:\\Windows'}\\System32`
+const SID_SYSTEM = 'S-1-5-18'
+
+/**
+ * Restrict `filePath` to the current user + SYSTEM on Windows (whoami SID
+ * lookup, then icacls strip-inheritance + grant). Same arguments as the
+ * server's owner-only ACL helper; duplicated because this package has no
+ * dependency on the server. FAIL-CLOSED: throws on any failure.
+ */
+function stampOwnerOnlyAcl(filePath, exec) {
+  let sid
+  try {
+    const out = exec(`${WIN_SYSTEM32}\\whoami.exe`, ['/user', '/fo', 'csv', '/nh'], {
+      encoding: 'utf-8', windowsHide: true, timeout: 5000,
+    })
+    const m = String(out ?? '').match(/S-1-[0-9-]+/)
+    if (!m) throw new Error('no SID in whoami output')
+    sid = m[0]
+  } catch (err) {
+    throw new Error(`could not resolve the current-user SID to restrict ${filePath}: ${err?.message || err}`)
+  }
+  try {
+    exec(`${WIN_SYSTEM32}\\icacls.exe`, [
+      filePath, '/inheritance:r', '/grant:r', `*${sid}:F`, '/grant:r', `*${SID_SYSTEM}:F`,
+    ], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
+  } catch (err) {
+    throw new Error(`icacls could not restrict ${filePath} to the owner: ${err?.message || err}`)
+  }
+}
+
+class SettingsConflictError extends Error {}
+
+const MAX_UPDATE_ATTEMPTS = 5
+
+const modeOf = (path) => {
+  try { return statSync(path).mode & 0o777 } catch { return null }
+}
+
+/**
+ * Throw SettingsConflictError unless the destination is still what the merge
+ * was computed from: same resolved path, same bytes, same permission bits (a
+ * concurrent `chmod 600` with identical bytes would otherwise be undone by the
+ * temp's older mode; the re-merge picks up the current mode).
+ */
+function verifyUnchanged(settingsPath, destPath, snapshot, seams) {
+  if (resolveSettingsWritePath(settingsPath, seams) !== destPath) {
+    throw new SettingsConflictError('its location or symlink target changed')
+  }
+  let raw
+  try {
+    raw = readRawOrNull(destPath)
+  } catch (err) {
+    throw new SettingsConflictError(`re-read failed: ${err.message}`)
+  }
+  if (sha256(raw) !== snapshot.hash) throw new SettingsConflictError('its content changed')
+  if (snapshot.mode !== null && modeOf(destPath) !== snapshot.mode) {
+    throw new SettingsConflictError('its permissions changed')
+  }
+}
+
+/**
+ * Write `payload` to a same-directory temp file and rename it over the target.
+ *
+ *   - POSIX: the temp is CREATED with the target mode (preserved mode, or 0600
+ *     for a new file), so it is never wider than the target at any point. The
+ *     exact mode is restated after the write (umask can only strip bits; a
+ *     read-only 0o444 target still gets its mode applied after the write).
+ *   - Windows: the temp is created empty, the owner-only ACL is stamped, THEN
+ *     bytes are written. A failed stamp writes nothing, renames nothing and
+ *     removes the temp.
+ *   - Optimistic conflict detection (NOT an atomic compare-and-swap): the
+ *     destination is re-resolved and re-read immediately before the rename and
+ *     the temp is discarded if it differs from the snapshot. There is no lock
+ *     and POSIX has no "rename if unchanged", so a writer landing in the
+ *     residual window between that check and the rename can still be lost, and
+ *     a link swapped in that window is replaced. This narrows the race; it
+ *     does not eliminate it.
+ *   - Cleanup only ignores ENOENT; any other failure to remove the temp is
+ *     reported with its path.
+ */
+function writeSettingsAtomic(settingsPath, payload, snapshot, seams) {
+  const { onWindows, exec, hooks, open, unlink } = seams
+  const destPath = resolveSettingsWritePath(settingsPath, seams)
+  if (destPath !== snapshot.path) throw new SettingsConflictError('its location or symlink target changed')
+  const targetMode = snapshot.mode === null ? 0o600 : snapshot.mode
+  const tmpPath = `${destPath}.chroxy-hooks-${process.pid}-${randomUUID()}.tmp`
+  try {
+    let fd
+    if (onWindows) {
+      closeSync(open(tmpPath, 'wx'))
+      stampOwnerOnlyAcl(tmpPath, exec)
+      fd = open(tmpPath, 'w')
+    } else {
+      fd = open(tmpPath, 'wx', targetMode)
+    }
     try {
-      realPath = join(realpathSync(dirname(settingsPath)), basename(settingsPath))
-    } catch {
-      // Parent doesn't resolve either — use the path as given.
+      writeSync(fd, payload, null, 'utf-8')
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    hooks.afterWrite?.({ tmpPath })
+    if (!onWindows) chmodSync(tmpPath, targetMode)
+    hooks.beforeRename?.({ tmpPath })
+    verifyUnchanged(settingsPath, destPath, snapshot, seams)
+    renameSync(tmpPath, destPath)
+  } catch (err) {
+    try {
+      unlink(tmpPath)
+    } catch (cleanupErr) {
+      if (cleanupErr?.code !== 'ENOENT') {
+        // Not a conflict any more: surface it so the caller stops retrying.
+        throw new Error(`could not remove temp file ${tmpPath}: ${cleanupErr?.code || cleanupErr?.message} (while handling: ${err?.message || err})`)
+      }
+    }
+    throw err
+  }
+}
+
+/**
+ * Read-merge-write with optimistic lost-update detection (see
+ * writeSettingsAtomic for the residual window): `mutate(settings)` returns the
+ * next settings object, or null for "nothing to write". On a detected change
+ * the merge is recomputed from the fresh file (bounded retries). Nothing on
+ * disk is touched (not even the parent directory) until a write is required.
+ */
+function updateSettings(settingsPath, mutate, { _seams = {} } = {}) {
+  const seams = {
+    onWindows: _seams.platform ? _seams.platform === 'win32' : process.platform === 'win32',
+    exec: _seams.exec ?? execFileSync,
+    getuid: 'getuid' in _seams ? _seams.getuid : process.getuid?.bind(process),
+    hooks: _seams.hooks ?? {},
+    open: _seams.open ?? openSync,
+    unlink: _seams.unlink ?? unlinkSync,
+  }
+  for (let attempt = 1; attempt <= MAX_UPDATE_ATTEMPTS; attempt++) {
+    let path = resolveSettingsWritePath(settingsPath, seams)
+    const raw = readRawOrNull(path)
+    const mode = raw === null ? null : modeOf(path)
+    const next = mutate(raw === null ? {} : parseSettings(raw, settingsPath))
+    if (!next) return
+    const payload = JSON.stringify(next, null, 2) + '\n'
+    if (!existsSync(dirname(path))) {
+      mkdirSync(dirname(path), { recursive: true })
+      path = resolveSettingsWritePath(settingsPath, seams)
+    }
+    try {
+      writeSettingsAtomic(settingsPath, payload, { path, mode, hash: sha256(raw) }, seams)
+      return
+    } catch (err) {
+      if (!(err instanceof SettingsConflictError)) throw err
     }
   }
-
-  // Preserve the existing file's mode across the temp+rename — settings.json
-  // can carry sensitive values (env, apiKeyHelper) and users may have
-  // tightened it to 0600; a default-mode temp file must not loosen that.
-  let mode = null
-  try {
-    mode = statSync(realPath).mode & 0o777
-  } catch {
-    // New file — default mode (umask applies).
-  }
-  const tmpPath = `${realPath}.chroxy-hooks-${process.pid}.tmp`
-  const payload = JSON.stringify(settings, null, 2) + '\n'
-  // Open ONCE with 'w' (create, default mode), write, then fsync on the same
-  // fd before rename so a crash can't leave a torn write on filesystems where
-  // rename outruns the data flush. We do NOT pass the preserved mode here: a
-  // read-only source (e.g. 0o444) would otherwise make the temp file
-  // unwritable to a follow-up open — and reopening it (the old 'r+' path)
-  // fails with EACCES. The mode is applied AFTER fsync, via chmodSync.
-  const fd = openSync(tmpPath, 'w')
-  try {
-    writeSync(fd, payload, null, 'utf-8')
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-  // Apply the preserved mode after the data is durable. chmodSync works even
-  // when tightening to a read-only mode (0o444) — unlike reopening the file.
-  if (mode !== null) chmodSync(tmpPath, mode)
-  renameSync(tmpPath, realPath)
+  throw new Error(`${settingsPath} kept changing while it was being updated; gave up after ${MAX_UPDATE_ATTEMPTS} attempts so another writer's changes are not overwritten — re-run`)
 }
 
 /** Install (idempotent). Returns the settings path written. */
-export function installHooks({ settingsPath = defaultSettingsPath(), nodePath, binPath } = {}) {
-  const settings = readSettings(settingsPath)
-  const next = addOwnHooks(settings, { nodePath, binPath })
-  writeSettingsAtomic(settingsPath, next)
+export function installHooks({ settingsPath = defaultSettingsPath(), nodePath, binPath, _seams } = {}) {
+  updateSettings(settingsPath, (settings) => addOwnHooks(settings, { nodePath, binPath }), { _seams })
   return settingsPath
 }
 
 /** Uninstall: removes ONLY our own entries. Missing file is a no-op. */
-export function uninstallHooks({ settingsPath = defaultSettingsPath() } = {}) {
-  const settings = readSettings(settingsPath)
-  if (Object.keys(settings).length === 0) return settingsPath
-  const next = removeOwnHooks(settings)
-  writeSettingsAtomic(settingsPath, next)
+export function uninstallHooks({ settingsPath = defaultSettingsPath(), _seams } = {}) {
+  updateSettings(settingsPath, (settings) => (
+    Object.keys(settings).length === 0 ? null : removeOwnHooks(settings)
+  ), { _seams })
   return settingsPath
 }

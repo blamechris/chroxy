@@ -39,6 +39,7 @@ export const INGEST_EVENT_TYPES = [
     'user_prompt_submit',
     'stop',
     'wave_complete',
+    'status',
 ];
 /**
  * Sanity bounds for `ts` (epoch milliseconds). Rejects seconds-precision

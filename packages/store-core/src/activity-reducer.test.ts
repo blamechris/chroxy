@@ -426,3 +426,23 @@ describe('prototype-key safety (wire-controlled ids/sessionIds)', () => {
     expect(({} as Record<string, unknown>).label).toBeUndefined()
   })
 })
+
+
+describe('stable session decision lifetimes', () => {
+  it('allows a later decision after explicit clear while rejecting old pending and ended deltas', () => {
+    const first = entry({ id: 'decision:session', kind: 'decision', label: 'First', status: 'blocked', startedAt: T0 })
+    const cleared = { ...first, status: 'done' as const, endedAt: T0 }
+    const next = { ...first, label: 'Second', startedAt: T0 + 1 }
+    let state = applyActivityDelta(createEmptyActivityState(), delta('s1', 'started', first))
+    state = applyActivityDelta(state, delta('s1', 'ended', cleared))
+    state = applyActivityDelta(state, delta('s1', 'updated', first))
+    expect(selectSessionEntries(state, 's1')[0]!.status).toBe('done')
+    state = applyActivityDelta(state, delta('s1', 'started', next))
+    state = applyActivityDelta(state, delta('s1', 'ended', cleared))
+    state = applyActivityDelta(state, delta('s1', 'updated', first))
+    expect(selectSessionEntries(state, 's1')[0]).toMatchObject({ status: 'blocked', label: 'Second' })
+    state = applyActivitySnapshot(state, snapshot('s1', [next]))
+    expect(selectSessionEntries(state, 's1')).toEqual([next])
+    expect(selectSessionEntries(applyActivitySnapshot(state, snapshot('s1', [])), 's1')).toEqual([])
+  })
+})

@@ -1,3 +1,4 @@
+import { assistantResponseText } from './assistant-response.js'
 import { mkdirSync, writeFileSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
@@ -167,6 +168,8 @@ const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex
  * CodexSession's statics so both paths report identically.
  */
 export class CodexAppServerSession extends BaseSession {
+  static canonicalAssistantResponses = true
+
   static get customizationDescriptor() { return CODEX_APPSERVER_CUSTOMIZATION }
   static get inputRequiresReady() { return true }
 
@@ -1640,6 +1643,7 @@ export class CodexAppServerSession extends BaseSession {
       this.emit('tool_result', { toolUseId: item.id, result, truncated, isError })
       this._trackToolResult(item.id)
     } else if (item.type === 'agentMessage') {
+      this.emit('assistant_response', { responseId: item.id, text: assistantResponseText(item.text) })
       // Fallback: if the final text never arrived as deltas (short replies can
       // skip the delta stream), emit it once so the message isn't lost.
       if (!this._activeTurn.didStreamStart && item.text) {
@@ -1973,11 +1977,12 @@ export class CodexAppServerSession extends BaseSession {
     // admission before result listeners save the now-completed native session.
     this._skillsPrepended = true
     this._clearResultTimeout()
-    if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId })
+    if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId, ...(turn?.status && turn.status !== 'completed' ? { interrupted: true } : {}) })
     this._emitResult(
       {
         cost: null,
         duration: turn?.durationMs ?? null,
+        declarationEligible: turn?.status === 'completed' && !turn?.error,
         usage: this._lastUsage,
         // #6692: single-model split (codex runs one model per session; cost
         // is unknown at the source — pricing happens downstream).

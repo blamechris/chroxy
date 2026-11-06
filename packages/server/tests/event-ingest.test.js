@@ -404,8 +404,10 @@ describe('event-ingest', () => {
       assert.equal(call.data.external, true)
     })
 
-    it('maps every schema event type onto a category', async () => {
-      for (const type of INGEST_EVENT_TYPES) {
+    it('maps notification-producing schema types onto a category', async () => {
+      // Status writes use the exact-session metadata handler, tested by
+      // declared-status-http.test.js; they do not fabricate notifications.
+      for (const type of INGEST_EVENT_TYPES.filter((type) => type !== 'status')) {
         assert.ok(INGEST_CATEGORY_FOR_TYPE[type], `category mapping for ${type}`)
       }
       await startWith(createMockServer())

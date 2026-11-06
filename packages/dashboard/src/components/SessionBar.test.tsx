@@ -111,6 +111,7 @@ describe('SessionBar', () => {
     )
     const badge = screen.getByTestId('pending-permission-total')
     expect(badge.textContent).toContain('2 pending')
+    expect(badge).toHaveAttribute('aria-label', '2 items needing attention — go to the next')
     fireEvent.click(badge)
     expect(onJumpToPending).toHaveBeenCalledTimes(1)
   })

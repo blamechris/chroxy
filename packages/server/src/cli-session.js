@@ -1,3 +1,4 @@
+import { assistantResponseText, sdkDeclarationEligible } from './assistant-response.js'
 import { spawn } from 'child_process'
 import { stillAuthorized } from './connection-authority.js'
 import { createInterface } from 'readline'
@@ -243,6 +244,8 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
  */
 
 export class CliSession extends BaseSession {
+  static canonicalAssistantResponses = true
+
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // DockerSession (docker-cli / docker) extends this and inherits it.
   static claudeFamily = true
@@ -1600,6 +1603,8 @@ export class CliSession extends BaseSession {
         const ctx = this._currentCtx
         const messageId = this._currentMessageId
         const content = data.message?.content
+        this.emit('assistant_response', { responseId: data.message?.id ?? data.uuid, text: assistantResponseText(content) })
+        if (ctx) ctx.assistantResponseSeen = true
         if (Array.isArray(content) && ctx && messageId) {
           // If stream_event deltas already drove streaming, skip assistant text
           if (ctx.didStreamText) {
@@ -1640,6 +1645,10 @@ export class CliSession extends BaseSession {
 
         const messageId = this._currentMessageId
         const ctx = this._currentCtx
+
+        if (!ctx?.assistantResponseSeen && typeof data.result === 'string') {
+          this.emit('assistant_response', { text: assistantResponseText(data.result) })
+        }
 
         // #7393: a turn can end under an open reasoning block; finalise it so the
         // client's "Thinking…" settles, before anything else this result emits.
@@ -1717,6 +1726,7 @@ export class CliSession extends BaseSession {
           modelUsage: normalizeSdkModelUsage(data.modelUsage),
           // #7326: the CLI's result is the same message the SDK's is, so it
           // carries the same stop_reason / subtype / terminal_reason.
+          declarationEligible: sdkDeclarationEligible(data),
           ...turnOutcomeField(outcomeFromSdkResult(data)),
         })
 

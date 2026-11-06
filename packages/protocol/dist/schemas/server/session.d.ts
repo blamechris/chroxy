@@ -5,6 +5,31 @@
  * ../server.ts (barrel). Split per #6201 Tier-3.
  */
 import { z } from 'zod';
+export declare const ServerSessionStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_status">;
+    sessionId: z.ZodString;
+    declaredStatus: z.ZodObject<{
+        state: z.ZodEnum<{
+            unknown: "unknown";
+            blocked: "blocked";
+            running: "running";
+            done: "done";
+            idle: "idle";
+            stalled: "stalled";
+        }>;
+        summary: z.ZodString;
+        next: z.ZodOptional<z.ZodString>;
+        blockedOn: z.ZodOptional<z.ZodString>;
+        etaMinutes: z.ZodOptional<z.ZodNumber>;
+        decision: z.ZodOptional<z.ZodString>;
+        updatedAt: z.ZodNumber;
+        source: z.ZodEnum<{
+            api: "api";
+            marker: "marker";
+            hook: "hook";
+        }>;
+    }, z.core.$strict>;
+}, z.core.$strip>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_focus_changed">;
     clientId: z.ZodString;
@@ -77,6 +102,27 @@ export declare const CumulativeUsageSchema: z.ZodObject<{
  *     (CliSession, Codex, Gemini) round-trip as `0`.
  */
 export declare const ServerSessionListEntrySchema: z.ZodObject<{
+    declaredStatus: z.ZodOptional<z.ZodObject<{
+        state: z.ZodEnum<{
+            unknown: "unknown";
+            blocked: "blocked";
+            running: "running";
+            done: "done";
+            idle: "idle";
+            stalled: "stalled";
+        }>;
+        summary: z.ZodString;
+        next: z.ZodOptional<z.ZodString>;
+        blockedOn: z.ZodOptional<z.ZodString>;
+        etaMinutes: z.ZodOptional<z.ZodNumber>;
+        decision: z.ZodOptional<z.ZodString>;
+        updatedAt: z.ZodNumber;
+        source: z.ZodEnum<{
+            api: "api";
+            marker: "marker";
+            hook: "hook";
+        }>;
+    }, z.core.$strict>>;
     sessionId: z.ZodString;
     name: z.ZodString;
     cwd: z.ZodOptional<z.ZodString>;
@@ -209,6 +255,27 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
     sessions: z.ZodArray<z.ZodObject<{
+        declaredStatus: z.ZodOptional<z.ZodObject<{
+            state: z.ZodEnum<{
+                unknown: "unknown";
+                blocked: "blocked";
+                running: "running";
+                done: "done";
+                idle: "idle";
+                stalled: "stalled";
+            }>;
+            summary: z.ZodString;
+            next: z.ZodOptional<z.ZodString>;
+            blockedOn: z.ZodOptional<z.ZodString>;
+            etaMinutes: z.ZodOptional<z.ZodNumber>;
+            decision: z.ZodOptional<z.ZodString>;
+            updatedAt: z.ZodNumber;
+            source: z.ZodEnum<{
+                api: "api";
+                marker: "marker";
+                hook: "hook";
+            }>;
+        }, z.core.$strict>>;
         sessionId: z.ZodString;
         name: z.ZodString;
         cwd: z.ZodOptional<z.ZodString>;
