@@ -9,7 +9,9 @@ import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-vers
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from '../src/utils/agent-sdk-version.js'
-import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
+import { resolveDeclaredMinVersion, probeBinaryVersion, _resetProbeCacheForTest } from '../src/utils/binary-version.js'
+import { runProviderPreflight, ProviderBinaryUnsupportedError } from '../src/utils/preflight.js'
+import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 
 /**
  * Integration tests for doctor.js.
@@ -850,6 +852,63 @@ describe('doctor requiresDirectExec shim refusal (#7986 review S2)', () => {
     // Falls through to the real checkBinary exec (which ignores
     // resolvedBinary and resolves via name+candidates) — not a shim
     // refusal, so it must NOT carry the shim-specific wording.
+    assert.doesNotMatch(row.message, /without a shell/)
+  })
+})
+
+// #8032 — preflight and doctor are two readers of one provider spec; for the
+// same win32 `.cmd` they must reach the same shim verdict for both spec shapes.
+describe('doctor and preflight agree on a win32 .cmd shim (#8032)', () => {
+  const CMD = 'C:\\npm\\node.cmd'
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+
+  function register(name, requiresDirectExec) {
+    class S extends SdkSession {
+      static get resolvedBinary() { return CMD }
+      static get preflight() {
+        return {
+          label: name,
+          binary: {
+            name: 'node',
+            args: ['--version'],
+            candidates: [process.execPath],
+            minVersion: '1.0.0',
+            ...(requiresDirectExec ? { requiresDirectExec: true } : {}),
+          },
+        }
+      }
+    }
+    registerProvider(name, S)
+    return S
+  }
+
+  it('requiresDirectExec: both refuse the shim', async () => {
+    const S = register('test-8032-direct', true)
+    assert.throws(
+      () => runProviderPreflight(S, { env: {}, platform: 'win32', verifyBinary: okVerify, probeVersion: () => '9.9.9' }),
+      ProviderBinaryUnsupportedError,
+    )
+    const { checks } = await runDoctorChecks({ providers: ['test-8032-direct'], platform: 'win32' })
+    const row = checks.find((c) => c.provider === 'test-8032-direct' && c.name === 'node')
+    assert.equal(row.status, 'fail')
+    assert.match(row.message, /without a shell/)
+  })
+
+  it('no requiresDirectExec: neither refuses the shim; preflight probes it via prepareSpawn', async () => {
+    const S = register('test-8032-shell-ok', false)
+    let probed = null
+    const probe = (path, args, opts) => {
+      _resetProbeCacheForTest()
+      return probeBinaryVersion(path, args, {
+        ...opts,
+        statSync: () => ({ dev: 1, ino: 2, size: 3, mtimeMs: 4, ctimeMs: 5 }),
+        spawnSync: (command) => { probed = command; return { error: undefined, status: 0, stdout: '9.9.9', stderr: '' } },
+      })
+    }
+    assert.doesNotThrow(() => runProviderPreflight(S, { env: {}, platform: 'win32', verifyBinary: okVerify, probeVersion: probe }))
+    assert.ok(/cmd\.exe$/i.test(probed), `probe spawned ${probed}`)
+    const { checks } = await runDoctorChecks({ providers: ['test-8032-shell-ok'], platform: 'win32' })
+    const row = checks.find((c) => c.provider === 'test-8032-shell-ok' && c.name === 'node')
     assert.doesNotMatch(row.message, /without a shell/)
   })
 })

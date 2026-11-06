@@ -119,6 +119,41 @@ describe('probeBinaryVersion', () => {
     assert.deepEqual(seenArgs, ['--version'])
   })
 
+  it('routes a win32 .cmd through cmd.exe via prepareSpawn (#8032)', () => {
+    let seen = null
+    const version = probeBinaryVersion('C:\\npm\\claude.cmd', ['--version'], {
+      platform: 'win32',
+      spawnSync: (command, args, options) => {
+        seen = { command, args, options }
+        return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
+      },
+      statSync: statOf(),
+    })
+    assert.equal(version, '2.1.283')
+    assert.ok(/cmd\.exe$/i.test(seen.command), `spawned ${seen.command}, not the .cmd directly`)
+    assert.deepEqual(seen.args.slice(0, 3), ['/d', '/s', '/c'])
+    assert.equal(seen.options.windowsVerbatimArguments, true)
+    assert.equal(seen.options.encoding, 'utf-8', 'probe options are kept alongside prepareSpawn options')
+  })
+
+  it('leaves a win32 .exe and a POSIX .cmd path untouched (#8032)', () => {
+    for (const [platform, path] of [['win32', 'C:\\bin\\claude.exe'], ['linux', '/weird/claude.cmd']]) {
+      _resetProbeCacheForTest()
+      let seen = null
+      probeBinaryVersion(path, ['--version'], {
+        platform,
+        spawnSync: (command, args, options) => {
+          seen = { command, args, options }
+          return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
+        },
+        statSync: statOf(),
+      })
+      assert.equal(seen.command, path)
+      assert.deepEqual(seen.args, ['--version'])
+      assert.equal(seen.options.windowsVerbatimArguments, undefined)
+    }
+  })
+
   it('defaults args to ["--version"] when omitted', () => {
     let seenArgs = null
     probeBinaryVersion('/fake/claude', undefined, {

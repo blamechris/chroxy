@@ -351,7 +351,7 @@ export function buildBinaryProvenanceOptions({ mode, signatureGate, ledger }) {
  * @param {{ mode?: string, signatureGate?: boolean, ledger?: object }|null} [options.provenance]
  *   - opt-in provenance config + pin ledger; null/disabled ⇒ gate skipped
  * @param {Function} [options.verifyProvenance] - provenance checker (injected in tests)
- * @param {Function} [options.probeVersion] - `(path, args) => string|null` version
+ * @param {Function} [options.probeVersion] - `(path, args, { platform }) => string|null` version
  *   prober (injected in tests); called AT MOST ONCE per call, when either
  *   `spec.binary.minVersion` OR `spec.binary.recommendedVersion` resolves to a
  *   valid version, and only after verifyBinary + provenance both pass (#7986,
@@ -527,7 +527,7 @@ export function runProviderPreflight(ProviderClass, {
     // The probe runs AT MOST ONCE per call — when EITHER field resolved to a
     // valid version — and its result feeds both checks below (#8031).
     if (required || recommended) {
-      const found = probeVersion(binaryPath, spec.binary.args || ['--version'])
+      const found = probeVersion(binaryPath, spec.binary.args || ['--version'], { platform })
 
       if (required) {
         if (!found) {
