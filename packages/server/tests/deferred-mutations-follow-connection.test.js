@@ -449,6 +449,35 @@ describe('a paired connection whose authentication was stripped', () => {
   })
 })
 
+describe('auth disabled (--no-auth)', () => {
+  it('every gate added for credentials behaves as before: a send, a reply and an authorization check', async () => {
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    const server = new WsServer({ port: 0, apiToken: null, sessionManager: made.manager, authRequired: false })
+    try {
+      server.start('127.0.0.1')
+      await new Promise((resolve) => server.httpServer.once('listening', resolve))
+      const ws = new WebSocket(`ws://127.0.0.1:${server.httpServer.address().port}`)
+      const messages = []
+      ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+      await new Promise((resolve) => ws.once('open', resolve))
+      await waitFor(() => messages.find((m) => m.type === 'auth_ok'), { timeoutMs: 2000, label: 'auth_ok without any token' })
+      const [sock, client] = [...server.clients][0]
+      assert.equal(server._isConnectionAuthorized(client), true)
+      assert.equal(server._send(sock, { type: 'probe_reply' }), true)
+      await waitFor(() => messages.find((m) => m.type === 'probe_reply'), { timeoutMs: 2000, label: 'a server-initiated frame' })
+      ws.send(JSON.stringify({ type: 'ping' }))
+      await waitFor(() => messages.find((m) => m.type === 'pong'), { timeoutMs: 2000, label: 'the reply to a request' })
+      ws.send(JSON.stringify({ type: 'input', data: 'hello', sessionId: 'session-1' }))
+      await waitFor(() => made.sessionsMap.get('session-1').session.sendMessage.callCount === 1, { timeoutMs: 2000, label: 'input dispatched' })
+      server._keepaliveSweep()
+      assert.equal(server.clients.size, 1, 'keepalive leaves a token-less connection alone')
+      ws.close()
+    } finally {
+      server.close()
+    }
+  })
+})
+
 describe('token store eviction', () => {
   it('evicts the least recently used token, not the oldest inserted', () => {
     const pm = new PairingManager()

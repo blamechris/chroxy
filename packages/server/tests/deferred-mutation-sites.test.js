@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parse as acornParse } from 'acorn'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { EnvironmentManager } from '../src/environment-manager.js'
@@ -473,24 +474,77 @@ describe('queued follow-ups', () => {
     const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
     const files = readdirSync(SRC).filter((f) => f.endsWith('.js'))
 
-    // The ONLY places allowed to take an item off a send queue. Anywhere else is a
-    // drain that can bypass the admission check.
-    const ALLOWED_SHIFTS = new Map([
-      ['base-session.js', { '_outgoingQueue.shift(': 1 }],
-      ['cli-session.js', { '_pendingQueue.shift(': 2 }],
+    // Parse every source file and find EVERY member access to a send queue, however it is
+    // spelled. Reading the size, pushing, or assigning a fresh value is harmless; anything
+    // else (shift, splice, indexing, iteration, passing the array on, aliasing it into a
+    // variable) can take an item off the queue and must sit in one of the checked drains.
+    const CHECKED_DRAINS = new Map([
+      ['base-session.js', new Set(['dequeueNextOutgoing', 'cancelQueuedMessage', 'clearOutgoingQueue'])],
+      ['cli-session.js', new Set(['_drainPendingQueue', '_drainNextPendingAfterResult'])],
     ])
+    const QUEUES = new Set(['_pendingQueue', '_outgoingQueue'])
 
-    it('no source file takes items off a send queue except the checked drains', () => {
+    function queueAccesses(file) {
+      const ast = acornParse(readFileSync(join(SRC, file), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true })
+      const found = []
+      const walk = (node, method, parent) => {
+        if (!node || typeof node.type !== 'string') return
+        const m = node.type === 'MethodDefinition' ? (node.key.name ?? node.key.value) : method
+        if (node.type === 'MemberExpression') {
+          const name = !node.computed ? node.property.name : (node.property.type === 'Literal' ? node.property.value : null)
+          if (QUEUES.has(name)) found.push({ method, name, parent })
+        }
+        for (const k of Object.keys(node)) {
+          if (k === 'type' || k === 'start' || k === 'end') continue
+          const v = node[k]
+          if (Array.isArray(v)) v.forEach((x) => walk(x, m, node))
+          else if (v && typeof v.type === 'string') walk(v, m, node)
+        }
+      }
+      walk(ast, undefined, null)
+      return found
+    }
+
+    function harmless({ parent: p }) {
+      if (!p) return false
+      if (p.type === 'MemberExpression' && !p.computed && (p.property.name === 'length' || p.property.name === 'push')) return true
+      if (p.type === 'AssignmentExpression') return true
+      return ['ConditionalExpression', 'LogicalExpression', 'UnaryExpression'].includes(p.type)
+    }
+
+    it('no source file touches a send queue except through the checked drains', () => {
       const offenders = []
       for (const f of files) {
-        const text = readFileSync(join(SRC, f), 'utf8')
-        for (const needle of ['_outgoingQueue.shift(', '_pendingQueue.shift(']) {
-          const count = text.split(needle).length - 1
-          const allowed = ALLOWED_SHIFTS.get(f)?.[needle] ?? 0
-          if (count !== allowed) offenders.push(`${f}: ${needle} x${count} (allowed ${allowed})`)
+        for (const use of queueAccesses(f)) {
+          if (harmless(use)) continue
+          if (CHECKED_DRAINS.get(f)?.has(use.method)) continue
+          offenders.push(`${f} :: ${use.method} :: ${use.name}`)
         }
       }
       assert.deepEqual(offenders, [])
+    })
+
+    it('the scan sees through the evasions: splice, aliasing and an inline shift are all flagged', () => {
+      const parseSnippet = (code) => acornParse(code, { ecmaVersion: 'latest', sourceType: 'module' })
+      const hits = (code) => {
+        const ast = parseSnippet(`class A { m() { ${code} } }`)
+        const found = []
+        const walk = (node, parent) => {
+          if (!node || typeof node.type !== 'string') return
+          if (node.type === 'MemberExpression' && !node.computed && QUEUES.has(node.property.name)) found.push({ parent })
+          for (const k of Object.keys(node)) {
+            const v = node[k]
+            if (Array.isArray(v)) v.forEach((x) => walk(x, node))
+            else if (v && typeof v.type === 'string') walk(v, node)
+          }
+        }
+        walk(ast, null)
+        return found.filter((u) => !harmless(u)).length
+      }
+      assert.equal(hits('this._pendingQueue.splice(0, 1)'), 1)
+      assert.equal(hits('const q = this._pendingQueue; q.shift()'), 1)
+      assert.equal(hits('process.nextTick(() => this._outgoingQueue.shift())'), 1)
+      assert.equal(hits('if (this._pendingQueue.length) this._pendingQueue.push(1)'), 0)
     })
 
     async function sessionClasses() {
@@ -564,6 +618,46 @@ describe('queued follow-ups', () => {
           assert.deepEqual(sent, ['live'], `${name}.${drain} sent ${JSON.stringify(sent)}`)
         }
       }
+    })
+
+    describe('the turn-end funnels', () => {
+      function live() {
+        const s = new CliSession({ cwd: '/tmp' })
+        s.on('error', () => {})
+        s._processReady = true
+        s._isBusy = false
+        s._log = { info() {}, warn() {} }
+        s.sent = []
+        s.sendMessage = (p) => { s.sent.push(p) }
+        return s
+      }
+      const rev = (prompt) => ({ prompt, attachments: undefined, sendOptions: { isAuthorized: () => false }, options: { isAuthorized: () => false } })
+      const ok = (prompt) => ({ prompt, attachments: undefined, sendOptions: { isAuthorized: () => true }, options: { isAuthorized: () => true } })
+
+      it('_clearMessageState drops a revoked startup-queued item and sends the live one', async () => {
+        const s = live()
+        s._pendingQueue = [rev('revoked'), ok('live')].map(({ prompt, attachments, options }) => ({ prompt, attachments, options }))
+        s._clearMessageState()
+        await tick(); await tick()
+        assert.deepEqual(s.sent, ['live'])
+      })
+
+      it('_clearMessageState drops a revoked outgoing item and sends the live one', async () => {
+        const s = live()
+        s._outgoingQueue = [rev('revoked'), ok('live')].map(({ prompt, attachments, sendOptions }) => ({ prompt, attachments, sendOptions }))
+        s._clearMessageState()
+        await tick(); await tick()
+        assert.deepEqual(s.sent, ['live'])
+      })
+
+      it('a refused outgoing item falls through to the startup queue (_continueDrainAfterRefusal)', async () => {
+        const s = live()
+        s._outgoingQueue = [rev('revoked')].map(({ prompt, attachments, sendOptions }) => ({ prompt, attachments, sendOptions }))
+        s._pendingQueue = [ok('live')].map(({ prompt, attachments, options }) => ({ prompt, attachments, options }))
+        s._clearMessageState()
+        await tick(); await tick()
+        assert.deepEqual(s.sent, ['live'])
+      })
     })
 
     it('a container session that drains its startup queue when the process comes up drops a revoked item', async () => {

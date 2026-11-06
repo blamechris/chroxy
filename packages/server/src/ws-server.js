@@ -3243,6 +3243,7 @@ export class WsServer {
     if (this._pairingManager?.destroyed === true) {
       if (client.authenticated) this._handleClientDeparture(client)
       client.authenticated = false
+      client.isPrimaryToken = false
       client.pairingCredential = null
       client.authToken = undefined
       if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)

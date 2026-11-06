@@ -380,11 +380,15 @@ describe('daemon shutdown: a frame landing mid-shutdown', () => {
   it('a destroyed pairing manager means shutting down, never an invalid credential', async () => {
     const { pm, server, ws, messages, closed } = await connected()
     try {
+      const record = [...server.clients.values()][0]
+      record.isPrimaryToken = true // as a primary connection would carry
       pm.destroy()
       ws.send(JSON.stringify({ type: 'ping' }))
       const code = await closed
       assert.equal(code, 1001)
       assert.equal(messages.some((m) => m.type === 'credential_invalidated'), false)
+      assert.equal(record.authenticated, false)
+      assert.equal(record.isPrimaryToken, false)
     } finally {
       server.close()
     }

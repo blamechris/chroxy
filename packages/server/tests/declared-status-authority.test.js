@@ -14,7 +14,7 @@ import { BaseSession } from '../src/base-session.js'
 // A declared-status write waits for its request body; a bearer that is revoked while
 // the body is still arriving must not get the write applied.
 
-async function fixture() {
+async function fixture({ authRequired = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'declared-authority-'))
   const manager = new SessionManager({ skipPreflight: true, stateFilePath: join(dir, 'state.json') })
   const session = new BaseSession({ cwd: dir, skillsDir: dir, repoSkillsDir: null })
@@ -23,7 +23,7 @@ async function fixture() {
   const pairing = new PairingManager()
   const bound = pairing.validatePairing(pairing.generateBoundPairing('s1').pairingId).sessionToken
   const server = Object.assign(Object.create(WsServer.prototype), {
-    sessionManager: manager, authRequired: true, apiToken: 'test-primary', _pairingManager: pairing,
+    sessionManager: manager, authRequired, apiToken: authRequired ? 'test-primary' : null, _pairingManager: pairing,
     _ingestSecret: 'test-ingest', config: {},
   })
   const http = createServer(createHttpHandler(server))
@@ -37,7 +37,7 @@ async function fixture() {
     return new Promise((resolve, reject) => {
       const req = httpRequest({
         host: '127.0.0.1', port, path: '/api/sessions/s1/status', method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
       }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)) })
       req.on('error', reject)
       req.write(body.slice(0, 10))
@@ -51,6 +51,14 @@ async function fixture() {
 }
 
 describe('declared status write authority', () => {
+  it('with auth off there is no bearer to re-check: the write is applied', async () => {
+    const f = await fixture({ authRequired: false })
+    try {
+      assert.equal(await f.slowPost('', async () => {}), 200)
+      assert.equal(f.manager.getSession('s1').declaredStatus?.summary, 'Testing status')
+    } finally { await f.close() }
+  })
+
   it('control: a live bound bearer writes the status', async () => {
     const f = await fixture()
     try {
