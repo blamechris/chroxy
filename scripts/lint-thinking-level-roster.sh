@@ -28,7 +28,14 @@
 # as an ordinary fallback value legal, which it has to be: `level || 'default'`
 # appears in several places and is not a roster.
 #
-# SCOPE: tracked, non-test source. Tests are deliberately OUT, and the reason is
+# SCOPE: tracked, non-test source INSIDE the pathspecs below, with extension
+# ts/tsx/js/jsx/mjs/cjs/mts/cts. The pathspecs are `packages/*/src/*`,
+# `packages/*/scripts/*`, `scripts/*` and `src/*`. NOT covered, so a roster
+# placed there is invisible: `packages/*/lib/`, `packages/*/sidecar/`, build and
+# tool configs (e.g. packages/dashboard/vite.config.ts), a root-level `*.mjs`
+# outside `scripts/`, and `.maestro/` fixtures. None is a plausible home for a
+# roster today; if one becomes one, extend the pathspec rather than assuming it
+# is reached. Tests are deliberately OUT, and the reason is
 # not convenience — a test that checks the accepted levels must be free to write
 # `['default','high','max']` by hand. Deriving that expectation from the
 # constant under test is #7424 exactly: a parity test whose expectation comes
@@ -43,6 +50,12 @@
 #     and legal: it is the Claude provider's level -> token-budget LOOKUP, read
 #     with a `?? null` fallback, not a membership decision. A future roster
 #     hidden in unquoted keys would slip past this lint.
+#   - A roster with fewer than TWO known words. A run is only recognised when at
+#     least two adjacent quoted words are both in `$word`, so a two-element
+#     roster with one new word — `['low','extreme']`, the realistic shape when a
+#     provider ships a new effort — matches nothing and passes. `$word` is itself
+#     a hardcoded list beside a growing set: adding a word to it WIDENS the match
+#     (and may flag new code), it does not validate anything.
 #   - Prose in comments is NOT exempt, and that is on purpose — a doc line
 #     spelling the three levels out is a copy of the roster that goes stale
 #     silently (two such lines were found when this lint was first run).
@@ -63,6 +76,7 @@
 # Pure bash + perl — no deps, no node. CI runs it under bash in the bash-lint job.
 #
 # Run:  bash scripts/lint-thinking-level-roster.sh
+#       (--test enables the LINT_THINKING_* env hooks; the golden test only)
 # Exit: 0 clean, 1 on a second roster, on an unreadable file, or on a scan that
 #       could not run.
 
@@ -76,22 +90,49 @@ command -v perl >/dev/null 2>&1 || {
 }
 
 # Floor on the number of files the scan must actually open. Well below today's
-# count (the run reports 824 non-test source files) so ordinary churn never
+# count (the run reports 985 non-test source files) so ordinary churn never
 # trips it, and far above zero so a broken path filter fails LOUDLY instead of
 # passing vacuously. The number is illustrative, not asserted — it is printed by
 # every run, so a reader can check it rather than trusting this line.
-MIN_FILES="${LINT_THINKING_MIN_FILES:-300}"
+#
+# The floor is ~90% of the measured count, not a token minimum: a floor 63% below
+# the real count (it was 300 against 824) lets a regression that drops a whole
+# package's src still clear it and report a clean repo (#7783). To re-measure,
+# run this script and read the "scanned N" figure it prints; if ordinary churn
+# has moved N well away from 985, set the floor to about 0.9 * N. A deleted-file
+# refactor that trips the floor is a prompt to re-measure, not to lower it blindly.
+MIN_FILES=900
+
+# TEST HOOKS. LINT_THINKING_MIN_FILES and LINT_THINKING_SCAN_DIR let the golden
+# test scan a temp tree with a tiny floor. They are honoured ONLY behind an
+# explicit --test argument: an environment variable alone is ignored, because a
+# workflow-level `env:` block in ci.yml is one added line away from setting them
+# and would make this guard vacuous with no diff to this script (#7783).
+TEST_MODE=0
+for arg in "$@"; do
+  case "$arg" in
+    --test) TEST_MODE=1 ;;
+    *) echo "::error::lint-thinking-level-roster.sh: unknown argument '$arg'"; exit 1 ;;
+  esac
+done
+SCAN_DIR=""
+if [ "$TEST_MODE" -eq 1 ]; then
+  MIN_FILES="${LINT_THINKING_MIN_FILES:-$MIN_FILES}"
+  SCAN_DIR="${LINT_THINKING_SCAN_DIR:-}"
+elif [ -n "${LINT_THINKING_MIN_FILES:-}" ] || [ -n "${LINT_THINKING_SCAN_DIR:-}" ]; then
+  echo "::warning::LINT_THINKING_MIN_FILES / LINT_THINKING_SCAN_DIR are set but ignored: they are test hooks, honoured only with --test"
+fi
 
 # The one file allowed to carry the literal roster: the module every other layer
 # imports it from. A second entry here is a decision to have two rosters, which
 # is the thing this lint exists to prevent — do not add one without an issue.
 ALLOW='packages/protocol/src/thinking-levels.ts'
 
-if [ -n "${LINT_THINKING_SCAN_DIR:-}" ]; then
-  # Test hook: scan a temp tree instead of the git index (see
+if [ -n "$SCAN_DIR" ]; then
+  # Test hook (--test only): scan a temp tree instead of the git index (see
   # scripts/__tests__/lint-thinking-level-roster.test.sh). The min-files floor
   # is overridden by the harness, which scans a handful of fixtures.
-  file_list() { find "$LINT_THINKING_SCAN_DIR" -type f -print0; }
+  file_list() { find "$SCAN_DIR" -type f -print0; }
 else
   file_list() { git ls-files -z -- 'packages/*/src/*' 'packages/*/scripts/*' 'scripts/*' 'src/*'; }
 fi
@@ -112,7 +153,7 @@ scan_out="$(file_list | LINT_THINKING_ALLOW="$ALLOW" perl -0 -ne '
   }
   chomp;
   my $f = $_;
-  next unless $f =~ /\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+  next unless $f =~ /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/;
   # Tests are out of scope on purpose — see the header.
   next if $f =~ m{(?:^|/)(?:tests?|__tests__)/};
   next if $f =~ /\.test\.[a-z]+$/;
