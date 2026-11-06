@@ -11,7 +11,8 @@ import { GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 // directory only: another directory's uncommitted work, and the repository's own
 // index, are untouched.
 describe('git snapshot for a checkpoint', () => {
-  let root, repo, mgr
+  let root, repo, mgr, privateTmp
+  const savedTmpdir = process.env.TMPDIR
   const git = (...args) => execFileSync(GIT, args, { cwd: repo, stdio: 'pipe' }).toString()
   const put = (rel, text) => {
     const abs = join(repo, rel)
@@ -20,7 +21,14 @@ describe('git snapshot for a checkpoint', () => {
   }
 
   before(() => {
+    // The snapshot's temporary index is created under os.tmpdir(), which honours
+    // TMPDIR. Point it at a directory only this file uses, so the "no temporary
+    // index left behind" check cannot see another test file's concurrent
+    // snapshot in the shared system temp dir (#9038).
     root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-snapshot-')))
+    privateTmp = join(root, 'tmp')
+    mkdirSync(privateTmp, { recursive: true })
+    process.env.TMPDIR = privateTmp
     repo = join(root, 'repo')
     mkdirSync(repo, { recursive: true })
     git('init', '-b', 'main')
@@ -39,7 +47,11 @@ describe('git snapshot for a checkpoint', () => {
     put('theirs/untracked.txt', 'SIBLING-UNTRACKED\n')
     mgr = new CheckpointManager({ checkpointsDir: join(root, 'checkpoints') })
   })
-  after(() => { rmDirRobust(root) })
+  after(() => {
+    if (savedTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = savedTmpdir
+    rmDirRobust(root)
+  })
 
   const snapshot = (cwd) => mgr._createGitSnapshot(cwd, 'cp-1')
 
@@ -62,7 +74,8 @@ describe('git snapshot for a checkpoint', () => {
   })
 
   it('leaves no temporary index behind', () => {
-    assert.deepEqual(readdirSync(tmpdir()).filter((n) => n.startsWith('ckpt-snapshot-')), [])
+    assert.equal(tmpdir(), privateTmp, 'the snapshot resolves its temp dir to this file\'s private one')
+    assert.deepEqual(readdirSync(privateTmp), [])
   })
 
   it('tags HEAD when nothing under the directory changed, even if a sibling has changes', async () => {

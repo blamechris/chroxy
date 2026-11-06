@@ -21,7 +21,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { IngestEventSchema, INGEST_EVENT_TYPES } from '@chroxy/protocol'
-import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
+import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE, DEFAULT_TIMEOUT_MS } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
 import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT, INGEST_SECRET_REQUIRED_MODE, readTrustedIngestSecretFile } from '../src/config.js'
 import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/project.js'
@@ -754,6 +754,11 @@ describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-
 })
 
 describe('runEmit', () => {
+  // Production's 250 ms fetch budget is deliberate, but a slow first request on
+  // a loaded runner can exceed it. Tests that are not about the timeout use a
+  // generous one; the default-budget test below calls runEmit directly (#9040).
+  const TEST_TIMEOUT_MS = 10_000
+  const emit = (opts) => runEmit({ timeoutMs: TEST_TIMEOUT_MS, ...opts })
   let server
   let baseUrl
   const received = []
@@ -788,7 +793,7 @@ describe('runEmit', () => {
   it('POSTs a schema-valid envelope with the bearer secret', async () => {
     const repo = tempRepo()
     const payload = { hook_event_name: 'SessionStart', session_id: 'sess-1', cwd: repo, source: 'startup' }
-    const result = await runEmit({
+    const result = await emit({
       hookEventArg: 'session_start',
       stdinText: JSON.stringify(payload),
       env: envFor(),
@@ -806,7 +811,7 @@ describe('runEmit', () => {
   })
 
   it('resolves the hook event from stdin when no arg is given', async () => {
-    const result = await runEmit({
+    const result = await emit({
       stdinText: JSON.stringify({ hook_event_name: 'SubagentStop', session_id: 's2' }),
       env: envFor(),
       now: () => NOW,
@@ -816,7 +821,7 @@ describe('runEmit', () => {
   })
 
   it('still emits on garbage stdin (envelope without payload fields)', async () => {
-    const result = await runEmit({
+    const result = await emit({
       hookEventArg: 'notification',
       stdinText: 'this is not json',
       env: envFor(),
@@ -830,7 +835,7 @@ describe('runEmit', () => {
 
   it('is a silent no-op when no secret resolves (no network call)', async () => {
     const countBefore = received.length
-    const result = await runEmit({
+    const result = await emit({
       hookEventArg: 'session_end',
       stdinText: '{}',
       env: { CHROXY_INGEST_URL: baseUrl, CHROXY_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'hooks-nosecret-')) },
@@ -848,7 +853,7 @@ describe('runEmit', () => {
     writeFileSync(secretPath, 'wrong-mode-secret\n', { mode: 0o600 })
     chmodSync(secretPath, 0o644)
     const countBefore = received.length
-    const result = await runEmit({
+    const result = await emit({
       hookEventArg: 'session_end',
       stdinText: '{}',
       env: { CHROXY_INGEST_URL: baseUrl, CHROXY_CONFIG_DIR: dir },
@@ -859,7 +864,7 @@ describe('runEmit', () => {
   })
 
   it('fails silent (no throw) when the daemon is down', async () => {
-    const result = await runEmit({
+    const result = await emit({
       hookEventArg: 'session_start',
       stdinText: '{}',
       env: { CHROXY_INGEST_URL: 'http://127.0.0.1:1/api/events', CHROXY_INGEST_SECRET: SECRET },
@@ -869,12 +874,35 @@ describe('runEmit', () => {
     assert.equal(result.sent, false)
   })
 
+  it('uses the default 250 ms fetch budget when no timeout is given', async () => {
+    assert.equal(DEFAULT_TIMEOUT_MS, 250)
+    let signal
+    // A daemon that never answers: the request only ends when the signal fires.
+    const hang = (_url, init) => new Promise((_resolve, reject) => {
+      signal = init.signal
+      signal.addEventListener('abort', () => reject(signal.reason))
+    })
+    const start = Date.now()
+    const result = await runEmit({
+      hookEventArg: 'session_start',
+      stdinText: '{}',
+      env: { CHROXY_INGEST_URL: baseUrl, CHROXY_INGEST_SECRET: SECRET },
+      fetchImpl: hang,
+      now: () => NOW,
+    })
+    const elapsed = Date.now() - start
+    assert.deepEqual(result, { sent: false, reason: 'error' })
+    assert.ok(signal.aborted, 'the request was ended by its timeout signal')
+    assert.ok(elapsed >= 200, `aborted at the default budget, not immediately (${elapsed} ms)`)
+    assert.ok(elapsed < 5000, `aborted by the default budget, not hung (${elapsed} ms)`)
+  })
+
   it('reports non-2xx responses without throwing', async () => {
     const deny = createServer((req, res) => { res.writeHead(401); res.end() })
     deny.listen(0, '127.0.0.1')
     await once(deny, 'listening')
     try {
-      const result = await runEmit({
+      const result = await emit({
         hookEventArg: 'session_start',
         stdinText: '{}',
         env: { CHROXY_INGEST_URL: `http://127.0.0.1:${deny.address().port}/api/events`, CHROXY_INGEST_SECRET: 'wrong' },
@@ -888,7 +916,7 @@ describe('runEmit', () => {
 
   it('returns unknown_event for unmapped hooks without touching the network', async () => {
     const countBefore = received.length
-    const result = await runEmit({ hookEventArg: 'PreCompact', stdinText: '{}', env: envFor(), now: () => NOW })
+    const result = await emit({ hookEventArg: 'PreCompact', stdinText: '{}', env: envFor(), now: () => NOW })
     assert.deepEqual(result, { sent: false, reason: 'unknown_event' })
     assert.equal(received.length, countBefore)
   })
@@ -901,7 +929,7 @@ describe('runEmit', () => {
     it('suppresses events from /tmp cwds', async () => {
       const tmpCwd = mkdtempSync('/tmp/hooks-tmpfilter-')
       const countBefore = received.length
-      const result = await runEmit({
+      const result = await emit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-tmp' }),
         // real prefixes, stated explicitly (incl. the macOS /tmp realpath)
@@ -915,7 +943,7 @@ describe('runEmit', () => {
     it('suppresses events from the home directory root (basename = username, not a project)', async () => {
       const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
       const countBefore = received.length
-      const result = await runEmit({
+      const result = await emit({
         hookEventArg: 'notification',
         stdinText: JSON.stringify({ cwd: home }),
         env: { ...envFor(), HOME: home },
@@ -929,7 +957,7 @@ describe('runEmit', () => {
       const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
       const proj = join(home, 'realproject')
       mkdirSync(join(proj, '.git'), { recursive: true })
-      const result = await runEmit({
+      const result = await emit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: proj, session_id: 's-proj' }),
         env: { ...envFor(), HOME: home },
@@ -945,7 +973,7 @@ describe('runEmit', () => {
       mkdirSync(wt, { recursive: true })
 
       const countBefore = received.length
-      const start = await runEmit({
+      const start = await emit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: wt, session_id: 's-wt' }),
         env: envFor(),
@@ -954,7 +982,7 @@ describe('runEmit', () => {
       assert.deepEqual(start, { sent: false, reason: 'non_project_cwd' })
       assert.equal(received.length, countBefore, 'worktree SessionStart suppressed')
 
-      const stop = await runEmit({
+      const stop = await emit({
         hookEventArg: 'subagent_stop',
         stdinText: JSON.stringify({ cwd: wt, session_id: 's-wt' }),
         env: envFor(),
@@ -974,7 +1002,7 @@ describe('runEmit', () => {
       const env = { ...envFor(), CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
 
       const countBefore = received.length
-      const start = await runEmit({
+      const start = await emit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: wt, session_id: 's-cwt' }),
         env,
@@ -983,7 +1011,7 @@ describe('runEmit', () => {
       assert.deepEqual(start, { sent: false, reason: 'non_project_cwd' })
       assert.equal(received.length, countBefore, 'chroxy worktree SessionStart suppressed')
 
-      const stop = await runEmit({
+      const stop = await emit({
         hookEventArg: 'subagent_stop',
         stdinText: JSON.stringify({ cwd: wt, session_id: 's-cwt' }),
         env,
@@ -997,7 +1025,7 @@ describe('runEmit', () => {
 
     it('CHROXY_HOOKS_SKIP_CWD_FILTER=1 bypasses the filter (test/debug escape hatch)', async () => {
       const tmpCwd = mkdtempSync('/tmp/hooks-tmpfilter-')
-      const result = await runEmit({
+      const result = await emit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-bypass' }),
         env: {
