@@ -106,6 +106,7 @@ export {
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
+  ServerSessionStatusSchema,
   ServerProviderListSchema,
   ServerErrorSchema,
   ServerPushTokenErrorSchema,

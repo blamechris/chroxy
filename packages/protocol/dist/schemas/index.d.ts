@@ -6,3 +6,4 @@
 export * from './client.ts';
 export * from './server.ts';
 export * from './ingest.ts';
+export * from './declared-status.ts';

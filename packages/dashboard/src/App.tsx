@@ -54,7 +54,7 @@ import { InputBar, type FileAttachment, type ImageAttachment } from './component
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
 import { toMessageAttachments } from './utils/attachment-preview'
-import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession } from './utils/pendingPermissions'
+import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession, withDecisionCounts } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
@@ -1715,7 +1715,7 @@ export function App() {
   // delta. The `expiresAt > now` check (inside the helper) clears the indicator
   // on expiry/timeout, which set `options: undefined` but not `answered`.
   const pendingPermissionCounts = useConnectionStore(
-    useShallow((s) => derivePendingPermissionCounts(s.sessionStates, Date.now())),
+    useShallow((s) => withDecisionCounts(derivePendingPermissionCounts(s.sessionStates, Date.now()), s.activity)),
   )
 
   const sessionTabs: SessionTabData[] = useMemo(

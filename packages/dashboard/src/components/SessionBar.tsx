@@ -639,8 +639,8 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 <span
                   className="tab-pending-permission"
                   data-testid="tab-pending-permission"
-                  title={`${count} permission request${count === 1 ? '' : 's'} — waiting for your approval`}
-                  aria-label={`${count} permission request${count === 1 ? '' : 's'} waiting for your approval`}
+                  title={`${count} item${count === 1 ? '' : 's'} needing your attention`}
+                  aria-label={`${count} item${count === 1 ? '' : 's'} needing your attention`}
                 >
                   {count > 1 ? `!${count}` : '!'}
                 </span>
@@ -770,8 +770,8 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
           className="session-bar-pending-total"
           data-testid="pending-permission-total"
           onClick={onJumpToPending}
-          aria-label={`${pendingPermissionTotal} permission request${pendingPermissionTotal === 1 ? '' : 's'} waiting — go to the next`}
-          title={`${pendingPermissionTotal} permission request${pendingPermissionTotal === 1 ? '' : 's'} waiting — click to go to the next`}
+          aria-label={`${pendingPermissionTotal} item${pendingPermissionTotal === 1 ? '' : 's'} needing attention — go to the next`}
+          title={`${pendingPermissionTotal} item${pendingPermissionTotal === 1 ? '' : 's'} needing attention — click to go to the next`}
           type="button"
         >
           <span aria-hidden="true">⚠ {pendingPermissionTotal} pending</span>

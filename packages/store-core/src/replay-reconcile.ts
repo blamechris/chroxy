@@ -75,6 +75,7 @@
 
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 import { clearPendingCreateFailures } from './handlers/session-lifecycle'
+import { isResponseStreamBubbleId } from './replay-dedup'
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
@@ -1332,8 +1333,58 @@ export function reconcileReplayEnd(
       : tail
   // #8960 — an in-flight response is not in server history, so the replay never
   // re-delivers it and the cut above would discard it with the prefix.
-  const carried = carriedLiveMessages(messages.slice(0, cut), ordered, live, inFlightResponseIds)
-  return { swappedMessages: carried.length === 0 ? ordered : [...ordered, ...carried] }
+  const discardedPrefix = messages.slice(0, cut)
+  const freshened = freshenInFlightReplies(discardedPrefix, ordered, live, inFlightResponseIds)
+  const carried = carriedLiveMessages(discardedPrefix, freshened, live, inFlightResponseIds)
+  return { swappedMessages: carried.length === 0 ? freshened : [...freshened, ...carried] }
+}
+
+/**
+ * #9022 — the replay now holds the text an OPEN response has streamed so far (a
+ * response is recorded only at `stream_end`, so a turn paused on a permission
+ * prompt used to replay none of it). That copy is a snapshot: deltas that reached
+ * the client between the server taking it and the client applying it landed on
+ * the row in the discarded prefix, so the prefix row can be the longer one.
+ *
+ * A stream only ever appends, so for a response this client still has live, a copy
+ * that extends the replayed one is the fresher one. The replayed row keeps its place in the
+ * transcript (where the server put it) and takes the longer content; the prefix
+ * row is then not carried, since the kept row now holds its id. A prefix row that
+ * is not longer — including every client that just reloaded, which has nothing
+ * live — changes nothing.
+ */
+function freshenInFlightReplies(
+  discardedPrefix: readonly unknown[],
+  kept: readonly unknown[],
+  live: ReplayEndLiveState,
+  inFlightResponseIds: ReadonlySet<string>,
+): unknown[] {
+  const streamingId = live.streamingMessageId
+  const prefixResponses: { id: string; content: string }[] = []
+  for (const m of discardedPrefix) {
+    const id = idOf(m)
+    const { type, content } = (m ?? {}) as { type?: unknown; content?: unknown }
+    if (id !== null && type === 'response' && typeof content === 'string') prefixResponses.push({ id, content })
+  }
+  if (prefixResponses.length === 0) return kept as unknown[]
+  return kept.map((m) => {
+    const keptId = idOf(m)
+    const row = m as { type?: unknown; content?: unknown }
+    if (keptId === null || row.type !== 'response' || typeof row.content !== 'string') return m
+    // The client's layout of this stream: the bubble itself and every bubble split
+    // off it, in transcript order, joined back into the stream's text.
+    const family = prefixResponses.filter((r) => isResponseStreamBubbleId(r.id, keptId))
+    // Only a stream this client still has LIVE: a finished one is the recorded
+    // entry's to say.
+    const isLive = inFlightResponseIds.has(keptId)
+      || (typeof streamingId === 'string' && family.some((r) => r.id === streamingId))
+    if (!isLive) return m
+    const liveContent = family.map((r) => r.content).join('')
+    // Append-only: the live copy is fresher only if it EXTENDS the replayed one.
+    return liveContent.length > row.content.length && liveContent.startsWith(row.content)
+      ? { ...row, content: liveContent }
+      : m
+  })
 }
 
 /**
@@ -1377,13 +1428,20 @@ export interface ReplayEndLiveState {
  * against the replayed tail applies to all of them.
  *
  * An id the replayed tail already holds is NOT carried: the replay is then the
- * authoritative copy and carrying it would duplicate the row. That relies on a
- * server invariant: history only ever holds a COMPLETED response (the entry is
- * pushed at `stream_end` with its full content; deltas only accumulate in the
- * server's pending stream), so a replayed same-id copy is never a partial one
- * that would be poorer than the live copy we drop. Live last, as in
+ * authoritative copy and carrying it would duplicate the row. The replayed copy
+ * of a response can be a PARTIAL one since #9022 (the text an open stream has
+ * produced so far, snapshotted by the server), which could be poorer than the live
+ * copy we drop; {@link freshenInFlightReplies} runs first and moves the longer
+ * live text onto the kept row. Live last, as in
  * {@link orderByProvenance}, since an in-flight response is newer than history.
  */
+function isSplitOffKeptResponse(id: string, keptResponseIds: ReadonlySet<string>): boolean {
+  for (const keptId of keptResponseIds) {
+    if (id !== keptId && isResponseStreamBubbleId(id, keptId)) return true
+  }
+  return false
+}
+
 function carriedLiveMessages(
   discardedPrefix: readonly unknown[],
   kept: readonly unknown[],
@@ -1392,10 +1450,12 @@ function carriedLiveMessages(
 ): unknown[] {
   const streamingId = live.streamingMessageId
   const keptIds = new Set<string>()
+  const keptResponseIds = new Set<string>()
   const keptToolUseIds = new Set<string>()
   for (const m of kept) {
     const id = idOf(m)
     if (id !== null) keptIds.add(id)
+    if (id !== null && (m as { type?: unknown } | null)?.type === 'response') keptResponseIds.add(id)
     const toolUseId = (m as { toolUseId?: unknown } | null)?.toolUseId
     if (typeof toolUseId === 'string') keptToolUseIds.add(toolUseId)
   }
@@ -1415,6 +1475,11 @@ function carriedLiveMessages(
   for (const [index, m] of discardedPrefix.entries()) {
     const id = idOf(m)
     if (id === null || keptIds.has(id)) continue
+    // #9022: a bubble split off a stream the replay now holds whole. A response is
+    // one entry for the whole stream, and the client lays a long one out as `m1`,
+    // `m1-response`, `m1-post-<ts>` and chained `m1-cont-<ts>-cont-<ts>` (the shared
+    // family matcher, replay-dedup); the replayed `m1` already has their text.
+    if (isSplitOffKeptResponse(id, keptResponseIds)) continue
     const { type, thinkingStreaming, toolUseId, toolResult, toolResultImages } = m as {
       type?: unknown
       thinkingStreaming?: unknown
