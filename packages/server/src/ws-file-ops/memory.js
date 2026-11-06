@@ -399,24 +399,19 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
       return
     }
 
-    // Resolved once; claudeConfigDir() is never the filesystem root.
+    // The canonical form is read first and the async resolution second; the
+    // global memory root is used only when the two are equal and not a filesystem
+    // root, otherwise it is unavailable. claudeConfigDir() is canonical for an
+    // override but the default `<home>/.claude` is only lexical, so the canonical
+    // form comes from the same sync resolver for both.
     const claudeHome = claudeConfigDir()
+    const claudeHomeCanonical = resolveClaudeConfigDirOverride(claudeHome)
     let claudeHomeReal
     try {
       claudeHomeReal = await realpathOfDeepestAncestor(claudeHome)
     } catch {
       claudeHomeReal = normalize(claudeHome)
     }
-
-    // Use-site check: the dir was validated earlier, but it is resolved again
-    // here (async). The canonical value is the only one that may become a
-    // containment root: a second resolution that differs from it (a path swapped
-    // in between the two steps), or is a filesystem root, makes the global memory
-    // root unavailable instead of installing it. claudeConfigDir() is canonical for
-    // an override but the default `<home>/.claude` is only lexical (a symlinked
-    // HOME), so the canonical form is taken from the same resolver (sync, not the
-    // async step above) for both.
-    const claudeHomeCanonical = resolveClaudeConfigDirOverride(claudeHome)
     const claudeRootUsable = claudeHomeCanonical !== null && claudeHomeReal === claudeHomeCanonical && !isFilesystemRoot(claudeHomeReal)
     // The session's own generated-memory directory inside the config tree.
     const encoded = projectSlug(cwdReal)
