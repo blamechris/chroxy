@@ -95,4 +95,50 @@ describe('a streaming response survives a full replay swap (#8960)', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.content).toBe('part one part two')
   })
+
+  // #8965 -- in-progress content that `streamingMessageId` does not name.
+  it('keeps the pre-permission text when a permission prompt split the stream', () => {
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'before the prompt' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'permission_request', requestId: 'perm-1', tool: 'Bash', input: { command: 'ls' } })
+    // The split nulls the live stream id; the response is still open server-side.
+    expect(store.getState().sessionStates[SID]!.streamingMessageId).toBeNull()
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    const rows = msgs().filter((m) => m.id === TURN)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.content).toBe('before the prompt')
+  })
+
+  it('keeps a response whose stream_end lands inside the replay window', () => {
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'whole answer' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'stream_end', messageId: TURN })
+    send({ type: 'history_replay_end' })
+    const rows = msgs().filter((m) => m.id === TURN)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.content).toBe('whole answer')
+  })
+
+  it('does not duplicate a response the replay already delivers', () => {
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'whole answer' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'message', messageType: 'response', messageId: TURN, content: 'whole answer', timestamp: 1, historySeq: 1 })
+    send({ type: 'stream_end', messageId: TURN })
+    send({ type: 'history_replay_end', latestSeq: 1 })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1)
+  })
+
+  it('keeps a tool card that is still running', () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', toolUseId: 'tu-1', input: { command: 'sleep 9' } })
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.type === 'tool_use').map((m) => m.id)).toEqual(['tool-1'])
+  })
 })

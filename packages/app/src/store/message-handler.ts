@@ -2841,7 +2841,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
             endTargetId,
             endSession.messages,
             endLatestSeq,
-            { streamingMessageId: endSession.streamingMessageId },
+            {
+              streamingMessageId: endSession.streamingMessageId,
+              turnInFlight: endSession.isIdle === false,
+            },
           );
           if (swappedMessages) {
             updateSession(endTargetId, () => ({
