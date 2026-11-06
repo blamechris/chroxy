@@ -3,6 +3,7 @@ import { createLogger } from '../../logger.js'
 import { VALID_USERNAME_RE } from '../../utils/validation-patterns.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 import { remapClaudeSpawn } from './container-claude-spawn.js'
+import { containerUnsetEnvPrefix } from './container-claude-spawn.js'
 
 const log = createLogger('docker-backend')
 
@@ -540,7 +541,8 @@ export class DockerBackend {
       log.info(`Remapped claude spawn: ${cmd} ${args[0] ?? ''} -> ${containerCmd} ${containerArgs[0] ?? ''}`)
     }
 
-    dockerArgs.push(containerId, containerCmd, ...containerArgs)
+    // A claude spawn runs with CLAUDE_CONFIG_DIR unset (see container-claude-spawn.js).
+    dockerArgs.push(containerId, ...(remap.remapped ? containerUnsetEnvPrefix() : []), containerCmd, ...containerArgs)
 
     log.info(`docker exec stream: ${containerId.slice(0, 12)} ${containerCmd} ${containerArgs.slice(0, 2).join(' ')}`)
 

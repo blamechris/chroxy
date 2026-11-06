@@ -4,6 +4,7 @@ import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
+import { containerUnsetEnvPrefix } from './environments/backends/container-claude-spawn.js'
 
 const log = createLogger('docker-session')
 
@@ -507,7 +508,9 @@ export class DockerSession extends CliSession {
       dockerArgs.push('--env', `${key}=${val}`)
     }
 
-    dockerArgs.push(this._containerId, 'claude', ...claudeArgs)
+    // Run claude with CLAUDE_CONFIG_DIR unset: an image-defined value cannot move its
+    // config directory somewhere the permission floor does not recognise.
+    dockerArgs.push(this._containerId, ...containerUnsetEnvPrefix(), 'claude', ...claudeArgs)
 
     log.info(`Exec into container ${this._containerId.slice(0, 12)} (model: ${this.model || 'default'})`)
 

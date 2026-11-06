@@ -239,6 +239,62 @@ host-side lexical checks are kept in front of it — they need nothing from the 
 userland — and the host refuses any container reply that does not carry the preamble's
 sentinel, so a command that lost the guard is an error rather than a quiet "no matches".
 
+## 1a. The configured Claude config directory is treated like `.claude`
+
+`CLAUDE_CONFIG_DIR` moves claude's config directory. The floor and the session-cwd
+check resolve it with `utils/claude-config-dir.js` (`claudeConfigDir()`, the same
+canonical, symlink-resolved path the rest of the server uses) and apply the
+`.claude` rules to it, whatever it is named.
+
+- **Dedicated directory** (named other than `.claude`, and not `$HOME` or an
+  ancestor of it): the full (write) floor covers every path inside it; both floors
+  cover `settings*.json` directly inside it. This holds inside a Claude Code
+  worktree of the session workspace too: the worktree carve-out does not switch it
+  off.
+- **Recognised by filesystem object as well as spelling:** a case or Unicode
+  normalisation variant of a path component, or a second path to the directory,
+  is the same directory. A directory that does not exist yet is recognised through
+  its deepest existing ancestor (by filesystem object) plus the missing names. A
+  location that cannot be checked, or a request whose lookups exceed the call's
+  identity budget (separate from the component walk), floors; lookups are cached within
+  one evaluation. Missing names are compared the way the filesystem would (case,
+  Unicode normalisation, trailing dots and spaces).
+- **Grep:** a recursive search from the directory, or from a directory above it,
+  floors unless a `glob` narrows it (an exclusion-only glob does not narrow). A
+  `glob` is also tested against bare `settings*.json` when the search is near it.
+- **`.credentials.json`** is a secret file name under both floors, at any depth,
+  for the default location and any override alike.
+- **Named `.claude`, anywhere:** the existing name rules already cover it; nothing
+  extra applies.
+- **Override equal to `$HOME` or an ancestor of it** (the resolver accepts these;
+  an override inside `$HOME` is dedicated, not this case): not floored wholesale,
+  and not refused as a cwd, which would prompt for or lock out the whole home
+  directory. Only `settings*.json` directly inside it (and the credentials name)
+  floor, and only a Grep from that directory or above counts as reaching them.
+- **Override the resolver rejects** (relative, `~/x`, `/`, an alias of `/`): ignored
+  with a startup warning, so claude and the floor both use `~/.claude`.
+- **Session cwd:** a cwd inside the directory is refused at the one creation
+  boundary in `SessionManager` (an omitted cwd, the startup default, a restored
+  session and a checkpoint branch included), matched by filesystem object. A
+  worktree directory is judged before it is created or recreated. A
+  restored session that now points into it fails the restore like any other
+  (logged, parked), and the WS handlers refuse it through `validateCwdAllowed`.
+- **Containers:** a claude spawn in a Docker session (SDK and CLI) runs through
+  `env -u CLAUDE_CONFIG_DIR`, and a Kubernetes or Rancher Pod spawn asks the sidecar
+  to remove it (`unsetEnv`). Claude then uses its own `<HOME>/.claude`, which the
+  floor recognises by name, whatever the image defines; its credentials and global
+  config stay where they are. A non-claude exec is left alone.
+- **Windows:** containment is case-insensitive and drive-aware
+  (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere. The
+  Windows spelling is tested through the verdict function on every host; the full
+  predicate runs natively only on a Windows runner.
+- The directory is read from the daemon's environment, per call. Both pipelines
+  reach it through `isFlooredTarget`.
+- **Limits.** A read through a hard link to a settings file under another name is
+  not identity-checked. A bind mount of only a descendant of the directory is not
+  recognised. The floor is path-based, so the time between check and use remains
+  (see the TOCTOU note above).
+
 ## 2. Precedence — the floor beats every lenient mode
 
 The floor is checked **before** any short-circuit, on **both** pipelines:

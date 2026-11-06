@@ -2540,6 +2540,41 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     assert.equal(frame.cwd, '/workspace')
   })
 
+  it('asks the sidecar to unset CLAUDE_CONFIG_DIR for a claude spawn, and forwards no value', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: ['-p'], env: { CLAUDE_CONFIG_DIR: '/workspace/claude-data', FOO: '1' }, agentToken: 'tok',
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const frame = JSON.parse(ws.sent[0])
+    assert.deepEqual(frame.unsetEnv, ['CLAUDE_CONFIG_DIR'])
+    assert.deepEqual(frame.env, { FOO: '1' })
+  })
+
+  it('wraps a claude spawn in env -u, so it holds with a sidecar that ignores unsetEnv', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+    backend.streamCliInEnvironment('pod-x', { cmd: 'claude', args: ['-p', '--verbose'], agentToken: 'tok' })
+    await new Promise(resolve => setImmediate(resolve))
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.cmd, 'env')
+    assert.deepEqual(frame.args, ['-u', 'CLAUDE_CONFIG_DIR', 'node', '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', '-p', '--verbose'])
+  })
+
+  it('leaves a non-claude spawn alone', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+    backend.streamCliInEnvironment('pod-x', { cmd: 'ls', args: [], env: { FOO: '1' }, agentToken: 'tok' })
+    await new Promise(resolve => setImmediate(resolve))
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.unsetEnv, undefined)
+    assert.equal(frame.cmd, 'ls')
+    assert.deepEqual(frame.env, { FOO: '1' })
+  })
+
+  it('Rancher inherits the same exec path', async () => {
+    const { RancherBackend } = await import('../../../src/environments/backends/rancher.js')
+    assert.equal(RancherBackend.prototype.streamCliInEnvironment, K8sBackend.prototype.streamCliInEnvironment)
+  })
+
   it('spawn frame always carries stdin: pipe (post-#3336 — stdin is wired)', async () => {
     const { backend, ws } = makeBackendWithFakeWs()
 
@@ -3095,8 +3130,9 @@ describe('K8sBackend.streamCliInEnvironment() cli.js remap', () => {
 
     assert.equal(ws.sent.length, 1)
     const frame = JSON.parse(ws.sent[0])
-    assert.equal(frame.args[0], containerCliPath, 'cli.js arg must be remapped to container path')
-    assert.equal(frame.args[1], '-p', 'remaining args preserved')
+    assert.deepEqual(frame.args.slice(0, 3), ['-u', 'CLAUDE_CONFIG_DIR', 'node'], 'wrapped so the variable is unset')
+    assert.equal(frame.args[3], containerCliPath, 'cli.js arg must be remapped to container path')
+    assert.equal(frame.args[4], '-p', 'remaining args preserved')
   })
 
   // #8027 — native SDK shape: host binary path as `command`, flag as args[0].
@@ -3119,8 +3155,8 @@ describe('K8sBackend.streamCliInEnvironment() cli.js remap', () => {
     await new Promise(r => setImmediate(r))
 
     const frame = JSON.parse(ws.sent[0])
-    assert.equal(frame.cmd, 'node')
-    assert.deepEqual(frame.args, [containerCliPath, '--output-format', 'stream-json'])
+    assert.equal(frame.cmd, 'env')
+    assert.deepEqual(frame.args, ['-u', 'CLAUDE_CONFIG_DIR', 'node', containerCliPath, '--output-format', 'stream-json'])
   })
 
   it('does not remap a non-claude command in the Pod', async () => {
@@ -3157,7 +3193,7 @@ describe('K8sBackend.streamCliInEnvironment() cli.js remap', () => {
     await new Promise(r => setImmediate(r))
 
     const frame = JSON.parse(ws.sent[0])
-    assert.equal(frame.args[0],
+    assert.equal(frame.args[3],
       '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
       'must use default container path when none configured')
   })

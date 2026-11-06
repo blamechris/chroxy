@@ -78,3 +78,17 @@ export function remapClaudeSpawn({ cmd, args = [], containerCliPath, hostClaudeP
 
   return { cmd, args: [...args], remapped: false }
 }
+
+/**
+ * Claude resolves its config directory from `CLAUDE_CONFIG_DIR` when the container
+ * image or pod defines it, which can put it somewhere the permission floor does not
+ * recognise. A claude spawn in a container therefore runs with the variable unset,
+ * so claude uses its own `<HOME>/.claude` (recognised by name) and its credentials
+ * and global config stay where they are. One definition for every container path.
+ */
+export const CONTAINER_UNSET_ENV = Object.freeze(['CLAUDE_CONFIG_DIR'])
+
+/** The argv prefix that runs a command with {@link CONTAINER_UNSET_ENV} unset (`env -u VAR ...`). */
+export function containerUnsetEnvPrefix() {
+  return ['env', ...CONTAINER_UNSET_ENV.flatMap((name) => ['-u', name])]
+}
