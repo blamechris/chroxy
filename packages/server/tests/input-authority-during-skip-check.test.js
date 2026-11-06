@@ -6,7 +6,7 @@ import { PairingManager } from '../src/pairing.js'
 import { TokenManager } from '../src/token-manager.js'
 import { createMockSessionManager, waitFor, createSpy } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
-import { boundedRegex } from '../src/utils/bounded-regex.js'
+import { boundedRegex, createBoundedRegexMatcher } from '../src/utils/bounded-regex.js'
 
 class WsServer extends _WsServer {
   constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
@@ -29,7 +29,11 @@ async function connect(port) {
 const send = (ws, m) => ws.send(JSON.stringify(m))
 const seen = (ms, t) => waitFor(() => ms.find(m => m.type === t), { timeoutMs: 2000, label: t })
 const tick = (ms = 80) => new Promise(r => setTimeout(r, ms))
-after(() => boundedRegex.close())
+// The default 50 ms match deadline can run out on a loaded host; these tests assert dispatch, not the deadline.
+const patientMatcher = createBoundedRegexMatcher({ timeoutMs: 10_000 })
+const defaultTest = boundedRegex.test
+boundedRegex.test = (source, text, key) => patientMatcher.test(source, text, key)
+after(() => { boundedRegex.test = defaultTest; boundedRegex.close(); patientMatcher.close() })
 
 let server, pm, tm
 afterEach(() => { if (server) { server.close(); server = null } if (pm) { pm.destroy(); pm = null } if (tm) { tm.destroy(); tm = null } })

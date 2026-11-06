@@ -18,12 +18,13 @@
  * audit).
  */
 
-import { join } from 'node:path'
-import { opendir, lstat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import { opendir, lstat, realpath, readlink } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
+import { validateRawPathWithinCwd, resolveSessionCwd } from './ws-file-ops/common.js'
+import { isPathWithin } from './utils/path-containment.js'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
@@ -474,7 +475,32 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
 
   // Realpath-validate the search ROOT against cwd. Pre-fix this was a
   // weak "no ..." check that let absolute paths to /etc through.
-  const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
+  const hasPath = typeof input?.path === 'string' && input.path.length > 0
+  const validatedRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
+  // The walk opens exactly one canonical path. The session root is resolved
+  // here; a `path` root takes its on-disk spelling (`realpath`) and is checked
+  // against the workspace again. Both happen before the walk is queued, so the
+  // walk never derives its own root. A path that does not exist is kept as
+  // given, so it behaves as before (no matches).
+  let realRoot
+  if (!hasPath) {
+    realRoot = await resolveSessionCwd(cwd, cwdRealCache, cwdCacheTtl)
+  } else {
+    try {
+      realRoot = await realpath(validatedRoot)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+      realRoot = validatedRoot
+    }
+    const cwdReal = await resolveSessionCwd(cwd, cwdRealCache, cwdCacheTtl)
+    if (!isPathWithin(realRoot, cwdReal)) {
+      return { content: `EACCES: path outside workspace: ${input.path} resolves to ${realRoot}, expected under ${cwdReal}`, isError: true }
+    }
+  }
+  // The search root is resolved once per walk: checks made during the walk
+  // resolve it from this map rather than from the shared, time-limited cache.
+  const walkCache = new Map([[resolve(realRoot), { resolved: realRoot, ts: Date.now() }]])
+  const walkCacheTtl = Infinity
 
   // #7918 — a brace alternative spanning a '/' (`{dup,nested/dup}`) has no
   // representation in the per-segment compiled matcher below, which splits
@@ -557,7 +583,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   if (patterns.length === 1) {
     const literalPrefix = literalDirPrefix(patterns[0])
     if (literalPrefix) {
-      await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
+      await safeResolveRoot(literalPrefix, realRoot, walkCache, walkCacheTtl)
     }
   }
 
@@ -647,7 +673,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
         if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
         const { matchers } = compileCaseCheck(p)
         const directoryOnly = p.endsWith('/')
-        await walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+        await walkGlob({ realRoot, matchers, cwdRealCache: walkCache, cwdCacheTtl: walkCacheTtl, state, results: files, maxEntries, directoryOnly })
       }
     } finally {
       release()
@@ -797,9 +823,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * SAME verified object where the platform allows it, and hands `walk` the
  * already-open, already-verified `Dir` directly — no path is ever handed
  * back for a second, disconnected open to (not) re-check. See that
- * function's doc for exactly what this closes, how, and the residual risk
- * that remains on platforms without a way to bind directory listing to an
- * already-open fd.
+ * function's doc for how the open and the listing are bound together.
  *
  * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
  * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
@@ -931,9 +955,8 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     // which opened AND identity-verified this exact directory itself;
     // opening it a SECOND time here, by path, would throw that verification
     // away and reintroduce the very race it exists to close (see that
-    // function's doc). Only the top-level call (the walk's `realRoot`,
-    // resolved once by the caller before any concurrent tool call could
-    // interfere with it) opens fresh. A pre-opened handle must still be
+    // function's doc). Only the top-level call (the walk's `realRoot`) arrives
+    // without one and opens the root through the same function. A pre-opened handle must still be
     // closed on the early-stop path below — it is already-open regardless of
     // whether `walk` goes on to use it. `fh` (#7910 review round 3) — present
     // only on the platforms where `dh` was reopened from an already-verified
@@ -951,22 +974,21 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     let key = preOpened?.key
     let fh = preOpened?.fh
     if (!dh) {
-      try {
-        dh = await opendir(dirAbs)
-      } catch {
-        return // unreadable or gone — FAIL CLOSED: no children found, never a crash
-      }
-      // SECURITY/DoS (#7910 review round 2) — only the TOP-LEVEL (root) call
-      // reaches here without a `preOpened.key` already computed by
-      // `openVerifiedDirForDescend`; register the root itself so a symlink
-      // ANYWHERE in the tree that resolves back to it is also caught as a
-      // cycle, not just a loop among its descendants.
-      try {
-        key = dirKey(await lstat(dirAbs, { bigint: true }))
-      } catch {
-        await dh.close().catch(() => {})
-        return
-      }
+      // The top-level (root) call. `dirAbs` is the canonical path the caller
+      // validated. The root is opened like any other directory: no-follow open, identity from the opened
+      // descriptor, and (where the platform has /proc/self/fd) listing and
+      // child lookups through that descriptor. Its key is registered so a
+      // symlink ANYWHERE in the tree that resolves back to it is also caught
+      // as a cycle, not just a loop among its descendants (#7910 review
+      // round 2).
+      const rootOpen = await openVerifiedDirForDescend(
+        dirAbs, '', realRoot, cwdRealCache, cwdCacheTtl, true, visitedDirs, dirKey, __testDescendSeam, __testForcePathFallback, null,
+      )
+      if (!rootOpen) return
+      dirAbs = rootOpen.path
+      dh = rootOpen.dh
+      key = rootOpen.key
+      fh = rootOpen.fh
     }
     // Only the call that ADDED the key may remove it. A re-entry into an
     // ancestor (a crossing, or a `**`-free chain) arrives with the key already
@@ -1170,6 +1192,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           // handed back for a caller to re-resolve blind.
           const descend = await openVerifiedDirForDescend(
             childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam, __testForcePathFallback,
+            { path: dirAbs, key, fh, name },
           )
           if (descend) {
             // An ancestor re-entry is only refused while a `**` would persist
@@ -1265,26 +1288,10 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * round 2's original post-open `lstat`-compare (kept, not removed — same
  * fail-closed-on-any-mismatch shape as before).
  *
- * RESIDUAL RISK, stated rather than implied, for macOS/non-Linux platforms
- * ONLY: the `openNoFollow` check above closes the SPECIFIC attack this
- * function's doc leads with (swap-to-symlink, then swap back) universally,
- * on every platform, because that attack needs step 1's open to SUCCEED
- * despite the symlink, and it does not. What remains possible on
- * non-Linux, and is NOT closed, is a *narrower, single-swap* variant: the
- * directory is genuinely real and unswapped through the `openNoFollow`
- * verification (no ABA needed to pass it), and the attacker plants a
- * symlink for the FIRST time in the short gap between that verification
- * succeeding and the fallback's own `opendir(target)` call. That call has
- * no `O_NOFOLLOW` equivalent (Node's `opendir` accepts no flags), so it
- * would follow the symlink — caught, as before, by the immediate
- * `lstat`-compare that follows it, UNLESS the attacker also restores the
- * real directory before that specific `lstat` runs, which is the same
- * inode-identity requirement — and the same accepted residual — already
- * documented for `openNoFollow`'s own win32 emulation branch (#7874/#7280).
- * This residual window is real but categorically smaller than round 2's:
- * it requires a fresh, precisely-timed swap landing in a few-microsecond
- * gap between two back-to-back `await`s with no attacker-observable signal
- * in between, not a swap-then-restore spanning this whole function.
+ * The `openNoFollow` check refuses a link at `target` on every platform. The
+ * fallback's own `opendir(target)` takes no flags, so it is followed
+ * immediately by the `lstat`-compare above, and its entries are verified by
+ * {@link verifyEntriesUnderParent}.
  *
  * `isKnownSymlink` — true when `dirent` was ALREADY flagged as a symlink at
  * listing time and `candidateAbs` is therefore already the confinement-
@@ -1299,10 +1306,22 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * the SAME `openNoFollow`-based verified-open below — there is exactly one
  * implementation of "open and verify", not two.
  *
+ * Parent (`parent`: the directory `walk` is inside, with its dev:ino key and,
+ * where it has one, its verified fd; null for the walk's root). A child is
+ * resolved against that directory, not against its path:
+ *   - Linux (`DIR_FD_REOPEN_SUPPORTED`), plain child, parent held open: looked
+ *     up and opened as `/proc/self/fd/<parentfd>/<name>`.
+ *   - Every other open (the root, a link entry, other platforms, the forced
+ *     fallback): after the open, `confirmEntryStillInside` confirms the
+ *     directory is still the one verified.
+ * The root is canonicalized and opened here too, so it has a held fd and its
+ * children use the first form where the platform allows.
+ *
  * `__testSeam(target, phase, names?)`, if given, is the ONLY way to hit any of
- * these windows deterministically in a test; a real concurrent race is flaky
+ * these phases deterministically in a test; a real concurrent race is flaky
  * by construction (see the test file). On every platform it is awaited at
- * three points: `'before-open'` immediately before the `openNoFollow` call
+ * these phases: `'before-stat'` immediately before the lstat of a resolved link
+ * target; `'before-open'` immediately before the `openNoFollow` call
  * (the pre-open check-to-open window); `'after-open'` (#7910 review round 3)
  * immediately after `openNoFollow` + the fstat-identity check have PASSED and
  * before entries are read — proving a swap landing AFTER a successful,
@@ -1346,6 +1365,40 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * @returns {Promise<{dh: import('fs/promises').Dir | VerifiedDirLike, path: string, key: string, fh: import('fs/promises').FileHandle|null, ancestor: boolean}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
+
+/**
+ * Confirms, after a by-path open, that the directory is still the one verified:
+ *   - child entry: the parent directory the walk is inside is a non-link
+ *     directory with the dev:ino it was verified with, and the entry's relative
+ *     path resolves inside the workspace component by component
+ *     (`validateRawPathWithinCwd`);
+ *   - root (`parent` null): the opened descriptor is the directory the path
+ *     names now. Where `/proc/self/fd` exists the kernel's name for the
+ *     descriptor must equal the path; on every platform the canonical path
+ *     must still name itself and a fresh lstat of the path must have the
+ *     descriptor's dev:ino.
+ * Fails closed on any error.
+ */
+export async function confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey, opened) {
+  try {
+    if (parent === null) {
+      if (DIR_FD_REOPEN_SUPPORTED && (await readlink(`/proc/self/fd/${opened.fh.fd}`)) !== target) return false
+      if ((await realpath(target)) !== target) return false
+      const fresh = await lstat(target, { bigint: true })
+      return !fresh.isSymbolicLink() && fresh.ino !== 0n && fresh.dev === opened.stat.dev && fresh.ino === opened.stat.ino
+    }
+    const [st, resolved] = await Promise.all([
+      lstat(parent.path, { bigint: true }),
+      validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl),
+    ])
+    // `parent` carries a key, not a stat, so this compares keys rather than
+    // reusing isStillVerifiedDir.
+    if (st.isSymbolicLink() || !st.isDirectory() || st.ino === 0n || dirKey(st) !== parent.key) return false
+    return !!resolved && resolved.valid === true
+  } catch {
+    return false
+  }
+}
 // #7919 — entries the fallback verifies per round (see verifyEntriesUnderParent),
 // which is also the most names one timed double swap can disclose. Measured on
 // macOS, `**/*` over 5,050 entries (median of 5): 15ms with no verification,
@@ -1353,12 +1406,20 @@ const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 // 33ms at 32, 31ms at 128.
 const FALLBACK_VERIFY_BATCH = 32
 
-async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam, __testForcePathFallback = false) {
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam, __testForcePathFallback = false, parent = null) {
   let target = candidateAbs
   let preStat = null
+  // A plain entry is opened relative to the parent's verified descriptor where
+  // the platform can (Linux), so the parent's path is never resolved again.
+  // `openPath` is what is handed to the kernel; `target` stays the logical path.
+  const pinnedToParent = !isKnownSymlink && !!parent?.fh && DIR_FD_REOPEN_SUPPORTED && !__testForcePathFallback
+  const openPath = pinnedToParent ? `/proc/self/fd/${parent.fh.fd}/${parent.name}` : candidateAbs
+  // Anything not opened relative to a held parent descriptor is confirmed
+  // after the open (see `confirmEntryStillInside`).
+  const recheckAfterOpen = !pinnedToParent
   if (!isKnownSymlink) {
     try {
-      preStat = await lstat(candidateAbs, { bigint: true })
+      preStat = await lstat(openPath, { bigint: true })
     } catch {
       return null // gone since it was listed — nothing to descend into
     }
@@ -1381,6 +1442,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   }
 
   if (!preStat) {
+    if (__testSeam) await __testSeam(target, 'before-stat')
     try {
       preStat = await lstat(target, { bigint: true })
     } catch {
@@ -1398,7 +1460,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   // by path. See the doc above for exactly why this closes the round-2 gap.
   let fh
   try {
-    fh = await openNoFollow(target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
+    fh = await openNoFollow(pinnedToParent ? openPath : target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
   } catch {
     return null // symlink, gone, or otherwise unopenable at this instant — FAIL CLOSED
   }
@@ -1417,6 +1479,12 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   if (!sameObject) {
     // The object actually opened is not the one we checked — withhold
     // rather than trust it. Nothing has been read from it yet.
+    await fh.close().catch(() => {})
+    return null
+  }
+
+  if (recheckAfterOpen && __testSeam) await __testSeam(target, 'before-confirm')
+  if (recheckAfterOpen && !(await confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey, { fh, stat: openedStat }))) {
     await fh.close().catch(() => {})
     return null
   }
@@ -1452,8 +1520,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
 
   // Fallback (macOS/win32/other — no fd-bound reopen available): a second,
   // path-based `opendir`, immediately re-verified with round 2's original
-  // lstat-compare. See the RESIDUAL RISK paragraph above for exactly what
-  // narrow window this does — and does not — close on these platforms.
+  // lstat-compare (see the doc above).
   let dh
   try {
     dh = await opendir(target)
@@ -1481,7 +1548,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
   if (__testSeam) await __testSeam(target, 'after-verify')
-  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam), path: target, key, fh: null, ancestor }
+  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam, parent === null), path: target, key, fh: null, ancestor }
 }
 
 /**
@@ -1515,7 +1582,8 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
  * Step 2 failing means the directory was swapped at some point; the rest of
  * it is abandoned (fail closed). Step 1 answering ENOENT with the parent
  * intact is an ordinary concurrent delete; that entry is dropped. Any other
- * lstat error fails closed for the rest of the directory.
+ * lstat error skips that entry; a root where nothing could be checked
+ * throws, which Glob reports as an error result.
  *
  * RESIDUAL (not closed): the per-round timed double swap above, bounded to
  * FALLBACK_VERIFY_BATCH names each. Cost: about one lstat per entry plus one
@@ -1531,10 +1599,12 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
  * @typedef {{ name: string, isDirectory: () => boolean, isSymbolicLink: () => boolean, isFile: () => boolean }} VerifiedEntry
  * @typedef {{ [Symbol.asyncIterator]: () => AsyncGenerator<VerifiedEntry>, close: () => Promise<void> }} VerifiedDirLike
  */
-function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
+function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam, isRoot = false) {
   return {
     async * [Symbol.asyncIterator]() {
       const it = dh[Symbol.asyncIterator]()
+      let verified = 0
+      let unverifiable = 0
       try {
         let exhausted = false
         while (!exhausted) {
@@ -1544,7 +1614,7 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
             if (done) { exhausted = true; break }
             batch.push(value)
           }
-          if (batch.length === 0) return
+          if (batch.length === 0) break
           if (__testSeam) await __testSeam(parentPath, 'before-entry-verify', batch.map((d) => d.name))
           // Step 1, concurrently for the whole batch: does each name exist
           // under the parent PATH right now? Keep the lstat result — it is
@@ -1554,13 +1624,16 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
               (st) => st,
               (err) => (err && err.code === 'ENOENT' ? 'gone' : 'error'),
             )))
-          if (outcomes.includes('error')) return // could not answer — FAIL CLOSED for the rest
+          // An entry that could not be checked (anything but ENOENT) is skipped
+          // and the listing continues; see the end of the iteration for the root.
           if (__testSeam) await __testSeam(parentPath, 'after-entry-lstat', batch.map((d) => d.name))
           // Step 2, AFTER step 1: is the parent still the verified directory?
           if (!(await isStillVerifiedDir(parentPath, parentStat))) return
           for (let i = 0; i < batch.length; i++) {
             const st = outcomes[i]
             if (st === 'gone') continue // deleted concurrently, parent intact
+            if (st === 'error') { unverifiable++; continue }
+            verified++
             // Yield the entry's TYPE from the step-1 lstat, never from the
             // Dirent: `dh` may be bound to a swapped-in outside directory, and
             // a name both directories share would otherwise carry the OUTSIDE
@@ -1575,6 +1648,9 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
             }
           }
         }
+        // A root none of whose entries could be checked is an error result, not
+        // a quiet "no matches".
+        if (isRoot && unverifiable > 0 && verified === 0) throw new Error(`cannot verify the entries of ${parentPath}`)
       } finally {
         // Closes `dh` on an early exit; a no-op once it is exhausted.
         try { await it.return?.() } catch { /* already closed */ }
