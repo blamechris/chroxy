@@ -142,10 +142,14 @@ describe('a request whose bearer ended while the body was arriving changes nothi
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const VALIDATORS = new Set(['_validateBearerAuth', '_validatePrimaryBearerAuth', 'validateBearerAuth'])
 const BODY_READERS = new Set(['readJsonBodyCapped', 'readCappedJson'])
-// Reasoned exclusions: these read a body under the per-session hook credential
-// (`_validateHookAuth`, not a bearer) and only create a prompt whose answer returns to
-// the same caller, or read; nothing executes on the strength of the body.
+// Reasoned exclusions: these read a body under `_validateHookAuth` (the per-session
+// hook credential; with no hook secrets registered it accepts the primary token
+// instead) and only create a prompt whose answer returns to the same caller, or
+// read. The reason that stands is that nothing executes on the strength of the body,
+// whichever credential was accepted. Other static-secret routes (ingest) end only
+// with a restart and are out of scope for the scan.
 const REASONED_EXCLUSIONS = ['handlePermissionRequest', 'handlePermissionFloorCheck']
+const HOOK_VALIDATORS = new Set(['_validateHookAuth', 'validateHookAuth'])
 
 function calleeName(node) {
   const c = node.callee
@@ -161,7 +165,7 @@ function isBodyRead(node) {
   return name === 'on' && node.arguments[0]?.type === 'Literal' && node.arguments[0].value === 'data'
 }
 function facts(node) {
-  const out = { validates: false, reads: false, rechecks: false }
+  const out = { validates: false, hookValidates: false, reads: false, rechecks: false }
   let firstRead = Infinity
   const rechecks = []
   const walk = (n) => {
@@ -169,6 +173,7 @@ function facts(node) {
     if (n.type === 'CallExpression') {
       const name = calleeName(n)
       if (VALIDATORS.has(name)) out.validates = true
+      if (HOOK_VALIDATORS.has(name)) out.hookValidates = true
       if (isBodyRead(n)) { out.reads = true; firstRead = Math.min(firstRead, n.start) }
       if (name === 'bearerStillValid') rechecks.push(n.start)
     }
@@ -204,6 +209,29 @@ function bodyAfterBearerSites(src) {
   }
   visit(ast)
   return sites
+}
+
+/** Innermost function declarations that call a hook validator and read a body (sorted names). */
+function hookBodyReaders(src) {
+  const ast = acornParse(src, { ecmaVersion: 'latest', sourceType: 'module' })
+  const names = []
+  const visit = (n) => {
+    if (!n || typeof n.type !== 'string') return false
+    let childHit = false
+    for (const k of Object.keys(n)) {
+      const v = n[k]
+      if (Array.isArray(v)) v.forEach((x) => { if (visit(x)) childHit = true })
+      else if (v && typeof v.type === 'string') { if (visit(v)) childHit = true }
+    }
+    if (childHit) return true
+    if (n.type === 'FunctionDeclaration' && n.id) {
+      const f = facts(n)
+      if (f.hookValidates && f.reads) { names.push(n.id.name); return true }
+    }
+    return false
+  }
+  visit(ast)
+  return names.sort()
 }
 
 describe('tripwire: a named body reader after bearer validation is followed by the shared re-check', () => {
@@ -278,6 +306,41 @@ describe('tripwire: a named body reader after bearer validation is followed by t
 })
 
 // ---------------------------------------------------------------------------
+describe('the exclusion roster matches the hook-credential routes that read a body, both ways', () => {
+  const walkSrc = (d, out = []) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const f = join(d, e.name)
+      if (e.isDirectory()) walkSrc(f, out)
+      else if (e.name.endsWith('.js')) out.push(f)
+    }
+    return out
+  }
+
+  it('every hook-validated body reader is listed, and every listed name is one', () => {
+    const found = []
+    for (const f of walkSrc(SRC)) {
+      const src = readFileSync(f, 'utf8')
+      if (!/validateHookAuth/.test(src)) continue
+      found.push(...hookBodyReaders(src))
+    }
+    assert.deepEqual(found.sort(), [...REASONED_EXCLUSIONS].sort())
+  })
+
+  it('positive control: a third hook-credential route that reads a body is found', () => {
+    const third = `
+      function handleThing(req, res) {
+        if (!validateHookAuth(req, res)) return
+        readJsonBodyCapped(req, res, 10).then((b) => { change(b) })
+      }
+      function handleNoBody(req, res) {
+        if (!validateHookAuth(req, res)) return
+        res.end('ok')
+      }`
+    assert.deepEqual(hookBodyReaders(third), ['handleThing'])
+    assert.equal(REASONED_EXCLUSIONS.includes('handleThing'), false)
+  })
+})
+
 describe('the shared re-check helper', () => {
   const pairing = (valid, live) => ({ isSessionTokenValid: () => valid, isSessionTokenLive: () => live })
   const req = (token) => ({ headers: { authorization: `Bearer ${token}` } })

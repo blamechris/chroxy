@@ -230,3 +230,36 @@ describe('the placeholder lock is released even if the authority check throws', 
     assert.equal(b.s1.sendMessage.callCount, 1, 'a later input was accepted')
   })
 })
+
+describe('the input request is released even if the authority check throws after the evaluator', () => {
+  const ID = '1c2d3e4f-5061-4b7c-9d8e-0f1a2b3c4d5e'
+  it('the same input id is accepted when retried', async () => {
+    const b = await boot()
+    b.s1.promptEvaluator = true
+    b.s1.promptEvaluatorSkipPattern = '^please'
+    const token = b.mint('session-1')
+    const c = await connect(b.port)
+    send(c.ws, { type: 'auth', token, protocolVersion: 1, capabilities: ['input_context_v1'] })
+    await seen(c.messages, 'auth_ok')
+    await tick(30)
+    const [ws] = recordFor(token)
+    const msg = { type: 'input', data: 'nomatch refactor the parser thoroughly today', sessionId: 'session-1', clientMessageId: ID }
+    let evaluated = false
+    server._handlerCtx.evaluateDraft = async () => { evaluated = true; return { verdict: 'forward' } }
+    const real = server._handlerCtx.transport.isConnectionAuthorized
+    // Only the check made after the evaluator has run throws.
+    server._handlerCtx.transport.isConnectionAuthorized = (...a) => {
+      if (evaluated) throw new Error('check failed')
+      return real.apply(server._handlerCtx.transport, a)
+    }
+    try {
+      await server._handleMessage(ws, msg).catch(() => {})
+    } finally { server._handlerCtx.transport.isConnectionAuthorized = real }
+    assert.equal(evaluated, true, 'the evaluator ran')
+    assert.equal(b.s1.sendMessage.callCount, 0)
+    send(c.ws, msg)
+    const ack = await waitFor(() => c.messages.find((m) => m.type === 'input_ack' && m.status === 'accepted'), { timeoutMs: 3000, label: 'accepted ack' })
+    assert.equal(ack.delivery, 'dispatch_started')
+    assert.equal(b.s1.sendMessage.callCount, 1)
+  })
+})
