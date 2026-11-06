@@ -713,8 +713,15 @@ export class PairingManager extends EventEmitter {
     if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
       this._sweepSessionTokens()
       if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
-        const oldest = this._sessionTokens.keys().next().value
-        this._dropSessionToken(oldest, 'evicted')
+        // Evict the least recently USED token (createdAt slides on every
+        // authentication and keepalive), not the oldest by insertion: a connected,
+        // recently used device must outlive an abandoned one.
+        let victim = null
+        let oldestUse = Infinity
+        for (const [stored, meta] of this._sessionTokens) {
+          if (meta.createdAt < oldestUse) { oldestUse = meta.createdAt; victim = stored }
+        }
+        this._dropSessionToken(victim, 'evicted')
       }
     }
     this._sessionTokens.set(token, meta)

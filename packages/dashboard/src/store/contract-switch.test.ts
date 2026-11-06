@@ -133,6 +133,9 @@ function seedStore(fx: ContractFixture) {
   const store = createMockStore({
     connectionPhase: 'connected',
     socket: null,
+    // credential_invalidated forgets the credential through these store actions.
+    updateServer: () => {},
+    clearSavedConnection: () => {},
     sessions: [],
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessionStates,

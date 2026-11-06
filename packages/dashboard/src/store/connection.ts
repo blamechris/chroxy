@@ -111,6 +111,7 @@ import {
   bumpConnectionAttemptId,
   disconnectedAttemptId,
   setDisconnectedAttemptId,
+  markCredentialSuspect,
   lastConnectedUrl,
   setLastConnectedUrl,
   nextReconnectAttempt,
@@ -3501,16 +3502,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // (#7411) — see `clearTransientSessionStatePatch` for what it clears.
       sweepTransientSessionState(get);
 
-      // The server ended this connection because its pairing token is no longer
-      // valid (revoked / expired / evicted). Reconnecting with that token can
-      // only fail, so stop: forget the credential for THIS server entry only and
-      // fall back to the unpaired state (tokenless entry, disconnected, with the
-      // re-pair copy), as a rejected pairing does.
-      if (isCredentialInvalidClose(event?.code) && disconnectedAttemptId !== myAttemptId) {
-        setDisconnectedAttemptId(myAttemptId);
-        if (ownedServerId) get().updateServer(ownedServerId, { token: '' });
-        get().clearSavedConnection();
-        set({ connectionPhase: 'disconnected', connectionError: getWsCloseMessage(event!.code) });
+      // The server closed an AUTHENTICATED connection with the credential-invalid
+      // code. A close code is not authenticated evidence (on a plain ws:// LAN link
+      // an intermediary can inject one), so it only stops auto-reconnect and shows
+      // the disconnected / pair-again state; the credential is kept so the user can
+      // retry. The server's authenticated `credential_invalidated` notice (or a
+      // later `auth_fail` invalid_token for this token) is what forgets it.
+      // Advancing the attempt id also kills a retry that `onerror` armed first.
+      if (isCredentialInvalidClose(event?.code) && wasConnected && disconnectedAttemptId !== myAttemptId) {
+        bumpConnectionAttemptId();
+        setDisconnectedAttemptId(connectionAttemptId);
+        markCredentialSuspect(token);
+        set({
+          connectionPhase: 'disconnected',
+          connectionError: getWsCloseMessage(event!.code),
+          reconnectRetryAt: null,
+        });
       } else if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
         // #4771: surface close-code-specific copy via the shared mapping
         // — e.g. a 4008 backpressure eviction now reads "Connection

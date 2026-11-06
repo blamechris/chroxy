@@ -267,6 +267,31 @@ export function handleAuthFail(msg: Record<string, unknown>): { reason: string }
 }
 
 /**
+ * Parse a `credential_invalidated` notice: the server's authenticated statement
+ * (it arrives on the normal, possibly encrypted channel) that the stored
+ * credential this connection used is no longer valid. A client may forget that
+ * credential on receiving it. A bare close code is NOT this evidence.
+ */
+export function handleCredentialInvalidated(msg: Record<string, unknown>): { reason: string } {
+  const raw = msg.reason
+  return { reason: typeof raw === 'string' && raw ? raw : 'invalid' }
+}
+
+/**
+ * Whether an `auth_fail` justifies forgetting the saved credential: only a
+ * rejection of the token (`invalid_token`) for the SAME token a previous
+ * authenticated connection ended on (a bare 4401 close marked it suspect). Any
+ * other reason (rate limit, protocol version, timeout) says nothing about the token.
+ */
+export function shouldForgetOnAuthFail(
+  reason: string,
+  suspectToken: string | null,
+  attemptToken: string | null | undefined,
+): boolean {
+  return reason === 'invalid_token' && suspectToken != null && suspectToken === attemptToken
+}
+
+/**
  * Extract the validated `publicKey` from a `key_exchange_ok` message.
  *
  * Returns null when the field is missing, empty, or non-string — matches the

@@ -20,6 +20,7 @@
  */
 
 import { createLogger } from '../logger.js'
+import { assertAuthorized, authorizedFor } from '../connection-authority.js'
 import { isOrchestrationEnabled } from '../config.js'
 import { validateCwdAllowed } from '../handler-utils.js'
 import { makeSurveyHandler, makeActionError } from '../control-room/handler-factory.js'
@@ -162,6 +163,7 @@ function orchestration_run_start(ws, client, msg, ctx) {
     // (`createRun`, which takes this bag) from driving it (`startRun(runId)`,
     // which awaits the whole planning turn). The ack must carry the newly-minted
     // runId without waiting for planning, so the engine composes the two (#7138).
+    .then(() => { assertAuthorized(authorizedFor(ctx, client)) })
     .then(() => manager(ctx).createAndStartRun({
       title: msg.title ?? null,
       goal: msg.epicPrompt ?? null,
@@ -190,6 +192,7 @@ function orchestration_gate_response(ws, client, msg, ctx) {
   if (!enabled(ctx)) return
   if (!guardAction(ws, client, msg, ctx, { requirePrimary: gateNeedsPrimary(msg) })) return
   Promise.resolve()
+    .then(() => { assertAuthorized(authorizedFor(ctx, client)) })
     .then(() => manager(ctx).resolveGate(msg.runId, msg.gateId, {
       decision: msg.decision,
       note: msg.note ?? null,
@@ -206,6 +209,7 @@ function orchestration_run_action(ws, client, msg, ctx) {
   if (!enabled(ctx)) return
   if (!guardAction(ws, client, msg, ctx)) return
   Promise.resolve()
+    .then(() => { assertAuthorized(authorizedFor(ctx, client)) })
     .then(() => manager(ctx).runAction(msg.runId, msg.action))
     .then(() => sendAck(ws, ctx, msg, msg.action, msg.runId))
     // 'unsupported' is a PERMANENT no — this engine will never serve the action
@@ -221,6 +225,7 @@ function orchestration_run_annotate(ws, client, msg, ctx) {
   if (!enabled(ctx)) return
   if (!guardAction(ws, client, msg, ctx)) return
   Promise.resolve()
+    .then(() => { assertAuthorized(authorizedFor(ctx, client)) })
     .then(() => manager(ctx).annotate(msg.runId, {
       baselineSessionId: msg.baselineSessionId ?? null, verdictQuality: msg.verdictQuality ?? undefined,
     }))

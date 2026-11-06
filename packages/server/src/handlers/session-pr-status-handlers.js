@@ -60,6 +60,7 @@
  * back-reference. See docs/security/bearer-token-authority.md §4.
  */
 import { surveySessionPrStatus } from '../session-pr-status.js'
+import { authorizedFor, stillAuthorized } from '../connection-authority.js'
 import { createSurveyThrottle } from './survey-throttle.js'
 import { createLogger } from '../logger.js'
 import { getErrorMessage } from '../utils/error-message.js'
@@ -251,7 +252,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     // #7427: arm the CI watcher off the reading we just paid for. Absent
     // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.
     try {
-      ctx.services?.sessionCiWatcher?.observe?.(targetSessionId, snapshot)
+      if (stillAuthorized(authorizedFor(ctx, client))) ctx.services?.sessionCiWatcher?.observe?.(targetSessionId, snapshot)
     } catch (err) {
       log.warn(`session_pr_status_request: ci-watch observe failed: ${getErrorMessage(err, 'unknown error')}`)
     }

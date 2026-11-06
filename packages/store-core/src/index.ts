@@ -750,6 +750,8 @@ export {
   handleAuthOk,
   parseConnectedClients,
   handleAuthFail,
+  handleCredentialInvalidated,
+  shouldForgetOnAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
   handleCheckpointCreated,

@@ -6,6 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { createHash, randomUUID } from 'node:crypto'
+import { authorizedFor } from '../connection-authority.js'
 import { InputContextEnvelopeSchema } from '@chroxy/protocol/schemas'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
@@ -639,6 +640,7 @@ async function handleInput(ws, client, msg, ctx) {
       // turn that just ended) so restoring this pre-turn checkpoint can truncate
       // the conversation to here. Undefined on providers that don't track it.
       boundaryMessageId: entry.session.lastMessageUuid,
+      isAuthorized: authorizedFor(ctx, client),
     }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
   // Adopt the sender's clientMessageId if present and well-formed; otherwise
@@ -980,6 +982,7 @@ async function handleInput(ws, client, msg, ctx) {
       clientMessageId: messageId,
       ...(inputRecord || seedClaim ? { onInputAdmission } : {}),
       ...(preparedContext?.context ? { context: preparedContext.context } : {}),
+      isAuthorized: authorizedFor(ctx, client),
     })
   } catch (err) {
     settleSeed(false)

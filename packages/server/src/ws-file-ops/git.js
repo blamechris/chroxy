@@ -37,6 +37,7 @@
  * onto the plain 'modified' unstaged half either.
  */
 import { normalize, resolve, join, relative, sep } from 'path'
+import { stillAuthorized } from '../connection-authority.js'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFile, unlink } from 'fs/promises'
@@ -566,7 +567,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
   }
 
   /** Stage specified files via git add */
-  async function gitStage(ws, files, sessionCwd) {
+  async function gitStage(ws, files, sessionCwd, isAuthorized) {
     if (!sessionCwd) {
       sendFn(ws, { type: 'git_stage_result', error: 'Git staging is not available in this mode' })
       return
@@ -614,6 +615,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         // #7281 — what git receives is the path we validated, not the client's string.
         validatedFiles.push(pathspec)
       }
+      if (!stillAuthorized(isAuthorized)) return
       await execFileAsync(GIT, ['--literal-pathspecs', 'add', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
@@ -627,7 +629,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
   }
 
   /** Unstage specified files via git reset HEAD */
-  async function gitUnstage(ws, files, sessionCwd) {
+  async function gitUnstage(ws, files, sessionCwd, isAuthorized) {
     if (!sessionCwd) {
       sendFn(ws, { type: 'git_unstage_result', error: 'Git unstaging is not available in this mode' })
       return
@@ -675,6 +677,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         // #7281 — what git receives is the path we validated, not the client's string.
         validatedFiles.push(pathspec)
       }
+      if (!stillAuthorized(isAuthorized)) return
       await execFileAsync(GIT, ['--literal-pathspecs', 'reset', 'HEAD', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
@@ -688,7 +691,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
   }
 
   /** Create a git commit with the given message */
-  async function gitCommit(ws, message, sessionCwd) {
+  async function gitCommit(ws, message, sessionCwd, isAuthorized) {
     if (!sessionCwd) {
       sendFn(ws, { type: 'git_commit_result', hash: null, message: null, error: 'Git commit is not available in this mode' })
       return
@@ -702,6 +705,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
     try {
       await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
+      if (!stillAuthorized(isAuthorized)) return
       const { stdout } = await execFileAsync(GIT, ['commit', '-m', message.trim()], {
         cwd: cwdReal,
         timeout: 30000,
@@ -740,7 +744,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
    * @param {{ title?: string, body?: string, base?: string, draft?: boolean }} opts
    * @param {string|null} sessionCwd
    */
-  async function gitCreatePR(ws, opts, sessionCwd) {
+  async function gitCreatePR(ws, opts, sessionCwd, isAuthorized) {
     const title = typeof opts?.title === 'string' ? opts.title.trim() : ''
     const body = typeof opts?.body === 'string' ? opts.body : ''
     const requestedBase = typeof opts?.base === 'string' ? opts.base.trim() : ''
@@ -781,6 +785,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       }
 
       // 3. Push the branch (set upstream). No-op when already up to date.
+      if (!stillAuthorized(isAuthorized)) return
       try {
         await execImpl(GIT, ['push', '--set-upstream', 'origin', branch], { cwd: cwdReal, timeout: 120000 })
       } catch (err) {
@@ -794,6 +799,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       // inlined. A body-file sidesteps the limit entirely and keeps the body out
       // of argv. The empty-body case writes an empty file (gh reads it as an
       // empty body without opening an editor). (#6934)
+      if (!stillAuthorized(isAuthorized)) return
       const bodyFile = join(tmpdir(), `chroxy-pr-body-${randomBytes(8).toString('hex')}.md`)
       let stdout = ''
       let stderr = ''

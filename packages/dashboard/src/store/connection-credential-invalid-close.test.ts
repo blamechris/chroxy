@@ -1,7 +1,8 @@
 /**
  * A server that ends a connection because the pairing token it authenticated
- * with is no longer valid (close code 4401) is not retried with that token: the
- * client forgets that server entry's credential and lands on the unpaired state.
+ * with is no longer valid sends an authenticated `credential_invalidated` notice
+ * and then closes with 4401. The close code alone (forgeable on a plain ws://
+ * link) only stops auto-reconnect; the notice is what forgets the credential.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 // The literal the server sends (ws-server.js WS_CLOSE_CREDENTIAL_INVALID).
@@ -44,7 +45,7 @@ const { resetReconnectAttempt } = await import('./message-handler')
 const URL_A = 'wss://server-a.example.com/ws'
 const URL_B = 'wss://server-b.example.com/ws'
 
-async function connectToA(): Promise<{ socket: MockWebSocket; serverId: string }> {
+async function connectToA(authenticate = true): Promise<{ socket: MockWebSocket; serverId: string }> {
   const s = useConnectionStore.getState()
   const a = s.addServer('A', URL_A, 'tok-a')
   vi.advanceTimersByTime(5) // ids are time + random based; both are frozen here
@@ -56,7 +57,11 @@ async function connectToA(): Promise<{ socket: MockWebSocket; serverId: string }
   const socket = MockWebSocket.instances[before]!
   socket.onopen?.()
   await vi.advanceTimersByTimeAsync(0)
-  useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false })
+  if (authenticate) {
+    // A real auth_ok through the production onmessage path.
+    socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+  }
   return { socket, serverId: a.id }
 }
 
@@ -79,7 +84,9 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('close code 4401 (the credential for this connection is no longer valid)', () => {
+const frame = (socket: MockWebSocket, msg: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(msg) })
+
+describe('close code 4401 alone (not authenticated evidence)', () => {
   it('control: an ordinary drop reconnects with the saved credential', async () => {
     const { socket } = await connectToA()
     const before = MockWebSocket.instances.length
@@ -88,28 +95,108 @@ describe('close code 4401 (the credential for this connection is no longer valid
     expect(MockWebSocket.instances.length).toBeGreaterThan(before)
   })
 
-  it('does not reconnect', async () => {
-    const { socket } = await connectToA()
+  it('stops reconnecting, shows the pair-again copy, and erases nothing', async () => {
+    const { socket, serverId } = await connectToA()
     const before = MockWebSocket.instances.length
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(MockWebSocket.instances.length).toBe(before)
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).toBe('disconnected')
+    expect(s.connectionError).toMatch(/pair it again/i)
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    expect(s.savedConnection).toEqual({ url: URL_A, token: 'tok-a' })
+  })
+
+  it('does not reconnect when an error armed the retry before the close arrived', async () => {
+    const { socket } = await connectToA()
+    const before = MockWebSocket.instances.length
     socket.onerror?.()
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
     await vi.advanceTimersByTimeAsync(120_000)
     expect(MockWebSocket.instances.length).toBe(before)
     expect(useConnectionStore.getState().connectionPhase).toBe('disconnected')
   })
 
-  it('forgets the credential of that server entry only', async () => {
+  it('a 4401 on a connection that never authenticated changes nothing durable', async () => {
+    const { socket, serverId } = await connectToA(false)
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    const s = useConnectionStore.getState()
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    expect(s.savedConnection).toEqual({ url: URL_A, token: 'tok-a' })
+  })
+})
+
+describe('the authenticated credential_invalidated notice', () => {
+  it('forgets the credential of that server entry only, and does not reconnect', async () => {
+    const { socket, serverId } = await connectToA()
+    const before = MockWebSocket.instances.length
+    frame(socket, { type: 'credential_invalidated', reason: 'revoked' })
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    await vi.advanceTimersByTimeAsync(120_000)
+    const s = useConnectionStore.getState()
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
+    expect(s.serverRegistry.find((e) => e.wsUrl === URL_B)?.token).toBe('tok-b')
+    expect(s.savedConnection).toBeNull()
+    expect(s.connectionPhase).toBe('disconnected')
+    expect(s.connectionError).toMatch(/pair it again/i)
+    expect(MockWebSocket.instances.length).toBe(before)
+  })
+})
+
+describe('the notice also stops a retry that an error armed', () => {
+  it('does not reconnect after notice then error', async () => {
+    const { socket } = await connectToA()
+    const before = MockWebSocket.instances.length
+    frame(socket, { type: 'credential_invalidated', reason: 'expired' })
+    socket.onerror?.()
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(MockWebSocket.instances.length).toBe(before)
+  })
+})
+
+describe('an auth_fail on a later attempt', () => {
+  async function laterAttempt(): Promise<MockWebSocket> {
+    const before = MockWebSocket.instances.length
+    useConnectionStore.getState().connect(URL_A, 'tok-a')
+    await vi.advanceTimersByTimeAsync(0)
+    const next = MockWebSocket.instances[before]!
+    next.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    return next
+  }
+
+  it('invalid_token for the token a bare 4401 ended on forgets it', async () => {
     const { socket, serverId } = await connectToA()
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
-    const { serverRegistry, savedConnection } = useConnectionStore.getState()
-    expect(serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
-    expect(serverRegistry.find((e) => e.wsUrl === URL_B)?.token).toBe('tok-b')
-    expect(savedConnection).toBeNull()
+    const next = await laterAttempt()
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    const s = useConnectionStore.getState()
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
+    expect(s.serverRegistry.find((e) => e.wsUrl === URL_B)?.token).toBe('tok-b')
   })
 
-  it('tells the user to pair again', async () => {
-    const { socket } = await connectToA()
+  it('invalid_token with no preceding authenticated drop erases nothing', async () => {
+    const { serverId } = await connectToA()
+    useConnectionStore.setState({ connectionPhase: 'disconnected' })
+    const next = await laterAttempt()
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+
+  it('a 4401 on a connection that never authenticated does not make a later invalid_token erase', async () => {
+    const { socket, serverId } = await connectToA(false)
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
-    expect(useConnectionStore.getState().connectionError).toMatch(/pair it again/i)
+    const next = await laterAttempt()
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+
+  it('a different failure reason after a bare 4401 erases nothing', async () => {
+    const { socket, serverId } = await connectToA()
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    const next = await laterAttempt()
+    frame(next, { type: 'auth_fail', reason: 'rate_limited' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
   })
 })

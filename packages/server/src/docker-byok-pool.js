@@ -63,6 +63,7 @@
  */
 
 import { execFile as defaultExecFile } from 'child_process'
+import { assertAuthorized } from './connection-authority.js'
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 
@@ -513,10 +514,11 @@ export class DockerContainerPool extends EventEmitter {
    *
    * @returns {Promise<number>}
    */
-  async drainAll() {
+  async drainAll({ isAuthorized } = {}) {
     if (this._shuttingDown) return 0
     let total = 0
     for (const key of [...this._entries.keys()]) {
+      assertAuthorized(isAuthorized)
       total += await this._drainBucket(key, 'drained')
     }
     return total

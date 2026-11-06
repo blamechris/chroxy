@@ -84,10 +84,10 @@ export declare const RunGateSchema: z.ZodObject<{
     }>;
     status: z.ZodEnum<{
         pending: "pending";
+        expired: "expired";
         approved: "approved";
         rejected: "rejected";
         skipped: "skipped";
-        expired: "expired";
         revise_requested: "revise_requested";
     }>;
     summary: z.ZodString;
@@ -328,10 +328,10 @@ export declare const RunDetailSchema: z.ZodObject<{
         }>;
         status: z.ZodEnum<{
             pending: "pending";
+            expired: "expired";
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";
-            expired: "expired";
             revise_requested: "revise_requested";
         }>;
         summary: z.ZodString;
@@ -578,10 +578,10 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             }>;
             status: z.ZodEnum<{
                 pending: "pending";
+                expired: "expired";
                 approved: "approved";
                 rejected: "rejected";
                 skipped: "skipped";
-                expired: "expired";
                 revise_requested: "revise_requested";
             }>;
             summary: z.ZodString;
@@ -770,10 +770,10 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
         }>;
         status: z.ZodEnum<{
             pending: "pending";
+            expired: "expired";
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";
-            expired: "expired";
             revise_requested: "revise_requested";
         }>;
         summary: z.ZodString;

@@ -111,6 +111,7 @@ import {
   bumpConnectionAttemptId,
   disconnectedAttemptId,
   setDisconnectedAttemptId,
+  markCredentialSuspect,
   lastConnectedUrl,
   setLastConnectedUrl,
   nextReconnectAttempt,
@@ -1035,8 +1036,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   clearSavedConnection: async () => {
+    // Only forget what was asked to be forgotten: a new pairing installed while the
+    // storage wipe was pending must survive it.
+    const clearing = useConnectionLifecycleStore.getState().savedConnection;
     await clearSavedCredentials();
-    useConnectionLifecycleStore.getState().setSavedConnection(null);
+    const current = useConnectionLifecycleStore.getState().savedConnection;
+    const stillSame = current === clearing
+      || (current != null && clearing != null && current.url === clearing.url && current.token === clearing.token);
+    if (stillSame) useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
   // #5518 — auto-select the best endpoint for a saved connection, then connect.
@@ -1607,13 +1614,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
         return;
       }
-      // The server ended this connection because its pairing token is no longer
-      // valid (revoked / expired / evicted). Reconnecting with that token can
-      // only fail, so stop: forget the saved credential and fall back to the
-      // disconnected / unpaired state with the re-pair copy.
-      if (isCredentialInvalidClose(event.code) && disconnectedAttemptId !== myAttemptId) {
+      // The server closed an AUTHENTICATED connection with the credential-invalid
+      // code. A close code is not authenticated evidence (on a plain ws:// LAN link
+      // an intermediary can inject one), so it only stops auto-reconnect and shows
+      // the disconnected / pair-again state; the credential is kept so the user can
+      // retry. The server's authenticated `credential_invalidated` notice (or a
+      // later `auth_fail` invalid_token for this token) is what forgets it.
+      // Advancing the attempt id also kills a retry that `onerror` armed first.
+      if (isCredentialInvalidClose(event.code) && wasConnected && disconnectedAttemptId !== myAttemptId) {
+        bumpConnectionAttemptId();
         setDisconnectedAttemptId(connectionAttemptId);
-        void get().clearSavedConnection();
+        markCredentialSuspect(socketCtx.token);
         useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
         useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(event.code) ?? '', 0);
         return;

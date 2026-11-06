@@ -4,6 +4,7 @@
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
 import { realpathSync } from 'fs'
+import { authorizedFor } from '../connection-authority.js'
 import { sendSessionError, broadcastFocusChanged, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
@@ -56,6 +57,7 @@ async function handleCreateCheckpoint(ws, client, msg, ctx) {
       // #6766: capture the conversation fork boundary so a later restore can
       // truncate the transcript to this point (SDK provider only; others → null).
       boundaryMessageId: entry.session.lastMessageUuid,
+      isAuthorized: authorizedFor(ctx, client),
     })
     ctx.transport.send(ws, {
       type: 'checkpoint_created',
@@ -184,7 +186,7 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     // checkpoint WITHOUT touching the working tree.
     let checkpoint
     if (restoreFiles) {
-      checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+      checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId, { isAuthorized: authorizedFor(ctx, client) })
     } else {
       checkpoint = ctx.services.checkpointManager.getCheckpoint(sid, msg.checkpointId)
       if (!checkpoint) throw new Error(`Checkpoint not found: ${msg.checkpointId}`)
@@ -265,6 +267,8 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       cwd: checkpoint.cwd,
       name: `Rewind: ${checkpoint.name}`,
     })
+    // The new session exists; do not re-home or announce for a connection that has ended.
+    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
     // #5563: index-maintaining helper. Checkpoint restore moves the active
     // session WITHOUT subscribing, so the index must follow activeSessionId.
     ctx.transport.setActiveSession(client, newSessionId)

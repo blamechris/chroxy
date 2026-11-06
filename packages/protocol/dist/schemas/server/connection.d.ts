@@ -118,6 +118,15 @@ export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;
     reason: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerCredentialInvalidatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"credential_invalidated">;
+    reason: z.ZodEnum<{
+        revoked: "revoked";
+        expired: "expired";
+        evicted: "evicted";
+        invalid: "invalid";
+    }>;
+}, z.core.$strip>;
 export declare const ServerPairFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair_fail">;
     reason: z.ZodString;

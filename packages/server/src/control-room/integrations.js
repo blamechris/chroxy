@@ -49,6 +49,7 @@
  */
 
 import { execFile } from 'child_process'
+import { assertAuthorized } from '../connection-authority.js'
 import { promisify } from 'util'
 import { readFile, stat } from 'fs/promises'
 import { join } from 'path'
@@ -313,9 +314,10 @@ export function parseRepoMemoryIndexCounts(stdout) {
  * @returns {Promise<{ counts: object|null }>}
  */
 export async function runRepoMemoryIndex(repoPath, opts = {}) {
-  const { bin, _execFile = execFileAsync } = opts
+  const { bin, _execFile = execFileAsync, isAuthorized } = opts
   const binPath = await resolveRepoMemoryBin(_execFile, bin)
   if (!binPath) throw new Error(CLI_MISSING_NOTE)
+  assertAuthorized(isAuthorized)
   let stdout
   try {
     ;({ stdout } = await _execFile(binPath, ['index', repoPath], INDEX_EXEC_OPTS))
@@ -375,7 +377,7 @@ function rerunFailure(reason, message) {
  * @returns {Promise<{ runId: number }>}
  */
 export async function runRepoRelayRerun(repoPath, runId, opts = {}) {
-  const { _execFile = execFileAsync } = opts
+  const { _execFile = execFileAsync, isAuthorized } = opts
 
   const ghPath = await probeBinOnPath(_execFile, 'gh')
   if (!ghPath) throw rerunFailure('gh-missing', GH_MISSING_NOTE)
@@ -418,6 +420,7 @@ export async function runRepoRelayRerun(repoPath, runId, opts = {}) {
       `run ${runId} did not fail (${state}) — only failed runs can be re-run`)
   }
 
+  assertAuthorized(isAuthorized)
   try {
     await _execFile(ghPath, ['run', 'rerun', String(runId), '-R', slug], RERUN_EXEC_OPTS)
   } catch (err) {

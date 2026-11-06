@@ -224,6 +224,8 @@ function seedStore(fx: ContractFixture) {
   // side actually proves the absence rather than skipping the check.
   const infoNotifications: string[] = [];
   const store = createMockStore({
+    // credential_invalidated forgets the saved connection through this store action.
+    clearSavedConnection: jest.fn(() => Promise.resolve()),
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessions: [],
     availableProviders: [],

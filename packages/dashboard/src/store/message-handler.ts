@@ -1,4 +1,4 @@
-import { captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { getWsCloseMessage, WS_CLOSE_CREDENTIAL_INVALID, captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -49,6 +49,8 @@ import {
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
+  handleCredentialInvalidated as sharedCredentialInvalidated,
+  shouldForgetOnAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   decideKeyPinWithPairingIdentity,
   decodeEncryptionGate,
@@ -1029,6 +1031,18 @@ export function resetReconnectAttempt(): void {
 
 export function setDisconnectedAttemptId(id: number): void {
   disconnectedAttemptId = id;
+}
+
+// A bare 4401 close (not authenticated evidence) stops reconnecting but erases
+// nothing; it marks the token it ended on as suspect. Only the server's
+// authenticated `credential_invalidated` notice, or an `auth_fail` of
+// `invalid_token` for that same token on a later attempt, forgets it.
+let suspectCredentialToken: string | null = null;
+export function markCredentialSuspect(token: string | null): void {
+  suspectCredentialToken = token;
+}
+export function getSuspectCredential(): string | null {
+  return suspectCredentialToken;
 }
 
 export function setLastConnectedUrl(url: string | null): void {
@@ -4753,6 +4767,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
   switch (msg.type) {
 
     case 'auth_ok': {
+      markCredentialSuspect(null);
       // Reset replay flags — fresh auth means clean slate (#4493/#7497: clear
       // every per-session replay window so a reconnect doesn't leave a stale
       // one gating future activity bumps; `resetReplayReconcile` below IS that
@@ -5113,7 +5128,33 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       break;
     }
 
+    case 'credential_invalidated': {
+      // Authenticated notice (normal channel): the server ended this connection
+      // because its stored credential is gone. Stop reconnecting; forget the
+      // credential of THIS server entry only.
+      const { reason: invalidReason } = sharedCredentialInvalidated(msg);
+      console.log(`[ws] credential invalidated by server (${invalidReason})`);
+      bumpConnectionAttemptId();
+      setDisconnectedAttemptId(connectionAttemptId);
+      markCredentialSuspect(null);
+      if (ctx.serverId) get().updateServer(ctx.serverId, { token: '' });
+      get().clearSavedConnection();
+      set({
+        connectionPhase: 'disconnected',
+        connectionError: getWsCloseMessage(WS_CLOSE_CREDENTIAL_INVALID),
+        reconnectRetryAt: null,
+      });
+      break;
+    }
+
     case 'auth_fail': {
+      if (shouldForgetOnAuthFail(sharedAuthFail(msg).reason, suspectCredentialToken, ctx.token)) {
+        // The token a previous authenticated connection ended on is now refused
+        // outright by the server: that is the confirmation a close code is not.
+        markCredentialSuspect(null);
+        if (ctx.serverId) get().updateServer(ctx.serverId, { token: '' });
+        get().clearSavedConnection();
+      }
       ctx.socket.close();
       set({ connectionPhase: 'disconnected', socket: null });
       if (!ctx.silent) {

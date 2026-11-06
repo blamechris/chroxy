@@ -5,6 +5,7 @@
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { authorizedFor } from '../connection-authority.js'
 import { isBoundClient } from '../environments/authority.js'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
@@ -412,7 +413,7 @@ async function handleDestroySession(ws, client, msg, ctx) {
   }
 
   if (typeof ctx.sessions.sessionManager.destroySessionLocked === 'function') {
-    await ctx.sessions.sessionManager.destroySessionLocked(targetId)
+    await ctx.sessions.sessionManager.destroySessionLocked(targetId, { isAuthorized: authorizedFor(ctx, client) })
   } else {
     ctx.sessions.sessionManager.destroySession(targetId)
   }
@@ -477,7 +478,7 @@ function handleRenameSession(ws, client, msg, ctx) {
   }
 
   const doRename = typeof ctx.sessions.sessionManager.renameSessionLocked === 'function'
-    ? () => ctx.sessions.sessionManager.renameSessionLocked(targetId, newName)
+    ? () => ctx.sessions.sessionManager.renameSessionLocked(targetId, newName, { isAuthorized: authorizedFor(ctx, client) })
     : async () => ctx.sessions.sessionManager.renameSession(targetId, newName)
 
   doRename().then(success => {
@@ -771,7 +772,7 @@ async function handleRetryFailedRestore(ws, client, msg, ctx) {
     return
   }
 
-  const result = await ctx.sessions.sessionManager.retryFailedRestore(sessionId)
+  const result = await ctx.sessions.sessionManager.retryFailedRestore(sessionId, { isAuthorized: authorizedFor(ctx, client) })
 
   if (result.ok) {
     // The retried session is live again, so it now belongs in session_list.
@@ -1055,7 +1056,7 @@ async function handleRestoreArchivedSession(ws, client, msg, ctx) {
   }
   const sm = ctx.sessions.sessionManager
   const result = typeof sm.restoreArchivedSession === 'function'
-    ? await sm.restoreArchivedSession(archiveId, mode)
+    ? await sm.restoreArchivedSession(archiveId, mode, { isAuthorized: authorizedFor(ctx, client) })
     : { ok: false, mode, code: 'ARCHIVED_SESSION_NOT_FOUND', message: 'No archived session with that id' }
   if (result.ok || result.sessionId) {
     // A live session (or a re-parked one) now exists that no client has been

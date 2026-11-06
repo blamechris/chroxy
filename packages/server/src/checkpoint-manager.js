@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { assertAuthorized } from './connection-authority.js'
 import { randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
@@ -121,7 +122,7 @@ export class CheckpointManager extends EventEmitter {
    *   this message; absent → the restore is files-only for this checkpoint.
    * @returns {Promise<object>} The created checkpoint
    */
-  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId }) {
+  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId, isAuthorized }) {
     const checkpoints = this._getCheckpoints(sessionId)
 
     // Enforce max checkpoints — remove oldest if at limit
@@ -155,6 +156,7 @@ export class CheckpointManager extends EventEmitter {
     if (isGit) {
       const release = await acquireCwdLock(cwd)
       try {
+        assertAuthorized(isAuthorized)
         checkpoint.gitRef = await this._createGitSnapshot(cwd, checkpoint.id)
       } finally {
         release()
@@ -225,7 +227,7 @@ export class CheckpointManager extends EventEmitter {
    * @returns {Promise<object>} The checkpoint data (including resumeSessionId
    *   and boundaryMessageId)
    */
-  async restoreCheckpoint(sessionId, checkpointId) {
+  async restoreCheckpoint(sessionId, checkpointId, { isAuthorized } = {}) {
     const checkpoint = this.getCheckpoint(sessionId, checkpointId)
     if (!checkpoint) {
       throw new Error(`Checkpoint not found: ${checkpointId}`)
@@ -235,6 +237,7 @@ export class CheckpointManager extends EventEmitter {
     if (checkpoint.gitRef) {
       const release = await acquireCwdLock(checkpoint.cwd)
       try {
+        assertAuthorized(isAuthorized)
         await this._restoreGitSnapshot(checkpoint.cwd, checkpoint.gitRef)
       } finally {
         release()
