@@ -888,7 +888,39 @@ export function buildGrepArgs(input) {
 }
 
 const GREP_GLOB_MAX_EXPANSIONS = 32
-const GREP_EXCLUDE_ROOT_REFUSAL = 'Grep failed: this exclusion glob would also exclude the search directory itself, which grep cannot search correctly because ripgrep is not installed in this environment; use a more specific glob or omit it'
+const GREP_ENUMERATE_FIND_REFUSAL = 'Grep failed: could not list the files to search, because ripgrep is not installed in this environment and `find` could not enumerate the directory'
+const GREP_ENUMERATE_GIT_REFUSAL = 'Grep failed: could not list the files to search, because ripgrep is not installed in this environment and `git ls-files` could not enumerate the work tree'
+// How many files, and how many path characters, one fallback grep invocation is
+// handed. The character budget is what bounds argv: 32768 characters is at most
+// ~128 KiB as UTF-8, under the smallest ARG_MAX in play (macOS: 256 KiB, shared
+// with the environment) even before one more path of up to PATH_MAX is added.
+const GREP_FALLBACK_BATCH = 200
+const GREP_FALLBACK_BATCH_CHARS = 32768
+/**
+ * Prefix of the informational lines the fallback writes to stderr (a skipped
+ * unreadable directory). They are NOT failures: a no-match search that skipped a
+ * directory must still say "No matches", but the container's `maskExit` leaves
+ * stderr as the only error signal, so callers drop these lines before deciding.
+ * Refusals and real grep errors carry no prefix and stay errors.
+ */
+export const GREP_NOTE_PREFIX = 'chroxy-grep-note: '
+
+/**
+ * Split fallback stderr into the lines that mean failure and the informational
+ * notes. `errors` is empty when nothing but notes was written.
+ *
+ * @param {string} stderr
+ * @returns {{ errors: string, notes: string }}
+ */
+export function splitGrepNotes(stderr) {
+  const errors = []
+  const notes = []
+  for (const line of String(stderr ?? '').split('\n')) {
+    if (line.startsWith(GREP_NOTE_PREFIX)) notes.push(line)
+    else errors.push(line)
+  }
+  return { errors: errors.join('\n').trim(), notes: notes.join('\n') }
+}
 // Bounds on the work/size one glob may cause (Codex review of #7961): the raw
 // glob, and the total length (in characters) of generated --include/--exclude flags.
 const GREP_GLOB_MAX_INPUT = 1024
@@ -933,19 +965,21 @@ function expandSimpleBraces(glob) {
  * every file's matches as if the filter had been applied. Only globs whose
  * grep form is equivalent are translated:
  *
- *   - a basename glob (`*.js`, `*.{ts,tsx}`) -> `--include=<g>` per brace
- *     alternative (rg matches a slash-less glob against the basename at any
- *     depth, which is what `--include` does)
- *   - a negated basename glob (`!*.min.js`) -> `--exclude=<g>`
+ *   - a basename glob (`*.js`, `*.{ts,tsx}`) -> `{ includes }`, one entry per
+ *     brace alternative (rg matches a slash-less glob against the basename at
+ *     any depth)
+ *   - a negated basename glob (`!*.min.js`) -> `{ excludes }`; like rg it also
+ *     drops anything under a directory of that name
  *
  * Anything else (a `/` or `**` path glob, a backslash escape, nested or
- * oversized braces, an empty negation) cannot be expressed with `--include`,
- * so it returns `{ refusal }` and the command fails loudly rather than
- * searching unfiltered. Every value is fused into one `--flag=<quoted>` token
- * (argv-safety.js case 3), so a glob that begins with `-` is never an option.
+ * oversized braces, an empty negation) cannot be expressed that way, so it
+ * returns `{ refusal }` and the command fails loudly rather than searching
+ * unfiltered. The alternatives are applied by the shell over the fallback's
+ * file list as `case` PATTERNS passed as shell-quoted DATA (never as grep
+ * flags), so a glob that begins with `-` is never an option.
  *
  * @param {string} glob
- * @returns {{ args: string } | { refusal: string }}
+ * @returns {{ includes: string[] } | { excludes: string[] } | { refusal: string }}
  */
 export function translateGlobForGrep(glob) {
   const refuse = (why) => ({
@@ -959,16 +993,15 @@ export function translateGlobForGrep(glob) {
   const alts = expandSimpleBraces(body)
   if (!alts) return refuse('unsupported brace set')
   if (alts.some((a) => a.length === 0)) return refuse('empty alternative')
-  // rg's negated glob also excludes a DIRECTORY of that name (and its
-  // descendants); grep needs --exclude-dir alongside --exclude to match.
-  const flags = negated ? ['--exclude', '--exclude-dir'] : ['--include']
-  const args = alts.flatMap((a) => flags.map((f) => ` ${f}=${shellQuote(a)}`)).join('')
-  if (args.length > GREP_GLOB_MAX_FLAG_BYTES) return refuse('glob expands to too many characters of grep flags')
-  // grep applies --exclude-dir to the COMMAND-LINE root too (GNU: any suffix of
-  // the argument after a '/'), so an exclusion that matches the root would make
-  // the whole search come back empty. buildGrepCommand tests these against the
-  // root in the shell and refuses instead.
-  return negated ? { args, excludeDirs: alts } : { args }
+  // The alternatives are NOT turned into grep flags any more (#7981): the
+  // fallback now greps an explicit file list, so the include/exclude decision is
+  // made in the shell over that list (see {@link buildGrepFallbackFunctions}),
+  // where it behaves identically on GNU and BSD grep and cannot hit the root
+  // (grep applies --exclude-dir to the command-line root too, which is what
+  // #7961's refusal guarded against). A negated glob also excludes a DIRECTORY
+  // of that name (rg parity), which the shell filter does per path component.
+  if (alts.join('').length > GREP_GLOB_MAX_FLAG_BYTES) return refuse('glob expands to too many characters')
+  return negated ? { excludes: alts } : { includes: alts }
 }
 
 /**
@@ -1050,15 +1083,197 @@ export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, gre
     throw new Error('buildGrepCommand: globArg without grepGlob would leave the grep -r fallback unfiltered (#7961)')
   }
   const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${rootArg}`
-  const refuseCmd = (msg) => `printf '%s\\n' ${shellQuote(msg)} >&2; (exit 2)`
-  // `case $__p in $1)` treats the VALUE of $1 as a pattern with no further
-  // parsing, so a model-supplied alternative is data here, never shell text.
-  const rootOverlap = grepGlob?.excludeDirs?.length
-    ? `__gx_hits() { __p=$2; while :; do case $__p in $1) return 0;; esac; case $__p in */*) __p=${'$'}{__p#*/};; *) return 1;; esac; done; }; __gx_root=${rootArg}; if ${grepGlob.excludeDirs.map((a) => `__gx_hits ${shellQuote(a)} "$__gx_root"`).join(' || ')}; then ${refuseCmd(GREP_EXCLUDE_ROOT_REFUSAL)}; else `
-    : ''
-  const grepCmd = grepGlob && 'refusal' in grepGlob
-    ? refuseCmd(grepGlob.refusal)
-    : `${rootOverlap}grep -r ${ci} ${ln}${grepGlob?.args ?? ''} -e ${shellQuote(pattern)} -- ${rootArg}${rootOverlap ? '; fi' : ''}`
-  const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
+  const refuse = (msg) => `printf '%s\\n' ${shellQuote(msg)} >&2; (exit 2)`
+  const refusing = grepGlob && 'refusal' in grepGlob
+  const prelude = refusing ? '' : `${buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob })}\n`
+  const grepCmd = refusing ? refuse(grepGlob.refusal) : `__gx_search ${rootArg}`
+  const core = `${prelude}if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
+}
+
+/**
+ * The bash functions behind the `grep -r` fallback (#7981). ripgrep skips
+ * hidden and gitignored files by default; `grep -r` skips neither, so with no
+ * rg (every `node:22-slim` container) a plain directory Grep read `.env`,
+ * `.claude/settings.local.json` and friends. Rather than hand `grep -r` the
+ * directory, the fallback builds the candidate file list itself, COMPLETELY,
+ * and only then greps it:
+ *
+ *   - inside a git work tree (git present, root not itself gitignored):
+ *     `git ls-files -z --cached --others --exclude-standard` (honours
+ *     .gitignore, .git/info/exclude, the global excludes), minus tracked files
+ *     that are also ignored (`-ci`, subtracted by an in-order merge because
+ *     ripgrep skips them). A directory entry (a nested repo / submodule) is
+ *     expanded with the find lister;
+ *   - otherwise `find . -mindepth 1 ( -name '.*' -prune ) -o -type f -print0`.
+ *     Without git, gitignored NON-hidden files cannot be known, so they are
+ *     still searched (recorded in docs/security/permission-floor.md). A root
+ *     inside a gitignored directory (`build/`, `node_modules/pkg`) takes this
+ *     path too: git lists nothing there, which would be a silent no-match where
+ *     rg and `grep -r` search it.
+ *
+ * Every candidate must pass: no path component starting with `.` (rg's hidden
+ * rule, judged on the path RELATIVE to the root, so a hidden root or one under
+ * a hidden directory is still searched, the #7961 lesson); the glob; a regular
+ * file; and NO symlinked ancestor under the root (`[ -L ]` on every prefix, with
+ * the last directory's verdict memoised), because a tracked `sub/f.txt` whose
+ * `sub` was later swapped for a link to an outside directory passes `-f` and
+ * `! -L` on the leaf alone. A file root is searched as named, hidden or not.
+ * Unreadable directories under the find lister are pruned with a one-line
+ * stderr note instead of failing the listing.
+ *
+ * FAIL CLOSED: each lister writes an empty record (impossible as a path) after
+ * a successful listing. Nothing is grepped until every lister has been seen to
+ * finish, so a listing failure yields NO stdout and exit 2 (both callers treat
+ * non-empty stdout as success, and the container's maskExit turns the status
+ * into 0). An empty list is a genuine no-match (exit 1). A missing root is exit
+ * 2 before the glob is consulted. Output stays `<root>/<relative>:line:text`
+ * (the prefix `grep -r` produced); exit 0 match, 1 none, 2 error.
+ *
+ * Requires bash (arrays, `read -d ''`, process substitution): the host runs
+ * `bash -c` and the container exec is `bash` too (the confinement preamble
+ * already depends on it).
+ */
+function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
+  const excludes = grepGlob?.excludes ?? []
+  const includes = grepGlob?.includes ?? []
+  const anyOf = (alts, subject) => alts.map((a) => `__gx_m ${shellQuote(a)} ${subject}`).join(' || ')
+  const keep = ['__gx_keep() {', '  local rel=$1 base=${1##*/} d']
+  if (excludes.length) {
+    keep.push(
+      `  if ${anyOf(excludes, '"$base"')}; then return 1; fi`,
+      '  d=${rel%/*}',
+      '  if [ "$d" != "$rel" ]; then',
+      '    while :; do',
+      `      if ${anyOf(excludes, '"${d%%/*}"')}; then return 1; fi`,
+      '      case $d in */*) d=${d#*/};; *) break;; esac',
+      '    done',
+      '  fi',
+    )
+  }
+  if (includes.length) keep.push(`  if ! { ${anyOf(includes, '"$base"')}; }; then return 1; fi`)
+  keep.push('  return 0', '}')
+  const grepFiles = `grep -H ${ci} ${ln} -e ${shellQuote(pattern)} --`
+  const refuseWith = (msg) => `printf '%s\\n' ${shellQuote(msg)} >&2`
+  const FIND_LIST = [
+    '    cd -- "$1" || exit 1',
+    '    if find . -maxdepth 0 -readable -executable >/dev/null 2>&1; then',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o \\( -type d \\( ! -readable -o ! -executable \\) -print0 -prune \\) -o -type f -print0",
+    '    elif type -P test >/dev/null 2>&1; then',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o \\( -type d ! -exec test -r {} -a -x {} \\; -print0 -prune \\) -o -type f -print0",
+    '    else',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o -type f -print0",
+    '    fi && printf \'\\0\'',
+  ]
+  return [
+    // `case $2 in $1)`: the VALUE of $1 is a pattern with no further parsing, so
+    // a model-supplied alternative is data here, never shell text.
+    '__gx_m() { case $2 in $1) return 0;; esac; return 1; }',
+    ...keep,
+    // 0 when no ancestor directory of $1 (under the root) is a symlink.
+    '__gx_safe() {',
+    '  local rel=$1 d acc=',
+    '  case $rel in */*) ;; *) return 0;; esac',
+    '  d=${rel%/*}',
+    '  if [ "$d" = "$__gx_lastdir" ]; then return "$__gx_lastrc"; fi',
+    '  __gx_lastdir=$d; __gx_lastrc=0',
+    '  while :; do',
+    '    acc=$acc${d%%/*}',
+    '    if [ -L "$__gx_root/$acc" ]; then __gx_lastrc=1; break; fi',
+    '    case $d in */*) d=${d#*/}; acc=$acc/;; *) break;; esac',
+    '  done',
+    '  return "$__gx_lastrc"',
+    '}',
+    '__gx_consider() {',
+    '  local f=$1 p',
+    '  case /$f in */.*) return 0;; esac',
+    '  __gx_keep "$f" || return 0',
+    '  __gx_safe "$f" || return 0',
+    '  p=$__gx_root/$f',
+    '  if [ -f "$p" ] && [ ! -L "$p" ]; then __gx_cand+=("$p"); fi',
+    '}',
+    // $1 = directory to list, $2 = path prefix of its entries relative to the root.
+    '__gx_find_dir() {',
+    '  local f ok=0',
+    "  while IFS= read -r -d '' f; do",
+    '    if [ -z "$f" ]; then ok=1; continue; fi',
+    '    f=${f#./}',
+    '    if [ -d "$1/$f" ] && [ ! -L "$1/$f" ]; then',
+    `      printf '%s%s: Permission denied (skipped)\\n' ${shellQuote(GREP_NOTE_PREFIX)} "$__gx_root/$2$f" >&2`,
+    '      continue',
+    '    fi',
+    '    __gx_consider "$2$f"',
+    '  done < <(',
+    ...FIND_LIST,
+    '  )',
+    '  [ "$ok" = 1 ] || __gx_fail=find',
+    '}',
+    '__gx_flush() {',
+    '  [ "${#__gx_batch[@]}" -gt 0 ] || return 0',
+    `  ${grepFiles} "\${__gx_batch[@]}" </dev/null`,
+    '  case $? in 0) __gx_rc=0;; 1) ;; *) __gx_err=1;; esac',
+    '  __gx_batch=()',
+    '}',
+    '__gx_search() {',
+    '  local root=$1 f p lister=find ok=0 bytes=0 prefix rc',
+    '  __gx_root=${root%/}; __gx_cand=(); __gx_tci=(); __gx_ti=0; __gx_fail=',
+    '  __gx_lastdir=; __gx_lastrc=0; __gx_batch=(); __gx_rc=1; __gx_err=0',
+    '  if [ ! -e "$root" ] && [ ! -L "$root" ]; then',
+    "    printf 'grep: %s: No such file or directory\\n' \"$root\" >&2; return 2",
+    '  fi',
+    '  if [ ! -d "$root" ]; then',
+    '    __gx_keep "${root##*/}" || return 1',
+    `    ${grepFiles} "$root" </dev/null; return`,
+    '  fi',
+    // Every git call's status is read, none is assumed. `--is-inside-work-tree`
+    // failing means "not a work tree" (git exits 128 outside one), which is the
+    // find lister's job. After that point a git failure is an ERROR, never a
+    // default: a failed `--show-prefix` must not read as the empty top-level
+    // prefix, and `check-ignore` is 0 ignored / 1 not ignored / else error.
+    '  if command -v git >/dev/null 2>&1 && [ "$(git -C "$root" -c core.fsmonitor=false rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then',
+    `    prefix=$(git -C "$root" -c core.fsmonitor=false rev-parse --show-prefix 2>/dev/null) || { ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2; }`,
+    '    lister=git',
+    '    if [ -n "$prefix" ]; then',
+    '      git -C "$root" -c core.fsmonitor=false check-ignore -q . >/dev/null 2>&1; rc=$?',
+    `      case $rc in 0) lister=find;; 1) ;; *) ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2;; esac`,
+    '    fi',
+    '  fi',
+    `  if [ "$lister" = find ] && ! command -v find >/dev/null 2>&1; then ${refuseWith(GREP_ENUMERATE_FIND_REFUSAL)}; return 2; fi`,
+    '  if [ "$lister" = git ]; then',
+    "    while IFS= read -r -d '' f; do",
+    '      if [ -z "$f" ]; then ok=1; else __gx_tci+=("$f"); fi',
+    '    done < <(git -C "$root" -c core.fsmonitor=false ls-files -z -ci --exclude-standard && printf \'\\0\')',
+    '    [ "$ok" = 1 ] || __gx_fail=git',
+    '    ok=0',
+    "    while IFS= read -r -d '' f; do",
+    '      if [ -z "$f" ]; then ok=1; continue; fi',
+    // Tracked-but-ignored entries arrive in index order. The merge relies on
+    // `ls-files -ci` ordering matching `--cached`'s; if they ever diverge the
+    // pointer stalls and the remaining tracked-ignored files are SEARCHED (it fails
+    // open to ripgrep-less behaviour, never skips a file it should read).
+    '      if [ "$__gx_ti" -lt "${#__gx_tci[@]}" ] && [ "$f" = "${__gx_tci[$__gx_ti]}" ]; then __gx_ti=$((__gx_ti+1)); continue; fi',
+    '      f=${f%/}',
+    '      case /$f in */.*) continue;; esac',
+    '      if [ -d "$__gx_root/$f" ] && [ ! -L "$__gx_root/$f" ]; then',
+    '        __gx_safe "$f/x" || continue',
+    '        __gx_find_dir "$__gx_root/$f" "$f/"',
+    '        continue',
+    '      fi',
+    '      __gx_consider "$f"',
+    '    done < <(git -C "$root" -c core.fsmonitor=false ls-files -z --cached --others --exclude-standard && printf \'\\0\')',
+    '    [ "$ok" = 1 ] || __gx_fail=git',
+    '  else',
+    '    __gx_find_dir "$root" ""',
+    '  fi',
+    `  if [ "$__gx_fail" = git ]; then ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2; fi`,
+    `  if [ -n "$__gx_fail" ]; then ${refuseWith(GREP_ENUMERATE_FIND_REFUSAL)}; return 2; fi`,
+    '  for p in "${__gx_cand[@]}"; do',
+    '    __gx_batch+=("$p"); bytes=$((bytes+${#p}+1))',
+    `    if [ "\${#__gx_batch[@]}" -ge ${GREP_FALLBACK_BATCH} ] || [ "$bytes" -ge ${GREP_FALLBACK_BATCH_CHARS} ]; then __gx_flush; bytes=0; fi`,
+    '  done',
+    '  __gx_flush',
+    '  if [ "$__gx_err" = 1 ]; then return 2; fi',
+    '  return "$__gx_rc"',
+    '}',
+  ].join('\n')
 }

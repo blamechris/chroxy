@@ -242,7 +242,7 @@ describe('buildGrepArgs', () => {
   it('honors -i, -n=false, and a glob filter', () => {
     assert.deepEqual(
       buildGrepArgs({ '-i': true, '-n': false, glob: '*.go' }),
-      { ci: '-i', ln: '', globArg: ` --glob='*.go'`, grepGlob: { args: ` --include='*.go'` } },
+      { ci: '-i', ln: '', globArg: ` --glob='*.go'`, grepGlob: { includes: ['*.go'] } },
     )
   })
 
@@ -266,10 +266,14 @@ describe('buildGrepCommand', () => {
   const base = { pattern: 'TODO', root: '/work', ci: '-i', ln: '-n', globArg: '' }
 
   it('prefers rg with an if/then/else grep fallback', () => {
-    assert.equal(
-      buildGrepCommand(base),
-      `if command -v rg >/dev/null 2>&1; then rg --no-config -i -n --no-heading -e 'TODO' -- '/work'; else grep -r -i -n -e 'TODO' -- '/work'; fi`,
+    const cmd = buildGrepCommand(base)
+    assert.ok(
+      cmd.endsWith(`if command -v rg >/dev/null 2>&1; then rg --no-config -i -n --no-heading -e 'TODO' -- '/work'; else __gx_search '/work'; fi`),
+      cmd,
     )
+    // The fallback lists files itself and greps only those (#7981), never the directory.
+    assert.ok(cmd.includes(`grep -H -i -n -e 'TODO' --`), cmd)
+    assert.equal(cmd.includes('grep -r'), false, 'grep -r would walk hidden and ignored files')
   })
 
   it('appends `; true` when maskExit (runner rejects on non-zero exit)', () => {
@@ -277,7 +281,7 @@ describe('buildGrepCommand', () => {
   })
 
   it('threads the glob arg into the rg command', () => {
-    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'`, grepGlob: { args: ` --include='*.md'` } }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
+    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'`, grepGlob: { includes: ['*.md'] } }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
   })
 
   it('rootExpr substitutes a shell expression for the quoted root (#7354)', () => {
@@ -285,7 +289,7 @@ describe('buildGrepCommand', () => {
     // same thing the host does (it passes safeResolveRoot's realpath).
     const cmd = buildGrepCommand({ ...base, root: undefined, rootExpr: '"$__cx_target"' })
     assert.ok(cmd.includes(`-e 'TODO' -- "$__cx_target";`), 'rg must search the resolved root')
-    assert.ok(cmd.includes(`grep -r -i -n -e 'TODO' -- "$__cx_target"`), 'so must the fallback')
+    assert.ok(cmd.includes(`else __gx_search "$__cx_target"; fi`), 'so must the fallback')
     assert.equal(cmd.includes(`'undefined'`), false, 'the unused literal root must not leak in')
   })
 
@@ -294,7 +298,9 @@ describe('buildGrepCommand', () => {
     // option parser seeing a root that begins with `-`. Swapping the root for
     // an expression must not take it with it.
     const cmd = buildGrepCommand({ ...base, rootExpr: '"$__cx_target"' })
-    assert.equal(cmd.split('-- "$__cx_target"').length - 1, 2, 'both arms need the terminator')
+    assert.ok(cmd.includes(`-e 'TODO' -- "$__cx_target"; else`), 'rg needs the terminator')
+    // The fallback passes the root only to `cd --`, `git -C`, and `grep --` (file root).
+    assert.ok(cmd.includes('cd -- "$1"') && cmd.includes(`-e 'TODO' -- "$root"`), 'the fallback needs it too')
   })
 
   it('falls back to the quoted literal root when rootExpr is absent or empty', () => {

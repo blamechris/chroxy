@@ -559,8 +559,30 @@ an approve with edits can do, and it lives in `edited-input.js` and
   `Grep` of a benign `path` reads every non-ignored file under it, a committed secret
   included. The floor sees the path, not the directory's contents, which is why `Grep`
   stays off the external-planner allowlist (`FLOOR_ALLOWLISTED_TOOLS`) even after
-  #7978. On a host with no ripgrep, BYOK's `grep -r` fallback honours neither
-  `.gitignore` nor hidden files, so there the barrier is absent entirely.
+  #7978. With no ripgrep (every `node:22-slim` container; any host without `rg`),
+  BYOK's fallback no longer walks the directory with `grep -r` (#7981): it builds the
+  COMPLETE file list first and only then greps it. Inside a git work tree (git
+  present, root not itself gitignored) the list is `git ls-files --cached --others
+  --exclude-standard` minus tracked files that are also ignored (ripgrep skips
+  those), which honours `.gitignore`, `.git/info/exclude` and the global excludes; a
+  nested repository is expanded with the find lister. Otherwise it is `find`,
+  pruning hidden entries and unreadable directories (skipped with a one-line stderr
+  note). Either way a path with a component starting with `.` is dropped (ripgrep's
+  hidden rule), judged on the path **relative to the search root**, so a root that is
+  itself hidden or under a hidden directory (`/home/u/.config/proj`) is still
+  searched, as is a root inside a gitignored directory (`build/`,
+  `node_modules/pkg`). A candidate with a symlinked ancestor under the root is
+  dropped, so a tracked `sub/f.txt` whose `sub` was swapped for a link cannot read
+  outside. An explicitly named file root is searched as named, hidden or not, as
+  ripgrep does. A listing that cannot run (no `find`, either lister failing midway)
+  prints nothing and exits 2 with the reason on stderr, never "no matches" and never
+  a partial result. **Remaining limits:** outside a git work tree, or where git is
+  not installed (stock `node:22-slim`, so the container path), a gitignored
+  *non-hidden* file (`secrets.json` listed in a `.gitignore`) cannot be known and is
+  still read, so there the barrier matches ripgrep's for hidden files only; files
+  inside an expanded nested repository are filtered by the hidden rule only (the
+  nested repo's own ignore rules are not applied); and an unreadable directory is
+  skipped rather than searched, as ripgrep does with a warning.
 - **Command-shaped access is out of scope.** `Bash` can read `.env` — the floor
   guards *path fields*, and `Bash` is in `NEVER_AUTO_ALLOW` (never rule-whitelisted)
   but IS auto-approved under `auto`. Flipping a session to `auto` remains a

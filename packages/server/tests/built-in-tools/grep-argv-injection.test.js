@@ -63,6 +63,8 @@ const GREP_PATH = findOnPath('grep')
 // No `|| '/bin/bash'` fallback: that would make the `assert.ok(BASH_PATH)` guard
 // below unfireable, and silently shim to a bash that may not exist.
 const BASH_PATH = findOnPath('bash')
+// The fallback enumerates files with `find` (#7981), so the shimmed PATH needs it.
+const FIND_PATH = findOnPath('find')
 
 /**
  * Run a built command the way the real sinks do (`bash -c`), with a hard
@@ -168,7 +170,7 @@ function requireRgOrSkip(t, what) {
  * Returns true when the caller should bail out of the test.
  */
 function requireGrepShimOrSkip(t) {
-  const missing = [GREP_PATH ? null : 'grep', BASH_PATH ? null : 'bash'].filter(Boolean)
+  const missing = [GREP_PATH ? null : 'grep', BASH_PATH ? null : 'bash', FIND_PATH ? null : 'find'].filter(Boolean)
   if (missing.length === 0) return false
   const what = `${missing.join(' and ')} not found on PATH`
   if (process.env.CI) {
@@ -210,9 +212,10 @@ async function makeGrepOnlyPath(dir) {
   // `|| '/bin/bash'` default they used to sit behind made that impossible.
   assert.ok(GREP_PATH, 'makeGrepOnlyPath called without requireGrepShimOrSkip: grep is not on PATH')
   assert.ok(BASH_PATH, 'makeGrepOnlyPath called without requireGrepShimOrSkip: bash is not on PATH')
+  assert.ok(FIND_PATH, 'makeGrepOnlyPath called without requireGrepShimOrSkip: find is not on PATH')
   const bin = path.join(dir, 'bin')
   await mkdir(bin, { recursive: true })
-  for (const [name, target] of [['grep', GREP_PATH], ['bash', BASH_PATH]]) {
+  for (const [name, target] of [['grep', GREP_PATH], ['bash', BASH_PATH], ['find', FIND_PATH]]) {
     const shim = path.join(bin, name)
     await writeFile(shim, `#!/bin/sh\nexec ${JSON.stringify(target)} "$@"\n`)
     await chmod(shim, 0o755)
@@ -345,7 +348,7 @@ describe('Grep argv option injection (#7295)', () => {
     it('binds the pattern to `-e` in BOTH branches, so it can never fill a bare positional slot', () => {
       const cmd = build('--pre=/tmp/evil.sh', '/work')
       assert.match(cmd, /rg --no-config .*--no-heading -e '--pre=\/tmp\/evil\.sh' -- '\/work'/)
-      assert.match(cmd, /grep -r .* -e '--pre=\/tmp\/evil\.sh' -- '\/work'/)
+      assert.match(cmd, /grep -H .* -e '--pre=\/tmp\/evil\.sh' -- /)
     })
 
     it('keeps `-e` immediately before the pattern even with a glob filter present', () => {
@@ -492,7 +495,11 @@ describe('Grep argv option injection (#7295)', () => {
     it('terminates option parsing with `--` before the root in BOTH branches', () => {
       const cmd = build('TODO', '/work')
       assert.match(cmd, /rg --no-config .* -e 'TODO' -- '\/work'/)
-      assert.match(cmd, /grep -r .* -e 'TODO' -- '\/work'/)
+      // The fallback never hands the root to grep as a directory (#7981): it is
+      // the argument of `__gx_search`, reaching `cd --` / `git -C` / `grep --`.
+      assert.ok(cmd.includes("else __gx_search '/work'; fi"), cmd)
+      assert.match(cmd, /grep -H .* -e 'TODO' -- "\$root"/)
+      assert.ok(cmd.includes('cd -- "$1" || exit 1'), 'the lister must not let a root beginning with - be an option')
     })
 
     it('POSITIVE CONTROL: an ordinary root still searches normally', POSIX_ONLY, async (t) => {
@@ -551,10 +558,14 @@ describe('Grep argv option injection (#7295)', () => {
       // class this file was written for.
       for (const pattern of ['--pre=/tmp/evil.sh', '-Wall', '--force', '-f/etc/passwd', '--']) {
         const cmd = build(pattern, '/work')
-        const [rgHalf, grepHalf] = cmd.split('; else ')
-        assert.ok(rgHalf.includes('rg ') && grepHalf.includes('grep -r '), `unexpected builder shape: ${cmd}`)
+        const cut = cmd.lastIndexOf('; else ')
+        const [rgHalf, grepHalf] = [cmd.slice(0, cut), cmd.slice(cut + '; else '.length)]
+        assert.ok(rgHalf.includes('rg ') && grepHalf.startsWith('__gx_search '), `unexpected builder shape: ${cmd}`)
         const quoted = `-e '${pattern}'`
-        for (const [branch, half] of [['rg', rgHalf], ['grep', grepHalf]]) {
+        // The fallback's grep invocations live in the function prelude (the
+        // `else` half is only the call), which is part of the first half.
+        assert.equal(rgHalf.split(`grep -H`).length - 1, 2, 'both fallback grep invocations are in the prelude')
+        for (const [branch, half] of [['rg', rgHalf], ['grep', rgHalf.slice(0, rgHalf.indexOf('if command -v rg'))]]) {
           assert.ok(
             half.includes(quoted),
             `pattern ${pattern} is not bound to -e in the ${branch} branch — Grep would exceed its read-only classification. half=${half}`,

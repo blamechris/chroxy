@@ -33,6 +33,7 @@ function findOnPath(name) {
 
 const GREP = findOnPath('grep')
 const BASH = findOnPath('bash')
+const FIND = findOnPath('find')
 
 /**
  * Capability probe for the real-bash tests. Returns a skip reason, or null when
@@ -44,6 +45,7 @@ const BASH = findOnPath('bash')
 function probeRealBash() {
   if (!BASH) return 'bash is not on PATH'
   if (!GREP) return 'grep is not on PATH'
+  if (!FIND) return 'find is not on PATH'
   const v = spawnSync(BASH, ['--version'], { encoding: 'utf8', timeout: 10_000 })
   if (v.error || v.status !== 0) return 'bash is present but not runnable'
   const dir = mkdtempSync(path.join(tmpdir(), 'grep-glob-probe-'))
@@ -70,6 +72,7 @@ function setupFixture() {
   mkdirSync(path.join(root, 'src'), { recursive: true })
   mkdirSync(bin)
   symlinkSync(GREP, path.join(bin, 'grep'))
+  symlinkSync(FIND, path.join(bin, 'find'))
   writeFileSync(path.join(root, 'a.js'), 'NEEDLE js\n')
   writeFileSync(path.join(root, 'b.ts'), 'NEEDLE ts\n')
   writeFileSync(path.join(root, 'c.tsx'), 'NEEDLE tsx\n')
@@ -119,20 +122,26 @@ describe('Grep grep -r fallback honours glob (#7961)', { skip: SKIP_REAL_BASH ||
     assert.ok(r.files.includes('a.js'))
   })
 
-  it('a negated glob matching the ROOT is refused loudly, never an empty result', () => {
-    // root is .../ws; `!w*` also matches it, and grep applies --exclude-dir to
-    // the command-line root. Must refuse (exit 2), not "no matches" (exit 1).
+  it('a negated glob matching the ROOT no longer skips or refuses the search (#7981)', () => {
+    // root is .../ws; `!w*` also matches it. `grep -r --exclude-dir` applied that
+    // to the command-line root (#7961 refused loudly); the fallback now filters a
+    // file list by path RELATIVE to the root, so the root is never a candidate.
     for (const glob of ['!w*', '!ws', '!*', '!{x,ws}', '!?s']) {
       const r = run({ glob })
-      assert.equal(r.status, 2, glob)
-      assert.equal(r.stdout, '', glob)
-      assert.ok(r.stderr.includes('exclude the search directory'), glob)
+      assert.equal(r.status, glob === '!*' ? 1 : 0, `${glob}: ${r.stderr}`)
+      assert.equal(r.stderr, '', glob)
+      if (glob !== '!*') assert.ok(r.files.includes('a.js'), glob)
     }
-    // A root of '.' with `!*` is the other reported shape.
+    // A root of '.' with `!*` excludes every file name (nothing left: no-match, exit 1).
     const cmd = buildGrepCommand({ pattern: 'NEEDLE', root: '.', ...buildGrepArgs({ glob: '!*' }) })
     const r = spawnSync(BASH, ['-c', cmd], { env: { PATH: bin }, cwd: root, encoding: 'utf8', timeout: 20_000 })
-    assert.equal(r.status, 2)
+    assert.equal(r.status, 1)
     assert.equal(r.stdout, '')
+    // ...while `!skipme` with root '.' still searches the rest.
+    const cmd2 = buildGrepCommand({ pattern: 'NEEDLE', root: '.', ...buildGrepArgs({ glob: '!skipme' }) })
+    const r2 = spawnSync(BASH, ['-c', cmd2], { env: { PATH: bin }, cwd: root, encoding: 'utf8', timeout: 20_000 })
+    assert.equal(r2.status, 0)
+    assert.ok(r2.stdout.includes('./a.js:1:NEEDLE js'))
   })
 
   it('a negated glob that does not match the root still searches correctly', () => {
@@ -171,10 +180,10 @@ describe('Grep grep -r fallback honours glob (#7961)', { skip: SKIP_REAL_BASH ||
 
 describe('translateGlobForGrep', () => {
   it('translates and refuses as documented', () => {
-    assert.deepEqual(translateGlobForGrep('*.js'), { args: " --include='*.js'" })
-    assert.deepEqual(translateGlobForGrep('*.{a,b}'), { args: " --include='*.a' --include='*.b'" })
-    assert.deepEqual(translateGlobForGrep('!*.log'), { args: " --exclude='*.log' --exclude-dir='*.log'", excludeDirs: ['*.log'] })
-    assert.deepEqual(translateGlobForGrep('--include=x'), { args: " --include='--include=x'" })
+    assert.deepEqual(translateGlobForGrep('*.js'), { includes: ['*.js'] })
+    assert.deepEqual(translateGlobForGrep('*.{a,b}'), { includes: ['*.a', '*.b'] })
+    assert.deepEqual(translateGlobForGrep('!*.log'), { excludes: ['*.log'] })
+    assert.deepEqual(translateGlobForGrep('--include=x'), { includes: ['--include=x'] })
     for (const g of ['a/b', '**', '!', '*.{a,{b,c}}', '*.{a', 'a}', '{,a}', '*.\\*']) {
       assert.ok('refusal' in translateGlobForGrep(g), g)
     }
@@ -200,7 +209,7 @@ describe('translateGlobForGrep', () => {
     const r = translateGlobForGrep(g)
     assert.ok('refusal' in r)
     assert.ok(r.refusal.includes('too many characters'))
-    assert.ok('args' in translateGlobForGrep('z'.repeat(100) + '{a,b}'))
+    assert.ok('includes' in translateGlobForGrep('z'.repeat(100) + '{a,b}'))
   })
 
   it('refuses a product just over the cap with the brace message', () => {

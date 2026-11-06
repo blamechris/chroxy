@@ -6,7 +6,7 @@ import { join, dirname, basename } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
-import { CONTAINER_CONFINE_OK } from '../src/built-in-tools/tool-transforms.js'
+import { CONTAINER_CONFINE_OK, GREP_NOTE_PREFIX } from '../src/built-in-tools/tool-transforms.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
 import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
@@ -863,7 +863,9 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 1)
     // Cmd is the rg-or-grep wrapper so both binaries appear:
     assert.match(_dockerBackend.calls[0].cmd, /rg /)
-    assert.match(_dockerBackend.calls[0].cmd, /grep -r/)
+    // The fallback lists files (skipping hidden/ignored ones, #7981) and greps that list.
+    assert.match(_dockerBackend.calls[0].cmd, /grep -H/)
+    assert.match(_dockerBackend.calls[0].cmd, /else __gx_search "\$__cx_target"; fi/)
     // PR #5021 review fix (Copilot, comment id 3348029186): the
     // command is suffixed with `; true` so rg/grep's exit code 1
     // (no matches) doesn't bubble up to execInEnvironment's reject.
@@ -884,6 +886,38 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     })
     assert.equal(result.isError, false)
     assert.match(result.content, /No matches for nosuchstring/)
+  })
+
+  describe('Grep stderr: notes are not failures, refusals and real errors are (#7981)', () => {
+    const grepWith = async (stdout, stderr) => {
+      const { session } = buildSession({ backend: backendStub({ defaultResponse: { stdout, stderr } }) })
+      return session._dispatchBuiltinTool({ toolName: 'Grep', input: { pattern: 'zzz' } })
+    }
+
+    it('a no-match search that only wrote a skipped-directory note says "No matches"', async () => {
+      const r = await grepWith('', `${GREP_NOTE_PREFIX}/workspace/priv: Permission denied (skipped)\n`)
+      assert.equal(r.isError, false)
+      assert.match(r.content, /^No matches for zzz/)
+    })
+
+    it('a match plus a note is a success', async () => {
+      const r = await grepWith('/workspace/a.txt:1:zzz\n', `${GREP_NOTE_PREFIX}/workspace/priv: Permission denied (skipped)\n`)
+      assert.equal(r.isError, false)
+      assert.match(r.content, /a\.txt:1:zzz/)
+    })
+
+    it('a listing refusal is still an error, even next to a note', async () => {
+      const r = await grepWith('', `${GREP_NOTE_PREFIX}/workspace/priv: Permission denied (skipped)\nGrep failed: could not list the files to search, because ripgrep is not installed\n`)
+      assert.equal(r.isError, true)
+      assert.match(r.content, /could not list the files/)
+      assert.equal(r.content.includes(GREP_NOTE_PREFIX), false, 'notes are not echoed into the error')
+    })
+
+    it('a real grep error is still an error', async () => {
+      const r = await grepWith('', 'grep: a.txt: No such file or directory\n')
+      assert.equal(r.isError, true)
+      assert.match(r.content, /No such file or directory/)
+    })
   })
 
   it('TodoWrite remains host-side (falls through to super._dispatchBuiltinTool)', async () => {
