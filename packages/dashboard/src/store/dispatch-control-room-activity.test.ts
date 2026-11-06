@@ -41,9 +41,11 @@ import {
 import {
   createEmptyActivityState,
   selectActivityTree,
+  selectCrossSessionActivity,
   type ActivityEntry,
 } from '@chroxy/store-core'
 import { createEmptySessionState } from './utils'
+import { withDecisionCounts, selectNextPendingSession } from '../utils/pendingPermissions'
 import type { ConnectionState } from './types'
 
 const SESSION_ID = 'sess-cr-1'
@@ -308,4 +310,24 @@ describe('Control Room activity dispatch (#5163)', () => {
       'b',
     ])
   })
+  it('reconciles an unvisited session from the roster and clears after reconnect', () => {
+    const declaredStatus = { state: 'blocked', summary: 'Ready', decision: 'Choose target', source: 'marker', updatedAt: 1 };
+    const list = (decisionActivity: { startedAt?: number; endedAt: number }, decision = 'Choose target') => ({ type: 'session_list', sessions: [
+      { sessionId: SESSION_ID, name: 'Default', cwd: '/tmp' },
+      { sessionId: OTHER_SESSION_ID, name: 'Review', cwd: '/tmp', declaredStatus: { ...declaredStatus, decision }, decisionActivity },
+    ] });
+    handleMessage(list({ startedAt: 100, endedAt: 0 }), ctx() as never);
+    expect(store.getState().activeSessionId).toBe(SESSION_ID);
+    expect(store.getState().sessionStates[OTHER_SESSION_ID]!.declaredStatus?.decision).toBe('Choose target');
+    handleMessage(delta('updated', runningEntry('decision:session', { kind: 'decision', label: 'Choose target', status: 'blocked', startedAt: 100 }), OTHER_SESSION_ID), ctx() as never);
+    const counts = withDecisionCounts({}, store.getState().activity);
+    expect(counts).toEqual({ [OTHER_SESSION_ID]: 1 });
+    expect(selectNextPendingSession(store.getState().sessions.map((s) => s.sessionId), counts, SESSION_ID)).toBe(OTHER_SESSION_ID);
+    expect(selectCrossSessionActivity(store.getState().activity, store.getState().sessions).total.blocked).toBe(1);
+    handleMessage(list({ endedAt: 100 }, 'none'), { ...ctx(), isReconnect: true } as never);
+    handleMessage(delta('updated', runningEntry('decision:session', { kind: 'decision', status: 'blocked', startedAt: 100 }), OTHER_SESSION_ID), ctx() as never);
+    expect(withDecisionCounts({}, store.getState().activity)).toEqual({});
+    expect(store.getState().activeSessionId).toBe(SESSION_ID);
+  });
+
 })

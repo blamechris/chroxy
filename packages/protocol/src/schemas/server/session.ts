@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod'
-import { DeclaredStatusSchema } from '../declared-status.ts'
+import { DeclaredStatusSchema, DecisionActivityStateSchema } from '../declared-status.ts'
 
 export const ServerSessionStatusSchema = z.object({
   type: z.literal('session_status'),
@@ -183,6 +183,7 @@ export const CumulativeUsageSchema = z.object({
  */
 export const ServerSessionListEntrySchema = z.object({
   declaredStatus: DeclaredStatusSchema.optional(),
+  decisionActivity: DecisionActivityStateSchema.optional(),
   sessionId: z.string(),
   name: z.string(),
   // cwd is conventionally always set by the server, but the schema accepts

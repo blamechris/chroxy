@@ -23,6 +23,8 @@
 
 import type {
   ActivityEntry,
+  DeclaredStatus,
+  DecisionActivityState,
   ServerActivitySnapshotMessage,
   ServerActivityDeltaMessage,
 } from '@chroxy/protocol'
@@ -42,6 +44,8 @@ export const MAX_TERMINAL_ENTRIES_PER_SESSION = 50
 
 /** One session's normalized activity state. */
 export interface SessionActivityState {
+  /** Retained even when the cleared decision entry is absent or pruned. */
+  readonly decisionEndedAt?: number
   /** Entries keyed by `ActivityEntry.id`. */
   readonly byId: Readonly<Record<string, ActivityEntry>>
   /**
@@ -125,6 +129,8 @@ function upsertEntry(
   entry: ActivityEntry,
   maxTerminal: number,
 ): SessionActivityState {
+  const decision = entry.id === 'decision:session' && entry.kind === 'decision'
+  if (decision && !isTerminal(entry) && entry.startedAt <= (session.decisionEndedAt ?? -1)) return session
   const existing = session.byId[entry.id]
   if (!shouldReplace(existing, entry)) return session
 
@@ -133,7 +139,10 @@ function upsertEntry(
   byId[entry.id] = entry
   const order = existing === undefined ? [...session.order, entry.id] : session.order
 
-  return pruneTerminal({ byId, order }, maxTerminal)
+  const decisionEndedAt = decision && isTerminal(entry)
+    ? Math.max(session.decisionEndedAt ?? 0, entry.endedAt ?? 0)
+    : session.decisionEndedAt
+  return pruneTerminal({ byId, order, ...(decisionEndedAt !== undefined ? { decisionEndedAt } : {}) }, maxTerminal)
 }
 
 /**
@@ -171,7 +180,7 @@ function pruneTerminal(session: SessionActivityState, maxTerminal: number): Sess
   }
   const order = session.order.filter((id) => !evicted.has(id))
 
-  return { byId, order }
+  return { ...session, byId, order }
 }
 
 /**
@@ -194,7 +203,20 @@ export function applyActivitySnapshot(
     byId[entry.id] = entry
   }
 
-  const session = pruneTerminal({ byId, order }, maxTerminal)
+  // A full work snapshot must not erase the durable clear fence learned from
+  // a roster snapshot or decision delta (including after terminal pruning).
+  const previousFence = state.bySession[message.sessionId]?.decisionEndedAt
+  const decision = byId['decision:session']
+  const decisionEndedAt = decision?.kind === 'decision' && isTerminal(decision)
+    ? Math.max(previousFence ?? 0, decision.endedAt ?? 0)
+    : previousFence
+  const staleDecision = decision?.kind === 'decision' && !isTerminal(decision) && decision.startedAt <= (decisionEndedAt ?? -1)
+  if (staleDecision) delete byId['decision:session']
+  const session = pruneTerminal({
+    byId,
+    order: staleDecision ? order.filter((id) => id !== 'decision:session') : order,
+    ...(decisionEndedAt !== undefined ? { decisionEndedAt } : {}),
+  }, maxTerminal)
   const bySession = emptyRecord<SessionActivityState>()
   Object.assign(bySession, state.bySession)
   bySession[message.sessionId] = session
@@ -231,5 +253,33 @@ export function clearSessionActivity(state: ActivityState, sessionId: string): A
   const bySession = emptyRecord<SessionActivityState>()
   Object.assign(bySession, state.bySession)
   delete bySession[sessionId]
+  return { bySession }
+}
+
+/** Reconcile only the server-authored session decision from a visible roster.
+ * Other activity kinds and newer lifetimes remain untouched. */
+export function reconcileSessionDecision(
+  state: ActivityState,
+  sessionId: string,
+  lifetime: DecisionActivityState,
+  status?: DeclaredStatus,
+): ActivityState {
+  const current = state.bySession[sessionId] ?? EMPTY_SESSION
+  const fence = Math.max(current.decisionEndedAt ?? 0, lifetime.endedAt)
+  let next = current.decisionEndedAt === fence ? current : { ...current, decisionEndedAt: fence }
+  const existing = next.byId['decision:session']
+  if (existing?.kind === 'decision' && existing.startedAt <= fence) {
+    const byId = emptyRecord<ActivityEntry>()
+    Object.assign(byId, next.byId)
+    delete byId['decision:session']
+    next = { ...next, byId, order: next.order.filter((id) => id !== 'decision:session') }
+  }
+  if (lifetime.startedAt !== undefined && lifetime.startedAt > fence && status?.decision && !/^none$/i.test(status.decision)) {
+    next = upsertEntry(next, { id: 'decision:session', kind: 'decision', label: status.decision, status: 'blocked', startedAt: lifetime.startedAt }, MAX_TERMINAL_ENTRIES_PER_SESSION)
+  }
+  if (next === current) return state
+  const bySession = emptyRecord<SessionActivityState>()
+  Object.assign(bySession, state.bySession)
+  bySession[sessionId] = next
   return { bySession }
 }
