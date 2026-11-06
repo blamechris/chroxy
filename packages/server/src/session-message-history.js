@@ -734,6 +734,8 @@ export class SessionMessageHistory extends EventEmitter {
     }
     const history = this._messageHistory.get(sessionId)
     let persistNeeded = false
+    let completedAssistant
+    let assistantCompleted = false
 
     switch (event) {
       case 'stream_start': {
@@ -779,6 +781,7 @@ export class SessionMessageHistory extends EventEmitter {
         this._pendingStreams.delete(key)
         this._streamKinds.delete(key)
         this._streamPrecedes.delete(key)
+        const wasTruncated = this._truncatedStreams.has(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
         // A reasoning stream is recorded even with no text: current Claude models
         // return the block with its signature only, so the SDK opens and closes a
@@ -786,6 +789,8 @@ export class SessionMessageHistory extends EventEmitter {
         // Xs" bubble with an empty body; skipping it for want of text made the whole
         // bubble vanish on replay. A reply with no text is still no entry, and so is
         // a stream_end whose start this history never saw.
+        assistantCompleted = hadStream && kind !== 'thinking'
+        if (assistantCompleted && !wasTruncated && data.interrupted !== true) completedAssistant = content
         if (content || (kind === 'thinking' && hadStream)) {
           // #6630: a reasoning stream keeps what the live bubble shows -- that it
           // IS reasoning (`kind`) and how long it took (`thinkingDurationMs`, the
@@ -817,6 +822,8 @@ export class SessionMessageHistory extends EventEmitter {
       }
 
       case 'message':
+        assistantCompleted = data.type === 'response' && data.kind !== 'thinking' && data.thinking !== true
+        if (assistantCompleted) completedAssistant = data.content
         this._pushHistory(history, {
           // #6630: the SAME envelope the live frame is built from, so a field the
           // live message carries (the compact_boundary / MCP-prompt-expansion
@@ -968,7 +975,7 @@ export class SessionMessageHistory extends EventEmitter {
         break
     }
 
-    return { persistNeeded }
+    return { persistNeeded, ...(assistantCompleted ? { assistantCompleted, completedAssistant } : {}) }
   }
 
   /**

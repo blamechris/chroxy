@@ -1376,11 +1376,12 @@ export class BaseSession extends EventEmitter {
     this._activity.setSessionId(sessionId)
   }
 
-  /**
-   * #5160: full current activity tree as an `activity_snapshot` message.
-   * Served to a fresh subscriber (snapshot-on-subscribe) and on resync.
-   * @returns {object} the `activity_snapshot` wire message
-   */
+  /** Project durable session intent into the existing activity tree. */
+  setDeclaredStatusActivity(status) {
+    this._activity.onDeclaredStatus(status)
+  }
+
+  /** Full current tree for fresh subscribers and resync. */
   getActivitySnapshot() {
     return this._activity.getSnapshotMessage()
   }

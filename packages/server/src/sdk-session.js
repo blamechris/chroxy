@@ -1614,7 +1614,8 @@ export class SdkSession extends BaseSession {
         reapTurnShells()
 
         if (streamState.hasStreamStarted) {
-          this.emit('stream_end', { messageId })
+          const outcome = outcomeFromSdkResult(msg)
+          this.emit('stream_end', { messageId, ...(msg.is_error === true || (outcome && outcome !== 'completed') ? { interrupted: true } : {}) })
         }
 
         if (msg.session_id) {

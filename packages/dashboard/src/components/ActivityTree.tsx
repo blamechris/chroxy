@@ -71,12 +71,14 @@ const KIND_ICON: Record<ActivityEntry['kind'], string> = {
   agent: '◆',
   shell: '$',
   tool: '⚙',
+  decision: '◇',
 }
 
 const KIND_LABEL: Record<ActivityEntry['kind'], string> = {
   agent: 'Subagent',
   shell: 'Background shell',
   tool: 'Tool',
+  decision: 'Decision',
 }
 
 const STATUS_LABEL: Record<ActivityEntry['status'], string> = {

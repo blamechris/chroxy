@@ -40,7 +40,7 @@ import { TurnTracker } from './turn-tracker.js'
 // Shared so the clamp at the derivation site below and the registry's own
 // defence-in-depth clamp stay one number, not two that can drift.
 import { MAX_EXTERNAL_PROJECT_CHARS } from './external-session-registry.js'
-import { IngestEventSchema } from '@chroxy/protocol'
+import { IngestEventSchema, DeclaredStatusInputSchema } from '@chroxy/protocol'
 // deriveProjectFromCwd + the chroxy-worktree helpers moved to the shared,
 // Zod-free @chroxy/protocol/project subpath (audit P2-2, #5850) so the hook
 // (packages/claude-hooks/src/project.js) and this server fallback can't drift.
@@ -487,6 +487,23 @@ export function handleEventIngest(server, req, res) {
         sendJson(res, 429, { error: 'rate limited', retryAfterMs }, {
           'Retry-After': Math.ceil(retryAfterMs / 1000),
         })
+        return
+      }
+
+      if (event.type === 'status') {
+        const parsed = DeclaredStatusInputSchema.safeParse(event.data)
+        if (!event.sessionId || !parsed.success) {
+          sendJson(res, 400, { error: 'invalid status or missing sessionId' })
+          return
+        }
+        const entry = server.sessionManager?.getSession(event.sessionId)
+        // Ingest is write-only; only an exact managed session id is accepted.
+        if (!entry) {
+          sendJson(res, 404, { error: 'session not found' })
+          return
+        }
+        const status = server.sessionManager.setDeclaredStatus(event.sessionId, parsed.data, 'hook')
+        sendJson(res, status ? 200 : 400, { ok: !!status })
         return
       }
 

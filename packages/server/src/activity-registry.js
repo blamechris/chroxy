@@ -36,10 +36,10 @@
  *
  * Lifetime: one registry per session, owned by BaseSession. It holds NO
  * timers and NO external refs; `reset()` (turn-end) and `clear()` (destroy)
- * empty the map. Nothing here is persisted — the underlying signals are all
- * transient/in-memory (see #4307/#4417), so a server restart starts with an
- * empty tree, which is correct (the OS-level work is owned by claude, not
- * chroxy).
+ * end transient work. The session decision survives reset and is rehydrated
+ * from SessionManager declaredStatus; other underlying signals are all
+ * transient/in-memory (see #4307/#4417). A restart reconstructs only the
+ * durable decision; OS-level work remains owned by the provider.
  */
 
 import { ACTIVITY_SCHEMA_VERSION } from '@chroxy/protocol'
@@ -78,6 +78,7 @@ export class ActivityRegistry {
     // `ActivityEntry` is the wire shape and this is server-side bookkeeping.
     // See `setAgentOutlivesTurn`.
     this._outlivesTurn = new Set()
+    this._decisionEndedAt = 0
   }
 
   /**
@@ -404,6 +405,24 @@ export class ActivityRegistry {
     this._end(BLOCKED_ID_PREFIX + requestId, 'failed')
   }
 
+  /** One durable, session-level decision; permission/question ids stay separate. */
+  onDeclaredStatus(status) {
+    const id = 'decision:session'
+    if (!status?.decision || /^none$/i.test(status.decision)) {
+      this._end(id, 'done')
+      return
+    }
+    const existing = this._entries.get(id)
+    if (existing?.label === status.decision) return
+    this._upsert({
+      id,
+      kind: 'decision',
+      label: status.decision,
+      status: 'blocked',
+      startedAt: existing?.startedAt ?? Math.max(status.updatedAt, this._decisionEndedAt + 1),
+    })
+  }
+
   // --- lifecycle ------------------------------------------------------------
 
   /**
@@ -438,7 +457,7 @@ export class ActivityRegistry {
     // a delta listener re-enters the registry.
     const toEnd = []
     for (const [id, entry] of this._entries) {
-      if (entry.kind === 'shell') continue
+      if (entry.kind === 'shell' || entry.kind === 'decision') continue
       if (this._outlivesTurn.has(id) || (entry.parentId && this._outlivesTurn.has(entry.parentId))) continue
       toEnd.push(id)
     }
@@ -492,6 +511,7 @@ export class ActivityRegistry {
     // clock that ticked backwards between start and end.
     const endedAt = Math.max(Date.now(), existing.startedAt)
     const ended = { ...existing, status, endedAt }
+    if (existing.kind === 'decision') this._decisionEndedAt = endedAt
     // Drop it BEFORE emitting so a re-entrant handler observing the emit
     // can't double-end the same node.
     this._entries.delete(id)

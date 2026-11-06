@@ -5,6 +5,12 @@
  * ../server.ts (barrel). Split per #6201 Tier-3.
  */
 import { z } from 'zod';
+import { DeclaredStatusSchema } from "../declared-status.js";
+export const ServerSessionStatusSchema = z.object({
+    type: z.literal('session_status'),
+    sessionId: z.string(),
+    declaredStatus: DeclaredStatusSchema,
+});
 import { MAX_SANE_DURATION_MS } from "./connection.js";
 import { ServerPendingBackgroundShellSchema } from "./stream.js";
 import { McpConfigScopeSchema } from "../client.js";
@@ -165,6 +171,7 @@ export const CumulativeUsageSchema = z.object({
  *     (CliSession, Codex, Gemini) round-trip as `0`.
  */
 export const ServerSessionListEntrySchema = z.object({
+    declaredStatus: DeclaredStatusSchema.optional(),
     sessionId: z.string(),
     name: z.string(),
     // cwd is conventionally always set by the server, but the schema accepts

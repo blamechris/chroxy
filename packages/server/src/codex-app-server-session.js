@@ -1973,7 +1973,7 @@ export class CodexAppServerSession extends BaseSession {
     // admission before result listeners save the now-completed native session.
     this._skillsPrepended = true
     this._clearResultTimeout()
-    if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId })
+    if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId, ...(turn?.status && turn.status !== 'completed' ? { interrupted: true } : {}) })
     this._emitResult(
       {
         cost: null,
