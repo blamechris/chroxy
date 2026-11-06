@@ -2109,14 +2109,14 @@ describe('input-handlers', () => {
     it('per-session pattern matches → skips evaluator (no broadcast, no rewrite)', async () => {
       const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'X', clarification: null, reasoning: '' }))
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
-      session.promptEvaluatorSkipPattern = '^lgtm ship it now$'
+      session.promptEvaluatorSkipPattern = '^lgtm ship it now please thanks$'
       const client = makeClient({ activeSessionId: 's1' })
 
-      await inputHandlers.input(makeWs(), client, { data: 'lgtm ship it now' }, ctx)
+      await inputHandlers.input(makeWs(), client, { data: 'lgtm ship it now please thanks' }, ctx)
 
       assert.equal(evaluator.callCount, 0, 'per-session pattern must short-circuit the evaluator')
       assert.equal(session.sendMessage.callCount, 1)
-      assert.equal(session.sendMessage.lastCall[0], 'lgtm ship it now', 'original draft forwarded as-is')
+      assert.equal(session.sendMessage.lastCall[0], 'lgtm ship it now please thanks', 'original draft forwarded as-is')
       const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
       assert.equal(evals.length, 0, 'no evaluator_* broadcast on skip')
     })
