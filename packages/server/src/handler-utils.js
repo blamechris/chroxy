@@ -11,6 +11,7 @@ import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
+import { resolveClaudeConfigDirOverride } from './utils/claude-config-dir.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { isBoundClient, isBoundToOtherSession } from './environments/authority.js'
 
@@ -408,6 +409,7 @@ function canonicalRealpath(p) {
 
 const CREDENTIAL_DIR_DENIED = 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
 const CONFIG_DIR_DENIED = 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+const CLAUDE_CONFIG_DIR_DENIED = 'Directory is not allowed: the configured Claude config directory is blocked'
 
 /**
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
@@ -533,6 +535,14 @@ function protectedDirectoryDenial(realCwd, home) {
     })
   }
   candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
+  // The configured Claude config directory, like `~/.claude`. Recognised by
+  // filesystem object, so a symlinked or second-path spelling is refused too.
+  // Dropped when it holds $HOME (the lockout guard below), so an override of
+  // `$HOME` or an ancestor does not refuse every directory.
+  const claudeOverride = claudeConfigDirOverride()
+  if (claudeOverride !== null) {
+    candidates.push({ path: claudeOverride, what: 'the configured Claude config directory', denial: CLAUDE_CONFIG_DIR_DENIED, exemptWhenHoldingHome: true })
+  }
 
   const byIdentity = new Map() // id -> candidates, credential entries before the config root
   const byPath = []
@@ -640,6 +650,15 @@ function pathTouchesConfigDir(absPath) {
     return false
   }
   return isPathWithin(absPath, realConfigDir)
+}
+
+/**
+ * The configured Claude config directory (CLAUDE_CONFIG_DIR), as the shared
+ * resolver accepts it, or null when none is set / it is not accepted (then
+ * claude uses `~/.claude`, which FORBIDDEN_HOME_SUBDIRS covers).
+ */
+function claudeConfigDirOverride() {
+  return resolveClaudeConfigDirOverride(process.env.CLAUDE_CONFIG_DIR)
 }
 
 /**

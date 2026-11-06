@@ -239,6 +239,33 @@ host-side lexical checks are kept in front of it — they need nothing from the 
 userland — and the host refuses any container reply that does not carry the preamble's
 sentinel, so a command that lost the guard is an error rather than a quiet "no matches".
 
+## 1a. The configured Claude config directory is treated like `.claude`
+
+`CLAUDE_CONFIG_DIR` moves claude's config directory. The floor and the session-cwd
+check resolve it with `utils/claude-config-dir.js` (`claudeConfigDir()`, the same
+canonical, symlink-resolved path the rest of the server uses) and apply the
+`.claude` rules to it, whatever it is named.
+
+- **Dedicated directory** (named other than `.claude`): the full (write) floor
+  covers every path inside it; both floors cover `settings*.json` directly inside
+  it. A Grep whose search reaches it (inside, or from above) also tests its `glob`
+  against bare `settings*.json`. A session cwd inside it is refused, by filesystem
+  object, so a symlinked spelling is refused too.
+- **`.credentials.json`** is a secret file name under both floors, at any depth,
+  for the default location and any override alike.
+- **Named `.claude`, anywhere:** the existing name rules already cover it; nothing
+  extra applies.
+- **Override equal to `$HOME` or an ancestor of it** (the resolver accepts these):
+  not floored wholesale, and not refused as a cwd, which would prompt for or lock
+  out the whole home directory. Only `settings*.json` directly inside it (and the
+  credentials name) floor.
+- **Override the resolver rejects** (relative, `~/x`, `/`, an alias of `/`): ignored
+  with a startup warning, so claude and the floor both use `~/.claude`.
+- **Windows:** containment is case-insensitive and drive-aware
+  (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere.
+- The directory is read from the daemon's environment, per call. Both pipelines
+  reach it through `isFlooredTarget`; the cwd check through `validateCwdAllowed`.
+
 ## 2. Precedence — the floor beats every lenient mode
 
 The floor is checked **before** any short-circuit, on **both** pipelines:

@@ -17,8 +17,8 @@
  * so `auto`/`acceptEdits` on claude-tui read `.env` / `id_rsa` ungated. Keep the
  * floor HERE — never reimplement it in the shell hook or a second JS call site
  * (the #6986/#7001 lesson: divergent copies of a security check are how these
- * bugs happen). A leaf module by design (no logger, no EventEmitter, no rule
- * store) so an HTTP handler can import it without pulling in PermissionManager
+ * bugs happen). A leaf module by design (no EventEmitter, no rule
+ * store; its one sibling import is the config-dir resolver) so an HTTP handler can import it without pulling in PermissionManager
  * or joining its permission-rule-store import cycle — the same shape as
  * `redaction.js`, the sanitizer both paths already share.
  *
@@ -26,8 +26,9 @@
  * lstat), which FAILS CLOSED — see {@link isProtectedPathValue}.
  */
 import { realpathSync, lstatSync } from 'node:fs'
-import { resolve, relative, sep, isAbsolute, dirname, basename, join } from 'node:path'
+import path, { resolve, relative, sep, isAbsolute, dirname, basename, join } from 'node:path'
 import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
+import { claudeConfigDir, claudeHomeDir } from './utils/claude-config-dir.js'
 
 // #6794 — hardcoded protected-path floor. Even under lenient settings (auto /
 // acceptEdits / a broad `allow` rule) Chroxy must not SILENTLY auto-approve a
@@ -61,6 +62,7 @@ const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
 const SECRET_FILE_EXACT = new Set([
   'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', // SSH private keys
   '.npmrc', '.pgpass', '.netrc',                // credential dotfiles
+  '.credentials.json',                          // claude's stored login, wherever its config dir is
 ])
 const SECRET_FILE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx']
 // The env-file family: exactly `.env`, or `.env.` followed by anything. Named so
@@ -412,6 +414,79 @@ function realpathDeepestAncestorSync(absPath) {
 // copies. Imported as `resolveTargetComponentwiseSync` at the top of this file.
 
 /**
+ * The configured Claude config directory (CLAUDE_CONFIG_DIR, resolved and
+ * canonical exactly as `claudeConfigDir` resolves it) treated like `.claude`.
+ *
+ * A `.claude`-NAMED root needs nothing here: the segment rules already cover it
+ * wherever it sits. Any other name is recognised by its resolved location:
+ *   - a dedicated root (the usual case): the full floor covers everything
+ *     inside it, and both floors cover `settings*.json` directly inside it, as
+ *     they do for `.claude/settings*.json`;
+ *   - a root that is `$HOME` or an ancestor of it (the resolver accepts these):
+ *     it is NOT floored wholesale, which would prompt for the whole home
+ *     directory. Only the `settings*.json` files directly inside it floor.
+ * A root the resolver rejects (relative, `/`, an alias of `/`) never reaches
+ * here: it resolves to `~/.claude`, which the name rules already cover.
+ * Resolved once per call. Returns null when no extra rule applies.
+ * @param {{ configRoot?: object|null }} call
+ * @returns {{ root: string, broad: boolean }|null}
+ */
+function _configRootRule(call) {
+  if (call.configRoot !== undefined) return call.configRoot
+  const root = claudeConfigDir()
+  let rule = null
+  if (basename(root).toLowerCase() !== CLAUDE_DIR) {
+    let home = claudeHomeDir()
+    try { home = realpathSync.native(home) } catch { /* the raw home still gives a prefix test */ }
+    rule = { root, broad: pathPiecesUnder(home, root, path) !== null }
+  }
+  call.configRoot = rule
+  return rule
+}
+
+/**
+ * The path pieces of `target` relative to `root` (both absolute), compared
+ * case-insensitively so a differently-cased spelling of one directory matches
+ * on a case-insensitive volume; null when `target` is not inside `root`.
+ * `[]` means the target is the root itself. `pathImpl` is injectable so the
+ * Windows spelling is testable from any host.
+ * @param {string} root
+ * @param {string} target
+ * @param {typeof path} pathImpl
+ * @returns {string[]|null}
+ */
+export function pathPiecesUnder(root, target, pathImpl) {
+  const rel = pathImpl.relative(root.toLowerCase(), target.toLowerCase())
+  if (rel === '') return []
+  if (pathImpl.isAbsolute(rel) || rel === '..' || rel.startsWith('..' + pathImpl.sep)) return null
+  return rel.split(/[/\\]+/).filter((s) => s.length > 0)
+}
+
+/**
+ * Does the already-resolved absolute `resolved` hit the configured config
+ * directory's rules (see {@link _configRootRule})?
+ * @param {string} resolved
+ * @param {boolean} secretsOnly
+ * @param {object} call
+ * @returns {boolean}
+ */
+function _hitsConfigRoot(resolved, secretsOnly, call) {
+  const rule = _configRootRule(call)
+  if (rule === null) return false
+  const inside = pathPiecesUnder(rule.root, resolved, path)
+  if (inside === null) return false
+  if (!rule.broad && !secretsOnly) return true
+  if (inside.length === 0) return false
+  // The first piece sits where `.claude` has `settings*.json`: test it in the
+  // same two forms and with the same matcher as the `.claude` rule.
+  const first = segmentName(inside[0])
+  if (SHORT_NAME_SEGMENT.test(first)) return true
+  const canonical = _canonicalNameIn(first, call)
+  if (canonical === null) return true
+  return isCredentialConfigSegment([CLAUDE_DIR, first], 0) || isCredentialConfigSegment([CLAUDE_DIR, canonical], 0)
+}
+
+/**
  * #6851 — the pure segment scan, factored out of {@link isProtectedPathValue} so
  * the lexical pass and the symlink-resolved pass share ONE matcher. Given a
  * resolution `base` and an already-resolved absolute `resolved` target, applies
@@ -472,7 +547,8 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
     canonical.push(form)
   }
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
-    _matchesProtectedSegments(canonical, start, secretsOnly)
+    _matchesProtectedSegments(canonical, start, secretsOnly) ||
+    (!carved && _hitsConfigRoot(resolved, secretsOnly, call))
 }
 
 /**
@@ -720,6 +796,7 @@ function _matchesFloor(input, cwd, secretsOnly) {
   }
   const call = {
     realBase: undefined,
+    configRoot: undefined,
     walk: { left: FLOOR_MAX_CALL_WALK },
     names: new Map(),
     canonical: { left: FLOOR_MAX_CALL_CANONICAL },
@@ -833,6 +910,7 @@ const GLOB_FLOOR_MAX_EXPANDED_LENGTH = 4096
 export const GLOB_FLOOR_MAX_STATES = 1_000_000
 
 let _globFloorTemplates = null
+let _globFloorTemplatesRootRelative = null
 
 /**
  * The templates a Grep glob is intersected with, built once from the floor's
@@ -843,10 +921,15 @@ let _globFloorTemplates = null
  *   { kind: 'star', slash }    any run of characters (`/` too when `slash`)
  * Every template also gets an any-directory-prefix variant, because a secret can
  * sit at any depth under the searched root.
+ * `rootRelative` adds the `settings*.json` names bare (not behind `.claude/`),
+ * for a search that reaches a configured Claude config directory whose name is
+ * not `.claude` (see {@link _configRootRule}).
+ * @param {boolean} [rootRelative]
  * @returns {{ elems: object[], requireCore: boolean }[]}
  */
-function globFloorTemplates() {
-  if (_globFloorTemplates) return _globFloorTemplates
+function globFloorTemplates(rootRelative = false) {
+  const cached = rootRelative ? _globFloorTemplatesRootRelative : _globFloorTemplates
+  if (cached) return cached
   const lit = (text, core) => [...text].map((ch) => ({ kind: 'lit', ch, core }))
   const oneOrMore = [{ kind: 'one' }, { kind: 'star', slash: false }]
   const base = []
@@ -881,9 +964,19 @@ function globFloorTemplates() {
     requireCore: true,
   })
 
+  if (rootRelative) {
+    for (const name of ['', '.local']) exact(`${CLAUDE_SETTINGS_PREFIX}${name}${CLAUDE_SETTINGS_SUFFIX}`)
+    base.push({
+      elems: [...lit(CLAUDE_SETTINGS_PREFIX, true), { kind: 'star', slash: false }, ...lit(CLAUDE_SETTINGS_SUFFIX, true)],
+      requireCore: true,
+    })
+  }
+
   const anyDirectory = [{ kind: 'star', slash: true }, { kind: 'lit', ch: '/', core: false }]
-  _globFloorTemplates = base.flatMap((t) => [t, { elems: [...anyDirectory, ...t.elems], requireCore: t.requireCore }])
-  return _globFloorTemplates
+  const built = base.flatMap((t) => [t, { elems: [...anyDirectory, ...t.elems], requireCore: t.requireCore }])
+  if (rootRelative) _globFloorTemplatesRootRelative = built
+  else _globFloorTemplates = built
+  return built
 }
 
 // The only characters the analysis models (PR #7980 review). Anything else in a
@@ -1039,9 +1132,10 @@ function _globMatchesTemplate(tokens, t, budget) {
  * cap, or once `budget` runs out, the glob floors without a full analysis.
  * @param {string} glob
  * @param {{ left: number }} [budget]  search states left; shared across one Grep call
+ * @param {boolean} [rootRelative]  also match bare `settings*.json` (see {@link globFloorTemplates})
  * @returns {boolean}
  */
-export function globSelectsSecret(glob, budget = { left: GLOB_FLOOR_MAX_STATES }) {
+export function globSelectsSecret(glob, budget = { left: GLOB_FLOOR_MAX_STATES }, rootRelative = false) {
   if (typeof glob !== 'string') return true
   if (glob.length > GLOB_FLOOR_MAX_LENGTH) return true
   const trimmed = glob.replace(/[ \t\n\r\v\f]+$/, '')
@@ -1051,7 +1145,7 @@ export function globSelectsSecret(glob, budget = { left: GLOB_FLOOR_MAX_STATES }
   const alternatives = expandGlobBraces(trimmed)
   if (alternatives === null) return true
   if (alternatives.reduce((sum, alt) => sum + alt.length, 0) > GLOB_FLOOR_MAX_EXPANDED_LENGTH) return true
-  const templates = globFloorTemplates()
+  const templates = globFloorTemplates(rootRelative)
   for (let alt of alternatives) {
     // Anchors: ripgrep roots a leading `/` at the search root, and `./` names
     // the same place. Both only narrow where a match can sit; drop them.
@@ -1089,7 +1183,7 @@ export function globSelectsSecret(glob, budget = { left: GLOB_FLOOR_MAX_STATES }
  * @param {object} input
  * @returns {boolean}
  */
-function grepGlobFloored(input) {
+function grepGlobFloored(input, rootRelative) {
   const glob = input.glob
   if (glob === undefined || glob === null) return false
   if (typeof glob !== 'string') return true
@@ -1102,7 +1196,7 @@ function grepGlobFloored(input) {
   }
   const budget = { left: GLOB_FLOOR_MAX_STATES }
   for (const reading of readings) {
-    if (globSelectsSecret(reading, budget)) return true
+    if (globSelectsSecret(reading, budget, rootRelative)) return true
   }
   return false
 }
@@ -1133,5 +1227,32 @@ export function isFlooredTarget(toolName, input, cwd) {
   if (isSecretReadTarget(input, cwd)) return true
   // #7978 — Grep's `glob` picks WHICH files it reads, overriding .gitignore.
   return GLOB_SELECTOR_FLOOR_TOOLS.has(toolName) &&
-    input !== null && typeof input === 'object' && grepGlobFloored(input)
+    input !== null && typeof input === 'object' && grepGlobFloored(input, _searchReachesConfigRoot(input, cwd))
+}
+
+/**
+ * Does a Grep's search location overlap a configured Claude config directory
+ * whose name is not `.claude`: inside it, or above it? Then its `glob` is also
+ * tested against bare `settings*.json`. Fails closed: a location that cannot be
+ * resolved counts as reaching it.
+ * @param {object} input
+ * @param {string} [cwd]
+ * @returns {boolean}
+ */
+function _searchReachesConfigRoot(input, cwd) {
+  const rule = _configRootRule({})
+  if (rule === null) return false
+  const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
+  const targets = PROTECTED_PATH_INPUT_FIELDS.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0)
+  if (targets.length === 0) targets.push('.')
+  try {
+    const realBase = realpathDeepestAncestorSync(base)
+    for (const target of targets) {
+      const real = resolveTargetComponentwiseSync(realBase, target, { left: FLOOR_MAX_CALL_WALK })
+      if (pathPiecesUnder(rule.root, real, path) !== null || pathPiecesUnder(real, rule.root, path) !== null) return true
+    }
+    return false
+  } catch {
+    return true
+  }
 }
