@@ -47,7 +47,7 @@ import {
 } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
-import type { ChatMessage } from '@chroxy/store-core';
+import { createEmptyActivityState, selectCrossSessionActivity, type ChatMessage } from '@chroxy/store-core';
 import type { ConnectionState } from '../../store/types';
 
 jest.mock('../../store/persistence', () => ({
@@ -342,5 +342,32 @@ describe('#7518 — session_activity resyncs isIdle from the server isBusy', () 
     expect(ss.messages).toHaveLength(1);
     // Observation B again — same reachable state, same dashboard-parity trade.
     expect(ss.activityState.state).toBe('thinking');
+  });
+});
+
+
+describe('inactive decision roster reconciliation', () => {
+  it('seeds and clears the inactive decision without selecting it or touching permission prompts', () => {
+    const store = seed({ s1: createEmptySessionState(), s2: createEmptySessionState() });
+    store.setState({ activity: createEmptyActivityState() });
+    const declaredStatus = { state: 'blocked', summary: 'Ready', decision: 'Choose target', source: 'marker', updatedAt: 1 };
+    const list = (decisionActivity: { startedAt?: number; endedAt: number }, decision = 'Choose target') => ({ type: 'session_list', sessions: [
+      { sessionId: 's1', name: 'Default' },
+      { sessionId: 's2', name: 'Review', declaredStatus: { ...declaredStatus, decision }, decisionActivity },
+    ] });
+    _testMessageHandler.handle(list({ startedAt: 100, endedAt: 0 }));
+    expect(store.getState().activeSessionId).toBe('s1');
+    expect(store.getState().sessionStates.s2.declaredStatus?.decision).toBe('Choose target');
+    expect(store.getState().activity.bySession.s2.byId['decision:session'].startedAt).toBe(100);
+    const old = { id: 'decision:session', kind: 'decision', status: 'blocked', label: 'Choose target', startedAt: 100 };
+    _testMessageHandler.handle({ type: 'activity_delta', sessionId: 's2', schemaVersion: 1, op: 'updated', entry: old });
+    expect(selectCrossSessionActivity(store.getState().activity, store.getState().sessions).total.blocked).toBe(1);
+    _testMessageHandler.handle({ type: 'activity_delta', sessionId: 's2', schemaVersion: 1, op: 'started', entry: { id: 'permission:p', kind: 'tool', status: 'blocked', label: 'Allow?', startedAt: 1 } });
+    _testMessageHandler.handle(list({ endedAt: 100 }, 'none'));
+    _testMessageHandler.handle({ type: 'activity_snapshot', sessionId: 's2', schemaVersion: 1, entries: [{ id: 'permission:p', kind: 'tool', status: 'blocked', label: 'Allow?', startedAt: 1 }] });
+    _testMessageHandler.handle({ type: 'activity_delta', sessionId: 's2', schemaVersion: 1, op: 'updated', entry: old });
+    expect(store.getState().activity.bySession.s2.byId['decision:session']).toBeUndefined();
+    expect(store.getState().activity.bySession.s2.byId['permission:p']).toBeDefined();
+    expect(store.getState().activeSessionId).toBe('s1');
   });
 });

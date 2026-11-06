@@ -450,6 +450,7 @@ export {
   createEmptyActivityState,
   applyActivitySnapshot,
   applyActivityDelta,
+  reconcileSessionDecision,
   clearSessionActivity,
   selectSessionEntries,
   selectActivityTree,
