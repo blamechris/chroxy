@@ -132,3 +132,10 @@ describe('credential-invalid close (4401)', () => {
     expect(getWsCloseMessage(4401)).toMatch(/pair it again/i)
   })
 })
+
+describe('close code 1001 (server going away)', () => {
+  it('is not a credential-invalid close and reads as a restart', () => {
+    expect(isCredentialInvalidClose(1001)).toBe(false)
+    expect(getWsCloseMessage(1001)).toMatch(/restarting/i)
+  })
+})

@@ -62,6 +62,9 @@ export function getWsCloseMessage(code: number): string | null {
     case 1008:
       // Policy violation — server couldn't complete key exchange (E2E encryption)
       return 'Encryption failed — check that your app is up to date'
+    case 1001:
+      // Going away — the server is shutting down or restarting; the client reconnects
+      return 'Server restarting — reconnecting'
     case 4008:
       // Server-side backpressure eviction — client was too slow to consume messages
       return 'Connection dropped — the server was overwhelmed, reconnecting'

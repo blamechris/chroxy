@@ -158,7 +158,12 @@ export class CheckpointManager extends EventEmitter {
     try {
       assertAuthorized(isAuthorized)
     } catch (err) {
-      if (checkpoint.gitRef) this._deleteGitRefTracked(cwd, checkpoint.gitRef)
+      // Awaited, so the ref is gone when the refusal reaches the caller (a
+      // fire-and-forget delete races the caller's next read, and loses on slow spawns).
+      if (checkpoint.gitRef && !(await this._deleteGitRef(cwd, checkpoint.gitRef))) {
+        this._recordFailedRefDelete(cwd, checkpoint.gitRef)
+        log.warn(`Failed to delete git ref ${checkpoint.gitRef} (recorded for retry)`)
+      }
       throw err
     }
 

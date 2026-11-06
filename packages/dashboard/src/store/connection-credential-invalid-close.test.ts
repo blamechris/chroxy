@@ -86,6 +86,20 @@ afterEach(() => {
 
 const frame = (socket: MockWebSocket, msg: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(msg) })
 
+describe('close code 1001 (server going away) is not a credential close', () => {
+  it('reconnects and does not mark the token suspect', async () => {
+    const { socket, serverId } = await connectToA()
+    const before = MockWebSocket.instances.length
+    socket.onclose?.({ code: 1001 })
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(MockWebSocket.instances.length).toBeGreaterThan(before)
+    const next = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    next.onopen?.()
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+})
+
 describe('close code 4401 alone (not authenticated evidence)', () => {
   it('control: an ordinary drop reconnects with the saved credential', async () => {
     const { socket } = await connectToA()

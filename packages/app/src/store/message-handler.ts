@@ -836,11 +836,17 @@ export function resetReconnectAttempt(): void {
  * token, and the url or tunnel url it connected to), so a notice for an old
  * connection can never wipe a connection saved since.
  */
-function forgetSavedConnectionFor(ctx: ConnectionContext, get: () => { clearSavedConnection?: () => Promise<void> }): void {
+function forgetSavedConnectionFor(ctx: ConnectionContext, get: () => { clearSavedConnection?: () => Promise<void> }): boolean {
   const saved = useConnectionLifecycleStore.getState().savedConnection;
-  if (!saved || saved.token !== ctx.token) return;
-  if (saved.url !== ctx.url && saved.tunnelUrl !== ctx.url) return;
+  if (!saved || saved.token !== ctx.token) return false;
+  // The saved record is this connection's if it points at the url the socket dialled, or
+  // is the very record this connection holds: a live tunnel rotation repoints the saved
+  // url/tunnelUrl (and ctx.savedConnection with it) while ctx.url stays on the old tunnel.
+  const own = ctx.savedConnection;
+  const sameRecord = !!own && own.token === saved.token && own.url === saved.url;
+  if (!sameRecord && saved.url !== ctx.url && saved.tunnelUrl !== ctx.url) return false;
   void get().clearSavedConnection?.();
+  return true;
 }
 
 export function setDisconnectedAttemptId(id: number): void {
@@ -2407,7 +2413,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       setDisconnectedAttemptId(connectionAttemptId);
       if (action === 'forget') {
         markCredentialSuspect(credentialKey(ctx), null);
-        forgetSavedConnectionFor(ctx, get);
+        // A saved record that is not this connection's is left alone, but the token stays
+        // suspect so a later auth_fail can still forget it.
+        if (!forgetSavedConnectionFor(ctx, get)) markCredentialSuspect(credentialKey(ctx), ctx.token);
       } else {
         markCredentialSuspect(credentialKey(ctx), ctx.token);
       }

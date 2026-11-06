@@ -215,6 +215,9 @@ describe('checkpoint restore', () => {
 
   it('a refusal at the last check removes the snapshot ref it had just created', async () => {
     const refsBefore = execFileSync(GIT, ['for-each-ref'], { cwd: repo, encoding: 'utf8' })
+    // A slow ref delete (as process spawn is on Windows): the refusal must wait for it.
+    const realDelete = cm._deleteGitRef.bind(cm)
+    cm._deleteGitRef = async (...a) => { await new Promise((r) => setTimeout(r, 300)); return realDelete(...a) }
     // allowed at the in-lock check, refused at the last-chance check before persisting
     await assert.rejects(cm.createCheckpoint({ sessionId: 's3', resumeSessionId: 'r', cwd: repo, name: 'cp', isAuthorized: allowFirst(1) }), (err) => isAuthorityRevoked(err))
     assert.equal(cm.listCheckpoints('s3').length, 0)
