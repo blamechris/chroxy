@@ -223,6 +223,17 @@ describe('the credential_invalidated notice', () => {
     ws.restore();
   });
 
+  it('an accepted notice does not clear a saved connection with the same token but a different url', async () => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    const MOVED = { url: 'wss://moved.example.com', token: SAVED.token };
+    useConnectionLifecycleStore.setState({ savedConnection: MOVED });
+    encryptedNotice('revoked');
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(MOVED);
+    ws.restore();
+  });
+
   it('an accepted notice does not clear a saved connection with the same url but a newer token', async () => {
     const ws = installMockWebSocket();
     await openConnectedSocket(ws);

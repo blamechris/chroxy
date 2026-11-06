@@ -1519,10 +1519,9 @@ export class WsServer {
       // A stored pairing token stopped being valid (revoked, expired, evicted):
       // end every connection that authenticated with it.
       this._sessionTokenRemovedHandler = ({ token, reason }) => {
-        // Daemon teardown clears the store from memory only: the tokens stay valid on
-        // disk and after the restart, so connections end through close(), not as
-        // "credential invalid" (which would make clients forget a good credential).
-        if (reason === 'destroyed') return
+        // Daemon teardown (reason 'destroyed') clears the store from memory only: the
+        // tokens stay valid on disk. _endCredentialConnection sees the destroyed
+        // pairing manager and ends the connection quietly, without a notice.
         for (const [ws, client] of [...this.clients]) {
           if (client.pairingCredential != null && client.pairingCredential === token) {
             this._endCredentialConnection(ws, client, reason)
