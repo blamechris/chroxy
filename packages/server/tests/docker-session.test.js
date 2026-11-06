@@ -724,6 +724,28 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
     )
   })
 
+  it('runs claude with CLAUDE_CONFIG_DIR unset, whatever HOME holds', async () => {
+    for (const home of ['/home/chroxy', undefined, 'C:\\Users\\dev']) {
+      const { DockerSession } = await import('../src/docker-session.js')
+      const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+      session._containerId = 'c0ffee1234567890'
+      const env = { ...session._buildChildEnv(), CLAUDE_CONFIG_DIR: '/workspace/claude-data' }
+      if (home === undefined) delete env.HOME
+      else env.HOME = home
+      session._buildChildEnv = () => env
+      let captured = null
+      const child = new EventEmitter()
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {}
+      session._spawnDocker = (a) => { captured = a; return child }
+      session._spawnPersistentProcess(['-p'])
+      session._cleanupReadlines()
+      for (const st of [child.stdin, child.stdout, child.stderr]) st.destroy()
+      const at = captured.indexOf('c0ffee1234567890')
+      assert.deepEqual(captured.slice(at, at + 5), ['c0ffee1234567890', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'claude'], `HOME=${home}`)
+      assert.ok(!captured.some((a) => String(a).startsWith('CLAUDE_CONFIG_DIR=')), 'no value is forwarded')
+    }
+  })
+
   it('does not leak the host sidecar PATH by any other argv route', async () => {
     // Keyed on the VALUE, not the variable name: a forward that renamed the key
     // (or embedded the path in another var) would slip past a name-only check

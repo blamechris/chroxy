@@ -913,6 +913,42 @@ describe('PodAgent', () => {
       }
     })
 
+    it('removes CLAUDE_CONFIG_DIR defined by the agent environment when the spawn asks', async () => {
+      const original = process.env.CLAUDE_CONFIG_DIR
+      process.env.CLAUDE_CONFIG_DIR = '/workspace/claude-data'
+      // A neutral name: PATH is spelled `Path` in a Windows environment.
+      process.env.CHROXY_TEST_KEEP_ME = 'kept'
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], unsetEnv: ['CLAUDE_CONFIG_DIR', 'CHROXY_TEST_KEEP_ME'] }))
+        await waitFor(() => capturedEnv !== undefined, { label: 'spawn invoked with env' })
+        assert.equal(capturedEnv.CLAUDE_CONFIG_DIR, undefined, 'the allowlisted name is removed')
+        assert.equal(capturedEnv.CHROXY_TEST_KEEP_ME, 'kept', 'a name outside the allowlist is ignored')
+        ws.close()
+      } finally {
+        delete process.env.CHROXY_TEST_KEEP_ME
+        if (original === undefined) delete process.env.CLAUDE_CONFIG_DIR
+        else process.env.CLAUDE_CONFIG_DIR = original
+      }
+    })
+
+    it('keeps CLAUDE_CONFIG_DIR when the spawn does not ask', async () => {
+      const original = process.env.CLAUDE_CONFIG_DIR
+      process.env.CLAUDE_CONFIG_DIR = '/workspace/claude-data'
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'ls', args: [] }))
+        await waitFor(() => capturedEnv !== undefined, { label: 'spawn invoked with env' })
+        assert.equal(capturedEnv.CLAUDE_CONFIG_DIR, '/workspace/claude-data')
+        ws.close()
+      } finally {
+        if (original === undefined) delete process.env.CLAUDE_CONFIG_DIR
+        else process.env.CLAUDE_CONFIG_DIR = original
+      }
+    })
+
     it('per-spawn env values still take effect', async () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)

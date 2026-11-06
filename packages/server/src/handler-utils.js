@@ -7,10 +7,12 @@
  */
 import fs, { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
+import { join, dirname, resolve, relative, sep, basename, isAbsolute, parse, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
+import { resolveClaudeConfigDirOverride } from './utils/claude-config-dir.js'
+import { canonicalName, segmentName } from './permission-floor.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { isBoundClient, isBoundToOtherSession } from './environments/authority.js'
 
@@ -408,6 +410,7 @@ function canonicalRealpath(p) {
 
 const CREDENTIAL_DIR_DENIED = 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
 const CONFIG_DIR_DENIED = 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+const CLAUDE_CONFIG_DIR_DENIED = 'Directory is not allowed: the configured Claude config directory is blocked'
 
 /**
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
@@ -505,7 +508,7 @@ function filesystemIdentity(p) {
  * `realCwd`, also refuses every session start the same way. One loop serves both
  * kinds of protected directory.
  */
-function protectedDirectoryDenial(realCwd, home) {
+function protectedDirectoryDenial(realCwd, home, { claudeConfigOnly = false } = {}) {
   const cannotCheck = (what, err) => `Directory is not allowed: cannot check ${what} (${err?.code ?? 'unknown error'}); fix or remove it`
 
   // Names to look up: every literal protected name, plus the case variants the
@@ -524,7 +527,7 @@ function protectedDirectoryDenial(realCwd, home) {
     if (FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) names.add(name)
   }
   const candidates = []
-  for (const name of names) {
+  for (const name of claudeConfigOnly ? [] : names) {
     candidates.push({
       path: join(home, name),
       what: `the protected home entry ~/${name}`,
@@ -532,7 +535,15 @@ function protectedDirectoryDenial(realCwd, home) {
       exemptWhenHoldingHome: true,
     })
   }
-  candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
+  if (!claudeConfigOnly) candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
+  // The configured Claude config directory, like `~/.claude`. Recognised by
+  // filesystem object, so a symlinked or second-path spelling is refused too.
+  // Dropped when it holds $HOME (the lockout guard below), so an override of
+  // `$HOME` or an ancestor does not refuse every directory.
+  const claudeOverride = claudeConfigDirOverride()
+  if (claudeOverride !== null) {
+    candidates.push({ path: claudeOverride, what: 'the configured Claude config directory', denial: CLAUDE_CONFIG_DIR_DENIED, exemptWhenHoldingHome: true })
+  }
 
   const byIdentity = new Map() // id -> candidates, credential entries before the config root
   const byPath = []
@@ -640,6 +651,67 @@ function pathTouchesConfigDir(absPath) {
     return false
   }
   return isPathWithin(absPath, realConfigDir)
+}
+
+/**
+ * The configured Claude config directory (CLAUDE_CONFIG_DIR), as the shared
+ * resolver accepts it, or null when none is set / it is not accepted (then
+ * claude uses `~/.claude`, which FORBIDDEN_HOME_SUBDIRS covers).
+ */
+function claudeConfigDirOverride() {
+  return resolveClaudeConfigDirOverride(process.env.CLAUDE_CONFIG_DIR)
+}
+
+// A path with every component folded the way the permission floor compares names
+// (case, Unicode normalisation, trailing dots and spaces), so a spelling the
+// filesystem treats as the same name compares equal.
+function foldPath(p) {
+  const { root } = parse(p)
+  const parts = p.slice(root.length).split(/[\\/]+/).filter((x) => x.length > 0)
+  return root.toLowerCase() + parts.map((x) => canonicalName(segmentName(x))).join(sep)
+}
+
+/**
+ * The refusal for a session working directory inside the configured Claude
+ * config directory (CLAUDE_CONFIG_DIR), or null. This is the check the session
+ * manager applies at its single creation boundary, so every way a session gets
+ * a cwd (an omitted cwd, the startup default, a restored session, a checkpoint
+ * branch) is covered, not only the callers of {@link validateCwdAllowed}. A
+ * directory that does not exist yet or cannot be resolved is left to the
+ * existing directory checks.
+ * @param {string} cwd
+ * @returns {string|null}
+ */
+export function claudeConfigDirCwdDenial(cwd) {
+  const override = claudeConfigDirOverride()
+  if (override === null) return null
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return null
+  let home
+  try {
+    home = canonicalRealpath(homedir())
+  } catch {
+    home = homedir()
+  }
+  // A directory that is not created yet (a worktree about to be made, one about to
+  // be recreated) is judged by its deepest existing ancestor plus the missing tail.
+  let existing = resolve(cwd)
+  const tail = []
+  for (;;) {
+    try {
+      existing = canonicalRealpath(existing)
+      break
+    } catch (err) {
+      if (!isAbsentError(err)) return CLAUDE_CONFIG_DIR_DENIED
+      const parent = dirname(existing)
+      if (parent === existing) return null
+      tail.push(basename(existing))
+      existing = parent
+    }
+  }
+  if (isPathWithin(home, override)) return null
+  const wouldBe = tail.length ? join(existing, ...tail.reverse()) : existing
+  if (isPathWithin(foldPath(wouldBe), foldPath(override))) return CLAUDE_CONFIG_DIR_DENIED
+  return protectedDirectoryDenial(existing, home, { claudeConfigOnly: true })
 }
 
 /**

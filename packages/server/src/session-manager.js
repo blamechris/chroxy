@@ -45,6 +45,7 @@ import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
 import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { claudeConfigDirCwdDenial } from './handler-utils.js'
 import { assertProviderPermissionModeSupported, UnsupportedPermissionModeError } from './permission-mode-support.js'
 import { toWireCount } from './utils/wire-counters.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
@@ -1613,6 +1614,14 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    // The configured Claude config directory is not a working directory. Checked
+    // here, at the one boundary every creation shares (an omitted cwd, the
+    // startup default, a restored session, a checkpoint branch), so none of
+    // them can reach it. A restored session that now points into it is refused
+    // like any other restore failure: logged, kept parked, not silently started.
+    const baseDenial = claudeConfigDirCwdDenial(baseCwd)
+    if (baseDenial) throw new SessionDirectoryError(baseDenial, baseCwd)
+
     // #4983 — preserve persisted ID on restoreState so dashboard's
     // localStorage-cached activeSessionId still resolves after a daemon
     // restart. Validate the format strictly (32 lower-case hex chars,
@@ -1794,6 +1803,10 @@ export class SessionManager extends EventEmitter {
       }
     } else if (worktree) {
       const worktreeDir = join(this._worktreeBase || defaultWorktreeBase(), sessionId)
+      // The session's cwd becomes the worktree: judge it before anything is created.
+      // (A restored worktree, rebound or recreated below, is at the path checked above.)
+      const worktreeDenial = claudeConfigDirCwdDenial(worktreeDir)
+      if (worktreeDenial) throw new SessionDirectoryError(worktreeDenial, worktreeDir)
       this._addDetachedWorktree(baseCwd, worktreeDir)
 
       resolvedCwd = worktreeDir
