@@ -56,7 +56,7 @@ import { registerOpenAiCompatibleProviders } from './openai-compatible-session.j
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay, setInUseModelsProvider } from './models.js'
 import { clientActiveProvider, overlayBroadcastReachesProvider, broadcastRosterPerRecipient } from './roster-broadcast.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
@@ -1148,6 +1148,8 @@ export async function startCliServer(config) {
     inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
 
   // 1. Create session manager
+  // (#8967 — registered right after construction below, so a live Claude model
+  // refresh keeps a row a running session is still on instead of dropping it.)
   const { sessionManager, startupSkillPolicy } = createDaemonSessionManager(config, {
     maxSessions: config.maxSessions || 5,
     port: PORT,
@@ -1258,6 +1260,8 @@ export async function startCliServer(config) {
     : `${formatIdleDuration(effectiveStreamStallTimeoutMs)} (${effectiveStreamStallTimeoutMs}ms)`
   log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms); stream-stall: ${stallLabel}`)
   log.info(formatStartupSkillPolicyDiagnostic(startupSkillPolicy.diagnostics))
+
+  setInUseModelsProvider(() => sessionManager.listSessions().map((s) => s.model).filter(Boolean))
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId

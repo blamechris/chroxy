@@ -301,8 +301,12 @@ describe('disk cache (loadCache / saveCache)', () => {
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
     for (const row of rows) assert.equal(r.resolveModelId(row.id), row.fullId)
-    r.updateModels([{ value: 'claude-sonnet-5-5', displayName: 'Default (Sonnet)' }])
     for (const row of rows) assert.ok(r.getModels().some(m => m.fullId === row.fullId))
+    // #8967: a successful live answer is authoritative over the cache, so the
+    // cache-only rows it does not name are retired.
+    r.updateModels([{ value: 'claude-sonnet-5-5', displayName: 'Default (Sonnet)' }])
+    // (Static-seed rows come back via the #3075 union; the dated id is cache-only.)
+    assert.ok(!r.getModels().some(m => m.fullId === 'claude-haiku-4-5-20251001'))
   })
 
   it('loadCache keeps dated and [1m] variants whose stem matches a FALLBACK family', () => {
