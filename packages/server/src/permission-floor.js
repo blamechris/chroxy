@@ -746,7 +746,7 @@ function _rootEntry(written, call) {
  * A config directory that cannot be determined at all names no sessions
  * directory: the configured-root rule already decides for that case.
  * @param {object} call
- * @returns {{ sessions: { paths: string[], failed: boolean }, inbox: { paths: string[], failed: boolean } }}
+ * @returns {{ sessions: { paths: string[], failed: boolean }, inbox: { paths: string[] } }}
  */
 function _protectedRoots(call) {
   if (call.protectedRoots !== undefined) return call.protectedRoots
@@ -756,7 +756,7 @@ function _protectedRoots(call) {
   } catch { /* see above */ }
   // The inbox roots are POSIX paths; there is nothing to resolve elsewhere.
   const inbox = _rootEntry(call.inboxDirs ?? (sep === '/' ? ['/tmp/' + INBOX_SOCKET_DIR, '/private/tmp/' + INBOX_SOCKET_DIR] : []), call)
-  call.protectedRoots = { sessions, inbox }
+  call.protectedRoots = { sessions, inbox: { paths: inbox.paths } }
   return call.protectedRoots
 }
 
@@ -1516,8 +1516,8 @@ export function isFlooredTarget(toolName, input, cwd) {
 
 /**
  * Can the Grep `glob` provably not select a `.key` file? True only when it has
- * at least one include and every include (under each reading of the field, see
- * {@link grepGlobFloored}) is inside the analysable grammar and ends in a fixed
+ * at least one piece and every piece (judged alone, under each reading of the field,
+ * see {@link grepGlobFloored}) is inside the analysable grammar and ends in a fixed
  * extension other than `key`: `*.js`, `src/**\/*.{js,ts}`. Anything else is
  * treated as able to select one, including `*`, `**`, `sessions/123*`,
  * `sessions/**`, `**\/*.key`, a class or escape, a directory (trailing `/`), and
@@ -1527,16 +1527,20 @@ export function isFlooredTarget(toolName, input, cwd) {
  */
 function globAvoidsKeyFiles(glob) {
   if (typeof glob !== 'string' || glob.length === 0 || glob.length > GLOB_FLOOR_MAX_LENGTH) return false
+  // Any `!` can turn a piece into an exclusion under one reading of the field
+  // and leave it an include under another, so none can be reasoned about.
+  if (glob.includes('!')) return false
   const readings = new Set([glob])
   for (const piece of glob.split(/\s+/)) {
     if (piece.includes('{') && piece.includes('}')) readings.add(piece)
     else for (const part of piece.split(',')) readings.add(part)
     if (readings.size > GLOB_FLOOR_MAX_PIECES) return false
   }
-  let includes = 0
+  let judged = 0
   for (const reading of readings) {
     const trimmed = reading.replace(/[ \t\n\r\v\f]+$/, '')
-    if (trimmed.length === 0 || trimmed.startsWith('!')) continue
+    // Nothing is passed to ripgrep for an empty piece; each real one is judged alone.
+    if (trimmed.length === 0) continue
     if (!GLOB_FLOOR_ANALYZABLE.test(trimmed)) return false
     const alternatives = expandGlobBraces(trimmed)
     if (alternatives === null) return false
@@ -1546,10 +1550,10 @@ function globAvoidsKeyFiles(glob) {
       const dot = last.lastIndexOf('.')
       const ext = dot === -1 ? '' : last.slice(dot + 1)
       if (ext.length === 0 || /[*?]/.test(ext) || ext.toLowerCase() === 'key') return false
-      includes++
     }
+    judged++
   }
-  return includes > 0
+  return judged > 0
 }
 
 export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])

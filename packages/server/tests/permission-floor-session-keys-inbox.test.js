@@ -236,8 +236,14 @@ describe('a search with no path starts from the session cwd', () => {
   })
 
   it('leaves a search from an ordinary cwd alone', async () => {
-    for (const cwd of [project, '/tmp', '/tmp/other', '/tmp/cc-socks-other']) {
-      for (const [tool, input] of SEARCHES) await assertBoth(tool, input, false, `ordinary cwd ${cwd}`, cwd)
+    // Not '/tmp' itself: the fixtures can live under it (TMPDIR=/tmp), which makes it an ancestor of the config dir.
+    const sibling = mkdtempSync(join(tmpdir(), 'floor-keys-sibling-'))
+    try {
+      for (const cwd of [project, sibling, '/tmp/other', '/tmp/cc-socks-other']) {
+        for (const [tool, input] of SEARCHES) await assertBoth(tool, input, false, `ordinary cwd ${cwd}`, cwd)
+      }
+    } finally {
+      rmSync(sibling, { recursive: true, force: true })
     }
   })
 
@@ -327,7 +333,7 @@ describe('a Grep from the config dir or above', () => {
       await assertBoth('Grep', { path: home, glob }, false, `glob ${glob} from home`)
     }
     for (const glob of ['sessions/123*', '*', '**', '**/*.key', 'sessions/**', '*.{js,key}', '{sessions/1*,*.js}',
-      '*.js sessions/12*', '*.js,sessions/12*', '!*.key', '*.k*', '*.?ey', 'sessions/', '[a]*.js', '*.KEY', '*.js\\', '']) {
+      '*.js sessions/12*', '*.js,sessions/12*', '!*.key', ' !*.js', ',!*.js', '\n!*.js', ' !*.js ', '*.js !*.js', '*.js,!*.js', '*.key *.js', 'sessions/1*.key,*.js', '!*.js', '*.k*', '*.?ey', 'sessions/', '[a]*.js', '*.KEY', '*.js\\', '']) {
       await assertBoth('Grep', { path: cfg, glob }, true, `glob ${JSON.stringify(glob)}`)
       await assertBoth('Grep', { path: home, glob }, true, `glob ${JSON.stringify(glob)} from home`)
     }
@@ -338,6 +344,15 @@ describe('a Grep from the config dir or above', () => {
     assert.equal(avoids('*.js'), true)
     assert.equal(avoids('sessions/123*'), false)
     assert.equal(avoids('!*.js'), false)
+    assert.equal(avoids('*.KEY'), false)
+    assert.equal(avoids('*.Key'), false)
+    assert.equal(avoids(' !*.js'), false)
+    assert.equal(avoids('*.js !*.js'), false)
+    assert.equal(avoids('*.js, *.txt'), true)
+    // each piece is judged alone: the whole string ends in .js, the first piece selects keys
+    assert.equal(avoids('*.key *.js'), false)
+    assert.equal(avoids('sessions/1*.key,*.js'), false)
+    assert.equal(avoids('sessions/12* *.js'), false)
     assert.equal(avoids(undefined), false)
     assert.equal(avoids(5), false)
   })
