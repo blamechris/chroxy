@@ -701,11 +701,34 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
 // what a symlinked or relative route arrives as; on other hosts it is a literal.
 const INBOX_SOCKET_DIR = 'cc-socks'
 const INBOX_SOCKET_PREFIXES = [['tmp', INBOX_SOCKET_DIR], ['private', 'tmp', INBOX_SOCKET_DIR]]
+const CLAUDE_SESSIONS_DIR = 'sessions'
+
+/**
+ * The protected directories as paths, each in its written spelling and its
+ * symlink-resolved one, so a root that is itself a link (or reached through
+ * one) is recognised from either side. A root that does not exist yet resolves
+ * through its deepest existing ancestor, so it names only itself. Computed once
+ * per call; throws when a root cannot be resolved, and callers fail closed.
+ * @param {object} call
+ * @returns {{ sessions: string[], inbox: string[] }}
+ */
+function _protectedRoots(call) {
+  if (call.protectedRoots !== undefined) return call.protectedRoots
+  const both = (p) => [...new Set([p, realpathDeepestAncestorSync(p)])]
+  const root = (call.configDirFn ?? claudeConfigDir)()
+  call.protectedRoots = {
+    sessions: both(join(root, CLAUDE_SESSIONS_DIR)),
+    // The inbox roots are POSIX paths; there is nothing to resolve elsewhere.
+    inbox: (call.inboxDirs ?? (sep === '/' ? ['/tmp/' + INBOX_SOCKET_DIR, '/private/tmp/' + INBOX_SOCKET_DIR] : [])).flatMap(both),
+  }
+  return call.protectedRoots
+}
 
 /**
  * Is the absolute `resolved` at or below an inbox socket directory? Compared
  * case-insensitively, in both the lowercased and the canonical spelling of each
- * name. A name that cannot be canonicalised floors, as everywhere in the scan.
+ * name, and against the resolved form of each directory. A name that cannot be
+ * canonicalised, or a directory that cannot be resolved, floors.
  * @param {string} resolved
  * @param {object} call
  * @returns {boolean}
@@ -723,26 +746,48 @@ function _hitsInboxSocketDir(resolved, call) {
     if (form === null) return true
     canonical.push(form)
   }
-  return INBOX_SOCKET_PREFIXES.some((prefix) =>
-    [lowered, canonical].some((names) => prefix.every((name, i) => names[i] === name)))
+  if (INBOX_SOCKET_PREFIXES.some((prefix) =>
+    [lowered, canonical].some((names) => prefix.every((name, i) => names[i] === name)))) return true
+  try {
+    return _protectedRoots(call).inbox.some((root) => pathPiecesUnder(root, resolved, path) !== null)
+  } catch {
+    return true
+  }
 }
-
-const CLAUDE_SESSIONS_DIR = 'sessions'
 
 /**
  * Is `resolved` the `sessions` directory of the configured Claude config
- * directory itself? A search rooted there reaches every key file inside it,
- * which the file-name rule alone does not see. A file inside it is judged by its
- * own name, so ordinary files there are unaffected. Fails closed when the config
- * directory cannot be resolved.
+ * directory itself, in either spelling? A search rooted there reaches every key
+ * file inside it, which the file-name rule alone does not see. A file inside it
+ * is judged by its own name, so ordinary files there are unaffected. Fails
+ * closed when the directory cannot be resolved.
  * @param {string} resolved
  * @param {object} call
  * @returns {boolean}
  */
 function _isSessionsDir(resolved, call) {
   try {
-    const root = (call.configDirFn ?? claudeConfigDir)()
-    return pathPiecesUnder(join(root, CLAUDE_SESSIONS_DIR), resolved, path)?.length === 0
+    return _protectedRoots(call).sessions.some((root) => pathPiecesUnder(root, resolved, path)?.length === 0)
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Does a recursive content search rooted at the absolute `resolved`, strictly
+ * above the sessions directory, reach it? Ripgrep skips hidden directories, so
+ * a route to it through a dot-named directory (`$HOME` to `~/.claude/sessions`)
+ * does not count; a dedicated or non-hidden config directory does. Fails closed.
+ * @param {string} resolved
+ * @param {object} call
+ * @returns {boolean}
+ */
+function _searchReachesSessions(resolved, call) {
+  try {
+    return _protectedRoots(call).sessions.some((root) => {
+      const below = pathPiecesUnder(resolved, root, path)
+      return below !== null && below.length > 0 && !below.some((piece) => piece.startsWith('.'))
+    })
   } catch {
     return true
   }
@@ -1429,6 +1474,7 @@ function grepGlobFloored(input, rootRelative) {
 export function isFlooredTarget(toolName, input, cwd) {
   if (!SECRET_READ_FLOOR_TOOLS.has(toolName)) return isProtectedPathTarget(input, cwd)
   if (isSecretReadTarget(input, cwd)) return true
+  if (SEARCH_ROOT_TOOLS.has(toolName) && _searchRootFloored(toolName, input, cwd)) return true
   // #7978 — Grep's `glob` picks WHICH files it reads, overriding .gitignore.
   if (!GLOB_SELECTOR_FLOOR_TOOLS.has(toolName) || input === null || typeof input !== 'object') return false
   const reach = _searchReachToConfigRoot(input, cwd)
@@ -1436,6 +1482,43 @@ export function isFlooredTarget(toolName, input, cwd) {
   // No glob narrowing the search: a recursive Grep from the configured root, or
   // from a directory above it, reads the settings files inside it.
   return reach.covers && !globNarrowsSearch(input.glob)
+}
+
+export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])
+
+/**
+ * Where a Grep / Glob searches, against the inbox socket and sessions rules.
+ * A call with no path field searches from the session cwd, so the cwd stands
+ * in for the missing root; a supplied root is judged in its written and its
+ * symlink-resolved form. A Grep also floors from the sessions directory's
+ * parent or an ancestor of it when it can reach it (see
+ * {@link _searchReachesSessions}) and no `glob` narrows it. A Glob returns
+ * names only, so it floors only when rooted in the directories themselves.
+ * Fails closed.
+ * @param {string} toolName
+ * @param {object} input
+ * @param {string} [cwd]
+ * @returns {boolean}
+ */
+function _searchRootFloored(toolName, input, cwd) {
+  if (input === null || typeof input !== 'object') return false
+  const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
+  const targets = PROTECTED_PATH_INPUT_FIELDS.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0)
+  if (targets.length === 0) targets.push('.')
+  const call = _newCall()
+  try {
+    const realBase = realpathDeepestAncestorSync(base)
+    for (const target of targets) {
+      const forms = [resolve(base, target), resolveTargetComponentwiseSync(realBase, target, call.walk)]
+      for (const form of forms) {
+        if (_hitsInboxSocketDir(form, call) || _isSessionsDir(form, call)) return true
+        if (toolName === 'Grep' && !globNarrowsSearch(input.glob) && _searchReachesSessions(form, call)) return true
+      }
+    }
+    return false
+  } catch {
+    return true
+  }
 }
 
 /**
@@ -1504,6 +1587,11 @@ export const floorInternalsForTest = {
       if (_hitsConfigRoot(target, secretsOnly, call)) hit = true
     }
     return hit
+  },
+  hitsInboxSocketDir(resolved, inboxDirs) {
+    const call = _newCall()
+    call.inboxDirs = inboxDirs
+    return _hitsInboxSocketDir(resolved, call)
   },
   searchReach(input, cwd, statFn) {
     return _searchReachToConfigRoot(input, cwd, statFn)

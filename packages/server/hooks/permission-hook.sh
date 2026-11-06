@@ -416,7 +416,7 @@ EOF
 #      payload keeps the no-round-trip path.
 floor_forces_prompt() {
   case "$REQUEST" in
-    *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*|*'"Grep"'*) ;;
+    *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*|*'"Grep"'*|*'"Glob"'*) ;;
     # (1) a \uXXXX escape may spell a path-naming key the byte scan cannot see.
     # Kept explicit for readability though arm (2) now subsumes it (`u` is not in
     # that arm's negated set), so a `\u` body probes either way.

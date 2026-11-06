@@ -303,21 +303,39 @@ Two path families are floored for reads (and writes) on top of the name rules:
 
 - **Session key files.** `<claude config dir>/sessions/*.key`. The `.key` extension
   rule already floors every such file, in the default `~/.claude` and under any
-  `CLAUDE_CONFIG_DIR` override. What the name rule could not see is a *search*
-  rooted at the directory, so a `Grep` or `Glob` whose `path` is exactly
-  `<claude config dir>/sessions` floors too. The directory is the one
-  `claudeConfigDir()` returns (canonical, symlink-resolved), compared
-  case-insensitively against both the written and the symlink-resolved target. A
-  non-key file inside it (`sessions/<pid>.json`), the rest of the config
-  directory, and a `sessions` directory elsewhere are not floored.
+  `CLAUDE_CONFIG_DIR` override. What the name rule could not see is a *search*, so
+  the following floor too:
+  - a `Grep` or `Glob` whose `path` is exactly `<claude config dir>/sessions`;
+  - a `Grep` rooted at the config directory, or at an ancestor of it, with no
+    narrowing `glob`, when a recursive search from there reaches `sessions`.
+    **`$HOME` choice:** ripgrep skips hidden directories, so a route that passes
+    through a dot-named directory does not count. A `Grep` from `$HOME` therefore
+    does *not* floor for the default `~/.claude`, and does floor for a non-hidden
+    override such as `/data/claude-data` (from it, from `/data`, or from `/`). A
+    `Grep` from the config directory itself always floors. A search from a
+    directory that does not contain the config dir is unaffected;
+  - a `Grep` or `Glob` with **no path field**, which searches from the session
+    cwd: the cwd stands in for the missing root, for all the rules here. A pathless
+    search from an ordinary cwd is unchanged;
+  - `Glob` returns names only, so it floors only when rooted *in* `sessions` (or the
+    socket directory), never from the config directory or above.
 - **Inbox sockets.** Any path at or below `/tmp/cc-socks` or `/private/tmp/cc-socks`,
   matched on the resolved absolute path (written and symlink-resolved), so a relative
   path, a `..` route, a symlink into it, and either spelling of `/tmp` on macOS all
   floor. `/tmp/cc-socks-other`, `/var/tmp/cc-socks` and the same name elsewhere do not.
 
-Both live in `_scanResolvedTarget` (`_hitsInboxSocketDir`, `_isSessionsDir`), the one
-scan both floors and both pipelines share. Tests:
-`permission-floor-session-keys-inbox.test.js`.
+The protected directories are themselves resolved: `<config>/sessions` and the two
+socket paths each match in their written spelling and their symlink-resolved one, so
+a directory that is a link, or reached through one, is recognised from either side.
+A directory that does not exist yet resolves through its deepest existing ancestor
+and names only itself; one that cannot be resolved floors (fail closed). The
+config directory is matched case-insensitively.
+
+The rules live in `_scanResolvedTarget` (`_hitsInboxSocketDir`, `_isSessionsDir`)
+and `_searchRootFloored`, reached through `isFlooredTarget`, so both pipelines share
+them. `hooks/permission-hook.sh` probes every `Grep` and `Glob` call, because either
+may carry no path field. Tests: `permission-floor-session-keys-inbox.test.js` and the
+hook cases in `permission-hook-floor.test.js`.
 
 **Not covered.** A `Glob` `pattern` is not a path field, so a pattern that names the
 directory (`<claude config dir>/sessions/*.key` with no `path`) is not inspected.

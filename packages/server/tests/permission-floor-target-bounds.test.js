@@ -273,8 +273,12 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     const changes = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `f${i}.js`, kind: 'update' }))
     const { value, calls, total } = countFsCalls(() => isFlooredTarget('apply_patch', { file_path: 'a.js', changes }, cwd))
     assert.equal(value, false)
-    // One realpath per missing component, and one for `root`, which exists.
-    assert.equal(calls.realpathSync, depth + 1, 'the cwd is resolved once per call')
+    // One realpath per missing component, and one for `root`, which exists; plus a
+    // small constant for resolving the protected directories once per call (how
+    // many depends on which of them exist on the host). Per target it would be
+    // FLOOR_MAX_CALL_TARGETS times `depth`.
+    assert.ok(calls.realpathSync >= depth + 1 && calls.realpathSync <= depth + 1 + 12,
+      `the cwd is resolved once per call (${calls.realpathSync} realpath calls)`)
     assert.ok(total <= depth + 1 + 4 * FLOOR_MAX_CALL_TARGETS, `${total} filesystem calls for ${FLOOR_MAX_CALL_TARGETS} targets`)
   })
 

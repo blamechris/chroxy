@@ -1,12 +1,12 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { PermissionManager } from '../src/permission-manager.js'
 import { evaluateHookFloorRequest } from '../src/ws-permissions.js'
-import { isFlooredTarget } from '../src/permission-floor.js'
+import { isFlooredTarget, SEARCH_ROOT_TOOLS, floorInternalsForTest } from '../src/permission-floor.js'
 import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
@@ -214,5 +214,135 @@ describe('the shared predicate', () => {
     assert.equal(isFlooredTarget('Read', { file_path: cfgKey }, project), true)
     assert.equal(isFlooredTarget('Read', { file_path: '/tmp/cc-socks/s' }, project), true)
     assert.equal(isFlooredTarget('Read', { file_path: '/tmp/other/s' }, project), false)
+  })
+})
+
+describe('a search with no path starts from the session cwd', () => {
+  const SEARCHES = [['Grep', { pattern: '.' }], ['Glob', { pattern: '*' }]]
+
+  it('floors when the cwd is an inbox socket directory', async () => {
+    for (const cwd of ['/tmp/cc-socks', '/private/tmp/cc-socks', '/tmp/cc-socks/nested']) {
+      for (const [tool, input] of SEARCHES) await assertBoth(tool, input, true, `cwd ${cwd}`, cwd)
+    }
+  })
+
+  it('floors when the cwd is the sessions directory', async () => {
+    const dir = join(home, '.claude', 'sessions')
+    for (const [tool, input] of SEARCHES) await assertBoth(tool, input, true, 'default sessions cwd', dir)
+    const root = join(sandbox, 'claude-data-cwd')
+    mkdirSync(join(root, 'sessions'), { recursive: true })
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
+    for (const [tool, input] of SEARCHES) await assertBoth(tool, input, true, 'override sessions cwd', join(realpathSync.native(root), 'sessions'))
+  })
+
+  it('leaves a search from an ordinary cwd alone', async () => {
+    for (const cwd of [project, '/tmp', '/tmp/other', '/tmp/cc-socks-other', home]) {
+      for (const [tool, input] of SEARCHES) await assertBoth(tool, input, false, `ordinary cwd ${cwd}`, cwd)
+    }
+  })
+
+  it('does not floor a pathless Glob from the config dir (names only)', async () => {
+    await assertBoth('Glob', { pattern: '*' }, false, 'glob from config dir', join(home, '.claude'))
+  })
+})
+
+describe('protected roots that are links, or not created yet', () => {
+  it('recognises the physical sessions directory when sessions is a link', { skip: SYMLINK_SUPPORTED ? false : SKIP_NO_SYMLINK }, async () => {
+    const root = join(sandbox, 'claude-linked')
+    const physical = join(sandbox, 'physical-sessions')
+    mkdirSync(root, { recursive: true })
+    mkdirSync(physical, { recursive: true })
+    symlinkSync(physical, join(root, 'sessions'))
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
+    await assertBoth('Grep', { path: physical }, true, 'physical path')
+    await assertBoth('Glob', { path: physical, pattern: '*' }, true, 'physical path glob')
+    await assertBoth('Grep', { pattern: '.' }, true, 'cwd is the physical path', physical)
+    const alias = join(sandbox, 'second-alias')
+    symlinkSync(physical, alias)
+    await assertBoth('Grep', { path: alias }, true, 'another alias')
+    await assertBoth('Grep', { path: join(sandbox, 'physical-other') }, false, 'control')
+  })
+
+  it('recognises the default config dir when it is a link', { skip: SYMLINK_SUPPORTED ? false : SKIP_NO_SYMLINK }, async () => {
+    const realHome = join(sandbox, 'home-linked')
+    const physical = join(sandbox, 'physical-claude')
+    mkdirSync(join(physical, 'sessions'), { recursive: true })
+    mkdirSync(realHome, { recursive: true })
+    symlinkSync(physical, join(realHome, '.claude'))
+    process.env.HOME = realHome
+    process.env.USERPROFILE = realHome
+    await assertBoth('Grep', { path: join(physical, 'sessions') }, true, 'physical sessions')
+    await assertBoth('Grep', { path: join(realHome, '.claude', 'sessions') }, true, 'link spelling')
+    await assertBoth('Grep', { path: physical }, true, 'physical config dir')
+  })
+
+  it('resolves an inbox directory that is a link, and one that does not exist', { skip: SYMLINK_SUPPORTED ? false : SKIP_NO_SYMLINK }, () => {
+    const hits = (target, dirs) => floorInternalsForTest.hitsInboxSocketDir(target, dirs)
+    const elsewhere = join(sandbox, 'elsewhere-socks')
+    mkdirSync(elsewhere, { recursive: true })
+    const parent = join(sandbox, 'fake-tmp')
+    mkdirSync(parent, { recursive: true })
+    const link = join(parent, 'cc-socks')
+    symlinkSync(elsewhere, link)
+    assert.equal(hits(join(elsewhere, 'a1.sock'), [link]), true, 'physical path of a linked root')
+    assert.equal(hits(join(sandbox, 'elsewhere-other', 'a1.sock'), [link]), false, 'control')
+    const missing = join(sandbox, 'not-yet', 'cc-socks')
+    assert.equal(hits(join(missing, 'a1.sock'), [missing]), true, 'a root not created yet names itself')
+    assert.equal(hits(join(sandbox, 'not-yet', 'other', 'a1.sock'), [missing]), false, 'and floors nothing else')
+    assert.equal(hits(join(sandbox, 'unrelated', 'a1.sock'), [missing]), false, 'control')
+    assert.equal(hits('/anywhere/else/a1.sock', ['relative/cc-socks']), true, 'a root that cannot be resolved fails closed')
+  })
+
+  it('does not floor everything when the config dir does not exist yet', async () => {
+    process.env.CLAUDE_CONFIG_DIR = join(sandbox, 'not-created-yet')
+    await assertBoth('Grep', { path: project }, false, 'project search')
+    await assertBoth('Grep', { pattern: '.' }, false, 'pathless search')
+    await assertBoth('Read', { file_path: join(project, 'a.txt') }, false, 'project read')
+    await assertBoth('Grep', { path: join(sandbox, 'not-created-yet', 'sessions') }, true, 'the missing sessions dir itself')
+  })
+})
+
+describe('a Grep from the config dir or above', () => {
+  it('floors from the config dir itself', async () => {
+    const cfg = join(home, '.claude')
+    await assertBoth('Grep', { path: cfg }, true, 'default config dir')
+    await assertBoth('Grep', { pattern: '.' }, true, 'cwd is the config dir', cfg)
+    await assertBoth('Grep', { path: cfg, glob: '*.md' }, false, 'narrowing glob')
+    await assertBoth('Glob', { path: cfg, pattern: '*' }, false, 'glob names only')
+    await assertBoth('Grep', { path: join(cfg, 'projects') }, false, 'sibling directory')
+  })
+
+  it('does not floor from $HOME when the config dir is hidden below it', async () => {
+    await assertBoth('Grep', { path: home }, false, 'home search')
+    await assertBoth('Grep', { pattern: '.' }, false, 'cwd is home', home)
+    await assertBoth('Grep', { path: project }, false, 'project search')
+  })
+
+  it('floors from a directory above a non-hidden override, but not from elsewhere', async () => {
+    const root = join(sandbox, 'claude-visible')
+    mkdirSync(join(root, 'sessions'), { recursive: true })
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
+    await assertBoth('Grep', { path: root }, true, 'override dir')
+    await assertBoth('Grep', { path: sandbox }, true, 'ancestor')
+    await assertBoth('Grep', { pattern: '.' }, true, 'cwd is an ancestor', sandbox)
+    await assertBoth('Grep', { path: sandbox, glob: '*.md' }, false, 'narrowing glob')
+    await assertBoth('Glob', { path: sandbox, pattern: '**/*' }, false, 'glob names only')
+    await assertBoth('Grep', { path: project }, false, 'project does not contain the config dir')
+    await assertBoth('Grep', { path: join(sandbox, 'claude-visible-other') }, false, 'sibling prefix')
+  })
+
+  it('follows a link to the config dir', { skip: SYMLINK_SUPPORTED ? false : SKIP_NO_SYMLINK }, async () => {
+    const link = join(project, 'cfg-link')
+    symlinkSync(join(home, '.claude'), link)
+    await assertBoth('Grep', { path: link }, true, 'linked config dir')
+  })
+})
+
+describe('the hook pre-filter', () => {
+  it('probes every tool the search-root rule covers (drift fails this)', () => {
+    const hook = readFileSync(new URL('../hooks/permission-hook.sh', import.meta.url), 'utf8')
+    for (const tool of SEARCH_ROOT_TOOLS) {
+      assert.ok(hook.includes(`*'"${tool}"'*`), `permission-hook.sh must match "${tool}"`)
+    }
   })
 })
