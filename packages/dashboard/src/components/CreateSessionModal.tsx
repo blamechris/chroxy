@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback, useRef, useMemo, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
+import { isDirectoryListingDenial } from '@chroxy/protocol'
 import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
@@ -439,7 +440,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         if (cancelled) return
         const responsePath = listing.path || ''
         if (!responsePath || !browsePathsMatch(trimmedCwd, responsePath)) return // not ours
-        setBrowseRefused(typeof listing.error === 'string' && listing.error.startsWith('Access denied') ? trimmedCwd : null)
+        setBrowseRefused(isDirectoryListingDenial(listing.error) ? trimmedCwd : null)
       })
       requestDirectoryListing(trimmedCwd)
     }, 300)
@@ -869,13 +870,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
-          {showBrowseNote && (
-            <span className="cwd-hint" data-testid="cwd-not-browsable">
-              Browse can't list this directory (it is outside your home folder and the configured workspace roots). You can still try to create a session here, or pick a directory inside them.
-            </span>
-          )}
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {showBrowseNote && (
+            <span className="cwd-browse-note" data-testid="cwd-not-browsable">
+              Browse can't list this directory (it is outside your home folder and the configured workspace roots). You can still try to create a session here, or pick a directory inside them.
+            </span>
           )}
           {currentPreset && (
             <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">

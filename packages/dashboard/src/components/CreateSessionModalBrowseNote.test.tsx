@@ -145,6 +145,8 @@ describe('CreateSessionModal: not-browsable note (#8303)', () => {
     typeCwd('/tmp/outside')
     await settle()
     fireEvent.click(screen.getByRole('button', { name: /browse directories/i }))
+    // the probe's debounce would fire now if it had not stood down
+    await settle()
     // the picker's own callback now owns the slot; a refusal it receives
     // must not raise the dialog note
     reply({ path: '/tmp/outside', error: DENIED })
@@ -168,5 +170,70 @@ describe('CreateSessionModal: not-browsable note (#8303)', () => {
     fireEvent.click(create)
     expect(onCreate).toHaveBeenCalledTimes(1)
     expect(onCreate.mock.calls[0]![0]).toMatchObject({ cwd: '/tmp/outside' })
+  })
+
+  it('sends one request for rapid typing (the earlier edit is debounced away)', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    render(<Modal {...baseProps} />)
+    typeCwd('/tmp/a')
+    await act(async () => { vi.advanceTimersByTime(100) })
+    typeCwd('/tmp/ab')
+    await settle()
+    expect(requests).toEqual(['/tmp/ab'])
+  })
+
+  it('a reply for a different path than the current cwd neither shows nor sets the note', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    render(<Modal {...baseProps} />)
+    typeCwd('/tmp/current')
+    await settle()
+    reply({ path: '/tmp/another', error: DENIED })
+    expect(note()).toBeNull()
+    // and it left no state behind: a plain listable reply keeps it clear
+    reply({ path: '/tmp/current' })
+    expect(note()).toBeNull()
+  })
+
+  it('a superseded listener cannot act: its late refusal does not resurface when the cwd returns', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    render(<Modal {...baseProps} />)
+    typeCwd('/tmp/a')
+    await settle()
+    const oldListener = callback!
+    typeCwd('/tmp/b') // supersedes /tmp/a (cleanup runs, no new request yet)
+    act(() => { oldListener({ path: '/tmp/a', parentPath: null, entries: [], error: DENIED }) })
+    typeCwd('/tmp/a') // back to the refused path, no new reply yet
+    expect(note()).toBeNull()
+  })
+
+  it('a reply arriving after the dialog unmounts is harmless', async () => {
+    mockStore()
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const Modal = await loadModal()
+    const { unmount } = render(<Modal {...baseProps} />)
+    typeCwd('/tmp/a')
+    await settle()
+    const listener = callback!
+    unmount()
+    expect(() => listener({ path: '/tmp/a', parentPath: null, entries: [], error: DENIED })).not.toThrow()
+    expect(err).not.toHaveBeenCalled()
+    err.mockRestore()
+  })
+
+  it('renders below the "New directory" hint and not as a .cwd-hint (which pulls itself up 6px and overlapped it)', async () => {
+    mockStore()
+    const Modal = await loadModal()
+    render(<Modal {...baseProps} />)
+    typeCwd('/tmp/outside')
+    await settle()
+    reply({ path: '/tmp/outside', error: DENIED })
+    const hint = screen.getByText(/New directory/)
+    const n = note()!
+    expect(n.classList.contains('cwd-hint')).toBe(false)
+    expect(n.classList.contains('cwd-browse-note')).toBe(true)
+    expect(hint.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

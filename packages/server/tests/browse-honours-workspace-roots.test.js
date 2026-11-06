@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { isDirectoryListingDenial } from '@chroxy/protocol'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -150,14 +151,132 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       assert.deepEqual(reply.entries, [])
     })
 
-    it('a missing path inside a root is refused, not "not found" (no oracle)', async () => {
+    it('a missing path inside a root is "not found" (nothing about an allowed area is hidden)', async () => {
       const reply = await list(join(root, 'nope'), { config: cfg() })
-      assert.match(reply.error, /^Access denied/)
+      assert.equal(reply.error, 'Directory not found')
+      assert.deepEqual((await list(join(root, 'nope', 'deeper'), { config: cfg() })).error, 'Directory not found')
+    })
+
+    it('a missing path below a credential/config directory in a root stays denied', async () => {
+      const cfgDir = join(root, 'cfg')
+      mkdirSync(cfgDir)
+      process.env.CHROXY_CONFIG_DIR = cfgDir
+      assert.match((await list(join(cfgDir, 'missing'), { config: cfg() })).error, /^Access denied/)
+    })
+
+    it('a missing path outside every root is the same denial as an existing one', async () => {
+      const a = await list(join(outside, 'nope'), { config: cfg() })
+      const b = await list(join(outside, 'x'), { config: cfg() })
+      assert.equal(a.error, b.error)
+      assert.match(a.error, /^Access denied/)
     })
 
     it('check_git_repo judges a root directory and answers null outside it', async () => {
       assert.equal((await probe(join(root, 'repo'), { config: cfg() })).isGitRepo, true)
       assert.equal((await probe(join(outside, 'x'), { config: cfg() })).isGitRepo, null)
+    })
+  })
+
+  describe('outside targets answer identically whether or not they exist (no oracle)', { skip: SKIP_NO_SYMLINK }, () => {
+    const cfgs = [['no roots', () => undefined], ['roots elsewhere', () => ({ workspaceRoots: [root] })]]
+
+    for (const [label, mk] of cfgs) {
+      it(`${label}: link/../candidate, tilde forms, trailing slashes, a file as ancestor`, async () => {
+        // home/link -> outside/deep ; outside/candidate exists, outside/absent does not
+        mkdirSync(join(outside, 'deep'))
+        mkdirSync(join(outside, 'candidate'))
+        writeFileSync(join(outside, 'afile'), 'x')
+        symlinkSync(join(outside, 'deep'), join(home, 'link'))
+        const config = mk()
+        const pairs = [
+          [`${home}/link/../candidate`, `${home}/link/../absent`],
+          [`~/link/../candidate`, `~/link/../absent`],
+          [`~//link/../candidate/`, `~//link/../absent/`],
+          [`${home}/link/../candidate/sub`, `${home}/link/../absent/sub`],
+          [`${outside}/afile/x`, `${outside}/nofile/x`],
+          [`${outside}/afile`, `${outside}/nofile`],
+          [`${outside}/candidate//`, `${outside}/absent//`],
+        ]
+        for (const [present, absent] of pairs) {
+          const a = await list(present, { config })
+          const b = await list(absent, { config })
+          assert.match(a.error, /^Access denied/, `${present}: ${a.error}`)
+          assert.equal(a.error, b.error, `${present} vs ${absent} differ`)
+          assert.deepEqual(a.entries, [])
+          assert.equal(a.parentPath, null)
+        }
+      })
+    }
+
+    it('inside home, a missing target (even through a link that stays inside) is still "not found"', async () => {
+      mkdirSync(join(home, 'real'))
+      symlinkSync(join(home, 'real'), join(home, 'inlink'))
+      assert.equal((await list(`${home}/inlink/../absent`, {})).error, 'Directory not found')
+      writeFileSync(join(home, 'afile'), 'x')
+      assert.equal((await list(`${home}/afile/x`, {})).error, 'Not a directory')
+    })
+  })
+
+  describe('listing identity and one tilde rule', () => {
+    it('with a `..` the reply names the directory actually listed, and its parent navigates up', async () => {
+      const cfg = { workspaceRoots: [root] }
+      const reply = await list(`${root}/sub/deep/..`, { config: cfg })
+      assert.equal(reply.error, null)
+      assert.equal(reply.path, join(root, 'sub'))
+      assert.equal(reply.parentPath, root)
+      assert.deepEqual(reply.entries.map((e) => e.name), ['deep'])
+      const up = await list(reply.parentPath, { config: cfg })
+      assert.equal(up.error, null)
+      assert.equal(up.path, root)
+      assert.equal(up.parentPath, scratch)
+    })
+
+    it('a `..` through a symlink reports the resolved directory, not the textual collapse', { skip: SKIP_NO_SYMLINK }, async () => {
+      // <scratch>/lk -> <root>/sub/deep ; lk/.. is <root>/sub (text collapse: <scratch>)
+      symlinkSync(join(root, 'sub', 'deep'), join(scratch, 'lk'))
+      const reply = await list(`${scratch}/lk/..`, { config: { workspaceRoots: [root] } })
+      assert.equal(reply.error, null)
+      assert.equal(reply.path, join(root, 'sub'))
+      assert.equal(reply.parentPath, root)
+    })
+
+    it('a file, or a path below one, inside a root is not mistaken for a path outside it', async () => {
+      writeFileSync(join(root, 'afile'), 'x')
+      const cfg = { workspaceRoots: [root] }
+      assert.equal((await list(join(root, 'afile'), { config: cfg })).error, 'Not a directory')
+      assert.equal((await list(`${root}/afile/x`, { config: cfg })).error, 'Not a directory')
+    })
+
+    it('a plain path echoes as typed and its parent is the lexical parent (home included)', async () => {
+      const reply = await list(home, {})
+      assert.equal(reply.path, home)
+      assert.equal(reply.parentPath, scratch)
+      assert.equal((await list(`~`, {})).path, home)
+    })
+
+    it('`~//x` means <home>/x for list_directory and check_git_repo alike', async () => {
+      execFileSync(GIT, ['init', '-q', join(home, 'proj')])
+      assert.equal((await list('~//proj', {})).error, null)
+      assert.equal((await probe('~//proj', {})).isGitRepo, true)
+      assert.equal((await probe('~/proj', {})).isGitRepo, true)
+      assert.equal((await list('~///', {})).path, home)
+    })
+
+    it('with bound unset and a config present nothing outside home is listed (fails safe)', async () => {
+      const sent = []
+      const ops = createFileOps((_ws, m) => sent.push(m))
+      await ops.listDirectory({}, root, { config: { workspaceRoots: [root] } })
+      assert.match(sent[0].error, /^Access denied/)
+      await ops.listDirectory({}, root, { config: { workspaceRoots: [root] }, bound: false })
+      assert.equal(sent[1].error, null)
+      await ops.listDirectory({}, root, { config: { workspaceRoots: [root] }, bound: true })
+      assert.match(sent[2].error, /^Access denied/)
+    })
+
+    it('the server refusal text carries the shared protocol prefix', async () => {
+      assert.equal(isDirectoryListingDenial((await list(outside, {})).error), true)
+      assert.equal(isDirectoryListingDenial('Directory not found'), false)
+      assert.equal(isDirectoryListingDenial(null), false)
     })
   })
 

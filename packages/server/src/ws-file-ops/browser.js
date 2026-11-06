@@ -1,8 +1,8 @@
-import { readdir, stat, realpath } from 'fs/promises'
+import { readdir, stat, lstat, realpath } from 'fs/promises'
 import { readContainedTextFile } from '../utils/regular-file.js'
 import { homedir } from 'os'
 import { claudeConfigDir } from '../utils/claude-config-dir.js'
-import { join, resolve, normalize, relative, sep, isAbsolute } from 'path'
+import { join, resolve, normalize, relative, sep, isAbsolute, dirname, basename } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
@@ -11,6 +11,7 @@ import { realpathOfDeepestAncestor, unresolvablePathError, fileOpErrorMessage } 
 import { truncateForLog } from './reader.js'
 import { isGitRepo } from '../utils/git-repo.js'
 import { validateCwdAllowed } from '../handler-utils.js'
+import { DIRECTORY_LISTING_DENIED_PREFIX } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -27,9 +28,9 @@ const LISTING_UNRESOLVABLE_REASONS = {
   ENOTDIR: 'Not a directory',
 }
 
-const HOME_ONLY_DENIAL = 'Access denied: directory listing is restricted to the home directory'
+const HOME_ONLY_DENIAL = `${DIRECTORY_LISTING_DENIED_PREFIX}: directory listing is restricted to the home directory`
 const HOME_AND_ROOTS_DENIAL =
-  'Access denied: directory listing is restricted to the home directory and any usable workspace roots'
+  `${DIRECTORY_LISTING_DENIED_PREFIX}: directory listing is restricted to the home directory and any usable workspace roots`
 
 function hasWorkspaceRoots(config) {
   return Array.isArray(config?.workspaceRoots) &&
@@ -46,7 +47,9 @@ function hasWorkspaceRoots(config) {
  */
 function kernelForm(trimmed, home) {
   if (trimmed.startsWith('~')) {
-    const rest = trimmed.slice(1).replace(/^\//, '')
+    // ONE tilde rule for every Browse path: drop every separator after the `~`,
+    // so `~//x` is `<home>/x` for list_directory and check_git_repo alike.
+    const rest = trimmed.slice(1).replace(/^[\\/]+/, '')
     return rest ? home + sep + rest : home
   }
   return isAbsolute(trimmed) ? trimmed : process.cwd() + sep + trimmed
@@ -54,6 +57,67 @@ function kernelForm(trimmed, home) {
 
 function hasDotDot(p) {
   return p.split(/[\\/]+/).includes('..')
+}
+
+const MAX_ANCESTOR_STEPS = 256
+
+/**
+ * Resolve `raw` the way the kernel does, and for a target that does not exist
+ * find its deepest EXISTING ancestor (a `..` is applied to the prefix before it,
+ * through links, never textually). Returns `{ real, missing, code }`: `real` is
+ * the resolved target (or ancestor), `missing` whether the target itself is
+ * absent, `code` the first failure (ENOENT or ENOTDIR). A dangling symlink on
+ * the way is followed with realpathOfDeepestAncestor (#8013). Any other error,
+ * or a walk that cannot finish, throws with `walked` set when it happened after
+ * the target was already known to be missing, so the caller can answer with the
+ * uniform denial instead of an error that differs by what exists out there.
+ */
+async function deepestExistingAncestor(raw) {
+  let cur = raw
+  let firstCode = null
+  for (let i = 0; i < MAX_ANCESTOR_STEPS; i++) {
+    try {
+      return { real: await realpath(cur), missing: firstCode !== null, code: firstCode }
+    } catch (err) {
+      if (firstCode === null && err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
+      try {
+        if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
+        firstCode ??= err.code
+        const parent = dirname(cur)
+        if (parent === cur) throw err
+        const leaf = basename(cur)
+        if (leaf !== '..' && leaf !== '.') {
+          let isLink = false
+          try { isLink = (await lstat(cur)).isSymbolicLink() } catch { /* absent */ }
+          if (isLink) {
+            const realParent = await realpath(parent)
+            return { real: await realpathOfDeepestAncestor(join(realParent, leaf)), missing: true, code: firstCode }
+          }
+        }
+        cur = parent
+      } catch (inner) {
+        inner.walked = true
+        throw inner
+      }
+    }
+  }
+  throw Object.assign(new Error('ancestor walk too deep'), { walked: true })
+}
+
+/** The directory to judge for a (possibly missing) target: its nearest existing directory. */
+async function judgedDirectory(real) {
+  let cur = real
+  for (let i = 0; i < MAX_ANCESTOR_STEPS; i++) {
+    try {
+      const st = await stat(cur)
+      return st.isDirectory() ? cur : dirname(cur)
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return null
+      cur = parent
+    }
+  }
+  return null
 }
 
 /**
@@ -93,76 +157,43 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     let absPath = null
     try {
       const home = homedir()
-      let rawPath
-      if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
-        absPath = home
-        rawPath = home
-      } else {
-        const trimmed = requestedPath.trim()
-        rawPath = kernelForm(trimmed, home)
-        absPath = trimmed.startsWith('~')
-          ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
-          : resolve(trimmed)
-      }
-      absPath = normalize(absPath)
+      const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
+      // Create's form (kernelForm); the lexical `absPath` is only the echo.
+      const rawPath = trimmed ? kernelForm(trimmed, home) : home
+      absPath = normalize(resolve(rawPath))
+      const denial = hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL
+      const deny = (message = denial) => sendFn(ws, {
+        type: 'directory_listing',
+        path: absPath,
+        parentPath: null,
+        entries: [],
+        error: message,
+      })
 
-      let realAbsPath
-      let containmentUnknown = false
-      // A `..` in the input is resolved by the kernel (through links), as New
-      // Session does; a target that does not exist is then not listed at all.
-      const dotDot = hasDotDot(rawPath)
-      let missingThroughDotDot = false
+      let walk
       try {
-        realAbsPath = await realpath(dotDot ? rawPath : absPath)
+        walk = await deepestExistingAncestor(rawPath)
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
-          // to skip the containment check: the outer catch answered
-          // "Permission denied" / "Not a directory" for a path outside home,
-          // where a readable one answers "Access denied", and sent ELOOP's
-          // raw message with the server path in it. Only a path inside home
-          // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
-          sendFn(ws, {
-            type: 'directory_listing',
-            path: absPath,
-            parentPath: null,
-            entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL),
-          })
-          return
-        }
-        // #8011 — a MISSING target is contained canonically too: realpath
-        // its deepest existing ancestor. This used to fall back to the raw
-        // lexical `absPath`, so `~/link-to-outside/missing` looked like a
-        // path inside home and answered "Directory not found", while an
-        // EXISTING subdirectory out there answered "Access denied" — two
-        // answers keyed on whether something outside home exists.
-        // A walk that cannot finish denies; it never reads as "not found".
-        try {
-          realAbsPath = await realpathOfDeepestAncestor(absPath)
-          missingThroughDotDot = dotDot
-        } catch {
-          containmentUnknown = true
-        }
+        if (err.walked) return deny() // cannot establish containment: the uniform denial
+        // #8012 — a first-step failure other than "missing" (EACCES, EPERM,
+        // ELOOP, …) keeps a specific message only for a path inside home.
+        const homeReal = await realpath(home).catch(() => null)
+        deny(await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS, denial))
+        return
       }
       const homeReal = await realpath(home)
 
-      if (containmentUnknown || !isBrowsable(realAbsPath, homeReal, opts)) {
-        sendFn(ws, {
-          type: 'directory_listing',
-          path: absPath,
-          parentPath: null,
-          entries: [],
-          error: hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL,
-        })
-        return
-      }
-
-      // The lexical ancestor stood in only for the containment answer; the real
-      // target (through `..`) is missing, so nothing is listed.
-      if (missingThroughDotDot) throw Object.assign(new Error('not found'), { code: 'ENOENT' })
+      // #8011/#8303 — a MISSING target is judged by its deepest existing
+      // ancestor, resolved as the kernel resolves it, with the SAME rule an
+      // existing one gets. Outside the browsable area the answer is the same
+      // denial whether or not anything exists out there; inside it nothing is
+      // hidden, so the answer is a plain "not found".
+      // (A file is judged by the directory holding it, so a file or a path below
+      // one inside a root is not mistaken for a path outside it.)
+      const judged = await judgedDirectory(walk.real)
+      if (judged === null || !isBrowsable(judged, homeReal, opts)) return deny()
+      if (walk.missing) throw Object.assign(new Error('missing'), { code: walk.code })
+      const realAbsPath = walk.real
 
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
       const entries = dirents
@@ -170,11 +201,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         .sort((a, b) => a.name.localeCompare(b.name))
         .map(d => ({ name: d.name, isDirectory: true }))
 
-      const parentPath = absPath === '/' ? null : resolve(absPath, '..')
+      // Report the directory actually listed. Without a `..` in the input the
+      // lexical form IS that directory (and is what the client asked for); with
+      // one, the lexical collapse can name a different directory, so report the
+      // resolved one.
+      const listedPath = hasDotDot(rawPath) ? realAbsPath : absPath
+      const parentPath = dirname(listedPath) === listedPath ? null : dirname(listedPath)
 
       sendFn(ws, {
         type: 'directory_listing',
-        path: absPath,
+        path: listedPath,
         parentPath,
         entries,
         error: null,
