@@ -94,13 +94,12 @@ export async function readFileTool({
   return { ok: true, content, totalLines, linesReturned, truncatedByLimit }
 }
 
-
 /**
  * #9045 — open `filePath` for writing through the same primitives as the
  * `write_file` / `append_memory` paths (#7957): `openNoFollow` (non-blocking, so
  * a FIFO cannot hold the call; a final-component symlink is refused) and an
  * fstat on the OPENED handle before any byte moves. Returns `{ fh }`, or
- * `{ error }` (an `{ ok: false }` result) for a refusal. The caller closes `fh`.
+ * `{ error }` (whose value is an `{ ok: false }` tool result) for a refusal. The caller closes `fh`.
  *
  * Truncation is NOT part of the open flags: O_TRUNC acts at open time, before
  * the regular-file check could run.
@@ -114,11 +113,12 @@ async function openRegularForWrite(filePath, flags, mode) {
   } catch (err) {
     await fh?.close().catch(() => {})
     // ENXIO: a non-blocking write-open of a FIFO that has no reader.
-    if (err.code === 'ENOTREG' || err.code === 'ENXIO') {
+    // EISDIR: a directory is a non-regular target too.
+    if (err.code === 'ENOTREG' || err.code === 'ENXIO' || err.code === 'EISDIR') {
       return { error: { ok: false, code: 'ENOTFILE', message: `not a regular file: ${filePath}` } }
     }
     if (err.code === 'ELOOP') {
-      return { error: { ok: false, code: 'ELOOP', message: `refusing to write through a symlink: ${filePath}` } }
+      return { error: { ok: false, code: 'ELOOP', message: err.message } }
     }
     throw err
   }

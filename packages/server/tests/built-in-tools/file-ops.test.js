@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync, chmodSync, mkdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -86,10 +86,27 @@ describe('file-ops', () => {
       assert.equal(r.code, 'EINVAL')
     })
 
-    it('writes with mode 0644 by default on a new file', async () => {
+    it('creates a new file with the requested mode', { skip: process.platform === 'win32' ? 'POSIX modes' : false }, async () => {
       const f = join(dir, 'mode.txt')
-      await writeFileTool({ filePath: f, content: 'x' })
-      assert.equal(statSync(f).mode & 0o777 & ~process.umask(), 0o644 & ~process.umask())
+      await writeFileTool({ filePath: f, content: 'x', mode: 0o600 })
+      assert.equal(statSync(f).mode & 0o777, 0o600)
+    })
+
+    it('keeps an existing file\'s mode on overwrite', { skip: process.platform === 'win32' ? 'POSIX modes' : false }, async () => {
+      const f = join(dir, 'keep-mode.txt')
+      writeFileSync(f, 'old')
+      chmodSync(f, 0o640)
+      await writeFileTool({ filePath: f, content: 'new', mode: 0o600 })
+      assert.equal(statSync(f).mode & 0o777, 0o640)
+      assert.equal(readFileSync(f, 'utf8'), 'new')
+    })
+
+    it('refuses a directory target as a non-regular file', async () => {
+      const d = join(dir, 'adir')
+      mkdirSync(d)
+      const r = await writeFileTool({ filePath: d, content: 'x' })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
     })
 
     it('replaces content fully when the new content is shorter', async () => {
@@ -107,7 +124,7 @@ describe('file-ops', () => {
       assert.equal(readFileSync(f, 'utf8'), 'deep')
     })
 
-    it('refuses a FIFO target with no reader, promptly', async () => {
+    it('refuses a FIFO target with no reader, promptly', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
       const fifo = join(dir, 'pipe')
       execFileSync('mkfifo', [fifo])
       const r = await Promise.race([
@@ -119,7 +136,7 @@ describe('file-ops', () => {
       assert.equal(r.code, 'ENOTFILE')
     })
 
-    it('refuses a FIFO target with a reader attached and writes nothing to it', async () => {
+    it('refuses a FIFO target with a reader attached and writes nothing to it', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
       const fifo = join(dir, 'pipe-reader')
       execFileSync('mkfifo', [fifo])
       let r
@@ -191,6 +208,14 @@ describe('file-ops', () => {
       assert.equal(r.code, 'ENOENT')
     })
 
+    it('refuses a directory target as a non-regular file', async () => {
+      const d = join(dir, 'adir')
+      mkdirSync(d)
+      const r = await editFileTool({ filePath: d, oldString: 'a', newString: 'b' })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
+    })
+
     it('writes the replaced content to disk', async () => {
       const f = join(dir, 'disk.txt')
       writeFileSync(f, 'foo bar baz long tail')
@@ -206,7 +231,7 @@ describe('file-ops', () => {
       assert.equal(readFileSync(f, 'utf8'), 'hello')
     })
 
-    it('refuses a FIFO target with no reader, promptly', async () => {
+    it('refuses a FIFO target with no reader, promptly', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
       const fifo = join(dir, 'pipe')
       execFileSync('mkfifo', [fifo])
       const r = await Promise.race([
@@ -218,7 +243,7 @@ describe('file-ops', () => {
       assert.equal(r.code, 'ENOTFILE')
     })
 
-    it('refuses a FIFO target with a reader attached and writes nothing to it', async () => {
+    it('refuses a FIFO target with a reader attached and writes nothing to it', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
       const fifo = join(dir, 'pipe-reader')
       execFileSync('mkfifo', [fifo])
       let r
