@@ -1643,7 +1643,7 @@ function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = d
     return {
       ok: false,
       code: 'EXISTS',
-      error: `An MCP server named '${validName.name}' is already defined in ${MCP_SOURCE_LABELS[shadowed]}, which takes precedence over ${MCP_SOURCE_LABELS[mcpWriteScopeToSource(scope)]}, so a server added here would never be used. Remove or rename it there, or use a different name.`,
+      error: `An MCP server named '${validName.name}' is already defined in ${MCP_SOURCE_LABELS[shadowed]}, which takes precedence over ${MCP_SOURCE_LABELS[mcpWriteScopeToSource(scope)]}, so a server added here would never be used. ${shadowed === MCP_SERVER_SOURCE.PROJECT_MCP_JSON ? 'Chroxy cannot edit that file, so remove or rename the entry there by hand' : 'Remove or rename it there'}, or use a different name.`,
     }
   }
 
@@ -1658,8 +1658,8 @@ function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = d
 
 /** Human-readable scope names for add-time errors (#7962). */
 const MCP_SOURCE_LABELS = Object.freeze({
-  [MCP_SERVER_SOURCE.LOCAL]: "this project's local scope",
-  [MCP_SERVER_SOURCE.PROJECT_MCP_JSON]: "this repository's .mcp.json",
+  [MCP_SERVER_SOURCE.LOCAL]: 'the local scope of this project',
+  [MCP_SERVER_SOURCE.PROJECT_MCP_JSON]: 'the .mcp.json file in this repository',
   [MCP_SERVER_SOURCE.USER]: 'user scope',
 })
 

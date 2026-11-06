@@ -71,4 +71,28 @@ describe('#7962 add into a scope shadowed by a higher-precedence one', () => {
     writeConfig({})
     assert.equal(add('user').ok, true)
   })
+
+  it('a same-scope duplicate in user scope keeps the plain EXISTS error', () => {
+    writeConfig({ mcpServers: { foo: { command: 'user' } } })
+    const res = add('user')
+    assert.equal(res.ok, false)
+    assert.equal(res.code, 'EXISTS')
+    assert.ok(/already exists in user scope/.test(res.error), res.error)
+  })
+
+  it('a same-scope duplicate in project scope keeps the plain EXISTS error', () => {
+    writeConfig({ projects: { [cwd]: { mcpServers: { foo: { command: 'local' } } } } })
+    const res = add('project')
+    assert.equal(res.ok, false)
+    assert.equal(res.code, 'EXISTS')
+    assert.ok(/already exists in project scope/.test(res.error), res.error)
+  })
+
+  it('the .mcp.json refusal says the file must be edited by hand and names no path', () => {
+    writeMcpJson({ mcpServers: { foo: { command: 'repo' } } })
+    writeConfig({})
+    const res = add('user')
+    assert.ok(/by hand/.test(res.error), res.error)
+    assert.ok(!res.error.includes(cwd), 'must not leak a filesystem path')
+  })
 })
