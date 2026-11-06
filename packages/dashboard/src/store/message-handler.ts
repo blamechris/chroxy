@@ -921,7 +921,9 @@ function applySettledCredential(ctx: ConnectionContext, credential: SettledCrede
   const entry = state.serverRegistry?.find(s => s.id === serverId);
   const shouldUpdate = credentialSettlements.get(ctx)?.paired || (entry && (entry.token !== credential.token || (credential.pin && entry.pinnedIdentityKey !== credential.pin)));
   if (serverId && serverId === state.activeServerId && shouldUpdate) {
-    state.updateServer(serverId, { ...(credential.token !== '' ? { token: credential.token } : {}), ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) });
+    // #9046: an empty (--no-auth) token is never written, so there may be nothing left to patch.
+    const patch = { ...(credential.token !== '' ? { token: credential.token } : {}), ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) };
+    if (Object.keys(patch).length > 0) state.updateServer(serverId, patch);
   }
   const savedUrl = rotation ? entry?.wsUrl ?? ctx.savedConnection?.url ?? ctx.url : ctx.url;
   ctx.savedConnection = { url: savedUrl, token: credential.token, ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) };

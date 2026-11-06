@@ -95,6 +95,25 @@ describe('saved connection vs empty token (#9046)', () => {
     expect(entry?.token).toBe('real-registry-token')
   })
 
+  it('does not call updateServer at all when the empty token leaves nothing to patch', async () => {
+    const updateServer = vi.fn()
+    useConnectionStore.setState({
+      serverRegistry: [{ id: 'srv-1', name: 'Local', wsUrl: URL_, token: 'real-registry-token' }],
+      activeServerId: 'srv-1',
+      updateServer,
+    } as never)
+    const before = MockWebSocket.instances.length
+    useConnectionStore.getState().connect(URL_, '', { _serverId: 'srv-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    const ws = MockWebSocket.instances[before]!
+    ws.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    ws.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(useConnectionStore.getState().connectionPhase).toBe('connected')
+    expect(updateServer).not.toHaveBeenCalled()
+  })
+
   it('still saves a real token on connect (auth on is unchanged)', async () => {
     saveConnection(URL_, 'old-token')
     await connectAndAuth('new-token')
