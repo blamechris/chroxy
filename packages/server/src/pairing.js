@@ -482,7 +482,7 @@ export class PairingManager extends EventEmitter {
         // that durable write has landed (see _persistSessionTokensSnapshot).
         const remaining = [...this._sessionTokens.entries()].filter(([t]) => t !== token)
         if (!this._persistSessionTokensSnapshot(remaining)) return { revoked: 0, persistFailed: true }
-        this._sessionTokens.delete(token)
+        this._dropSessionToken(token, 'revoked')
         return { revoked: 1 }
       }
     }
@@ -520,8 +520,57 @@ export class PairingManager extends EventEmitter {
     if (n === 0) return { revoked: 0 }
     // Persist the emptied store first; only clear memory once it has landed.
     if (!this._persistSessionTokensSnapshot([])) return { revoked: 0, persistFailed: true }
-    this._sessionTokens.clear()
+    for (const token of [...this._sessionTokens.keys()]) this._dropSessionToken(token, 'revoked')
     return { revoked: n }
+  }
+
+  /**
+   * Remove one session token from the store and announce it. EVERY removal of
+   * a stored token goes through here (revoke, revoke-all, expiry on lookup,
+   * background sweep, cap eviction, teardown) so a connection that authenticated
+   * with the token can be ended in the same step — the store and the live
+   * connections cannot disagree about whether a token is still valid.
+   *
+   * Emits `session_token_removed` with `{ token, reason }` AFTER the delete.
+   * In-process only: the raw token never leaves the daemon via this event.
+   * A throwing listener must not undo or abort the removal.
+   * @param {string} token
+   * @param {'revoked'|'expired'|'evicted'|'destroyed'} reason
+   */
+  _dropSessionToken(token, reason) {
+    if (!this._sessionTokens.delete(token)) return
+    try {
+      this.emit('session_token_removed', { token, reason })
+    } catch { /* a listener failure never reverses the removal */ }
+  }
+
+  /**
+   * True when `token` is currently stored and unexpired. Read-only and O(1):
+   * no sliding refresh, no pruning, no persistence. Meant for re-checking a
+   * credential an established connection recorded at authentication time —
+   * the token comes from the daemon's own connection record, never from a
+   * frame, so a plain map lookup is appropriate here.
+   * @param {string} token
+   * @returns {boolean}
+   */
+  isSessionTokenLive(token) {
+    if (!token || this._destroyed) return false
+    const meta = this._sessionTokens.get(token)
+    if (!meta) return false
+    return Date.now() - meta.createdAt <= this._sessionTokenTtlMs
+  }
+
+  /**
+   * Slide the expiry of a live token for a connection that is still in use
+   * (same clock the auth path refreshes). No-op for a token that is not live.
+   * @param {string} token
+   * @returns {boolean} true if the token was live and refreshed
+   */
+  touchSessionToken(token) {
+    if (!this.isSessionTokenLive(token)) return false
+    this._sessionTokens.get(token).createdAt = Date.now()
+    this._maybePersistSlide()
+    return true
   }
 
   /**
@@ -536,7 +585,7 @@ export class PairingManager extends EventEmitter {
     const tokenBuf = Buffer.from(token)
     for (const [stored, meta] of this._sessionTokens.entries()) {
       if (now - meta.createdAt > this._sessionTokenTtlMs) {
-        this._sessionTokens.delete(stored)
+        this._dropSessionToken(stored, 'expired')
         continue
       }
       const storedBuf = Buffer.from(stored)
@@ -559,7 +608,7 @@ export class PairingManager extends EventEmitter {
     let removed = 0
     for (const [stored, meta] of this._sessionTokens) {
       if (now - meta.createdAt > this._sessionTokenTtlMs) {
-        this._sessionTokens.delete(stored)
+        this._dropSessionToken(stored, 'expired')
         removed++
       }
     }
@@ -665,7 +714,7 @@ export class PairingManager extends EventEmitter {
       this._sweepSessionTokens()
       if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
         const oldest = this._sessionTokens.keys().next().value
-        this._sessionTokens.delete(oldest)
+        this._dropSessionToken(oldest, 'evicted')
       }
     }
     this._sessionTokens.set(token, meta)
@@ -938,7 +987,7 @@ export class PairingManager extends EventEmitter {
     this._destroyed = true
     this._current = null
     this._activePairings.clear()
-    this._sessionTokens.clear()
+    for (const token of [...this._sessionTokens.keys()]) this._dropSessionToken(token, 'destroyed')
     this._pendingRequests.clear()
     this._pendingRateBuckets.clear()
     if (this._refreshTimer) {
