@@ -456,13 +456,14 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null, isSe
   })
   // The synthesized `agent_idle` mirrors the live fan-out so a client clears the
   // turn-scoped state a dropped event left behind (#4628). It must NOT be sent
-  // while the session is BUSY (#8965), evaluated per result because a replay is
-  // chunked and a turn can start part-way through it: the entry is an OLD turn's result, the
+  // while the session is BUSY (#8965): the entry is an OLD turn's result, the
   // client has nothing to clear for the turn that is still running, and the frame
   // flips the client's isIdle to true -- where nothing sets it back until the next
   // stream_start -- so the Send button shows during a run and a second replay of
-  // the same turn sees an idle session. The JSONL heal (conversation-handlers.js)
-  // already holds the same line. An idle session still gets it.
+  // the same turn sees an idle session. Busy is asked per result, because a replay
+  // is chunked and a turn can start part-way through it. The JSONL heal
+  // (conversation-handlers.js) already holds the same line. An idle session still
+  // gets it.
   if (entry && entry.type === 'result' && !isSessionBusy()) {
     send(ws, { type: 'agent_idle', sessionId })
   }

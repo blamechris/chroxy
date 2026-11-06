@@ -195,6 +195,21 @@ describe('#7459 — request_full_history mirrors replayHistory result → agent_
     assert.equal(idleIdx, resultIdx + 1, 'the synthesis must come IMMEDIATELY after its result, in the same order replayHistory emits it')
   })
 
+  it('asks whether the session is busy for EACH replayed result: a turn that starts mid-replay stops the synthesis (#8965)', async () => {
+    const entries = [
+      { type: 'result', durationMs: 1, timestamp: 1, _seq: 1 },
+      { type: 'result', durationMs: 2, timestamp: 2, _seq: 2 },
+      { type: 'result', durationMs: 3, timestamp: 3, _seq: 3 },
+    ]
+    let asked = 0
+    const { ctx, sends, ws } = build(entries, {
+      managerOverrides: { isSessionBusy: () => ++asked > 1 }, // idle for the first result, busy after
+    })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    assert.equal(sends.filter(m => m.type === 'result').length, 3)
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1, 'only the result seen while idle is followed by agent_idle')
+  })
+
   it('synthesizes NO agent_idle while the session is busy, and says the result is replayed (#8965)', async () => {
     const entries = [
       { type: 'result', durationMs: 12, timestamp: 2, _seq: 2 },
