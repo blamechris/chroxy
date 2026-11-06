@@ -82,8 +82,6 @@ describe('a session-scoped connection receives its own conversation transcript',
       ]
       return ctx
     }
-    const clientOf = (ws) => server.clients.get([...server.clients.keys()].find((k) => server.clients.get(k).boundSessionId === ws))
-    void clientOf
     const guestClient = [...server.clients.values()].find((c) => c.boundSessionId === 'session-1')
     const guestWs = [...server.clients.entries()].find(([, c]) => c === guestClient)[0]
     const ownerClient = [...server.clients.values()].find((c) => c.authenticated && !c.boundSessionId)
@@ -283,12 +281,19 @@ describe('smaller items', () => {
     const restricted = lim.submit({ key: 'k', clientKey: 'r', restricted: true }, run)
     await new Promise((r) => setImmediate(r))
     assert.equal(started, 1, 'the restricted read waits for the reserved slot')
-    await assert.rejects(lim.submit({ key: 'k', clientKey: 'u' }, run), (e) => e instanceof ReadLimitError)
-    // Any later submission re-examines the queue.
-    await lim.submit({ key: 'other', clientKey: 'o' }, async () => 'x')
-    await new Promise((r) => setImmediate(r))
-    assert.equal(started, 1, 'still waiting: the refused caller did not lift the restriction')
-    release()
-    await Promise.all([filler, restricted])
+    let otherP = Promise.resolve()
+    try {
+      await assert.rejects(lim.submit({ key: 'k', clientKey: 'u' }, run), (e) => e instanceof ReadLimitError)
+      // Any later submission re-examines the queue.
+      const other = lim.submit({ key: 'other', clientKey: 'o' }, async () => 'x')
+      otherP = other
+      await new Promise((r) => setImmediate(r))
+      assert.equal(started, 1, 'still waiting: the refused caller did not lift the restriction')
+    } finally {
+      // Release the held reads even when an assertion failed, so a failure is an
+      // assertion and not a hung, cancelled run.
+      release()
+    }
+    await Promise.all([filler, restricted, otherP])
   })
 })

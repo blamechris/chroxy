@@ -16,7 +16,10 @@
  *   - a backreference (`\1`, `\k<name>`) or a lookaround group;
  *   - a group repeated without a bound (`*`, `+`, `{n,}`) whose body contains
  *     any quantifier (including `?` and `{n,m}`) or an alternation;
- *   - a bounded repeat of a group that contains an unbounded repeat (`(.*a){12}`);
+ *   - any quantifier on a group whose body holds a quantifier or an alternation
+ *     (`(.*a){12}`, `(aa|a){1,40}`, `(a|a)?`). This also refuses harmless
+ *     patterns such as `(foo.*)?`: that over-refusal is deliberate;
+ *   - more than `MAX_QUANTIFIED_ATOMS` quantified atoms in all;
  *   - two unbounded repeats (`*`, `+`, `{n,}`) with nothing mandatory between
  *     them (optional items in between do not count as mandatory): `a*a*`,
  *     `\s*\s*x`, `a+b*c+`.
@@ -25,6 +28,11 @@
  * alternations pass.
  */
 export const MAX_PATTERN_LENGTH = 200
+
+// Many optional or repeated atoms in a row (`a?` x36 then `a` x36) backtrack
+// exponentially on a short input although no single rule above fires, so the
+// number of quantified atoms is capped.
+export const MAX_QUANTIFIED_ATOMS = 10
 
 class Refused extends Error {}
 
@@ -38,7 +46,8 @@ export function isSafeRegexSource(source) {
   if (/\\[1-9]|\\k</.test(source)) return false
   if (/\(\?<?[=!]/.test(source)) return false
   try {
-    const end = parseAlternation(source, 0, 0)
+    const counter = { quantified: 0 }
+    const end = parseAlternation(source, 0, 0, counter)
     // An unmatched ')' leaves input unread: not a pattern this screen understands.
     return end.i === source.length
   } catch (err) {
@@ -72,7 +81,7 @@ function parseQuantifier(src, i) {
  * Parse alternatives until the closing ')' or the end. Returns the index reached
  * and whether the body held a quantifier or an alternation.
  */
-function parseAlternation(src, start, depth) {
+function parseAlternation(src, start, depth, counter) {
   let i = start
   let busy = false // body contains a quantifier or an alternation
   let pending = false // an unbounded repeat with nothing mandatory since
@@ -95,7 +104,7 @@ function parseAlternation(src, start, depth) {
         if (!m) throw new Refused()
         j += m[0].length
       }
-      const inner = parseAlternation(src, j, depth + 1)
+      const inner = parseAlternation(src, j, depth + 1, counter)
       if (src[inner.i] !== ')') throw new Refused()
       atomBusy = inner.busy
       atomUnbounded = inner.unbounded
@@ -112,11 +121,13 @@ function parseAlternation(src, start, depth) {
       i++
     }
     const q = parseQuantifier(src, i)
-    if (q.any) busy = true
-    if (q.unbounded && atomBusy) throw new Refused()
-    // A bounded repeat of a group that itself holds an unbounded repeat multiplies
-    // the work per iteration: `(.*a){12}$`.
-    if (q.any && !q.unbounded && c === '(' && atomUnbounded) throw new Refused()
+    if (q.any) {
+      busy = true
+      if (++counter.quantified > MAX_QUANTIFIED_ATOMS) throw new Refused()
+    }
+    // ANY quantifier on a group that itself holds a quantifier or an alternation
+    // (`(aa|a){1,40}`, `(a{0,9}){0,9}`, `(a|a)?` repeated) can multiply the work.
+    if (q.any && atomBusy) throw new Refused()
     if (q.unbounded) {
       unbounded = true
       if (pending) throw new Refused()

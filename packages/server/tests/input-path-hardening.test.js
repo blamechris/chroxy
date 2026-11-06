@@ -1,14 +1,14 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync, renameSync, unlinkSync, linkSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isSafeRegexSource, MAX_PATTERN_LENGTH } from '../src/utils/safe-regex.js'
+import { isSafeRegexSource, MAX_PATTERN_LENGTH, MAX_QUANTIFIED_ATOMS } from '../src/utils/safe-regex.js'
 import { shouldSkipEvaluator, _resetSkipPatternCache } from '../src/prompt-evaluator.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
-import { readContainedTextFile, readContainedBytesSync, readPinnedHandle } from '../src/utils/regular-file.js'
+import { readContainedTextFile, readContainedBytes, readContainedBytesSync, readPinnedHandle } from '../src/utils/regular-file.js'
 import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
 import { open } from 'node:fs/promises'
 import { searchContent } from '../src/ide/search.js'
@@ -26,6 +26,14 @@ describe('screen for patterns the daemon will run', () => {
     for (const bad of ['(a+)+$', '(a*)*b', '(a|aa)+c', '(x+x+)+y', '((a+))*', '(a|b)*c', '(a)\\1', '(?=a)b', '(?<!a)b', '^(a?a)+$', '\\s*\\s*\\s*x', 'a*a*', 'a+b*c+', '(a{1,2})+b', 'a'.repeat(MAX_PATTERN_LENGTH + 1)]) {
       assert.equal(isSafeRegexSource(bad), false, bad)
     }
+  })
+
+  it('refuses bounded or optional repeats of groups that hold repeats, and many quantified atoms', () => {
+    for (const bad of ['(aa|a){1,40}$', '(a|a){0,25}$', '(a{0,9}){0,9}$', '(a|a)?'.repeat(20), 'a?'.repeat(36) + 'a'.repeat(36), '(foo.*)?']) {
+      assert.equal(isSafeRegexSource(bad), false, bad.slice(0, 40))
+    }
+    assert.equal(isSafeRegexSource('a?'.repeat(MAX_QUANTIFIED_ATOMS) + 'b'), true, 'at the cap it is still accepted')
+    assert.equal(isSafeRegexSource('a?'.repeat(MAX_QUANTIFIED_ATOMS + 1) + 'b'), false, 'one past the cap is refused')
   })
 
   it('accepts ordinary patterns', () => {
@@ -191,6 +199,95 @@ describe('containment does not depend on resolving the name twice', () => {
     const report = {}
     assert.equal(readContainedBytesSync(join(ws, 'sub', 'f.js'), ws, 4, { report }), null)
     assert.equal(report.reason, 'too-large')
+  })
+})
+
+describe('pinning: second pass, descriptor path, lexical roots', () => {
+  let base
+  before(() => { base = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-pin2-'))) })
+  after(() => { rmSync(base, { recursive: true, force: true }) })
+
+  // proj/sub/f.txt (INSIDE) and outside/sub/f.txt that is a HARD LINK to the same
+  // inode, so a read through the outside tree has the inside file's identity.
+  function tree(name) {
+    const root = join(base, name, 'proj')
+    const outside = join(base, name, 'outside')
+    mkdirSync(join(root, 'sub'), { recursive: true })
+    mkdirSync(join(outside, 'sub'), { recursive: true })
+    writeFileSync(join(root, 'sub', 'f.txt'), 'SAME-OBJECT\n')
+    linkSync(join(root, 'sub', 'f.txt'), join(outside, 'sub', 'f.txt'))
+    return { root, outside, file: join(root, 'sub', 'f.txt'), parent: join(root, 'sub') }
+  }
+  const toLinkAndBack = (t, name) => ({
+    park: () => { renameSync(t.parent, `${t.parent}.real`); symlinkSync(join(t.outside, 'sub'), t.parent) },
+    restore: () => { unlinkSync(t.parent); renameSync(`${t.parent}.real`, t.parent) },
+    name,
+  })
+
+  it('a directory turned into a link only between the first and second check is refused (async, sync, pinned handle)', { skip: SKIP_NO_SYMLINK }, async () => {
+    // The first pass sees real directories and the file\'s identity (the outside
+    // tree holds a hard link to it, so identity matches either way); the swap lands
+    // between the passes, and only a second pass can see it.
+    for (const kind of ['async', 'sync', 'handle']) {
+      const t = tree(`second-${kind}`)
+      const sw = toLinkAndBack(t)
+      const deps = { betweenChecks: () => sw.park() }
+      let out
+      if (kind === 'async') out = await readContainedBytes(t.file, t.root, 1024, { deps })
+      else if (kind === 'sync') out = readContainedBytesSync(t.file, t.root, 1024, { deps })
+      else {
+        const fh = await open(t.file, 'r')
+        try { out = await readPinnedHandle(fh, t.file, t.root, 1024, deps).catch((e) => (e.code === 'EACCES' ? null : Promise.reject(e))) } finally { await fh.close() }
+      }
+      assert.equal(out, null, kind)
+    }
+  })
+
+  it('undisturbed, the same reads succeed (control for the second pass)', async () => {
+    const t = tree('control')
+    assert.equal((await readContainedBytes(t.file, t.root, 1024)).toString(), 'SAME-OBJECT\n')
+    assert.equal(readContainedBytesSync(t.file, t.root, 1024).toString(), 'SAME-OBJECT\n')
+  })
+
+  it('with a descriptor-path check the file opened must be the file at the expected path (simulated /proc)', async () => {
+    const t = tree('procsim')
+    const expectedTarget = join(t.root, 'sub', 'f.txt')
+    const agree = { procFd: { available: true, readlink: () => expectedTarget } }
+    const disagree = { procFd: { available: true, readlink: () => join(t.outside, 'sub', 'f.txt') } }
+    const throws = { procFd: { available: true, readlink: () => { throw new Error('no proc') } } }
+    const absent = { procFd: { available: false, readlink: () => { throw new Error('must not be asked') } } }
+    assert.equal((await readContainedBytes(t.file, t.root, 1024, { deps: agree })).toString(), 'SAME-OBJECT\n')
+    assert.equal(await readContainedBytes(t.file, t.root, 1024, { deps: disagree }), null)
+    assert.equal(await readContainedBytes(t.file, t.root, 1024, { deps: throws }), null, 'fails closed when the platform offers the check and it errors')
+    assert.equal((await readContainedBytes(t.file, t.root, 1024, { deps: absent })).toString(), 'SAME-OBJECT\n', 'not consulted where the platform has no such primitive')
+    assert.equal(readContainedBytesSync(t.file, t.root, 1024, { deps: disagree }), null)
+    assert.equal(readContainedBytesSync(t.file, t.root, 1024, { deps: agree }).toString(), 'SAME-OBJECT\n')
+  })
+
+  it('on Linux the real /proc check refuses a parent link that was restored before the checks even when identities agree', { skip: process.platform !== 'linux' && `needs /proc/self/fd (Linux); this platform is ${process.platform}` }, async () => {
+    const t = tree('proc-real')
+    const sw = toLinkAndBack(t)
+    const deps = { beforeOpen: () => sw.park(), afterOpen: () => sw.restore() }
+    // The descriptor was opened through the link (so it resolved to the outside
+    // path), and the hard link makes its identity equal to the inside file's.
+    assert.equal(await readContainedBytes(t.file, t.root, 1024, { deps }), null)
+    assert.equal(readContainedBytesSync(t.file, t.root, 1024, { deps }), null)
+  })
+
+  it('a lexical root (a link spelling, or the unresolved temp directory) reads correctly', { skip: SKIP_NO_SYMLINK }, async () => {
+    const t = tree('lexical')
+    const spelled = join(base, 'lexical-link')
+    symlinkSync(join(base, 'lexical'), spelled)
+    const viaLink = join(spelled, 'proj')
+    assert.equal((await readContainedBytes(join(viaLink, 'sub', 'f.txt'), viaLink, 1024)).toString(), 'SAME-OBJECT\n')
+    assert.equal(readContainedBytesSync(join(viaLink, 'sub', 'f.txt'), viaLink, 1024).toString(), 'SAME-OBJECT\n')
+    const raw = mkdtempSync(join(tmpdir(), 'chroxy-lexical-')) // NOT realpath'd: /var vs /private/var on macOS
+    try {
+      mkdirSync(join(raw, 'd'))
+      writeFileSync(join(raw, 'd', 'x.txt'), 'RAW\n')
+      assert.equal((await readContainedBytes(join(raw, 'd', 'x.txt'), raw, 1024)).toString(), 'RAW\n')
+    } finally { rmSync(raw, { recursive: true, force: true }) }
+    void t
   })
 })
 

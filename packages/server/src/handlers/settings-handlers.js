@@ -960,7 +960,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // the operator gets no feedback when their pattern is broken.
   if (typeof msg.value === 'string' && msg.value.length > 0) {
     if (!isSafeRegexSource(msg.value)) {
-      sendSessionError(ws, ctx, 'Invalid pattern: too long or too complex (no repeated groups containing repeats or alternation, no backreferences or lookaround)')
+      sendSessionError(ws, ctx, 'Invalid pattern: too long or too complex (at most 200 characters and 10 repeated items; no quantifier on a group that contains a quantifier or alternation, no two unbounded repeats in a row, no backreferences or lookaround)')
       return
     }
     try {
