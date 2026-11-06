@@ -129,6 +129,8 @@ const AGENT_TOKEN = process.env.CHROXY_AGENT_TOKEN ?? null
 // environment. The child is the user-facing CLI; agent-internal credentials
 // have no business being readable from inside it.
 const AGENT_SECRET_ENV_KEYS = ['CHROXY_AGENT_TOKEN']
+// Env names a spawn frame may ask the agent to remove from the child's env (`unsetEnv`).
+const UNSETTABLE_ENV_KEYS = new Set(['CLAUDE_CONFIG_DIR'])
 
 // Constant-time token comparison — adapted from token-compare.js in the main server.
 function safeTokenCompare(a, b) {
@@ -795,7 +797,7 @@ export class PodAgent {
   // ---------------------------------------------------------------------------
 
   _handleSpawn(ws, msg) {
-    const { cmd, args = [], env = {}, cwd, stdin: stdinMode = 'pipe' } = msg
+    const { cmd, args = [], env = {}, unsetEnv, cwd, stdin: stdinMode = 'pipe' } = msg
 
     if (!cmd) {
       this._send(ws, { type: 'error', message: 'spawn: cmd is required' })
@@ -837,6 +839,14 @@ export class PodAgent {
     const spawnOpts = {
       stdio: [resolvedStdin, 'pipe', 'pipe'],
       env: { ...sanitizedAgentEnv, ...env },
+    }
+    // Variables the spawner asks to have removed from the merged env (the agent's
+    // own env, e.g. one defined by the image or pod, would otherwise survive).
+    // Only an allowlisted name is honoured.
+    if (Array.isArray(unsetEnv)) {
+      for (const key of unsetEnv) {
+        if (UNSETTABLE_ENV_KEYS.has(key)) delete spawnOpts.env[key]
+      }
     }
     if (cwd) spawnOpts.cwd = cwd
 
