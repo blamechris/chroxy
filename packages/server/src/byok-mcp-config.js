@@ -1638,6 +1638,15 @@ function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = d
   const normalized = normalizeMcpServerConfig(validName.name, config)
   if (!normalized.ok) return { ok: false, error: normalized.error }
 
+  const shadowed = findShadowingMcpScope({ name: validName.name, scope, cwd, configPath })
+  if (shadowed) {
+    return {
+      ok: false,
+      code: 'EXISTS',
+      error: `An MCP server named '${validName.name}' is already defined in ${MCP_SOURCE_LABELS[shadowed]}, which takes precedence over ${MCP_SOURCE_LABELS[mcpWriteScopeToSource(scope)]}, so a server added here would never be used. ${shadowed === MCP_SERVER_SOURCE.PROJECT_MCP_JSON ? 'Chroxy cannot edit that file, so remove or rename the entry there by hand' : 'Remove or rename it there'}, or use a different name.`,
+    }
+  }
+
   // DRY-RUN read (the plan path). The COMMIT re-runs `locateAddTarget` on a fresh
   // read inside `updateClaudeConfig`, which owns the conflict detection (#8983).
   const read = readClaudeConfigForMutation(configPath)
@@ -1645,6 +1654,33 @@ function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = d
   const located = locateAddTarget(read.raw, { scope, cwd, validName, normalized })
   if (!located.ok) return located
   return { ...located, mode: read.mode, scope, name: validName.name, configPath }
+}
+
+/** Human-readable scope names for add-time errors (#7962). */
+const MCP_SOURCE_LABELS = Object.freeze({
+  [MCP_SERVER_SOURCE.LOCAL]: 'the local scope of this project',
+  [MCP_SERVER_SOURCE.PROJECT_MCP_JSON]: 'the .mcp.json file in this repository',
+  [MCP_SERVER_SOURCE.USER]: 'user scope',
+})
+
+/** Precedence rank, highest first — the same order `readMcpSourcesInPrecedenceOrder` enumerates. */
+const MCP_SOURCE_RANK = Object.freeze({
+  [MCP_SERVER_SOURCE.LOCAL]: 0,
+  [MCP_SERVER_SOURCE.PROJECT_MCP_JSON]: 1,
+  [MCP_SERVER_SOURCE.USER]: 2,
+})
+
+/**
+ * #7962: the scope a server NAMED `name` currently spawns from, when that scope
+ * outranks the write target. Resolved through `discoverMcpServerSpecs` (the spawn
+ * path's own resolver) so "what wins" cannot drift from "what spawns". Returns an
+ * `MCP_SERVER_SOURCE` value, or null when nothing outranks the target.
+ */
+function findShadowingMcpScope({ name, scope, cwd, configPath }) {
+  const winner = discoverMcpServerSpecs(cwd, { configPath }).servers.find((s) => s.name === name)
+  if (!winner) return null
+  const target = mcpWriteScopeToSource(scope)
+  return MCP_SOURCE_RANK[winner.source] < MCP_SOURCE_RANK[target] ? winner.source : null
 }
 
 /** Locate (creating if absent) the block an add targets in `raw`; refuse a duplicate / malformed shape. */
