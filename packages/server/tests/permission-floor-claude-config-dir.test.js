@@ -6,10 +6,13 @@ import { tmpdir } from 'node:os'
 
 import { PermissionManager } from '../src/permission-manager.js'
 import { evaluateHookFloorRequest } from '../src/ws-permissions.js'
-import { pathPiecesUnder, configRootVerdict } from '../src/permission-floor.js'
+import { pathPiecesUnder, configRootVerdict, floorInternalsForTest } from '../src/permission-floor.js'
 import { SessionManager, SessionDirectoryError } from '../src/session-manager.js'
 import { validateCwdAllowed, claudeConfigDirCwdDenial } from '../src/handler-utils.js'
 import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { EventEmitter } from 'node:events'
+import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * The configured Claude config directory (CLAUDE_CONFIG_DIR) is treated like
@@ -18,6 +21,18 @@ import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js
  */
 
 const silentLog = { info() {}, warn() {} }
+
+class FloorFakeSession extends EventEmitter {
+  constructor(opts = {}) { super(); this.cwd = opts.cwd }
+  start() {}
+  destroy() {}
+  sendMessage() {}
+  interrupt() {}
+  setModel() { return false }
+  setPermissionMode() { return false }
+}
+declareUnknownCustomization(FloorFakeSession)
+registerProvider('test-floor-fake-9027', FloorFakeSession)
 
 let sandbox
 let home
@@ -343,7 +358,7 @@ describe('Windows spelling through the verdict', () => {
 describe('session creation boundary', () => {
   let sm
   afterEach(() => { try { sm?.destroy?.() } catch { /* ignore */ } })
-  const mk = (extra = {}) => new SessionManager({ stateFilePath: join(sandbox, `state-${Math.random().toString(36).slice(2)}.json`), providerType: 'claude-sdk', ...extra })
+  const mk = (extra = {}) => new SessionManager({ stateFilePath: join(sandbox, `state-${Math.random().toString(36).slice(2)}.json`), providerType: 'test-floor-fake-9027', ...extra })
 
   it('refuses an explicit cwd inside the override', () => {
     const root = mkRoot('claude-data')
@@ -364,7 +379,7 @@ describe('session creation boundary', () => {
     const root = mkRoot('claude-data')
     process.env.CLAUDE_CONFIG_DIR = root
     sm = mk()
-    const saved = { id: 'a'.repeat(32), name: 'Parked', cwd: root, provider: 'claude-sdk', history: [] }
+    const saved = { id: 'a'.repeat(32), name: 'Parked', cwd: root, provider: 'test-floor-fake-9027', history: [] }
     assert.throws(() => sm._attemptRestoreOne(saved, false), SessionDirectoryError)
   })
 
@@ -402,5 +417,139 @@ describe('a location that cannot be checked', () => {
     } finally {
       chmodSync(locked, 0o755)
     }
+  })
+})
+
+describe('an override directory that is not created yet, reached through an aliased ancestor', () => {
+  function aliasPair() {
+    const parent = mkRoot('serverparent')
+    const alias = join(sandbox, 'ſerverparent')
+    try {
+      const a = statSync(parent, { bigint: true })
+      const b = statSync(alias, { bigint: true })
+      if (a.ino !== b.ino || a.dev !== b.dev) return null
+    } catch { return null }
+    return { parent, alias }
+  }
+
+  it('floors through the alias with one missing directory', async (t) => {
+    const pair = aliasPair()
+    if (!pair) return t.skip('this filesystem does not fold the long s')
+    process.env.CLAUDE_CONFIG_DIR = join(pair.parent, 'absent-root')
+    await assertBoth('Read', { file_path: join(pair.alias, 'absent-root', 'settings.json') }, true, 'alias settings')
+    await assertBoth('Write', { file_path: join(pair.alias, 'absent-root', 'commands', 'x.md') }, true, 'alias write')
+    await assertBoth('Grep', { path: pair.alias, pattern: '.' }, true, 'alias search from above')
+    await assertBoth('Write', { file_path: join(pair.alias, 'other-name', 'x.md') }, false, 'alias sibling')
+  })
+
+  it('floors through the alias with several missing directories', async (t) => {
+    const pair = aliasPair()
+    if (!pair) return t.skip('this filesystem does not fold the long s')
+    process.env.CLAUDE_CONFIG_DIR = join(pair.parent, 'a', 'b', 'c')
+    await assertBoth('Read', { file_path: join(pair.alias, 'a', 'b', 'c', 'settings.json') }, true, 'deep settings')
+    await assertBoth('Write', { file_path: join(pair.alias, 'a', 'b', 'c', 'x.md') }, true, 'deep write')
+    await assertBoth('Grep', { path: join(pair.alias, 'a'), pattern: '.' }, true, 'search from a missing ancestor')
+    await assertBoth('Write', { file_path: join(pair.alias, 'a', 'b', 'd', 'x.md') }, false, 'diverging sibling')
+  })
+})
+
+describe('the identity lookups are bounded and fail closed', () => {
+  const eacces = () => Object.assign(new Error('denied'), { code: 'EACCES' })
+
+  it('a lookup that errors floors a Read-path target', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const target = join(project, 'trigger-dir', 'f.txt')
+    const stat = (p, o) => { if (p.includes('trigger-dir')) throw eacces(); return statSync(p, o) }
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, stat), true)
+    // positive control: the same target with working lookups is not a hit
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined), false)
+  })
+
+  it('a lookup that errors counts a Grep search as reaching the root', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    mkdirSync(join(project, 'trigger-dir'), { recursive: true })
+    const stat = (p, o) => { if (p.includes('trigger-dir')) throw eacces(); return statSync(p, o) }
+    const input = { path: join(project, 'trigger-dir'), pattern: '.' }
+    assert.deepEqual(floorInternalsForTest.searchReach(input, project, stat), { near: true, covers: true })
+    assert.deepEqual(floorInternalsForTest.searchReach(input, project, undefined), { near: false, covers: false })
+  })
+
+  it('a spent budget floors', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const target = join(project, 'src', 'a.js')
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined, 2), true)
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined, 10_000), false)
+  })
+
+  it('many deep targets cost few lookups and stay fast', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    let calls = 0
+    const stat = (p, o) => { calls++; return statSync(p, o) }
+    const deep = Array.from({ length: 240 }, (_, i) => `m${i}`)
+    const started = Date.now()
+    const targets = Array.from({ length: 64 }, (_, k) => join(project, ...deep, `f${k}.txt`))
+    floorInternalsForTest.hitsConfigRoot(targets, false, stat, 16384)
+    assert.ok(calls < 64, `lookups are shared across the call and stop at the first missing directory; got ${calls}`)
+    assert.ok(Date.now() - started < 2000, 'stays fast')
+    assert.equal(hookFloors('Read', { file_path: join(project, ...deep, 'f.txt') }), false, 'an ordinary deep read is not floored')
+  })
+})
+
+describe('a creation path that cannot be checked', () => {
+  it('is refused rather than assumed fine', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const locked = join(sandbox, 'locked-cwd')
+    mkdirSync(locked, { recursive: true })
+    assert.equal(claudeConfigDirCwdDenial(join(locked, 'wt')), null, 'positive control: a creatable path is fine')
+    chmodSync(locked, 0o000)
+    try {
+      assert.match(claudeConfigDirCwdDenial(join(locked, 'wt')) ?? '', /Claude config directory/)
+    } finally {
+      chmodSync(locked, 0o755)
+    }
+  })
+})
+
+describe('session creation with a worktree', () => {
+  let sm
+  afterEach(() => { try { sm?.destroy?.() } catch { /* ignore */ } })
+  const mk = () => new SessionManager({ stateFilePath: join(sandbox, `state-${Math.random().toString(36).slice(2)}.json`), providerType: 'test-floor-fake-9027' })
+
+  it('refuses a worktree whose directory is inside the override, before creating it', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    sm = mk()
+    const created = []
+    sm._addDetachedWorktree = (repo, dir) => { created.push(dir) }
+    sm._worktreeBase = join(root, 'wt')
+    assert.throws(() => sm._resolveCreateSessionPlan({ cwd: project, worktree: true }), SessionDirectoryError)
+    assert.deepEqual(created, [])
+    // positive control: a base outside the override creates it
+    sm._worktreeBase = join(sandbox, 'wt-ok')
+    const plan = sm._resolveCreateSessionPlan({ cwd: project, worktree: true })
+    assert.equal(created.length, 1)
+    assert.ok(plan.resolvedCwd.startsWith(join(sandbox, 'wt-ok')))
+  })
+
+  it('refuses a missing restored worktree inside the override, before recreating it', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    sm = mk()
+    const id = 'b'.repeat(32)
+    const recreated = []
+    sm._recreateMissingWorktree = (dir) => { recreated.push(dir) }
+    const args = (base) => ({ cwd: join(base, id), restoreWorktreePath: join(base, id), restoreWorktreeRepoDir: project, preserveId: id, isRestore: true })
+    sm._worktreeBase = join(root, 'wt')
+    assert.throws(() => sm._resolveCreateSessionPlan(args(join(root, 'wt'))), SessionDirectoryError)
+    assert.deepEqual(recreated, [])
+    // positive control: outside the override it is recreated
+    sm._worktreeBase = join(sandbox, 'wt-ok2')
+    sm._resolveCreateSessionPlan(args(join(sandbox, 'wt-ok2')))
+    assert.equal(recreated.length, 1)
   })
 })

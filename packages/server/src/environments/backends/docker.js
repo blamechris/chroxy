@@ -3,6 +3,7 @@ import { createLogger } from '../../logger.js'
 import { VALID_USERNAME_RE } from '../../utils/validation-patterns.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 import { remapClaudeSpawn } from './container-claude-spawn.js'
+import { pinnedContainerClaudeConfigDir } from './container-claude-spawn.js'
 
 const log = createLogger('docker-backend')
 
@@ -532,7 +533,7 @@ export class DockerBackend {
     // Pin claude's config directory inside the container to the `.claude` under that
     // HOME, so an image-defined CLAUDE_CONFIG_DIR cannot move it somewhere the
     // permission floor does not know (it recognises `.claude` by name in the guest).
-    dockerArgs.push('--env', `CLAUDE_CONFIG_DIR=/home/${containerUser}/.claude`)
+    dockerArgs.push('--env', `CLAUDE_CONFIG_DIR=${pinnedContainerClaudeConfigDir(`/home/${containerUser}`)}`)
     dockerArgs.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
 
     // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the

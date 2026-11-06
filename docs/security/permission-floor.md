@@ -253,8 +253,10 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
   off.
 - **Recognised by filesystem object as well as spelling:** a case or Unicode
   normalisation variant of a path component, or a second path to the directory,
-  is the same directory. A directory that does not exist yet is recognised by its
-  spelling. A location that cannot be checked floors.
+  is the same directory. A directory that does not exist yet is recognised through
+  its deepest existing ancestor (by filesystem object) plus the missing names. A
+  location that cannot be checked, or a request whose lookups exceed the call's
+  budget, floors; lookups are cached within one evaluation.
 - **Grep:** a recursive search from the directory, or from a directory above it,
   floors unless a `glob` narrows it (an exclusion-only glob does not narrow). A
   `glob` is also tested against bare `settings*.json` when the search is near it.
@@ -272,17 +274,23 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
 - **Session cwd:** a cwd inside the directory is refused at the one creation
   boundary in `SessionManager` (an omitted cwd, the startup default, a restored
   session and a checkpoint branch included), matched by filesystem object. A
+  worktree directory is judged before it is created or recreated. A
   restored session that now points into it fails the restore like any other
   (logged, parked), and the WS handlers refuse it through `validateCwdAllowed`.
-- **Containers:** claude's config directory inside a Docker session is pinned to
-  the `.claude` under the container HOME, so the guest location is always one the
-  floor recognises by name, whatever the image defines.
+- **Containers:** claude's config directory inside a Docker session (SDK and CLI)
+  and a Kubernetes or Rancher Pod is pinned to the `.claude` under the container
+  HOME (`/home/chroxy` when none is known), so the guest location is always one
+  the floor recognises by name, whatever the image defines.
 - **Windows:** containment is case-insensitive and drive-aware
   (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere. The
   Windows spelling is tested through the verdict function on every host; the full
   predicate runs natively only on a Windows runner.
 - The directory is read from the daemon's environment, per call. Both pipelines
   reach it through `isFlooredTarget`.
+- **Limits.** A read through a hard link to a settings file under another name is
+  not identity-checked. A bind mount of only a descendant of the directory is not
+  recognised. The floor is path-based, so the time between check and use remains
+  (see the TOCTOU note above).
 
 ## 2. Precedence — the floor beats every lenient mode
 

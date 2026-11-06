@@ -7,7 +7,7 @@
  */
 import fs, { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
+import { join, dirname, resolve, relative, sep, basename, isAbsolute, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
@@ -673,20 +673,35 @@ function claudeConfigDirOverride() {
  * @returns {string|null}
  */
 export function claudeConfigDirCwdDenial(cwd) {
-  if (claudeConfigDirOverride() === null) return null
-  let realCwd
+  const override = claudeConfigDirOverride()
+  if (override === null) return null
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return null
   let home
-  try {
-    realCwd = canonicalRealpath(cwd)
-  } catch {
-    return null
-  }
   try {
     home = canonicalRealpath(homedir())
   } catch {
     home = homedir()
   }
-  return protectedDirectoryDenial(realCwd, home, { claudeConfigOnly: true })
+  // A directory that is not created yet (a worktree about to be made, one about to
+  // be recreated) is judged by its deepest existing ancestor plus the missing tail.
+  let existing = resolve(cwd)
+  const tail = []
+  for (;;) {
+    try {
+      existing = canonicalRealpath(existing)
+      break
+    } catch (err) {
+      if (!isAbsentError(err)) return CLAUDE_CONFIG_DIR_DENIED
+      const parent = dirname(existing)
+      if (parent === existing) return null
+      tail.push(basename(existing))
+      existing = parent
+    }
+  }
+  if (isPathWithin(home, override)) return null
+  const wouldBe = tail.length ? join(existing, ...tail.reverse()) : existing
+  if (isPathWithin(wouldBe.toLowerCase(), override.toLowerCase())) return CLAUDE_CONFIG_DIR_DENIED
+  return protectedDirectoryDenial(existing, home, { claudeConfigOnly: true })
 }
 
 /**

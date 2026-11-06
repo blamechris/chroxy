@@ -732,6 +732,23 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
     assert.deepEqual(pins, [`CLAUDE_CONFIG_DIR=${home.replace(/\/+$/, '')}/.claude`])
   })
 
+  it('pins the claude config directory to the default container home when HOME is absent', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+    session._containerId = 'c0ffee1234567890'
+    const env = { ...session._buildChildEnv(), CLAUDE_CONFIG_DIR: '/workspace/claude-data' }
+    delete env.HOME
+    session._buildChildEnv = () => env
+    let captured = null
+    const child = new EventEmitter()
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {}
+    session._spawnDocker = (a) => { captured = a; return child }
+    session._spawnPersistentProcess(['-p'])
+    session._cleanupReadlines()
+    for (const st of [child.stdin, child.stdout, child.stderr]) st.destroy()
+    assert.deepEqual(captured.filter((a) => String(a).startsWith('CLAUDE_CONFIG_DIR=')), ['CLAUDE_CONFIG_DIR=/home/chroxy/.claude'])
+  })
+
   it('does not leak the host sidecar PATH by any other argv route', async () => {
     // Keyed on the VALUE, not the variable name: a forward that renamed the key
     // (or embedded the path in another var) would slip past a name-only check

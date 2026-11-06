@@ -78,3 +78,19 @@ export function remapClaudeSpawn({ cmd, args = [], containerCliPath, hostClaudeP
 
   return { cmd, args: [...args], remapped: false }
 }
+
+/**
+ * The claude config directory every container claude spawn is pinned to: the
+ * `.claude` under the container user's HOME. Pinned explicitly so an image- or
+ * pod-defined `CLAUDE_CONFIG_DIR` cannot move it somewhere the permission floor
+ * does not recognise (the floor knows `.claude` by name in the guest). One
+ * implementation for the Docker backend, the Docker CLI session and the Pod path.
+ *
+ * @param {unknown} home  the HOME the spawn runs with, when known (absolute path)
+ * @param {string} [user]  the container user to fall back to (`/home/<user>`)
+ * @returns {string}
+ */
+export function pinnedContainerClaudeConfigDir(home, user = 'chroxy') {
+  const base = typeof home === 'string' && home.startsWith('/') ? home.replace(/\/+$/, '') : `/home/${user}`
+  return `${base}/.claude`
+}

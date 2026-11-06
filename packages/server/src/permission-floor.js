@@ -438,13 +438,24 @@ function _configRootRule(call) {
   if (basename(root).toLowerCase() !== CLAUDE_DIR) {
     let home = claudeHomeDir()
     try { home = realpathSync.native(home) } catch { /* the raw home still gives a prefix test */ }
-    rule = { root, broad: false, rootId: null, rootAncestorIds: null, failed: false }
+    // `anchor` is the root, or its deepest EXISTING ancestor when the root is not
+    // created yet; `tail` are the missing pieces between them (lowercased).
+    rule = { root, broad: false, anchor: null, anchorId: null, tail: [], anchorAncestorIds: null, failed: false }
     try {
-      rule.rootId = _statId(root)
-      if (rule.rootId === undefined) rule.rootId = null
       // The root holds $HOME (is it, or an ancestor of it). Both are canonical
       // (native realpath), so the spelling comparison is enough.
       rule.broad = pathPiecesUnder(root, home, path) !== null
+      let anchor = root
+      const missing = []
+      for (;;) {
+        const id = _statId(anchor, call)
+        if (id !== undefined) { rule.anchor = anchor; rule.anchorId = id; break }
+        const parent = dirname(anchor)
+        if (parent === anchor) break
+        missing.push(basename(anchor).toLowerCase())
+        anchor = parent
+      }
+      rule.tail = missing.reverse()
     } catch {
       rule.failed = true
     }
@@ -464,15 +475,30 @@ function _withAncestors(p) {
  * Which filesystem object is at `p`: a `device:inode` id; null when the
  * filesystem reports inode 0 (identifies nothing); undefined when nothing is
  * there (ENOENT / ENOTDIR). Any other error throws, and callers fail closed.
+ * Each distinct lookup is charged to the call's walk budget and remembered for
+ * the rest of the call; running out of budget throws, so the call floors.
  */
-function _statId(p) {
+function _statId(p, call) {
+  if (call.ids.has(p)) return call.ids.get(p)
+  if (--call.walk.left < 0) throw Object.assign(new Error('floor: identity lookups exceed the call budget'), { code: 'EBUDGET' })
+  let id
   try {
-    const st = statSync(p, { bigint: true })
-    return st.ino === 0n ? null : `${st.dev}:${st.ino}`
+    const st = (call.statFn ?? statSync)(p, { bigint: true })
+    id = st.ino === 0n ? null : `${st.dev}:${st.ino}`
   } catch (err) {
-    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return undefined
-    throw err
+    if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') throw err
+    id = undefined
   }
+  call.ids.set(p, id)
+  return id
+}
+
+/** A name the filesystem might treat as another (case, normalisation). */
+function _sameName(a, b, call) {
+  if (a === b) return true
+  const ca = _canonicalNameIn(a, call)
+  const cb = _canonicalNameIn(b, call)
+  return ca === null || cb === null || ca === cb
 }
 
 /**
@@ -496,31 +522,45 @@ export function pathPiecesUnder(root, target, pathImpl) {
 /**
  * How the absolute `real` relates to the configured root, by spelling first and
  * then by filesystem object, so a name the filesystem treats as equivalent (a
- * case or Unicode-normalisation variant, a second path) is recognised too.
+ * case or Unicode-normalisation variant, a second path) is recognised too. A
+ * root that is not created yet is matched through its deepest existing ancestor
+ * (by identity) plus the missing tail (by name).
  *   inside: the pieces of `real` below the root, or null when not inside it
  *   covers: `real` is the root or an ancestor of it (a search from there
  *           reaches the root)
- * Throws on a stat error other than "nothing there"; callers fail closed.
+ * Throws on a stat error other than "nothing there", or when the call's budget
+ * is spent; callers fail closed.
  */
-function _rootRelation(rule, real, wantCovers) {
+function _rootRelation(rule, real, wantCovers, call) {
   let inside = pathPiecesUnder(rule.root, real, path)
   let covers = wantCovers && pathPiecesUnder(real, rule.root, path) !== null
-  if (rule.rootId !== null) {
-    if (inside === null) {
-      for (const dir of _withAncestors(real)) {
-        if (_statId(dir) === rule.rootId) {
-          inside = pathPiecesUnder(dir, real, path) ?? []
-          break
-        }
+  if (rule.anchorId === null || rule.anchorId === undefined) return { inside, covers }
+  if (inside === null || (wantCovers && !covers)) {
+    // Top-down, so the first missing directory ends the walk: nothing below it exists.
+    for (const dir of _withAncestors(real).reverse()) {
+      const id = _statId(dir, call)
+      if (id === undefined) break
+      if (id !== rule.anchorId) continue
+      const rest = pathPiecesUnder(dir, real, path) ?? []
+      let k = 0
+      while (k < rest.length && k < rule.tail.length && _sameName(rest[k], rule.tail[k], call)) k++
+      if (k === rule.tail.length) {
+        if (inside === null) inside = rest.slice(k)
+      } else if (k === rest.length) {
+        covers = true // `real` is above the root, reached through directories not created yet
       }
     }
     if (wantCovers && !covers) {
-      const realId = _statId(real)
+      const realId = _statId(real, call)
       if (realId) {
-        if (rule.rootAncestorIds === null) {
-          rule.rootAncestorIds = new Set(_withAncestors(rule.root).map(_statId).filter((id) => id))
+        if (rule.anchorAncestorIds === null) {
+          rule.anchorAncestorIds = new Set()
+          for (const dir of _withAncestors(rule.anchor)) {
+            const id = _statId(dir, call)
+            if (id) rule.anchorAncestorIds.add(id)
+          }
         }
-        covers = rule.rootAncestorIds.has(realId)
+        covers = rule.anchorAncestorIds.has(realId)
       }
     }
   }
@@ -565,7 +605,7 @@ function _hitsConfigRoot(resolved, secretsOnly, call) {
   if (rule === null) return false
   if (rule.failed) return true
   try {
-    const { inside } = _rootRelation(rule, resolved, false)
+    const { inside } = _rootRelation(rule, resolved, false, call)
     if (inside === null) return false
     return configRootVerdict(inside, rule.broad, secretsOnly, call)
   } catch {
@@ -854,6 +894,18 @@ export function isSecretReadTarget(input, cwd) {
  * @param {boolean} secretsOnly
  * @returns {boolean}
  */
+function _newCall(statFn) {
+  return {
+    realBase: undefined,
+    configRoot: undefined,
+    walk: { left: FLOOR_MAX_CALL_WALK },
+    names: new Map(),
+    canonical: { left: FLOOR_MAX_CALL_CANONICAL },
+    ids: new Map(),
+    statFn,
+  }
+}
+
 function _matchesFloor(input, cwd, secretsOnly) {
   if (!input || typeof input !== 'object') return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
@@ -881,13 +933,7 @@ function _matchesFloor(input, cwd, secretsOnly) {
     bytes += Buffer.byteLength(target, 'utf8')
     if (bytes > FLOOR_MAX_CALL_BYTES) return true
   }
-  const call = {
-    realBase: undefined,
-    configRoot: undefined,
-    walk: { left: FLOOR_MAX_CALL_WALK },
-    names: new Map(),
-    canonical: { left: FLOOR_MAX_CALL_CANONICAL },
-  }
+  const call = _newCall()
   for (const target of targets) {
     if (isProtectedPathValue(target, base, secretsOnly, call)) return true
   }
@@ -1344,8 +1390,9 @@ function globNarrowsSearch(glob) {
  * @param {string} [cwd]
  * @returns {{ near: boolean, covers: boolean }}
  */
-function _searchReachToConfigRoot(input, cwd) {
-  const rule = _configRootRule({})
+function _searchReachToConfigRoot(input, cwd, statFn) {
+  const call = _newCall(statFn)
+  const rule = _configRootRule(call)
   if (rule === null) return { near: false, covers: false }
   if (rule.failed) return { near: true, covers: true }
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
@@ -1356,7 +1403,7 @@ function _searchReachToConfigRoot(input, cwd) {
     const realBase = realpathDeepestAncestorSync(base)
     for (const target of targets) {
       const real = resolveTargetComponentwiseSync(realBase, target, { left: FLOOR_MAX_CALL_WALK })
-      const { inside, covers } = _rootRelation(rule, real, true)
+      const { inside, covers } = _rootRelation(rule, real, true, call)
       if (inside !== null || covers) reach.near = true
       if (covers) reach.covers = true
     }
@@ -1364,4 +1411,25 @@ function _searchReachToConfigRoot(input, cwd) {
   } catch {
     return { near: true, covers: true }
   }
+}
+
+/**
+ * Internals exposed for tests only: they take an injected `stat` so the
+ * fail-closed paths (a lookup that errors, a spent budget) can be driven
+ * without making a real directory unreadable.
+ */
+export const floorInternalsForTest = {
+  hitsConfigRoot(resolved, secretsOnly, statFn, budget) {
+    const call = _newCall(statFn)
+    if (budget !== undefined) call.walk.left = budget
+    // An array is evaluated within ONE call, sharing its lookups and budget.
+    let hit = false
+    for (const target of Array.isArray(resolved) ? resolved : [resolved]) {
+      if (_hitsConfigRoot(target, secretsOnly, call)) hit = true
+    }
+    return hit
+  },
+  searchReach(input, cwd, statFn) {
+    return _searchReachToConfigRoot(input, cwd, statFn)
+  },
 }

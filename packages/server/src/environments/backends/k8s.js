@@ -6,7 +6,7 @@ import WebSocket from 'ws'
 import { createLogger } from '../../logger.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 import { assertSafeArgvValue } from '../../utils/argv-safety.js'
-import { remapClaudeSpawn } from './container-claude-spawn.js'
+import { remapClaudeSpawn, pinnedContainerClaudeConfigDir } from './container-claude-spawn.js'
 
 const log = createLogger('k8s-backend')
 
@@ -1669,6 +1669,14 @@ export class K8sBackend {
       log.info(`Remapped claude spawn: ${cmd} ${args[0] ?? ''} -> ${containerCmd} ${containerArgs[0] ?? ''}`)
     }
 
+    // Pin claude's config directory in the Pod to the `.claude` under its HOME, so an
+    // image- or pod-defined CLAUDE_CONFIG_DIR cannot move it somewhere the permission
+    // floor does not recognise. The per-spawn env is layered over the agent's own
+    // (sidecar/agent.js), so this value wins. Only a claude spawn is pinned.
+    const spawnEnv = remap.remapped
+      ? { ...(env || {}), CLAUDE_CONFIG_DIR: pinnedContainerClaudeConfigDir(env?.HOME) }
+      : env
+
     // Remap host cwd to /workspace inside the Pod when provided.
     let containerCwd = cwd
     if (cwd && hostCwd) {
@@ -1731,7 +1739,7 @@ export class K8sBackend {
       }
 
       _wireWsToProc(ws, proc, {
-        cmd: containerCmd, args: containerArgs, env, cwd: containerCwd, signal, cleanup,
+        cmd: containerCmd, args: containerArgs, env: spawnEnv, cwd: containerCwd, signal, cleanup,
       })
     }).catch((err) => {
       log.warn(`streamCliInEnvironment dial failed for ${podName}: ${err.message}`)

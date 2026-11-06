@@ -1608,10 +1608,8 @@ export class SessionManager extends EventEmitter {
     // startup default, a restored session, a checkpoint branch), so none of
     // them can reach it. A restored session that now points into it is refused
     // like any other restore failure: logged, kept parked, not silently started.
-    if (!missingRestoreWorktree) {
-      const denial = claudeConfigDirCwdDenial(baseCwd)
-      if (denial) throw new SessionDirectoryError(denial, baseCwd)
-    }
+    const baseDenial = claudeConfigDirCwdDenial(baseCwd)
+    if (baseDenial) throw new SessionDirectoryError(baseDenial, baseCwd)
 
     // #4983 — preserve persisted ID on restoreState so dashboard's
     // localStorage-cached activeSessionId still resolves after a daemon
@@ -1794,6 +1792,10 @@ export class SessionManager extends EventEmitter {
       }
     } else if (worktree) {
       const worktreeDir = join(this._worktreeBase || defaultWorktreeBase(), sessionId)
+      // The session's cwd becomes the worktree: judge it before anything is created.
+      // (A restored worktree, rebound or recreated below, is at the path checked above.)
+      const worktreeDenial = claudeConfigDirCwdDenial(worktreeDir)
+      if (worktreeDenial) throw new SessionDirectoryError(worktreeDenial, worktreeDir)
       this._addDetachedWorktree(baseCwd, worktreeDir)
 
       resolvedCwd = worktreeDir
