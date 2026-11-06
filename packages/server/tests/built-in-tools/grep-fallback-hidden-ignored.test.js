@@ -15,12 +15,19 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, chmodSync,
+  mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, chmodSync, readFileSync,
   accessSync, statSync, constants,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { buildGrepArgs, buildGrepCommand } from '../../src/built-in-tools/tool-transforms.js'
+import {
+  buildGrepArgs,
+  buildGrepCommand,
+  buildConfinedContainerCommand,
+  parseConfinedContainerStdout,
+  splitGrepNotes,
+  GREP_NOTE_PREFIX,
+} from '../../src/built-in-tools/tool-transforms.js'
 
 function findOnPath(name) {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
@@ -537,6 +544,200 @@ describe('Grep grep-fallback skips hidden and ignored files (#7981)', { skip: SK
         const r = run(root)
         assert.equal(r.status, 0, r.stderr)
         assert.equal(r.files.length, 220)
+      })
+    })
+  })
+
+  describe('round-2 review findings', () => {
+    function shim(name, scripts, withReal = ['grep']) {
+      const bin = path.join(base, name)
+      mkdirSync(bin)
+      for (const n of withReal) symlinkSync({ grep: GREP, find: FIND }[n], path.join(bin, n))
+      for (const [n, body] of Object.entries(scripts)) {
+        const f = path.join(bin, n)
+        writeFileSync(f, `#!/bin/sh\n${body}\n`)
+        chmodSync(f, 0o755)
+      }
+      return bin
+    }
+
+    // A fake git whose per-subcommand status is chosen by the test.
+    function fakeGit({ prefix = 'sub/', prefixRc = 0, checkIgnoreRc = 1 }) {
+      return [
+        'case "$*" in',
+        '  *is-inside-work-tree*) echo true;;',
+        `  *show-prefix*) printf '%s\\n' '${prefix}'; exit ${prefixRc};;`,
+        `  *check-ignore*) exit ${checkIgnoreRc};;`,
+        '  *" -ci "*) ;;',
+        "  *ls-files*) printf 'a.txt\\0';;",
+        'esac',
+      ].join('\n')
+    }
+
+    describe('git status handling: every status is read, none is assumed', () => {
+      for (const [label, opts] of [
+        ['check-ignore fails (128)', { checkIgnoreRc: 128 }],
+        ['show-prefix fails (128), which must not read as the top-level prefix', { prefixRc: 128, prefix: '' }],
+      ]) {
+        it(`${label}: no stdout, exit 2 (masked: 0 with the reason on stderr)`, () => {
+          const root = path.join(base, `gitstatus-${label.slice(0, 5)}`)
+          write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+          const bin = shim(`bin-gs-${label.slice(0, 5)}`, { git: fakeGit(opts) }, ['grep', 'find'])
+          for (const maskExit of [false, true]) {
+            const r = run(root, { bin, cmdOpts: { maskExit } })
+            assert.equal(r.stdout, '', label)
+            assert.equal(r.status, maskExit ? 0 : 2, label)
+            assert.ok(r.stderr.includes('`git ls-files` could not enumerate'), r.stderr)
+            assert.equal(splitGrepNotes(r.stderr).errors === '', false, 'a refusal is an error to both callers')
+          }
+        })
+      }
+
+      it('POSITIVE CONTROLS: check-ignore 1 uses git; check-ignore 0 uses find', () => {
+        const root = path.join(base, 'gitstatus-ctl')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        write(path.join(root, 'b.txt'), 'NEEDLE b\n')
+        const viaGit = run(root, { bin: shim('bin-gs-ok1', { git: fakeGit({ checkIgnoreRc: 1 }) }, ['grep', 'find']) })
+        assert.deepEqual(viaGit.files, ['a.txt'], viaGit.stderr) // the fake git lists only a.txt
+        const viaFind = run(root, { bin: shim('bin-gs-ok0', { git: fakeGit({ checkIgnoreRc: 0 }) }, ['grep', 'find']) })
+        assert.deepEqual(viaFind.files, ['a.txt', 'b.txt'], viaFind.stderr)
+        // the top-level (empty prefix) skips check-ignore entirely
+        const top = run(root, { bin: shim('bin-gs-top', { git: fakeGit({ prefix: '', checkIgnoreRc: 128 }) }, ['grep', 'find']) })
+        assert.deepEqual(top.files, ['a.txt'], top.stderr)
+      })
+    })
+
+    describe('informational notes are not failures (container maskExit)', { skip: SKIP_REAL_BASH || false }, () => {
+      const POSIX_PERMS = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+        ? 'permission bits are not enforced here (Windows or root)'
+        : false
+
+      // The real container wrapper: confinement preamble + the Grep body, maskExit on.
+      function runConfined(root, bin, input = {}) {
+        const body = buildGrepCommand({
+          pattern: 'NEEDLE', rootExpr: '"$__cx_target"', maskExit: true, ...buildGrepArgs(input),
+        })
+        const cmd = buildConfinedContainerCommand({ target: root, workspace: base, body })
+        const r = spawnSync(BASH, ['-c', cmd], { env: { PATH: bin, HOME: base }, encoding: 'utf8', timeout: 30_000 })
+        const confined = parseConfinedContainerStdout(r.stdout)
+        assert.equal(confined.ok, true, `${r.stdout} / ${r.stderr}`)
+        return { body: confined.body, stderr: r.stderr, errors: splitGrepNotes(r.stderr).errors }
+      }
+
+      it('a no-match search that skipped an unreadable dir is NOT an error', { skip: POSIX_PERMS }, () => {
+        const root = path.join(base, 'conf-skip')
+        write(path.join(root, 'a.txt'), 'nothing here\n')
+        write(path.join(root, 'priv', 'p.txt'), 'NEEDLE x\n')
+        chmodSync(path.join(root, 'priv'), 0o000)
+        try {
+          const bin = makeBin('bin-conf1', [['grep', GREP], ['find', FIND], ...(TEST_BIN ? [['test', TEST_BIN]] : [])])
+          const r = runConfined(root, bin)
+          assert.equal(r.body, '')
+          assert.ok(r.stderr.includes(GREP_NOTE_PREFIX) && r.stderr.includes('priv'), r.stderr)
+          assert.equal(r.errors, '', 'the skip note alone must not turn "No matches" into "Grep failed"')
+        } finally {
+          chmodSync(path.join(root, 'priv'), 0o755)
+        }
+      })
+
+      it('a match plus a skip note is a success', { skip: POSIX_PERMS }, () => {
+        const root = path.join(base, 'conf-match')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        write(path.join(root, 'priv', 'p.txt'), 'NEEDLE x\n')
+        chmodSync(path.join(root, 'priv'), 0o000)
+        try {
+          const bin = makeBin('bin-conf2', [['grep', GREP], ['find', FIND], ...(TEST_BIN ? [['test', TEST_BIN]] : [])])
+          const r = runConfined(root, bin)
+          assert.ok(r.body.includes('NEEDLE a'), r.body)
+          assert.equal(r.errors, '')
+        } finally {
+          chmodSync(path.join(root, 'priv'), 0o755)
+        }
+      })
+
+      it('a refusal under maskExit is still an error through the wrapper', () => {
+        const root = path.join(base, 'conf-refuse')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const bin = shim('bin-conf3', { find: "printf './a.txt\\0'; exit 1" })
+        const r = runConfined(root, bin)
+        assert.equal(r.body, '')
+        assert.ok(r.errors.includes('could not list the files'), r.errors)
+      })
+
+      it('a real grep error (not a note) is still an error', () => {
+        const root = path.join(base, 'conf-realerr')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const bin = shim('bin-conf4', {
+          grep: `echo 'grep: a.txt: No such file or directory' >&2; exit 2`,
+          find: 'exec ' + JSON.stringify(FIND) + ' "$@"',
+        }, [])
+        const r = runConfined(root, bin)
+        assert.equal(r.body, '')
+        assert.ok(r.errors.includes('No such file or directory'), r.errors)
+      })
+    })
+
+    describe('splitGrepNotes', () => {
+      it('separates notes from failures', () => {
+        const n = `${GREP_NOTE_PREFIX}/r/priv: Permission denied (skipped)`
+        assert.deepEqual(splitGrepNotes(`${n}\n`), { errors: '', notes: n })
+        assert.equal(splitGrepNotes(`${n}\ngrep: x: gone\n`).errors, 'grep: x: gone')
+        assert.equal(splitGrepNotes('Grep failed: boom\n').errors, 'Grep failed: boom')
+        assert.deepEqual(splitGrepNotes(undefined), { errors: '', notes: '' })
+      })
+    })
+
+    describe('batching and branch selection', () => {
+      it('flushes on the path-character budget: 2 grep calls for ~150 long names, 1 match', () => {
+        const root = path.join(base, 'budget')
+        const stem = 'q'.repeat(240)
+        for (let i = 0; i < 150; i++) write(path.join(root, `${stem}${String(i).padStart(3, '0')}.txt`), 'nothing\n')
+        write(path.join(root, 'hit.txt'), 'NEEDLE hit\n')
+        const log = path.join(base, 'budget-calls.log')
+        const bin = shim('bin-budget', {
+          grep: `echo call >> ${JSON.stringify(log)}\nexec ${JSON.stringify(GREP)} "$@"`,
+          find: `exec ${JSON.stringify(FIND)} "$@"`,
+        }, [])
+        const r = run(root, { bin })
+        assert.equal(r.status, 0, r.stderr)
+        assert.deepEqual(r.files, ['hit.txt'])
+        const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).length
+        assert.equal(calls, 2, 'the character clause must split ~46 KB of paths into two greps (count alone would use one)')
+      })
+
+      it('a file root with a non-matching glob is rc 1, not searched', () => {
+        const root = path.join(base, 'fileroot-glob')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const r = run(path.join(root, 'a.txt'), { input: { glob: '*.md' } })
+        assert.equal(r.status, 1)
+        assert.equal(r.stdout, '')
+        assert.equal(run(path.join(root, 'a.txt'), { input: { glob: '*.txt' } }).status, 0)
+      })
+
+      it('picks the -readable prune when find supports it, the test-binary prune when it does not, neither without test', () => {
+        const root = path.join(base, 'branch')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const mk = (name, accept, withTest) => {
+          const log = path.join(base, `${name}.log`)
+          const bin = shim(name, {
+            find: `echo "$*" >> ${JSON.stringify(log)}\ncase "$*" in *-maxdepth*) exit ${accept ? 0 : 1};; esac\nprintf './a.txt\\0'`,
+          }, ['grep'])
+          if (withTest && TEST_BIN) symlinkSync(TEST_BIN, path.join(bin, 'test'))
+          return { bin, log }
+        }
+        const listing = (log) => readFileSync(log, 'utf8').split('\n').filter((l) => l && !l.includes('-maxdepth'))[0]
+        const a = mk('bin-br1', true, true)
+        assert.equal(run(root, { bin: a.bin }).status, 0)
+        assert.ok(listing(a.log).includes('-readable') && listing(a.log).includes('-executable'), listing(a.log))
+        if (TEST_BIN) {
+          const b = mk('bin-br2', false, true)
+          assert.equal(run(root, { bin: b.bin }).status, 0)
+          assert.ok(listing(b.log).includes('-exec test -r'), listing(b.log))
+          assert.equal(listing(b.log).includes('-readable'), false)
+        }
+        const c = mk('bin-br3', false, false)
+        assert.equal(run(root, { bin: c.bin }).status, 0)
+        assert.equal(/-readable|-exec/.test(listing(c.log)), false, listing(c.log))
       })
     })
   })

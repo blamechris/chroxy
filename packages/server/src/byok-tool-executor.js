@@ -36,6 +36,7 @@ import {
   GLOB_PATTERN_MAX_BRACE_DEPTH,
   buildGrepArgs,
   buildGrepCommand,
+  splitGrepNotes,
   formatWriteConfirmation,
 } from './built-in-tools/tool-transforms.js'
 import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
@@ -2766,8 +2767,10 @@ async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // grep/rg both return exit 1 on "no matches" — that's not an error
   // for our purposes. Only exit 2+ or stderr-without-stdout signals an
   // actual failure.
-  if (result.stderr && !result.stdout && result.exitCode !== 1) {
-    return { content: `Grep failed: ${result.stderr.trim()}`, isError: true }
+  // Informational notes (a skipped unreadable directory) are not failures (#7981).
+  const grepErrors = splitGrepNotes(result.stderr).errors
+  if (grepErrors && !result.stdout && result.exitCode !== 1) {
+    return { content: `Grep failed: ${grepErrors}`, isError: true }
   }
   if (!result.stdout) return { content: `No matches for ${pattern}`, isError: false }
   return { content: result.stdout, isError: false }

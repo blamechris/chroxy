@@ -138,6 +138,7 @@ import {
   globMatchEscapesRoot,
   buildGrepArgs,
   buildGrepCommand,
+  splitGrepNotes,
   buildConfinedContainerCommand,
   buildConfinedGlobBody,
   parseConfinedContainerStdout,
@@ -2615,8 +2616,11 @@ export class DockerByokSession extends ClaudeByokSession {
         isError: true,
       }
     }
-    if (!confined.body && stderr && stderr.trim()) {
-      return { content: `Grep failed: ${stderr.trim()}`, isError: true }
+    // Informational notes (a skipped unreadable directory) are not failures;
+    // refusals and real grep errors are, and carry no note prefix (#7981).
+    const grepErrors = splitGrepNotes(stderr).errors
+    if (!confined.body && grepErrors) {
+      return { content: `Grep failed: ${grepErrors}`, isError: true }
     }
     if (!confined.body) return { content: `No matches for ${pattern}`, isError: false }
     return { content: confined.body, isError: false }

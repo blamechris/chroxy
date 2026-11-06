@@ -896,6 +896,31 @@ const GREP_ENUMERATE_GIT_REFUSAL = 'Grep failed: could not list the files to sea
 // with the environment) even before one more path of up to PATH_MAX is added.
 const GREP_FALLBACK_BATCH = 200
 const GREP_FALLBACK_BATCH_CHARS = 32768
+/**
+ * Prefix of the informational lines the fallback writes to stderr (a skipped
+ * unreadable directory). They are NOT failures: a no-match search that skipped a
+ * directory must still say "No matches", but the container's `maskExit` leaves
+ * stderr as the only error signal, so callers drop these lines before deciding.
+ * Refusals and real grep errors carry no prefix and stay errors.
+ */
+export const GREP_NOTE_PREFIX = 'chroxy-grep-note: '
+
+/**
+ * Split fallback stderr into the lines that mean failure and the informational
+ * notes. `errors` is empty when nothing but notes was written.
+ *
+ * @param {string} stderr
+ * @returns {{ errors: string, notes: string }}
+ */
+export function splitGrepNotes(stderr) {
+  const errors = []
+  const notes = []
+  for (const line of String(stderr ?? '').split('\n')) {
+    if (line.startsWith(GREP_NOTE_PREFIX)) notes.push(line)
+    else errors.push(line)
+  }
+  return { errors: errors.join('\n').trim(), notes: notes.join('\n') }
+}
 // Bounds on the work/size one glob may cause (Codex review of #7961): the raw
 // glob, and the total length (in characters) of generated --include/--exclude flags.
 const GREP_GLOB_MAX_INPUT = 1024
@@ -1174,7 +1199,7 @@ function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
     '    if [ -z "$f" ]; then ok=1; continue; fi',
     '    f=${f#./}',
     '    if [ -d "$1/$f" ] && [ ! -L "$1/$f" ]; then',
-    "      printf 'grep: %s: Permission denied (skipped)\\n' \"$__gx_root/$2$f\" >&2",
+    `      printf '%s%s: Permission denied (skipped)\\n' ${shellQuote(GREP_NOTE_PREFIX)} "$__gx_root/$2$f" >&2`,
     '      continue',
     '    fi',
     '    __gx_consider "$2$f"',
@@ -1190,7 +1215,7 @@ function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
     '  __gx_batch=()',
     '}',
     '__gx_search() {',
-    '  local root=$1 f p lister=find ok=0 bytes=0',
+    '  local root=$1 f p lister=find ok=0 bytes=0 prefix rc',
     '  __gx_root=${root%/}; __gx_cand=(); __gx_tci=(); __gx_ti=0; __gx_fail=',
     '  __gx_lastdir=; __gx_lastrc=0; __gx_batch=(); __gx_rc=1; __gx_err=0',
     '  if [ ! -e "$root" ] && [ ! -L "$root" ]; then',
@@ -1200,7 +1225,19 @@ function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
     '    __gx_keep "${root##*/}" || return 1',
     `    ${grepFiles} "$root" </dev/null; return`,
     '  fi',
-    '  if command -v git >/dev/null 2>&1 && [ "$(git -C "$root" -c core.fsmonitor=false rev-parse --is-inside-work-tree 2>/dev/null)" = true ] && { [ -z "$(git -C "$root" -c core.fsmonitor=false rev-parse --show-prefix 2>/dev/null)" ] || ! git -C "$root" -c core.fsmonitor=false check-ignore -q . >/dev/null 2>&1; }; then lister=git; fi',
+    // Every git call's status is read, none is assumed. `--is-inside-work-tree`
+    // failing means "not a work tree" (git exits 128 outside one), which is the
+    // find lister's job. After that point a git failure is an ERROR, never a
+    // default: a failed `--show-prefix` must not read as the empty top-level
+    // prefix, and `check-ignore` is 0 ignored / 1 not ignored / else error.
+    '  if command -v git >/dev/null 2>&1 && [ "$(git -C "$root" -c core.fsmonitor=false rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then',
+    `    prefix=$(git -C "$root" -c core.fsmonitor=false rev-parse --show-prefix 2>/dev/null) || { ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2; }`,
+    '    lister=git',
+    '    if [ -n "$prefix" ]; then',
+    '      git -C "$root" -c core.fsmonitor=false check-ignore -q . >/dev/null 2>&1; rc=$?',
+    `      case $rc in 0) lister=find;; 1) ;; *) ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2;; esac`,
+    '    fi',
+    '  fi',
     `  if [ "$lister" = find ] && ! command -v find >/dev/null 2>&1; then ${refuseWith(GREP_ENUMERATE_FIND_REFUSAL)}; return 2; fi`,
     '  if [ "$lister" = git ]; then',
     "    while IFS= read -r -d '' f; do",
@@ -1210,7 +1247,10 @@ function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
     '    ok=0',
     "    while IFS= read -r -d '' f; do",
     '      if [ -z "$f" ]; then ok=1; continue; fi',
-    // tracked-but-ignored entries arrive in index order, a subsequence of --cached
+    // Tracked-but-ignored entries arrive in index order. The merge relies on
+    // `ls-files -ci` ordering matching `--cached`'s; if they ever diverge the
+    // pointer stalls and the remaining tracked-ignored files are SEARCHED (it fails
+    // open to ripgrep-less behaviour, never skips a file it should read).
     '      if [ "$__gx_ti" -lt "${#__gx_tci[@]}" ] && [ "$f" = "${__gx_tci[$__gx_ti]}" ]; then __gx_ti=$((__gx_ti+1)); continue; fi',
     '      f=${f%/}',
     '      case /$f in */.*) continue;; esac',
