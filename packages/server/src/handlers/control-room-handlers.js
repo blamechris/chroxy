@@ -29,6 +29,7 @@
  * additional requests until the current one settles.
  */
 import { realpathSync } from 'fs'
+import { authorizedFor, stillAuthorized } from '../connection-authority.js'
 import { resolve } from 'path'
 import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
@@ -679,12 +680,12 @@ const integrationActions = {
   repo_memory_reindex: {
     failureReason: 'index-failed',
     validate: () => null,
-    async run({ ctx, config, targetKey }) {
+    async run({ ctx, config, targetKey, isAuthorized }) {
       const runFn = typeof ctx?.runRepoMemoryIndex === 'function' ? ctx.runRepoMemoryIndex : runRepoMemoryIndex
       const bin = typeof config.controlRoomRepoMemoryBin === 'string' && config.controlRoomRepoMemoryBin.length > 0
         ? config.controlRoomRepoMemoryBin
         : undefined
-      const result = await runFn(targetKey, { bin })
+      const result = await runFn(targetKey, { bin, isAuthorized })
       return { counts: result && result.counts ? result.counts : null }
     },
   },
@@ -705,9 +706,9 @@ const integrationActions = {
       }
       return null
     },
-    async run({ msg, ctx, targetKey }) {
+    async run({ msg, ctx, targetKey, isAuthorized }) {
       const runFn = typeof ctx?.runRepoRelayRerun === 'function' ? ctx.runRepoRelayRerun : runRepoRelayRerun
-      const result = await runFn(targetKey, msg.runId)
+      const result = await runFn(targetKey, msg.runId, { isAuthorized })
       return { runId: result && Number.isInteger(result.runId) ? result.runId : msg.runId, counts: null }
     },
   },
@@ -847,7 +848,7 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
   actionInFlight.set(targetKey, action)
   try {
     // Exec against the canonical realpath — never the raw client string.
-    const ackFields = await actionEntry.run({ msg, ctx, config, targetKey })
+    const ackFields = await actionEntry.run({ msg, ctx, config, targetKey, isAuthorized: authorizedFor(ctx, client) })
     log.info(`integration_action ${action} completed for ${targetKey} (client=${client?.id})`)
     ctx.transport.send(ws, {
       type: 'integration_action_ack',
@@ -981,9 +982,9 @@ async function handleContainersAction(ws, client, msg, ctx) {
   try {
     let status
     if (action === 'stop') {
-      status = await envManager.stop(environmentId)
+      status = await envManager.stop(environmentId, { isAuthorized: authorizedFor(ctx, client) })
     } else if (action === 'restart') {
-      status = await envManager.restart(environmentId)
+      status = await envManager.restart(environmentId, { isAuthorized: authorizedFor(ctx, client) })
     } else {
       // #7562: the Control Room is NOT exempt from the live-session guard. The
       // issue floated leaving this path as "the deliberate override", but an
@@ -999,6 +1000,7 @@ async function handleContainersAction(ws, client, msg, ctx) {
         environmentId,
         // Strict boolean: only an explicit `true` escalates.
         force: msg?.force === true,
+        isAuthorized: authorizedFor(ctx, client),
       })
       if (destroyedSessions.length > 0) {
         log.warn(`containers_action destroy force: tore down ${destroyedSessions.length} live session(s) in ${environmentId} (${destroyedSessions.join(', ')}) before destroying the environment`)
@@ -1167,7 +1169,7 @@ async function handleByokPoolAction(ws, client, msg, ctx) {
       configured: null,
     }
     if (action === 'drain') {
-      ack.drained = await pool.drainAll()
+      ack.drained = await pool.drainAll({ isAuthorized: authorizedFor(ctx, client) })
     } else if (action === 'recycle') {
       ack.drained = await pool.recycleKey(key)
     } else {
@@ -1291,6 +1293,7 @@ async function handleHostPruneAction(ws, client, msg, ctx) {
     const result = await runFn({
       kind,
       listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
+      isAuthorized: authorizedFor(ctx, client),
     })
     log.info(`host_prune_action ${kind} removed ${result.removedContainers}c/${result.removedImages}i (client=${client?.id})`)
     ctx.transport.send(ws, {
@@ -1485,6 +1488,8 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
     // Pass the server-trusted, survey-validated udid (not the raw client string)
     // to the exec — makes the trust boundary self-evident at the call site and
     // survives any future loosening of the `.find` match predicate above.
+    // The survey above was a wait: the requesting connection may have ended.
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
     const status = await runFn({ action, udid: device.udid })
     log.info(`simulator_action ${action} completed for ${udid} (client=${client?.id})`)
     ctx.transport.send(ws, {
@@ -1678,6 +1683,7 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
       }
     }
 
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
     const status = await runFn({
       action,
       avd: action === 'boot' ? avd : undefined,
@@ -1859,6 +1865,7 @@ async function handleWslAction(ws, client, msg, ctx) {
       return
     }
 
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
     const status = await runFn({ action, distro })
     log.info(`wsl_action ${action} completed for ${distro} (client=${client?.id})`)
     ctx.transport.send(ws, {

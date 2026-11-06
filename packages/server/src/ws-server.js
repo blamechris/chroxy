@@ -11,6 +11,7 @@ import { finalizeShellCreate } from './handlers/session-handlers.js'
 import { decrypt, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { safeTokenCompare } from './token-compare.js'
 import { createClientSender } from './ws-client-sender.js'
+import { isAuthorityRevoked } from './connection-authority.js'
 import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
 import { createFileOps } from './ws-file-ops/index.js'
@@ -204,6 +205,20 @@ const REVOKE_ACK_TIMEOUT_MS = 10_000
 // client cadence. The server's own ws.ping() still fires each sweep to hold
 // Cloudflare / mobile-OS idle timeouts open for clients that don't initiate.
 export const KEEPALIVE_SWEEP_MS = 15_000
+
+// Application close code sent when a connection's credential stops being valid
+// (the pairing token was revoked, expired or evicted). Distinct from the
+// protocol-level 1008 so a client re-pairs instead of retrying the dead token.
+export const WS_CLOSE_CREDENTIAL_INVALID = 4401
+
+// The revoke acknowledgement's error codes (the only errors a stripped connection still gets).
+const REVOKE_NOTICE_ERROR_CODES = new Set(['REVOKE_NOT_DURABLE', 'REVOKE_DURABILITY_UNKNOWN'])
+
+// Frames that belong to the authentication handshake and are never withheld.
+const AUTH_FLOW_FRAME_TYPES = new Set([
+  'auth_ok', 'auth_fail', 'key_exchange_ok', 'pair_fail', 'pair_result',
+  'pair_request_pending', 'pair_request_ack',
+])
 
 async function checkLatestVersion(packageName) {
   const now = Date.now()
@@ -452,7 +467,8 @@ function _isSecureRequest(req) {
  *   { type: 'pong', serverTs? }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
  *   { type: 'permission_outcome', requestId, tool, description, outcome, input?, decision?, sessionId, timestamp, historySeq } — #8348: how a permission prompt ended (outcome 'allowed' | 'denied' | 'expired' | 'stopped'), delivered ONLY inside a history replay so a session switch or reload still shows the prompt, with the same sanitized, capped `input` the live permission_request carried and, on an allowed outcome, which allow was chosen (`decision`: allow | allowSession | allowAlways) (#8503, both absent on older entries); the live permission_request / permission_resolved / permission_expired frames stay transient and are not replayed
- *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's token persist reports success, so the ack can never precede the revocation being stored — that persist is an fsync of the temp file + containing directory on the `config.json` fallback, while on the OS-keychain path (the macOS/libsecret default) durability is delegated to the keychain and no fsync is performed here. If the persist FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` FIRST and then this message anyway: enforcement already ran unconditionally, so the client must still re-authenticate — the message carries no token and makes no durability claim, and the caveat rides the error. #7053: the wait is BOUNDED (`REVOKE_ACK_TIMEOUT_MS`), because an `onPersist` that never settles would otherwise emit nothing at all and make the panic button look like a no-op; on timeout the connection gets `code: 'REVOKE_DURABILITY_UNKNOWN'` — deliberately NOT `REVOKE_NOT_DURABLE`, since a timeout means the outcome is unknown and may still land, not that the write is known to have failed — followed by this message on the same reasoning.
+ *   { type: 'credential_invalidated', reason } — sent just before the server ends a connection whose stored pairing credential is no longer valid (reason: 'revoked' | 'expired' | 'evicted' | 'invalid'); close code 4401 follows. It travels the normal (possibly encrypted) channel, so it is the authenticated evidence a client may forget that credential on; the close code alone is not
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients that authenticated with the primary token (transparent re-key, sessions survive); session-bound and pairing-issued connections receive no frame, since rotation does not touch their credential. A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's token persist reports success, so the ack can never precede the revocation being stored — that persist is an fsync of the temp file + containing directory on the `config.json` fallback, while on the OS-keychain path (the macOS/libsecret default) durability is delegated to the keychain and no fsync is performed here. If the persist FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` FIRST and then this message anyway: enforcement already ran unconditionally, so the client must still re-authenticate — the message carries no token and makes no durability claim, and the caveat rides the error. #7053: the wait is BOUNDED (`REVOKE_ACK_TIMEOUT_MS`), because an `onPersist` that never settles would otherwise emit nothing at all and make the panic button look like a no-op; on timeout the connection gets `code: 'REVOKE_DURABILITY_UNKNOWN'` — deliberately NOT `REVOKE_NOT_DURABLE`, since a timeout means the outcome is unknown and may still land, not that the write is known to have failed — followed by this message on the same reasoning.
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
@@ -692,7 +708,7 @@ export class WsServer {
     // here when userShell.requireApproval is on; the host operator approves it
     // out-of-band via the loopback /api/shell routes (or `chroxy shell approve`).
     this._shellApprovalStore = new ShellApprovalStore()
-    this._clientSend = createClientSender(log)
+    this._clientSend = createClientSender(log, { mayDeliver: (client, message) => this._mayDeliverTo(client, message) })
     // audit P1-2: when a client's active session changes, re-sync the live
     // terminal mirror gate for BOTH the session it left and the one it joined.
     // Without this a client opted into session A's terminal that switches to B
@@ -899,6 +915,7 @@ export class WsServer {
           self._adoptPermissionSubscription(client.id, sid)
           self._clientManager.unsubscribe(client, sid)
         },
+        isConnectionAuthorized: (client) => self._isConnectionAuthorized(client),
         setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
         // #5563: explicit primary-ownership surface. `updatePrimary` is the
         // first-input adoption path (claims if unclaimed, no-op if already
@@ -1489,6 +1506,7 @@ export class WsServer {
     // authenticated dashboard clients so they can auto-refresh the QR code (#2916).
     this._pairingRefreshedHandler = null
     this._pendingRequestExpiredHandler = null
+    this._sessionTokenRemovedHandler = null
     if (this._pairingManager) {
       this._pairingRefreshedHandler = () => {
         this._broadcast({ type: 'pairing_refreshed' })
@@ -1504,6 +1522,20 @@ export class WsServer {
         this._broadcastPairResolved(requestId, 'expired')
       }
       this._pairingManager.on('pending_request_expired', this._pendingRequestExpiredHandler)
+
+      // A stored pairing token stopped being valid (revoked, expired, evicted):
+      // end every connection that authenticated with it.
+      this._sessionTokenRemovedHandler = ({ token, reason }) => {
+        // Daemon teardown (reason 'destroyed') clears the store from memory only: the
+        // tokens stay valid on disk. _endCredentialConnection sees the destroyed
+        // pairing manager and ends the connection quietly, without a notice.
+        for (const [ws, client] of [...this.clients]) {
+          if (client.pairingCredential != null && client.pairingCredential === token) {
+            this._endCredentialConnection(ws, client, reason)
+          }
+        }
+      }
+      this._pairingManager.on('session_token_removed', this._sessionTokenRemovedHandler)
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
@@ -1699,9 +1731,15 @@ export class WsServer {
         // Send the new token to encrypted clients (they need it for reconnection).
         // Unencrypted clients (e.g. localhost dashboard) get the event without the
         // raw token to avoid leaking credentials over plaintext connections.
+        //
+        // The rotated token is the PRIMARY credential, so only a connection that
+        // authenticated with the primary token is told about it. A session-scoped
+        // or pairing-issued connection holds its own stored credential, which
+        // rotation does not touch: it receives nothing and keeps that credential.
         let encrypted = 0, unencrypted = 0
         for (const [ws, client] of this.clients) {
           if (!client.authenticated || ws.readyState !== 1) continue
+          if (!this._holdsPrimaryCredential(client)) continue
           // Carry `reason: 'scheduled'` so the wire is self-describing and
           // matches the documented contract + TokenManager's event payload.
           if (client.encryptionState) {
@@ -2330,6 +2368,7 @@ export class WsServer {
         // a still-alive but invisible WS connection.
         visible: true,
         _seq: 0,                  // monotonic sequence number for outbound messages
+        pairingCredential: null,  // stored pairing token this connection authenticated with (null = primary / none)
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
         postAuthQueue: null,      // queued messages during key exchange
@@ -2680,6 +2719,20 @@ export class WsServer {
       }
       return
     }
+
+    // A connection that authenticated with a stored pairing token is only as
+    // good as that token: re-check it on every frame (an `auth` frame included)
+    // rather than trusting the `authenticated` flag cached at connect time.
+    // Removal events end the connection eagerly; this is the backstop for any
+    // removal that did not announce itself, and it fails closed (no pairing
+    // store => no credential). The cause is not known here, so the reason is
+    // neutral.
+    if (client.pairingCredential != null &&
+        !this._pairingManager?.isSessionTokenLive(client.pairingCredential)) {
+      this._endCredentialConnection(ws, client, 'invalid')
+      return
+    }
+
     if (msg.type === 'auth') return
 
     // Key exchange for E2E encryption (delegates to ws-auth.js)
@@ -2755,6 +2808,10 @@ export class WsServer {
         await handleCliMessage(ws, client, validatedMsg, ctx)
       }
     } catch (err) {
+      if (isAuthorityRevoked(err)) {
+        log.info(`[${correlationId}] ${validatedMsg.type} from ${client.id} not started: connection no longer authorized`)
+        return
+      }
       log.error(`[${correlationId}] Handler error for ${validatedMsg.type}: ${err.message}`)
       this._send(ws, { type: 'server_error', correlationId, message: err.message, recoverable: true })
     }
@@ -3132,6 +3189,96 @@ export class WsServer {
   }
 
   /**
+   * True when the connection authenticated with the PRIMARY token (or auth is
+   * disabled). Fails closed: any session binding, any recorded pairing
+   * credential, or a primary flag that is not exactly `true` means "not primary".
+   */
+  _holdsPrimaryCredential(client) {
+    if (client.boundSessionId != null) return false
+    if (client.pairingCredential != null) return false
+    return client.isPrimaryToken === true || !this.authRequired
+  }
+
+  /**
+   * Delivery gate for the client sender. A connection whose stored credential is
+   * no longer live (silent expiry between sweeps), or whose authentication was
+   * stripped after it had authenticated (primary revoke), receives nothing but the
+   * notices that explain it. Frames to a connection that never authenticated
+   * (auth_ok / auth_fail / pairing / key exchange) are not gated here.
+   */
+  _mayDeliverTo(client, message) {
+    const type = message?.type
+    if (type === 'credential_invalidated' || type === 'token_rotated') return true
+    // The authentication flow itself: a connection whose authentication was
+    // stripped may attempt to authenticate again and must be told the outcome.
+    if (AUTH_FLOW_FRAME_TYPES.has(type)) return true
+    if (type === 'error' && REVOKE_NOTICE_ERROR_CODES.has(message.code)) return true
+    if (client.authTime != null && client.authenticated !== true) return false
+    if (client.pairingCredential != null) {
+      return !!this._pairingManager?.isSessionTokenLive(client.pairingCredential)
+    }
+    return true
+  }
+
+  /**
+   * True only while `client` is still authenticated AND the credential it
+   * authenticated with is still valid. For code that resumes after an await:
+   * the connection may have ended while it was suspended, and the handler still
+   * holds the client record. A stored credential that has silently gone invalid
+   * ends the connection here too, so the answer and the socket agree.
+   */
+  _isConnectionAuthorized(client) {
+    if (!client || client.authenticated !== true) return false
+    if (client.pairingCredential != null &&
+        !this._pairingManager?.isSessionTokenLive(client.pairingCredential)) {
+      for (const [ws, c] of this.clients) {
+        if (c === client) { this._endCredentialConnection(ws, client, 'invalid'); break }
+      }
+      return false
+    }
+    return true
+  }
+
+  /**
+   * End a connection whose credential is no longer valid. Departure runs first
+   * (it reads client state), the client is removed so any frame still in flight
+   * finds no connection to dispatch against, and the socket is closed with a
+   * distinct code so the client re-pairs instead of retrying the dead token.
+   */
+  _endCredentialConnection(ws, client, reason = 'revoked') {
+    // A destroyed pairing manager means the daemon is shutting down, not that this
+    // credential was revoked: end the connection quietly, with no notice (which would
+    // make the client forget a token that is still valid) and no credential close code.
+    if (this._pairingManager?.destroyed === true) {
+      if (client.authenticated) this._handleClientDeparture(client)
+      client.authenticated = false
+      client.isPrimaryToken = false
+      client.pairingCredential = null
+      client.authToken = undefined
+      if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+      this._clientManager.removeClient(ws)
+      try { ws.close(1001, 'server shutting down') } catch { /* already closing */ }
+      return
+    }
+    // Tell the client WHY through the normal (possibly encrypted) channel first:
+    // that frame is what lets it forget the credential. The close code that
+    // follows only stops the connection.
+    const known = reason === 'revoked' || reason === 'expired' || reason === 'evicted'
+    if (ws.readyState === 1) {
+      this._send(ws, { type: 'credential_invalidated', reason: known ? reason : 'invalid' })
+    }
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+    if (client.authenticated) this._handleClientDeparture(client)
+    client.authenticated = false
+    client.isPrimaryToken = false
+    client.pairingCredential = null
+    client.authToken = undefined
+    this._clientManager.removeClient(ws)
+    log.info(`Client ${client.id} ended: credential ${reason}`)
+    try { ws.close(WS_CLOSE_CREDENTIAL_INVALID, `credential ${reason}`) } catch { /* already closing */ }
+  }
+
+  /**
    * #5555.6 — one keepalive sweep over all authenticated clients.
    *
    * Liveness contract: `client.isAlive` is set true by ANY inbound frame
@@ -3159,6 +3306,16 @@ export class WsServer {
         this._clientManager.removeClient(ws)
         try { ws.terminate() } catch {}
         continue
+      }
+      // A connected, responsive device is in use: slide its pairing token's
+      // expiry so the connection does not outlive its token by simply idling.
+      // A token that cannot be refreshed (expired, removed, or no pairing
+      // store) ends the connection instead of leaving it authenticated.
+      if (client.pairingCredential != null) {
+        if (!this._pairingManager?.touchSessionToken(client.pairingCredential)) {
+          this._endCredentialConnection(ws, client, 'invalid')
+          continue
+        }
       }
       client.isAlive = false
       try { ws.ping() } catch {}
@@ -3426,6 +3583,10 @@ export class WsServer {
     if (this._pairingManager && this._pendingRequestExpiredHandler) {
       this._pairingManager.off('pending_request_expired', this._pendingRequestExpiredHandler)
       this._pendingRequestExpiredHandler = null
+    }
+    if (this._pairingManager && this._sessionTokenRemovedHandler) {
+      this._pairingManager.off('session_token_removed', this._sessionTokenRemovedHandler)
+      this._sessionTokenRemovedHandler = null
     }
     this._pairRequesters.clear()
 

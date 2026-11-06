@@ -267,6 +267,59 @@ export function handleAuthFail(msg: Record<string, unknown>): { reason: string }
 }
 
 /**
+ * Parse a `credential_invalidated` notice: the server's authenticated statement
+ * (it arrives on the normal, possibly encrypted channel) that the stored
+ * credential this connection used is no longer valid. A client may forget that
+ * credential on receiving it. A bare close code is NOT this evidence.
+ */
+export function handleCredentialInvalidated(msg: Record<string, unknown>): { reason: string } {
+  const raw = msg.reason
+  return { reason: typeof raw === 'string' && raw ? raw : 'invalid' }
+}
+
+/** What a client does with a `credential_invalidated` notice. */
+export type CredentialNoticeAction = 'forget' | 'stop' | 'ignore'
+
+/** Reasons that mean the stored token is really gone (a clean shutdown is none of them). */
+const FORGETTABLE_REASONS: ReadonlySet<string> = new Set(['revoked', 'expired', 'evicted'])
+
+/**
+ * Decide how far to trust a `credential_invalidated` notice.
+ *
+ * - Only an ENCRYPTED frame is authenticated evidence: it proves the daemon sent it.
+ *   Then the credential is forgotten, but only for a reason that means the token is
+ *   gone (never a shutdown or an unknown reason).
+ * - A plaintext notice is acted on only if encryption is not in use for this
+ *   connection AND the connection had authenticated, and then it is no stronger than a
+ *   bare 4401 close: stop reconnecting, erase nothing.
+ * - Anything else (before auth, or plaintext while encryption is in use) is ignored.
+ */
+export function classifyCredentialNotice(input: {
+  encryptedFrame: boolean
+  authReceived: boolean
+  encryptionInUse: boolean
+  reason: string
+}): CredentialNoticeAction {
+  if (input.encryptedFrame) return FORGETTABLE_REASONS.has(input.reason) ? 'forget' : 'stop'
+  if (!input.authReceived || input.encryptionInUse) return 'ignore'
+  return 'stop'
+}
+
+/**
+ * Whether an `auth_fail` justifies forgetting the saved credential: only a
+ * rejection of the token (`invalid_token`) for the SAME non-empty token a previous
+ * authenticated connection ended on (a bare 4401 close marked it suspect). Any
+ * other reason (rate limit, protocol version, timeout) says nothing about the token.
+ */
+export function shouldForgetOnAuthFail(
+  reason: string,
+  suspectToken: string | null,
+  attemptToken: string | null | undefined,
+): boolean {
+  return reason === 'invalid_token' && !!suspectToken && suspectToken === attemptToken
+}
+
+/**
  * Extract the validated `publicKey` from a `key_exchange_ok` message.
  *
  * Returns null when the field is missing, empty, or non-string — matches the

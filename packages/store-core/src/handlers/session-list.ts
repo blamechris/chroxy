@@ -14,6 +14,8 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
+import { DeclaredStatusSchema, DecisionActivityStateSchema, type DeclaredStatus, type DecisionActivityState } from '@chroxy/protocol'
+
 import type {
   BusyReason,
   CumulativeUsage,
@@ -114,6 +116,8 @@ export function busyStateDiffers(
 export interface SessionListPatches {
   /** Parsed sessions array (same reference returned by {@link handleSessionList}). */
   sessionList: SessionInfo[]
+  declaredStatusPatches: Map<string, DeclaredStatus>
+  decisionActivityPatches: Map<string, DecisionActivityState>
   /**
    * Session ids present in `prevSessionStateIds` but missing from the new
    * snapshot. Consumers GC persisted state + `sessionStates[id]` for these,
@@ -317,6 +321,8 @@ export function buildSessionListPatches(
     if (!newIdSet.has(prev)) removedIds.push(prev)
   }
 
+  const declaredStatusPatches = new Map<string, DeclaredStatus>()
+  const decisionActivityPatches = new Map<string, DecisionActivityState>()
   const newSessionIds: string[] = []
   const isIdlePatches = new Map<string, boolean>()
   const conversationIdPatches = new Map<string, string>()
@@ -327,6 +333,10 @@ export function buildSessionListPatches(
   for (const s of sessionList) {
     if (!s || typeof s.sessionId !== 'string') continue
     const sid = s.sessionId
+    const status = DeclaredStatusSchema.safeParse(s.declaredStatus)
+    if (status.success) declaredStatusPatches.set(sid, status.data)
+    const lifetime = DecisionActivityStateSchema.safeParse(s.decisionActivity)
+    if (lifetime.success) decisionActivityPatches.set(sid, lifetime.data)
     if (!prevIdSet.has(sid)) newSessionIds.push(sid)
     // #4639 / #7518 — only a BOOLEAN isBusy is an opinion. `typeof` rather than
     // truthiness: `isBusy: false` is the whole point of the heal, and an older
@@ -350,6 +360,8 @@ export function buildSessionListPatches(
 
   return {
     sessionList,
+    declaredStatusPatches,
+    decisionActivityPatches,
     removedIds,
     newSessionIds,
     isIdlePatches,

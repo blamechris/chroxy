@@ -1,3 +1,4 @@
+import { ServerSessionStatusSchema, ServerActivityDeltaSchema } from '@chroxy/protocol'
 import { createLogger } from './logger.js'
 import { getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { settlePush } from './push.js'
@@ -426,7 +427,19 @@ function setupSessionForwarding(normalizer, ctx) {
     // Broadcast messages
     for (const { msg, filter } of result.messages) {
       const stamped = withServerTs(msg)
-      if (filter) {
+      // Bounded session attention is visible with the session roster, even
+      // when the operator is viewing another session. The broadcaster retains
+      // its central bound-session recipient check. All other work stays scoped.
+      if (msg.type === 'session_status') {
+        const parsed = ServerSessionStatusSchema.safeParse({ ...stamped, sessionId })
+        if (parsed.success) broadcast(parsed.data)
+      } else if (msg.type === 'activity_delta' && msg.entry?.id === 'decision:session' && msg.entry?.kind === 'decision') {
+        const parsed = ServerActivityDeltaSchema.safeParse({ ...stamped, sessionId })
+        if (parsed.success && parsed.data.entry.label.length <= 280) {
+          const { id, kind, label, status, startedAt, endedAt } = parsed.data.entry
+          broadcast({ ...parsed.data, entry: { id, kind, label, status, startedAt, ...(endedAt !== undefined ? { endedAt } : {}) } })
+        }
+      } else if (filter) {
         broadcastToSession(sessionId, stamped, filter)
       } else {
         broadcastToSession(sessionId, stamped)

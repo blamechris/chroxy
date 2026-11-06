@@ -1,4 +1,5 @@
 import { stat, mkdir, realpath } from 'fs/promises'
+import { stillAuthorized } from '../connection-authority.js'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
@@ -466,7 +467,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
   }
 
   /** Write file content at a given path within the session CWD */
-  async function writeFileContent(ws, requestedPath, content, sessionCwd) {
+  async function writeFileContent(ws, requestedPath, content, sessionCwd, isAuthorized) {
     if (!sessionCwd) {
       sendFn(ws, {
         type: 'write_file_result',
@@ -562,8 +563,12 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
+      // Everything above waited; the requesting connection may have ended.
+      if (!stillAuthorized(isAuthorized)) return
+
       // Create parent directories if needed
       await mkdir(resolve(absPath, '..'), { recursive: true })
+      if (!stillAuthorized(isAuthorized)) return
 
       // Write the file through openNoFollow to close the post-validation TOCTOU
       // window: a symlink swapped in at absPath between validation and this
@@ -649,7 +654,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
    * is needed; a race there is benign (a stray/missing separator at worst — the
    * note line itself is always written atomically and in full).
    */
-  async function appendMemory(ws, note, sessionCwd) {
+  async function appendMemory(ws, note, sessionCwd, isAuthorized) {
     if (!sessionCwd) {
       sendFn(ws, { type: 'append_memory_result', path: null, created: false, error: 'Memory is not available in this mode' })
       return
@@ -721,6 +726,9 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
+      // Everything above waited; the requesting connection may have ended.
+      if (!stillAuthorized(isAuthorized)) return
+
       // Cheap tail check: does the existing file already end with a newline? If
       // not, prepend one so the note lands on its own line. Best-effort (a race
       // only affects the separator, never the note itself).
@@ -752,6 +760,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         }
       }
 
+      if (!stillAuthorized(isAuthorized)) return
       const data = Buffer.from((needsLeadingNewline ? '\n' : '') + line + '\n', 'utf-8')
 
       // O_APPEND: atomic append at EOF (no lost-update / truncation window).

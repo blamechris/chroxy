@@ -208,6 +208,15 @@ const NO_SWITCH_CONTRACT_BY_DESIGN = new Set<string>([
   // (window.history.replaceState); the app persists via the mocked SecureStore +
   // the mocked connection-lifecycle store (setSavedConnection). No main-store set().
   'token_rotated',
+  // credential_invalidated — acts only on an ENCRYPTED frame (forgetting a credential)
+  // or on a plaintext frame from an authenticated, unencrypted connection (stop
+  // reconnecting); a plaintext frame before authentication, or while encryption is in
+  // use, is dropped. This harness delivers every frame as plaintext in a FRESH
+  // per-message ctx (authReceived never carries over), so a fixture would only ever
+  // observe the drop: no main-store write. The behaviour is pinned per client in
+  // dashboard/src/store/connection-credential-invalid-close.test.ts and
+  // app/src/__tests__/store/connection-credential-invalid-close.test.ts.
+  'credential_invalidated',
 ])
 
 // ---------------------------------------------------------------------------

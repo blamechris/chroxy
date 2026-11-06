@@ -197,7 +197,12 @@ export function handleAuthMessage(ctx, ws, msg) {
     // `!authRequired` short-circuit. The `pair`-message path never sets this, so
     // paired clients default to undefined (non-primary) — gates use strict
     // `=== true`. Consumed by the user-shell create + terminal_* gates.
-    client.isPrimaryToken = !authRequired || !pairingManager?.isSessionTokenValid(msg.token)
+    const isPairingCredential = authRequired && !!pairingManager?.isSessionTokenValid(msg.token)
+    client.isPrimaryToken = !isPairingCredential
+    // Remember which stored credential this connection holds, so the connection
+    // ends when that credential is removed (revoked, expired, evicted). The
+    // primary token has its own lifecycle (rotation / revoke) and records none.
+    client.pairingCredential = isPairingCredential ? msg.token : null
 
     client.clientCapabilities = new Set(authData.capabilities ?? [])
 
@@ -401,6 +406,7 @@ export function handlePairMessage(ctx, ws, msg) {
     // Attach sessionToken so onAuthSuccess can include it in the auth_ok payload
     // (client stores this for future reconnections)
     client._sessionToken = result.sessionToken
+    client.pairingCredential = result.sessionToken
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} paired via pairing ID`)
     return true

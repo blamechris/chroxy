@@ -1,4 +1,4 @@
-import { captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { getWsCloseMessage, WS_CLOSE_CREDENTIAL_INVALID, captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -59,6 +59,9 @@ import {
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
+  handleCredentialInvalidated as sharedCredentialInvalidated,
+  shouldForgetOnAuthFail,
+  classifyCredentialNotice,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
   // checkpoint_created / checkpoint_list migrated to the shared dispatch table
@@ -137,6 +140,7 @@ import {
   // directory_listing / file_listing / file_content / write_file_result —
   // migrated to the shared dispatch table (#5556 slice 3 / #5653).
   buildSessionListPatches as sharedBuildSessionListPatches,
+  reconcileSessionDecision,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
   chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
@@ -828,8 +832,43 @@ export function resetReconnectAttempt(): void {
   reconnectAttempt = 0;
 }
 
+/**
+ * Forget the saved connection only if it is the one this connection used (same
+ * token, and the url or tunnel url it connected to), so a notice for an old
+ * connection can never wipe a connection saved since.
+ */
+function forgetSavedConnectionFor(ctx: ConnectionContext, get: () => { clearSavedConnection?: () => Promise<void> }): boolean {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  if (!saved || saved.token !== ctx.token) return false;
+  // The saved record is this connection's if it points at the url the socket dialled, or
+  // is the very record this connection holds: a live tunnel rotation repoints the saved
+  // url/tunnelUrl (and ctx.savedConnection with it) while ctx.url stays on the old tunnel.
+  const own = ctx.savedConnection;
+  const sameRecord = !!own && own.token === saved.token && own.url === saved.url;
+  if (!sameRecord && saved.url !== ctx.url && saved.tunnelUrl !== ctx.url) return false;
+  void get().clearSavedConnection?.();
+  return true;
+}
+
 export function setDisconnectedAttemptId(id: number): void {
   disconnectedAttemptId = id;
+}
+
+// A bare 4401 close (not authenticated evidence) stops reconnecting but erases
+// nothing; it marks the token it ended on as suspect. Only the server's
+// authenticated `credential_invalidated` notice, or an `auth_fail` of
+// `invalid_token` for that same token on a later attempt, forgets it.
+// Keyed per server so one server's drop or sign-in never touches another's.
+const suspectCredentials = new Map<string, string>();
+export function credentialKey(ctx: { serverId?: string | null; url: string }): string {
+  return ctx.serverId ?? ctx.url;
+}
+export function markCredentialSuspect(key: string, token: string | null): void {
+  if (token) suspectCredentials.set(key, token);
+  else suspectCredentials.delete(key);
+}
+export function getSuspectCredential(key: string): string | null {
+  return suspectCredentials.get(key) ?? null;
 }
 
 export function setLastConnectedUrl(url: string | null): void {
@@ -2061,6 +2100,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       return;
 
     case 'auth_ok': {
+      markCredentialSuspect(credentialKey(ctx), null);
       // Direct auth completes here; pairing keeps its timeout until the
       // post-handshake bootstrap credential has been admitted.
       // Reset replay flags — fresh auth means clean slate (#4512/#7497: clear
@@ -2357,7 +2397,43 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       break;
     }
 
+    case 'credential_invalidated': {
+      const { reason: invalidReason } = sharedCredentialInvalidated(msg);
+      const action = classifyCredentialNotice({
+        encryptedFrame,
+        authReceived: ctx.authReceived === true,
+        encryptionInUse: getEncryptionState() !== null,
+        reason: invalidReason,
+      });
+      // A plaintext notice is forgeable: before authentication, or while encryption is
+      // in use, it is dropped; otherwise it only stops reconnecting (like a bare 4401).
+      if (action === 'ignore') break;
+      console.log(`[ws] credential invalidated by server (${invalidReason}, ${action})`);
+      ctx.credentialNoticeReceived = true;
+      bumpConnectionAttemptId();
+      setDisconnectedAttemptId(connectionAttemptId);
+      if (action === 'forget') {
+        markCredentialSuspect(credentialKey(ctx), null);
+        // A saved record that is not this connection's is left alone, but the token stays
+        // suspect so a later auth_fail can still forget it.
+        if (!forgetSavedConnectionFor(ctx, get)) markCredentialSuspect(credentialKey(ctx), ctx.token);
+      } else {
+        markCredentialSuspect(credentialKey(ctx), ctx.token);
+      }
+      useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+      useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(WS_CLOSE_CREDENTIAL_INVALID) ?? '', 0);
+      try { ctx.socket.close(); } catch { /* already closing */ }
+      break;
+    }
+
     case 'auth_fail': {
+      const failedReason = sharedAuthFail(msg).reason;
+      if (shouldForgetOnAuthFail(failedReason, getSuspectCredential(credentialKey(ctx)), ctx.token)) {
+        // The token a previous authenticated connection ended on is now refused
+        // outright by the server: that is the confirmation a close code is not.
+        markCredentialSuspect(credentialKey(ctx), null);
+        forgetSavedConnectionFor(ctx, get);
+      }
       ctx.socket.close();
       set({ socket: null });
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
@@ -2414,6 +2490,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         sessionList,
         removedIds,
         newSessionIds,
+        declaredStatusPatches,
+        decisionActivityPatches,
         isIdlePatches,
         conversationIdPatches,
         cumulativeUsagePatches,
@@ -2513,6 +2591,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // `activeTools` because it is a turn BOUNDARY; a snapshot resync is not,
       // and widening it here would fight #7500's replay synthesis and #7508's
       // pending-question resend for state they own.
+      // Roster metadata restores attention for sessions this client has never viewed.
+      for (const [sid, declaredStatus] of declaredStatusPatches) {
+        updateSession(sid, () => ({ declaredStatus }));
+      }
+      let decisionActivity = get().activity;
+      for (const [sid, lifetime] of decisionActivityPatches) {
+        decisionActivity = reconcileSessionDecision(decisionActivity, sid, lifetime, declaredStatusPatches.get(sid));
+      }
+      if (decisionActivity !== get().activity) set({ activity: decisionActivity });
       for (const [sid, desiredIsIdle] of isIdlePatches) {
         if (!get().sessionStates[sid]) continue;
         // #8965 — an idle resync means no turn runs: drop any stream whose end was missed.

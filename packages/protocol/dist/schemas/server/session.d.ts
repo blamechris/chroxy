@@ -123,6 +123,10 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
             hook: "hook";
         }>;
     }, z.core.$strict>>;
+    decisionActivity: z.ZodOptional<z.ZodObject<{
+        startedAt: z.ZodOptional<z.ZodNumber>;
+        endedAt: z.ZodNumber;
+    }, z.core.$strict>>;
     sessionId: z.ZodString;
     name: z.ZodString;
     cwd: z.ZodOptional<z.ZodString>;
@@ -275,6 +279,10 @@ export declare const ServerSessionListSchema: z.ZodObject<{
                 marker: "marker";
                 hook: "hook";
             }>;
+        }, z.core.$strict>>;
+        decisionActivity: z.ZodOptional<z.ZodObject<{
+            startedAt: z.ZodOptional<z.ZodNumber>;
+            endedAt: z.ZodNumber;
         }, z.core.$strict>>;
         sessionId: z.ZodString;
         name: z.ZodString;
@@ -1488,10 +1496,10 @@ export declare const ServerInputAckSchema: z.ZodObject<{
     clientMessageId: z.ZodString;
     status: z.ZodEnum<{
         queued: "queued";
+        expired: "expired";
         rejected: "rejected";
         accepted: "accepted";
         duplicate: "duplicate";
-        expired: "expired";
         uncertain: "uncertain";
     }>;
     delivery: z.ZodEnum<{

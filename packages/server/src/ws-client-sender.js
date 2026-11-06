@@ -42,6 +42,9 @@ export function createClientSender(log, opts = {}) {
   const warnThreshold = opts.warnThreshold ?? WARN_THRESHOLD
   const evictThreshold = opts.evictThreshold ?? EVICT_THRESHOLD
   const warnThrottleMs = opts.warnThrottleMs ?? WARN_THROTTLE_MS
+  // Optional delivery gate: (client, message) => boolean. A false answer drops the
+  // frame (a connection whose credential is no longer valid receives no replies).
+  const mayDeliver = typeof opts.mayDeliver === 'function' ? opts.mayDeliver : null
 
   return function send(ws, client, message) {
     // #4834: short-circuit if this client has already been evicted. ws.close()
@@ -49,6 +52,10 @@ export function createClientSender(log, opts = {}) {
     // chain (e.g. replayHistory / flushPostAuthQueue) would otherwise keep
     // serializing + encrypting messages that will never leave the buffer.
     if (client?._evicted) {
+      return false
+    }
+    if (client && mayDeliver && !mayDeliver(client, message)) {
+      log.debug?.(`Dropped ${message?.type || 'unknown'} for client ${client.id}: credential no longer valid`)
       return false
     }
     // Queue messages while key exchange is pending

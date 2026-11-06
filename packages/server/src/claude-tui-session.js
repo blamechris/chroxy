@@ -1,4 +1,5 @@
 import { refreshClaudeModels } from './claude-model-refresh.js'
+import { stillAuthorized } from './connection-authority.js'
 import { randomBytes, randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import {
@@ -4998,6 +4999,17 @@ export class ClaudeTuiSession extends BaseSession {
     // execute against a half-reset TUI or silently desync busy state
     // (server clears busy via _finishTurnError below, but the TUI might
     // still process the bytes once it returns to prompt). Bail cleanly.
+    // The waits above (a respawn, the idle probe) can outlast the connection that
+    // sent this input; do not write a prompt for one that is no longer authorized.
+    if (!stillAuthorized(sendOptions.isAuthorized)) {
+      this._logPtyDiagnostic('sending connection no longer authorized; prompt not written', 'info')
+      this._finishTurnStopped(messageId)
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: false,
+        reason: 'connection_not_authorized', message: 'The sending connection is no longer authorized; the input was not dispatched.',
+      })
+      return { ok: false, reason: 'not_authorized' }
+    }
     if (this._activeTurn?.aborted) {
       this._logPtyDiagnostic('turn aborted before prompt write', 'info')
       this._finishTurnStopped(messageId)

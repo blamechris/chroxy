@@ -96,3 +96,12 @@ flat `data` and the usual `source` and `ts`. Unknown or absent targets are refus
 This write-only path sets status source to `hook`; it grants no session reads,
 input, permission responses or execution. API/hook `decision: "none"` explicitly
 clears the same decision; omitting `decision` preserves it.
+
+Session decisions appear in attention counts and Control Room even while another
+session is selected. Live delivery shares only bounded declared status and the
+stable session-decision activity; response text and other work remain scoped to
+session viewers. The session list includes optional server-authored
+`decisionActivity` lifetime metadata (`startedAt` when pending, `endedAt` as the
+last clear fence). Reconnect uses those original times to restore or clear only
+the decision, preserving permissions and other activity. Status write callers
+cannot supply this metadata. Older servers omitting it leave local activity alone.

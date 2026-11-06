@@ -77,6 +77,8 @@ export interface ConnectionContext {
   /** This socket sent a one-use pairing request. */
   isPairing?: boolean;
   authReceived?: boolean;
+  /** An accepted `credential_invalidated` notice ended this connection; its close must still run teardown. */
+  credentialNoticeReceived?: boolean;
   identityTarget?: ConnectionIdentityTarget;
   verifiedIdentityKey?: string | null;
   savedConnection?: SavedConnection | null;

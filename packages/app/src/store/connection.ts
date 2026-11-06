@@ -111,6 +111,8 @@ import {
   bumpConnectionAttemptId,
   disconnectedAttemptId,
   setDisconnectedAttemptId,
+  markCredentialSuspect,
+  credentialKey,
   lastConnectedUrl,
   setLastConnectedUrl,
   nextReconnectAttempt,
@@ -144,6 +146,7 @@ import {
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
+  isCredentialInvalidClose,
   getHealthCheckErrorMessage,
   // #5968 — seed the cross-session activity reducer state consumed by the mobile
   // MissionControlScreen. PR1 only initializes/resets it; the live feeder is PR2.
@@ -1034,8 +1037,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   clearSavedConnection: async () => {
+    // Only forget what was asked to be forgotten: a new pairing installed while the
+    // storage wipe was pending must survive it.
+    const clearing = useConnectionLifecycleStore.getState().savedConnection;
     await clearSavedCredentials();
-    useConnectionLifecycleStore.getState().setSavedConnection(null);
+    const current = useConnectionLifecycleStore.getState().savedConnection;
+    const stillSame = current === clearing
+      || (current != null && clearing != null && current.url === clearing.url && current.token === clearing.token);
+    if (stillSame) useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
   // #5518 — auto-select the best endpoint for a saved connection, then connect.
@@ -1557,8 +1566,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     socket.onclose = (event: CloseEvent) => {
       stopHeartbeat();
 
-      // Stale socket from a previous connection attempt — ignore
-      if (myAttemptId !== connectionAttemptId) return;
+      // Stale socket from a previous connection attempt — ignore. EXCEPT the one a
+      // `credential_invalidated` notice just ended: it advanced the attempt id to cancel
+      // any armed retry, but its teardown below must still run.
+      if (myAttemptId !== connectionAttemptId && !socketCtx.credentialNoticeReceived) return;
 
       // #5962 (#5721 parity) — this attempt's socket closed; no handshake left to
       // time. Clear AFTER the stale guard so a late stale-socket close can't
@@ -1604,6 +1615,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // skips the scheduleReconnect()/error writes below that the bare phase
       // guard wouldn't.
       if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
+      // The server closed an AUTHENTICATED connection with the credential-invalid
+      // code. A close code is not authenticated evidence (on a plain ws:// LAN link
+      // an intermediary can inject one), so it only stops auto-reconnect and shows
+      // the disconnected / pair-again state; the credential is kept so the user can
+      // retry. The server's authenticated `credential_invalidated` notice (or a
+      // later `auth_fail` invalid_token for this token) is what forgets it.
+      // Advancing the attempt id also kills a retry that `onerror` armed first.
+      if (socketCtx.credentialNoticeReceived) {
+        // The notice already stopped reconnecting and set the phase and message.
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        return;
+      }
+      if (isCredentialInvalidClose(event.code) && wasConnected && disconnectedAttemptId !== myAttemptId) {
+        bumpConnectionAttemptId();
+        setDisconnectedAttemptId(connectionAttemptId);
+        markCredentialSuspect(credentialKey(socketCtx), socketCtx.token);
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(event.code) ?? '', 0);
         return;
       }
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)

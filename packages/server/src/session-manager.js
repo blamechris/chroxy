@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { assertAuthorized } from './connection-authority.js'
 import { DeclaredStatusInputSchema, DeclaredStatusSchema } from '@chroxy/protocol'
 import { extractDeclaredStatus } from './declared-status.js'
 import { randomBytes } from 'crypto'
@@ -2924,6 +2925,7 @@ export class SessionManager extends EventEmitter {
       // round-trip as `0` — matching the strict-boolean pattern used by
       // `stdinForwardingDisabled` so reconnecting clients see a stable
       // numeric shape regardless of provider.
+      const decisionActivity = entry.session.getDecisionActivityState?.()
       const totals = entry.session.stdinDroppedTotals
       const stdinDroppedBytes = totals && Number.isFinite(totals.bytes) ? totals.bytes : 0
       const stdinDroppedCount = totals && Number.isFinite(totals.count) ? totals.count : 0
@@ -2968,6 +2970,7 @@ export class SessionManager extends EventEmitter {
         starting: entry._starting === true,
         isBusy: entry.session.isRunning,
         ...(entry.declaredStatus ? { declaredStatus: { ...entry.declaredStatus } } : {}),
+        ...(decisionActivity ? { decisionActivity } : {}),
         // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
         // "mid-turn" with "idle but a background shell is still tracked"; a
         // client needs to tell them apart to say "waiting on N shells" instead
@@ -3114,9 +3117,10 @@ export class SessionManager extends EventEmitter {
    * Rename a session with mutation lock.
    * @returns {Promise<boolean>}
    */
-  async renameSessionLocked(sessionId, name) {
+  async renameSessionLocked(sessionId, name, { isAuthorized } = {}) {
     const release = await this._locks.acquire(sessionId)
     try {
+      assertAuthorized(isAuthorized)
       return this.renameSession(sessionId, name)
     } finally {
       release()
@@ -3132,11 +3136,27 @@ export class SessionManager extends EventEmitter {
    * @returns {Promise<boolean>}
    */
   async destroySessionLocked(sessionId, opts) {
+    const { isAuthorized, ...destroyOpts } = opts || {}
     const entry = this._sessions.get(sessionId)
-    if (entry) entry._destroying = true
+    if (entry) {
+      entry._destroying = true
+      entry._pendingDestroys = (entry._pendingDestroys || 0) + 1
+    }
     const release = await this._locks.acquire(sessionId)
     try {
-      return this.destroySession(sessionId, opts)
+      try {
+        assertAuthorized(isAuthorized)
+      } catch (err) {
+        // Not destroyed after all: the session must not stay marked as going away -
+        // unless another destroy of it is still queued behind this one.
+        const live = this._sessions.get(sessionId)
+        if (live) {
+          live._pendingDestroys = Math.max(0, (live._pendingDestroys || 1) - 1)
+          if (live._pendingDestroys === 0) live._destroying = false
+        }
+        throw err
+      }
+      return this.destroySession(sessionId, opts === undefined ? undefined : destroyOpts)
     } finally {
       release()
     }
@@ -4751,7 +4771,7 @@ export class SessionManager extends EventEmitter {
    * @param {{ settleTimeoutMs?: number }} [opts]
    * @returns {Promise<{ok: true, mode: string, sessionId: string, seed?: {messagesIncluded: number, messagesTotal: number, bytes: number}} | {ok: false, mode: string, code: string, message: string, sessionId?: string}>}
    */
-  async restoreArchivedSession(archiveId, mode, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
+  async restoreArchivedSession(archiveId, mode, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS, isAuthorized } = {}) {
     const fail = (code, message, extra = {}) => ({ ok: false, mode, code, message, ...extra })
     if (mode !== 'native' && mode !== 'new_thread') {
       return fail('ARCHIVE_RESTORE_INVALID', 'mode must be "native" or "new_thread"')
@@ -4765,7 +4785,9 @@ export class SessionManager extends EventEmitter {
     }
     let awaitStart = null
     try {
+      assertAuthorized(isAuthorized)
       const read = await this._sessionArchive.getSaved?.(archiveId)
+      assertAuthorized(isAuthorized)
       if (!read) return fail('ARCHIVED_SESSION_NOT_FOUND', 'No archived session with that id')
       if (!read.ok) return fail(read.code, read.message)
       const { saved, meta } = read
@@ -5127,7 +5149,7 @@ export class SessionManager extends EventEmitter {
    *   `sessionId` on an `ok: false` reply is set only when a start() rejection
    *   re-parked the session, and names the id it was re-parked under.
    */
-  async retryFailedRestore(sessionId, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS } = {}) {
+  async retryFailedRestore(sessionId, { settleTimeoutMs = RETRY_RESTORE_SETTLE_TIMEOUT_MS, isAuthorized } = {}) {
     let release = await this._locks.acquire(sessionId)
     // Idempotent: the lock is released early on the success path (before the
     // settle wait) and by the `finally` on every other path.
@@ -5141,6 +5163,7 @@ export class SessionManager extends EventEmitter {
     // lock. Declared out here so the `finally` can run before the await.
     let awaitStart = null
     try {
+      assertAuthorized(isAuthorized)
       const parked = this._failedRestores.get(sessionId)
       if (!parked) {
         // Distinguishable from a failed attempt: the caller needs to tell "your

@@ -105,7 +105,6 @@ export class ServerOrchestrator {
       try { this._bonjourInstance.destroy?.() } catch {}
     }
     if (this._tokenManager) this._tokenManager.destroy()
-    if (this._pairingManager) this._pairingManager.destroy()
     // #5413: stop the Discord sink's heartbeat. It's unref'd so it wouldn't
     // block exit, but clearing it avoids a refresh PATCH racing shutdown.
     if (this._pushManager) {
@@ -172,6 +171,10 @@ export class ServerOrchestrator {
       }
     }
     await this._wsServer.close()
+    // Only after the sockets are closed: destroying the pairing manager while
+    // connections are still open would make their stored tokens look invalid. The
+    // tokens themselves stay valid on disk across the restart.
+    if (this._pairingManager) this._pairingManager.destroy()
     if (this._tunnel) await this._tunnel.stop()
     this._removeConnectionInfo()
     this._exit(0)

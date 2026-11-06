@@ -6,6 +6,7 @@
  */
 import { isSafeRegexSource } from '../utils/safe-regex.js'
 import { getErrorMessage } from '../utils/error-message.js'
+import { authorizedFor } from '../connection-authority.js'
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import { buildThinkingLevelChanged } from '../thinking-level-wire.js'
 import {
@@ -1472,7 +1473,7 @@ async function handleAddMcpServer(ws, client, msg, ctx) {
   }
 
   try {
-    const result = await entry.session.addMcpServer(name, msg.config, scope)
+    const result = await entry.session.addMcpServer(name, msg.config, scope, { isAuthorized: authorizedFor(ctx, client) })
     if (!result || result.ok !== true) {
       // #7001: a denied spawn-trust prompt is a distinct outcome from a failure —
       // nothing was written, and the client should say "you declined" rather than

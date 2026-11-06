@@ -12,7 +12,7 @@
  * a fabricated cause.
  */
 import { describe, it, expect } from 'vitest'
-import { getWsCloseMessage, getHealthCheckErrorMessage } from './ws-errors'
+import { getWsCloseMessage, getHealthCheckErrorMessage, WS_CLOSE_CREDENTIAL_INVALID, isCredentialInvalidClose } from './ws-errors'
 
 describe('getWsCloseMessage', () => {
   describe('codes the server actually sends', () => {
@@ -113,5 +113,29 @@ describe('getHealthCheckErrorMessage', () => {
     const msg = getHealthCheckErrorMessage({})
     expect(typeof msg).toBe('string')
     expect(msg.length).toBeGreaterThan(0)
+  })
+})
+
+describe('credential-invalid close (4401)', () => {
+  it('has the code the server sends', () => {
+    expect(WS_CLOSE_CREDENTIAL_INVALID).toBe(4401)
+  })
+
+  it('is recognised only for that code', () => {
+    expect(isCredentialInvalidClose(4401)).toBe(true)
+    for (const other of [1000, 1006, 1008, 4008, 4400, 4402, undefined, null, '4401']) {
+      expect(isCredentialInvalidClose(other)).toBe(false)
+    }
+  })
+
+  it('maps to copy that asks the user to pair again', () => {
+    expect(getWsCloseMessage(4401)).toMatch(/pair it again/i)
+  })
+})
+
+describe('close code 1001 (server going away)', () => {
+  it('is not a credential-invalid close and reads as a restart', () => {
+    expect(isCredentialInvalidClose(1001)).toBe(false)
+    expect(getWsCloseMessage(1001)).toMatch(/restarting/i)
   })
 })

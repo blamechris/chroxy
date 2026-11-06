@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { assertAuthorized } from './connection-authority.js'
 import { randomUUID } from 'crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'fs'
 import { join } from 'path'
@@ -123,18 +124,8 @@ export class CheckpointManager extends EventEmitter {
    *   this message; absent → the restore is files-only for this checkpoint.
    * @returns {Promise<object>} The created checkpoint
    */
-  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId }) {
+  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId, isAuthorized }) {
     const checkpoints = this._getCheckpoints(sessionId)
-
-    // Enforce max checkpoints — remove oldest if at limit
-    let evictedCwd = null
-    if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
-      const evicted = checkpoints.shift()
-      if (evicted?.gitRef) {
-        evictedCwd = evicted.cwd
-        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
-      }
-    }
 
     const checkpoint = {
       id: randomUUID(),
@@ -157,9 +148,36 @@ export class CheckpointManager extends EventEmitter {
     if (isGit) {
       const release = await acquireCwdLock(cwd)
       try {
+        assertAuthorized(isAuthorized)
         checkpoint.gitRef = await this._createGitSnapshot(cwd, checkpoint.id)
       } finally {
         release()
+      }
+    }
+
+    // Last chance to refuse before anything is evicted or persisted. A refusal here
+    // must not leave the snapshot ref it just created behind.
+    try {
+      assertAuthorized(isAuthorized)
+    } catch (err) {
+      // Awaited, so the ref is gone when the refusal reaches the caller (a
+      // fire-and-forget delete races the caller's next read, and loses on slow spawns).
+      if (checkpoint.gitRef && !(await this._deleteGitRef(cwd, checkpoint.gitRef))) {
+        this._recordFailedRefDelete(cwd, checkpoint.gitRef)
+        log.warn(`Failed to delete git ref ${checkpoint.gitRef} (recorded for retry)`)
+      }
+      throw err
+    }
+
+    // Enforce max checkpoints — remove oldest if at limit. Only now, with the new
+    // snapshot in hand: evicting first would lose a rewind point when the creation
+    // is refused or fails partway.
+    let evictedCwd = null
+    if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
+      const evicted = checkpoints.shift()
+      if (evicted?.gitRef) {
+        evictedCwd = evicted.cwd
+        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
       }
     }
 
@@ -227,7 +245,7 @@ export class CheckpointManager extends EventEmitter {
    * @returns {Promise<object>} The checkpoint data (including resumeSessionId
    *   and boundaryMessageId)
    */
-  async restoreCheckpoint(sessionId, checkpointId) {
+  async restoreCheckpoint(sessionId, checkpointId, { isAuthorized } = {}) {
     const checkpoint = this.getCheckpoint(sessionId, checkpointId)
     if (!checkpoint) {
       throw new Error(`Checkpoint not found: ${checkpointId}`)
@@ -237,6 +255,7 @@ export class CheckpointManager extends EventEmitter {
     if (checkpoint.gitRef) {
       const release = await acquireCwdLock(checkpoint.cwd)
       try {
+        assertAuthorized(isAuthorized)
         await this._restoreGitSnapshot(checkpoint.cwd, checkpoint.gitRef)
       } finally {
         release()
