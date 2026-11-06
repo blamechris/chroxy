@@ -1128,7 +1128,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
     send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(rosterProvider), provider: rosterProvider })
-    permissions.resendPendingPermissions(ws, client)
+    // #9015: the active session's prompts are NOT sent here. `replayHistory`
+    // above always ends in `resendPendingPermissionsForSession` (its empty-history
+    // early return and its `finishReplay` both call it), which delivers them
+    // after `history_replay_end`; sending them here too put two copies on the
+    // wire ~1 ms apart. Every other session, and ownerless hook-held prompts,
+    // still go out through this unfiltered call.
+    permissions.resendPendingPermissions(ws, client, entry ? { excludeSessionId: activeId } : undefined)
     // #5555: fire the connect-time bootstrap burst (providers + slash commands
     // + agents) so a new client never sends its 3-request list_* round trip.
     // Fire-and-forget — the slash/agent compute is async (disk scans) and the
@@ -1781,14 +1787,13 @@ export function resendPendingQuestions(ctx, ws, sessionId) {
  * one have nothing to re-send, hence the optional chain on it alone — the
  * method on a real handler is called unguarded so drift fails loudly.
  *
- * Connect: `sendPostAuthInfo` also does the unfiltered resend, so the ACTIVE
- * session's permission can arrive twice on a (re)connect — once from that call
- * and once from here after `history_replay_end`. Both clients update a prompt
- * in place by `requestId` (dashboard `handlePermissionRequest`, app
- * `case 'permission_request'`), so that is one card, and the second delivery
- * is what rescues a BACKGROUND session's card on connect: its
- * `subscribe_sessions` full-rebuild replay otherwise swaps away the card the
- * unfiltered resend had just placed.
+ * Connect (#9015): `sendPostAuthInfo` also does an unfiltered resend, but it
+ * EXCLUDES the active session it is about to replay — this replay-exit call owns
+ * that session's prompts, so they arrive exactly once, after `history_replay_end`.
+ * The unfiltered call still delivers every other session's prompts (and
+ * ownerless hook-held ones); a BACKGROUND session's later `subscribe_sessions`
+ * full-rebuild replay re-asserts its card via this function, which is the
+ * intended second delivery there (clients update in place by `requestId`).
  *
  * @param {object} ctx
  * @param {WebSocket} ws
@@ -1872,18 +1877,26 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // them leaves the empty-slice path — the quick reconnect, the most common
   // replay of all — silently unfixed.
   const finishReplay = () => {
-    send(ws, { type: 'history_replay_end', sessionId, latestSeq })
-    reseedActiveAgents(ctx, ws, sessionId)
-    // #7457: AFTER the end frame, never before it. The client's replay-end
-    // sweep has already run by the time this lands, which is the entire reason
-    // a still-pending question survives the reconnect.
-    resendPendingQuestions(ctx, ws, sessionId)
-    // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
-    // history-only message list at `history_replay_end`, dropping the live
-    // permission card the client held for this session; `permission_request`
-    // is transient, so the replay itself cannot restore it. Sent after the
-    // swap, the re-send lands on the rebuilt list and is kept.
-    resendPendingPermissionsForSession(ctx, ws, sessionId)
+    // #9015: the permission re-send is the ONLY delivery of the active
+    // session's pending prompt on connect (the post-auth resend excludes it), so
+    // it runs in a `finally`: a throw from the end frame, the agent re-seed or
+    // the question re-send must not drop the sole copy. The success path still
+    // sends it exactly once.
+    try {
+      send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+      reseedActiveAgents(ctx, ws, sessionId)
+      // #7457: AFTER the end frame, never before it. The client's replay-end
+      // sweep has already run by the time this lands, which is the entire reason
+      // a still-pending question survives the reconnect.
+      resendPendingQuestions(ctx, ws, sessionId)
+    } finally {
+      // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
+      // history-only message list at `history_replay_end`, dropping the live
+      // permission card the client held for this session; `permission_request`
+      // is transient, so the replay itself cannot restore it. Sent after the
+      // swap, the re-send lands on the rebuilt list and is kept.
+      resendPendingPermissionsForSession(ctx, ws, sessionId)
+    }
   }
 
   // A manager that cannot answer reads as idle, as in the JSONL heal's own check
@@ -1912,7 +1925,24 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     : history
   sendChunkedWithBackpressure(ws, replayEntries, {
     startOffset: pending.length > 0 ? 0 : startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy),
+    // #9015: a throwing entry ABORTS the replay and never claims completion (no
+    // `history_replay_end` carrying `latestSeq` — the client would commit a
+    // partial transcript and its cursor). Permission recovery is independent of
+    // replay success, though: the connect-time resend excludes the active
+    // session, so this abort path delivers its pending prompt (once — the loop
+    // stops and `finishReplay` never runs) and then rethrows, as before.
+    emit: (entry) => {
+      try {
+        sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy)
+      } catch (err) {
+        try {
+          resendPendingPermissionsForSession(ctx, ws, sessionId)
+        } catch (resendErr) {
+          log.warn(`Permission re-send after an aborted replay of ${sessionId} failed: ${resendErr?.message ?? resendErr}`)
+        }
+        throw err
+      }
+    },
     onDone: finishReplay,
   })
 }

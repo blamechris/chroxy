@@ -178,6 +178,34 @@ describe('replayHistory — pending permission re-send (#8328)', () => {
     assert.equal(permFrames(tail).length, 1)
   })
 
+  it('still re-sends exactly once when the end-of-replay steps throw (#9015)', async () => {
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-throw')] } })
+    const realSend = ctx.send
+    ctx.send = (ws, msg) => {
+      if (msg.type === 'history_replay_end') throw new Error('end frame failed')
+      realSend(ws, msg)
+    }
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    try {
+      replayHistory(ctx, ws, 'sess-b', { forceFull: true })
+    } catch (_err) { /* the replay's own failure is not under test */ }
+    await settle()
+    assert.equal(permFrames(ctx._sends).length, 1)
+  })
+
+  it('a throwing history entry aborts the replay with NO completion frame, yet the prompt is delivered exactly once (#9015)', async () => {
+    const bad = { _seq: 2 }
+    Object.defineProperty(bad, 'type', { get() { throw new Error('boom') }, enumerable: true })
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-abort')] }, history: [{ type: 'response', content: 'hi', _seq: 1 }, bad] })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    assert.throws(() => replayHistory(ctx, ws, 'sess-b', { forceFull: true }), /boom/)
+    await settle()
+    assert.equal(ctx._sends.some((m) => m.type === 'history_replay_end'), false, 'no completion claimed')
+    assert.equal(permFrames(ctx._sends).length, 1)
+  })
+
   it('re-sends on an already-current (empty-slice) delta replay too', async () => {
     const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-current')] } })
     const ws = makeFakeWs()
