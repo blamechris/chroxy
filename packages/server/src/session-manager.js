@@ -3128,6 +3128,20 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Undo the "going away" mark of a destroy that did not finish (refused, or
+   * threw before the entry left the map), so the session is visible again and
+   * can be destroyed again. Stays marked while another destroy of it is queued.
+   * @param {string} sessionId
+   * @param {boolean} [counted] true when this destroy bumped `_pendingDestroys`
+   */
+  _releaseDestroyMark(sessionId, counted = false) {
+    const live = this._sessions.get(sessionId)
+    if (!live) return
+    if (counted) live._pendingDestroys = Math.max(0, (live._pendingDestroys || 1) - 1)
+    if (!live._pendingDestroys) live._destroying = false
+  }
+
+  /**
    * Destroy a session with mutation lock.
    * Sets _destroying immediately (before lock acquisition) so concurrent
    * getSession() calls see the session as unavailable right away.
@@ -3149,14 +3163,16 @@ export class SessionManager extends EventEmitter {
       } catch (err) {
         // Not destroyed after all: the session must not stay marked as going away -
         // unless another destroy of it is still queued behind this one.
-        const live = this._sessions.get(sessionId)
-        if (live) {
-          live._pendingDestroys = Math.max(0, (live._pendingDestroys || 1) - 1)
-          if (live._pendingDestroys === 0) live._destroying = false
-        }
+        this._releaseDestroyMark(sessionId, true)
         throw err
       }
-      return this.destroySession(sessionId, opts === undefined ? undefined : destroyOpts)
+      try {
+        return this.destroySession(sessionId, opts === undefined ? undefined : destroyOpts)
+      } catch (err) {
+        // #9034: a failed destroy must not strand the entry as going away.
+        this._releaseDestroyMark(sessionId, true)
+        throw err
+      }
     } finally {
       release()
     }
@@ -3336,16 +3352,28 @@ export class SessionManager extends EventEmitter {
     // Prevent unhandled 'error' throw if session emits error during destroy
     entry.session.on('error', () => {})
     // Emit synthetic stream_end for any in-flight streams so clients see termination
-    const closedMessageIds = this._history.closePendingStreams(sessionId)
-    for (const messageId of closedMessageIds) {
-      this.emit('session_event', { sessionId, event: 'stream_end', data: { messageId } })
+    // A failure here (history, or a session_event listener) must not abort the
+    // teardown and strand the entry as going away (#9034).
+    try {
+      const closedMessageIds = this._history.closePendingStreams(sessionId)
+      for (const messageId of closedMessageIds) {
+        this.emit('session_event', { sessionId, event: 'stream_end', data: { messageId } })
+      }
+    } catch (streamErr) {
+      log.error(`Error closing pending streams for session ${sessionId} "${entry.name}": ${streamErr?.stack || streamErr}`)
     }
     try {
       entry.session.destroy()
     } catch (destroyErr) {
       log.error(`Error destroying session ${sessionId} "${entry.name}": ${destroyErr?.stack || destroyErr}`)
     }
-    this._cleanupSessionMaps(sessionId)
+    try {
+      this._cleanupSessionMaps(sessionId)
+    } catch (err) {
+      // Still in the map: leave it visible and destroyable rather than invisible.
+      this._releaseDestroyMark(sessionId)
+      throw err
+    }
     if (entry.worktreePath) {
       this._removeWorktree(entry.worktreePath, entry.worktreeRepoDir, sessionId)
     }
