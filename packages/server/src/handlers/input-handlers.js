@@ -782,10 +782,14 @@ async function handleInput(ws, client, msg, ctx) {
       // The connection may have ended (credential revoked / expired) while the
       // evaluator was running. Nothing below may dispatch, record or broadcast
       // on its behalf.
-      if (!stillAuthorized(authorizedFor(ctx, client))) {
-        releaseInputRequest(ctx, inputRecord)
-        return
+      let authorizedAfterEvaluator = false
+      try {
+        authorizedAfterEvaluator = stillAuthorized(authorizedFor(ctx, client))
+      } finally {
+        // Released on a refusal AND if the check itself throws.
+        if (!authorizedAfterEvaluator) releaseInputRequest(ctx, inputRecord)
       }
+      if (!authorizedAfterEvaluator) return
 
       // #3636 — re-check input_conflict after the await. State may have
       // flipped during the round-trip (e.g. another path started the

@@ -5,8 +5,10 @@
  * acting on the first answer for as long as the body takes. The one rule for
  * such a route: capture the bearer when it is first validated, and call
  * `bearerStillValid` once the body is complete and BEFORE anything changes.
- * Every route that reads a body after bearer validation goes through these two
- * functions (tests/bearer-recheck.test.js lists them and fails on a new one).
+ * Every route that reads a body after a primary or pairing bearer validation
+ * goes through these two functions. tests/bearer-recheck.test.js is a tripwire
+ * over named body readers, not a proof; it fails on a new route that skips them
+ * unless the route is listed there as a named, reasoned exclusion.
  *
  *   - auth off: there is no bearer to re-check;
  *   - a pairing token: it must still be live (`isSessionTokenLive`: stored and
@@ -32,7 +34,8 @@ export function captureBearer(server, req) {
 
 /**
  * @param {{ _pairingManager?: object|null, _isTokenValid: (t: string) => boolean }} server
- * @param {{ required: boolean, token: string|null, wasPairing: boolean }} captured
+ * @param {{ required: boolean, token: string|null, wasPairing: boolean }|null|undefined} captured
+ *   null or undefined (nothing was captured) is refused
  * @returns {boolean}
  */
 export function bearerStillValid(server, captured) {
