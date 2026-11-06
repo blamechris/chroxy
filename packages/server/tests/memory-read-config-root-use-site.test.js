@@ -63,3 +63,43 @@ describe('memory read: config dir re-resolved to a filesystem root (#8270)', () 
     }
   })
 })
+
+describe('memory read: config dir re-resolved to a different non-root directory (#8975)', () => {
+  it('does not install the differing directory as an allowed root', async () => {
+    const cfg = join(root, 'cfg')
+    const cwd = join(root, 'work')
+    const outside = join(root, 'outside')
+    mkdirSync(cfg, { recursive: true })
+    mkdirSync(cwd, { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, 'note.md'), 'outside-markdown-body')
+    writeFileSync(join(cfg, 'CLAUDE.md'), 'global-body')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `see @${join(outside, 'note.md')}`)
+    process.env.CLAUDE_CONFIG_DIR = cfg
+
+    // A real directory that CONTAINS the outside import: if it were installed as
+    // a root the import would be read. It is not a filesystem root.
+    const differing = root
+    const handle = mock.module('../src/ws-file-ops/common.js', {
+      namedExports: {
+        ...common,
+        realpathOfDeepestAncestor: async (p) => (p === cfg ? differing : common.realpathOfDeepestAncestor(p)),
+      },
+    })
+    try {
+      const { createMemoryOps } = await import(`../src/ws-file-ops/memory.js?usesite=${Date.now()}`)
+      const out = []
+      const ops = createMemoryOps((_ws, msg) => out.push(msg), (c) => resolveSessionCwd(c, new Map(), 60_000))
+      await ops.readMemory({}, cwd)
+      const res = out[0]
+      assert.equal(res.error, null)
+      assert.ok(!JSON.stringify(res).includes('outside-markdown-body'), 'content outside both roots is not returned')
+      const global = res.entries.find((e) => e.scope === 'global')
+      assert.equal(global.content, null, 'global memory root is unavailable')
+      const imported = res.entries.find((e) => e.scope === 'import')
+      assert.equal(imported.skipped, true)
+    } finally {
+      handle.restore()
+    }
+  })
+})
