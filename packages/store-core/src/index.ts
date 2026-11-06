@@ -751,6 +751,9 @@ export {
   handleAuthOk,
   parseConnectedClients,
   handleAuthFail,
+  handleCredentialInvalidated,
+  shouldForgetOnAuthFail,
+  classifyCredentialNotice,
   handleKeyExchangeOk,
   handleServerMode,
   handleCheckpointCreated,
@@ -943,6 +946,8 @@ export {
 export {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
+  WS_CLOSE_CREDENTIAL_INVALID,
+  isCredentialInvalidClose,
 } from './ws-errors'
 
 // #5515 (epic #5514): latency instrumentation primitives — a bounded p50/p95

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { assertAuthorized } from './connection-authority.js'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
@@ -420,9 +421,10 @@ export class EnvironmentManager extends EventEmitter {
    * @throws {Error & {code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: string[]}}
    *   when sessions are attached and `force` is not set. Nothing is torn down.
    */
-  async destroy(envId, { force = false } = {}) {
+  async destroy(envId, { force = false, isAuthorized } = {}) {
     const release = await this._acquireLock(envId)
     try {
+      assertAuthorized(isAuthorized)
       const env = this._getEnvironmentOrThrow(envId)
       // #7562 — refuse BEFORE any teardown, so a refused destroy leaves the
       // container running and the environment registered.
@@ -512,9 +514,10 @@ export class EnvironmentManager extends EventEmitter {
    * don't implement the lifecycle (k8s/rancher today) throw a clear error that
    * the handler surfaces as CONTAINER_ACTION_FAILED.
    */
-  async stop(envId) {
+  async stop(envId, { isAuthorized } = {}) {
     const release = await this._acquireLock(envId)
     try {
+      assertAuthorized(isAuthorized)
       const env = this._getEnvironmentOrThrow(envId)
       if (env.compose) throw new Error(`Stop is not supported for compose environments yet`)
       if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to stop`)
@@ -538,9 +541,10 @@ export class EnvironmentManager extends EventEmitter {
    * currently running or stopped; ends running). Returns the resulting status.
    * Same compose / backend-support constraints as {@link stop}.
    */
-  async restart(envId) {
+  async restart(envId, { isAuthorized } = {}) {
     const release = await this._acquireLock(envId)
     try {
+      assertAuthorized(isAuthorized)
       const env = this._getEnvironmentOrThrow(envId)
       if (env.compose) throw new Error(`Restart is not supported for compose environments yet`)
       if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to restart`)

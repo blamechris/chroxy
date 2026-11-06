@@ -60,10 +60,12 @@ describe('ServerOrchestrator — graceful shutdown order (SIGTERM)', () => {
       'mdns.stop',
       'bonjour.destroy',
       'token.destroy',
-      'pairing.destroy',
       'serializeState',
       'destroyAll',
       'wsServer.close',
+      // After the sockets are closed: destroying it earlier makes live connections'
+      // stored tokens look invalid while they are still open.
+      'pairing.destroy',
       'tunnel.stop',
       'removeConnectionInfo',
       'exit',

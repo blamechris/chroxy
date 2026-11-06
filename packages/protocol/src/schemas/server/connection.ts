@@ -199,6 +199,15 @@ export const ServerAuthFailSchema = z.object({
   reason: z.string(),
 })
 
+// Sent on a connection just before the server ends it because the stored
+// credential it authenticated with is no longer valid (revoked, expired or
+// evicted). It travels the normal (possibly encrypted) channel, so it is the
+// authenticated evidence a client may act on; the close code that follows is not.
+export const ServerCredentialInvalidatedSchema = z.object({
+  type: z.literal('credential_invalidated'),
+  reason: z.enum(['revoked', 'expired', 'evicted', 'invalid']),
+})
+
 export const ServerPairFailSchema = z.object({
   type: z.literal('pair_fail'),
   reason: z.string(),

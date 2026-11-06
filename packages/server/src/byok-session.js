@@ -15,6 +15,7 @@
  */
 
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
+import { assertAuthorized, stillAuthorized } from './connection-authority.js'
 import { performance } from 'node:perf_hooks'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { BYOK_CUSTOMIZATION } from './provider-customization.js'
@@ -938,7 +939,7 @@ export class ClaudeByokSession extends BaseSession {
    * duplicate name from a generic validation failure; `code: 'TRUST_DENIED'`
    * distinguishes "the user said no" from a failure.
    */
-  async addMcpServer(name, config, scope = 'user') {
+  async addMcpServer(name, config, scope = 'user', { isAuthorized } = {}) {
     const valid = validateNewMcpServerName(name)
     if (!valid.ok) return { ok: false, error: valid.error }
 
@@ -972,6 +973,9 @@ export class ClaudeByokSession extends BaseSession {
         error: `Spawning MCP server '${valid.name}' was denied, so it was not added to the config.`,
       }
     }
+
+    // The trust prompt above was a wait: the requesting connection may have ended.
+    assertAuthorized(isAuthorized)
 
     let written
     try {
@@ -1148,6 +1152,15 @@ export class ClaudeByokSession extends BaseSession {
     if (mcpPromptMatch) {
       try {
         promptText = await this._resolveMcpPromptToText(mcpPromptMatch)
+        if (!stillAuthorized(sendOptions.isAuthorized)) {
+          this._isBusy = false
+          this._permissions.clearUserStopInFlight()
+          reportInputAdmission(sendOptions, {
+            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+            reason: 'connection_not_authorized', message: 'The sending connection is no longer authorized; the input was not dispatched.',
+          })
+          return
+        }
       } catch (err) {
         this._isBusy = false
         this._permissions.clearUserStopInFlight() // #8430: this turn ends here, off the _finishTurn path

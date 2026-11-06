@@ -10,6 +10,7 @@
  * reduce file fragmentation (each file had 1–4 small functions).
  */
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
+import { authorizedFor } from '../connection-authority.js'
 import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError, canClientSeeWebTask } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
@@ -400,6 +401,7 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
     sessionManager: ctx.sessions.sessionManager,
     environmentId,
     force,
+    isAuthorized: authorizedFor(ctx, client),
   })
     .then(({ destroyedSessions }) => {
       if (destroyedSessions.length > 0) {

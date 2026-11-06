@@ -32,6 +32,7 @@
  */
 
 import { execFile } from 'child_process'
+import { assertAuthorized } from '../connection-authority.js'
 import { promisify } from 'util'
 import { parseByteSize } from './containers.js'
 import { listSnapshots } from '../snapshots-store.js'
@@ -347,6 +348,7 @@ export async function runHostPrune(opts = {}) {
     listByokSnapshots = () => listSnapshots(),
     _execFile = execFileAsync,
     _now = () => new Date(),
+    isAuthorized,
   } = opts
   const selected = PRUNE_KINDS.includes(kind) ? kind : 'all'
   const survey = await surveyHostPrune({ listEnvironments, listByokSnapshots, _execFile, _now })
@@ -360,9 +362,11 @@ export async function runHostPrune(opts = {}) {
     failures: [],
   }
   if (!survey.dockerAvailable) return result
+  assertAuthorized(isAuthorized)
 
   if (selected === 'containers' || selected === 'all') {
     for (const c of survey.containers) {
+      assertAuthorized(isAuthorized)
       try {
         await _execFile('docker', ['rm', c.id], EXEC_OPTS)
         result.removedContainers += 1
@@ -374,6 +378,7 @@ export async function runHostPrune(opts = {}) {
   }
   if (selected === 'images' || selected === 'all') {
     for (const img of survey.images) {
+      assertAuthorized(isAuthorized)
       try {
         await _execFile('docker', ['rmi', img.id], EXEC_OPTS)
         result.removedImages += 1

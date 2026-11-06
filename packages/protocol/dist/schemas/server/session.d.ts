@@ -1496,10 +1496,10 @@ export declare const ServerInputAckSchema: z.ZodObject<{
     clientMessageId: z.ZodString;
     status: z.ZodEnum<{
         queued: "queued";
+        expired: "expired";
         rejected: "rejected";
         accepted: "accepted";
         duplicate: "duplicate";
-        expired: "expired";
         uncertain: "uncertain";
     }>;
     delivery: z.ZodEnum<{

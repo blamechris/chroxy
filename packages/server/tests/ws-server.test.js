@@ -4382,6 +4382,8 @@ describe('WsServer linking-mode pairing default (#3079)', () => {
     pairingManager.getSessionIdForToken = () => null
     pairingManager.getCurrentId = () => null
     pairingManager.consumeIfRefreshGrace = () => null
+    pairingManager.isSessionTokenLive = () => true
+    pairingManager.touchSessionToken = () => true
 
     server = new WsServer({
       port: 0,

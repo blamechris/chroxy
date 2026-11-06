@@ -6,6 +6,7 @@
  *          git_commit, git_create_pr, list_slash_commands, list_agents
  */
 import { resolveSession, sendError } from '../handler-utils.js'
+import { authorizedFor } from '../connection-authority.js'
 import { loggerForSession } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
 
@@ -95,7 +96,7 @@ function handleReadFile(ws, client, msg, ctx) {
 function handleWriteFile(ws, client, msg, ctx) {
   if (rejectMutationIfBound(ws, client, msg, ctx, 'write_file')) return
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
+  ctx.services.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null, authorizedFor(ctx, client))
 }
 
 function handleAppendMemory(ws, client, msg, ctx) {
@@ -103,7 +104,7 @@ function handleAppendMemory(ws, client, msg, ctx) {
   // a bound (share-a-session) token cannot append to the host's CLAUDE.md.
   if (rejectMutationIfBound(ws, client, msg, ctx, 'append_memory')) return
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.appendMemory(ws, msg.text, entry?.cwd || null)
+  ctx.services.fileOps.appendMemory(ws, msg.text, entry?.cwd || null, authorizedFor(ctx, client))
 }
 
 function handleMemoryRead(ws, client, msg, ctx) {
@@ -133,19 +134,19 @@ function handleGitBranches(ws, client, msg, ctx) {
 function handleGitStage(ws, client, msg, ctx) {
   if (rejectMutationIfBound(ws, client, msg, ctx, 'git_stage')) return
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.gitStage(ws, msg.files, entry?.cwd || null)
+  ctx.services.fileOps.gitStage(ws, msg.files, entry?.cwd || null, authorizedFor(ctx, client))
 }
 
 function handleGitUnstage(ws, client, msg, ctx) {
   if (rejectMutationIfBound(ws, client, msg, ctx, 'git_unstage')) return
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null)
+  ctx.services.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null, authorizedFor(ctx, client))
 }
 
 function handleGitCommit(ws, client, msg, ctx) {
   if (rejectMutationIfBound(ws, client, msg, ctx, 'git_commit')) return
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
+  ctx.services.fileOps.gitCommit(ws, msg.message, entry?.cwd || null, authorizedFor(ctx, client))
 }
 
 function handleGitCreatePr(ws, client, msg, ctx) {
@@ -158,6 +159,7 @@ function handleGitCreatePr(ws, client, msg, ctx) {
     ws,
     { title: msg.title, body: msg.body, base: msg.base, draft: msg.draft },
     entry?.cwd || null,
+    authorizedFor(ctx, client),
   )
 }
 

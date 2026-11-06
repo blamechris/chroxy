@@ -21,12 +21,27 @@
  */
 
 /**
+ * Application close code the server sends when the credential a connection
+ * authenticated with stops being valid (the pairing token was revoked, expired
+ * or evicted). Retrying with the same credential can only fail, so a client
+ * must not reconnect with it: it forgets that credential and asks to pair again.
+ */
+export const WS_CLOSE_CREDENTIAL_INVALID = 4401
+
+/** True when a close code means "the credential used for this connection is dead". */
+export function isCredentialInvalidClose(code: unknown): boolean {
+  return code === WS_CLOSE_CREDENTIAL_INVALID
+}
+
+/**
  * Map a WebSocket close code to a user-readable error message.
  *
  * Only codes the server actually sends are given specific messages:
+ *   4401 — ws-server.js: the credential this connection authenticated with is no longer valid
  *   1008 — ws-auth.js: key exchange failure (encryption setup failed)
  *   4008 — ws-broadcaster.js / ws-client-sender.js: backpressure eviction
  *   1006 — abnormal closure / network drop (never sent explicitly; set by browser/RN)
+ *   1001 — going away: the server is shutting down or restarting (the client reconnects)
  *   1000 — normal close initiated by the server (no error to show)
  *
  * All other codes fall through to a generic message. We intentionally
@@ -36,6 +51,9 @@
  */
 export function getWsCloseMessage(code: number): string | null {
   switch (code) {
+    case WS_CLOSE_CREDENTIAL_INVALID:
+      // The stored pairing token was revoked / expired / evicted server-side
+      return 'This device is no longer paired with the server — pair it again'
     case 1000:
       // Normal close — no error to surface
       return null
@@ -45,6 +63,9 @@ export function getWsCloseMessage(code: number): string | null {
     case 1008:
       // Policy violation — server couldn't complete key exchange (E2E encryption)
       return 'Encryption failed — check that your app is up to date'
+    case 1001:
+      // Going away — the server is shutting down or restarting; the client reconnects
+      return 'Server restarting — reconnecting'
     case 4008:
       // Server-side backpressure eviction — client was too slow to consume messages
       return 'Connection dropped — the server was overwhelmed, reconnecting'

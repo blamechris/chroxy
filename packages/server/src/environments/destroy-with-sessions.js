@@ -27,6 +27,7 @@
  * ended up with no guard at all while the dashboard had one.
  */
 import { createLogger } from '../logger.js'
+import { assertAuthorized } from '../connection-authority.js'
 
 const log = createLogger('destroy-environment')
 
@@ -84,8 +85,10 @@ export async function destroyEnvironmentWithSessions({
   sessionManager = null,
   environmentId,
   force = false,
+  isAuthorized,
 }) {
   const destroyedSessions = []
+  assertAuthorized(isAuthorized)
 
   if (force) {
     // Drain first, so every session gets a real teardown while its container is
@@ -133,6 +136,7 @@ export async function destroyEnvironmentWithSessions({
   // successful drain the refusal would not fire anyway, but a session that
   // attached after the last pass must not turn an explicit force into a
   // failure.
-  await environmentManager.destroy(environmentId, { force })
+  assertAuthorized(isAuthorized)
+  await environmentManager.destroy(environmentId, { force, isAuthorized })
   return { destroyedSessions }
 }

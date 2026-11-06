@@ -584,6 +584,14 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
       }
       const body = await readJsonBodyCapped(req, res, 4096)
       if (body === null) return
+      // Reading the body was a wait: the bearer may have been revoked or expired meanwhile.
+      // (With auth off there is no bearer to re-check, as in _validateBearerAuth.)
+      const stillValid = !server.authRequired || (isPairing ? pairing.isSessionTokenLive(token) === true : server._isTokenValid(token) === true)
+      if (!stillValid) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
       const parsed = DeclaredStatusInputSchema.safeParse(body)
       if (!parsed.success) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
