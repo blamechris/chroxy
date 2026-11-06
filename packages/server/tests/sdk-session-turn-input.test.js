@@ -1308,6 +1308,64 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session.isRunning, true, 'the foreign shell still holds the session busy')
     })
 
+    // #8321: the turn's `finally` awaits a stop request for each shell still
+    // tracked. The drain stays held across that await, so a send there queues
+    // behind older messages instead of starting a second query() at once.
+    for (const mode of ['hangs', 'throws']) {
+      it(`holds the drain while a leftover shell's stop request ${mode}, then runs the queued sends in order`, async () => {
+        const defaultStop = SdkSession.STOP_TASK_TIMEOUT_MS
+        SdkSession.STOP_TASK_TIMEOUT_MS = 150
+        try {
+          capture(session)
+          let calls = 0
+          const startedWith = []
+          let drainAtSecondQuery = 'unset'
+          session._callQuery = (args) => {
+            calls++
+            if (calls === 1) {
+              consumeInput(args.prompt, state)
+              const q = fakeQuery(shellScript('sh-x',
+                // _isBusy is set by hand because this window needs it: a real turn that
+                // leaves a shell tracked after busy cleared is reached only via paths
+                // (hard timeout, stall) that also abandon the drain.
+                () => { session._isBusy = false }), state)
+              if (mode === 'throws') {
+                q.stopTask = () => new Promise((_, reject) => setTimeout(() => reject(new Error('control channel gone')), 100))
+              } else {
+                state.stopTaskHangs = true
+              }
+              return q
+            }
+            drainAtSecondQuery = session._drainingTurn
+            const bState = {}
+            startedWith.push(bState)
+            consumeInput(args.prompt, bState)
+            return fakeQuery([init('sdk-2'), promptResult(1)], bState)
+          }
+          const aDone = session.sendMessage('A')
+          await until(() => session._isBusy === false && session._drainingTurn !== null && session._pendingBackgroundShells.has('sh-x'))
+          // The stop request is in flight (hanging, or about to reject).
+          await session.sendMessage('B')
+          await session.sendMessage('C')
+          assert.equal(calls, 1, 'no second query() while the first still awaits its shell stop')
+          assert.equal(session._outgoingQueue.length, 2)
+          assert.notEqual(session._drainingTurn, null, 'the drain is still held')
+          await aDone
+          await until(() => calls === 3 && !session._isBusy)
+          assert.equal(drainAtSecondQuery, null, 'the drain had ended before the queued send started')
+          assert.equal(startedWith.length, 2)
+          const texts = []
+          for (const b of startedWith) {
+            await b.inputDone
+            texts.push(b.items[0].message.content[0].text)
+          }
+          assert.deepEqual(texts, ['B', 'C'], 'queued sends ran in arrival order')
+        } finally {
+          SdkSession.STOP_TASK_TIMEOUT_MS = defaultStop
+        }
+      })
+    }
+
     it('does not reap a shell belonging to the turn that is still running', async () => {
       // Turn A ends while turn B (started inside A's drain) holds a tracked shell.
       // Explicit barriers make the ORDER the claim, not a timing hope:
