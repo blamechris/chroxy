@@ -28,6 +28,9 @@
 # --offline forbids it), so it is reported as a rejection with an explanatory
 # note, and the cache can never be the cause because it is always empty.
 #
+# NOT VERIFIED: integrity hashes and `resolved` URLs — a dry run never fetches
+# tarballs, so a lockfile with a wrong hash or URL still passes this check.
+#
 # Usage: check-derived-lockfile.sh [REPO_ROOT]
 #   REPO_ROOT defaults to the checkout this script lives in; tests pass a
 #   fixture monorepo. Exit 0 = npm accepted the lockfile; non-zero = it did not

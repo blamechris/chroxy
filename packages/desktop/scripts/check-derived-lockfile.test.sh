@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-EXPECTED_CASES=6
+EXPECTED_CASES=7
 PASS=0
 FAIL=0
 
@@ -76,7 +76,7 @@ expect "fixture with devDependencies/postinstall/@chroxy/*: accepted after the s
     "$TMP_DIR/good/packages/desktop/scripts/check-derived-lockfile.sh" "$TMP_DIR/good"
 
 # 3. Out-of-sync lockfile: the locked foo (1.2.0) does not satisfy the staged
-#    package.json's range (^2.0.0). npm itself must reject it (EUSAGE).
+#    package.json's range (^2.0.0). npm itself must reject it (offline this reports ENOTCACHED, not EUSAGE: npm tries to re-resolve the range).
 make_repo "$TMP_DIR/stale" '^2.0.0' '1.2.0' no
 expect "out-of-sync lockfile: npm rejection reported, exit 1" 1 'npm ci rejected the derived server lockfile' \
     "$TMP_DIR/stale/packages/desktop/scripts/check-derived-lockfile.sh" "$TMP_DIR/stale"
@@ -100,16 +100,78 @@ mkdir -p "$TMP_DIR/empty"
 expect "missing inputs: exit 2, not a pass" 2 'missing input' \
     "$SCRIPT_DIR/check-derived-lockfile.sh" "$TMP_DIR/empty"
 
-# 6. The cache must not matter: a poisoned NPM_CONFIG_CACHE pointing at an
-#    unusable path must not change the verdict (the script pins its own).
-NPM_CONFIG_CACHE="/nonexistent/chroxy-cache-$$" expect "poisoned NPM_CONFIG_CACHE does not affect the verdict" 0 'OK: npm ci accepts' \
-    "$SCRIPT_DIR/check-derived-lockfile.sh"
 
-echo "$PASS passed, $FAIL failed (expected $EXPECTED_CASES cases)"
-if [ "$FAIL" -ne 0 ]; then
-    exit 1
+# 6. The npm invocation. A stub npm on PATH records its argv and whether the
+#    --cache directory it was handed was empty. This is what pins the flags: a
+#    real npm cannot tell us, because without network access dropping
+#    --offline or --cache changes no verdict (the good case never touches the
+#    cache or the registry, and a drifted one fails either way). Also poisons
+#    NPM_CONFIG_CACHE to prove the explicit --cache wins over the environment.
+mkdir -p "$TMP_DIR/stubbin"
+cat > "$TMP_DIR/stubbin/npm" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_ARGV"
+prev=''
+for a in "$@"; do
+    if [ "$prev" = "--cache" ]; then
+        if [ -d "$a" ] && [ -z "$(ls -A "$a")" ]; then echo "cache-empty:$a" >> "$STUB_ARGV"; fi
+    fi
+    prev="$a"
+done
+exit 0
+EOF
+chmod +x "$TMP_DIR/stubbin/npm"
+STUB_ARGV="$TMP_DIR/argv.txt"
+rc=0
+PATH="$TMP_DIR/stubbin:$PATH" STUB_ARGV="$STUB_ARGV" NPM_CONFIG_CACHE="/nonexistent/chroxy-cache-$$" \
+    bash "$SCRIPT_DIR/check-derived-lockfile.sh" >/dev/null 2>&1 || rc=$?
+flags_ok=yes
+for want in ci --omit=dev --ignore-scripts --dry-run --offline; do
+    grep -qxF -- "$want" "$STUB_ARGV" 2>/dev/null || flags_ok=no
+done
+grep -q '^cache-empty:' "$STUB_ARGV" 2>/dev/null || flags_ok=no
+if grep -q 'nonexistent/chroxy-cache' "$STUB_ARGV" 2>/dev/null; then flags_ok=no; fi
+if [ "$rc" -eq 0 ] && [ "$flags_ok" = yes ]; then
+    echo "ok   - npm is run with ci --omit=dev --ignore-scripts --dry-run --offline and a fresh empty --cache (not NPM_CONFIG_CACHE)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL - npm invocation (exit $rc, flags_ok=$flags_ok)" >&2
+    sed 's/^/       | /' "$STUB_ARGV" >&2 || true
+    FAIL=$((FAIL + 1))
 fi
-if [ "$PASS" -ne "$EXPECTED_CASES" ]; then
-    echo "HARNESS ERROR: ran $PASS cases, expected $EXPECTED_CASES" >&2
-    exit 1
+
+# 7. The shared strip helper itself, asserted directly: postinstall and
+#    devDependencies are removed, @chroxy/* dependencies removed, everything
+#    else kept. Under --ignore-scripts a leftover postinstall is invisible to
+#    npm, so only a direct assertion can pin it.
+cat > "$TMP_DIR/strip-in.json" <<'EOF'
+{"name":"s","dependencies":{"@chroxy/protocol":"*","foo":"^1.0.0"},"devDependencies":{"d":"1"},"scripts":{"postinstall":"node x.js","start":"node y.js"}}
+EOF
+rc=0
+node "$SCRIPT_DIR/strip-server-package-json.mjs" "$TMP_DIR/strip-in.json" || rc=$?
+if [ "$rc" -eq 0 ] && node -e "
+  const p = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+  const ok = !('devDependencies' in p) && !('postinstall' in p.scripts) && p.scripts.start === 'node y.js'
+    && !('@chroxy/protocol' in p.dependencies) && p.dependencies.foo === '^1.0.0';
+  process.exit(ok ? 0 : 1);
+" "$TMP_DIR/strip-in.json"; then
+    echo "ok   - strip helper removes @chroxy/*, devDependencies and scripts.postinstall, keeps the rest"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL - strip helper output wrong (exit $rc)" >&2
+    cat "$TMP_DIR/strip-in.json" >&2
+    FAIL=$((FAIL + 1))
 fi
+
+echo ""
+echo "check-derived-lockfile tests: $PASS passed, $FAIL failed"
+
+BROKEN=0
+if [ "$FAIL" -gt 0 ]; then
+    BROKEN=1
+fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+    echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+    BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
