@@ -2199,10 +2199,9 @@ export function handleResultUsage(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): ResultUsagePayload {
-  // #8965 — the turn is over: close any stream whose stream_end was missed. Not
-  // while a replay window is open, where a replayed `result` is an old turn's.
-  const endedSessionId = parseRawStringField(msg, 'sessionId') || activeSessionId
-  if (endedSessionId && getReplayWindowDepth(endedSessionId) === 0) noteTurnEnded(endedSessionId)
+  // #8965 — the turn is over: close any stream whose stream_end was missed
+  // (noteTurnEnded ignores a replayed result inside an open window).
+  noteTurnEnded(parseRawStringField(msg, 'sessionId') || activeSessionId)
   const rawUsage = msg.usage
   const usage =
     rawUsage !== null &&

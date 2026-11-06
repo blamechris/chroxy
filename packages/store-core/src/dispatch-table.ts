@@ -1317,6 +1317,7 @@ function dispatchSessionActivity<S extends DispatchSessionBase>(
   const parsed = handleSessionActivity(msg as Record<string, unknown>)
   if (!parsed) return
   if (!adapter.hasSession(parsed.sessionId)) return
+  if (parsed.isIdle) noteTurnEnded(parsed.sessionId) // #8965: an idle resync, outside any replay window
   adapter.updateSession(parsed.sessionId, (ss) =>
     (ss.isIdle === parsed.isIdle ? {} : { isIdle: parsed.isIdle }) as Partial<S>,
   )

@@ -189,6 +189,13 @@ interface ReplayWindow {
   /** How many replays are in flight for this session right now (>= 1). */
   depth: number
   /**
+   * Whether the session was mid-turn when the window OPENED (#8965). Captured at
+   * the start because the replay itself flips `isIdle`: the server sends an
+   * `agent_idle` after every replayed `result` entry, so at `history_replay_end`
+   * the live flag no longer says whether the turn that is still running was.
+   */
+  turnInFlight: boolean
+  /**
    * The prefix as it stood at the 0->1 transition — the OUTERMOST start,
    * whatever KIND it was (#7492).
    *
@@ -704,6 +711,11 @@ export function noteStreamOpen(
  */
 export function noteTurnEnded(sessionId: string | null | undefined): void {
   if (!sessionId) return
+  // Not inside a replay window: the server sends an `agent_idle` after every
+  // REPLAYED `result` entry, and an old turn's end says nothing about the live
+  // turn this window must keep. A live turn that truly ends inside the window
+  // is covered by `endedInWindow`.
+  if (isReplayWindowOpen(sessionId)) return
   const entry = _openStreams.get(sessionId)
   if (!entry) return
   entry.open.clear()
@@ -858,6 +870,7 @@ export function reconcileReplayStart(
   // Accepted for call-site symmetry with the wire frame; deliberately unused —
   // see the doc comment above on why the cursor is not advanced at start.
   _latestSeq?: unknown,
+  live: { turnInFlight?: boolean } = {},
 ): { rebuildInProgress: boolean } {
   if (!sessionId) return { rebuildInProgress: false }
   // #7420 — open the window for BOTH replay kinds. #7455 — as a REFCOUNT, so
@@ -868,9 +881,11 @@ export function reconcileReplayStart(
   const isOutermost = existing === undefined
   const replayWindow: ReplayWindow = existing ?? {
     depth: 0,
+    turnInFlight: false,
     baseline: snapshotPrefix(currentMessages),
   }
   replayWindow.depth += 1
+  if (live.turnInFlight === true) replayWindow.turnInFlight = true
   if (isOutermost) {
     // #7492 — the record (and with it the baseline) is installed here and
     // nowhere else, so the captured prefix is the OUTERMOST start's by
@@ -1239,10 +1254,14 @@ export function reconcileReplayEnd(
   // after this — see `closeReplayWindow`.
   // #8965 — read the streams this window saw end BEFORE closing it consumes them.
   const streams = sessionId ? _openStreams.get(sessionId) : undefined
-  // An OPEN stream is only live while the turn is; a stale one (its stream_end
-  // and turn end both missed) must not be resurrected. Ended-in-window is exact.
+  // The turn counts as in flight if it was when the window opened, or is now (a
+  // turn that began inside the window); replayed agent_idle frames only flip the
+  // latter.
+  const turnInFlight =
+    live.turnInFlight === true || (sessionId ? _replayWindowOpen.get(sessionId)?.turnInFlight === true : false)
+  live = { ...live, turnInFlight }
   const inFlightResponseIds = new Set<string>(
-    streams ? [...(live.turnInFlight === true ? streams.open.values() : []), ...streams.endedInWindow] : [],
+    streams ? [...(turnInFlight ? streams.open.values() : []), ...streams.endedInWindow] : [],
   )
   if (sessionId) closeReplayWindow(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
@@ -1302,6 +1321,11 @@ export interface ReplayEndLiveState {
    * clients derive it from `isIdle`, because the app keeps no `activeTools`.
    */
   turnInFlight?: boolean
+  /**
+   * `clientMessageId`s of the session's QUEUED sends. A queued `user_input` bubble
+   * is appended locally mid-turn, so it is not the start of a turn (#8965).
+   */
+  queuedMessageIds?: readonly string[]
 }
 
 /**
@@ -1344,9 +1368,11 @@ function carriedLiveMessages(
   // A pending tool card belongs to the CURRENT turn only if it comes after the
   // last user message; an unresulted card from an earlier, interrupted turn is
   // stale and carrying it would resurrect it out of order (#8965).
+  const queuedIds = new Set(live.queuedMessageIds ?? [])
   let currentTurnStart = 0
   for (let i = discardedPrefix.length - 1; i >= 0; i--) {
-    if ((discardedPrefix[i] as { type?: unknown } | null)?.type === 'user_input') {
+    const row = discardedPrefix[i] as { type?: unknown; id?: unknown } | null
+    if (row?.type === 'user_input' && !(typeof row.id === 'string' && queuedIds.has(row.id))) {
       currentTurnStart = i + 1
       break
     }

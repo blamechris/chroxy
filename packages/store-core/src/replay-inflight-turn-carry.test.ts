@@ -50,8 +50,9 @@ function fullReplay(
   replayed: ChatMessage[],
   live: ReplayEndLiveState,
   during: () => void = () => undefined,
+  startLive: { turnInFlight?: boolean } = {},
 ): ChatMessage[] {
-  reconcileReplayStart(SID, true, messages)
+  reconcileReplayStart(SID, true, messages, undefined, startLive)
   let current = messages
   for (const entry of replayed) {
     const cache = replayDedupCache(SID, current) as ChatMessage[]
@@ -182,6 +183,84 @@ describe('in-flight turn content across a full replay swap (#8965)', () => {
     })
   })
 
+  describe('a replayed result + agent_idle inside the window (mid-turn reconnect)', () => {
+    // The server sends agent_idle after EVERY replayed result entry; that flips the
+    // live isIdle, so the turn flag must come from the window's start.
+    const midTurn = () => streamStart([response('old-1', 'earlier')], 'live-1')
+
+    it('carries the in-flight stream: captured turnInFlight survives replayed idle frames', () => {
+      const swapped = fullReplay(
+        midTurn(),
+        [userInput('hist-u'), response('hist-r', 'old reply')],
+        { streamingMessageId: null, turnInFlight: false }, // what isIdle reads after the replayed agent_idle
+        () => {
+          handleResultUsage({ sessionId: SID }, SID) // replayed result entry
+          noteTurnEnded(SID) // dispatchAgentIdle, replayed
+        },
+        { turnInFlight: true },
+      )
+      expect(swapped.map((m) => m.id)).toEqual(['hist-u', 'hist-r', 'live-1'])
+    })
+
+    it('without the captured flag the same sequence loses it (the flag is what carries it)', () => {
+      const swapped = fullReplay(
+        midTurn(),
+        [response('hist-r', 'old reply')],
+        { streamingMessageId: null, turnInFlight: false },
+        () => noteTurnEnded(SID),
+        { turnInFlight: false },
+      )
+      expect(swapped.map((m) => m.id)).toEqual(['hist-r'])
+    })
+
+    it('a live turn that truly ends inside the window is carried once, not twice', () => {
+      const before = midTurn()
+      const swapped = fullReplay(
+        before,
+        [response('hist-r', 'old reply')],
+        { streamingMessageId: null, turnInFlight: false },
+        () => {
+          handleStreamEnd({ messageId: 'live-1', sessionId: SID }, SID)
+          noteTurnEnded(SID)
+        },
+        { turnInFlight: true },
+      )
+      expect(swapped.map((m) => m.id)).toEqual(['hist-r', 'live-1'])
+      // ...and the next swap does not resurrect it.
+      expect(fullReplay(before, [response('hist-r', 'old reply')], { streamingMessageId: null, turnInFlight: true }).map((m) => m.id)).toEqual(['hist-r'])
+    })
+
+    it('does not duplicate a response the replay already holds', () => {
+      const swapped = fullReplay(
+        midTurn(),
+        [response('live-1', 'persisted')],
+        { streamingMessageId: null, turnInFlight: false },
+        () => {
+          handleStreamEnd({ messageId: 'live-1', sessionId: SID }, SID)
+          noteTurnEnded(SID)
+        },
+        { turnInFlight: true },
+      )
+      expect(swapped.map((m) => m.id)).toEqual(['live-1'])
+    })
+  })
+
+  describe('an idle resync outside a window (session_list / session_activity)', () => {
+    it("does not leave turn A's dead partial to be resurrected mid turn B", () => {
+      let before = streamStart([], 'turn-a') // stream_end never arrived
+      noteTurnEnded(SID) // session_list isIdle=true, outside any window
+      before = streamStart(before, 'turn-b') // agent_busy + stream_start of turn B
+      const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true })
+      expect(swapped.map((m) => m.id)).toEqual(['turn-b'])
+    })
+
+    it('inside an open window the resync is ignored', () => {
+      const before = streamStart([], 'turn-a')
+      const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true }, () => noteTurnEnded(SID))
+      expect(swapped.map((m) => m.id)).toEqual(['turn-a'])
+    })
+  })
+
   describe('pending tool_use', () => {
     it('keeps a tool card still in flight', () => {
       const before: ChatMessage[] = [response('old-1', 'earlier'), tool('tool-1', 'tu-1')]
@@ -210,6 +289,22 @@ describe('in-flight turn content across a full replay swap (#8965)', () => {
       ]
       const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true })
       expect(swapped.map((m) => m.id)).toEqual(['tool-cur'])
+    })
+
+    it('a queued user message sent mid-turn does not hide the running tool card', () => {
+      const before: ChatMessage[] = [userInput('u1'), tool('tool-cur', 'tu-cur'), userInput('queued-1')]
+      const swapped = fullReplay(before, [], {
+        streamingMessageId: null,
+        turnInFlight: true,
+        queuedMessageIds: ['queued-1'],
+      })
+      expect(swapped.map((m) => m.id)).toEqual(['tool-cur'])
+    })
+
+    it('a user message that is not queued still starts a new turn', () => {
+      const before: ChatMessage[] = [userInput('u1'), tool('tool-old', 'tu-old'), userInput('u2')]
+      const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true, queuedMessageIds: [] })
+      expect(swapped.map((m) => m.id)).toEqual([])
     })
 
     it('never carries a tool card without a toolUseId (it cannot be deduped)', () => {

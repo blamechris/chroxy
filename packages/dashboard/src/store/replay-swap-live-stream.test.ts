@@ -135,6 +135,72 @@ describe('a streaming response survives a full replay swap (#8960)', () => {
     expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1)
   })
 
+  it('keeps the in-flight response across a mid-turn reconnect whose history holds an old result + agent_idle', () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'before the prompt' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'permission_request', requestId: 'perm-1', tool: 'Bash', input: { command: 'ls' } })
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'message', messageType: 'user_input', content: 'old question', timestamp: 1, historySeq: 1 })
+    send({ type: 'message', messageType: 'response', messageId: 'hist-r', content: 'old reply', timestamp: 2, historySeq: 2 })
+    send({ type: 'result', historySeq: 3 })
+    send({ type: 'agent_idle' }) // the server follows every replayed result with one
+    send({ type: 'history_replay_end', latestSeq: 3 })
+    const rows = msgs().filter((m) => m.id === TURN)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.content).toBe('before the prompt')
+  })
+
+  it('a live turn that ends inside the window is kept once, and not again by the next swap', () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'whole answer' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'stream_end', messageId: TURN })
+    send({ type: 'agent_idle' })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(0)
+  })
+
+  it("does not resurrect turn A's dead stream mid turn B after an idle resync", () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'dead partial' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'session_activity', isBusy: false })
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: 'turn-b' })
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(0)
+    expect(msgs().filter((m) => m.id === 'turn-b')).toHaveLength(1)
+  })
+
+  it('keeps a running tool card when a queued message was sent mid-turn', () => {
+    send({ type: 'message', messageType: 'user_input', messageId: 'u1', content: 'go', timestamp: 1 })
+    send({ type: 'agent_busy' })
+    send({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', toolUseId: 'tu-1', input: { command: 'sleep 9' } })
+    const sid = store.getState().sessionStates[SID]!
+    store.setState({
+      sessionStates: {
+        ...store.getState().sessionStates,
+        [SID]: {
+          ...sid,
+          messages: [...sid.messages, { id: 'q1', type: 'user_input', content: 'next', timestamp: 3 }],
+          queuedMessages: [{ clientMessageId: 'q1', text: 'next', queuedAt: 3, status: 'pending' }],
+        },
+      },
+    } as never)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.type === 'tool_use').map((m) => m.id)).toEqual(['tool-1'])
+  })
+
   it('does not resurrect a stream whose stream_end was missed once the session went idle', () => {
     send({ type: 'stream_start', messageId: TURN })
     send({ type: 'stream_delta', messageId: TURN, delta: 'partial, never persisted' })
