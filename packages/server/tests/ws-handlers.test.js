@@ -42,30 +42,31 @@ async function createClient(port) {
     }),
     2000, 'Connection timeout'
   )
-  await withTimeout(
-    (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-    2000, 'Auth timeout'
-  )
+  await pollUntil(() => messages.find(m => m.type === 'auth_ok'), 2000, 'Auth timeout')
   return { ws, messages }
 }
 
 function send(ws, msg) { ws.send(JSON.stringify(msg)) }
 
+// Polls with its own deadline. Racing an endless loop against a timer rejects on
+// time but leaves the loop running, so one missed message hangs the whole file.
+async function pollUntil(predicate, timeoutMs, msg) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(msg)
+    await new Promise(r => setTimeout(r, 10))
+  }
+}
+
 async function waitForMessage(messages, type, timeout = 1000) {
   const existing = messages.find(m => m.type === type)
   if (existing) return existing
-  await withTimeout(
-    (async () => { while (!messages.find(m => m.type === type)) await new Promise(r => setTimeout(r, 10)) })(),
-    timeout, `Timeout waiting for message type: ${type}`
-  )
+  await pollUntil(() => messages.find(m => m.type === type), timeout, `Timeout waiting for message type: ${type}`)
   return messages.find(m => m.type === type)
 }
 
 async function _waitForMessages(messages, type, count, timeout = 1000) {
-  await withTimeout(
-    (async () => { while (messages.filter(m => m.type === type).length < count) await new Promise(r => setTimeout(r, 10)) })(),
-    timeout, `Timeout waiting for ${count} messages of type: ${type}`
-  )
+  await pollUntil(() => messages.filter(m => m.type === type).length >= count, timeout, `Timeout waiting for ${count} messages of type: ${type}`)
   return messages.filter(m => m.type === type)
 }
 
@@ -600,18 +601,8 @@ describe('WS handler: register_push_token', () => {
 
     send(ws, { type: 'register_push_token', token: 'invalid-token' })
 
-    const errorMsg = await withTimeout(
-      new Promise(resolve => {
-        const check = () => {
-          const found = messages.find(m => m.type === 'push_token_error')
-          if (found) return resolve(found)
-          setTimeout(check, 50)
-        }
-        check()
-      }),
-      2000,
-      'Expected push_token_error message'
-    )
+    await pollUntil(() => messages.find(m => m.type === 'push_token_error'), 2000, 'Expected push_token_error message')
+    const errorMsg = messages.find(m => m.type === 'push_token_error')
     assert.equal(errorMsg.type, 'push_token_error')
     assert.ok(errorMsg.message.includes('rejected'))
 
