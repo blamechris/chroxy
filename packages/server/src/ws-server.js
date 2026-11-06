@@ -898,6 +898,7 @@ export class WsServer {
           self._adoptPermissionSubscription(client.id, sid)
           self._clientManager.unsubscribe(client, sid)
         },
+        isConnectionAuthorized: (client) => self._isConnectionAuthorized(client),
         setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
         // #5563: explicit primary-ownership surface. `updatePrimary` is the
         // first-input adoption path (claims if unclaimed, no-op if already
@@ -2694,18 +2695,21 @@ export class WsServer {
       }
       return
     }
-    if (msg.type === 'auth') return
 
     // A connection that authenticated with a stored pairing token is only as
-    // good as that token: re-check it on every frame rather than trusting the
-    // `authenticated` flag cached at connect time. Removal events end the
-    // connection eagerly; this is the backstop for any removal that did not
-    // announce itself, and it fails closed (no pairing store => no credential).
+    // good as that token: re-check it on every frame (an `auth` frame included)
+    // rather than trusting the `authenticated` flag cached at connect time.
+    // Removal events end the connection eagerly; this is the backstop for any
+    // removal that did not announce itself, and it fails closed (no pairing
+    // store => no credential). The cause is not known here, so the reason is
+    // neutral.
     if (client.pairingCredential != null &&
         !this._pairingManager?.isSessionTokenLive(client.pairingCredential)) {
-      this._endCredentialConnection(ws, client, 'revoked')
+      this._endCredentialConnection(ws, client, 'invalid')
       return
     }
+
+    if (msg.type === 'auth') return
 
     // Key exchange for E2E encryption (delegates to ws-auth.js)
     if (handleKeyExchange(this._authCtx, ws, msg)) return
@@ -3168,6 +3172,25 @@ export class WsServer {
   }
 
   /**
+   * True only while `client` is still authenticated AND the credential it
+   * authenticated with is still valid. For code that resumes after an await:
+   * the connection may have ended while it was suspended, and the handler still
+   * holds the client record. A stored credential that has silently gone invalid
+   * ends the connection here too, so the answer and the socket agree.
+   */
+  _isConnectionAuthorized(client) {
+    if (!client || client.authenticated !== true) return false
+    if (client.pairingCredential != null &&
+        !this._pairingManager?.isSessionTokenLive(client.pairingCredential)) {
+      for (const [ws, c] of this.clients) {
+        if (c === client) { this._endCredentialConnection(ws, client, 'invalid'); break }
+      }
+      return false
+    }
+    return true
+  }
+
+  /**
    * End a connection whose credential is no longer valid. Departure runs first
    * (it reads client state), the client is removed so any frame still in flight
    * finds no connection to dispatch against, and the socket is closed with a
@@ -3215,7 +3238,17 @@ export class WsServer {
       }
       // A connected, responsive device is in use: slide its pairing token's
       // expiry so the connection does not outlive its token by simply idling.
-      if (client.pairingCredential != null) this._pairingManager?.touchSessionToken(client.pairingCredential)
+      // A token that cannot be refreshed (expired, removed, or no pairing
+      // store) ends the connection instead of leaving it authenticated.
+      if (client.pairingCredential != null) {
+        const kept = client.isAlive
+          ? this._pairingManager?.touchSessionToken(client.pairingCredential)
+          : this._pairingManager?.isSessionTokenLive(client.pairingCredential)
+        if (!kept) {
+          this._endCredentialConnection(ws, client, 'invalid')
+          continue
+        }
+      }
       client.isAlive = false
       try { ws.ping() } catch {}
     }

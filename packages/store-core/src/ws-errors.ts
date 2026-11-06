@@ -21,9 +21,23 @@
  */
 
 /**
+ * Application close code the server sends when the credential a connection
+ * authenticated with stops being valid (the pairing token was revoked, expired
+ * or evicted). Retrying with the same credential can only fail, so a client
+ * must not reconnect with it: it forgets that credential and asks to pair again.
+ */
+export const WS_CLOSE_CREDENTIAL_INVALID = 4401
+
+/** True when a close code means "the credential used for this connection is dead". */
+export function isCredentialInvalidClose(code: unknown): boolean {
+  return code === WS_CLOSE_CREDENTIAL_INVALID
+}
+
+/**
  * Map a WebSocket close code to a user-readable error message.
  *
  * Only codes the server actually sends are given specific messages:
+ *   4401 — ws-server.js: the credential this connection authenticated with is no longer valid
  *   1008 — ws-auth.js: key exchange failure (encryption setup failed)
  *   4008 — ws-broadcaster.js / ws-client-sender.js: backpressure eviction
  *   1006 — abnormal closure / network drop (never sent explicitly; set by browser/RN)
@@ -36,6 +50,9 @@
  */
 export function getWsCloseMessage(code: number): string | null {
   switch (code) {
+    case WS_CLOSE_CREDENTIAL_INVALID:
+      // The stored pairing token was revoked / expired / evicted server-side
+      return 'This device is no longer paired with the server — pair it again'
     case 1000:
       // Normal close — no error to surface
       return null

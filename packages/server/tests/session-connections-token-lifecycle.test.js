@@ -6,6 +6,8 @@ import { PairingManager } from '../src/pairing.js'
 import { TokenManager } from '../src/token-manager.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { handleSessionMessage } from '../src/ws-message-handlers.js'
+import { createSpy } from './test-helpers.js'
 
 // Session-scoped connections follow the lifecycle of the credential they hold:
 // a primary-token rotation never reaches them, and removing their stored token
@@ -33,7 +35,10 @@ async function listen(server) {
 async function connect(port) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`)
   const messages = []
-  const closed = new Promise((resolve) => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
+  const raw = new Promise((resolve) => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
+  // A connection that should have ended must end promptly; never wait on the keepalive timer.
+  const closed = Promise.race([raw, new Promise((_, rej) => setTimeout(() => rej(new Error('connection was not ended')), 3000).unref())])
+  closed.catch(() => {})
   ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
   return { ws, messages, closed }
@@ -41,6 +46,10 @@ async function connect(port) {
 
 const send = (ws, msg) => ws.send(JSON.stringify(msg))
 const seen = (messages, type) => waitFor(() => messages.find(m => m.type === type), { timeoutMs: 2000, label: type })
+
+it('the credential-invalid close code is the one clients act on', () => {
+  assert.equal(WS_CLOSE_CREDENTIAL_INVALID, 4401)
+})
 
 describe('scheduled rotation reaches only connections that hold the primary token', () => {
   function fakeClient(over) {
@@ -121,7 +130,10 @@ describe('a stored pairing token that stops being valid ends the connections hol
     ])
     sessions = made.sessionsMap
     server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
-    return listen(server)
+    const port = await listen(server)
+    // Only the explicit sweep / frame under test may end a connection.
+    clearInterval(server._pingInterval)
+    return port
   }
 
   async function authWith(port, token) {
@@ -339,5 +351,231 @@ describe('PairingManager announces every removal of a stored token', () => {
     assert.equal(pm.isSessionTokenLive(t), false)
     assert.equal(pm._sessionTokens.has(t), true, 'read-only: expired entry left for the sweep')
     pm.destroy()
+  })
+})
+
+describe('work already under way when a connection ends does not continue on its behalf', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function startBound() {
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const recordUserInput = createSpy()
+    const made = createMockSessionManager(
+      [{ id: 'session-1', name: 'One', cwd: '/tmp/one' }],
+      { recordUserInput },
+    )
+    const session = made.sessionsMap.get('session-1').session
+    session.promptEvaluator = true
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    const port = await listen(server)
+    const token = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const c = await connect(port)
+    send(c.ws, { type: 'auth', token })
+    await seen(c.messages, 'auth_ok')
+    const [ws, client] = [...server.clients].find(([, cl]) => cl.pairingCredential === token)
+    return { c, ws, client, token, session, recordUserInput }
+  }
+
+  function runInput(ws, client, evaluateDraft) {
+    const ctx = { ...server._handlerCtx, correlationId: 'test', evaluateDraft }
+    const msg = { type: 'input', data: 'please refactor the parser module thoroughly', sessionId: 'session-1' }
+    return handleSessionMessage(ws, client, msg, ctx)
+  }
+
+  it('control: an input whose evaluator finishes while the connection is live is dispatched and recorded', async () => {
+    const { ws, client, session, recordUserInput, c } = await startBound()
+    await runInput(ws, client, async () => ({ verdict: 'forward' }))
+    assert.equal(session.sendMessage.callCount, 1)
+    assert.equal(recordUserInput.callCount, 1)
+    c.ws.close()
+  })
+
+  it('an input is neither dispatched nor recorded when its token is removed while the evaluator is pending', async () => {
+    const { ws, client, token, session, recordUserInput } = await startBound()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const pending = runInput(ws, client, async () => { await gate; return { verdict: 'forward' } })
+    await new Promise((r) => setImmediate(r))
+    assert.equal(pm.revokeSessionTokenById(pm._deviceIdForToken(token)).revoked, 1)
+    release()
+    await pending
+    assert.equal(session.sendMessage.callCount, 0)
+    assert.equal(recordUserInput.callCount, 0)
+  })
+
+  it('a rewrite verdict arriving after removal broadcasts nothing and dispatches nothing', async () => {
+    const { ws, client, token, session, recordUserInput } = await startBound()
+    const broadcasts = []
+    const origBroadcast = server._broadcastToSession.bind(server)
+    server._broadcastToSession = (...a) => { broadcasts.push(a[1]?.type); return origBroadcast(...a) }
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const pending = runInput(ws, client, async () => { await gate; return { verdict: 'rewrite', rewritten: 'rewritten draft text' } })
+    await new Promise((r) => setImmediate(r))
+    pm.revokeAllSessionTokens()
+    release()
+    await pending
+    assert.equal(session.sendMessage.callCount, 0)
+    assert.equal(recordUserInput.callCount, 0)
+    assert.equal(broadcasts.includes('evaluator_rewrite'), false)
+    void token
+  })
+
+  it('the connection check also fails closed for a credential that went invalid silently', async () => {
+    const { client, token, c } = await startBound()
+    assert.equal(server._isConnectionAuthorized(client), true)
+    pm._sessionTokens.delete(token)
+    assert.equal(server._isConnectionAuthorized(client), false)
+    assert.equal((await c.closed).code, WS_CLOSE_CREDENTIAL_INVALID)
+  })
+
+  it('a checkpoint restore stops before forking or creating a session once its connection has ended', async () => {
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    const orig = made.sessionsMap.get('session-1').session
+    orig.supportsConversationFork = true
+    orig.forkConversation = createSpy(async () => 'forked-id')
+    made.manager.createSession = createSpy(async () => 'new-session')
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    const port = await listen(server)
+    // Unscoped (linking-mode) pairing token: allowed to rewind, still revocable.
+    const token = pm.validatePairing(pm.currentPairingId).sessionToken
+    const c = await connect(port)
+    send(c.ws, { type: 'auth', token })
+    await seen(c.messages, 'auth_ok')
+    const [ws, client] = [...server.clients].find(([, cl]) => cl.pairingCredential === token)
+    client.activeSessionId = 'session-1'
+
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const checkpoint = { id: 'cp-1', name: 'cp', cwd: '/tmp/one', resumeSessionId: 'r1', boundaryMessageId: 'm1' }
+    const base = server._handlerCtx
+    const ctx = {
+      ...base,
+      correlationId: 'test',
+      services: { ...base.services, checkpointManager: {
+        getCheckpoint: () => checkpoint,
+        restoreCheckpoint: async () => { await gate; return checkpoint },
+      } },
+    }
+    const pending = handleSessionMessage(ws, client, { type: 'restore_checkpoint', checkpointId: 'cp-1', mode: 'both' }, ctx)
+    await new Promise((r) => setImmediate(r))
+    pm.revokeSessionTokenById(pm._deviceIdForToken(token))
+    release()
+    await pending
+    assert.equal(orig.forkConversation.callCount, 0)
+    assert.equal(made.manager.createSession.callCount, 0)
+  })
+
+  it('a checkpoint restore stops before creating a session when its connection ends during the fork', async () => {
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    const orig = made.sessionsMap.get('session-1').session
+    orig.supportsConversationFork = true
+    let releaseFork
+    const forkGate = new Promise((resolve) => { releaseFork = resolve })
+    orig.forkConversation = createSpy(async () => { await forkGate; return 'forked-id' })
+    made.manager.createSession = createSpy(async () => 'new-session')
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    const port = await listen(server)
+    // Unscoped (linking-mode) pairing token: allowed to rewind, still revocable.
+    const token = pm.validatePairing(pm.currentPairingId).sessionToken
+    const c = await connect(port)
+    send(c.ws, { type: 'auth', token })
+    await seen(c.messages, 'auth_ok')
+    const [ws, client] = [...server.clients].find(([, cl]) => cl.pairingCredential === token)
+    client.activeSessionId = 'session-1'
+
+    const checkpoint = { id: 'cp-1', name: 'cp', cwd: '/tmp/one', resumeSessionId: 'r1', boundaryMessageId: 'm1' }
+    const base = server._handlerCtx
+    const ctx = {
+      ...base,
+      correlationId: 'test',
+      services: { ...base.services, checkpointManager: {
+        getCheckpoint: () => checkpoint,
+        restoreCheckpoint: async () => checkpoint,
+      } },
+    }
+    const pending = handleSessionMessage(ws, client, { type: 'restore_checkpoint', checkpointId: 'cp-1', mode: 'both' }, ctx)
+    await new Promise((r) => setImmediate(r))
+    pm.revokeSessionTokenById(pm._deviceIdForToken(token))
+    releaseFork()
+    await pending
+    assert.equal(orig.forkConversation.callCount, 1)
+    assert.equal(made.manager.createSession.callCount, 0)
+  })
+
+  it('the production handler context carries the check', async () => {
+    await startBound()
+    assert.equal(typeof server._handlerCtx.transport.isConnectionAuthorized, 'function')
+  })
+})
+
+describe('an expired credential is caught by keepalive and by an auth frame', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function startWith(ttl) {
+    pm = new PairingManager({ wsUrl: 'wss://example.com', sessionTokenTtlMs: ttl })
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    const port = await listen(server)
+    // Only the explicit sweep / frame under test may end the connection.
+    clearInterval(server._pingInterval)
+    const token = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const c = await connect(port)
+    send(c.ws, { type: 'auth', token })
+    await seen(c.messages, 'auth_ok')
+    return { c, token }
+  }
+
+  it('the keepalive sweep ends a connection whose token expired', async () => {
+    const { c, token } = await startWith(60_000)
+    pm._sessionTokens.get(token).createdAt = Date.now() - 120_000
+    server._keepaliveSweep()
+    assert.equal((await c.closed).code, WS_CLOSE_CREDENTIAL_INVALID)
+    assert.equal(server.clients.size, 0)
+  })
+
+  it('the keepalive sweep ends a responsive connection whose token went invalid without announcing it', async () => {
+    const { c, token } = await startWith(60_000)
+    const client = [...server.clients.values()][0]
+    client.isAlive = true
+    pm._sessionTokens.delete(token)
+    server._keepaliveSweep()
+    assert.equal((await c.closed).code, WS_CLOSE_CREDENTIAL_INVALID)
+  })
+
+  it('an auth frame on an authenticated connection does not bypass the token check', async () => {
+    const { c, token } = await startWith(60_000)
+    pm._sessionTokens.get(token).createdAt = Date.now() - 120_000
+    send(c.ws, { type: 'auth', token })
+    assert.equal((await c.closed).code, WS_CLOSE_CREDENTIAL_INVALID)
+  })
+
+  it('a token found invalid with no known cause closes with a neutral reason', async () => {
+    const { c, token } = await startWith(60_000)
+    pm._sessionTokens.delete(token)
+    send(c.ws, { type: 'ping' })
+    const closed = await c.closed
+    assert.equal(closed.code, WS_CLOSE_CREDENTIAL_INVALID)
+    assert.equal(closed.reason, 'credential invalid')
+  })
+
+  it('an explicit revoke names the cause', async () => {
+    const { c, token } = await startWith(60_000)
+    pm.revokeSessionTokenById(pm._deviceIdForToken(token))
+    assert.equal((await c.closed).reason, 'credential revoked')
   })
 })

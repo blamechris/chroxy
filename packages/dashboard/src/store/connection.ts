@@ -163,6 +163,7 @@ import {
 } from './session-defaults';
 import {
   getWsCloseMessage,
+  isCredentialInvalidClose,
   getHealthCheckErrorMessage,
   // #4853: runtime type-guard for `VoiceInputMode`. Used in
   // `loadSavedConnection` below to validate the persisted
@@ -3500,8 +3501,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // (#7411) — see `clearTransientSessionStatePatch` for what it clears.
       sweepTransientSessionState(get);
 
-      // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
-      if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
+      // The server ended this connection because its pairing token is no longer
+      // valid (revoked / expired / evicted). Reconnecting with that token can
+      // only fail, so stop: forget the credential for THIS server entry only and
+      // fall back to the unpaired state (tokenless entry, disconnected, with the
+      // re-pair copy), as a rejected pairing does.
+      if (isCredentialInvalidClose(event?.code) && disconnectedAttemptId !== myAttemptId) {
+        setDisconnectedAttemptId(myAttemptId);
+        if (ownedServerId) get().updateServer(ownedServerId, { token: '' });
+        get().clearSavedConnection();
+        set({ connectionPhase: 'disconnected', connectionError: getWsCloseMessage(event!.code) });
+      } else if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
         // #4771: surface close-code-specific copy via the shared mapping
         // — e.g. a 4008 backpressure eviction now reads "Connection
         // dropped — the server was overwhelmed, reconnecting" instead

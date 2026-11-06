@@ -144,6 +144,7 @@ import {
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
+  isCredentialInvalidClose,
   getHealthCheckErrorMessage,
   // #5968 — seed the cross-session activity reducer state consumed by the mobile
   // MissionControlScreen. PR1 only initializes/resets it; the live feeder is PR2.
@@ -1604,6 +1605,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // skips the scheduleReconnect()/error writes below that the bare phase
       // guard wouldn't.
       if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
+      // The server ended this connection because its pairing token is no longer
+      // valid (revoked / expired / evicted). Reconnecting with that token can
+      // only fail, so stop: forget the saved credential and fall back to the
+      // disconnected / unpaired state with the re-pair copy.
+      if (isCredentialInvalidClose(event.code) && disconnectedAttemptId !== myAttemptId) {
+        setDisconnectedAttemptId(connectionAttemptId);
+        void get().clearSavedConnection();
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(event.code) ?? '', 0);
         return;
       }
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)

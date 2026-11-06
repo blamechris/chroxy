@@ -273,6 +273,14 @@ function reserveInputRequest(ctx, sessionId, msg) {
   return { record, duplicate: false }
 }
 
+// True while the connection that sent a frame is still authorized. Used after
+// an await, before any side effect (see ws-handler-context isConnectionAuthorized).
+// A ctx without the hook (hand-built test ctx) cannot end a connection; the
+// production ctx always carries it (assertCtxShape pins the roster).
+function connectionStillAuthorized(ctx, client) {
+  return ctx.transport?.isConnectionAuthorized?.(client) ?? true
+}
+
 function releaseInputRequest(ctx, record) {
   if (!record) return
   const records = getInputDedupRecords(ctx).get(record.sessionId)
@@ -732,6 +740,14 @@ async function handleInput(ws, client, msg, ctx) {
         if (pending.get(targetSessionId) === evalPromise) {
           pending.delete(targetSessionId)
         }
+      }
+
+      // The connection may have ended (credential revoked / expired) while the
+      // evaluator was running. Nothing below may dispatch, record or broadcast
+      // on its behalf.
+      if (!connectionStillAuthorized(ctx, client)) {
+        releaseInputRequest(ctx, inputRecord)
+        return
       }
 
       // #3636 — re-check input_conflict after the await. State may have

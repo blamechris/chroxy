@@ -190,6 +190,10 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       if (!checkpoint) throw new Error(`Checkpoint not found: ${msg.checkpointId}`)
     }
 
+    // The connection may have ended while the restore ran; do no further work
+    // (fork, new session, re-homing) on its behalf.
+    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
+
     // #6766/#6767: decide whether this rewind branches the conversation. A real
     // branch needs (a) a fork-capable provider on the ORIGINAL session, (b) a
     // captured fork boundary, and (c) a mode that includes the conversation
@@ -227,6 +231,8 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
         log.warn(`Checkpoint conversation fork failed, restoring files only: ${err.message}`)
       }
     }
+    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
+
     // #6767: a 'conversation'-only rewind that failed to branch would create a
     // misleading full-transcript session with no file change — surface the
     // failure instead. (Verified fork-capable + boundary above, so this only
