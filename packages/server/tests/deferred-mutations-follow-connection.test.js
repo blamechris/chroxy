@@ -355,17 +355,17 @@ describe('replies after silent expiry', () => {
 
   it('control: a reply to a connection with a live credential is delivered', async () => {
     const { ws, messages, sock } = await connectBound()
-    server._send(sock, { type: 'probe_reply' })
-    await waitFor(() => messages.find(m => m.type === 'probe_reply'), { timeoutMs: 2000, label: 'probe_reply' })
+    server._send(sock, { type: 'pong' })
+    await waitFor(() => messages.find(m => m.type === 'pong'), { timeoutMs: 2000, label: 'pong' })
     ws.close()
   })
 
   it('a reply is not delivered once the credential has lapsed, even before any sweep noticed', async () => {
     const { ws, messages, sock, token } = await connectBound()
     pm._sessionTokens.get(token).createdAt = Date.now() - 120_000 // expired, not yet swept
-    assert.equal(server._send(sock, { type: 'probe_reply' }), false)
+    assert.equal(server._send(sock, { type: 'pong' }), false)
     await new Promise((r) => setTimeout(r, 150))
-    assert.equal(messages.some(m => m.type === 'probe_reply'), false)
+    assert.equal(messages.some(m => m.type === 'pong'), false)
     ws.close()
   })
 
@@ -420,12 +420,12 @@ describe('a connection whose authentication was stripped', () => {
       await waitFor(() => messages.find(m => m.type === 'auth_ok'), { timeoutMs: 2000, label: 'auth_ok' })
       const [sock, client] = [...server.clients][0]
       client.authenticated = false // what a token revoke does
-      assert.equal(server._send(sock, { type: 'probe_reply' }), false, 'ordinary replies are withheld')
+      assert.equal(server._send(sock, { type: 'pong' }), false, 'ordinary replies are withheld')
       assert.equal(server._send(sock, { type: 'error', code: 'SOMETHING_ELSE', message: 'x' }), false, 'an ordinary error is withheld')
       assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_NOT_DURABLE', message: 'x' }), true, 'the revoke caveat still reaches it')
       ws.send(JSON.stringify({ type: 'auth', token: 'wrong' }))
       await waitFor(() => messages.find(m => m.type === 'auth_fail'), { timeoutMs: 2000, label: 'auth_fail' })
-      assert.equal(messages.some(m => m.type === 'probe_reply'), false)
+      assert.equal(messages.some(m => m.type === 'pong'), false)
       ws.close()
     } finally {
       server.close()
@@ -452,7 +452,7 @@ describe('a paired connection whose authentication was stripped', () => {
       const [sock, client] = [...server.clients].find(([, c]) => c.pairingCredential === token)
       client.authenticated = false // a primary revoke strips every connection, paired ones too
       assert.equal(pm.isSessionTokenLive(token), true, 'the pairing token itself is still live')
-      assert.equal(server._send(sock, { type: 'probe_reply' }), false)
+      assert.equal(server._send(sock, { type: 'pong' }), false)
       assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_UNAVAILABLE', message: 'x' }), false, 'only the exact revoke acknowledgement codes are exempt')
       assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_DURABILITY_UNKNOWN', message: 'x' }), true)
       ws.close()
@@ -477,8 +477,8 @@ describe('auth disabled (--no-auth)', () => {
       await waitFor(() => messages.find((m) => m.type === 'auth_ok'), { timeoutMs: 2000, label: 'auth_ok without any token' })
       const [sock, client] = [...server.clients][0]
       assert.equal(server._isConnectionAuthorized(client), true)
-      assert.equal(server._send(sock, { type: 'probe_reply' }), true)
-      await waitFor(() => messages.find((m) => m.type === 'probe_reply'), { timeoutMs: 2000, label: 'a server-initiated frame' })
+      assert.equal(server._send(sock, { type: 'pong' }), true)
+      await waitFor(() => messages.find((m) => m.type === 'pong'), { timeoutMs: 2000, label: 'a server-initiated frame' })
       ws.send(JSON.stringify({ type: 'ping' }))
       await waitFor(() => messages.find((m) => m.type === 'pong'), { timeoutMs: 2000, label: 'the reply to a request' })
       ws.send(JSON.stringify({ type: 'input', data: 'hello', sessionId: 'session-1' }))

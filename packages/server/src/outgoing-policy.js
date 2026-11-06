@@ -56,7 +56,7 @@ export const BOUND_OUTGOING_ALLOWED = Object.freeze([
   'background_work_changed', 'budget_exceeded', 'budget_resume_ack', 'budget_warning',
   'cancel_activity_ack', 'checkpoint_created', 'checkpoint_list', 'checkpoint_restored',
   'chroxy_context_hint_changed', 'claude_ready', 'client_focus_changed', 'client_joined',
-  'client_left', 'code_search_results', 'conversation_id', 'dev_preview_status',
+  'client_left', 'code_search_results', 'conversation_id', 'credential_invalidated', 'dev_preview_status',
   'diff_result', 'error', 'evaluate_draft_result', 'evaluator_clarify', 'evaluator_rewrite',
   'extension_message', 'file_content', 'git_branches_result', 'git_stage_result',
   'git_status_result', 'git_unstage_result', 'inactivity_warning', 'input_ack', 'key_exchange_ok',
@@ -93,7 +93,9 @@ export const BOUND_OUTGOING_SCHEMALESS_ALLOWED = Object.freeze([
 
 /** Schema-less frames a session-scoped connection never receives. @type {readonly string[]} */
 export const BOUND_OUTGOING_SCHEMALESS_DENIED = Object.freeze([
-  // Carries the daemon's own credential.
+  // Carries the daemon's own credential. The one exception is the token-less
+  // revoke notice (see frameForBoundClient): without it a connection whose
+  // authentication was stripped is never told to re-authenticate.
   'token_rotated',
   // A host-wide signal.
   'pairing_refreshed',
@@ -132,6 +134,14 @@ const projectLevel = (list) => (Array.isArray(list) ? list.filter((e) => e?.sour
 export function frameForBoundClient(message) {
   const type = message?.type
   if (typeof type !== 'string') return null
+  if (type === 'token_rotated') {
+    // The daemon's credential is never sent to this connection. Only the revoke
+    // notice passes, with any token removed: it tells a connection whose
+    // authentication was stripped that it must re-authenticate.
+    if (message.reason !== 'revoke') return null
+    const { token: _token, ...rest } = message
+    return rest
+  }
   if (DENIED.has(type)) return null
   if (REDACTED.has(type)) {
     if (type === 'mcp_servers' && Array.isArray(message.servers)) {

@@ -136,6 +136,8 @@ describe('HTTP routes and a session-scoped bearer token', () => {
     // along, another caller of the validity check that skips the scoped-token
     // test) changes a count and must be reviewed and classified above.
     const reviewed = {
+      // The status route re-checks the bearer after reading its body.
+      'http-routes.js:_isTokenValid': 1,
       'http-routes.js:_validateBearerAuth': 6,
       'http-routes.js:allowScoped': 1,
       'ws-server.js:_validateBearerAuth': 2,

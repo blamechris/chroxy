@@ -98,6 +98,19 @@ describe('frames with no outbound schema', () => {
     assert.equal(frameForBoundClient({ type: 'pairing_refreshed' }), null)
   })
 
+  it('the connection-ending notice and the token-less revoke notice still reach a session-scoped connection', () => {
+    for (const reason of ['revoked', 'expired', 'evicted', 'invalid']) {
+      assert.deepEqual(frameForBoundClient({ type: 'credential_invalidated', reason }), { type: 'credential_invalidated', reason })
+    }
+    // The revoke notice passes with any token removed; a scheduled rotation never does.
+    assert.deepEqual(
+      frameForBoundClient({ type: 'token_rotated', token: 'primary-secret', expiresAt: 5, reason: 'revoke' }),
+      { type: 'token_rotated', expiresAt: 5, reason: 'revoke' },
+    )
+    assert.equal(frameForBoundClient({ type: 'token_rotated', expiresAt: 5, reason: 'scheduled' }), null)
+    assert.equal(frameForBoundClient({ type: 'token_rotated', token: 'primary-secret', expiresAt: 5 }), null)
+  })
+
   it('delivery is deny-by-default: an unclassified or untyped frame is dropped', () => {
     assert.equal(frameForBoundClient({ type: 'some_future_frame', data: 1 }), null)
     assert.equal(frameForBoundClient({ data: 1 }), null)
