@@ -29,6 +29,7 @@ import { _resetModelDiscoveryStateForTests } from '../src/model-discovery.js'
 import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { SetThinkingLevelSchema } from '@chroxy/protocol'
 import { UNKNOWN } from '../src/codex-protocol-capabilities.js'
 import { spawn as realSpawn } from 'child_process'
 import { getProvider } from '../src/providers.js'
@@ -223,6 +224,43 @@ describe('codex model catalog — parsing model/list', () => {
     assert.deepEqual([...levels], ['hyper', 'bare'])
     assert.equal(parseReasoningLevels([]), null)
     assert.equal(parseReasoningLevels('low'), null)
+  })
+})
+
+describe('codex reasoning levels — parser output is a subset of what the wire accepts (#7790)', () => {
+  // Expectations are a hand-written table of tokens and verdicts, NOT derived
+  // from the parser or the predicate. The wire verdict is the real
+  // set_thinking_level Zod schema; the table pins what we expect of it.
+  const TOKENS = [
+    ['low', true], ['medium', true], ['high', true], ['xhigh', true], ['max', true], ['ultra', true],
+    ['x-high', true], ['x_high', true], ['a'.repeat(32), true],
+    ['0.5', false], ['xhigh.1', false], ['a'.repeat(33), false], ['two words', false],
+    ['../../etc', false], ['a/b', false],
+  ]
+  const wireAccepts = (level) => SetThinkingLevelSchema.safeParse({ type: 'set_thinking_level', level }).success
+
+  it('every level the parser emits passes the wire schema; every refused token is dropped', () => {
+    for (const [token, wireOk] of TOKENS) {
+      assert.equal(wireAccepts(token), wireOk, `fixture verdict for ${token} disagrees with the wire schema`)
+      for (const input of [[{ reasoningEffort: token }], [token]]) {
+        const out = parseReasoningLevels(input)
+        const advertised = out ? [...out] : []
+        assert.equal(advertised.includes(token), wireOk, `${token}: advertised iff wire-accepted`)
+        for (const level of advertised) assert.ok(wireAccepts(level), `${level} advertised but refused`)
+      }
+    }
+  })
+
+  it('a dotted level next to good ones is dropped, the rest survive in order', () => {
+    const out = parseReasoningLevels([{ reasoningEffort: 'low' }, { reasoningEffort: '0.5' }, { reasoningEffort: 'high' }])
+    assert.deepEqual([...out], ['low', 'high'])
+    assert.equal(parseReasoningLevels([{ reasoningEffort: '0.5' }]), null)
+  })
+
+  it('a malformed defaultReasoningEffort is not carried onto the row', () => {
+    const [row] = parseModelListResult({ data: [{ model: 'm', defaultReasoningEffort: '0.5', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }] })
+    assert.equal(row.defaultReasoningLevel, null)
+    assert.deepEqual([...row.reasoningLevels], ['low'])
   })
 })
 

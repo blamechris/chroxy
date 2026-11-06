@@ -57,6 +57,7 @@
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { isWellFormedThinkingLevel } from '@chroxy/protocol'
 import { createLogger } from './logger.js'
 import { probeMethod } from './codex-protocol-capabilities.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
@@ -174,13 +175,21 @@ function firstNonEmptyString(...values) {
   return null
 }
 
+function wellFormedLevelOrNull(level) {
+  return isWellFormedThinkingLevel(level) ? level : null
+}
+
 /**
  * `supportedReasoningEfforts: [{reasoningEffort, description}]` → the effort
  * strings, de-duplicated and order-preserved. `ReasoningEffort` is a non-empty
  * STRING in the app-server schema, not an enum (six values already in the wild:
  * low / medium / high / xhigh / max / ultra), so nothing is validated against a
  * fixed list here — a hardcoded list beside a growing set is this repo's #1
- * recurring defect.
+ * recurring defect. FORM is checked, though, with the same predicate the
+ * `set_thinking_level` wire schema uses (`isWellFormedThinkingLevel`, #7790):
+ * a level the wire would refuse (a dotted `0.5`, an over-long token) must not
+ * be advertised in the picker, or choosing it always fails with
+ * THINKING_LEVEL_NOT_APPLIED.
  *
  * @returns {ReadonlyArray<string>|null} null when there is nothing usable,
  *   so `withModelMetadata` (models.js) leaves the key ABSENT rather than
@@ -194,7 +203,7 @@ export function parseReasoningLevels(supportedReasoningEfforts) {
     // Tolerate both the object form the protocol uses and a bare string, so a
     // future flattening of the field does not read as "no levels".
     const level = typeof e === 'string' ? firstNonEmptyString(e) : firstNonEmptyString(e?.reasoningEffort)
-    if (!level || seen.has(level)) continue
+    if (!level || !isWellFormedThinkingLevel(level) || seen.has(level)) continue
     seen.add(level)
     out.push(level)
   }
@@ -231,7 +240,7 @@ export function parseModelListResult(result) {
       label: firstNonEmptyString(m.displayName) || id,
       description: firstNonEmptyString(m.description) || '',
       reasoningLevels: parseReasoningLevels(m.supportedReasoningEfforts),
-      defaultReasoningLevel: firstNonEmptyString(m.defaultReasoningEffort),
+      defaultReasoningLevel: wellFormedLevelOrNull(firstNonEmptyString(m.defaultReasoningEffort)),
       isDefault: m.isDefault === true,
     })
   }
