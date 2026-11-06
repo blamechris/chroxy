@@ -151,7 +151,7 @@ const CLAUDE_SETTINGS_SUFFIX = '.json'
 // The name a path segment carries: anything from a `:` on, and any trailing
 // dots or spaces, are dropped. The trim is a scan from the end, not a regex,
 // so a long run of dots or spaces costs linear time.
-function segmentName(seg) {
+export function segmentName(seg) {
   const colon = seg.indexOf(':')
   const name = colon === -1 ? seg : seg.slice(0, colon)
   let end = name.length
@@ -165,7 +165,7 @@ function segmentName(seg) {
 // capital or small sharp s becomes `ss`). An ASCII name is only lowercased.
 // Each segment is also checked as written, so this form only adds matches.
 const ASCII_NAME = /^[\x00-\x7f]*$/
-function canonicalName(name) {
+export function canonicalName(name) {
   if (ASCII_NAME.test(name)) return name.toLowerCase()
   return [...name.normalize('NFKD').replace(/\p{M}/gu, '')]
     .map((ch) => ch.toLowerCase().toUpperCase().toLowerCase())
@@ -302,6 +302,10 @@ export const FLOOR_MAX_CALL_COMPONENTS = 16384
 // FLOOR_MAX_CALL_WALK components walked across all its targets (those a symlink
 // adds included), the call floors.
 export const FLOOR_MAX_CALL_WALK = 16384
+// Filesystem-identity lookups made for the configured Claude config directory in
+// one call; past it the call floors. Separate from the walk so a large patch is
+// not floored by this budget alone.
+export const FLOOR_MAX_CALL_IDENTITY = 16384
 // And more than FLOOR_MAX_CALL_BYTES UTF-8 bytes across one call's targets
 // floors the call. A thousand-file patch of 250-byte absolute paths is about 250 KB.
 export const FLOOR_MAX_CALL_BYTES = 262144
@@ -433,10 +437,18 @@ function realpathDeepestAncestorSync(absPath) {
  */
 function _configRootRule(call) {
   if (call.configRoot !== undefined) return call.configRoot
-  const root = claudeConfigDir()
+  let root
+  let home
+  try {
+    root = (call.configDirFn ?? claudeConfigDir)()
+    home = claudeHomeDir()
+  } catch {
+    // The resolver itself failed: nothing can be said about the directory, so floor.
+    call.configRoot = { root: null, broad: false, anchor: null, anchorId: null, tail: [], anchorAncestorIds: null, failed: true }
+    return call.configRoot
+  }
   let rule = null
   if (basename(root).toLowerCase() !== CLAUDE_DIR) {
-    let home = claudeHomeDir()
     try { home = realpathSync.native(home) } catch { /* the raw home still gives a prefix test */ }
     // `anchor` is the root, or its deepest EXISTING ancestor when the root is not
     // created yet; `tail` are the missing pieces between them (lowercased).
@@ -475,12 +487,13 @@ function _withAncestors(p) {
  * Which filesystem object is at `p`: a `device:inode` id; null when the
  * filesystem reports inode 0 (identifies nothing); undefined when nothing is
  * there (ENOENT / ENOTDIR). Any other error throws, and callers fail closed.
- * Each distinct lookup is charged to the call's walk budget and remembered for
+ * Each distinct lookup is charged to the call's own identity budget
+ * ({@link FLOOR_MAX_CALL_IDENTITY}, separate from the component walk) and remembered for
  * the rest of the call; running out of budget throws, so the call floors.
  */
 function _statId(p, call) {
   if (call.ids.has(p)) return call.ids.get(p)
-  if (--call.walk.left < 0) throw Object.assign(new Error('floor: identity lookups exceed the call budget'), { code: 'EBUDGET' })
+  if (--call.idBudget.left < 0) throw Object.assign(new Error('floor: identity lookups exceed the call budget'), { code: 'EBUDGET' })
   let id
   try {
     const st = (call.statFn ?? statSync)(p, { bigint: true })
@@ -496,8 +509,9 @@ function _statId(p, call) {
 /** A name the filesystem might treat as another (case, normalisation). */
 function _sameName(a, b, call) {
   if (a === b) return true
-  const ca = _canonicalNameIn(a, call)
-  const cb = _canonicalNameIn(b, call)
+  // Trailing dots and spaces, and a `:` suffix, are not part of a Windows name.
+  const ca = _canonicalNameIn(segmentName(a), call)
+  const cb = _canonicalNameIn(segmentName(b), call)
   return ca === null || cb === null || ca === cb
 }
 
@@ -899,6 +913,7 @@ function _newCall(statFn) {
     realBase: undefined,
     configRoot: undefined,
     walk: { left: FLOOR_MAX_CALL_WALK },
+    idBudget: { left: FLOOR_MAX_CALL_IDENTITY },
     names: new Map(),
     canonical: { left: FLOOR_MAX_CALL_CANONICAL },
     ids: new Map(),
@@ -1388,6 +1403,7 @@ function globNarrowsSearch(glob) {
  * counts as both.
  * @param {object} input
  * @param {string} [cwd]
+ * @param {Function} [statFn]  injected `stat`, for tests
  * @returns {{ near: boolean, covers: boolean }}
  */
 function _searchReachToConfigRoot(input, cwd, statFn) {
@@ -1419,9 +1435,13 @@ function _searchReachToConfigRoot(input, cwd, statFn) {
  * without making a real directory unreadable.
  */
 export const floorInternalsForTest = {
-  hitsConfigRoot(resolved, secretsOnly, statFn, budget) {
+  sameName(a, b) {
+    return _sameName(a, b, _newCall())
+  },
+  hitsConfigRoot(resolved, secretsOnly, statFn, budget, configDirFn) {
     const call = _newCall(statFn)
-    if (budget !== undefined) call.walk.left = budget
+    call.configDirFn = configDirFn
+    if (budget !== undefined) call.idBudget.left = budget
     // An array is evaluated within ONE call, sharing its lookups and budget.
     let hit = false
     for (const target of Array.isArray(resolved) ? resolved : [resolved]) {

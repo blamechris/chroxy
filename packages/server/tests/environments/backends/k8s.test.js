@@ -2540,25 +2540,24 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     assert.equal(frame.cwd, '/workspace')
   })
 
-  it('pins the claude config directory in the Pod for a claude spawn', async () => {
+  it('asks the sidecar to unset CLAUDE_CONFIG_DIR for a claude spawn, and forwards no value', async () => {
     const { backend, ws } = makeBackendWithFakeWs()
     backend.streamCliInEnvironment('pod-x', {
-      cmd: 'claude', args: ['-p'], env: { CLAUDE_CONFIG_DIR: '/workspace/claude-data' }, agentToken: 'tok',
+      cmd: 'claude', args: ['-p'], env: { CLAUDE_CONFIG_DIR: '/workspace/claude-data', FOO: '1' }, agentToken: 'tok',
     })
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(JSON.parse(ws.sent[0]).env.CLAUDE_CONFIG_DIR, '/home/chroxy/.claude')
+    const frame = JSON.parse(ws.sent[0])
+    assert.deepEqual(frame.unsetEnv, ['CLAUDE_CONFIG_DIR'])
+    assert.deepEqual(frame.env, { FOO: '1' })
   })
 
-  it('pins it under the HOME the spawn carries, and leaves a non-claude spawn alone', async () => {
-    const first = makeBackendWithFakeWs()
-    first.backend.streamCliInEnvironment('pod-x', { cmd: 'claude', args: ['-p'], env: { HOME: '/home/dev' }, agentToken: 'tok' })
+  it('leaves a non-claude spawn alone', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+    backend.streamCliInEnvironment('pod-x', { cmd: 'ls', args: [], env: { FOO: '1' }, agentToken: 'tok' })
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(JSON.parse(first.ws.sent[0]).env.CLAUDE_CONFIG_DIR, '/home/dev/.claude')
-
-    const second = makeBackendWithFakeWs()
-    second.backend.streamCliInEnvironment('pod-x', { cmd: 'ls', args: [], env: { FOO: '1' }, agentToken: 'tok' })
-    await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual(JSON.parse(second.ws.sent[0]).env, { FOO: '1' })
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.unsetEnv, undefined)
+    assert.deepEqual(frame.env, { FOO: '1' })
   })
 
   it('Rancher inherits the same exec path', async () => {

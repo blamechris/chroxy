@@ -900,7 +900,7 @@ describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
 
     const { args } = getLastSpawn()
     const tail = args.slice(args.indexOf('ctr-x'))
-    assert.deepEqual(tail, ['ctr-x', 'node', containerCliPath, '--output-format', 'stream-json', '--verbose'])
+    assert.deepEqual(tail, ['ctr-x', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'node', containerCliPath, '--output-format', 'stream-json', '--verbose'])
     assert.ok(!args.includes(hostBin), 'host binary path must not reach docker exec')
   })
 
@@ -914,7 +914,7 @@ describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
     })
 
     const { args } = getLastSpawn()
-    assert.deepEqual(args.slice(args.indexOf('ctr-x')), ['ctr-x', '/usr/local/bin/claude', '-p'])
+    assert.deepEqual(args.slice(args.indexOf('ctr-x')), ['ctr-x', 'env', '-u', 'CLAUDE_CONFIG_DIR', '/usr/local/bin/claude', '-p'])
   })
 
   it('does not remap a non-claude command', () => {
@@ -1073,7 +1073,6 @@ describe('DockerBackend.streamCliInEnvironment() — exact argv env-key pin (#74
       'NODE_ENV',
       ...Object.keys(getChroxyHostEnv()),
       'HOME',
-      'CLAUDE_CONFIG_DIR',
       'PATH',
     ]
     assert.deepEqual(

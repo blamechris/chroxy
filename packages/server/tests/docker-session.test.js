@@ -724,29 +724,26 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
     )
   })
 
-  it('pins the claude config directory to the .claude under the forwarded HOME', async () => {
-    const { captured, session } = await captureArgv()
-    const home = session._buildChildEnv().HOME
-    assert.ok(typeof home === 'string' && home.startsWith('/'), 'POSITIVE CONTROL: the child env carries an absolute HOME')
-    const pins = captured.filter((a) => String(a).startsWith('CLAUDE_CONFIG_DIR='))
-    assert.deepEqual(pins, [`CLAUDE_CONFIG_DIR=${home.replace(/\/+$/, '')}/.claude`])
-  })
-
-  it('pins the claude config directory to the default container home when HOME is absent', async () => {
-    const { DockerSession } = await import('../src/docker-session.js')
-    const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
-    session._containerId = 'c0ffee1234567890'
-    const env = { ...session._buildChildEnv(), CLAUDE_CONFIG_DIR: '/workspace/claude-data' }
-    delete env.HOME
-    session._buildChildEnv = () => env
-    let captured = null
-    const child = new EventEmitter()
-    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {}
-    session._spawnDocker = (a) => { captured = a; return child }
-    session._spawnPersistentProcess(['-p'])
-    session._cleanupReadlines()
-    for (const st of [child.stdin, child.stdout, child.stderr]) st.destroy()
-    assert.deepEqual(captured.filter((a) => String(a).startsWith('CLAUDE_CONFIG_DIR=')), ['CLAUDE_CONFIG_DIR=/home/chroxy/.claude'])
+  it('runs claude with CLAUDE_CONFIG_DIR unset, whatever HOME holds', async () => {
+    for (const home of ['/home/chroxy', undefined, 'C:\\Users\\dev']) {
+      const { DockerSession } = await import('../src/docker-session.js')
+      const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+      session._containerId = 'c0ffee1234567890'
+      const env = { ...session._buildChildEnv(), CLAUDE_CONFIG_DIR: '/workspace/claude-data' }
+      if (home === undefined) delete env.HOME
+      else env.HOME = home
+      session._buildChildEnv = () => env
+      let captured = null
+      const child = new EventEmitter()
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {}
+      session._spawnDocker = (a) => { captured = a; return child }
+      session._spawnPersistentProcess(['-p'])
+      session._cleanupReadlines()
+      for (const st of [child.stdin, child.stdout, child.stderr]) st.destroy()
+      const at = captured.indexOf('c0ffee1234567890')
+      assert.deepEqual(captured.slice(at, at + 5), ['c0ffee1234567890', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'claude'], `HOME=${home}`)
+      assert.ok(!captured.some((a) => String(a).startsWith('CLAUDE_CONFIG_DIR=')), 'no value is forwarded')
+    }
   })
 
   it('does not leak the host sidecar PATH by any other argv route', async () => {

@@ -40,7 +40,7 @@ let project
 let savedEnv
 
 before(() => {
-  sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'cfgdir-floor-')))
+  sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), 'cfgdir-floor-')))
   home = join(sandbox, 'home')
   project = join(home, 'work', 'project')
   mkdirSync(project, { recursive: true })
@@ -48,9 +48,10 @@ before(() => {
 after(() => rmSync(sandbox, { recursive: true, force: true }))
 
 beforeEach(() => {
-  savedEnv = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, HOME: process.env.HOME }
+  savedEnv = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
   delete process.env.CLAUDE_CONFIG_DIR
   process.env.HOME = home
+  process.env.USERPROFILE = home
 })
 afterEach(() => {
   for (const [k, v] of Object.entries(savedEnv)) {
@@ -62,7 +63,7 @@ afterEach(() => {
 function mkRoot(name) {
   const dir = join(sandbox, name)
   mkdirSync(dir, { recursive: true })
-  return realpathSync(dir)
+  return realpathSync.native(dir)
 }
 
 // The same verdict through both pipelines: the in-process manager and the
@@ -222,7 +223,7 @@ describe('where the override sits relative to HOME', () => {
   it('an override strictly inside HOME is dedicated: writes inside it are floored', async () => {
     const root = join(home, 'claude-data')
     mkdirSync(join(root, 'commands'), { recursive: true })
-    process.env.CLAUDE_CONFIG_DIR = realpathSync(root)
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
     await assertBoth('Write', { file_path: join(root, 'commands', 'x.md') }, true, 'inside HOME write')
     await assertBoth('Read', { file_path: join(root, 'settings.json') }, true, 'inside HOME settings')
     await assertBoth('Read', { file_path: join(root, 'commands', 'x.md') }, false, 'inside HOME read')
@@ -246,7 +247,7 @@ describe('where the override sits relative to HOME', () => {
   it('floors a relative target that resolves into the override', async () => {
     const root = join(home, 'claude-data')
     mkdirSync(root, { recursive: true })
-    process.env.CLAUDE_CONFIG_DIR = realpathSync(root)
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
     await assertBoth('Read', { file_path: '../../claude-data/settings.json' }, true, 'relative settings')
     await assertBoth('Write', { file_path: '../../claude-data/commands/x.md' }, true, 'relative write')
     await assertBoth('Write', { file_path: '../../other/x.md' }, false, 'relative elsewhere')
@@ -326,8 +327,8 @@ describe('inside a Claude Code worktree of the session workspace', () => {
     const workspace = join(sandbox, 'wsproj')
     const root = join(workspace, '.claude', 'worktrees', 'demo', 'claude-data')
     mkdirSync(root, { recursive: true })
-    process.env.CLAUDE_CONFIG_DIR = realpathSync(root)
-    const cwd = realpathSync(workspace)
+    process.env.CLAUDE_CONFIG_DIR = realpathSync.native(root)
+    const cwd = realpathSync.native(workspace)
     await assertBoth('Read', { file_path: join(root, 'settings.json') }, true, 'worktree settings', cwd)
     await assertBoth('Write', { file_path: join(root, 'commands', 'x.md') }, true, 'worktree write', cwd)
     await assertBoth('Write', { file_path: join(workspace, '.claude', 'worktrees', 'demo', 'src', 'a.js') }, false, 'worktree ordinary file', cwd)
@@ -394,7 +395,7 @@ describe('session creation boundary', () => {
 
 describe('an override directory that does not exist yet', () => {
   it('is still recognised by its spelling', async () => {
-    const root = join(realpathSync(sandbox), 'not-created-yet')
+    const root = join(realpathSync.native(sandbox), 'not-created-yet')
     process.env.CLAUDE_CONFIG_DIR = root
     await assertBoth('Read', { file_path: join(root, 'settings.json') }, true, 'settings')
     await assertBoth('Write', { file_path: join(root, 'commands', 'x.md') }, true, 'write')
@@ -551,5 +552,88 @@ describe('session creation with a worktree', () => {
     sm._worktreeBase = join(sandbox, 'wt-ok2')
     sm._resolveCreateSessionPlan(args(join(sandbox, 'wt-ok2')))
     assert.equal(recreated.length, 1)
+  })
+})
+
+describe('a missing tail compared the way the filesystem would', () => {
+  const nfc = (n) => n.normalize('NFC')
+  const nfd = (n) => n.normalize('NFD')
+
+  it('matches a differently normalised spelling of a missing root', async () => {
+    const parent = mkRoot('tailparent')
+    process.env.CLAUDE_CONFIG_DIR = join(parent, nfc('caf\u00e9-cfg'))
+    await assertBoth('Read', { file_path: join(parent, nfd('caf\u00e9-cfg'), 'settings.json') }, true, 'NFD settings')
+    await assertBoth('Write', { file_path: join(parent, nfd('caf\u00e9-cfg'), 'x.md') }, true, 'NFD write')
+    await assertBoth('Write', { file_path: join(parent, nfd('caf\u00e9-other'), 'x.md') }, false, 'other name')
+  })
+
+  it('matches a differently cased spelling of a missing root', async () => {
+    const parent = mkRoot('tailparent')
+    process.env.CLAUDE_CONFIG_DIR = join(parent, 'caf\u00e9-cfg')
+    await assertBoth('Write', { file_path: join(parent, 'CAF\u00c9-CFG', 'x.md') }, true, 'upper-case write')
+  })
+
+  it('matches a search from a differently normalised missing intermediate directory', async () => {
+    const parent = mkRoot('tailparent')
+    process.env.CLAUDE_CONFIG_DIR = join(parent, nfc('\u00fcn\u00ef'), 'cfg')
+    await assertBoth('Grep', { path: join(parent, nfd('\u00fcn\u00ef')), pattern: '.' }, true, 'NFD intermediate')
+    await assertBoth('Grep', { path: join(parent, nfd('\u00fcn\u00ef-x')), pattern: '.' }, false, 'other intermediate')
+  })
+
+  it('ignores trailing dots and spaces, as Windows does, through the win32 spelling', () => {
+    const w = path.win32
+    const rest = pathPiecesUnder('C:\\x', 'C:\\x\\cfg.\\settings.json', w)
+    assert.deepEqual(rest, ['cfg.', 'settings.json'])
+    assert.equal(floorInternalsForTest.sameName(rest[0], 'cfg'), true)
+    assert.equal(floorInternalsForTest.sameName('cfg ', 'cfg'), true)
+    assert.equal(floorInternalsForTest.sameName('cfg2', 'cfg'), false)
+  })
+})
+
+describe('the cwd check on a root that does not exist yet', () => {
+  it('refuses a worktree base inside it, in any spelling', () => {
+    const parent = mkRoot('tailparent')
+    process.env.CLAUDE_CONFIG_DIR = join(parent, 'caf\u00e9-cfg'.normalize('NFC'))
+    assert.match(claudeConfigDirCwdDenial(join(parent, 'caf\u00e9-cfg', 'wt', 'id')) ?? '', /Claude config directory/)
+    assert.match(claudeConfigDirCwdDenial(join(parent, 'caf\u00e9-cfg'.normalize('NFD'), 'wt', 'id')) ?? '', /Claude config directory/)
+    assert.match(claudeConfigDirCwdDenial(join(parent, 'CAF\u00c9-CFG', 'wt', 'id')) ?? '', /Claude config directory/)
+    assert.equal(claudeConfigDirCwdDenial(join(parent, 'caf\u00e9-other', 'wt', 'id')), null)
+  })
+
+  it('refuses a worktree created at a base inside it, before creating anything', () => {
+    const parent = mkRoot('tailparent')
+    const root = join(parent, 'not-yet-created')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const sm = new SessionManager({ stateFilePath: join(sandbox, 'state-missing-root.json'), providerType: 'test-floor-fake-9027' })
+    try {
+      const created = []
+      sm._addDetachedWorktree = (repo, dir) => { created.push(dir) }
+      sm._worktreeBase = join(root, 'wt')
+      assert.throws(() => sm._resolveCreateSessionPlan({ cwd: project, worktree: true }), SessionDirectoryError)
+      assert.deepEqual(created, [])
+    } finally {
+      sm.destroy?.()
+    }
+  })
+})
+
+describe('budgets and failures in the identity lookups', () => {
+  it('a large patch below the walk threshold is not floored by the identity budget', async () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const rel = (k) => join(`p${k}`, 'a', 'b', 'c', 'd', 'e', 'f', 'g.txt')
+    for (let k = 0; k < 1000; k++) mkdirSync(join(project, `p${k}`, 'a', 'b', 'c', 'd', 'e', 'f'), { recursive: true })
+    const input = { file_path: 'a.txt', changes: Array.from({ length: 1000 }, (_, k) => ({ path: rel(k), kind: 'update', diff: '' })) }
+    assert.equal(hookFloors('apply_patch', input), false)
+    assert.equal(await inProcessPrompts('apply_patch', input, 'auto'), false)
+    delete process.env.CLAUDE_CONFIG_DIR
+    assert.equal(hookFloors('apply_patch', input), false, 'control: the same patch without an override')
+  })
+
+  it('a resolver that throws floors rather than escaping', () => {
+    const target = join(project, 'src', 'a.js')
+    const boom = () => { throw new Error('no home') }
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined, undefined, boom), true)
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined, undefined, undefined), false)
   })
 })

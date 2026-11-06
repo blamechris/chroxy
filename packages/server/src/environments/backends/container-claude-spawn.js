@@ -80,17 +80,15 @@ export function remapClaudeSpawn({ cmd, args = [], containerCliPath, hostClaudeP
 }
 
 /**
- * The claude config directory every container claude spawn is pinned to: the
- * `.claude` under the container user's HOME. Pinned explicitly so an image- or
- * pod-defined `CLAUDE_CONFIG_DIR` cannot move it somewhere the permission floor
- * does not recognise (the floor knows `.claude` by name in the guest). One
- * implementation for the Docker backend, the Docker CLI session and the Pod path.
- *
- * @param {unknown} home  the HOME the spawn runs with, when known (absolute path)
- * @param {string} [user]  the container user to fall back to (`/home/<user>`)
- * @returns {string}
+ * Claude resolves its config directory from `CLAUDE_CONFIG_DIR` when the container
+ * image or pod defines it, which can put it somewhere the permission floor does not
+ * recognise. A claude spawn in a container therefore runs with the variable unset,
+ * so claude uses its own `<HOME>/.claude` (recognised by name) and its credentials
+ * and global config stay where they are. One definition for every container path.
  */
-export function pinnedContainerClaudeConfigDir(home, user = 'chroxy') {
-  const base = typeof home === 'string' && home.startsWith('/') ? home.replace(/\/+$/, '') : `/home/${user}`
-  return `${base}/.claude`
+export const CONTAINER_UNSET_ENV = Object.freeze(['CLAUDE_CONFIG_DIR'])
+
+/** The argv prefix that runs a command with {@link CONTAINER_UNSET_ENV} unset (`env -u VAR ...`). */
+export function containerUnsetEnvPrefix() {
+  return ['env', ...CONTAINER_UNSET_ENV.flatMap((name) => ['-u', name])]
 }

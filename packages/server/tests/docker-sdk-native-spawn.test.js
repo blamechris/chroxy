@@ -43,7 +43,7 @@ describe('DockerSdkSession spawn callback, native SDK shape (#8027)', () => {
     const { cmd, args } = getLastSpawn()
     assert.equal(cmd, 'docker')
     assert.deepEqual(args.slice(args.indexOf('ctr-native')), [
-      'ctr-native', 'node', cli, '--output-format', 'stream-json', '--input-format', 'stream-json',
+      'ctr-native', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'node', cli, '--output-format', 'stream-json', '--input-format', 'stream-json',
     ])
     assert.ok(!args.includes(hostBin))
     session.removeAllListeners()
@@ -57,7 +57,7 @@ describe('DockerSdkSession spawn callback, native SDK shape (#8027)', () => {
     session._augmentQueryOptions(options)
     options.spawnClaudeCodeProcess({ command: pinned, args: ['-p'], cwd: '/tmp/work', env: {} })
     const { args } = getLastSpawn()
-    assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'node', cli, '-p'])
+    assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'node', cli, '-p'])
     assert.ok(!args.includes(pinned))
     session.removeAllListeners()
   })
@@ -72,17 +72,18 @@ describe('DockerSdkSession spawn callback, native SDK shape (#8027)', () => {
       env: {},
     })
     const { args } = getLastSpawn()
-    assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'node', cli, '-p'])
+    assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'env', '-u', 'CLAUDE_CONFIG_DIR', 'node', cli, '-p'])
     session.removeAllListeners()
   })
 
-  it('pins the claude config directory to the .claude under the container HOME', () => {
+  it('runs claude with CLAUDE_CONFIG_DIR unset and forwards none', () => {
     const { callback, getLastSpawn, session } = makeCallback('/usr/local/bin/claude')
     callback({ command: 'node', args: ['/x/@anthropic-ai/claude-code/cli.js', '-p'], cwd: '/tmp/work', env: { CLAUDE_CONFIG_DIR: '/workspace/claude-data' } })
     const { args } = getLastSpawn()
-    const envPairs = args.flatMap((a, k) => (a === '--env' ? [args[k + 1]] : []))
-    assert.ok(envPairs.includes('CLAUDE_CONFIG_DIR=/home/chroxy/.claude'), 'config dir is the .claude under HOME')
-    assert.ok(!envPairs.includes('CLAUDE_CONFIG_DIR=/workspace/claude-data'), 'a caller value is not forwarded')
+    const tail = args.slice(args.indexOf('ctr-native'))
+    assert.deepEqual(tail.slice(0, 4), ['ctr-native', 'env', '-u', 'CLAUDE_CONFIG_DIR'])
+    assert.ok(!args.some((a) => String(a).startsWith('CLAUDE_CONFIG_DIR=')), 'no value is forwarded')
     session.removeAllListeners()
   })
+
 })

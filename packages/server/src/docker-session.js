@@ -4,7 +4,7 @@ import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
-import { pinnedContainerClaudeConfigDir } from './environments/backends/container-claude-spawn.js'
+import { containerUnsetEnvPrefix } from './environments/backends/container-claude-spawn.js'
 
 const log = createLogger('docker-session')
 
@@ -495,11 +495,6 @@ export class DockerSession extends CliSession {
         dockerArgs.push('--env', `${key}=${val}`)
       }
     }
-    // Pin claude's config directory to the `.claude` under the forwarded HOME (or the
-    // default container user's home when there is none), so an
-    // image-defined CLAUDE_CONFIG_DIR cannot move it somewhere the permission floor
-    // does not know (it recognises `.claude` by name in the guest).
-    dockerArgs.push('--env', `CLAUDE_CONFIG_DIR=${pinnedContainerClaudeConfigDir(env.HOME)}`)
     // Always forward CHROXY_HOST if set
     if (env.CHROXY_HOST) {
       dockerArgs.push('--env', `CHROXY_HOST=${env.CHROXY_HOST}`)
@@ -513,7 +508,9 @@ export class DockerSession extends CliSession {
       dockerArgs.push('--env', `${key}=${val}`)
     }
 
-    dockerArgs.push(this._containerId, 'claude', ...claudeArgs)
+    // Run claude with CLAUDE_CONFIG_DIR unset: an image-defined value cannot move its
+    // config directory somewhere the permission floor does not recognise.
+    dockerArgs.push(this._containerId, ...containerUnsetEnvPrefix(), 'claude', ...claudeArgs)
 
     log.info(`Exec into container ${this._containerId.slice(0, 12)} (model: ${this.model || 'default'})`)
 

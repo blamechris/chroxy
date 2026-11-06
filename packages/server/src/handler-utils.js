@@ -7,11 +7,12 @@
  */
 import fs, { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, dirname, resolve, relative, sep, basename, isAbsolute, posix as posixPath, win32 as win32Path } from 'path'
+import { join, dirname, resolve, relative, sep, basename, isAbsolute, parse, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
 import { resolveClaudeConfigDirOverride } from './utils/claude-config-dir.js'
+import { canonicalName, segmentName } from './permission-floor.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { isBoundClient, isBoundToOtherSession } from './environments/authority.js'
 
@@ -661,6 +662,15 @@ function claudeConfigDirOverride() {
   return resolveClaudeConfigDirOverride(process.env.CLAUDE_CONFIG_DIR)
 }
 
+// A path with every component folded the way the permission floor compares names
+// (case, Unicode normalisation, trailing dots and spaces), so a spelling the
+// filesystem treats as the same name compares equal.
+function foldPath(p) {
+  const { root } = parse(p)
+  const parts = p.slice(root.length).split(/[\\/]+/).filter((x) => x.length > 0)
+  return root.toLowerCase() + parts.map((x) => canonicalName(segmentName(x))).join(sep)
+}
+
 /**
  * The refusal for a session working directory inside the configured Claude
  * config directory (CLAUDE_CONFIG_DIR), or null. This is the check the session
@@ -700,7 +710,7 @@ export function claudeConfigDirCwdDenial(cwd) {
   }
   if (isPathWithin(home, override)) return null
   const wouldBe = tail.length ? join(existing, ...tail.reverse()) : existing
-  if (isPathWithin(wouldBe.toLowerCase(), override.toLowerCase())) return CLAUDE_CONFIG_DIR_DENIED
+  if (isPathWithin(foldPath(wouldBe), foldPath(override))) return CLAUDE_CONFIG_DIR_DENIED
   return protectedDirectoryDenial(existing, home, { claudeConfigOnly: true })
 }
 

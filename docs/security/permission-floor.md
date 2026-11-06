@@ -256,7 +256,9 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
   is the same directory. A directory that does not exist yet is recognised through
   its deepest existing ancestor (by filesystem object) plus the missing names. A
   location that cannot be checked, or a request whose lookups exceed the call's
-  budget, floors; lookups are cached within one evaluation.
+  identity budget (separate from the component walk), floors; lookups are cached within
+  one evaluation. Missing names are compared the way the filesystem would (case,
+  Unicode normalisation, trailing dots and spaces).
 - **Grep:** a recursive search from the directory, or from a directory above it,
   floors unless a `glob` narrows it (an exclusion-only glob does not narrow). A
   `glob` is also tested against bare `settings*.json` when the search is near it.
@@ -277,10 +279,11 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
   worktree directory is judged before it is created or recreated. A
   restored session that now points into it fails the restore like any other
   (logged, parked), and the WS handlers refuse it through `validateCwdAllowed`.
-- **Containers:** claude's config directory inside a Docker session (SDK and CLI)
-  and a Kubernetes or Rancher Pod is pinned to the `.claude` under the container
-  HOME (`/home/chroxy` when none is known), so the guest location is always one
-  the floor recognises by name, whatever the image defines.
+- **Containers:** a claude spawn in a Docker session (SDK and CLI) runs through
+  `env -u CLAUDE_CONFIG_DIR`, and a Kubernetes or Rancher Pod spawn asks the sidecar
+  to remove it (`unsetEnv`). Claude then uses its own `<HOME>/.claude`, which the
+  floor recognises by name, whatever the image defines; its credentials and global
+  config stay where they are. A non-claude exec is left alone.
 - **Windows:** containment is case-insensitive and drive-aware
   (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere. The
   Windows spelling is tested through the verdict function on every host; the full
