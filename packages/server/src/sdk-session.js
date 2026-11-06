@@ -1,3 +1,4 @@
+import { assistantResponseText, sdkDeclarationEligible } from './assistant-response.js'
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { performance } from 'node:perf_hooks'
@@ -224,6 +225,9 @@ function toolResultText(block) {
 }
 
 export class SdkSession extends BaseSession {
+  static canonicalAssistantResponses = true
+  static declarationTurnOwnership = true
+
   // #5858: marks this as a Claude-family provider — the single source of truth
   // for `isClaudeProvider()` (drives the createSession soft-fallback for stale
   // model ids + the shared models registry). Docker subclasses inherit it.
@@ -1078,6 +1082,10 @@ export class SdkSession extends BaseSession {
     // affect the wire schema; clients treat messageId as opaque string.
     const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
+    // This immutable request id remains this query's identity across awaits,
+    // timeout recovery and a successor query taking over the session.
+    const emitTurnEvent = (event, payload) => this.emit(event, { ...payload, declarationTurnId: messageId })
+    this.emit('declaration_turn', { declarationTurnId: messageId })
     // Shared ref so _handleResultTimeout can observe the latest value
     // when it fires (the timer was armed when hasStreamStarted was still
     // false, but the turn may have streamed before the timeout landed).
@@ -1368,7 +1376,7 @@ export class SdkSession extends BaseSession {
         if (reportedShellIds.has(task.taskId)) continue
         reportedShellIds.add(task.taskId)
         const tail = 'A claude-sdk session runs background work only within the turn that started it.'
-        this.emit('error', {
+        emitTurnEvent('error', {
           code: 'background_task_ended_with_turn',
           message: outcome === 'stopped'
             ? `Background shell "${task.description}" was still running when the turn ended and was stopped with it; ${tail}`
@@ -1587,7 +1595,7 @@ export class SdkSession extends BaseSession {
         // that turn's, and this one only reports and ends its own process.
         const superseded = supersededByNewerTurn()
         for (const { task, kind, stopped } of stopResults) {
-          this.emit('error', {
+          emitTurnEvent('error', {
             code: 'background_task_ended_with_turn',
             message: stopped
               ? `Background ${kind} "${task.description}" was still running when the turn ended and was stopped with it; a claude-sdk session runs background work only within the turn that started it.`
@@ -1614,7 +1622,8 @@ export class SdkSession extends BaseSession {
         reapTurnShells()
 
         if (streamState.hasStreamStarted) {
-          this.emit('stream_end', { messageId })
+          const outcome = outcomeFromSdkResult(msg)
+          this.emit('stream_end', { messageId, ...(msg.is_error === true || (outcome && outcome !== 'completed') ? { interrupted: true } : {}) })
         }
 
         if (msg.session_id) {
@@ -1677,7 +1686,7 @@ export class SdkSession extends BaseSession {
         // event" ordering. `_planAllowedPrompts` is only non-null once
         // ExitPlanMode's tool_use block has been parsed (see
         // _handleToolUseBlock's 'exit_plan' branch above).
-        if (!superseded && this._inPlanMode && this._planAllowedPrompts !== null) {
+        if (!supersededByNewerTurn() && this._inPlanMode && this._planAllowedPrompts !== null) {
           this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
           this._inPlanMode = false
           this._planAllowedPrompts = null
@@ -1690,7 +1699,7 @@ export class SdkSession extends BaseSession {
         // tool_results to the dashboard.
         // A superseded turn emits its result directly: `_emitResult` would
         // sweep the shared in-flight tool_starts, which are the successor's.
-        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason, opts) => this._emitResult(payload, reason, opts))({
+        ;(supersededByNewerTurn() ? (payload) => emitTurnEvent('result', payload) : (payload, reason, opts) => this._emitResult(payload, reason, opts))({
           sessionId: msg.session_id || this._sdkSessionId,
           cost: msg.total_cost_usd,
           duration: msg.duration_ms,
@@ -1707,6 +1716,8 @@ export class SdkSession extends BaseSession {
           ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
           // #7326: why the turn ended (truncated by max_tokens / max turns /
           // budget, refused, ...). Omitted when the SDK reported nothing we map.
+          declarationTurnId: messageId,
+          declarationEligible: !supersededByNewerTurn() && !this._stdinForwardingDisabled && sdkDeclarationEligible(msg),
           ...turnOutcomeField(outcomeFromSdkResult(msg)),
         }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
@@ -1733,7 +1744,7 @@ export class SdkSession extends BaseSession {
         // (the `background_task_ended_with_turn` error above) instead of
         // leaving the loss silent. Exempting on this path needs the query
         // kept alive past `result`, which is a much larger change.
-        if (!superseded) this._clearMessageState({ completion: 'normal' }) // #7376
+        if (!supersededByNewerTurn()) this._clearMessageState({ completion: 'normal' }) // #7376
 
         // #8300: the prompt is answered — release the streaming input so the
         // SDK closes the CLI's stdin and the process exits once idle. With
@@ -2099,7 +2110,7 @@ export class SdkSession extends BaseSession {
               if (!authRequiredEmitted) {
                 authRequiredEmitted = true
                 ;(this._log || log).warn('Assistant message reported authentication_failed')
-                this.emit('error', this._authRequiredPayload())
+                emitTurnEvent('error', this._authRequiredPayload())
               }
               break
             }
@@ -2112,6 +2123,7 @@ export class SdkSession extends BaseSession {
             confirmHeldNotice('assistant output followed it')
             // Full assistant message — process content blocks for tool detection
             const content = msg.message?.content
+            emitTurnEvent('assistant_response', { responseId: msg.message?.id ?? msg.uuid, text: assistantResponseText(content) })
             if (!Array.isArray(content)) break
 
             for (const block of content) {
@@ -2173,7 +2185,7 @@ export class SdkSession extends BaseSession {
                 ;(this._log || log).error(
                   `Claude Code cancelled the ${tool} tool call ${block.tool_use_id} without consulting the permission pipeline: ${firstLine}`,
                 )
-                this.emit('error', {
+                emitTurnEvent('error', {
                   code: 'tool_cancelled_by_provider',
                   message: `Claude Code cancelled the ${tool} tool call (${block.tool_use_id}) before it reached the permission pipeline: ${firstLine}`,
                   tool,
@@ -2284,7 +2296,7 @@ export class SdkSession extends BaseSession {
           // with CliSession. No `code` because SDK runs in-process — there
           // is no child-process exit status to carry.
           ;(this._log || log).info('Query aborted after user stop')
-          this.emit('stopped', {})
+          emitTurnEvent('stopped', {})
         } else if (spawnRefused) {
           // #8030: the turn was refused BEFORE query() was ever called — by the
           // per-spawn binary gate (a block-mode hash mismatch, quarantine, a
@@ -2318,7 +2330,7 @@ export class SdkSession extends BaseSession {
             // fall through to _clearMessageState below; destroy() owns the UX
           } else if (containerGone) {
             ;(this._log || log).warn(`Container vanished during turn: ${containerGone.message}`)
-            this.emit('error', containerGone)
+            emitTurnEvent('error', containerGone)
           } else {
             // #8030 backstop: a spawn failure AFTER preflight passed (the
             // pinned binary was quarantined/moved/removed between the gate
@@ -2345,10 +2357,10 @@ export class SdkSession extends BaseSession {
             if (classified.code === AUTH_REQUIRED_CODE) {
               if (!authRequiredEmitted) {
                 authRequiredEmitted = true
-                this.emit('error', this._authRequiredPayload())
+                emitTurnEvent('error', this._authRequiredPayload())
               }
             } else {
-              this.emit('error', { message: classified.message })
+              emitTurnEvent('error', { message: classified.message })
             }
           }
         }
@@ -2786,6 +2798,7 @@ export class SdkSession extends BaseSession {
       ;(this._log || log).warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
+        declarationTurnId: messageId,
       })
       return
     }
@@ -3561,7 +3574,7 @@ export class SdkSession extends BaseSession {
     // #7376: name the cause so a tool left in flight reads as "the turn was
     // terminated under it", not as a failed command.
     this._clearMessageState({ terminatedReason: 'hard_timeout' })
-    this.emit('error', { message: `Response timed out after ${friendly} of inactivity` })
+    this.emit('error', { message: `Response timed out after ${friendly} of inactivity`, declarationTurnId: messageId })
   }
 
   /**
@@ -3611,10 +3624,11 @@ export class SdkSession extends BaseSession {
     // terminal event, this result, and drops the `error` below at its epoch guard;
     // without the mark a stalled turn reads as a completed one and the caller never
     // sees TURN_ERROR. The result itself stays: it is what clears activeTools.
-    this.emit('result', { cost: null, duration: this._streamStallTimeoutMs, usage: null, sessionId, interrupted: true, failureMessage: message })
+    this.emit('result', { cost: null, duration: this._streamStallTimeoutMs, usage: null, sessionId, interrupted: true, failureMessage: message, declarationTurnId: messageId })
     this.emit('error', {
       code: 'stream_stall',
       message,
+      declarationTurnId: messageId,
     })
   }
 

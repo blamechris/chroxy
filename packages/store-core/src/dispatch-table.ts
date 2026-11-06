@@ -63,6 +63,7 @@ import type {
   Checkpoint,
 } from './types'
 import { nextMessageId } from './utils'
+import { DeclaredStatusSchema } from '@chroxy/protocol'
 import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
@@ -912,6 +913,11 @@ export interface DispatchMessageMap {
     slashCommands?: unknown[]
     agents?: unknown[]
     tunnelUrl?: string
+  }
+  session_status: {
+    type: 'session_status'
+    sessionId?: string
+    declaredStatus?: unknown
   }
   session_usage: {
     type: 'session_usage'
@@ -2782,6 +2788,11 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
     tunnel_url_changed: dispatchTunnelUrlChanged,
     auth_bootstrap: dispatchAuthBootstrap,
+    session_status: (msg, adapter) => {
+      const parsed = DeclaredStatusSchema.safeParse(msg.declaredStatus)
+      if (!parsed.success || !msg.sessionId || !adapter.hasSession(msg.sessionId)) return
+      adapter.updateSession(msg.sessionId, (session) => ({ ...session, declaredStatus: parsed.data }))
+    },
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     statusline_output: sessionPatchDispatcher<S>(handleStatuslineOutput),
@@ -2920,6 +2931,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
   'tunnel_url_changed',
   'auth_bootstrap',
+  'session_status',
   'session_usage',
   'session_context',
   'statusline_output',

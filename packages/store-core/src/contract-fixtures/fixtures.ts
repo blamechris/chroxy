@@ -283,6 +283,13 @@ function sysMsg(content: string): Partial<ChatMessage> {
 
 export const DISPATCH_FIXTURES: ContractFixture[] = [
   {
+    name: 'session_status stores declared intent without changing observed busy state',
+    type: 'session_status',
+    init: { sessions: { s1: { isIdle: false } } },
+    message: { type: 'session_status', sessionId: 's1', declaredStatus: { state: 'blocked', summary: 'Choose a target', decision: 'Choose a target', updatedAt: 100, source: 'marker' } },
+    expect: { sessions: { s1: { isIdle: false, declaredStatus: { state: 'blocked', summary: 'Choose a target', decision: 'Choose a target', updatedAt: 100, source: 'marker' } } } },
+  },
+  {
     name: 'provider_runtime_info preserves explicit unknown facts on its session',
     type: 'provider_runtime_info',
     init: { sessions: { s1: {} } },

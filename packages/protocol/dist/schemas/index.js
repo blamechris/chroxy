@@ -6,3 +6,4 @@
 export * from "./client.js";
 export * from "./server.js";
 export * from "./ingest.js";
+export * from "./declared-status.js";

@@ -40,6 +40,7 @@ export const INGEST_EVENT_TYPES = [
   'user_prompt_submit',
   'stop',
   'wave_complete',
+  'status',
 ] as const
 
 export type IngestEventType = (typeof INGEST_EVENT_TYPES)[number]
