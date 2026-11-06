@@ -1877,18 +1877,26 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // them leaves the empty-slice path — the quick reconnect, the most common
   // replay of all — silently unfixed.
   const finishReplay = () => {
-    send(ws, { type: 'history_replay_end', sessionId, latestSeq })
-    reseedActiveAgents(ctx, ws, sessionId)
-    // #7457: AFTER the end frame, never before it. The client's replay-end
-    // sweep has already run by the time this lands, which is the entire reason
-    // a still-pending question survives the reconnect.
-    resendPendingQuestions(ctx, ws, sessionId)
-    // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
-    // history-only message list at `history_replay_end`, dropping the live
-    // permission card the client held for this session; `permission_request`
-    // is transient, so the replay itself cannot restore it. Sent after the
-    // swap, the re-send lands on the rebuilt list and is kept.
-    resendPendingPermissionsForSession(ctx, ws, sessionId)
+    // #9015: the permission re-send is the ONLY delivery of the active
+    // session's pending prompt on connect (the post-auth resend excludes it), so
+    // it runs in a `finally`: a throw from the end frame, the agent re-seed or
+    // the question re-send must not drop the sole copy. The success path still
+    // sends it exactly once.
+    try {
+      send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+      reseedActiveAgents(ctx, ws, sessionId)
+      // #7457: AFTER the end frame, never before it. The client's replay-end
+      // sweep has already run by the time this lands, which is the entire reason
+      // a still-pending question survives the reconnect.
+      resendPendingQuestions(ctx, ws, sessionId)
+    } finally {
+      // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
+      // history-only message list at `history_replay_end`, dropping the live
+      // permission card the client held for this session; `permission_request`
+      // is transient, so the replay itself cannot restore it. Sent after the
+      // swap, the re-send lands on the rebuilt list and is kept.
+      resendPendingPermissionsForSession(ctx, ws, sessionId)
+    }
   }
 
   // A manager that cannot answer reads as idle, as in the JSONL heal's own check
@@ -1910,7 +1918,16 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy),
+    // #9015: one entry that fails to serialise or send must not abort the
+    // replay before `finishReplay` — that would strand the pending prompt, whose
+    // only delivery on connect is the replay exit.
+    emit: (entry) => {
+      try {
+        sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy)
+      } catch (err) {
+        log.warn(`Skipping history entry that failed to replay on session ${sessionId}: ${err?.message ?? err}`)
+      }
+    },
     onDone: finishReplay,
   })
 }

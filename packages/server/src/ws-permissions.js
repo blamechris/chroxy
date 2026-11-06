@@ -868,7 +868,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       for (const [sessionId, entry] of sm._sessions) {
         if (onlySessionId && sessionId !== onlySessionId) continue
         if (isBound && sessionId !== boundSessionId) continue
-        if (excludeSessionId != null && sessionId === excludeSessionId) continue
+        const excluded = excludeSessionId != null && sessionId === excludeSessionId
         if (entry.session?._pendingPermissions instanceof Map) {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
@@ -912,6 +912,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               } else {
                 permissionSessionMap.set(requestId, sessionId)
               }
+              // #9015: the excluded session's replay owns the FRAME, but the
+              // route registration / auto-subscribe above is connect-time
+              // bookkeeping the replay-exit resend skips for an already-routed
+              // request (#8328). Dropping it left the client unsubscribed, so
+              // the app's bootstrap `subscribe_sessions` replayed (and re-sent) again.
+              if (excluded) continue
               // #6054: buildPermissionRequestMessage throws on field drift (the
               // intended #6031 fail-loud guard). Isolate it per-permission so one
               // malformed pending entry can't abort the loop and strand the

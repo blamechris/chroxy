@@ -178,6 +178,22 @@ describe('replayHistory — pending permission re-send (#8328)', () => {
     assert.equal(permFrames(tail).length, 1)
   })
 
+  it('still re-sends exactly once when the end-of-replay steps throw (#9015)', async () => {
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-throw')] } })
+    const realSend = ctx.send
+    ctx.send = (ws, msg) => {
+      if (msg.type === 'history_replay_end') throw new Error('end frame failed')
+      realSend(ws, msg)
+    }
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    try {
+      replayHistory(ctx, ws, 'sess-b', { forceFull: true })
+    } catch (_err) { /* the replay's own failure is not under test */ }
+    await settle()
+    assert.equal(permFrames(ctx._sends).length, 1)
+  })
+
   it('re-sends on an already-current (empty-slice) delta replay too', async () => {
     const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-current')] } })
     const ws = makeFakeWs()

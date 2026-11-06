@@ -1052,6 +1052,35 @@ describe('permission/question routing to originating session', () => {
         ws.close()
       })
 
+      it('a request whose route is already registered (as at dispatch) is delivered once even after the app\'s bootstrap subscribe_sessions', async () => {
+        const manager = managerWithPending({ pendingOn: { 'sess-a': 'perm-routed' } })
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+        // A real pending request already has its route from dispatch, before this client connects.
+        server._permissionSessionMap.set('perm-routed', 'sess-a')
+        const port = await startServerAndGetPort(server)
+        const { ws, messages } = await createClient(port, true)
+        await settleAfterReplay(ws, messages, 'sess-a')
+        // The mobile app subscribes to its active session right after connect.
+        send(ws, { type: 'subscribe_sessions', sessionIds: ['sess-a'] })
+        await waitForMessageMatch(messages, (m) => m.type === 'subscriptions_updated', 2000, 'subscribe ack')
+        await settlePing(ws, messages)
+        await settlePing(ws, messages)
+        assert.equal(count(messages, 'perm-routed'), 1)
+        ws.close()
+      })
+
+      it('still delivers the prompt exactly once when a history entry throws during the replay', async () => {
+        const bad = { _seq: 2 }
+        Object.defineProperty(bad, 'type', { get() { throw new Error('boom') }, enumerable: true })
+        const manager = managerWithPending({ history: [{ type: 'response', content: 'hi', _seq: 1 }, bad], pendingOn: { 'sess-a': 'perm-throw' } })
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+        const port = await startServerAndGetPort(server)
+        const { ws, messages } = await createClient(port, true)
+        await settleAfterReplay(ws, messages, 'sess-a')
+        assert.equal(count(messages, 'perm-throw'), 1)
+        ws.close()
+      })
+
       it('a session-bound client reconnects to exactly one copy of its own session\'s request and none of a sibling\'s', async () => {
         const manager = managerWithPending({ pendingOn: { 'sess-a': 'perm-a', 'sess-b': 'perm-b' } })
         const pairingManager = new PairingManager({ wsUrl: null })
