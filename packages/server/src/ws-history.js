@@ -1918,14 +1918,22 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    // #9015: one entry that fails to serialise or send must not abort the
-    // replay before `finishReplay` — that would strand the pending prompt, whose
-    // only delivery on connect is the replay exit.
+    // #9015: a throwing entry ABORTS the replay and never claims completion (no
+    // `history_replay_end` carrying `latestSeq` — the client would commit a
+    // partial transcript and its cursor). Permission recovery is independent of
+    // replay success, though: the connect-time resend excludes the active
+    // session, so this abort path delivers its pending prompt (once — the loop
+    // stops and `finishReplay` never runs) and then rethrows, as before.
     emit: (entry) => {
       try {
         sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy)
       } catch (err) {
-        log.warn(`Skipping history entry that failed to replay on session ${sessionId}: ${err?.message ?? err}`)
+        try {
+          resendPendingPermissionsForSession(ctx, ws, sessionId)
+        } catch (resendErr) {
+          log.warn(`Permission re-send after an aborted replay of ${sessionId} failed: ${resendErr?.message ?? resendErr}`)
+        }
+        throw err
       }
     },
     onDone: finishReplay,

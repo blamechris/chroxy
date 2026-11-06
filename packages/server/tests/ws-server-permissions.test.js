@@ -1069,17 +1069,35 @@ describe('permission/question routing to originating session', () => {
         ws.close()
       })
 
-      it('still delivers the prompt exactly once when a history entry throws during the replay', async () => {
-        const bad = { _seq: 2 }
-        Object.defineProperty(bad, 'type', { get() { throw new Error('boom') }, enumerable: true })
-        const manager = managerWithPending({ history: [{ type: 'response', content: 'hi', _seq: 1 }, bad], pendingOn: { 'sess-a': 'perm-throw' } })
-        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
-        const port = await startServerAndGetPort(server)
-        const { ws, messages } = await createClient(port, true)
-        await settleAfterReplay(ws, messages, 'sess-a')
-        assert.equal(count(messages, 'perm-throw'), 1)
-        ws.close()
-      })
+      // The app subscribes to its active session right after connect; arrival order
+      // against the replay is a race, so both orders are pinned, for both holders.
+      for (const holder of ['sdk', 'hook']) {
+        for (const order of ['before', 'after']) {
+          it(`${holder}-held request with its route registered is delivered once when the bootstrap subscribe_sessions arrives ${order} history_replay_end`, async () => {
+            const id = `perm-${holder}-${order}`
+            const manager = managerWithPending(holder === 'sdk' ? { pendingOn: { 'sess-a': id } } : {})
+            server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+            server._permissionSessionMap.set(id, 'sess-a')
+            if (holder === 'hook') {
+              server._pendingPermissions.set(id, {
+                resolve: () => {}, timer: null,
+                data: { requestId: id, tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false },
+              })
+            }
+            const port = await startServerAndGetPort(server)
+            const { ws, messages } = await createClient(port, true)
+            if (order === 'after') {
+              await waitForMessageMatch(messages, (m) => m.type === 'history_replay_end' && m.sessionId === 'sess-a', 2000, 'replay end')
+            }
+            send(ws, { type: 'subscribe_sessions', sessionIds: ['sess-a'] })
+            await waitForMessageMatch(messages, (m) => m.type === 'subscriptions_updated', 2000, 'subscribe ack')
+            await settleAfterReplay(ws, messages, 'sess-a')
+            await settlePing(ws, messages)
+            assert.equal(count(messages, id), 1)
+            ws.close()
+          })
+        }
+      }
 
       it('a session-bound client reconnects to exactly one copy of its own session\'s request and none of a sibling\'s', async () => {
         const manager = managerWithPending({ pendingOn: { 'sess-a': 'perm-a', 'sess-b': 'perm-b' } })

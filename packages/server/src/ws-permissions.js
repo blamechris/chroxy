@@ -960,12 +960,25 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // A bound client gets only the entries owned by its bound session; an
         // ownerless entry cannot be shown to be that session's, so it is skipped.
         if (isBound && ownerSessionId !== boundSessionId) continue
-        if (excludeSessionId != null && ownerSessionId === excludeSessionId) continue
+        const excluded = excludeSessionId != null && ownerSessionId === excludeSessionId
         const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
         if (remainingMs <= 0) {
           log.debug(`Skipping expired legacy permission ${requestId}`)
+          continue
+        }
+        // #9015: same as the SDK branch — the replay owns the FRAME, but the
+        // connect-time route registration / auto-subscribe stays here. Without
+        // it the client is never subscribed to the session, and the app's
+        // bootstrap `subscribe_sessions` treats it as new and replays (and
+        // re-sends) again.
+        if (excluded) {
+          if (typeof registerPermissionRoute === 'function') {
+            registerPermissionRoute(requestId, ownerSessionId)
+          } else {
+            permissionSessionMap.set(requestId, ownerSessionId)
+          }
           continue
         }
         log.info(`Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
