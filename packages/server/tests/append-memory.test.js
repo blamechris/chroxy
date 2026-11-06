@@ -9,6 +9,7 @@ import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { createReaderOps } from '../src/ws-file-ops/reader.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { runAgainstFifoWithReader } from './helpers/fifo-with-reader.js'
 
 /**
  * `appendMemory` op (#6861, epic #6760) — the `#`-prefix composer quick-append.
@@ -30,6 +31,25 @@ describe('appendMemory handler', () => {
 
   after(async () => {
     await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  // #7957 — the reader makes the non-blocking open succeed; only the fstat on
+  // the opened handle stops the write.
+  it('append_memory refuses a FIFO that has a reader attached and writes nothing to it (#7957)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-fifo-rd-'))
+    const fifo = join(dir, 'CLAUDE.md')
+    execFileSync('mkfifo', [fifo])
+    const out = []
+    const ops = createFileOps((_ws, msg) => out.push(msg))
+    try {
+      const piped = await runAgainstFifoWithReader(fifo, () => ops.appendMemory(mockWs, 'secret-note', dir))
+      assert.equal(piped, '', 'nothing may be written into the pipe')
+      assert.equal(out.length, 1)
+      assert.equal(out[0].type, 'append_memory_result')
+      assert.equal(out[0].error, 'Not a regular file')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('creates CLAUDE.md with the note when it does not exist yet', async () => {

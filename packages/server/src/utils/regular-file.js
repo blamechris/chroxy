@@ -38,6 +38,26 @@ export async function openRegularFile(filePath) {
 }
 
 /**
+ * Refuse a handle that is not a regular file, BEFORE any byte is written.
+ *
+ * `openNoFollow` opens with O_NONBLOCK, so a FIFO with a reader attached (or a
+ * device) opens successfully; writing to it would put the payload into the pipe
+ * and report success for something that is not a file. The check is made on the
+ * opened handle (fstat), never on a separate stat of the path (#7957).
+ *
+ * @param {import('fs/promises').FileHandle} handle
+ * @throws {Error} with code 'ENOTREG' when the opened object is not a regular file
+ */
+export async function assertRegularHandle(handle) {
+  const st = await handle.stat()
+  if (!st.isFile()) {
+    const err = new Error('Not a regular file')
+    err.code = 'ENOTREG'
+    throw err
+  }
+}
+
+/**
  * Read at most `maxBytes` from the start of a regular file as UTF-8.
  * @param {string} filePath
  * @param {number} maxBytes
