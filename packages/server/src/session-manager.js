@@ -43,6 +43,7 @@ import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
 import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { claudeConfigDirCwdDenial } from './handler-utils.js'
 import { assertProviderPermissionModeSupported, UnsupportedPermissionModeError } from './permission-mode-support.js'
 import { toWireCount } from './utils/wire-counters.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
@@ -1600,6 +1601,16 @@ export class SessionManager extends EventEmitter {
       } else {
         throw err
       }
+    }
+
+    // The configured Claude config directory is not a working directory. Checked
+    // here, at the one boundary every creation shares (an omitted cwd, the
+    // startup default, a restored session, a checkpoint branch), so none of
+    // them can reach it. A restored session that now points into it is refused
+    // like any other restore failure: logged, kept parked, not silently started.
+    if (!missingRestoreWorktree) {
+      const denial = claudeConfigDirCwdDenial(baseCwd)
+      if (denial) throw new SessionDirectoryError(denial, baseCwd)
     }
 
     // #4983 — preserve persisted ID on restoreState so dashboard's

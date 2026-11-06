@@ -246,25 +246,43 @@ check resolve it with `utils/claude-config-dir.js` (`claudeConfigDir()`, the sam
 canonical, symlink-resolved path the rest of the server uses) and apply the
 `.claude` rules to it, whatever it is named.
 
-- **Dedicated directory** (named other than `.claude`): the full (write) floor
-  covers every path inside it; both floors cover `settings*.json` directly inside
-  it. A Grep whose search reaches it (inside, or from above) also tests its `glob`
-  against bare `settings*.json`. A session cwd inside it is refused, by filesystem
-  object, so a symlinked spelling is refused too.
+- **Dedicated directory** (named other than `.claude`, and not `$HOME` or an
+  ancestor of it): the full (write) floor covers every path inside it; both floors
+  cover `settings*.json` directly inside it. This holds inside a Claude Code
+  worktree of the session workspace too: the worktree carve-out does not switch it
+  off.
+- **Recognised by filesystem object as well as spelling:** a case or Unicode
+  normalisation variant of a path component, or a second path to the directory,
+  is the same directory. A directory that does not exist yet is recognised by its
+  spelling. A location that cannot be checked floors.
+- **Grep:** a recursive search from the directory, or from a directory above it,
+  floors unless a `glob` narrows it (an exclusion-only glob does not narrow). A
+  `glob` is also tested against bare `settings*.json` when the search is near it.
 - **`.credentials.json`** is a secret file name under both floors, at any depth,
   for the default location and any override alike.
 - **Named `.claude`, anywhere:** the existing name rules already cover it; nothing
   extra applies.
-- **Override equal to `$HOME` or an ancestor of it** (the resolver accepts these):
-  not floored wholesale, and not refused as a cwd, which would prompt for or lock
-  out the whole home directory. Only `settings*.json` directly inside it (and the
-  credentials name) floor.
+- **Override equal to `$HOME` or an ancestor of it** (the resolver accepts these;
+  an override inside `$HOME` is dedicated, not this case): not floored wholesale,
+  and not refused as a cwd, which would prompt for or lock out the whole home
+  directory. Only `settings*.json` directly inside it (and the credentials name)
+  floor, and only a Grep from that directory or above counts as reaching them.
 - **Override the resolver rejects** (relative, `~/x`, `/`, an alias of `/`): ignored
   with a startup warning, so claude and the floor both use `~/.claude`.
+- **Session cwd:** a cwd inside the directory is refused at the one creation
+  boundary in `SessionManager` (an omitted cwd, the startup default, a restored
+  session and a checkpoint branch included), matched by filesystem object. A
+  restored session that now points into it fails the restore like any other
+  (logged, parked), and the WS handlers refuse it through `validateCwdAllowed`.
+- **Containers:** claude's config directory inside a Docker session is pinned to
+  the `.claude` under the container HOME, so the guest location is always one the
+  floor recognises by name, whatever the image defines.
 - **Windows:** containment is case-insensitive and drive-aware
-  (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere.
+  (`pathPiecesUnder`), and an 8.3 short-name segment floors as elsewhere. The
+  Windows spelling is tested through the verdict function on every host; the full
+  predicate runs natively only on a Windows runner.
 - The directory is read from the daemon's environment, per call. Both pipelines
-  reach it through `isFlooredTarget`; the cwd check through `validateCwdAllowed`.
+  reach it through `isFlooredTarget`.
 
 ## 2. Precedence — the floor beats every lenient mode
 

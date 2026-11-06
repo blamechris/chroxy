@@ -25,7 +25,7 @@
  * Everything here is PURE except the deliberate symlink resolution (realpath /
  * lstat), which FAILS CLOSED — see {@link isProtectedPathValue}.
  */
-import { realpathSync, lstatSync } from 'node:fs'
+import { realpathSync, lstatSync, statSync } from 'node:fs'
 import path, { resolve, relative, sep, isAbsolute, dirname, basename, join } from 'node:path'
 import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
 import { claudeConfigDir, claudeHomeDir } from './utils/claude-config-dir.js'
@@ -438,10 +438,41 @@ function _configRootRule(call) {
   if (basename(root).toLowerCase() !== CLAUDE_DIR) {
     let home = claudeHomeDir()
     try { home = realpathSync.native(home) } catch { /* the raw home still gives a prefix test */ }
-    rule = { root, broad: pathPiecesUnder(home, root, path) !== null }
+    rule = { root, broad: false, rootId: null, rootAncestorIds: null, failed: false }
+    try {
+      rule.rootId = _statId(root)
+      if (rule.rootId === undefined) rule.rootId = null
+      // The root holds $HOME (is it, or an ancestor of it). Both are canonical
+      // (native realpath), so the spelling comparison is enough.
+      rule.broad = pathPiecesUnder(root, home, path) !== null
+    } catch {
+      rule.failed = true
+    }
   }
   call.configRoot = rule
   return rule
+}
+
+/** `p` followed by each ancestor, ending at the filesystem root. */
+function _withAncestors(p) {
+  const chain = [p]
+  for (let parent = dirname(p); parent !== chain[chain.length - 1]; parent = dirname(parent)) chain.push(parent)
+  return chain
+}
+
+/**
+ * Which filesystem object is at `p`: a `device:inode` id; null when the
+ * filesystem reports inode 0 (identifies nothing); undefined when nothing is
+ * there (ENOENT / ENOTDIR). Any other error throws, and callers fail closed.
+ */
+function _statId(p) {
+  try {
+    const st = statSync(p, { bigint: true })
+    return st.ino === 0n ? null : `${st.dev}:${st.ino}`
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return undefined
+    throw err
+  }
 }
 
 /**
@@ -463,19 +494,53 @@ export function pathPiecesUnder(root, target, pathImpl) {
 }
 
 /**
- * Does the already-resolved absolute `resolved` hit the configured config
- * directory's rules (see {@link _configRootRule})?
- * @param {string} resolved
+ * How the absolute `real` relates to the configured root, by spelling first and
+ * then by filesystem object, so a name the filesystem treats as equivalent (a
+ * case or Unicode-normalisation variant, a second path) is recognised too.
+ *   inside: the pieces of `real` below the root, or null when not inside it
+ *   covers: `real` is the root or an ancestor of it (a search from there
+ *           reaches the root)
+ * Throws on a stat error other than "nothing there"; callers fail closed.
+ */
+function _rootRelation(rule, real, wantCovers) {
+  let inside = pathPiecesUnder(rule.root, real, path)
+  let covers = wantCovers && pathPiecesUnder(real, rule.root, path) !== null
+  if (rule.rootId !== null) {
+    if (inside === null) {
+      for (const dir of _withAncestors(real)) {
+        if (_statId(dir) === rule.rootId) {
+          inside = pathPiecesUnder(dir, real, path) ?? []
+          break
+        }
+      }
+    }
+    if (wantCovers && !covers) {
+      const realId = _statId(real)
+      if (realId) {
+        if (rule.rootAncestorIds === null) {
+          rule.rootAncestorIds = new Set(_withAncestors(rule.root).map(_statId).filter((id) => id))
+        }
+        covers = rule.rootAncestorIds.has(realId)
+      }
+    }
+  }
+  return { inside, covers }
+}
+
+/**
+ * The verdict for a target `inside` the configured root (see
+ * {@link _configRootRule}): is it floored? `inside` are its pieces below the
+ * root. Dedicated root: everything under the full floor; `settings*.json`
+ * directly inside under both. Broad root (holds $HOME): only the latter.
+ * Exported so the Windows spelling can be tested from any host.
+ * @param {string[]} inside
+ * @param {boolean} broad
  * @param {boolean} secretsOnly
  * @param {object} call
  * @returns {boolean}
  */
-function _hitsConfigRoot(resolved, secretsOnly, call) {
-  const rule = _configRootRule(call)
-  if (rule === null) return false
-  const inside = pathPiecesUnder(rule.root, resolved, path)
-  if (inside === null) return false
-  if (!rule.broad && !secretsOnly) return true
+export function configRootVerdict(inside, broad, secretsOnly, call) {
+  if (!broad && !secretsOnly) return true
   if (inside.length === 0) return false
   // The first piece sits where `.claude` has `settings*.json`: test it in the
   // same two forms and with the same matcher as the `.claude` rule.
@@ -484,6 +549,28 @@ function _hitsConfigRoot(resolved, secretsOnly, call) {
   const canonical = _canonicalNameIn(first, call)
   if (canonical === null) return true
   return isCredentialConfigSegment([CLAUDE_DIR, first], 0) || isCredentialConfigSegment([CLAUDE_DIR, canonical], 0)
+}
+
+/**
+ * Does the already-resolved absolute `resolved` hit the configured config
+ * directory's rules? Applies whether or not the target sits in a workspace
+ * the worktree carve-out admits. Fails closed.
+ * @param {string} resolved
+ * @param {boolean} secretsOnly
+ * @param {object} call
+ * @returns {boolean}
+ */
+function _hitsConfigRoot(resolved, secretsOnly, call) {
+  const rule = _configRootRule(call)
+  if (rule === null) return false
+  if (rule.failed) return true
+  try {
+    const { inside } = _rootRelation(rule, resolved, false)
+    if (inside === null) return false
+    return configRootVerdict(inside, rule.broad, secretsOnly, call)
+  } catch {
+    return true
+  }
 }
 
 /**
@@ -548,7 +635,7 @@ function _scanResolvedTarget(base, resolved, secretsOnly, carved, call) {
   }
   return _matchesProtectedSegments(pieces.map((p) => p.toLowerCase()), start, secretsOnly) ||
     _matchesProtectedSegments(canonical, start, secretsOnly) ||
-    (!carved && _hitsConfigRoot(resolved, secretsOnly, call))
+    _hitsConfigRoot(resolved, secretsOnly, call)
 }
 
 /**
@@ -1226,33 +1313,55 @@ export function isFlooredTarget(toolName, input, cwd) {
   if (!SECRET_READ_FLOOR_TOOLS.has(toolName)) return isProtectedPathTarget(input, cwd)
   if (isSecretReadTarget(input, cwd)) return true
   // #7978 — Grep's `glob` picks WHICH files it reads, overriding .gitignore.
-  return GLOB_SELECTOR_FLOOR_TOOLS.has(toolName) &&
-    input !== null && typeof input === 'object' && grepGlobFloored(input, _searchReachesConfigRoot(input, cwd))
+  if (!GLOB_SELECTOR_FLOOR_TOOLS.has(toolName) || input === null || typeof input !== 'object') return false
+  const reach = _searchReachToConfigRoot(input, cwd)
+  if (grepGlobFloored(input, reach.near)) return true
+  // No glob narrowing the search: a recursive Grep from the configured root, or
+  // from a directory above it, reads the settings files inside it.
+  return reach.covers && !globNarrowsSearch(input.glob)
 }
 
 /**
- * Does a Grep's search location overlap a configured Claude config directory
- * whose name is not `.claude`: inside it, or above it? Then its `glob` is also
- * tested against bare `settings*.json`. Fails closed: a location that cannot be
- * resolved counts as reaching it.
- * @param {object} input
- * @param {string} [cwd]
+ * Does the Grep `glob` field restrict which files are searched? Absent, empty,
+ * and exclusion-only (`!x`) globs do not.
+ * @param {unknown} glob
  * @returns {boolean}
  */
-function _searchReachesConfigRoot(input, cwd) {
+function globNarrowsSearch(glob) {
+  if (glob === undefined || glob === null) return false
+  if (typeof glob !== 'string') return true
+  return glob.split(/[\s,]+/).some((piece) => piece.length > 0 && !piece.startsWith('!'))
+}
+
+/**
+ * How a Grep's search location relates to a configured Claude config directory
+ * whose name is not `.claude`: `near` when it is inside it or reaches it, and
+ * `covers` when it is the root or above it (so a recursive search reaches the
+ * files directly inside it). `near` makes its `glob` also be tested against
+ * bare `settings*.json`. Fails closed: a location that cannot be resolved
+ * counts as both.
+ * @param {object} input
+ * @param {string} [cwd]
+ * @returns {{ near: boolean, covers: boolean }}
+ */
+function _searchReachToConfigRoot(input, cwd) {
   const rule = _configRootRule({})
-  if (rule === null) return false
+  if (rule === null) return { near: false, covers: false }
+  if (rule.failed) return { near: true, covers: true }
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
   const targets = PROTECTED_PATH_INPUT_FIELDS.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0)
   if (targets.length === 0) targets.push('.')
+  const reach = { near: false, covers: false }
   try {
     const realBase = realpathDeepestAncestorSync(base)
     for (const target of targets) {
       const real = resolveTargetComponentwiseSync(realBase, target, { left: FLOOR_MAX_CALL_WALK })
-      if (pathPiecesUnder(rule.root, real, path) !== null || pathPiecesUnder(real, rule.root, path) !== null) return true
+      const { inside, covers } = _rootRelation(rule, real, true)
+      if (inside !== null || covers) reach.near = true
+      if (covers) reach.covers = true
     }
-    return false
+    return reach
   } catch {
-    return true
+    return { near: true, covers: true }
   }
 }

@@ -529,6 +529,10 @@ export class DockerBackend {
 
     // Override HOME and PATH for the container user.
     dockerArgs.push('--env', `HOME=/home/${containerUser}`)
+    // Pin claude's config directory inside the container to the `.claude` under that
+    // HOME, so an image-defined CLAUDE_CONFIG_DIR cannot move it somewhere the
+    // permission floor does not know (it recognises `.claude` by name in the guest).
+    dockerArgs.push('--env', `CLAUDE_CONFIG_DIR=/home/${containerUser}/.claude`)
     dockerArgs.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
 
     // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the

@@ -1073,6 +1073,7 @@ describe('DockerBackend.streamCliInEnvironment() — exact argv env-key pin (#74
       'NODE_ENV',
       ...Object.keys(getChroxyHostEnv()),
       'HOME',
+      'CLAUDE_CONFIG_DIR',
       'PATH',
     ]
     assert.deepEqual(

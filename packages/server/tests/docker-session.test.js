@@ -724,6 +724,14 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
     )
   })
 
+  it('pins the claude config directory to the .claude under the forwarded HOME', async () => {
+    const { captured, session } = await captureArgv()
+    const home = session._buildChildEnv().HOME
+    assert.ok(typeof home === 'string' && home.startsWith('/'), 'POSITIVE CONTROL: the child env carries an absolute HOME')
+    const pins = captured.filter((a) => String(a).startsWith('CLAUDE_CONFIG_DIR='))
+    assert.deepEqual(pins, [`CLAUDE_CONFIG_DIR=${home.replace(/\/+$/, '')}/.claude`])
+  })
+
   it('does not leak the host sidecar PATH by any other argv route', async () => {
     // Keyed on the VALUE, not the variable name: a forward that renamed the key
     // (or embedded the path in another var) would slip past a name-only check

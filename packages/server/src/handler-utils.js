@@ -507,7 +507,7 @@ function filesystemIdentity(p) {
  * `realCwd`, also refuses every session start the same way. One loop serves both
  * kinds of protected directory.
  */
-function protectedDirectoryDenial(realCwd, home) {
+function protectedDirectoryDenial(realCwd, home, { claudeConfigOnly = false } = {}) {
   const cannotCheck = (what, err) => `Directory is not allowed: cannot check ${what} (${err?.code ?? 'unknown error'}); fix or remove it`
 
   // Names to look up: every literal protected name, plus the case variants the
@@ -526,7 +526,7 @@ function protectedDirectoryDenial(realCwd, home) {
     if (FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) names.add(name)
   }
   const candidates = []
-  for (const name of names) {
+  for (const name of claudeConfigOnly ? [] : names) {
     candidates.push({
       path: join(home, name),
       what: `the protected home entry ~/${name}`,
@@ -534,7 +534,7 @@ function protectedDirectoryDenial(realCwd, home) {
       exemptWhenHoldingHome: true,
     })
   }
-  candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
+  if (!claudeConfigOnly) candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
   // The configured Claude config directory, like `~/.claude`. Recognised by
   // filesystem object, so a symlinked or second-path spelling is refused too.
   // Dropped when it holds $HOME (the lockout guard below), so an override of
@@ -659,6 +659,34 @@ function pathTouchesConfigDir(absPath) {
  */
 function claudeConfigDirOverride() {
   return resolveClaudeConfigDirOverride(process.env.CLAUDE_CONFIG_DIR)
+}
+
+/**
+ * The refusal for a session working directory inside the configured Claude
+ * config directory (CLAUDE_CONFIG_DIR), or null. This is the check the session
+ * manager applies at its single creation boundary, so every way a session gets
+ * a cwd (an omitted cwd, the startup default, a restored session, a checkpoint
+ * branch) is covered, not only the callers of {@link validateCwdAllowed}. A
+ * directory that does not exist yet or cannot be resolved is left to the
+ * existing directory checks.
+ * @param {string} cwd
+ * @returns {string|null}
+ */
+export function claudeConfigDirCwdDenial(cwd) {
+  if (claudeConfigDirOverride() === null) return null
+  let realCwd
+  let home
+  try {
+    realCwd = canonicalRealpath(cwd)
+  } catch {
+    return null
+  }
+  try {
+    home = canonicalRealpath(homedir())
+  } catch {
+    home = homedir()
+  }
+  return protectedDirectoryDenial(realCwd, home, { claudeConfigOnly: true })
 }
 
 /**

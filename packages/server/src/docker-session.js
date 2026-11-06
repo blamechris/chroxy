@@ -494,6 +494,12 @@ export class DockerSession extends CliSession {
         dockerArgs.push('--env', `${key}=${val}`)
       }
     }
+    // Pin claude's config directory to the `.claude` under the forwarded HOME, so an
+    // image-defined CLAUDE_CONFIG_DIR cannot move it somewhere the permission floor
+    // does not know (it recognises `.claude` by name in the guest).
+    if (typeof env.HOME === 'string' && env.HOME.startsWith('/')) {
+      dockerArgs.push('--env', `CLAUDE_CONFIG_DIR=${env.HOME.replace(/\/+$/, '')}/.claude`)
+    }
     // Always forward CHROXY_HOST if set
     if (env.CHROXY_HOST) {
       dockerArgs.push('--env', `CHROXY_HOST=${env.CHROXY_HOST}`)

@@ -75,4 +75,14 @@ describe('DockerSdkSession spawn callback, native SDK shape (#8027)', () => {
     assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'node', cli, '-p'])
     session.removeAllListeners()
   })
+
+  it('pins the claude config directory to the .claude under the container HOME', () => {
+    const { callback, getLastSpawn, session } = makeCallback('/usr/local/bin/claude')
+    callback({ command: 'node', args: ['/x/@anthropic-ai/claude-code/cli.js', '-p'], cwd: '/tmp/work', env: { CLAUDE_CONFIG_DIR: '/workspace/claude-data' } })
+    const { args } = getLastSpawn()
+    const envPairs = args.flatMap((a, k) => (a === '--env' ? [args[k + 1]] : []))
+    assert.ok(envPairs.includes('CLAUDE_CONFIG_DIR=/home/chroxy/.claude'), 'config dir is the .claude under HOME')
+    assert.ok(!envPairs.includes('CLAUDE_CONFIG_DIR=/workspace/claude-data'), 'a caller value is not forwarded')
+    session.removeAllListeners()
+  })
 })
