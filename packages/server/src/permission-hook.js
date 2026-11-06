@@ -32,6 +32,16 @@ export function userSettingsPath() {
 // and refuses a link it will not follow (dangling, non-regular, foreign uid).
 // A read refusal comes back as `{ ok: false }`; this maps it to the Error the
 // callers (and `createPermissionHookManager`'s `invalid JSON` check) expect.
+/**
+ * Advisory (#8983): the settings.json mode is PRESERVED (never re-permissioned), so
+ * when it is group/world-readable say so — the document can hold `env` credentials.
+ * Returns null when there is nothing to warn about. Never echoes content.
+ */
+export function describeSettingsModeWarning({ filePath, mode } = {}) {
+  if (process.platform === 'win32' || typeof mode !== 'number' || (mode & 0o044) === 0) return null
+  return `${filePath} is mode ${mode.toString(8)} (readable beyond its owner) and may hold credentials in its env block. Chroxy preserved the existing permissions rather than changing them — tighten it yourself with: chmod 600 ${filePath}`
+}
+
 function updateSettingsFile(settingsPath, mutate, { onInvalidJson } = {}) {
   const updated = updateClaudeConfig(settingsPath, mutate, { createDir: true })
   if (updated.ok) return updated
@@ -112,7 +122,9 @@ function _isChroxyHookEntry(entry) {
 function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
   settingsPath = settingsPath || defaultSettingsPath()
 
-  const updated = updateSettingsFile(settingsPath, (settings) => {
+  let existingMode = null
+  const updated = updateSettingsFile(settingsPath, (settings, info) => {
+    existingMode = info.existed ? info.mode : null
     if (!settings.hooks) settings.hooks = {}
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
 
@@ -148,6 +160,8 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
 
     return {}
   })
+  const modeWarning = describeSettingsModeWarning({ filePath: updated.path, mode: existingMode })
+  if (modeWarning) log.warn(modeWarning)
   log.info(`Registered hook in ${settingsPath}`)
   return updated.path
 }

@@ -17,7 +17,7 @@
  * write and go red. All paths are temp dirs (the sandbox guard protects the real
  * ~/.claude and ~/.chroxy).
  */
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import {
@@ -44,7 +44,8 @@ import {
   removeMcpServerFromConfig,
   updateClaudeConfig,
 } from '../src/byok-mcp-config.js'
-import { createPermissionHookManager } from '../src/permission-hook.js'
+import { createPermissionHookManager, describeSettingsModeWarning } from '../src/permission-hook.js'
+import { stampWindowsAclStrict } from '../src/platform.js'
 // Import order matters (see claude-tui-ensure-cwd-trusted-write.test.js): the
 // session module first, then the driver.
 import '../src/claude-tui-session.js'
@@ -314,6 +315,180 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
       assert.deepEqual(readJson(file), { env: { ANTHROPIC_API_KEY: 'x' }, b: 2 })
     })
   }
+
+  it('Windows: a retarget DURING the EBUSY backoff is caught (the check re-runs after the sleep)', { skip: process.platform === 'win32' }, () => {
+    const a = join(dir, 'a.json')
+    const b = join(dir, 'b.json')
+    const link = join(dir, 'link.json')
+    writeFileSync(a, JSON.stringify({ from: 'A' }))
+    writeFileSync(b, JSON.stringify({ from: 'B' }))
+    symlinkSync(a, link)
+    let renames = 0
+    updateClaudeConfig(link, (raw) => { raw.mine = 1 }, {
+      _isWindowsOverride: true,
+      _stampAcl: () => {},
+      _rename: (from, to) => {
+        if (renames++ === 0) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+        renameSync(from, to)
+      },
+      _sleep: (ms) => {
+        // only the first backoff retargets; later pauses (conflict jitter) must not
+        if (ms === 25) { rmSync(link); symlinkSync(b, link) }
+      },
+    })
+    assert.deepEqual(readJson(a), { from: 'A' }, 'the stale target was not modified')
+    assert.deepEqual(readJson(b), { from: 'B', mine: 1 })
+    assert.equal(readlinkSync(link), b)
+    assert.deepEqual(leftovers(dir), [])
+  })
+
+  describe('Windows ACL stamp fails CLOSED (real helper, command runner mocked)', () => {
+    const run = (execImpl, file) => {
+      const calls = []
+      const stamped = []
+      let fsyncs = 0
+      let renames = 0
+      return {
+        calls,
+        stamped,
+        counts: () => ({ fsyncs, renames }),
+        go: () => updateClaudeConfig(file, (raw) => { raw.b = 2 }, {
+          _isWindowsOverride: true,
+          _fsync: () => { fsyncs++ },
+          _rename: (f, t) => { renames++; renameSync(f, t) },
+          _stampAcl: (tmp) => {
+            stamped.push(statSync(tmp).size)
+            return stampWindowsAclStrict(tmp, { _onWindows: true, _exec: (cmd, args) => { calls.push(cmd); return execImpl(cmd, args) } })
+          },
+        }),
+      }
+    }
+    for (const [label, execImpl, re] of [
+      ['whoami fails', (cmd) => { if (cmd.includes('whoami')) throw new Error('whoami boom'); return '' }, /current-user SID.*whoami boom/],
+      ['whoami output has no SID', (cmd) => (cmd.includes('whoami') ? 'garbage' : ''), /current-user SID/],
+      ['icacls fails', (cmd) => { if (cmd.includes('icacls')) throw new Error('icacls boom'); return '"u","S-1-5-21-1-2-3-1001"' }, /icacls could not stamp the owner-only ACL.*icacls boom/],
+    ]) {
+      it(`${label}: throws naming the ACL step, no payload write, no rename, destination untouched, temp cleaned`, () => {
+        const file = join(dir, 'settings.json')
+        const original = '{"env":{"ANTHROPIC_API_KEY":"x"}}'
+        writeFileSync(file, original)
+        const r = run(execImpl, file)
+        assert.throws(() => r.go(), re)
+        assert.equal(readFileSync(file, 'utf8'), original)
+        assert.deepEqual(leftovers(dir), [])
+        assert.deepEqual(r.counts(), { fsyncs: 0, renames: 0 }, 'payload never fsynced, nothing renamed')
+        assert.deepEqual(r.stamped, [0], 'the stamp ran on the empty temp')
+      })
+    }
+
+    it('success path: whoami then icacls with the owner + SYSTEM grants, content written afterwards', () => {
+      const file = join(dir, '.claude.json')
+      writeFileSync(file, '{"a":1}')
+      const seen = []
+      const r = run((cmd, args) => { seen.push(args); return cmd.includes('whoami') ? '"u","S-1-5-21-1-2-3-1001"' : '' }, file)
+      r.go()
+      assert.deepEqual(readJson(file), { a: 1, b: 2 })
+      assert.ok(seen.some((a) => a.includes('/inheritance:r')))
+    })
+  })
+
+  it('a torn read (truncate-then-write editor caught mid-write) is re-read once after a pause, then merged', () => {
+    const file = join(dir, 'torn.json')
+    writeFileSync(file, '{"a":')
+    const pauses = []
+    const out = updateClaudeConfig(file, (raw) => { raw.mine = 1 }, {
+      _sleep: (ms) => { pauses.push(ms); writeFileSync(file, '{"a":1}') },
+    })
+    assert.equal(out.ok, true)
+    assert.equal(pauses.length, 1)
+    assert.deepEqual(readJson(file), { a: 1, mine: 1 })
+  })
+
+  it('a file that is STILL invalid after the re-read fails closed and is never overwritten', () => {
+    const file = join(dir, 'torn2.json')
+    writeFileSync(file, '{"a":')
+    const pauses = []
+    const out = updateClaudeConfig(file, (raw) => { raw.mine = 1 }, { _sleep: (ms) => pauses.push(ms) })
+    assert.equal(out.ok, false)
+    assert.equal(pauses.length, 1, 'exactly one re-read')
+    assert.equal(readFileSync(file, 'utf8'), '{"a":')
+  })
+
+  it('conflict retries pause with a small jittered delay (not after the last attempt)', () => {
+    const file = join(dir, 'pace.json')
+    writeFileSync(file, '{}')
+    let n = 0
+    claudeConfigTestHooks.beforeVerify = () => { n++; writeFileSync(file, JSON.stringify({ n })) }
+    const pauses = []
+    assert.throws(() => updateClaudeConfig(file, () => {}, { maxAttempts: 3, _sleep: (ms) => pauses.push(ms) }), ClaudeConfigConflictError)
+    assert.equal(pauses.length, 2)
+    for (const ms of pauses) assert.ok(ms >= 1 && ms <= 8, `jitter ${ms} in 1..8ms`)
+  })
+
+  it('foreign-uid symlink target is refused, including when it appears on the re-resolve before the rename', { skip: process.platform === 'win32' || typeof process.getuid !== 'function' }, () => {
+    const real = join(dir, 'real.json')
+    const link = join(dir, 'link.json')
+    writeFileSync(real, '{"a":1}')
+    symlinkSync(real, link)
+    const uid = process.getuid()
+    const stub = mock.method(process, 'getuid', () => uid + 1)
+    try {
+      assert.throws(() => updateClaudeConfig(link, (raw) => { raw.x = 1 }), /owned by uid/)
+    } finally {
+      stub.mock.restore()
+    }
+    assert.equal(readFileSync(real, 'utf8'), '{"a":1}')
+    // re-resolve path: acceptable at read time, foreign by the time of the rename
+    let stub2
+    claudeConfigTestHooks.beforeVerify = () => {
+      claudeConfigTestHooks.beforeVerify = null
+      stub2 = mock.method(process, 'getuid', () => uid + 1)
+    }
+    try {
+      assert.throws(() => updateClaudeConfig(link, (raw) => { raw.x = 1 }), /owned by uid/)
+    } finally {
+      stub2?.mock.restore()
+    }
+    assert.equal(readFileSync(real, 'utf8'), '{"a":1}')
+    assert.deepEqual(leftovers(dir), [])
+  })
+
+  for (const [label, preMode] of [['a new file', null], ['an existing 0600 file', 0o600], ['an existing 0640 file', 0o640]]) {
+    it(`the temp is never wider than the target mode at the verify point (${label})`, { skip: process.platform === 'win32' }, () => {
+      const file = join(dir, 'm.json')
+      if (preMode !== null) { writeFileSync(file, '{}'); chmodSync(file, preMode) }
+      const target = preMode ?? 0o600
+      const seen = []
+      claudeConfigTestHooks.beforeVerify = () => {
+        for (const n of leftovers(dir)) seen.push(statSync(join(dir, n)).mode & 0o777)
+      }
+      updateClaudeConfig(file, (raw) => { raw.x = 1 })
+      assert.ok(seen.length >= 1, 'a temp existed at the verify point')
+      for (const m of seen) assert.equal(m & ~target & 0o777, 0, `temp mode ${m.toString(8)} wider than ${target.toString(8)}`)
+      assert.equal(statSync(file).mode & 0o777, target)
+    })
+  }
+
+  it('settings.json mode warning: group/world-readable warns, owner-only and Windows do not', () => {
+    assert.match(describeSettingsModeWarning({ filePath: '/x/settings.json', mode: 0o644 }), /chmod 600 \/x\/settings\.json/)
+    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: 0o600 }), null)
+    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: null }), null)
+  })
+
+  it('hook register on a 0644 settings.json preserves the mode and warns', { skip: process.platform === 'win32' }, async () => {
+    const settingsPath = join(dir, 'settings.json')
+    writeFileSync(settingsPath, '{}')
+    chmodSync(settingsPath, 0o644)
+    const warns = []
+    const m = mock.method(console, 'warn', (line) => warns.push(String(line)))
+    try {
+      await createPermissionHookManager(new EventEmitter(), { settingsPath }).register()
+    } finally {
+      m.mock.restore()
+    }
+    assert.equal(statSync(settingsPath).mode & 0o777, 0o644)
+    assert.ok(warns.some((l) => l.includes('readable beyond its owner')), 'warned')
+  })
 
   it('POSIX does not retry EBUSY (only Windows has the held-handle semantics)', () => {
     const file = join(dir, 'posix.json')

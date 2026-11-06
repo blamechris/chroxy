@@ -29,7 +29,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { claudeGlobalConfigPath, parseClaudeConfigText } from './utils/claude-config-dir.js'
-import { fsyncForDurability, confirmRenameDurable, stampWindowsAcl } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable, stampWindowsAclStrict } from './platform.js'
 import { createLogger } from './logger.js'
 import {
   MCP_SERVER_NAME_RE,
@@ -1120,6 +1120,7 @@ export function readClaudeConfigForMutation(filePath) {
     // token from elsewhere in the file), so it is deliberately NOT echoed.
     return {
       ok: false,
+      invalidJson: true,
       error: `Config ${filePath} is not valid JSON; refusing to overwrite it. Fix or move the file, then retry.`,
     }
   }
@@ -1307,7 +1308,7 @@ export function writeClaudeConfigAtomic(
     _rename = renameSync,
     _isWindowsOverride,
     _sleep = sleepSyncMs,
-    _stampAcl = stampWindowsAcl,
+    _stampAcl = stampWindowsAclStrict,
   },
 ) {
   const resolved = resolveClaudeConfigWritePath(filePath)
@@ -1350,7 +1351,11 @@ export function writeClaudeConfigAtomic(
       // parent directory's (possibly broader) ACL. Create it EMPTY, stamp the
       // owner-only DACL, THEN write — so credentials in the document (env API keys,
       // OAuth material) never exist in a file readable beyond the owner. The DACL
-      // survives the same-directory rename (same as `writeFileRestricted`).
+      // survives the same-directory rename (same as `writeFileRestricted`). The
+      // stamp is FAIL-CLOSED here (unlike writeFileRestricted's best-effort): a
+      // failed stamp throws, the temp is discarded and the destination — possibly
+      // already restricted — is left untouched rather than replaced by a file
+      // carrying the parent's inherited ACL.
       writeFileSync(tmpPath, '')
       _stampAcl(tmpPath)
       writeFileSync(tmpPath, payload)
@@ -1486,6 +1491,9 @@ function verifyUnchanged(destPath, expect) {
   }
 }
 
+const TORN_READ_PAUSE_MS = 20
+const CONFLICT_JITTER_MAX_MS = 8
+
 /** Retry budget for `updateClaudeConfig` (#8983). Bounded: a file under constant churn must fail loudly, not spin. */
 export const CLAUDE_CONFIG_MAX_ATTEMPTS = 5
 
@@ -1520,11 +1528,22 @@ export const CLAUDE_CONFIG_MAX_ATTEMPTS = 5
  */
 export function updateClaudeConfig(filePath, mutate, opts = {}) {
   const { maxAttempts = CLAUDE_CONFIG_MAX_ATTEMPTS, createDir = false, ...writerOpts } = opts
+  const sleep = writerOpts._sleep ?? sleepSyncMs
+  let tornReadRetried = false
   let lastWhy = 'unknown'
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const resolved = resolveClaudeConfigWritePath(filePath)
     if (!resolved.ok) throw new Error(resolved.error)
-    const read = readClaudeConfigForMutation(resolved.path)
+    let read = readClaudeConfigForMutation(resolved.path)
+    if (!read.ok && read.invalidJson && !tornReadRetried) {
+      // A writer that truncates then writes (rather than rename-replaces) can be
+      // caught mid-write: the file parses as garbage for a moment. Re-read ONCE
+      // after a short pause before treating it as genuinely invalid; if it still
+      // is, fail closed exactly as before.
+      tornReadRetried = true
+      sleep(TORN_READ_PAUSE_MS)
+      read = readClaudeConfigForMutation(resolved.path)
+    }
     if (!read.ok) return read
     const out = mutate(read.raw, { existed: read.existed, mode: read.mode, attempt }) ?? {}
     if (out.write === false) {
@@ -1542,6 +1561,8 @@ export function updateClaudeConfig(filePath, mutate, opts = {}) {
       if (!(err instanceof ClaudeConfigConflictError)) throw err
       lastWhy = err.message
       log.warn(`${lastWhy}; re-reading and re-merging (attempt ${attempt}/${maxAttempts})`)
+      // Jittered pause so two contending writers do not retry in lockstep.
+      if (attempt < maxAttempts) sleep(1 + Math.floor(Math.random() * CONFLICT_JITTER_MAX_MS))
     }
   }
   log.error(`config update of ${filePath} abandoned after ${maxAttempts} attempts: ${lastWhy}`)
