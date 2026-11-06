@@ -8,8 +8,8 @@
 // methods live on `PtyDriverMixin` and are copied onto ClaudeTuiSession.prototype
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
 // session instance and every `this._*` / static reference resolves as before.
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
-import { claudeGlobalConfigPath, parseClaudeConfigText } from '../utils/claude-config-dir.js'
+import { realpathSync, writeFileSync } from 'fs'
+import { claudeGlobalConfigPath } from '../utils/claude-config-dir.js'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 // #7986 — the shared candidate list + resolver moved to utils/claude-binary.js
@@ -24,7 +24,7 @@ import { CLAUDE_LOGIN_COMMAND } from '../utils/claude-login-command.js'
 // `writeFileSync(tmp)` → `renameSync(tmp, ~/.claude.json)` is exactly how the
 // symlink-destroying, mode-widening bug survived in two places at once. Any new
 // caller that writes this file MUST come through here too.
-import { writeClaudeConfigAtomic } from '../byok-mcp-config.js'
+import { updateClaudeConfig } from '../byok-mcp-config.js'
 import { claudeNativeRouteSettingsEnv } from '../utils/claude-native-route.js'
 // Imported at call-time only (circular-safe): the writer methods read the
 // PROMPT_CHAR_DELAY_MS / MAX_THROTTLED_CHARS static getters off the class.
@@ -247,63 +247,55 @@ export const AUTH_REQUIRED_MESSAGE = `Claude is not logged in on this host, or i
 export function ensureCwdTrusted(cwd, env = process.env) {
   const realCwd = realpathSync(cwd)
   const claudeConfig = claudeGlobalConfigPath(env)
-  let config = {}
-  // #7046: PRESERVE the destination's permissions. This write used to call
-  // `writeFileSync(tmp, ...)` with no `mode` and never chmod the sidecar, so the
-  // rename left `0666 & ~umask` (0644 under the usual umask) on a file that holds
-  // OAuth material — chroxy actively WIDENING a 0600 config on every start() that
-  // pre-trusts a cwd. `null` means "we are creating the file", and the shared
-  // writer then uses 0600.
-  let mode = null
-  if (existsSync(claudeConfig)) {
-    try {
-      config = parseClaudeConfigText(readFileSync(claudeConfig, 'utf8'))
-      mode = statSync(claudeConfig).mode & 0o777
-    } catch (err) {
-      log.warn(`claude global config ${basename(claudeConfig)} unreadable, skipping trust pre-write: ${err.message}`)
-      return
-    }
-  }
-  if (!config.projects || typeof config.projects !== 'object') {
-    config.projects = {}
-  }
-  const existing = config.projects[realCwd]
-  // #5777 FIX-2 — also require hasCompletedProjectOnboarding. Pre-#5777 the
-  // early-return fired on trust alone, so a trusted-but-unonboarded cwd (every
-  // fresh worktree-isolated spawn — ensureCwdTrusted set trust but never the
-  // onboarding flag) still rendered claude's project-onboarding interstitial,
-  // which swallows the injected first prompt → the consumed=0 first_output
-  // wedge. Pre-writing both flags suppresses that screen. NOTE: this does NOT
-  // cover account-level one-shot notices (release notes / opus / remote-control
-  // upsell) which render even on a fully-onboarded trusted folder — those are
-  // gated/surfaced by FIX-1, not by per-project config.
-  if (existing && existing.hasTrustDialogAccepted === true && existing.hasCompletedProjectOnboarding === true) return
-
-  config.projects[realCwd] = {
-    ...(existing || {}),
-    hasTrustDialogAccepted: true,
-    hasCompletedProjectOnboarding: true,
-    projectOnboardingSeenCount: existing?.projectOnboardingSeenCount ?? 0,
-  }
-  // #7046: through the SHARED atomic writer, which (a) writes THROUGH a symlinked
-  // `~/.claude.json` instead of replacing the user's dotfiles link with a regular
-  // file, (b) preserves the mode we captured above rather than widening it, (c)
-  // still uses a per-call random sidecar suffix — concurrent ClaudeTuiSessions in
-  // one daemon share a pid and would race for the same temp path (#3922) — and
-  // (d) unlinks that sidecar if the rename throws, so a failed write cannot leave
-  // a full credential-bearing copy of the config lying in $HOME (#4463).
+  // #8983: the read-merge-write goes through the ONE shared choke point, which
+  // re-reads `~/.claude.json` just before the rename and re-merges if claude (or
+  // another daemon) changed it meanwhile — claude rewrites this file constantly
+  // (history, usage counters), so a stale-snapshot replace silently dropped its
+  // updates. `updateClaudeConfig` also (#7046) writes THROUGH a symlinked
+  // `~/.claude.json` instead of replacing the user's dotfiles link, PRESERVES the
+  // destination's mode rather than widening a 0600 OAuth-bearing file, uses a
+  // per-call random sidecar suffix (concurrent ClaudeTuiSessions in one daemon
+  // share a pid, #3922) and unlinks that sidecar if the rename throws (#4463).
   //
-  // Best-effort, like the unreadable-config branch above: a REFUSAL (a link we
-  // will not follow — dangling, non-regular, foreign-uid) or an I/O failure warns
-  // and skips the pre-write instead of failing session start. The degraded outcome
-  // is claude rendering its trust dialog; the alternative — destroying the link —
-  // is strictly worse.
+  // Best-effort: an unreadable config, a REFUSAL (a link we will not follow —
+  // dangling, non-regular, foreign-uid), an I/O failure or exhausted retries warn
+  // and skip the pre-write instead of failing session start. The degraded outcome
+  // is claude rendering its trust dialog; destroying the link or overwriting a
+  // concurrent writer is strictly worse.
   try {
-    // A fresh CLAUDE_CONFIG_DIR override need not exist yet (the resolver accepts
-    // it). Create ONLY the validated destination's directory, private to the
-    // owner, so the first start does not fail with ENOENT (#8974).
-    mkdirSync(dirname(claudeConfig), { recursive: true, mode: 0o700 })
-    writeClaudeConfigAtomic(claudeConfig, config, { mode })
+    const updated = updateClaudeConfig(claudeConfig, (config) => {
+      if (!config.projects || typeof config.projects !== 'object') {
+        config.projects = {}
+      }
+      const existing = config.projects[realCwd]
+      // #5777 FIX-2 — also require hasCompletedProjectOnboarding. Pre-#5777 the
+      // early-return fired on trust alone, so a trusted-but-unonboarded cwd (every
+      // fresh worktree-isolated spawn — ensureCwdTrusted set trust but never the
+      // onboarding flag) still rendered claude's project-onboarding interstitial,
+      // which swallows the injected first prompt → the consumed=0 first_output
+      // wedge. Pre-writing both flags suppresses that screen. NOTE: this does NOT
+      // cover account-level one-shot notices (release notes / opus / remote-control
+      // upsell) which render even on a fully-onboarded trusted folder — those are
+      // gated/surfaced by FIX-1, not by per-project config.
+      if (existing && existing.hasTrustDialogAccepted === true && existing.hasCompletedProjectOnboarding === true) {
+        return { write: false }
+      }
+      config.projects[realCwd] = {
+        ...(existing || {}),
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+        projectOnboardingSeenCount: existing?.projectOnboardingSeenCount ?? 0,
+      }
+      return {}
+    }, {
+      // A fresh CLAUDE_CONFIG_DIR override need not exist yet (the resolver accepts
+      // it). Create ONLY the validated destination's directory, private to the
+      // owner, so the first start does not fail with ENOENT (#8974).
+      createDir: true,
+    })
+    if (!updated.ok) {
+      log.warn(`claude global config ${basename(claudeConfig)} unreadable, skipping trust pre-write: ${updated.error}`)
+    }
   } catch (err) {
     log.warn(`claude global config ${basename(claudeConfig)} not written, skipping trust pre-write: ${err.message}`)
   }
