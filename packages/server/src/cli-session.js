@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { stillAuthorized } from './connection-authority.js'
 import { createInterface } from 'readline'
 import { randomBytes, randomUUID } from 'crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
@@ -787,9 +788,24 @@ export class CliSession extends BaseSession {
    * delivers a message queued while the process was down, whether it went down
    * for a crash, a model switch, or a user Stop (#7438).
    */
+  /**
+   * A startup-queued message is dispatched only while the connection that sent it
+   * is still authorized; otherwise it is dropped and reported as not dispatched.
+   */
+  _admitPendingItem(pending) {
+    if (stillAuthorized(pending?.options?.isAuthorized)) return true
+    reportInputAdmission(pending?.options, {
+      status: 'rejected', delivery: 'not_dispatched', retrySafe: false,
+      reason: 'connection_not_authorized',
+      message: 'The sending connection is no longer authorized; the input was not dispatched.',
+    })
+    return false
+  }
+
   _drainPendingQueue() {
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
+      if (!this._admitPendingItem(pending)) continue
       // #4828: session-scoped when init has fired (dequeue can race with
       // the very-first init so the fallback is intentional).
       ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
@@ -897,6 +913,10 @@ export class CliSession extends BaseSession {
       if (this._destroying) return
       if (!this._processReady || this._pendingQueue.length === 0) return
       const pending = this._pendingQueue.shift()
+      if (!this._admitPendingItem(pending)) {
+        this._drainNextPendingAfterResult()
+        return
+      }
       // #4828: session-scoped (post-result, post-init).
       ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})

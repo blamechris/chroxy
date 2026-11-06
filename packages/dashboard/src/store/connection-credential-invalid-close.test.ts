@@ -40,7 +40,7 @@ class MockWebSocket {
 const okFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok' }) })
 
 const { useConnectionStore } = await import('./connection')
-const { resetReconnectAttempt } = await import('./message-handler')
+const { resetReconnectAttempt, handleMessage, setEncryptionState } = await import('./message-handler')
 
 const URL_A = 'wss://server-a.example.com/ws'
 const URL_B = 'wss://server-b.example.com/ws'
@@ -127,11 +127,15 @@ describe('close code 4401 alone (not authenticated evidence)', () => {
   })
 })
 
-describe('the authenticated credential_invalidated notice', () => {
-  it('forgets the credential of that server entry only, and does not reconnect', async () => {
+// An ENCRYPTED frame is the authenticated evidence: the production transport hands
+// handleMessage `encryptedFrame = true` only after decrypting under the session key.
+const encryptedNotice = (reason: string) => handleMessage({ type: 'credential_invalidated', reason }, undefined, true)
+
+describe('the credential_invalidated notice', () => {
+  it('an encrypted notice forgets the credential of that server entry only, and does not reconnect', async () => {
     const { socket, serverId } = await connectToA()
     const before = MockWebSocket.instances.length
-    frame(socket, { type: 'credential_invalidated', reason: 'revoked' })
+    encryptedNotice('revoked')
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
     await vi.advanceTimersByTimeAsync(120_000)
     const s = useConnectionStore.getState()
@@ -142,16 +146,99 @@ describe('the authenticated credential_invalidated notice', () => {
     expect(s.connectionError).toMatch(/pair it again/i)
     expect(MockWebSocket.instances.length).toBe(before)
   })
-})
 
-describe('the notice also stops a retry that an error armed', () => {
+  it('the close that follows still runs the connection teardown', async () => {
+    const { socket } = await connectToA()
+    expect(useConnectionStore.getState().socket).not.toBeNull()
+    encryptedNotice('expired')
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    expect(useConnectionStore.getState().socket).toBeNull()
+  })
+
+  it('an accepted notice closes the socket', async () => {
+    const { socket } = await connectToA()
+    expect(socket.readyState).toBe(1)
+    encryptedNotice('revoked')
+    expect(socket.readyState).toBe(3)
+  })
+
+  it('a notice that does not forget still marks the token suspect, so a later invalid_token erases it', async () => {
+    const { serverId } = await connectToA()
+    encryptedNotice('destroyed')
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    const before = MockWebSocket.instances.length
+    useConnectionStore.getState().connect(URL_A, 'tok-a')
+    await vi.advanceTimersByTimeAsync(0)
+    const next = MockWebSocket.instances[before]!
+    next.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
+  })
+
+  it('does not blank a server entry that was re-paired since this connection began', async () => {
+    const { serverId } = await connectToA()
+    useConnectionStore.getState().updateServer(serverId, { token: 'tok-new' })
+    encryptedNotice('revoked')
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-new')
+  })
+
   it('does not reconnect after notice then error', async () => {
     const { socket } = await connectToA()
     const before = MockWebSocket.instances.length
-    frame(socket, { type: 'credential_invalidated', reason: 'expired' })
+    encryptedNotice('expired')
     socket.onerror?.()
     await vi.advanceTimersByTimeAsync(120_000)
     expect(MockWebSocket.instances.length).toBe(before)
+  })
+
+  it.each(['destroyed', 'invalid', 'something-new'])('an encrypted notice with reason %s stops reconnecting but erases nothing', async (reason) => {
+    const { serverId } = await connectToA()
+    encryptedNotice(reason)
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).toBe('disconnected')
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    expect(s.savedConnection).toEqual({ url: URL_A, token: 'tok-a' })
+  })
+
+  it('a plaintext notice before auth_ok is dropped: nothing erased, still connecting', async () => {
+    const { socket, serverId } = await connectToA(false)
+    frame(socket, { type: 'credential_invalidated', reason: 'revoked' })
+    const s = useConnectionStore.getState()
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    expect(s.savedConnection).toEqual({ url: URL_A, token: 'tok-a' })
+    expect(s.connectionPhase).not.toBe('disconnected')
+  })
+
+  it('a plaintext notice while encryption is in use is dropped', async () => {
+    const { serverId } = await connectToA()
+    setEncryptionState({ sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 })
+    try {
+      handleMessage({ type: 'credential_invalidated', reason: 'revoked' }, undefined, false)
+    } finally {
+      setEncryptionState(null)
+    }
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).toBe('connected')
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+
+  it('a plaintext notice on an authenticated unencrypted connection only stops reconnecting', async () => {
+    const { socket, serverId } = await connectToA()
+    frame(socket, { type: 'credential_invalidated', reason: 'revoked' })
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).toBe('disconnected')
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+    expect(s.savedConnection).toEqual({ url: URL_A, token: 'tok-a' })
+  })
+
+  it('does not clear a saved connection that belongs to a different server', async () => {
+    const { serverId } = await connectToA()
+    useConnectionStore.setState({ savedConnection: { url: URL_B, token: 'tok-b' } })
+    encryptedNotice('revoked')
+    const s = useConnectionStore.getState()
+    expect(s.serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
+    expect(s.savedConnection).toEqual({ url: URL_B, token: 'tok-b' })
   })
 })
 
@@ -176,11 +263,40 @@ describe('an auth_fail on a later attempt', () => {
     expect(s.serverRegistry.find((e) => e.wsUrl === URL_B)?.token).toBe('tok-b')
   })
 
+  it('another server signing in does not clear the suspect token', async () => {
+    const { socket, serverId } = await connectToA()
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    // Server B connects and authenticates.
+    const beforeB = MockWebSocket.instances.length
+    useConnectionStore.getState().connect(URL_B, 'tok-b')
+    await vi.advanceTimersByTimeAsync(0)
+    const b = MockWebSocket.instances[beforeB]!
+    b.onopen?.()
+    b.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+    // Back to A: its token is refused outright.
+    const next = await laterAttempt()
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.wsUrl === URL_B)?.token).toBe('tok-b')
+  })
+
   it('invalid_token with no preceding authenticated drop erases nothing', async () => {
     const { serverId } = await connectToA()
     useConnectionStore.setState({ connectionPhase: 'disconnected' })
     const next = await laterAttempt()
     frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+
+  it('signing in again clears the suspect token, so a later invalid_token erases nothing', async () => {
+    const { socket, serverId } = await connectToA()
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    const ok = await laterAttempt()
+    frame(ok, { type: 'auth_ok', serverMode: 'cli' })
+    await vi.advanceTimersByTimeAsync(0)
+    const again = await laterAttempt()
+    frame(again, { type: 'auth_fail', reason: 'invalid_token' })
     expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
   })
 

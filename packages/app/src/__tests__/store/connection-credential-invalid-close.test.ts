@@ -14,7 +14,7 @@ jest.mock('expo-secure-store', () => ({
 const WS_CLOSE_CREDENTIAL_INVALID = 4401;
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { resetReconnectAttempt, setLastConnectedUrl } from '../../store/message-handler';
+import { resetReconnectAttempt, setLastConnectedUrl, handleMessage, setEncryptionState } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 function flushPromises(): Promise<void> {
@@ -90,8 +90,8 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-async function openConnectedSocket(ws: { instances: FakeSocket[] }, authenticate = true): Promise<FakeSocket> {
-  useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+async function openConnectedSocket(ws: { instances: FakeSocket[] }, authenticate = true, url = 'wss://tunnel.example.com'): Promise<FakeSocket> {
+  useConnectionStore.getState().connect(url, 'tok', { silent: true });
   await flushPromises();
   const socket = ws.instances[ws.instances.length - 1];
   socket.onopen?.();
@@ -158,13 +158,17 @@ describe('close code 4401 alone (not authenticated evidence)', () => {
   });
 });
 
-describe('the authenticated credential_invalidated notice', () => {
-  it('forgets the saved credential and does not reconnect', async () => {
+// An ENCRYPTED frame is the authenticated evidence: the production transport hands
+// handleMessage `encryptedFrame = true` only after decrypting under the session key.
+const encryptedNotice = (reason: string) => handleMessage({ type: 'credential_invalidated', reason }, undefined, true);
+
+describe('the credential_invalidated notice', () => {
+  it('an encrypted notice forgets the saved credential and does not reconnect', async () => {
     const ws = installMockWebSocket();
     const socket = await openConnectedSocket(ws);
     useConnectionLifecycleStore.setState({ savedConnection: SAVED });
     const before = ws.instances.length;
-    frame(socket, { type: 'credential_invalidated', reason: 'revoked' });
+    encryptedNotice('revoked');
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
     await jest.advanceTimersByTimeAsync(120_000);
     await flushPromises();
@@ -175,18 +179,98 @@ describe('the authenticated credential_invalidated notice', () => {
     expect(ws.instances.length).toBe(before);
     ws.restore();
   });
-});
 
-describe('the notice also stops a retry that an error armed', () => {
+  it('the close that follows still runs the connection teardown', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    expect(useConnectionStore.getState().socket).not.toBeNull();
+    encryptedNotice('expired');
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
+    expect(useConnectionStore.getState().socket).toBeNull();
+    ws.restore();
+  });
+
+  it('an accepted notice closes the socket', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    encryptedNotice('revoked');
+    expect(socket.close).toHaveBeenCalled();
+    ws.restore();
+  });
+
+  it('a notice that does not forget still marks the token suspect, so a later invalid_token erases it', async () => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    encryptedNotice('destroyed');
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
+    const next = await openConnectedSocket(ws, false);
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
+    ws.restore();
+  });
+
   it('does not reconnect after notice then error', async () => {
     const ws = installMockWebSocket();
     const socket = await openConnectedSocket(ws);
     const before = ws.instances.length;
-    frame(socket, { type: 'credential_invalidated', reason: 'expired' });
+    encryptedNotice('expired');
     socket.onerror?.({});
     await jest.advanceTimersByTimeAsync(120_000);
     await flushPromises();
     expect(ws.instances.length).toBe(before);
+    ws.restore();
+  });
+
+  it.each(['destroyed', 'invalid', 'something-new'])('an encrypted notice with reason %s stops reconnecting but erases nothing', async (reason) => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    encryptedNotice(reason);
+    await flushPromises();
+    const lifecycle = useConnectionLifecycleStore.getState();
+    expect(lifecycle.connectionPhase).toBe('disconnected');
+    expect(lifecycle.savedConnection).toEqual(SAVED);
+    ws.restore();
+  });
+
+  it('a plaintext notice before auth_ok is dropped: nothing erased', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws, false);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    frame(socket, { type: 'credential_invalidated', reason: 'revoked' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
+    expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('disconnected');
+    ws.restore();
+  });
+
+  it('a plaintext notice while encryption is in use is dropped', async () => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    setEncryptionState({ sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 });
+    try {
+      handleMessage({ type: 'credential_invalidated', reason: 'revoked' }, undefined, false);
+    } finally {
+      setEncryptionState(null);
+    }
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+    ws.restore();
+  });
+
+  it('a plaintext notice on an authenticated unencrypted connection only stops reconnecting', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    frame(socket, { type: 'credential_invalidated', reason: 'revoked' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
     ws.restore();
   });
 });
@@ -215,6 +299,32 @@ describe('an auth_fail on a later attempt', () => {
     frame(next, { type: 'auth_fail', reason: 'invalid_token' });
     await flushPromises();
     expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
+    ws.restore();
+  });
+
+  it('signing in again clears the suspect token, so a later invalid_token erases nothing', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
+    await openConnectedSocket(ws, true);
+    const again = await openConnectedSocket(ws, false);
+    frame(again, { type: 'auth_fail', reason: 'invalid_token' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).not.toBeNull();
+    ws.restore();
+  });
+
+  it("another server's sign-in does not clear this server's suspect token", async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED });
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
+    await openConnectedSocket(ws, true, 'wss://other.example.com');
+    const back = await openConnectedSocket(ws, false);
+    frame(back, { type: 'auth_fail', reason: 'invalid_token' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
     ws.restore();
   });
 

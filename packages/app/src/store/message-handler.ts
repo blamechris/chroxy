@@ -61,6 +61,7 @@ import {
   handleAuthFail as sharedAuthFail,
   handleCredentialInvalidated as sharedCredentialInvalidated,
   shouldForgetOnAuthFail,
+  classifyCredentialNotice,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
   // checkpoint_created / checkpoint_list migrated to the shared dispatch table
@@ -838,12 +839,17 @@ export function setDisconnectedAttemptId(id: number): void {
 // nothing; it marks the token it ended on as suspect. Only the server's
 // authenticated `credential_invalidated` notice, or an `auth_fail` of
 // `invalid_token` for that same token on a later attempt, forgets it.
-let suspectCredentialToken: string | null = null;
-export function markCredentialSuspect(token: string | null): void {
-  suspectCredentialToken = token;
+// Keyed per server so one server's drop or sign-in never touches another's.
+const suspectCredentials = new Map<string, string>();
+export function credentialKey(ctx: { serverId?: string | null; url: string }): string {
+  return ctx.serverId ?? ctx.url;
 }
-export function getSuspectCredential(): string | null {
-  return suspectCredentialToken;
+export function markCredentialSuspect(key: string, token: string | null): void {
+  if (token) suspectCredentials.set(key, token);
+  else suspectCredentials.delete(key);
+}
+export function getSuspectCredential(key: string): string | null {
+  return suspectCredentials.get(key) ?? null;
 }
 
 export function setLastConnectedUrl(url: string | null): void {
@@ -2075,7 +2081,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       return;
 
     case 'auth_ok': {
-      markCredentialSuspect(null);
+      markCredentialSuspect(credentialKey(ctx), null);
       // Direct auth completes here; pairing keeps its timeout until the
       // post-handshake bootstrap credential has been admitted.
       // Reset replay flags — fresh auth means clean slate (#4512/#7497: clear
@@ -2373,25 +2379,38 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     }
 
     case 'credential_invalidated': {
-      // Authenticated notice (normal channel): the server ended this connection
-      // because its stored credential is gone. Stop reconnecting and forget it.
       const { reason: invalidReason } = sharedCredentialInvalidated(msg);
-      console.log(`[ws] credential invalidated by server (${invalidReason})`);
+      const action = classifyCredentialNotice({
+        encryptedFrame,
+        authReceived: ctx.authReceived === true,
+        encryptionInUse: getEncryptionState() !== null,
+        reason: invalidReason,
+      });
+      // A plaintext notice is forgeable: before authentication, or while encryption is
+      // in use, it is dropped; otherwise it only stops reconnecting (like a bare 4401).
+      if (action === 'ignore') break;
+      console.log(`[ws] credential invalidated by server (${invalidReason}, ${action})`);
+      ctx.credentialNoticeReceived = true;
       bumpConnectionAttemptId();
       setDisconnectedAttemptId(connectionAttemptId);
-      markCredentialSuspect(null);
-      void get().clearSavedConnection();
+      if (action === 'forget') {
+        markCredentialSuspect(credentialKey(ctx), null);
+        void get().clearSavedConnection();
+      } else {
+        markCredentialSuspect(credentialKey(ctx), ctx.token);
+      }
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(WS_CLOSE_CREDENTIAL_INVALID) ?? '', 0);
+      try { ctx.socket.close(); } catch { /* already closing */ }
       break;
     }
 
     case 'auth_fail': {
       const failedReason = sharedAuthFail(msg).reason;
-      if (shouldForgetOnAuthFail(failedReason, suspectCredentialToken, ctx.token)) {
+      if (shouldForgetOnAuthFail(failedReason, getSuspectCredential(credentialKey(ctx)), ctx.token)) {
         // The token a previous authenticated connection ended on is now refused
         // outright by the server: that is the confirmation a close code is not.
-        markCredentialSuspect(null);
+        markCredentialSuspect(credentialKey(ctx), null);
         void get().clearSavedConnection();
       }
       ctx.socket.close();

@@ -125,16 +125,6 @@ export class CheckpointManager extends EventEmitter {
   async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId, isAuthorized }) {
     const checkpoints = this._getCheckpoints(sessionId)
 
-    // Enforce max checkpoints — remove oldest if at limit
-    let evictedCwd = null
-    if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
-      const evicted = checkpoints.shift()
-      if (evicted?.gitRef) {
-        evictedCwd = evicted.cwd
-        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
-      }
-    }
-
     const checkpoint = {
       id: randomUUID(),
       sessionId,
@@ -160,6 +150,21 @@ export class CheckpointManager extends EventEmitter {
         checkpoint.gitRef = await this._createGitSnapshot(cwd, checkpoint.id)
       } finally {
         release()
+      }
+    }
+
+    // Last chance to refuse before anything is evicted or persisted.
+    assertAuthorized(isAuthorized)
+
+    // Enforce max checkpoints — remove oldest if at limit. Only now, with the new
+    // snapshot in hand: evicting first would lose a rewind point when the creation
+    // is refused or fails partway.
+    let evictedCwd = null
+    if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
+      const evicted = checkpoints.shift()
+      if (evicted?.gitRef) {
+        evictedCwd = evicted.cwd
+        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
       }
     }
 

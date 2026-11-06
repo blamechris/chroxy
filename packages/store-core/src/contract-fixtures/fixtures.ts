@@ -3619,25 +3619,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // The server's authenticated notice that this connection's stored credential is
-    // no longer valid. Same divergence shape as auth_fail: the dashboard flips the
-    // flat connectionPhase to disconnected (seeded connected, so non-vacuous) and forgets
-    // the credential; the app keeps the phase in the mocked lifecycle store and forgets
-    // the saved connection there, so it makes no observable main-store mutation.
-    name: 'credential_invalidated flips the dashboard flat connectionPhase to disconnected; the app routes the phase to the mocked lifecycle store (divergent)',
-    type: 'credential_invalidated',
-    init: { activeSessionId: 's1', sessions: { s1: {} } },
-    message: { type: 'credential_invalidated', reason: 'revoked' },
-    divergent: {
-      reason:
-        "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', ... }) " +
-        '(seeded connected, so non-vacuous); the app keeps connectionPhase in the secondary useConnectionLifecycleStore (mocked here), ' +
-        'so the app makes no observable main-store mutation.',
-      app: {},
-      dashboard: { flat: { connectionPhase: 'disconnected' } },
-    },
-  },
-  {
     // #6325 (pair_fail close-out): pairing rejected — same divergence as auth_fail.
     // The dashboard flips the flat connectionPhase to disconnected; the app routes the
     // phase into the mocked lifecycle store and only does the vacuous set({socket:null}).

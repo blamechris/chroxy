@@ -7,6 +7,7 @@
  * SdkSession, and GeminiSession don't duplicate them.
  */
 import { EventEmitter } from 'events'
+import { stillAuthorized } from './connection-authority.js'
 import { randomBytes } from 'crypto'
 import { resolveModelId } from './models.js'
 import {
@@ -1190,6 +1191,9 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean}
    */
   _admitQueuedItem(item) {
+    // The connection that queued this follow-up may have ended while it waited:
+    // a revoked or expired credential must not get its queued input dispatched.
+    if (!stillAuthorized(item?.sendOptions?.isAuthorized)) return false
     const predicate = item?.sendOptions?.admitAtFlush
     if (typeof predicate !== 'function') return true
     try {

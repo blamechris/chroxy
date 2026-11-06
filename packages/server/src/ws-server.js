@@ -210,6 +210,9 @@ export const KEEPALIVE_SWEEP_MS = 15_000
 // protocol-level 1008 so a client re-pairs instead of retrying the dead token.
 export const WS_CLOSE_CREDENTIAL_INVALID = 4401
 
+// The revoke acknowledgement's error codes (the only errors a stripped connection still gets).
+const REVOKE_NOTICE_ERROR_CODES = new Set(['REVOKE_NOT_DURABLE', 'REVOKE_DURABILITY_UNKNOWN'])
+
 // Frames that belong to the authentication handshake and are never withheld.
 const AUTH_FLOW_FRAME_TYPES = new Set([
   'auth_ok', 'auth_fail', 'key_exchange_ok', 'pair_fail', 'pair_result',
@@ -1515,6 +1518,10 @@ export class WsServer {
       // A stored pairing token stopped being valid (revoked, expired, evicted):
       // end every connection that authenticated with it.
       this._sessionTokenRemovedHandler = ({ token, reason }) => {
+        // Daemon teardown clears the store from memory only: the tokens stay valid on
+        // disk and after the restart, so connections end through close(), not as
+        // "credential invalid" (which would make clients forget a good credential).
+        if (reason === 'destroyed') return
         for (const [ws, client] of [...this.clients]) {
           if (client.pairingCredential != null && client.pairingCredential === token) {
             this._endCredentialConnection(ws, client, reason)
@@ -3196,11 +3203,11 @@ export class WsServer {
     // The authentication flow itself: a connection whose authentication was
     // stripped may attempt to authenticate again and must be told the outcome.
     if (AUTH_FLOW_FRAME_TYPES.has(type)) return true
-    if (type === 'error' && typeof message.code === 'string' && message.code.startsWith('REVOKE_')) return true
+    if (type === 'error' && REVOKE_NOTICE_ERROR_CODES.has(message.code)) return true
+    if (client.authTime != null && client.authenticated !== true) return false
     if (client.pairingCredential != null) {
       return !!this._pairingManager?.isSessionTokenLive(client.pairingCredential)
     }
-    if (client.authTime != null && client.authenticated !== true) return false
     return true
   }
 

@@ -112,6 +112,7 @@ import {
   disconnectedAttemptId,
   setDisconnectedAttemptId,
   markCredentialSuspect,
+  credentialKey,
   lastConnectedUrl,
   setLastConnectedUrl,
   nextReconnectAttempt,
@@ -1565,8 +1566,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     socket.onclose = (event: CloseEvent) => {
       stopHeartbeat();
 
-      // Stale socket from a previous connection attempt — ignore
-      if (myAttemptId !== connectionAttemptId) return;
+      // Stale socket from a previous connection attempt — ignore. EXCEPT the one a
+      // `credential_invalidated` notice just ended: it advanced the attempt id to cancel
+      // any armed retry, but its teardown below must still run.
+      if (myAttemptId !== connectionAttemptId && !socketCtx.credentialNoticeReceived) return;
 
       // #5962 (#5721 parity) — this attempt's socket closed; no handshake left to
       // time. Clear AFTER the stale guard so a late stale-socket close can't
@@ -1621,10 +1624,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // retry. The server's authenticated `credential_invalidated` notice (or a
       // later `auth_fail` invalid_token for this token) is what forgets it.
       // Advancing the attempt id also kills a retry that `onerror` armed first.
+      if (socketCtx.credentialNoticeReceived) {
+        // The notice already stopped reconnecting and set the phase and message.
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        return;
+      }
       if (isCredentialInvalidClose(event.code) && wasConnected && disconnectedAttemptId !== myAttemptId) {
         bumpConnectionAttemptId();
         setDisconnectedAttemptId(connectionAttemptId);
-        markCredentialSuspect(socketCtx.token);
+        markCredentialSuspect(credentialKey(socketCtx), socketCtx.token);
         useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
         useConnectionLifecycleStore.getState().setConnectionError(getWsCloseMessage(event.code) ?? '', 0);
         return;

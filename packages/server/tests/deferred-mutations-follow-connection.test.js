@@ -209,11 +209,14 @@ describe('checkpoint restore', () => {
   })
 
   it('creates no checkpoint snapshot once the connection is no longer authorized', async () => {
+    const refsBefore = execFileSync(GIT, ['for-each-ref'], { cwd: repo, encoding: 'utf8' })
     const f = flag()
     const p = cm.createCheckpoint({ sessionId: 's2', resumeSessionId: 'r', cwd: repo, name: 'cp', isAuthorized: f.isAuthorized })
     f.ok = false
     await assert.rejects(p, (err) => isAuthorityRevoked(err))
     assert.equal(cm.listCheckpoints('s2').length, 0)
+    const refs = execFileSync(GIT, ['for-each-ref'], { cwd: repo, encoding: 'utf8' })
+    assert.equal(refs, refsBefore, 'no snapshot ref was created')
   })
 })
 
@@ -388,6 +391,8 @@ describe('a connection whose authentication was stripped', () => {
       const [sock, client] = [...server.clients][0]
       client.authenticated = false // what a token revoke does
       assert.equal(server._send(sock, { type: 'probe_reply' }), false, 'ordinary replies are withheld')
+      assert.equal(server._send(sock, { type: 'error', code: 'SOMETHING_ELSE', message: 'x' }), false, 'an ordinary error is withheld')
+      assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_NOT_DURABLE', message: 'x' }), true, 'the revoke caveat still reaches it')
       ws.send(JSON.stringify({ type: 'auth', token: 'wrong' }))
       await waitFor(() => messages.find(m => m.type === 'auth_fail'), { timeoutMs: 2000, label: 'auth_fail' })
       assert.equal(messages.some(m => m.type === 'probe_reply'), false)

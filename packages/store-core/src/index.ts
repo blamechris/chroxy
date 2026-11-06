@@ -752,6 +752,7 @@ export {
   handleAuthFail,
   handleCredentialInvalidated,
   shouldForgetOnAuthFail,
+  classifyCredentialNotice,
   handleKeyExchangeOk,
   handleServerMode,
   handleCheckpointCreated,

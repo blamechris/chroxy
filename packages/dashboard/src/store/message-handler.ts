@@ -51,6 +51,7 @@ import {
   handleAuthFail as sharedAuthFail,
   handleCredentialInvalidated as sharedCredentialInvalidated,
   shouldForgetOnAuthFail,
+  classifyCredentialNotice,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   decideKeyPinWithPairingIdentity,
   decodeEncryptionGate,
@@ -1029,6 +1030,18 @@ export function resetReconnectAttempt(): void {
   reconnectAttempt = 0;
 }
 
+/**
+ * Forget the credential this connection used: that server entry's token (only if it
+ * is still the token in use) and the saved connection (only if it is this one).
+ */
+function forgetCredential(ctx: ConnectionContext, get: () => ConnectionState): void {
+  const state = get();
+  const entry = ctx.serverId ? state.serverRegistry?.find((e) => e.id === ctx.serverId) : undefined;
+  if (ctx.serverId && (!entry || entry.token === ctx.token)) state.updateServer(ctx.serverId, { token: '' });
+  const saved = state.savedConnection;
+  if (saved && saved.url === ctx.url && saved.token === ctx.token) state.clearSavedConnection();
+}
+
 export function setDisconnectedAttemptId(id: number): void {
   disconnectedAttemptId = id;
 }
@@ -1037,12 +1050,17 @@ export function setDisconnectedAttemptId(id: number): void {
 // nothing; it marks the token it ended on as suspect. Only the server's
 // authenticated `credential_invalidated` notice, or an `auth_fail` of
 // `invalid_token` for that same token on a later attempt, forgets it.
-let suspectCredentialToken: string | null = null;
-export function markCredentialSuspect(token: string | null): void {
-  suspectCredentialToken = token;
+// Keyed per server so one server's drop or sign-in never touches another's.
+const suspectCredentials = new Map<string, string>();
+export function credentialKey(ctx: { serverId?: string | null; url: string }): string {
+  return ctx.serverId ?? ctx.url;
 }
-export function getSuspectCredential(): string | null {
-  return suspectCredentialToken;
+export function markCredentialSuspect(key: string, token: string | null): void {
+  if (token) suspectCredentials.set(key, token);
+  else suspectCredentials.delete(key);
+}
+export function getSuspectCredential(key: string): string | null {
+  return suspectCredentials.get(key) ?? null;
 }
 
 export function setLastConnectedUrl(url: string | null): void {
@@ -4767,7 +4785,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
   switch (msg.type) {
 
     case 'auth_ok': {
-      markCredentialSuspect(null);
+      markCredentialSuspect(credentialKey(ctx), null);
       // Reset replay flags — fresh auth means clean slate (#4493/#7497: clear
       // every per-session replay window so a reconnect doesn't leave a stale
       // one gating future activity bumps; `resetReplayReconcile` below IS that
@@ -5129,31 +5147,41 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     }
 
     case 'credential_invalidated': {
-      // Authenticated notice (normal channel): the server ended this connection
-      // because its stored credential is gone. Stop reconnecting; forget the
-      // credential of THIS server entry only.
       const { reason: invalidReason } = sharedCredentialInvalidated(msg);
-      console.log(`[ws] credential invalidated by server (${invalidReason})`);
+      const action = classifyCredentialNotice({
+        encryptedFrame,
+        authReceived: ctx.authReceived === true,
+        encryptionInUse: getEncryptionState() !== null,
+        reason: invalidReason,
+      });
+      // A plaintext notice is forgeable: before authentication, or while encryption is
+      // in use, it is dropped; otherwise it only stops reconnecting (like a bare 4401).
+      if (action === 'ignore') break;
+      console.log(`[ws] credential invalidated by server (${invalidReason}, ${action})`);
+      ctx.credentialNoticeReceived = true;
       bumpConnectionAttemptId();
       setDisconnectedAttemptId(connectionAttemptId);
-      markCredentialSuspect(null);
-      if (ctx.serverId) get().updateServer(ctx.serverId, { token: '' });
-      get().clearSavedConnection();
+      if (action === 'forget') {
+        markCredentialSuspect(credentialKey(ctx), null);
+        forgetCredential(ctx, get);
+      } else {
+        markCredentialSuspect(credentialKey(ctx), ctx.token);
+      }
       set({
         connectionPhase: 'disconnected',
         connectionError: getWsCloseMessage(WS_CLOSE_CREDENTIAL_INVALID),
         reconnectRetryAt: null,
       });
+      try { ctx.socket.close(); } catch { /* already closing */ }
       break;
     }
 
     case 'auth_fail': {
-      if (shouldForgetOnAuthFail(sharedAuthFail(msg).reason, suspectCredentialToken, ctx.token)) {
+      if (shouldForgetOnAuthFail(sharedAuthFail(msg).reason, getSuspectCredential(credentialKey(ctx)), ctx.token)) {
         // The token a previous authenticated connection ended on is now refused
         // outright by the server: that is the confirmation a close code is not.
-        markCredentialSuspect(null);
-        if (ctx.serverId) get().updateServer(ctx.serverId, { token: '' });
-        get().clearSavedConnection();
+        markCredentialSuspect(credentialKey(ctx), null);
+        forgetCredential(ctx, get);
       }
       ctx.socket.close();
       set({ connectionPhase: 'disconnected', socket: null });
