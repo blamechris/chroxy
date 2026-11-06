@@ -61,7 +61,6 @@ export interface SidebarPanelSlotProps {
 
 const DEFAULT_MIN_HEIGHT = 120
 const DEFAULT_MAX_HEIGHT = 600
-const HEADER_HEIGHT_PX = 28
 
 export function SidebarPanelSlot({
   views,
@@ -229,7 +228,6 @@ export function SidebarPanelSlot({
       <div
         className="sidebar-panel-slot-header"
         data-testid="sidebar-panel-slot-header"
-        style={{ height: HEADER_HEIGHT_PX }}
       >
         <div
           className="sidebar-panel-slot-tabs"

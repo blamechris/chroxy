@@ -1395,11 +1395,22 @@ a.dev-preview-chip__link:focus-visible {
   outline: none;
 }
 
+/* #8943 — the header wraps instead of squeezing. It used to be a fixed 28px
+   single row where the tab strip was `flex: 1; min-width: 0`, so at the default
+   240px sidebar the tab labels kept their text but their boxes shrank under the
+   Control Room launcher and the metric. Now: min-height (not height), items
+   never shrink below their content, and the row wraps. Narrow (default): tabs
+   + collapse toggle on row 1, launcher + metric on row 2 (the metric takes
+   the leftover width and truncates with an ellipsis, never overlapping).
+   Wide (container >= 400px): one row in DOM order. Every control is >= 44px. */
 .sidebar-panel-slot-header {
+  container-type: inline-size;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  column-gap: 6px;
   padding: 0 8px;
+  min-height: 44px;
   font-size: 11px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border-primary);
@@ -1409,14 +1420,21 @@ a.dev-preview-chip__link:focus-visible {
 .sidebar-panel-slot-tabs {
   display: flex;
   gap: 8px;
-  flex: 1;
+  /* Basis = the row minus the 44px toggle and one column-gap, so the toggle
+     always shares row 1 and the launcher + metric always take row 2. */
+  flex: 1 1 calc(100% - 50px);
   min-width: 0;
+  order: 1;
 }
 
 .sidebar-panel-slot-tab {
   background: transparent;
   border: none;
   padding: 4px 6px;
+  min-height: 44px;
+  min-width: 44px;
+  white-space: nowrap;
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 11px;
   cursor: pointer;
@@ -1440,13 +1458,17 @@ a.dev-preview-chip__link:focus-visible {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: 6px;
+  flex: 0 0 auto;
+  order: 3;
 }
 
 .sidebar-panel-slot-launcher {
   background: transparent;
   border: 1px solid var(--border-primary, color-mix(in srgb, var(--text-secondary) 22%, transparent));
   padding: 3px 8px;
+  min-height: 44px;
+  min-width: 44px;
+  flex: 0 0 auto;
   color: var(--accent-blue);
   font-size: 11px;
   font-weight: 600;
@@ -1460,9 +1482,16 @@ a.dev-preview-chip__link:focus-visible {
 }
 
 .sidebar-panel-slot-collapsed-metric {
+  flex: 1 1 0;
+  min-width: 0;
+  order: 4;
   font-size: 11px;
   color: var(--text-secondary);
   padding: 0 6px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-panel-slot-collapse-toggle {
@@ -1471,11 +1500,23 @@ a.dev-preview-chip__link:focus-visible {
   color: var(--text-muted);
   cursor: pointer;
   padding: 2px 4px;
+  min-height: 44px;
+  min-width: 44px;
+  flex: 0 0 auto;
+  order: 2;
   font-size: 11px;
 }
 
 .sidebar-panel-slot-collapse-toggle:hover {
   color: var(--text-primary);
+}
+
+@container (min-width: 400px) {
+  /* Wide enough for one row: restore DOM order (tabs, launcher, metric, toggle). */
+  .sidebar-panel-slot-tabs { flex: 0 1 auto; order: 0; }
+  .sidebar-panel-slot-launchers { order: 0; }
+  .sidebar-panel-slot-collapsed-metric { order: 0; }
+  .sidebar-panel-slot-collapse-toggle { order: 0; }
 }
 
 .sidebar-panel-slot-body {
