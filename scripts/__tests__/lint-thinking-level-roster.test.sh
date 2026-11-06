@@ -40,7 +40,13 @@
 #      Cases 2-8 and 10 reach the lint only through the find-based
 #      LINT_THINKING_SCAN_DIR hook; case 9 proved the real branch green and
 #      nothing could turn it red (#7783, #7633). Case 7 is split in two
-#      (suffix rule / directory rule), hence 14 checks for 13 numbered cases.
+#      (suffix rule / directory rule), hence extra checks beyond the numbered cases.
+#  14. the DEFAULT floor (900) fails a 400-file scan — only the built-in floor
+#      can fail it, so a floor slackened back toward 300 goes red
+#  15-16. LINT_THINKING_MIN_FILES / LINT_THINKING_SCAN_DIR are IGNORED without
+#      --test (a workflow-level env: must not be able to blind the guard)
+#  17-18. .mts and .cts files are in scope
+#  Every harness call passes --test; case 9 (real repo) passes no flag.
 #
 # Drives the lint against a TEMP tree via LINT_THINKING_SCAN_DIR so it never
 # depends on repo state. No test framework — matches the sibling
@@ -55,7 +61,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-thinking-level-roster.sh"
 
 # Asserted EQUAL, not -ge, so removing a case is as loud as skipping one.
-EXPECTED_CASES=14
+EXPECTED_CASES=19
 
 PASS=0
 FAIL=0
@@ -64,7 +70,7 @@ FAILED=()
 
 # run_lint <scan-dir> [min-files] -> echoes the lint's exit code.
 run_lint() {
-  LINT_THINKING_SCAN_DIR="$1" LINT_THINKING_MIN_FILES="${2:-1}" bash "$LINT" >/dev/null 2>&1
+  LINT_THINKING_SCAN_DIR="$1" LINT_THINKING_MIN_FILES="${2:-1}" bash "$LINT" --test >/dev/null 2>&1
   echo $?
 }
 
@@ -119,8 +125,8 @@ rm -f "$SCAN/src/fallback.ts"
 # Case 7 — tests are out of scope on purpose; see the lint header. Two
 # INDEPENDENT exclusions (a `*.test.*` suffix, and a tests/ directory), so one
 # file per rule: a single tests/roster.test.ts satisfied both and left either
-# rule deletable with the case still green (#7783). Two checks, so the count
-# below is 14.
+# rule deletable with the case still green (#7783). Two checks; see the total
+# in EXPECTED_CASES.
 printf "expect(levels).toEqual(['default', 'high', 'max'])\n" > "$SCAN/src/roster.test.ts"
 check "a roster in a *.test.ts OUTSIDE tests/ passes (suffix rule alone)" 0 "$(run_lint "$SCAN")"
 rm -f "$SCAN/src/roster.test.ts"
@@ -166,7 +172,7 @@ if [ -r "$UNREADABLE" ] || cat "$UNREADABLE" >/dev/null 2>&1; then
 else
   # Not run_lint: this case asserts on the lint's OUTPUT as well as its exit
   # code, and run_lint discards it.
-  unreadable_out="$(LINT_THINKING_SCAN_DIR="$SCAN" LINT_THINKING_MIN_FILES=2 bash "$LINT" 2>&1)"
+  unreadable_out="$(LINT_THINKING_SCAN_DIR="$SCAN" LINT_THINKING_MIN_FILES=2 bash "$LINT" --test 2>&1)"
   unreadable_rc=$?
   case "$unreadable_out" in
     *"$UNREADABLE"*) unreadable_actual="$unreadable_rc" ;;
@@ -192,7 +198,7 @@ git -C "$PROD" add scripts/lint-thinking-level-roster.sh "$PROD_FILE"
 # run_prod -> the lint's combined output, then "RC=<exit>" as the last line.
 run_prod() {
   local out rc
-  out="$(cd "$PROD" && env -u LINT_THINKING_SCAN_DIR LINT_THINKING_MIN_FILES=1 bash scripts/lint-thinking-level-roster.sh 2>&1)"
+  out="$(cd "$PROD" && env -u LINT_THINKING_SCAN_DIR LINT_THINKING_MIN_FILES=1 bash scripts/lint-thinking-level-roster.sh --test 2>&1)"
   rc=$?
   printf '%s\nRC=%s\n' "$out" "$rc"
 }
@@ -226,6 +232,35 @@ else
   check "production path: an unreadable tracked file fails BY NAME" 1 "$(prod_actual "$PROD_FILE" "$prod_out")"
 fi
 chmod 644 "$PROD/$PROD_FILE" 2>/dev/null || true
+
+# Case 14 — the DEFAULT floor is tight. 400 clean files clear the old floor of
+# 300 but are far below a real tree (~985), i.e. the shape of "a whole package's
+# src went missing". --test is passed but LINT_THINKING_MIN_FILES is NOT, so
+# only the built-in floor can fail this.
+BIG="$TMP/big"; mkdir -p "$BIG"
+for i in $(seq 1 400); do printf "export const v%s = %s\n" "$i" "$i" > "$BIG/f$i.ts"; done
+big_rc=0
+LINT_THINKING_SCAN_DIR="$BIG" bash "$LINT" --test >/dev/null 2>&1 || big_rc=$?
+check "the default floor fails a 400-file scan (a package's src gone missing)" 1 "$big_rc"
+
+# Cases 15-16 — the env hooks are IGNORED without --test. Neither passes the
+# flag; both set the env vars a workflow-level `env:` could set. If an env var
+# were honoured, the floor would be 1 (case 15) or the scan would walk the
+# clean temp tree (case 16) — either way the output below would not report the
+# production scan's count of 1 file against the real floor.
+prod_out="$(cd "$PROD" && LINT_THINKING_MIN_FILES=1 bash scripts/lint-thinking-level-roster.sh 2>&1; echo "RC=$?")"
+check "LINT_THINKING_MIN_FILES alone is ignored without --test" 1 "$(prod_actual "scanned only 1 files (floor: 900)" "$prod_out")"
+prod_out="$(cd "$PROD" && LINT_THINKING_SCAN_DIR="$BIG" bash scripts/lint-thinking-level-roster.sh 2>&1; echo "RC=$?")"
+check "LINT_THINKING_SCAN_DIR alone is ignored without --test" 1 "$(prod_actual "scanned only 1 files (floor: 900)" "$prod_out")"
+
+# Cases 17-18 — the module extensions .mts / .cts are in scope.
+MX="$TMP/mx"; mkdir -p "$MX/src"
+printf "export const A = 1\n" > "$MX/src/a.ts"
+printf "export const L = ['default', 'high', 'max']\n" > "$MX/src/roster.mts"
+check "a roster in a .mts file fails" 1 "$(run_lint "$MX")"
+rm -f "$MX/src/roster.mts"
+printf "export const L = ['default', 'high', 'max']\n" > "$MX/src/roster.cts"
+check "a roster in a .cts file fails" 1 "$(run_lint "$MX")"
 
 echo "----"
 BROKEN=0
