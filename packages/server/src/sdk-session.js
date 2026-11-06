@@ -1717,7 +1717,7 @@ export class SdkSession extends BaseSession {
           // #7326: why the turn ended (truncated by max_tokens / max turns /
           // budget, refused, ...). Omitted when the SDK reported nothing we map.
           declarationTurnId: messageId,
-          declarationEligible: !supersededByNewerTurn() && sdkDeclarationEligible(msg),
+          declarationEligible: !supersededByNewerTurn() && !this._stdinForwardingDisabled && sdkDeclarationEligible(msg),
           ...turnOutcomeField(outcomeFromSdkResult(msg)),
         }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
@@ -2798,6 +2798,7 @@ export class SdkSession extends BaseSession {
       ;(this._log || log).warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
+        declarationTurnId: messageId,
       })
       return
     }

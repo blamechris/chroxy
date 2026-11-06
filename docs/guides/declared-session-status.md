@@ -55,6 +55,9 @@ SDK responses and terminal events carry an internal immutable request identity.
 A superseded query's accounting result still records usage, but cannot apply,
 replace or discard the successor's declaration candidate. These identities stay
 in memory and are separate from the public status model.
+SDK completion also checks the existing session-sticky sidecar stdin-disabled
+flag. Known input-channel loss vetoes declaration application until the session
+is restarted; the session-wide callback receives no fabricated query identity.
 
 Gemini limit, loop-stop and blocked diagnostics veto declaration application,
 even if a later result says success. Informational warnings remain distinct.
