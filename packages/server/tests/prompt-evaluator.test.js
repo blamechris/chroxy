@@ -1,13 +1,19 @@
-import { describe, it } from 'node:test'
+import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { recordTimerArms } from './test-helpers.js'
 import { evaluateDraft, shouldSkipEvaluator, shouldSkipEvaluatorAsync } from '../src/prompt-evaluator.js'
+import { createBoundedRegexMatcher } from '../src/utils/bounded-regex.js'
 
 /**
  * The evaluator wraps a single Anthropic API call and parses its JSON response.
  * Tests use a stub `client` that mimics the SDK's `messages.create` shape, so
  * we can drive each parse path without ever hitting the network.
  */
+
+// A match is expected in these tests, and a timeout counts as no match, so the 50 ms default deadline would turn a
+// correct match into a failure on a busy runner. The deadline is not what they test.
+const patientMatcher = createBoundedRegexMatcher({ timeoutMs: 5000 })
+after(() => patientMatcher.close())
 
 function makeStubClient(responseText, { onCall } = {}) {
   return {
@@ -694,7 +700,7 @@ describe('shouldSkipEvaluator', () => {
       const msg = 'please proceed when ready'
       assert.equal(await shouldSkipEvaluatorAsync(msg), false)
       assert.equal(
-        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '^please proceed' }),
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '^please proceed' }, patientMatcher),
         true,
       )
     })
@@ -739,7 +745,7 @@ describe('shouldSkipEvaluator', () => {
 
     it('treats custom pattern as case-insensitive', async () => {
       assert.equal(
-        await shouldSkipEvaluatorAsync('PROCEED', { promptEvaluatorSkipPattern: '^proceed$' }),
+        await shouldSkipEvaluatorAsync('PROCEED', { promptEvaluatorSkipPattern: '^proceed$' }, patientMatcher),
         true,
       )
     })

@@ -73,7 +73,9 @@ describe('bounded regex matching', () => {
   })
 
   it('text longer than maxInput is not tested at all and counts as no match (no prefix match)', async () => {
-    const m = createBoundedRegexMatcher({ maxInput: 10 })
+    // The cap is under test, not the deadline: the match at the cap must not be able to miss 50 ms on a busy runner
+    // (a timeout counts as no match, which is what a real match would then be mistaken for).
+    const m = createBoundedRegexMatcher({ maxInput: 10, timeoutMs: 5000 })
     try {
       assert.equal(await m.test('^x{10}$', 'x'.repeat(50)), false, 'an anchored pattern does not match a long text by its prefix')
       assert.equal(await m.test('^[a-z ]+$', 'abc '.repeat(10)), false)

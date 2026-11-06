@@ -2,7 +2,7 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { inputHandlers } from '../../src/handlers/input-handlers.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
-import { boundedRegex } from '../../src/utils/bounded-regex.js'
+import { boundedRegex, createBoundedRegexMatcher } from '../../src/utils/bounded-regex.js'
 import { buildMessageCtx } from '../../src/ws-handler-context.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -148,8 +148,15 @@ describe('the per-session evaluator lock is shared across messages', () => {
       const evaluator = createSpy(async () => OK)
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
       session.promptEvaluatorSkipPattern = '^skip this draft please$'
-      await send(ctx, makeClient({ id: 'A', activeSessionId: 's1' }), 'skip this draft please')
-      await send(ctx, makeClient({ id: 'A', activeSessionId: 's1' }), 'skip this draft please')
+      // The draft must be skipped, and a timeout counts as no match: route the handler's default matcher through
+      // one with a generous deadline so a busy runner cannot turn the skip into an evaluator call.
+      const patient = createBoundedRegexMatcher({ timeoutMs: 5000 })
+      const real = boundedRegex.test
+      boundedRegex.test = (source, text, key) => patient.test(source, text, key)
+      try {
+        await send(ctx, makeClient({ id: 'A', activeSessionId: 's1' }), 'skip this draft please')
+        await send(ctx, makeClient({ id: 'A', activeSessionId: 's1' }), 'skip this draft please')
+      } finally { boundedRegex.test = real; patient.close() }
       assert.equal(evaluator.callCount, 0)
       assert.equal(session.sendMessage.callCount, 2)
       assert.equal(ctx.runtime.pendingEvaluatorAwaits.size, 0)
