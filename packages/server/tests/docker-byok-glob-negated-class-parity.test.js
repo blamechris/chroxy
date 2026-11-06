@@ -47,7 +47,9 @@ let workspaceDir
 function bashBackend() {
   return {
     async execInEnvironment(_containerId, opts) {
-      const local = opts.cmd.split(CONTAINER_WORKSPACE).join(workspaceDir)
+      const parts = opts.cmd.split(CONTAINER_WORKSPACE)
+      assert.ok(parts.length > 1, 'fixture rewrite matched no /workspace in the command')
+      const local = parts.join(workspaceDir)
       const { stdout, stderr } = await pexec('bash', ['-c', local], { maxBuffer: 8 << 20 })
       return { stdout, stderr }
     },
