@@ -2949,6 +2949,7 @@ export function App() {
         // model's own roster offers; the `as`-to-a-three-level-union that
         // stood here compiled and was false for every codex session.
         onThinkingLevelChange={(level) => setThinkingLevel(level)}
+        onThinkingLevelClear={() => setThinkingLevel(null)}
         sessionNotifications={sessionNotifications}
         onSwitchSession={handleSwitchSession}
         isNotificationSessionListed={sessionIsListed}

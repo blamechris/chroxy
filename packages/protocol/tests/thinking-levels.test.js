@@ -200,6 +200,28 @@ describe('SetThinkingLevelSchema — a BOUNDED string, not an enum (#7730)', () 
   })
 })
 
+describe('SetThinkingLevelSchema — `level: null` clears the override (#7786)', () => {
+  it('ACCEPTS an explicit null, through the schema AND the ClientMessageSchema union the server routes on', async () => {
+    const { SetThinkingLevelSchema, ClientMessageSchema } = await import('../src/schemas/client.ts')
+    const msg = { type: 'set_thinking_level', level: null, requestId: 'r1' }
+    const direct = SetThinkingLevelSchema.safeParse(msg)
+    assert.equal(direct.success, true, 'null is the wire spelling of "back to the provider/model default"')
+    assert.equal(direct.data.level, null)
+    const routed = ClientMessageSchema.safeParse(msg)
+    assert.equal(routed.success, true, 'ws-server parses with the union before routing')
+    assert.equal(routed.data.level, null)
+  })
+
+  it('still REJECTS every non-null junk value (the clear spelling is exactly null)', async () => {
+    const { SetThinkingLevelSchema } = await import('../src/schemas/client.ts')
+    for (const level of ['', '  ', 0, false, {}, [], '../../etc', 'a'.repeat(200)]) {
+      assert.equal(SetThinkingLevelSchema.safeParse({ type: 'set_thinking_level', level }).success, false, JSON.stringify(level))
+    }
+    // An ABSENT level is not a clear: omitting the key must not be a way to unset.
+    assert.equal(SetThinkingLevelSchema.safeParse({ type: 'set_thinking_level' }).success, false)
+  })
+})
+
 // #8700 — `thinking_level_changed.effective`: what the provider reports it
 // applied, beside what the operator asked for. Optional (absent = this provider
 // makes no such report), nullable (null = not reported yet), open string.

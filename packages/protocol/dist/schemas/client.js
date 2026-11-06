@@ -253,7 +253,15 @@ export const ThinkingLevelValueSchema = z.string().refine(isWellFormedThinkingLe
 });
 export const SetThinkingLevelSchema = z.object({
     type: z.literal('set_thinking_level'),
-    level: ThinkingLevelValueSchema,
+    // #7786 — `null` is the wire spelling of "clear the override": drop the
+    // session's own level and fall back to the provider/model default. Same
+    // convention as `set_prompt_evaluator_skip_pattern`'s `value: null`. It is
+    // exactly `null`: an empty string, an absent key and the word "null" are not
+    // clears (the first two are malformed, the last is an ordinary well-formed
+    // level whose membership the server decides). `default` is NOT the clear
+    // spelling — it is Claude's own named level, and a codex roster may not
+    // offer it at all.
+    level: ThinkingLevelValueSchema.nullable(),
     sessionId: z.string().max(256).optional(),
 }).passthrough();
 export const PermissionRuleSchema = z.object({

@@ -53,6 +53,9 @@ function buildActiveModelTooltip(
   return `Active model: ${display}.${win}`
 }
 
+/** <option> value of the "Model default" entry (#7786). Never a valid level. */
+const THINKING_LEVEL_CLEAR_VALUE = ''
+
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
   /** #8909 — model ids the backend refused for this session's client; shown disabled in the picker. */
@@ -112,6 +115,13 @@ export interface ChatSettingsDropdownProps {
   // new call site must do the same rather than relying on the fallback below.
   thinkingLevels?: ThinkingLevelOption[]
   onThinkingLevelChange: (level: string) => void
+  // #7786: clear the session's own level (`set_thinking_level` with `level:
+  // null`) so the provider/model default applies again. When given, the picker
+  // gains a "Model default" entry — but only on a roster that has no `default`
+  // level of its own: Claude's `default` ("Auto") already IS that choice, and
+  // a second spelling of it would be two options for one state. Omitted =
+  // no entry (a client that cannot send the clear must not offer it).
+  onThinkingLevelClear?: () => void
   // #8700: the active provider's `thinkingLevelEffective` capability — it
   // REPORTS the level it actually applied (claude-sdk family). Only then does
   // the picker get a read-only "Effective: <level>" readout beside it: the
@@ -149,6 +159,7 @@ export function ChatSettingsDropdown({
   thinkingLevel,
   thinkingLevels,
   onThinkingLevelChange,
+  onThinkingLevelClear,
   thinkingLevelEffective = false,
   effectiveThinkingLevel,
   readOnlyModel = null,
@@ -191,6 +202,16 @@ export function ChatSettingsDropdown({
       ? { options, selected: current }
       : { options: [...options, { id: current, label: formatThinkingLevelLabel(current) }], selected: current }
   }, [thinkingLevels, thinkingLevel])
+
+  // #7786: the "Model default" entry exists only where `default` is not already
+  // a level of the roster (see `onThinkingLevelClear`).
+  // Asked of the OFFERED roster, not of `thinkingLevelChoices`: that list also
+  // carries an appended current level, and a fresh codex session's current level
+  // is the placeholder `default` — which would hide the entry on exactly the
+  // sessions that need it.
+  const offersThinkingLevelClear = !!onThinkingLevelClear
+    && !(thinkingLevels && thinkingLevels.length > 0 ? thinkingLevels : thinkingLevelOptions(null))
+      .some(o => o.id === LEGACY_DEFAULT_THINKING_LEVEL)
 
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
@@ -320,16 +341,26 @@ export function ChatSettingsDropdown({
 
       {/* Thinking Level */}
       {showThinkingLevel && (
-        <SelectFit kind="thinking" labels={thinkingLevelChoices.options.map(o => o.label)}>
+        <SelectFit kind="thinking" labels={[...thinkingLevelChoices.options.map(o => o.label), ...(offersThinkingLevelClear ? ['Model default'] : [])]}>
           <select
             data-kind="thinking"
             aria-label="Thinking level"
             value={thinkingLevelChoices.selected}
-            onChange={e => onThinkingLevelChange(e.target.value)}
+            onChange={e => {
+              // '' is the clear entry's value; it cannot collide with a level
+              // (`isWellFormedThinkingLevel` refuses the empty string). The
+              // select stays controlled, so it snaps back to the real current
+              // level until the server's thinking_level_changed lands.
+              if (e.target.value === THINKING_LEVEL_CLEAR_VALUE) onThinkingLevelClear?.()
+              else onThinkingLevelChange(e.target.value)
+            }}
           >
             {thinkingLevelChoices.options.map(({ id, label }) => (
               <option key={id} value={id}>{label}</option>
             ))}
+            {offersThinkingLevelClear && (
+              <option value={THINKING_LEVEL_CLEAR_VALUE}>Model default</option>
+            )}
           </select>
         </SelectFit>
       )}

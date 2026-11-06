@@ -806,6 +806,11 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // dropdown stuck on a level the session never entered. requestId is optional
   // (older clients omit it); sendError tolerates null.
   const requestId = msg?.requestId
+  // #7786 — an explicit `level: null` is the wire spelling of "clear the
+  // override" (back to the provider/model default). Exactly null: an absent key,
+  // '' and whitespace stay malformed and are refused by the form check below, so
+  // a client that merely forgot the field cannot un-pin a level by accident.
+  const clearing = msg.level === null
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   // #7730 — two questions, asked separately and in this order.
   //
@@ -815,7 +820,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // what refuses `../../etc` and a 200-char string). This says nothing about
   // which levels exist; a syntactic guard that also carried the roster is what
   // the six-site problem was made of.
-  if (!isWellFormedThinkingLevel(level)) {
+  if (!clearing && !isWellFormedThinkingLevel(level)) {
     sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Invalid thinking level: ${level}`, undefined, ctx)
     return
   }
@@ -829,6 +834,23 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
 
   if (!entry.session || typeof entry.session.setThinkingLevel !== 'function') {
     sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'This provider does not support thinking level control', undefined, ctx)
+    return
+  }
+
+  // A CLEAR names no level, so there is nothing to check against a roster — and
+  // it must work when the roster is empty (a pre-catalog codex session refuses
+  // every SET, yet an override recorded earlier still has to be undoable).
+  // Everything after this point is about validating a level being SET.
+  if (clearing) {
+    const previousLevel = entry.session.thinkingLevel || LEGACY_DEFAULT_THINKING_LEVEL
+    try {
+      await entry.session.setThinkingLevel(null)
+      const described = typeof entry.session.describeThinkingLevel === 'function' ? entry.session.describeThinkingLevel() : null
+      ;sessionLogger(sessionId).info(`Thinking level cleared by ${client.id} on session ${sessionId}: ${previousLevel} → provider default${described ? ` (${described})` : ''}`)
+      ctx.transport.broadcastToSession(sessionId, buildThinkingLevelChanged(entry.session) ?? { type: 'thinking_level_changed', level: LEGACY_DEFAULT_THINKING_LEVEL })
+    } catch (err) {
+      sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to clear thinking level: ${err.message}`, undefined, ctx)
+    }
     return
   }
 

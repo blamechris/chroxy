@@ -2124,7 +2124,8 @@ export interface ConnectionState {
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
-  setThinkingLevel: (level: ThinkingLevel) => void;
+  // #7786: `null` clears the session's override (provider/model default).
+  setThinkingLevel: (level: ThinkingLevel | null) => void;
   // #3185: toggle the per-session promptEvaluator. Server broadcasts a
   // `prompt_evaluator_changed` event back which updates the session
   // entry — no optimistic update here.

@@ -427,7 +427,7 @@ export declare const SetPermissionModeSchema: z.ZodObject<{
 export declare const ThinkingLevelValueSchema: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
 export declare const SetThinkingLevelSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_thinking_level">;
-    level: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
+    level: z.ZodNullable<z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const PermissionRuleSchema: z.ZodObject<{
@@ -1577,7 +1577,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     confirmed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_thinking_level">;
-    level: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
+    level: z.ZodNullable<z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_permission_rules">;

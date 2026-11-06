@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { ClientMessageSchema } from '@chroxy/protocol'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { PermissionAuditLog } from '../../src/permission-audit.js'
 import { PermissionManager } from '../../src/permission-manager.js'
@@ -3114,6 +3115,144 @@ describe('settings-handlers', () => {
       assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
       assert.equal(ws._messages[0].requestId, 'r-unsup')
       assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
+    })
+
+    // -----------------------------------------------------------------------
+    // #7786 — `level: null` CLEARS the override. Every case here drives the
+    // frame the way ws-server does (ClientMessageSchema.safeParse, then the
+    // handler gets the parsed data), so the null is one a client can produce.
+    // -----------------------------------------------------------------------
+    describe('clearing the override with level:null (#7786)', () => {
+      const wire = (frame) => {
+        const parsed = ClientMessageSchema.safeParse(frame)
+        assert.equal(parsed.success, true, `the frame must survive the wire schema: ${JSON.stringify(frame)}`)
+        return parsed.data
+      }
+
+      it('passes null to the session and broadcasts the session\'s resolved level', async () => {
+        const session = sessionWithThinking(true)
+        session.thinkingLevel = 'xhigh'
+        session.setThinkingLevel = createSpy(async () => { session.thinkingLevel = null })
+        const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' }]])
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+
+        await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }),
+          wire({ type: 'set_thinking_level', level: null, requestId: 'r-clear' }), ctx)
+
+        assert.equal(session.setThinkingLevel.callCount, 1)
+        assert.equal(session.setThinkingLevel.lastCall[0], null, 'the clear reaches the setter as null, not as a level')
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0)
+        assert.deepEqual(ctx._sessionBroadcasts.map((b) => b.msg), [{ type: 'thinking_level_changed', level: 'default' }])
+      })
+
+      it('un-pins a REAL CodexAppServerSession: the override is gone, codex\'s own echo is shown, and turn/start carries no effort', async () => {
+        const { CodexAppServerSession } = await import('../../src/codex-app-server-session.js')
+        const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-clear-7786-'))
+        const session = new CodexAppServerSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+        try {
+          // The state the issue describes: an operator touched the control, so an
+          // override pins every later turn/start; codex's own resolution was 'low'.
+          session._bootedReasoningEffort = 'low'
+          session.setThinkingLevel('xhigh')
+          assert.equal(session.thinkingLevel, 'xhigh')
+          assert.equal(session._buildTurnParams([]).effort, 'xhigh', 'control: the override rides the turn')
+
+          const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'codex' }]])
+          const ctx = makeCtx(sessions)
+          const ws = makeWs()
+          await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }),
+            wire({ type: 'set_thinking_level', level: null, requestId: 'r-codex-clear' }), ctx)
+
+          assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0)
+          assert.equal(session._reasoningEffortOverride, null)
+          assert.equal(session.thinkingLevel, 'low', 'the display falls back to what codex resolved')
+          assert.equal('effort' in session._buildTurnParams([]), false, 'no effort key: codex re-resolves its own default')
+          assert.deepEqual(ctx._sessionBroadcasts.map((b) => b.msg), [{ type: 'thinking_level_changed', level: 'low' }])
+        } finally {
+          session.destroy()
+          rmSync(skillsDir, { recursive: true, force: true })
+        }
+      })
+
+      it('clears on a model that advertised NO levels yet — a clear needs no roster, only a setter', async () => {
+        // The pre-catalog codex state: the legacy fallback does not apply, so
+        // every SET is refused. Un-pinning must still work there — it is the
+        // only way out of an override recorded before the roster went away.
+        class NoRosterCodexLikeSession {
+          static claudeFamily = false
+          static get capabilities() { return { thinkingLevel: true } }
+          static getModelMetadata(modelId) { return { id: modelId, label: 'NoRoster', fullId: modelId } }
+          sendMessage() {}
+          interrupt() {}
+          setModel() {}
+          setPermissionMode() {}
+          start() {}
+          destroy() {}
+        }
+        declareUnknownCustomization(NoRosterCodexLikeSession)
+        registerProvider('test-no-roster-clear', NoRosterCodexLikeSession)
+        const session = createMockSession()
+        session.model = 'no-roster-model'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'test-no-roster-clear' }]])
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, wire({ type: 'set_thinking_level', level: 'high', requestId: 'r-set' }), ctx)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED', 'control: a SET is refused here, so the clear passing is not a free pass')
+        assert.equal(session.setThinkingLevel.callCount, 0)
+
+        const ws2 = makeWs()
+        await settingsHandlers.set_thinking_level(ws2, client, wire({ type: 'set_thinking_level', level: null, requestId: 'r-clear' }), ctx)
+        assert.equal(ws2._messages.filter((m) => m.type === 'error').length, 0)
+        assert.equal(session.setThinkingLevel.callCount, 1)
+        assert.equal(session.setThinkingLevel.lastCall[0], null)
+      })
+
+      it('a clear on a provider without thinking-level control is still rejected with the requestId', async () => {
+        const sessions = new Map([['s1', { session: sessionWithThinking(false), name: 'S', cwd: '/tmp' }]])
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }),
+          wire({ type: 'set_thinking_level', level: null, requestId: 'r-clear-unsup' }), ctx)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        assert.equal(ws._messages[0].requestId, 'r-clear-unsup')
+        assert.equal(ctx._sessionBroadcasts.length, 0)
+      })
+
+      it('a clear with no session is rejected with the requestId', async () => {
+        const ctx = makeCtx(new Map())
+        const ws = makeWs()
+        await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 'gone' }),
+          wire({ type: 'set_thinking_level', level: null, requestId: 'r-clear-nosess' }), ctx)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        assert.equal(ws._messages[0].requestId, 'r-clear-nosess')
+      })
+
+      it('a handler reached with an ABSENT or empty level (bypassing the schema) is NOT a clear', async () => {
+        for (const level of [undefined, '', '   ']) {
+          const session = sessionWithThinking(true)
+          const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' }]]))
+          const ws = makeWs()
+          await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }), { level, requestId: 'r-not-clear' }, ctx)
+          assert.equal(session.setThinkingLevel.callCount, 0, `${JSON.stringify(level)} must not clear`)
+          assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        }
+      })
+
+      it('a failing setter on a clear is reported, not swallowed', async () => {
+        const session = sessionWithThinking(true)
+        session.setThinkingLevel = createSpy(async () => { throw new Error('boom') })
+        const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' }]]))
+        const ws = makeWs()
+        await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }),
+          wire({ type: 'set_thinking_level', level: null, requestId: 'r-clear-throw' }), ctx)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        assert.equal(ws._messages[0].requestId, 'r-clear-throw')
+        assert.equal(ctx._sessionBroadcasts.length, 0)
+      })
     })
 
     // -----------------------------------------------------------------------
