@@ -15,12 +15,19 @@ const CORPUS = [
 
 describe('bounded regex matching', () => {
   const matcher = createBoundedRegexMatcher()
-  after(() => matcher.close())
+  // For tests that are NOT about the 50 ms deadline: a harmless match must not be
+  // able to miss it on a busy runner (a cold worker can take longer than 50 ms).
+  const generous = createBoundedRegexMatcher({ timeoutMs: 10_000 })
+  // The deadline for tests that need a runaway to time out AND a harmless match
+  // after it to succeed: far above any scheduling jitter, short enough to wait out.
+  const REPLACEMENT_TIMEOUT_MS = 1500
+  const RUNAWAY = { source: '^(a+)+$', text: 'a'.repeat(40) + '!' } // does not finish in any real time
+  after(() => { matcher.close(); generous.close() })
 
   it('matches and rejects ordinary patterns, case-insensitively', async () => {
-    assert.equal(await matcher.test('^proceed$', 'PROCEED'), true)
-    assert.equal(await matcher.test('^proceed$', 'stop'), false)
-    assert.equal(await matcher.test('[unclosed', 'anything'), false, 'a malformed pattern never matches')
+    assert.equal(await generous.test('^proceed$', 'PROCEED'), true)
+    assert.equal(await generous.test('^proceed$', 'stop'), false)
+    assert.equal(await generous.test('[unclosed', 'anything'), false, 'a malformed pattern never matches')
   })
 
   it('stops each catastrophic pattern at the deadline, counts it as no match, and the daemon stays responsive', async () => {
@@ -41,19 +48,28 @@ describe('bounded regex matching', () => {
   })
 
   it('serves a harmless match immediately after a timeout (the worker is replaced)', async () => {
-    await matcher.test(CORPUS[0].source, CORPUS[0].text)
-    const started = Date.now()
-    assert.equal(await matcher.test('^ok$', 'ok'), true)
-    assert.ok(Date.now() - started < 2000)
+    // Tests replacement, not speed: the deadline is generous so the harmless match
+    // cannot time out on a slow runner, and a timeout is what it would take to fail.
+    const m = createBoundedRegexMatcher({ timeoutMs: REPLACEMENT_TIMEOUT_MS })
+    try {
+      assert.equal(await m.test(RUNAWAY.source, RUNAWAY.text), false)
+      assert.equal(m.stats().timeouts, 1, 'the runaway ran out its deadline')
+      assert.equal(await m.test('^ok$', 'ok'), true)
+      assert.equal(m.stats().timeouts, 1, 'and the harmless match did not')
+    } finally { m.close() }
   })
 
   it('a harmless match queued behind a runaway one is not charged for it', async () => {
-    const [runaway, harmless] = await Promise.all([
-      matcher.test(CORPUS[0].source, CORPUS[0].text),
-      matcher.test('^fine$', 'fine'),
-    ])
-    assert.equal(runaway, false)
-    assert.equal(harmless, true)
+    const m = createBoundedRegexMatcher({ timeoutMs: REPLACEMENT_TIMEOUT_MS })
+    try {
+      const [runaway, harmless] = await Promise.all([
+        m.test(RUNAWAY.source, RUNAWAY.text),
+        m.test('^fine$', 'fine'),
+      ])
+      assert.equal(runaway, false)
+      assert.equal(harmless, true)
+      assert.equal(m.stats().timeouts, 1, 'only the runaway timed out')
+    } finally { m.close() }
   })
 
   it('text longer than maxInput is not tested at all and counts as no match (no prefix match)', async () => {
@@ -69,7 +85,7 @@ describe('bounded regex matching', () => {
   })
 
   it('bounds queued jobs per caller key and overall; refused jobs count as no match', async () => {
-    const m = createBoundedRegexMatcher({ maxQueuedPerKey: 2, maxQueued: 3 })
+    const m = createBoundedRegexMatcher({ maxQueuedPerKey: 2, maxQueued: 3, timeoutMs: 400 })
     try {
       // The first job occupies the chain for its whole deadline.
       const slow = [0, 1, 2, 3].map(() => m.test(CORPUS[0].source, CORPUS[0].text, 'greedy'))
@@ -106,6 +122,6 @@ describe('bounded regex matching', () => {
     const text = 'a'.repeat(250) + ' please review the change'
     assert.equal(await shouldSkipEvaluatorAsync(text, { promptEvaluatorSkipPattern: '.*a.*a.*b' }, matcher), false)
     // And a normal custom pattern still skips.
-    assert.equal(await shouldSkipEvaluatorAsync('please proceed when ready', { promptEvaluatorSkipPattern: '^please proceed' }, matcher), true)
+    assert.equal(await shouldSkipEvaluatorAsync('please proceed when ready', { promptEvaluatorSkipPattern: '^please proceed' }, generous), true)
   })
 })

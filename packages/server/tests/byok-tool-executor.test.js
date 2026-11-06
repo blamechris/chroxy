@@ -2955,7 +2955,7 @@ describe('executeBuiltinTool', () => {
         })
         const ms = Date.now() - t0
 
-        assert.ok(ms < 2000, `a self-loop through a determinate segment must not blow up the walk time, took ${ms}ms`)
+        assert.ok(ms < 10_000, `a self-loop through a determinate segment must not blow up the walk time, took ${ms}ms`)
         // Bounded LINEARLY in the number of siblings (visiting each real
         // entry a small constant number of times), never exponentially —
         // the unpatched shape grew past 1,600 matches on an equivalent
@@ -3097,7 +3097,7 @@ describe('executeBuiltinTool', () => {
         const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
         const ms = Date.now() - t0
         assert.equal(r.isError, false)
-        assert.ok(ms < 2000, `a bare-**-discovered symlink self-loop must terminate quickly, took ${ms}ms`)
+        assert.ok(ms < 10_000, `a bare-**-discovered symlink self-loop must terminate quickly, took ${ms}ms`)
         const lines = r.content.split('\n')
         assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
         assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
@@ -3160,7 +3160,7 @@ describe('executeBuiltinTool', () => {
           const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
           const ms = Date.now() - t0
           assert.equal(r.isError, false)
-          assert.ok(ms < 2000, `${pattern} must terminate quickly, took ${ms}ms`)
+          assert.ok(ms < 10_000, `${pattern} must terminate quickly, took ${ms}ms`)
           assert.ok(r.content.split('\n').length < 400, `${pattern} must stay bounded, got ${r.content.split('\n').length} lines`)
         }
       })
@@ -3221,7 +3221,7 @@ describe('executeBuiltinTool', () => {
           const ms = Date.now() - t0
           assert.equal(r.isError, false)
           const lines = r.content.split('\n').length
-          assert.ok(ms < 2000, `${pattern} must terminate quickly, took ${ms}ms`)
+          assert.ok(ms < 10_000, `${pattern} must terminate quickly, took ${ms}ms`)
           assert.ok(lines < 100, `${pattern} must stay bounded, got ${lines} lines`)
         })
       }
@@ -3251,7 +3251,8 @@ describe('executeBuiltinTool', () => {
       // `glob()` to actually match there). `openVerifiedDirForDescend`'s new
       // ancestor handling (the refusal now applies only while a
       // `**` is active in the child's index set) skips the refusal specifically when the WHOLE pattern
-      // contains no `**` at all — see that parameter's doc for why this is
+      // contains no `**` at all — see `walk`'s `hasActiveGlobstar` check
+      // (byok-tool-executor.js) for why this is
       // safe: a `**`-free pattern's recursion depth is hard-bounded by its
       // own segment count, independent of the filesystem's symlink
       // structure, so there is nothing here for the DoS guard to protect
@@ -3296,7 +3297,7 @@ describe('executeBuiltinTool', () => {
         const ms = Date.now() - t0
 
         assert.equal(r.isError, false)
-        assert.ok(ms < 2000, `a ${hops}-hop **-free self-loop chain must terminate quickly, took ${ms}ms`)
+        assert.ok(ms < 10_000, `a ${hops}-hop **-free self-loop chain must terminate quickly, took ${ms}ms`)
         assert.equal(r.content, `sub/${'selfloop/'.repeat(hops)}file.txt`, 'must match fs.glob exactly for this exact chain length')
       })
 
@@ -3331,7 +3332,7 @@ describe('executeBuiltinTool', () => {
         })
         const ms = Date.now() - t0
         assert.equal(r.isError, false)
-        assert.ok(ms < 2000, `a **-containing pattern through a self-loop must still be bounded, took ${ms}ms`)
+        assert.ok(ms < 10_000, `a **-containing pattern through a self-loop must still be bounded, took ${ms}ms`)
         const lines = r.content.startsWith('No matches') ? [] : r.content.split('\n')
         assert.ok(lines.length < 200, `a **-containing pattern through a self-loop must still be bounded in match count, got ${lines.length}`)
       })

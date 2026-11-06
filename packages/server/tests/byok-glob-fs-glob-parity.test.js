@@ -389,8 +389,9 @@ const PATTERNS = [
   // cross it, since 'selfloop' is only reached by the second bare '*',
   // non-determinately). 'sub/selfloop/*' and 'sub/selfloop/file.txt' are
   // fully `**`-free (a literal segment chain re-entering the ancestor 'sub'
-  // via 'selfloop'), which #7916's partial fix now allows — see that fix's
-  // doc on `openVerifiedDirForDescend`'s ancestor re-entry handling.
+  // via 'selfloop'), which #7916's partial fix now allows — see `walk`'s
+  // `hasActiveGlobstar` check in byok-tool-executor.js (the ancestor
+  // refusal only applies while a `**` is active).
   'sub/**', 'sub/*', 'sub/*/file.txt', 'sub/selfloop/*', 'sub/selfloop/file.txt',
 
   // symlinks escaping the workspace — reached only via a WILDCARD, so no
