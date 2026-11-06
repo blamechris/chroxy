@@ -731,6 +731,12 @@ export class SdkSession extends BaseSession {
     // lifetime; the binding stays valid until destroy() drops the instance.
     this._log = null
     this._query = null
+    // #8321: the turn whose query() generator is still being consumed, from the
+    // moment the query is created until its loop's `finally`. Busy state ends at
+    // the prompt's `result`, which is BEFORE the generator does (the CLI exits
+    // only once stdin closes), so `_isBusy` alone does not say whether a query
+    // is alive. `{ query, waitTimer, forceTimer }`, or null.
+    this._drainingTurn = null
     this._thinkingLevel = null
     // #8700: what Claude Code last reported it applied (see
     // `effectiveThinkingLevel`), the model it reported with it, the last
@@ -1037,7 +1043,10 @@ export class SdkSession extends BaseSession {
       return
     }
 
-    if (this._isBusy) {
+    // #8321: a previous turn's query may still be draining after its result
+    // cleared busy. A follow-up then waits in the same outgoing queue and is
+    // flushed by that turn's `finally`, so one query() runs at a time.
+    if (this._isBusy || this._drainingTurn) {
       // #5936 (epic #5935): a send-while-busy follow-up goes into the shared
       // outgoing queue (BaseSession) — flushed FIFO on the next `result`. The
       // overflow cap + the `message_queued` mirror event live in
@@ -1316,6 +1325,8 @@ export class SdkSession extends BaseSession {
     // `this._query` when it still points here — a follow-up turn that started
     // while this one was draining must keep its handle.
     let turnQuery = null
+    // #8321: this turn's entry in `_drainingTurn`; ended in the `finally`.
+    let turnDrain = null
     // #8300: the task ids THIS turn saw start. The roster is shared per
     // session, so a turn that finishes after a follow-up turn has started
     // must only stop and report the tasks it owns, never the successor's.
@@ -1478,6 +1489,8 @@ export class SdkSession extends BaseSession {
       const queryArgs = { prompt: input.iterable, options }
       this._query = this._callQuery(queryArgs)
       turnQuery = this._query
+      turnDrain = { query: turnQuery, waitTimer: null, forceTimer: null }
+      this._drainingTurn = turnDrain
       reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       // #5269: a fresh turn — drop any task_id mappings left over from a prior
       // turn (every subagent should clear via task_notification, but a turn
@@ -2393,6 +2406,8 @@ export class SdkSession extends BaseSession {
       if (input) input.end()
       if (this._turnInput === input) this._turnInput = null
       if (this._query === turnQuery) this._query = null
+      // #8321: the generator has ended; a follow-up queued behind it may run.
+      if (turnDrain) this._endDrain(turnDrain)
       // #8300: whatever this turn saw start is gone with its process.
       for (const taskId of turnTaskIds) this._liveBackgroundTasks.delete(taskId)
       // #8302: ...and so is every shell it started, whatever ended the loop (a
@@ -2519,6 +2534,11 @@ export class SdkSession extends BaseSession {
   // the control request in milliseconds when alive; the cap only bites when
   // it is already gone, in which case the task is reported as not stopped.
   static STOP_TASK_TIMEOUT_MS = 3000
+  // #8321: how long a follow-up may wait behind a previous query's generator
+  // that is still draining after the turn's result, before that query is
+  // closed, and the further grace after the close before the hold is dropped.
+  static DRAIN_WAIT_MS = 10000
+  static DRAIN_FORCE_GRACE_MS = 3000
 
   /**
    * #8300: ask the CLI to stop a task that would outlive the turn, via the
@@ -3571,6 +3591,7 @@ export class SdkSession extends BaseSession {
     // into a cleared message. Best-effort — the SDK's generator may not
     // support .return()/.throw() uniformly.
     this._abortActiveQuery()
+    this._abandonDrain() // #8321
     // #7376: name the cause so a tool left in flight reads as "the turn was
     // terminated under it", not as a failed command.
     this._clearMessageState({ terminatedReason: 'hard_timeout' })
@@ -3607,6 +3628,7 @@ export class SdkSession extends BaseSession {
     // Attempt to abort the SDK query generator so no further events land
     // into a cleared message context. Best-effort — matches _handleHardTimeout.
     this._abortActiveQuery()
+    this._abandonDrain() // #8321
     // #4616: snapshot sessionId BEFORE _clearMessageState wipes it so the
     // synthetic `result` event below carries the correct identifier.
     const sessionId = this._sdkSessionId || this._sessionId
@@ -3630,6 +3652,60 @@ export class SdkSession extends BaseSession {
       message,
       declarationTurnId: messageId,
     })
+  }
+
+  /**
+   * #8321: stop timing a drain and forget it. Idempotent, and a no-op for a
+   * drain that is no longer the session's current one.
+   */
+  _endDrain(drain) {
+    if (drain.waitTimer) clearTimeout(drain.waitTimer)
+    if (drain.forceTimer) clearTimeout(drain.forceTimer)
+    drain.waitTimer = null
+    drain.forceTimer = null
+    if (this._drainingTurn === drain) this._drainingTurn = null
+  }
+
+  /**
+   * #8321: a hard timeout or stream stall gives up on the query: it was told to
+   * abort and is not answering, and the point of the recovery is that the next
+   * send runs now. Waiting behind such a query would only add the drain bound to
+   * every retry, so the hold is dropped; the abandoned loop is superseded by the
+   * next turn and touches nothing of its.
+   */
+  _abandonDrain() {
+    if (this._drainingTurn) this._endDrain(this._drainingTurn)
+  }
+
+  /**
+   * #8321: a drain has an end. Once busy has cleared, the generator gets
+   * `DRAIN_WAIT_MS` to finish; then its query is closed; and if even that does
+   * not end it within `DRAIN_FORCE_GRACE_MS`, the hold is released anyway and
+   * the next queued follow-up runs (the late loop is superseded by it, and its
+   * own `finally` then touches nothing of the successor's). Without the bound
+   * a generator that never ended would block the session forever.
+   */
+  _armDrainRelease() {
+    const drain = this._drainingTurn
+    if (!drain || drain.waitTimer || drain.forceTimer) return
+    drain.waitTimer = setTimeout(() => {
+      drain.waitTimer = null
+      if (this._drainingTurn !== drain || this._destroying) return
+      ;(this._log || log).warn(`Previous query still draining after ${SdkSession.DRAIN_WAIT_MS}ms; closing it`)
+      try {
+        if (typeof drain.query?.close === 'function') drain.query.close()
+      } catch (err) {
+        ;(this._log || log).warn(`Failed to close draining query: ${err?.message || err}`)
+      }
+      drain.forceTimer = setTimeout(() => {
+        drain.forceTimer = null
+        if (this._drainingTurn !== drain || this._destroying) return
+        ;(this._log || log).warn('Draining query did not end after close; releasing queued follow-ups anyway')
+        this._endDrain(drain)
+        if (this._query === drain.query) this._query = null
+        if (this._outgoingQueue.length && !this._isBusy) this.dequeueNextOutgoing()
+      }, SdkSession.DRAIN_FORCE_GRACE_MS)
+    }, SdkSession.DRAIN_WAIT_MS)
   }
 
   /**
@@ -3713,6 +3789,9 @@ export class SdkSession extends BaseSession {
     const userStop = opts?.userStop ?? this._permissions.isUserStopInFlight()
     super._clearMessageState(opts)
     this._permissions.clearAll({ userStop })
+    // #8321: busy ends here, possibly with the turn's generator still alive.
+    // Bound how long a follow-up can be held behind it.
+    if (this._drainingTurn && !this._destroying) this._armDrainRelease()
     // Pause counter is tied to the previous message — reset so the next
     // message starts with a fresh counter.
     this._permissionPauseCount = 0
@@ -3734,6 +3813,7 @@ export class SdkSession extends BaseSession {
    */
   destroy() {
     this._destroying = true
+    if (this._drainingTurn) this._endDrain(this._drainingTurn)
     // #5936: tear down the shared outgoing queue silently — no message_dequeued
     // (which signals "sent") for a session that's going away.
     this.clearOutgoingQueue({ emit: false })
