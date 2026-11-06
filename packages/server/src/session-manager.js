@@ -3135,15 +3135,22 @@ export class SessionManager extends EventEmitter {
   async destroySessionLocked(sessionId, opts) {
     const { isAuthorized, ...destroyOpts } = opts || {}
     const entry = this._sessions.get(sessionId)
-    if (entry) entry._destroying = true
+    if (entry) {
+      entry._destroying = true
+      entry._pendingDestroys = (entry._pendingDestroys || 0) + 1
+    }
     const release = await this._locks.acquire(sessionId)
     try {
       try {
         assertAuthorized(isAuthorized)
       } catch (err) {
-        // Not destroyed after all: the session must not stay marked as going away.
+        // Not destroyed after all: the session must not stay marked as going away -
+        // unless another destroy of it is still queued behind this one.
         const live = this._sessions.get(sessionId)
-        if (live) live._destroying = false
+        if (live) {
+          live._pendingDestroys = Math.max(0, (live._pendingDestroys || 1) - 1)
+          if (live._pendingDestroys === 0) live._destroying = false
+        }
         throw err
       }
       return this.destroySession(sessionId, opts === undefined ? undefined : destroyOpts)

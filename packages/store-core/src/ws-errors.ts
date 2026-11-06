@@ -41,6 +41,7 @@ export function isCredentialInvalidClose(code: unknown): boolean {
  *   1008 — ws-auth.js: key exchange failure (encryption setup failed)
  *   4008 — ws-broadcaster.js / ws-client-sender.js: backpressure eviction
  *   1006 — abnormal closure / network drop (never sent explicitly; set by browser/RN)
+ *   1001 — going away: the server is shutting down or restarting (the client reconnects)
  *   1000 — normal close initiated by the server (no error to show)
  *
  * All other codes fall through to a generic message. We intentionally

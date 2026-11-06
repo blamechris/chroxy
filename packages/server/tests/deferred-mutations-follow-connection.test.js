@@ -177,6 +177,20 @@ describe('session lock', () => {
     assert.equal(mgr._sessions.get('s1')._destroying, false)
   })
 
+  it('a refused destroy leaves the session marked while another destroy of it is still queued', async () => {
+    const { mgr, session } = manager()
+    const f = flag()
+    let markedWhenSecondRuns
+    const refused = mgr.destroySessionLocked('s1', { isAuthorized: f.isAuthorized })
+    const authorized = mgr.destroySessionLocked('s1', { isAuthorized: () => { markedWhenSecondRuns = mgr._sessions.get('s1')?._destroying; return true } })
+    f.ok = false
+    await assert.rejects(refused, (err) => isAuthorityRevoked(err))
+    await authorized
+    assert.equal(markedWhenSecondRuns, true, 'still marked going away when the second destroy gets its turn')
+    assert.equal(session.destroy.callCount, 1)
+    assert.equal(mgr._sessions.has('s1'), false)
+  })
+
   it('control: rename and destroy proceed while authorized', async () => {
     const { mgr } = manager()
     assert.equal(await mgr.renameSessionLocked('s1', 'Renamed', { isAuthorized: () => true }), true)

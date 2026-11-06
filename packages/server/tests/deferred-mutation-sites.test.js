@@ -472,27 +472,42 @@ describe('queued follow-ups', () => {
 
   describe('every session class, found in the source tree', () => {
     const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
-    const files = readdirSync(SRC).filter((f) => f.endsWith('.js'))
+    // Every .js file under src/, recursively, as a path relative to src/.
+    const files = readdirSync(SRC, { recursive: true }).filter((f) => f.endsWith('.js')).sort()
 
-    // Parse every source file and find EVERY member access to a send queue, however it is
-    // spelled. Reading the size, pushing, or assigning a fresh value is harmless; anything
-    // else (shift, splice, indexing, iteration, passing the array on, aliasing it into a
-    // variable) can take an item off the queue and must sit in one of the checked drains.
+    // A tripwire, NOT the guarantee (the behaviour tests below are): it parses source and
+    // flags an access to a send queue that is not one of
+    //   - a size read or push (`q.length`, `q.push(x)`),
+    //   - an assignment TO the queue (`this._q = []`, the queue as the left-hand side),
+    //   - a boolean test (`!q`, `q ? a : b`, `if (q)`),
+    // unless it sits in one of the checked drains. It also flags a string literal naming the
+    // queue (`Reflect.get(this, '_pendingQueue')`) and a destructuring key. A static scan
+    // cannot be complete (indirection through another variable or helper defeats it), so it
+    // only catches the direct spellings; do not read more into it than that.
     const CHECKED_DRAINS = new Map([
       ['base-session.js', new Set(['dequeueNextOutgoing', 'cancelQueuedMessage', 'clearOutgoingQueue'])],
       ['cli-session.js', new Set(['_drainPendingQueue', '_drainNextPendingAfterResult'])],
     ])
     const QUEUES = new Set(['_pendingQueue', '_outgoingQueue'])
 
-    function queueAccesses(file) {
-      const ast = acornParse(readFileSync(join(SRC, file), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true })
+    /** Every access to a send queue in `code`, with its parent node, enclosing method and node. */
+    function scanSource(code) {
+      const ast = acornParse(code, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true })
       const found = []
       const walk = (node, method, parent) => {
         if (!node || typeof node.type !== 'string') return
         const m = node.type === 'MethodDefinition' ? (node.key.name ?? node.key.value) : method
         if (node.type === 'MemberExpression') {
           const name = !node.computed ? node.property.name : (node.property.type === 'Literal' ? node.property.value : null)
-          if (QUEUES.has(name)) found.push({ method, name, parent })
+          if (QUEUES.has(name)) found.push({ node, method, name, parent })
+        } else if (node.type === 'Literal' && typeof node.value === 'string' && QUEUES.has(node.value)) {
+          // a string naming the queue, unless it is the computed key already counted above
+          if (!(parent?.type === 'MemberExpression' && parent.computed && parent.property === node)) {
+            found.push({ node, method, name: node.value, parent })
+          }
+        } else if (node.type === 'Property' && parent?.type === 'ObjectPattern') {
+          const key = node.key.name ?? node.key.value
+          if (QUEUES.has(key)) found.push({ node, method, name: key, parent })
         }
         for (const k of Object.keys(node)) {
           if (k === 'type' || k === 'start' || k === 'end') continue
@@ -505,46 +520,70 @@ describe('queued follow-ups', () => {
       return found
     }
 
-    function harmless({ parent: p }) {
-      if (!p) return false
-      if (p.type === 'MemberExpression' && !p.computed && (p.property.name === 'length' || p.property.name === 'push')) return true
-      if (p.type === 'AssignmentExpression') return true
-      return ['ConditionalExpression', 'LogicalExpression', 'UnaryExpression'].includes(p.type)
+    function harmless({ node, parent: p }) {
+      if (!p || node.type !== 'MemberExpression') return false
+      if (p.type === 'MemberExpression' && p.object === node && !p.computed && (p.property.name === 'length' || p.property.name === 'push')) return true
+      if (p.type === 'AssignmentExpression' && p.left === node) return true
+      if (p.type === 'UnaryExpression' && p.operator === '!') return true
+      if (p.type === 'ConditionalExpression' && p.test === node) return true
+      if (p.type === 'IfStatement' && p.test === node) return true
+      return false
     }
+
+    const offendersIn = (file, code) => scanSource(code)
+      .filter((use) => !harmless(use) && !CHECKED_DRAINS.get(file)?.has(use.method))
+      .map((use) => `${file} :: ${use.method} :: ${use.name}`)
+
+    it('the scan reaches nested directories and finds exactly the known drain sites (a positive control)', () => {
+      assert.ok(files.some((f) => f.includes('/')), 'the walk is recursive')
+      assert.ok(files.includes('server-cli/server-orchestrator.js'))
+      const sites = new Set()
+      for (const f of files) {
+        for (const use of scanSource(readFileSync(join(SRC, f), 'utf8'))) {
+          if (!harmless(use)) sites.add(`${f} :: ${use.method} :: ${use.name}`)
+        }
+      }
+      assert.deepEqual([...sites].sort(), [
+        'base-session.js :: cancelQueuedMessage :: _outgoingQueue',
+        'base-session.js :: clearOutgoingQueue :: _outgoingQueue',
+        'base-session.js :: dequeueNextOutgoing :: _outgoingQueue',
+        'cli-session.js :: _drainNextPendingAfterResult :: _pendingQueue',
+        'cli-session.js :: _drainPendingQueue :: _pendingQueue',
+      ])
+    })
 
     it('no source file touches a send queue except through the checked drains', () => {
       const offenders = []
-      for (const f of files) {
-        for (const use of queueAccesses(f)) {
-          if (harmless(use)) continue
-          if (CHECKED_DRAINS.get(f)?.has(use.method)) continue
-          offenders.push(`${f} :: ${use.method} :: ${use.name}`)
-        }
-      }
+      for (const f of files) offenders.push(...offendersIn(f, readFileSync(join(SRC, f), 'utf8')))
       assert.deepEqual(offenders, [])
     })
 
-    it('the scan sees through the evasions: splice, aliasing and an inline shift are all flagged', () => {
-      const parseSnippet = (code) => acornParse(code, { ecmaVersion: 'latest', sourceType: 'module' })
-      const hits = (code) => {
-        const ast = parseSnippet(`class A { m() { ${code} } }`)
-        const found = []
-        const walk = (node, parent) => {
-          if (!node || typeof node.type !== 'string') return
-          if (node.type === 'MemberExpression' && !node.computed && QUEUES.has(node.property.name)) found.push({ parent })
-          for (const k of Object.keys(node)) {
-            const v = node[k]
-            if (Array.isArray(v)) v.forEach((x) => walk(x, node))
-            else if (v && typeof v.type === 'string') walk(v, node)
-          }
-        }
-        walk(ast, null)
-        return found.filter((u) => !harmless(u)).length
+    it('the scan flags each direct evasion spelling, through the real scanner', () => {
+      const flagged = (body) => offendersIn('evil.js', `class A { m() { ${body} } }`).length
+      const spellings = [
+        'this._pendingQueue.splice(0, 1)',
+        'const q = this._pendingQueue; q.shift()',
+        'process.nextTick(() => this._outgoingQueue.shift())',
+        "this['_pendingQueue'].shift()",
+        'const x = this._pendingQueue',
+        'x = this._pendingQueue',
+        'return this._pendingQueue && other',
+        'const y = cond ? this._pendingQueue : []',
+        'const z = [...this._outgoingQueue]',
+        'const { _pendingQueue: q } = this',
+        "Reflect.get(this, '_outgoingQueue').shift()",
+        'foo(this._pendingQueue)',
+        'for (const i of this._pendingQueue) { send(i) }',
+        'this._pendingQueue[0]',
+      ]
+      for (const code of spellings) assert.ok(flagged(code) >= 1, `not flagged: ${code}`)
+      // and the harmless uses stay unflagged
+      for (const code of ['if (this._pendingQueue.length) this._pendingQueue.push(1)', 'this._pendingQueue = []', 'return !this._outgoingQueue', 'const n = cond ? 1 : this._outgoingQueue.length']) {
+        assert.equal(flagged(code), 0, `wrongly flagged: ${code}`)
       }
-      assert.equal(hits('this._pendingQueue.splice(0, 1)'), 1)
-      assert.equal(hits('const q = this._pendingQueue; q.shift()'), 1)
-      assert.equal(hits('process.nextTick(() => this._outgoingQueue.shift())'), 1)
-      assert.equal(hits('if (this._pendingQueue.length) this._pendingQueue.push(1)'), 0)
+      // a drain site is allowed only inside the named method
+      assert.equal(offendersIn('cli-session.js', 'class A { _drainPendingQueue() { this._pendingQueue.shift() } }').length, 0)
+      assert.equal(offendersIn('cli-session.js', 'class A { other() { this._pendingQueue.shift() } }').length, 1)
     })
 
     async function sessionClasses() {
@@ -617,6 +656,26 @@ describe('queued follow-ups', () => {
           await tick()
           assert.deepEqual(sent, ['live'], `${name}.${drain} sent ${JSON.stringify(sent)}`)
         }
+      }
+    })
+
+    it('the codex and ACP turn-end entry (_maybeDequeue) drops a revoked item and sends the live one', async () => {
+      const { CodexAppServerSession } = await import('../src/codex-app-server-session.js')
+      const Acp = createAcpSessionClass({ id: 'roster-acp-2', command: process.execPath, args: [], env: {} })
+      for (const C of [CodexAppServerSession, Acp]) {
+        const sent = []
+        const s = Object.create(C.prototype)
+        s._outgoingQueue = [
+          { prompt: 'revoked', attachments: undefined, sendOptions: { isAuthorized: () => false } },
+          { prompt: 'live', attachments: undefined, sendOptions: { isAuthorized: () => true } },
+        ]
+        s._destroying = false
+        s._log = { info() {}, warn() {} }
+        s.emit = () => true
+        s.sendMessage = (p) => { sent.push(p) }
+        s._maybeDequeue()
+        await tick(); await tick()
+        assert.deepEqual(sent, ['live'], `${C.name}._maybeDequeue sent ${JSON.stringify(sent)}`)
       }
     })
 

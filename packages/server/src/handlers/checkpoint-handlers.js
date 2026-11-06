@@ -4,7 +4,7 @@
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
 import { realpathSync } from 'fs'
-import { authorizedFor } from '../connection-authority.js'
+import { authorizedFor, stillAuthorized } from '../connection-authority.js'
 import { sendSessionError, broadcastFocusChanged, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
@@ -194,7 +194,7 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
 
     // The connection may have ended while the restore ran; do no further work
     // (fork, new session, re-homing) on its behalf.
-    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
 
     // #6766/#6767: decide whether this rewind branches the conversation. A real
     // branch needs (a) a fork-capable provider on the ORIGINAL session, (b) a
@@ -233,7 +233,7 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
         log.warn(`Checkpoint conversation fork failed, restoring files only: ${err.message}`)
       }
     }
-    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
 
     // #6767: a 'conversation'-only rewind that failed to branch would create a
     // misleading full-transcript session with no file change — surface the
@@ -268,7 +268,7 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       name: `Rewind: ${checkpoint.name}`,
     })
     // The new session exists; do not re-home or announce for a connection that has ended.
-    if (!(ctx.transport?.isConnectionAuthorized?.(client) ?? true)) return
+    if (!stillAuthorized(authorizedFor(ctx, client))) return
     // #5563: index-maintaining helper. Checkpoint restore moves the active
     // session WITHOUT subscribing, so the index must follow activeSessionId.
     ctx.transport.setActiveSession(client, newSessionId)
