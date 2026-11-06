@@ -1,12 +1,10 @@
-import { readFileSync, mkdirSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { readFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { shellQuotePath } from './utils/verify-binary.js'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { resolveClaudeConfigWritePath } from './byok-mcp-config.js'
+import { updateClaudeConfig } from './byok-mcp-config.js'
 
 const log = createLogger('permission-hook')
 
@@ -26,17 +24,22 @@ export function userSettingsPath() {
   return defaultSettingsPath()
 }
 
-// Write settings.json atomically THROUGH a symlinked path (a dotfiles link is
-// kept, not replaced by a regular file) using a per-call sidecar name, so two
-// daemon processes never share a temp file. Refuses a link the shared resolver
-// refuses (dangling, non-regular, foreign uid).
-function writeSettingsFile(settingsPath, settings) {
-  const resolved = resolveClaudeConfigWritePath(settingsPath)
-  if (!resolved.ok) throw new Error(resolved.error)
-  writeFileRestricted(resolved.path, JSON.stringify(settings, null, 2) + '\n', {
-    tmpSuffix: `.chroxy.${randomUUID()}.tmp`,
-  })
-  return resolved.path
+// settings.json is written ONLY through `updateClaudeConfig` (#8983): the shared
+// symlink-aware, mode-preserving atomic writer that re-reads the file just before
+// the rename and re-merges if claude (or another daemon) changed it meanwhile.
+// It writes THROUGH a symlinked path (a dotfiles link is kept, not replaced),
+// uses a per-call sidecar name so two daemon processes never share a temp file,
+// and refuses a link it will not follow (dangling, non-regular, foreign uid).
+// A read refusal comes back as `{ ok: false }`; this maps it to the Error the
+// callers (and `createPermissionHookManager`'s `invalid JSON` check) expect.
+function updateSettingsFile(settingsPath, mutate, { onInvalidJson } = {}) {
+  const updated = updateClaudeConfig(settingsPath, mutate, { createDir: true })
+  if (updated.ok) return updated
+  if (/not valid JSON/.test(updated.error)) {
+    if (onInvalidJson) return onInvalidJson()
+    throw new Error(`${settingsPath} contains invalid JSON and could not be parsed. Please fix or delete the file. Permissions will not work until this is resolved.`)
+  }
+  throw new Error(updated.error)
 }
 const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
@@ -109,55 +112,44 @@ function _isChroxyHookEntry(entry) {
 function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
   settingsPath = settingsPath || defaultSettingsPath()
 
-  let settings = {}
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      mkdirSync(dirname(settingsPath), { recursive: true })
-    } else if (err instanceof SyntaxError) {
-      throw new Error(`${settingsPath} contains invalid JSON and could not be parsed. Please fix or delete the file. Permissions will not work until this is resolved. (${err.message})`)
-    } else {
-      throw err
+  const updated = updateSettingsFile(settingsPath, (settings) => {
+    if (!settings.hooks) settings.hooks = {}
+    if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
+
+    // Remove any existing Chroxy hook entry — catches the canonical
+    // `_chroxy:true` marker AND orphan entries that lost the flag (#3714).
+    const before = settings.hooks.PreToolUse.length
+    settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
+      (entry) => !_isChroxyHookEntry(entry)
+    )
+    const removed = before - settings.hooks.PreToolUse.length
+    if (removed > 1) {
+      // Logging the orphan count makes future regressions visible in the
+      // boot log instead of silently piling up.
+      log.warn(`Removed ${removed} chroxy permission-hook entries from ${settingsPath} (>1 indicates leaked orphans from a prior install — see #3714)`)
     }
-  }
 
-  if (!settings.hooks) settings.hooks = {}
-  if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
+    // Add our hook — script reads CHROXY_PORT and CHROXY_TOKEN from env vars
+    settings.hooks.PreToolUse.push({
+      _chroxy: true,
+      matcher: '',
+      hooks: [
+        {
+          type: 'command',
+          // Claude runs this string through a shell: an install path with a space
+          // would split into words and exit 127, which Claude treats as a
+          // non-blocking error (the permission check silently skipped). Quoted only
+          // when it needs it, so a plain path is byte-for-byte what it always was.
+          command: shellQuotePath(hookScript),
+          timeout: 300,
+        },
+      ],
+    })
 
-  // Remove any existing Chroxy hook entry — catches the canonical
-  // `_chroxy:true` marker AND orphan entries that lost the flag (#3714).
-  const before = settings.hooks.PreToolUse.length
-  settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-    (entry) => !_isChroxyHookEntry(entry)
-  )
-  const removed = before - settings.hooks.PreToolUse.length
-  if (removed > 1) {
-    // Logging the orphan count makes future regressions visible in the
-    // boot log instead of silently piling up.
-    log.warn(`Removed ${removed} chroxy permission-hook entries from ${settingsPath} (>1 indicates leaked orphans from a prior install — see #3714)`)
-  }
-
-  // Add our hook — script reads CHROXY_PORT and CHROXY_TOKEN from env vars
-  settings.hooks.PreToolUse.push({
-    _chroxy: true,
-    matcher: '',
-    hooks: [
-      {
-        type: 'command',
-        // Claude runs this string through a shell: an install path with a space
-        // would split into words and exit 127, which Claude treats as a
-        // non-blocking error (the permission check silently skipped). Quoted only
-        // when it needs it, so a plain path is byte-for-byte what it always was.
-        command: shellQuotePath(hookScript),
-        timeout: 300,
-      },
-    ],
+    return {}
   })
-
-  const written = writeSettingsFile(settingsPath, settings)
   log.info(`Registered hook in ${settingsPath}`)
-  return written
+  return updated.path
 }
 
 /**
@@ -166,18 +158,10 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
  */
 function unregisterPermissionHookSync(settingsPath) {
   settingsPath = settingsPath || defaultSettingsPath()
-  let settings
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-  } catch (err) {
-    if (err instanceof SyntaxError) {
-      log.warn(`Cannot unregister: ${settingsPath} contains invalid JSON. Skipping cleanup.`)
-      return
-    }
-    throw err
-  }
-
-  if (settings.hooks?.PreToolUse) {
+  const updated = updateSettingsFile(settingsPath, (settings, info) => {
+    // Nothing to remove from a file that does not exist or has no hooks — and a
+    // no-op must not rewrite the user's settings (nor race claude for nothing).
+    if (!info.existed || !settings.hooks?.PreToolUse) return { write: false }
     // Same predicate as register — also strips orphans without the flag (#3714).
     settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
       (entry) => !_isChroxyHookEntry(entry)
@@ -188,9 +172,14 @@ function unregisterPermissionHookSync(settingsPath) {
     if (Object.keys(settings.hooks).length === 0) {
       delete settings.hooks
     }
-    writeSettingsFile(settingsPath, settings)
-    log.info(`Unregistered hook from ${settingsPath}`)
-  }
+    return {}
+  }, {
+    onInvalidJson: () => {
+      log.warn(`Cannot unregister: ${settingsPath} contains invalid JSON. Skipping cleanup.`)
+      return { ok: true, wrote: false }
+    },
+  })
+  if (updated.wrote) log.info(`Unregistered hook from ${settingsPath}`)
 }
 
 /**
