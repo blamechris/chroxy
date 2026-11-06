@@ -843,8 +843,15 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    *   hook-held (legacy HTTP) permission with NO known owner is never sent by a
    *   filtered call: it cannot be shown to be this session's, and sending it
    *   would drop another session's prompt into this one's transcript.
+   * @param {string} [opts.excludeSessionId] - Skip this session's prompts
+   *   (#9015). The connect handshake passes the session it is about to replay:
+   *   that replay's exit re-sends the session's pending permissions itself
+   *   (`finishReplay`, AFTER `history_replay_end`, where a full-rebuild swap
+   *   cannot drop it), so a second copy from here would be a duplicate. A
+   *   hook-held permission with NO known owner is not excluded: no replay will
+   *   ever claim it, so this call stays the only path that can deliver it.
    */
-  function resendPendingPermissions(ws, client, { sessionId: onlySessionId } = {}) {
+  function resendPendingPermissions(ws, client, { sessionId: onlySessionId, excludeSessionId } = {}) {
     // A session-bound client (share-a-session pairing token, `boundSessionId`)
     // is re-sent only its own session's pending permissions. The bound id is
     // checked with the fail-safe `!= null` test (`isBoundClient`), so an
@@ -861,6 +868,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       for (const [sessionId, entry] of sm._sessions) {
         if (onlySessionId && sessionId !== onlySessionId) continue
         if (isBound && sessionId !== boundSessionId) continue
+        const excluded = excludeSessionId != null && sessionId === excludeSessionId
         if (entry.session?._pendingPermissions instanceof Map) {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
@@ -904,6 +912,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               } else {
                 permissionSessionMap.set(requestId, sessionId)
               }
+              // #9015: the excluded session's replay owns the FRAME, but the
+              // route registration / auto-subscribe above is connect-time
+              // bookkeeping the replay-exit resend skips for an already-routed
+              // request (#8328). Dropping it left the client unsubscribed, so
+              // the app's bootstrap `subscribe_sessions` replayed (and re-sent) again.
+              if (excluded) continue
               // #6054: buildPermissionRequestMessage throws on field drift (the
               // intended #6031 fail-loud guard). Isolate it per-permission so one
               // malformed pending entry can't abort the loop and strand the
@@ -946,11 +960,25 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // A bound client gets only the entries owned by its bound session; an
         // ownerless entry cannot be shown to be that session's, so it is skipped.
         if (isBound && ownerSessionId !== boundSessionId) continue
+        const excluded = excludeSessionId != null && ownerSessionId === excludeSessionId
         const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
         if (remainingMs <= 0) {
           log.debug(`Skipping expired legacy permission ${requestId}`)
+          continue
+        }
+        // #9015: same as the SDK branch — the replay owns the FRAME, but the
+        // connect-time route registration / auto-subscribe stays here. Without
+        // it the client is never subscribed to the session, and the app's
+        // bootstrap `subscribe_sessions` treats it as new and replays (and
+        // re-sends) again.
+        if (excluded) {
+          if (typeof registerPermissionRoute === 'function') {
+            registerPermissionRoute(requestId, ownerSessionId)
+          } else {
+            permissionSessionMap.set(requestId, ownerSessionId)
+          }
           continue
         }
         log.info(`Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
