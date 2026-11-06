@@ -7,6 +7,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSpy } from './test-helpers.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import {
   handleAuthMessage,
   handlePairMessage,
@@ -1536,6 +1537,26 @@ describe('handleKeyExchange', () => {
       const ctx = { clients: new Map(), flushPostAuthQueue: createSpy() }
       const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: 'abc' })
       assert.equal(result, false)
+    })
+  })
+
+  describe('non-key_exchange message while encryption is pending', () => {
+    it('keeps a client-supplied type containing a newline on one log line', () => {
+      const lines = []
+      const listener = (entry) => lines.push(entry.message)
+      addLogListener(listener)
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      try {
+        const result = handleKeyExchange(ctx, ws, { type: 'ping\n[INFO] [ws] forged line' })
+        assert.equal(result, true)
+      } finally {
+        removeLogListener(listener)
+      }
+      assert.equal(ws.closed, true)
+      const mine = lines.filter((l) => l.includes('forged line'))
+      assert.equal(mine.length, 1)
+      assert.equal(mine[0].includes('\n'), false)
     })
   })
 
