@@ -2,7 +2,7 @@ import { readdir, stat, realpath } from 'fs/promises'
 import { readContainedTextFile } from '../utils/regular-file.js'
 import { homedir } from 'os'
 import { claudeConfigDir } from '../utils/claude-config-dir.js'
-import { join, resolve, normalize, relative, sep } from 'path'
+import { join, resolve, normalize, relative, sep, isAbsolute } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
@@ -29,7 +29,7 @@ const LISTING_UNRESOLVABLE_REASONS = {
 
 const HOME_ONLY_DENIAL = 'Access denied: directory listing is restricted to the home directory'
 const HOME_AND_ROOTS_DENIAL =
-  'Access denied: directory listing is restricted to the home directory and the configured workspace roots'
+  'Access denied: directory listing is restricted to the home directory and any usable workspace roots'
 
 function hasWorkspaceRoots(config) {
   return Array.isArray(config?.workspaceRoots) &&
@@ -37,12 +37,34 @@ function hasWorkspaceRoots(config) {
 }
 
 /**
+ * The requested path in the form New Session hands to `validateCwdAllowed`: the
+ * trimmed input with `~` expanded and NOT lexically normalised, so the kernel
+ * resolves any `..` through the links before it (`/tmp/..` is `/private` where
+ * `/tmp` links to `/private/tmp`). `normalize`/`resolve` would collapse it
+ * textually and make Browse and Create answer differently for one input (#8303).
+ * The containment decision is made on the realpath of this form.
+ */
+function kernelForm(trimmed, home) {
+  if (trimmed.startsWith('~')) {
+    const rest = trimmed.slice(1).replace(/^\//, '')
+    return rest ? home + sep + rest : home
+  }
+  return isAbsolute(trimmed) ? trimmed : process.cwd() + sep + trimmed
+}
+
+function hasDotDot(p) {
+  return p.split(/[\\/]+/).includes('..')
+}
+
+/**
  * The one containment rule for Browse (`list_directory`, `check_git_repo`): $HOME
  * as before, plus whatever New Session's cwd check (`validateCwdAllowed`, the
  * credential-directory deny-list then `workspaceRoots`) accepts. Asking the same
- * function keeps the two from drifting. A session-bound client keeps the
- * $HOME-only boundary: it cannot create sessions, so it gets nothing from the
- * create allowlist (docs/security/bearer-token-authority.md section 4).
+ * function keeps the two from drifting. A session-bound client is denied these
+ * message types before dispatch (bound-client-policy.js), so this is a second
+ * layer: should one ever reach here it keeps the $HOME-only boundary, since it
+ * cannot create sessions and gets nothing from the create allowlist
+ * (docs/security/bearer-token-authority.md section 4).
  * @param {string} realPath canonical (realpath) target
  * @param {string} homeReal canonical home
  * @param {{ config?: object|null, bound?: boolean }} [opts]
@@ -71,10 +93,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     let absPath = null
     try {
       const home = homedir()
+      let rawPath
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
         absPath = home
+        rawPath = home
       } else {
         const trimmed = requestedPath.trim()
+        rawPath = kernelForm(trimmed, home)
         absPath = trimmed.startsWith('~')
           ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
           : resolve(trimmed)
@@ -83,8 +108,12 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
       let realAbsPath
       let containmentUnknown = false
+      // A `..` in the input is resolved by the kernel (through links), as New
+      // Session does; a target that does not exist is then not listed at all.
+      const dotDot = hasDotDot(rawPath)
+      let missingThroughDotDot = false
       try {
-        realAbsPath = await realpath(absPath)
+        realAbsPath = await realpath(dotDot ? rawPath : absPath)
       } catch (err) {
         if (err.code !== 'ENOENT') {
           // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
@@ -113,6 +142,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         // A walk that cannot finish denies; it never reads as "not found".
         try {
           realAbsPath = await realpathOfDeepestAncestor(absPath)
+          missingThroughDotDot = dotDot
         } catch {
           containmentUnknown = true
         }
@@ -129,6 +159,10 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         })
         return
       }
+
+      // The lexical ancestor stood in only for the containment answer; the real
+      // target (through `..`) is missing, so nothing is listed.
+      if (missingThroughDotDot) throw Object.assign(new Error('not found'), { code: 'ENOENT' })
 
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
       const entries = dirents
@@ -775,10 +809,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
   async function probeGitRepo(trimmed, opts) {
     try {
       const home = homedir()
-      const absPath = normalize(trimmed.startsWith('~')
-        ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
-        : resolve(trimmed))
-      const [realAbs, homeReal] = await Promise.all([realpath(absPath), realpath(home)])
+      // Same form New Session validates (kernel-resolved `..`), see kernelForm.
+      const [realAbs, homeReal] = await Promise.all([realpath(kernelForm(trimmed, home)), realpath(home)])
       if (!isBrowsable(realAbs, homeReal, opts)) return null
       if (!(await stat(realAbs)).isDirectory()) return null
       return await isGitRepo(realAbs)

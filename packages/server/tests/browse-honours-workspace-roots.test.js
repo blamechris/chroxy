@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -88,6 +89,51 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       }
     })
 
+    // (Paths are built by string concatenation: path.join would collapse `..` itself.)
+    // `..` is read as the kernel reads it (through links), the way Create reads
+    // it, not collapsed textually. link -> <scratch>/root/sub/deep, so
+    // link/.. is root/sub (inside the root) while the TEXTUAL collapse of
+    // <scratch>/link/.. is <scratch> (outside every root and home).
+    describe('`..` through a symlink', { skip: SKIP_NO_SYMLINK }, () => {
+      let link
+      beforeEach(() => {
+        link = join(scratch, 'link')
+        symlinkSync(join(root, 'sub', 'deep'), link)
+      })
+
+      it('link/.. resolves through the link: listed like Create accepts it', async () => {
+        const p = `${link}/..`
+        assert.equal(validateCwdAllowed(p, cfg()), null, 'precondition: Create accepts it')
+        const reply = await list(p, { config: cfg() })
+        assert.equal(reply.error, null)
+        assert.deepEqual(reply.entries.map((e) => e.name), ['deep'])
+        assert.equal((await probe(`${link}/../../repo`, { config: cfg() })).isGitRepo, true)
+      })
+
+      it('link/../../outside: textually inside nothing, really outside: refused like Create', async () => {
+        // really: root/sub/deep -> .. root/sub -> .. root ; so link/../.. is root (accepted)
+        // and link/../../.. is <scratch> (refused). Text collapse would give the opposite.
+        const accepted = `${link}/../..`
+        const refused = `${link}/../../..`
+        assert.equal(validateCwdAllowed(accepted, cfg()), null)
+        assert.notEqual(validateCwdAllowed(refused, cfg()), null)
+        assert.equal((await list(accepted, { config: cfg() })).error, null)
+        assert.match((await list(refused, { config: cfg() })).error, /^Access denied/)
+      })
+
+      it('a target that exists only under the textual collapse is not listed (Create calls it missing)', async () => {
+        // <root>/lk -> <root>/sub/deep. Really: <root>/lk/../repo = <root>/sub/repo (missing).
+        // Textually: <root>/repo, which exists and is inside the root.
+        symlinkSync(join(root, 'sub', 'deep'), join(root, 'lk'))
+        const p = `${root}/lk/../repo`
+        assert.notEqual(validateCwdAllowed(p, cfg()), null, 'precondition: Create refuses it (missing)')
+        const reply = await list(p, { config: cfg() })
+        assert.notEqual(reply.error, null)
+        assert.deepEqual(reply.entries, [])
+        assert.equal((await probe(p, { config: cfg() })).isGitRepo, null)
+      })
+    })
+
     it('a credential/config directory inside a root stays refused', async () => {
       const cfgDir = join(root, 'cfg')
       mkdirSync(cfgDir)
@@ -98,7 +144,7 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       assert.deepEqual(reply.entries, [])
     })
 
-    it('a session-bound client gets no widening: roots are not browsable to it', async () => {
+    it('second layer: if a bound client reached the op it would get no widening (production denies it before dispatch)', async () => {
       const reply = await list(root, { config: cfg(), bound: true })
       assert.match(reply.error, /restricted to the home directory$/)
       assert.deepEqual(reply.entries, [])
@@ -130,7 +176,10 @@ describe('Browse honours workspaceRoots (#8303)', () => {
     it('roots that all fail to resolve fall back to home, like Create', async () => {
       const config = { workspaceRoots: [join(scratch, 'gone')] }
       assert.notEqual(validateCwdAllowed(outside, config), null)
-      assert.match((await list(outside, { config })).error, /^Access denied/)
+      const denied = await list(outside, { config })
+      assert.match(denied.error, /^Access denied/)
+      // Roots are configured but none resolves: the wording must not promise them.
+      assert.match(denied.error, /any usable workspace roots/)
       assert.equal((await list(home, { config })).error, null)
     })
   })

@@ -421,6 +421,34 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setGitRepoCheckCallback(null)
     }
   }, [open, trimmedCwd, requestGitRepoCheck, setGitRepoCheckCallback])
+  // #8303: ask the daemon whether Browse can list the chosen directory, by
+  // sending the same `list_directory` request the picker sends, so the daemon's
+  // one rule decides. Only an explicit "Access denied" refusal for THIS path
+  // raises the note; no reply, a dropped socket, "not found" or any other error
+  // says nothing. Informational only — it never gates Create. The picker owns
+  // the single listing-callback slot while it is open, so this probe stands
+  // down then (and cancels itself instead of clearing the slot).
+  const [browseRefused, setBrowseRefused] = useState<string | null>(null)
+  useEffect(() => {
+    if (!open || browsing || !trimmedCwd || typeof requestDirectoryListing !== 'function' || typeof setDirectoryListingCallback !== 'function') return
+    let cancelled = false
+    // The callback goes into the shared slot only when the request is sent, so a
+    // picker that just closed (and cleared the slot) is left cleared meanwhile.
+    const t = setTimeout(() => {
+      setDirectoryListingCallback((listing: DirectoryListing) => {
+        if (cancelled) return
+        const responsePath = listing.path || ''
+        if (!responsePath || !browsePathsMatch(trimmedCwd, responsePath)) return // not ours
+        setBrowseRefused(typeof listing.error === 'string' && listing.error.startsWith('Access denied') ? trimmedCwd : null)
+      })
+      requestDirectoryListing(trimmedCwd)
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [open, browsing, trimmedCwd, requestDirectoryListing, setDirectoryListingCallback])
+  const showBrowseNote = browseRefused !== null && browseRefused === trimmedCwd
   const knownIsGitRepo = gitCheck && gitCheck.path === trimmedCwd ? gitCheck.isGitRepo : null
   const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree, knownIsGitRepo)
   const effectiveWorktree = worktreeSwitch.effectiveWorktree
@@ -841,6 +869,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
+          {showBrowseNote && (
+            <span className="cwd-hint" data-testid="cwd-not-browsable">
+              Browse can't list this directory (it is outside your home folder and the configured workspace roots). You can still try to create a session here, or pick a directory inside them.
+            </span>
+          )}
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}

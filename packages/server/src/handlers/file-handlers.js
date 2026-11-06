@@ -49,8 +49,9 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 }
 
 function handleListDirectory(ws, client, msg, ctx) {
-  // Unbound (host-level) clients browse what New Session accepts; a bound client
-  // keeps $HOME-only (see browser.js isBrowsable).
+  // Unbound (host-level) clients browse what New Session accepts. Bound clients
+  // are denied this message before dispatch (bound-client-policy.js); the
+  // $HOME-only branch in browser.js isBrowsable is a second layer.
   ctx.services.fileOps.listDirectory(ws, msg.path, {
     config: ctx.services.config,
     bound: isBoundClient(client),
