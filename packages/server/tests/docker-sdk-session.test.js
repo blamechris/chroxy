@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { remapClaudeSpawn } from '../src/environments/backends/container-claude-spawn.js'
 
 /**
  * Tests for DockerSdkSession.
@@ -266,12 +267,12 @@ class FakeDockerSdkSession extends EventEmitter {
   // Mirror of DockerSdkSession._augmentQueryOptions
   _augmentQueryOptions(options) {
     if (!this._containerId) return
-    options.spawnClaudeCodeProcess = this._createSpawnCallback()
+    options.spawnClaudeCodeProcess = this._createSpawnCallback(options.pathToClaudeCodeExecutable)
     this._augmentedOptions = options
   }
 
   // Mirror of DockerSdkSession._createSpawnCallback
-  _createSpawnCallback() {
+  _createSpawnCallback(hostClaudePath) {
     const containerId = this._containerId
     const containerCliPath = this._containerCliPath || DEFAULT_CONTAINER_CLI_PATH
     const containerUser = this._containerUser
@@ -300,12 +301,9 @@ class FakeDockerSdkSession extends EventEmitter {
       dockerArgs.push('--env', `HOME=/home/${containerUser}`)
       dockerArgs.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
 
-      const containerCommand = command
-      const containerArgs = [...args]
-
-      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
-        containerArgs[0] = containerCliPath
-      }
+      // One implementation: the real remap lives in container-claude-spawn.js.
+      const { cmd: containerCommand, args: containerArgs } =
+        remapClaudeSpawn({ cmd: command, args, containerCliPath, hostClaudePath })
 
       dockerArgs.push(containerId, containerCommand, ...containerArgs)
 

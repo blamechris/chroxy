@@ -885,6 +885,51 @@ describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
     assert.ok(!args.includes(hostCliPath), 'host cli.js path must not appear in container exec args')
   })
 
+  // #8027 — the SDK's native shape: `command` is an absolute HOST path to a
+  // claude binary and args[0] is a flag, so there is no cli.js in args to remap.
+  it('runs the container claude for a native SDK spawn (host binary path never reaches docker exec)', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+    const hostBin = '/Users/me/proj/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude'
+    const containerCliPath = '/opt/installed/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: hostBin,
+      args: ['--output-format', 'stream-json', '--verbose'],
+      containerCliPath,
+    })
+
+    const { args } = getLastSpawn()
+    const tail = args.slice(args.indexOf('ctr-x'))
+    assert.deepEqual(tail, ['ctr-x', 'node', containerCliPath, '--output-format', 'stream-json', '--verbose'])
+    assert.ok(!args.includes(hostBin), 'host binary path must not reach docker exec')
+  })
+
+  it('execs a non-js containerCliPath directly for a native SDK spawn', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: '/home/me/.local/bin/claude',
+      args: ['-p'],
+      containerCliPath: '/usr/local/bin/claude',
+    })
+
+    const { args } = getLastSpawn()
+    assert.deepEqual(args.slice(args.indexOf('ctr-x')), ['ctr-x', '/usr/local/bin/claude', '-p'])
+  })
+
+  it('does not remap a non-claude command', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'bash',
+      args: ['-c', 'echo hi'],
+      containerCliPath: '/opt/x/cli.js',
+    })
+
+    const { args } = getLastSpawn()
+    assert.deepEqual(args.slice(args.indexOf('ctr-x')), ['ctr-x', 'bash', '-c', 'echo hi'])
+  })
+
   it('falls back to default container CLI path when none provided', () => {
     const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
 

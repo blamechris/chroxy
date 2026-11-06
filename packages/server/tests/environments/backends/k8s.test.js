@@ -3099,6 +3099,48 @@ describe('K8sBackend.streamCliInEnvironment() cli.js remap', () => {
     assert.equal(frame.args[1], '-p', 'remaining args preserved')
   })
 
+  // #8027 — native SDK shape: host binary path as `command`, flag as args[0].
+  it('runs the Pod claude for a native SDK spawn', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+    const hostBin = '/Users/me/proj/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude'
+    const containerCliPath = '/opt/installed/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: hostBin,
+      args: ['--output-format', 'stream-json'],
+      agentToken: 'tok',
+      containerCliPath,
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.cmd, 'node')
+    assert.deepEqual(frame.args, [containerCliPath, '--output-format', 'stream-json'])
+  })
+
+  it('does not remap a non-claude command in the Pod', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'bash', args: ['-c', 'true'], agentToken: 'tok', containerCliPath: '/opt/x/cli.js',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.cmd, 'bash')
+    assert.deepEqual(frame.args, ['-c', 'true'])
+  })
+
   it('falls back to default cli path when none provided', async () => {
     const { ws } = createFakeWs()
     const backend = new K8sBackend({

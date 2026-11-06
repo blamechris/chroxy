@@ -350,7 +350,7 @@ export class DockerSdkSession extends SdkSession {
       log.warn('No container ID — spawnClaudeCodeProcess will not be injected')
       return
     }
-    options.spawnClaudeCodeProcess = this._createSpawnCallback()
+    options.spawnClaudeCodeProcess = this._createSpawnCallback(options.pathToClaudeCodeExecutable)
   }
 
   /**
@@ -368,7 +368,7 @@ export class DockerSdkSession extends SdkSession {
    * disabled mid-turn. The proc emits a one-shot `'stdin_disabled'` signal at
    * that point — subscribe so the loss is observable instead of silent.
    */
-  _createSpawnCallback() {
+  _createSpawnCallback(hostClaudePath) {
     const backend = this._backend || (this._backend = new DockerBackend())
     const containerId = this._containerId
     const containerCliPath = this._containerCliPath || DEFAULT_CONTAINER_CLI_PATH
@@ -386,6 +386,7 @@ export class DockerSdkSession extends SdkSession {
         containerUser,
         containerCliPath,
         hostCwd,
+        hostClaudePath,
       })
       // Attach default warn-log listeners for SidecarProcess stdin failure
       // signals (#3402, #3468, #3474).  Docker procs are plain ChildProcess
