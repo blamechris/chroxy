@@ -19,11 +19,12 @@
  */
 
 import { join } from 'node:path'
-import { opendir, lstat, realpath } from 'node:fs/promises'
+import { opendir, lstat, realpath, readlink } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd, resolveSessionCwd } from './ws-file-ops/common.js'
+import { isPathWithin } from './utils/path-containment.js'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
@@ -474,11 +475,28 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
 
   // Realpath-validate the search ROOT against cwd. Pre-fix this was a
   // weak "no ..." check that let absolute paths to /etc through.
+  const hasPath = typeof input?.path === 'string' && input.path.length > 0
   const validatedRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
-  // The walk opens exactly this canonical path. A search root given by `path`
-  // is already canonical; the session root is resolved here, before the walk
-  // is queued, so the walk never derives its own root.
-  const realRoot = input?.path ? validatedRoot : await resolveSessionCwd(cwd, cwdRealCache, cwdCacheTtl)
+  // The walk opens exactly one canonical path. The session root is resolved
+  // here; a `path` root takes its on-disk spelling (`realpath`) and is checked
+  // against the workspace again. Both happen before the walk is queued, so the
+  // walk never derives its own root. A path that does not exist is kept as
+  // given, so it behaves as before (no matches).
+  let realRoot
+  if (!hasPath) {
+    realRoot = await resolveSessionCwd(cwd, cwdRealCache, cwdCacheTtl)
+  } else {
+    try {
+      realRoot = await realpath(validatedRoot)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+      realRoot = validatedRoot
+    }
+    const cwdReal = await resolveSessionCwd(cwd, cwdRealCache, cwdCacheTtl)
+    if (!isPathWithin(realRoot, cwdReal)) {
+      return { content: `EACCES: path outside workspace: ${input.path} resolves to ${realRoot}, expected under ${cwdReal}`, isError: true }
+    }
+  }
 
   // #7918 — a brace alternative spanning a '/' (`{dup,nested/dup}`) has no
   // representation in the per-segment compiled matcher below, which splits
@@ -801,9 +819,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * SAME verified object where the platform allows it, and hands `walk` the
  * already-open, already-verified `Dir` directly — no path is ever handed
  * back for a second, disconnected open to (not) re-check. See that
- * function's doc for exactly what this closes, how, and the residual risk
- * that remains on platforms without a way to bind directory listing to an
- * already-open fd.
+ * function's doc for how the open and the listing are bound together.
  *
  * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
  * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
@@ -1352,12 +1368,21 @@ const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
  *     directory with the dev:ino it was verified with, and the entry's relative
  *     path resolves inside the workspace component by component
  *     (`validateRawPathWithinCwd`);
- *   - root (`parent` null): the canonical path still names itself.
+ *   - root (`parent` null): the opened descriptor is the directory the path
+ *     names now. Where `/proc/self/fd` exists the kernel's name for the
+ *     descriptor must equal the path; on every platform a fresh lstat of the
+ *     path must have the descriptor's dev:ino, and the canonical path must
+ *     still name itself.
  * Fails closed on any error.
  */
-async function confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey) {
+export async function confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey, opened) {
   try {
-    if (parent === null) return (await realpath(target)) === target
+    if (parent === null) {
+      if (DIR_FD_REOPEN_SUPPORTED && (await readlink(`/proc/self/fd/${opened.fh.fd}`)) !== target) return false
+      const fresh = await lstat(target, { bigint: true })
+      if (fresh.isSymbolicLink() || fresh.ino === 0n || fresh.dev !== opened.stat.dev || fresh.ino !== opened.stat.ino) return false
+      return (await realpath(target)) === target
+    }
     const [st, resolved] = await Promise.all([
       lstat(parent.path, { bigint: true }),
       validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl),
@@ -1454,7 +1479,8 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
 
-  if (recheckAfterOpen && !(await confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey))) {
+  if (recheckAfterOpen && __testSeam) await __testSeam(target, 'before-confirm')
+  if (recheckAfterOpen && !(await confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey, { fh, stat: openedStat }))) {
     await fh.close().catch(() => {})
     return null
   }
@@ -1518,7 +1544,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
   if (__testSeam) await __testSeam(target, 'after-verify')
-  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam), path: target, key, fh: null, ancestor }
+  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam, parent === null), path: target, key, fh: null, ancestor }
 }
 
 /**
@@ -1552,7 +1578,8 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
  * Step 2 failing means the directory was swapped at some point; the rest of
  * it is abandoned (fail closed). Step 1 answering ENOENT with the parent
  * intact is an ordinary concurrent delete; that entry is dropped. Any other
- * lstat error throws, which Glob reports as an error result.
+ * lstat error skips that entry; a root where nothing could be checked
+ * throws, which Glob reports as an error result.
  *
  * RESIDUAL (not closed): the per-round timed double swap above, bounded to
  * FALLBACK_VERIFY_BATCH names each. Cost: about one lstat per entry plus one
@@ -1568,10 +1595,12 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
  * @typedef {{ name: string, isDirectory: () => boolean, isSymbolicLink: () => boolean, isFile: () => boolean }} VerifiedEntry
  * @typedef {{ [Symbol.asyncIterator]: () => AsyncGenerator<VerifiedEntry>, close: () => Promise<void> }} VerifiedDirLike
  */
-function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
+function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam, isRoot = false) {
   return {
     async * [Symbol.asyncIterator]() {
       const it = dh[Symbol.asyncIterator]()
+      let verified = 0
+      let unverifiable = 0
       try {
         let exhausted = false
         while (!exhausted) {
@@ -1591,15 +1620,16 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
               (st) => st,
               (err) => (err && err.code === 'ENOENT' ? 'gone' : 'error'),
             )))
-          // An entry that could not be checked (anything but ENOENT) is an
-          // error result for the whole listing, not a quiet "no matches".
-          if (outcomes.includes('error')) throw new Error(`cannot verify the entries of ${parentPath}`)
+          // An entry that could not be checked (anything but ENOENT) is skipped
+          // and the listing continues; see the end of the iteration for the root.
           if (__testSeam) await __testSeam(parentPath, 'after-entry-lstat', batch.map((d) => d.name))
           // Step 2, AFTER step 1: is the parent still the verified directory?
           if (!(await isStillVerifiedDir(parentPath, parentStat))) return
           for (let i = 0; i < batch.length; i++) {
             const st = outcomes[i]
             if (st === 'gone') continue // deleted concurrently, parent intact
+            if (st === 'error') { unverifiable++; continue }
+            verified++
             // Yield the entry's TYPE from the step-1 lstat, never from the
             // Dirent: `dh` may be bound to a swapped-in outside directory, and
             // a name both directories share would otherwise carry the OUTSIDE
@@ -1614,6 +1644,9 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
             }
           }
         }
+        // A root none of whose entries could be checked is an error result, not
+        // a quiet "no matches".
+        if (isRoot && unverifiable > 0 && verified === 0) throw new Error(`cannot verify the entries of ${parentPath}`)
       } finally {
         // Closes `dh` on an early exit; a no-op once it is exhausted.
         try { await it.return?.() } catch { /* already closed */ }

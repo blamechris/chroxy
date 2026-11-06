@@ -1,11 +1,11 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs'
-import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
+import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync, open as openAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, acquireGlobWalkSlot, globWalkSlotStats, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded, buildSafeBashEnv } from '../src/byok-tool-executor.js'
+import { confirmEntryStillInside, executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, acquireGlobWalkSlot, globWalkSlotStats, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded, buildSafeBashEnv } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -3034,6 +3034,72 @@ describe('executeBuiltinTool', () => {
             await assert.rejects(run('*', undefined, true, join(dir, 'locked')))
           } finally {
             chmodSync(join(dir, 'locked'), 0o755)
+          }
+        })
+
+        it('a root that is not the directory opened when it is confirmed lists nothing', async () => {
+          const other = mkdtempSync(join(tmpdir(), 'chroxy-walk-other-'))
+          try {
+            mkdirSync(join(dir, 'a', 'sub'), { recursive: true })
+            writeFileSync(join(dir, 'a', 'sub', 'INSIDE.txt'), '1')
+            mkdirSync(join(other, 'sub'))
+            writeFileSync(join(other, 'sub', 'OUTSIDE.txt'), '1')
+            const root = join(dir, 'a', 'sub')
+            for (const forceFallback of [false, true]) {
+              let replaced = 0
+              let restored = 0
+              const results = await run('*', async (target, phase) => {
+                if (target !== root) return
+                if (phase === 'before-stat') {
+                  replaced++
+                  await renameAsync(join(dir, 'a'), join(dir, 'a.bak'))
+                  await symlinkAsync(other, join(dir, 'a'))
+                } else if (phase === 'before-confirm') {
+                  restored++
+                  await rmAsync(join(dir, 'a'), { force: true })
+                  await renameAsync(join(dir, 'a.bak'), join(dir, 'a'))
+                }
+              }, forceFallback, root)
+              assert.equal(replaced, 1)
+              assert.equal(restored, 1)
+              assert.deepEqual(results, [])
+            }
+          } finally { rmSync(other, { recursive: true, force: true }) }
+        })
+
+        it('the root confirmation requires the path to name the directory that was opened', async () => {
+          mkdirSync(join(dir, 'one'))
+          mkdirSync(join(dir, 'two'))
+          const one = join(dir, 'one')
+          const fh = await openAsync(one, 'r')
+          try {
+            const stat = await fh.stat({ bigint: true })
+            const key = (st) => `${st.dev}:${st.ino}`
+            const confirm = (target) => confirmEntryStillInside(target, '', dir, new Map(), 30_000, null, key, { fh, stat })
+            assert.equal(await confirm(one), true)
+            assert.equal(await confirm(join(dir, 'two')), false)
+            assert.equal(await confirm(join(dir, 'missing')), false)
+          } finally {
+            await fh.close()
+          }
+        })
+
+        it('one entry that cannot be checked is skipped and the rest of the tree is listed', {
+          skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+            ? 'needs permission bits that the platform or user does not enforce' : false,
+        }, async () => {
+          mkdirSync(join(dir, 't', 'deep', 'locked'), { recursive: true })
+          writeFileSync(join(dir, 't', 'deep', 'locked', 'a.txt'), '1')
+          writeFileSync(join(dir, 't', 'deep', 'ok.txt'), '1')
+          writeFileSync(join(dir, 't', 'top.txt'), '1')
+          chmodSync(join(dir, 't', 'deep', 'locked'), 0o444)
+          try {
+            const results = (await run('**', undefined, true, join(dir, 't'))).map((r) => r.replace(/\\/g, '/'))
+            assert.ok(results.includes('top.txt'))
+            assert.ok(results.includes('deep/ok.txt'))
+            assert.ok(results.includes('deep/locked'))
+          } finally {
+            chmodSync(join(dir, 't', 'deep', 'locked'), 0o755)
           }
         })
 
