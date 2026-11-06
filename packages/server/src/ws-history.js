@@ -579,7 +579,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     // If client is bound to a specific session, use that session's cwd
     // instead of the server default to avoid leaking unrelated session info.
-    if (client.boundSessionId) {
+    if (isBoundClient(client)) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
         entry = boundEntry
@@ -968,7 +968,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // `daemon_update_action` it exists to drive: strict primary token AND unbound.
   // A paired phone (an unbound pairing token) must not be told which commits are
   // queued for the owner's machine, and a bound client sees nothing host-level.
-  if (daemonUpdate && client?.isPrimaryToken === true && !client.boundSessionId) {
+  if (daemonUpdate && client?.isPrimaryToken === true && !isBoundClient(client)) {
     try {
       send(ws, { type: 'daemon_update_status', ...daemonUpdate.getStatus() })
     } catch (err) {
@@ -997,7 +997,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // reconnect after the event fired.
     if (typeof sessionManager.getFailedRestores === 'function') {
       for (const failed of sessionManager.getFailedRestores()) {
-        if (client.boundSessionId && failed.sessionId !== client.boundSessionId) continue
+        if (isBoundClient(client) && failed.sessionId !== client.boundSessionId) continue
         send(ws, {
           type: 'session_restore_failed',
           sessionId: failed.sessionId,
@@ -1056,7 +1056,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // any persisted per-device preference. Fail closed: if the bound session
     // no longer exists, clear the active session rather than silently falling
     // back to a different session (or inheriting an unrelated persisted pref).
-    if (client.boundSessionId) {
+    if (isBoundClient(client)) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
         activeId = client.boundSessionId
@@ -1191,7 +1191,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   permissions.resendPendingPermissions(ws, client)
   // #5555: legacy single-session bootstrap burst — providers + slash commands
   // + agents for the cliSession's cwd (no provider scoping in legacy mode).
-  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
+  sendAuthBootstrap(ctx, ws, { scoped: isBoundClient(client), cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
 }
 
 /**
@@ -1260,15 +1260,17 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
   // tolerate either failing on its own.
   const catalogsAllowed = !scoped || cwd !== null
   const slashP = catalogsAllowed && fileOps && typeof fileOps.computeSlashCommands === 'function'
-    ? fileOps.computeSlashCommands(cwd, provider, mcpPrompts).catch(err => {
+    ? fileOps.computeSlashCommands(cwd, provider, mcpPrompts, { projectOnly: scoped }).catch(err => {
         log.warn(`auth_bootstrap: computeSlashCommands failed: ${err.message}`)
         return []
       })
     : Promise.resolve([])
   const userAgentsDirs = ctx.userAgentsDirs
-  const agentsOpts = Array.isArray(userAgentsDirs) && userAgentsDirs.length > 0
-    ? { userAgentsDirs }
-    : {}
+  const agentsOpts = {
+    ...(Array.isArray(userAgentsDirs) && userAgentsDirs.length > 0 ? { userAgentsDirs } : {}),
+    // A session-scoped connection is bootstrapped with the project's agents only.
+    projectOnly: scoped,
+  }
   const agentsP = catalogsAllowed && fileOps && typeof fileOps.computeAgents === 'function'
     ? fileOps.computeAgents(cwd, agentsOpts).catch(err => {
         log.warn(`auth_bootstrap: computeAgents failed: ${err.message}`)

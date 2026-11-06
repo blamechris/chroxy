@@ -1,10 +1,16 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import WebSocket from 'ws'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   BOUND_OUTGOING_ALLOWED,
   BOUND_OUTGOING_DENIED,
   BOUND_OUTGOING_REDACTED,
+  BOUND_OUTGOING_SCHEMALESS_ALLOWED,
+  BOUND_OUTGOING_SCHEMALESS_DENIED,
+  NOT_CLIENT_FRAMES,
   frameForBoundClient,
 } from '../src/outgoing-policy.js'
 import { SCHEMA_BACKED_OUTBOUND_TYPES } from '../src/ws-outbound-schemas.js'
@@ -47,6 +53,66 @@ describe('outgoing frame classification', () => {
   })
 })
 
+const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+
+// Names the source hands to a send/broadcast style call as `type: '...'`.
+function emittedTypes() {
+  const found = new Set()
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const f = join(d, e.name)
+      if (e.isDirectory()) walk(f)
+      else if (e.name.endsWith('.js')) {
+        const src = readFileSync(f, 'utf8')
+        const re = /(?:send|sendFn|_send|broadcast|_broadcast|broadcastToSession|_broadcastToSession|broadcastMinProtocolVersion|sendMessage|emit)\s*\([^;]{0,400}?\btype:\s*'([a-z_]+)'/gs
+        for (const m of src.matchAll(re)) found.add(m[1])
+      }
+    }
+  }
+  walk(SRC)
+  return found
+}
+
+describe('frames with no outbound schema', () => {
+  const emitted = emittedTypes()
+  const schemaless = [...BOUND_OUTGOING_SCHEMALESS_ALLOWED, ...BOUND_OUTGOING_SCHEMALESS_DENIED]
+
+  it('every type the source emits is classified (a new frame must be decided)', () => {
+    const known = new Set([...schemaTypes, ...schemaless, ...NOT_CLIENT_FRAMES])
+    const unclassified = [...emitted].filter((t) => !known.has(t)).sort()
+    assert.deepEqual(unclassified, [], 'classify each new frame in src/outgoing-policy.js')
+  })
+
+  it('every classified schema-less name is really emitted by the source (no stale entries)', () => {
+    const stale = [...schemaless, ...NOT_CLIENT_FRAMES].filter((t) => !emitted.has(t))
+    assert.deepEqual(stale, [])
+  })
+
+  it('no name is in two lists', () => {
+    const all = [...schemaless, ...NOT_CLIENT_FRAMES, ...BOUND_OUTGOING_ALLOWED, ...BOUND_OUTGOING_DENIED, ...BOUND_OUTGOING_REDACTED]
+    assert.equal(new Set(all).size, all.length)
+  })
+
+  it('a frame carrying the daemon credential is never delivered', () => {
+    assert.equal(frameForBoundClient({ type: 'token_rotated', token: 'primary-secret' }), null)
+    assert.equal(frameForBoundClient({ type: 'pairing_refreshed' }), null)
+  })
+
+  it('delivery is deny-by-default: an unclassified or untyped frame is dropped', () => {
+    assert.equal(frameForBoundClient({ type: 'some_future_frame', data: 1 }), null)
+    assert.equal(frameForBoundClient({ data: 1 }), null)
+    assert.equal(frameForBoundClient(null), null)
+    assert.equal(frameForBoundClient({ type: '__proto__' }), null)
+  })
+
+  it('classified session frames still arrive', () => {
+    for (const t of ['session_switched', 'history_replay_start', 'status', 'stream_delta', 'permission_request']) {
+      const m = { type: t, sessionId: 's' }
+      assert.equal(frameForBoundClient(m), m, t)
+    }
+  })
+})
+
 describe('frameForBoundClient', () => {
   it('removes an authorization URL from every server entry and touches nothing else', () => {
     const msg = {
@@ -65,10 +131,23 @@ describe('frameForBoundClient', () => {
     assert.ok('authUrl' in msg.servers[0], 'the original frame is not modified (other recipients still get it)')
   })
 
-  it('removes the billing snapshot from auth_ok', () => {
-    const out = frameForBoundClient({ type: 'auth_ok', clientId: 'c', billingCanary: { warnings: [{ sessionId: 'other' }] } })
-    assert.equal('billingCanary' in out, false)
+  it('removes the host-wide fields from auth_ok', () => {
+    const out = frameForBoundClient({ type: 'auth_ok', clientId: 'c', billingCanary: { warnings: [{ sessionId: 'other' }] }, webFeatures: { remote: true }, exposure: { lan: true } })
+    for (const k of ['billingCanary', 'webFeatures', 'exposure']) assert.equal(k in out, false, k)
     assert.equal(out.clientId, 'c')
+  })
+
+  it('redacts auth_bootstrap itself: no providers, project-level catalog entries only', () => {
+    const out = frameForBoundClient({
+      type: 'auth_bootstrap',
+      providers: [{ name: 'claude-sdk', auth: { ready: true } }],
+      defaultProvider: 'claude-sdk',
+      slashCommands: [{ name: 'a', source: 'project' }, { name: 'b', source: 'user' }, { name: 'c', source: 'builtin' }],
+      agents: [{ name: 'x', source: 'user' }, { name: 'y', source: 'project' }],
+    })
+    assert.deepEqual(out.providers, [])
+    assert.deepEqual(out.slashCommands.map((c) => c.name), ['a', 'c'])
+    assert.deepEqual(out.agents.map((c) => c.name), ['y'])
   })
 
   it('passes a session-scoped frame through unchanged', () => {
@@ -151,5 +230,19 @@ describe('what a session-scoped connection is sent, over a real socket', () => {
     const owner = await authed(port, 'primary-tok')
     await waitFor(() => owner.messages.find((m) => m.type === 'mcp_servers'), { label: 'owner replayed snapshot' })
     assert.ok(JSON.stringify(owner.messages).includes('state=replay'))
+  })
+
+  it('a direct frame tagged with another session is not delivered', async () => {
+    const port = await start()
+    const scoped = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const guest = await authed(port, scoped)
+    const clientWs = [...server.clients.entries()].find(([, c]) => c.boundSessionId === 'session-1')[0]
+    server._send(clientWs, { type: 'stream_delta', sessionId: 'session-2', delta: 'other session text' })
+    server._send(clientWs, { type: 'stream_delta', sessionId: 'session-1', delta: 'own session text' })
+    server._send(clientWs, { type: 'token_rotated', token: 'primary-secret' })
+    await waitFor(() => guest.messages.find((m) => m.delta === 'own session text'), { label: 'own delta' })
+    const all = JSON.stringify(guest.messages)
+    assert.equal(all.includes('other session text'), false)
+    assert.equal(all.includes('primary-secret'), false)
   })
 })

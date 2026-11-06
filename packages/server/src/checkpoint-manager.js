@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { stripInheritedChroxySecrets } from './utils/spawn-env.js'
@@ -322,7 +322,10 @@ export class CheckpointManager extends EventEmitter {
    */
   async _createGitSnapshot(cwd, checkpointId) {
     const tagName = `chroxy-checkpoint/${checkpointId}`
-    const indexFile = join(tmpdir(), `ckpt-snapshot-index-${randomUUID()}`)
+    // A private directory (mode 0700) holds the temporary index, so no other user
+    // can read the staged content or swap the file.
+    const indexDir = mkdtempSync(join(tmpdir(), 'ckpt-snapshot-'))
+    const indexFile = join(indexDir, 'index')
 
     try {
       const { stdout: status } = await execFileAsync(
@@ -364,7 +367,7 @@ export class CheckpointManager extends EventEmitter {
       log.warn(`Failed to create git snapshot: ${err.message}`)
       return null
     } finally {
-      try { unlinkSync(indexFile) } catch { /* never created, or already gone */ }
+      try { rmSync(indexDir, { recursive: true, force: true }) } catch { /* already gone */ }
     }
   }
 

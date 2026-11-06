@@ -182,7 +182,7 @@ function handleListSlashCommands(ws, client, msg, ctx) {
   const mcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
     ? entry.session.getMcpPromptCommands()
     : []
-  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider, mcpPrompts)
+  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider, mcpPrompts, { projectOnly: isBoundClient(client) })
 }
 
 function handleListAgents(ws, client, msg, ctx) {
@@ -193,7 +193,7 @@ function handleListAgents(ws, client, msg, ctx) {
     ctx.transport.send(ws, { type: 'agent_list', agents: [], ...(sid ? { sessionId: sid } : {}) })
     return
   }
-  const opts = ctx.runtime.userAgentsDirs ? { userAgentsDirs: ctx.runtime.userAgentsDirs } : {}
+  const opts = { ...(ctx.runtime.userAgentsDirs ? { userAgentsDirs: ctx.runtime.userAgentsDirs } : {}), projectOnly: isBoundClient(client) }
   ctx.services.fileOps.listAgents(ws, entry?.cwd || null, sid, opts)
 }
 

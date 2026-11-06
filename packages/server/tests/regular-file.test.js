@@ -60,7 +60,29 @@ describe('regular-file open', { skip: !POSIX && 'needs mkfifo' }, () => {
     clearScanCache()
     const found = await within(3000, scanConversations({ projectsDirs: [projects] }), 'scan')
     assert.deepEqual(found.map((c) => c.conversationId), ['11111111-1111-4111-8111-111111111111'])
-    const hits = await within(3000, searchConversations('needle', { projectsDirs: [projects] }), 'search')
-    assert.ok(Array.isArray(hits))
+    // `projectsDir` (singular) is what search reads; a plural key would silently
+    // search the real home and prove nothing.
+    const hits = await within(3000, searchConversations('needle', { projectsDir: projects }), 'search')
+    assert.deepEqual(hits.map((h) => h.conversationId), ['11111111-1111-4111-8111-111111111111'], 'the planted hit is found, and the FIFO does not stall it')
+  })
+
+  it('a file swapped for a FIFO between listing and open is refused without waiting (contained read)', () => {
+    // The swap happens through the helper's own scheduling seam: after the
+    // directory was listed, before the open. In a child with a hard timeout, so a
+    // blocking open fails here quickly.
+    const mod = new URL('../src/utils/regular-file.js', import.meta.url).href
+    const target = join(dir, 'swapme.jsonl')
+    writeFileSync(target, 'x'.repeat(200))
+    const code = `
+      const fs = require('node:fs'); const cp = require('node:child_process');
+      import(${JSON.stringify(mod)}).then(async (m) => {
+        const out = await m.readContainedBytes(${JSON.stringify(target)}, ${JSON.stringify(dir)}, 1024, {
+          deps: { beforeOpen: () => { fs.unlinkSync(${JSON.stringify(target)}); cp.execFileSync('mkfifo', [${JSON.stringify(target)}]) } },
+        })
+        console.log(out === null ? 'REFUSED' : 'READ')
+      })`
+    const r = spawnSync(process.execPath, ['--input-type=commonjs', '-e', code], { timeout: 4000, encoding: 'utf8' })
+    assert.equal(r.error, undefined, `the read did not return: ${r.error?.message}`)
+    assert.equal(r.stdout.trim(), 'REFUSED')
   })
 })

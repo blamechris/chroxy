@@ -1,5 +1,6 @@
 import { execFile } from 'child_process'
-import { readFile } from 'fs/promises'
+import { realpath } from 'fs/promises'
+import { readContainedTextFile } from './utils/regular-file.js'
 import { basename, join } from 'path'
 import { GIT } from './git.js'
 
@@ -41,7 +42,11 @@ function gitCommand(cwd, args) {
 
 async function readProjectName(cwd) {
   try {
-    const raw = await readFile(join(cwd, 'package.json'), 'utf8')
+    // Pinned, contained in the session directory, size-capped (a link or special
+    // file named package.json is not read).
+    const real = await realpath(cwd)
+    const raw = await readContainedTextFile(join(real, 'package.json'), real, 1024 * 1024)
+    if (raw === null) return basename(cwd)
     const pkg = JSON.parse(raw)
     if (typeof pkg.name === 'string' && pkg.name) return pkg.name
   } catch {}

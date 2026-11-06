@@ -62,7 +62,7 @@ describe('git snapshot for a checkpoint', () => {
   })
 
   it('leaves no temporary index behind', () => {
-    assert.deepEqual(readdirSync(tmpdir()).filter((n) => n.startsWith('ckpt-snapshot-index-')), [])
+    assert.deepEqual(readdirSync(tmpdir()).filter((n) => n.startsWith('ckpt-snapshot-')), [])
   })
 
   it('tags HEAD when nothing under the directory changed, even if a sibling has changes', async () => {

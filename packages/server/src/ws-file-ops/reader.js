@@ -1,4 +1,4 @@
-import { readFile, stat, mkdir, realpath } from 'fs/promises'
+import { stat, mkdir, realpath } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
@@ -10,6 +10,7 @@ import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
 import { isPathWithin } from '../utils/path-containment.js'
+import { readPinnedHandle, readContainedBytes } from '../utils/regular-file.js'
 import { unresolvablePathError, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError, CONFIG_DIR_REFUSAL } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
@@ -366,12 +367,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           // open from hanging on a planted FIFO with no writer, but the
           // content must still not be read from anything but a regular file
           // — re-check on the OPENED fd, which can't be raced the same way.
-          const fhStat = await fh.stat()
-          if (!fhStat.isFile()) {
+          // The opened object must be the file this name denotes inside the
+          // project (parents included), within the size cap, and is read from
+          // the descriptor in bounded steps (utils/regular-file.js).
+          try {
+            buf = await readPinnedHandle(fh, resolvedAbsPath, await resolveSessionCwd(sessionCwd), 512 * 1024)
+          } catch (pinErr) {
             // No path in the text: this reaches the client verbatim.
-            throw clientSafeError('Not a regular file')
+            if (pinErr.code === 'ENOTREG') throw clientSafeError('Not a regular file')
+            if (pinErr.code === 'EFBIG') throw clientSafeError('File too large (max 512KB)')
+            if (pinErr.code === 'EACCES') throw Object.assign(new Error('pinned'), { code: 'ELOOP' })
+            throw pinErr
           }
-          buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
             // Symlink appeared at the canonical path after validation — reject
@@ -1070,7 +1077,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
                 lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
                 additions = 0
               } else {
-                const buf = await readFile(validation.realPath)
+                const buf = await readContainedBytes(validation.realPath, cwdReal, MAX_UNTRACKED_SIZE)
+                if (buf === null) continue
                 const checkLen = Math.min(buf.length, 8192)
                 let isBinary = false
                 for (let i = 0; i < checkLen; i++) {

@@ -43,6 +43,10 @@ export class ReadCancelledError extends Error {
  * @param {{ maxConcurrent?: number, maxPerClient?: number, maxQueued?: number }} [opts]
  */
 export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueued = 32, maxWaitersPerJob = 64 } = {}) {
+  // Capacity kept for callers that are not `restricted` (a session-scoped
+  // connection is): one running slot, and the tail of the queue.
+  const reservedRunning = maxConcurrent > 1 ? 1 : 0
+  const restrictedQueueCap = maxQueued > 8 ? maxQueued - 8 : Math.max(1, Math.ceil(maxQueued / 2))
   for (const [name, v] of Object.entries({ maxConcurrent, maxPerClient, maxQueued, maxWaitersPerJob })) {
     if (!Number.isInteger(v) || v < 1) throw new RangeError(`createReadLimiter: ${name} must be a positive integer`)
   }
@@ -73,7 +77,11 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
 
   function pump() {
     while (running < maxConcurrent && queue.length > 0) {
-      const job = queue.shift()
+      // The first queued job allowed to start now: a restricted one may not take
+      // the last running slot.
+      const at = queue.findIndex((j) => !j.restricted || running < maxConcurrent - reservedRunning)
+      if (at < 0) return
+      const [job] = queue.splice(at, 1)
       if (job.waiters === 0) continue // everyone left while it queued
       running++
       job.started = true
@@ -87,7 +95,7 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
    * @param {(signal: AbortSignal) => Promise<T>} run
    * @returns {Promise<T>}
    */
-  function submit({ key, clientKey, signal }, run) {
+  function submit({ key, clientKey, signal, restricted = false }, run) {
     if (signal?.aborted) return Promise.reject(new ReadCancelledError())
 
     let job = jobs.get(key)
@@ -101,10 +109,16 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
       if (running >= maxConcurrent && queue.length >= maxQueued) {
         return Promise.reject(new ReadLimitError('queue', 'Too many transcript requests are in progress'))
       }
+      if (restricted && queue.length >= restrictedQueueCap) {
+        return Promise.reject(new ReadLimitError('queue', 'Too many transcript requests are in progress'))
+      }
       job = createJob(key, run)
+      job.restricted = restricted
       jobs.set(key, job)
       queue.push(job)
     }
+    // An unrestricted caller joining a restricted read lifts the restriction.
+    if (!restricted) job.restricted = false
     if (job.waiters >= maxWaitersPerJob) {
       return Promise.reject(new ReadLimitError('queue', 'Too many transcript requests are in progress'))
     }
@@ -154,7 +168,7 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
   function createJob(key, run) {
     const abort = new AbortController()
     /** @type {Job} */
-    const job = { key, run, clients: new Map(), waiters: 0, abort, started: false, done: false, promise: null, start: null }
+    const job = { key, run, clients: new Map(), waiters: 0, abort, started: false, done: false, restricted: false, promise: null, start: null }
     job.promise = new Promise((resolve, reject) => {
       job.start = () => {
         Promise.resolve()
@@ -182,4 +196,21 @@ export function createReadLimiter({ maxConcurrent = 4, maxPerClient = 2, maxQueu
     /** For tests and diagnostics. */
     stats: () => ({ running, queued: queue.length, outstanding: jobs.size }),
   }
+}
+
+/**
+ * The key a connection's reads are counted under, and whether it is restricted.
+ * A session-scoped connection is counted by its CREDENTIAL (the pairing token it
+ * authenticated with), so one token cannot widen its share by opening more
+ * connections; an unscoped connection is counted by connection. Scoped callers
+ * are `restricted`: they cannot take the capacity reserved for the others.
+ * @param {{ id?: string, authToken?: string, boundSessionId?: unknown }} client
+ * @param {(c: object) => boolean} isScoped
+ */
+export function admissionFor(client, isScoped) {
+  const scoped = isScoped(client)
+  const key = scoped && typeof client?.authToken === 'string' && client.authToken
+    ? `credential:${client.authToken}`
+    : String(client?.id ?? '')
+  return { clientKey: key, restricted: scoped }
 }

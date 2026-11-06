@@ -27,7 +27,7 @@ import { getDashboardBuildId } from './dashboard-build.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
-import { broadcastEnvironmentList, isBoundClient } from './environments/authority.js'
+import { broadcastEnvironmentList, isBoundClient, isBoundToOtherSession } from './environments/authority.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
@@ -3350,6 +3350,9 @@ export class WsServer {
     // The one outgoing choke point: a session-scoped connection is sent no
     // host-wide frame and has host-wide fields removed from the rest.
     if (client && isBoundClient(client)) {
+      // A frame tagged with another session is not for this connection, on a
+      // direct send as on a broadcast.
+      if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) return true
       const frame = frameForBoundClient(message)
       if (frame === null) return true
       message = frame

@@ -94,7 +94,7 @@
 //     each scan reads only the new tail. A shrunken file (rotation /
 //     truncation) resets the scanner and re-reads from byte 0.
 
-import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
+import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { join } from 'path'
 import { createLogger } from './logger.js'
@@ -377,7 +377,9 @@ export class TranscriptTaskScanner {
   }
 
   _readNewBytes() {
-    const fd = openSync(this.path, 'r')
+    // Non-blocking: a FIFO planted at the transcript path must be refused by the
+    // fstat below, not waited on by the open (and the daemon with it).
+    const fd = openSync(this.path, constants.O_RDONLY | (constants.O_NONBLOCK || 0))
     try {
       const stat = fstatSync(fd)
       // #8223: something other than a regular file at the transcript path is

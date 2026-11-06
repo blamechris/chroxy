@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import {
   readConversationHistoryWithMetaAsync,
   readConversationTranscriptStrictAsync,
-  encodeProjectPath,
+  projectSlug,
 } from '../src/jsonl-reader.js'
 import { createReadLimiter, ReadLimitError } from '../src/utils/read-limiter.js'
 import { SessionManager } from '../src/session-manager.js'
@@ -42,6 +42,16 @@ describe('every transcript reader is admitted through the shared limiter', () =>
     assert.equal(out.messages.length, 3)
     assert.equal(seen.length, 1)
     assert.equal(seen[0].clientKey, 'conn-7')
+  })
+
+  it('a refusal for load is reported by the full-history reader, not read as an empty history', async () => {
+    const limiter = createReadLimiter({ maxConcurrent: 1, maxPerClient: 1, maxQueued: 4 })
+    const first = readConversationHistoryWithMetaAsync(join(dir, 'a.jsonl'), undefined, { limiter, clientKey: 'conn-2' })
+    await assert.rejects(
+      readConversationHistoryWithMetaAsync(join(dir, 'b.jsonl'), undefined, { limiter, clientKey: 'conn-2' }),
+      (e) => e instanceof ReadLimitError,
+    )
+    await first
   })
 
   it('a connection with a read outstanding cannot start another through the strict reader either', async () => {
@@ -86,7 +96,7 @@ describe('every transcript reader is admitted through the shared limiter', () =>
 describe('SessionManager.getFullHistoryAsync reads inside the transcript store', () => {
   let root, home, realHome, realProfile, realConfig, cwd, store
   before(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-fullhist-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-fullhist-')))
     home = join(root, 'home')
     cwd = join(root, 'work', 'proj')
     mkdirSync(cwd, { recursive: true })
@@ -111,7 +121,7 @@ describe('SessionManager.getFullHistoryAsync reads inside the transcript store',
     }
     return SessionManager.prototype.getFullHistoryAsync.call(self, 's1', opts)
   }
-  const projectDir = (c) => join(store, encodeProjectPath(c))
+  const projectDir = (c) => join(store, projectSlug(c))
 
   it('reads the transcript from the store', async () => {
     mkdirSync(projectDir(cwd), { recursive: true })
@@ -131,6 +141,25 @@ describe('SessionManager.getFullHistoryAsync reads inside the transcript store',
     const out = await history(planted, { clientKey: 'conn-2' })
     assert.equal(out.source, 'ring')
     assert.equal(JSON.stringify(out).includes('OUTSIDE-THE-STORE'), false)
+  })
+
+  it('reports a refusal for load instead of falling back to the ring buffer', async () => {
+    const many = []
+    for (let i = 0; i < 3; i++) {
+      const c = join(root, 'work', `many${i}`)
+      mkdirSync(c, { recursive: true })
+      mkdirSync(projectDir(c), { recursive: true })
+      writeFileSync(join(projectDir(c), `${CONV}.jsonl`), LINE)
+      many.push(c)
+    }
+    const self = {
+      _sessions: new Map(many.map((c, i) => [`m${i}`, { cwd: c, session: { resumeSessionId: CONV, constructor: {} } }])),
+      getHistory: () => [],
+      isHistoryTruncated: () => false,
+    }
+    // One connection, three different files at once: its per-connection cap is two.
+    const results = await Promise.allSettled(many.map((_, i) => SessionManager.prototype.getFullHistoryAsync.call(self, `m${i}`, { clientKey: 'conn-limit' })))
+    assert.ok(results.some((r) => r.status === 'rejected' && r.reason?.name === 'ReadLimitError'), JSON.stringify(results.map((r) => r.status)))
   })
 
   it('does not wait on a special file at the transcript path', { skip: !POSIX && 'needs mkfifo' }, async () => {

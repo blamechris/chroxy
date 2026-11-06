@@ -6,7 +6,7 @@
  * circular dependencies.
  */
 import fs, { statSync, realpathSync } from 'fs'
-import { readRegularFileSync } from './utils/regular-file.js'
+import { readContainedBytesSync } from './utils/regular-file.js'
 import { homedir } from 'os'
 import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
@@ -219,41 +219,37 @@ export function resolveFileRefAttachments(attachments, cwd) {
     if (!isPathWithin(absPath, cwdAbs)) {
       return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
     }
-    // Security: verify after symlink resolution to prevent symlink escape
+    // Security: verify after symlink resolution to prevent symlink escape, then
+    // read the RESOLVED path through one descriptor whose identity is checked
+    // against it (utils/regular-file.js readContainedBytesSync), so a link planted
+    // after the check cannot redirect the read.
+    const errBody = (text) => ({ type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: ${text}: ${att.path}]`).toString('base64'), name: att.name || att.path })
+    let realAbs
+    let realCwd
     try {
-      const realAbs = realpathSync(absPath)
-      const realCwd = realpathSync(cwd)
+      realAbs = realpathSync(absPath)
+      realCwd = realpathSync(cwd)
       // Same root-awareness fix as layer 2 — this re-check repeated the flaw
       // verbatim, so it could not catch what layer 2 let through.
-      if (!isPathWithin(realAbs, realCwd)) {
-        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
-      }
+      if (!isPathWithin(realAbs, realCwd)) return errBody('cannot read file outside project')
     } catch (err) {
-      // ENOENT is the ONLY benign case: the target does not exist yet, so there
-      // is no symlink to escape through and readFileSync reports "file not
-      // found" below. Anything else — EACCES, ELOOP, or an EINVAL out of
-      // isPathWithin — means the containment question was NOT answered, and a
-      // bare `catch {}` here fell through to readFileSync and served the file.
-      // "Could not check" must never read as "nothing to check" (#7273 review).
-      if (err?.code !== 'ENOENT') {
-        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
-      }
+      // A target that does not exist is reported as such and is NOT read later:
+      // reading it anyway would admit a link planted in between. Anything else
+      // — EACCES, ELOOP, or an EINVAL out of isPathWithin — means the
+      // containment question was NOT answered ("could not check" must never read
+      // as "nothing to check", #7273 review).
+      if (err?.code === 'ENOENT') return errBody('file not found')
+      return errBody('cannot read file outside project')
     }
     try {
-      // Read through one non-blocking descriptor that is checked to be a regular
-      // file: a stat of the path followed by a read of the path would wait forever
-      // on a FIFO planted at the name, with the whole process stalled behind it.
-      let raw
-      try {
-        raw = readRegularFileSync(absPath, MAX_FILE_REF_SIZE)
-      } catch (err) {
-        if (err?.code === 'EFBIG') {
-          return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(err.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
-        }
-        if (err?.code === 'ENOTREG') {
-          return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: not a regular file: ${att.path}]`).toString('base64'), name: att.name || att.path }
-        }
-        throw err
+      const report = {}
+      const raw = readContainedBytesSync(realAbs, realCwd, MAX_FILE_REF_SIZE, { report })
+      if (raw === null) {
+        if (report.reason === 'too-large') return errBody(`file too large (${(report.size / 1024).toFixed(0)}KB, max 1MB)`)
+        if (report.reason === 'not-regular') return errBody('not a regular file')
+        if (report.reason === 'missing') return errBody('file not found')
+        if (report.reason === 'denied') return errBody('permission denied')
+        return errBody('cannot read file outside project')
       }
       const sample = raw.subarray(0, 8192)
       if (sample.includes(0)) {

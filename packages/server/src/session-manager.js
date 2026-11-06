@@ -5359,6 +5359,7 @@ export class SessionManager extends EventEmitter {
         const { messages, truncated } = await readConversationHistoryWithMetaAsync(src.path, undefined, {
           expectedIdentity: src.identity,
           clientKey: readOpts.clientKey,
+          restricted: readOpts.restricted,
           signal: readOpts.signal,
         })
         if (messages.length > 0) {
@@ -5369,6 +5370,8 @@ export class SessionManager extends EventEmitter {
           }
         }
       } catch (err) {
+        // Too many reads in flight: tell the caller, do not substitute the ring buffer.
+        if (err?.name === 'ReadLimitError') throw err
         log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
       }
     }

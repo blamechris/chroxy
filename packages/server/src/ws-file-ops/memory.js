@@ -9,6 +9,7 @@ import { createLogger } from '../logger.js'
 import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { projectSlug } from '../jsonl-reader.js'
+import { readPinnedHandle, readFdBounded } from '../utils/regular-file.js'
 
 const log = createLogger('ws')
 
@@ -213,7 +214,7 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
  *   for a FIFO deterministically. Every production caller passes one argument.
  * @returns {Promise<{path: string, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
  */
-export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndOpen) {
+export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndOpen, pinRoot = null) {
   const base = { path: resolvedPath, exists: false, content: null, truncated: false, skipped: false, error: null }
 
   let fileStat
@@ -247,11 +248,18 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
     // Without this, a FIFO raced in here reads as an EMPTY file (a
     // non-blocking read of a writerless FIFO is EOF): exists, content '',
     // no error. Same text as the pre-open refusal above.
-    const fhStat = await fh.stat()
-    if (!fhStat.isFile()) {
-      throw clientSafeError('Not a regular file')
+    // Bounded read from the descriptor; with a pin root the opened object must
+    // also be the file this name denotes beneath that root (parents included).
+    try {
+      buf = pinRoot
+        ? await readPinnedHandle(fh, resolvedPath, pinRoot, MAX_FILE_SIZE)
+        : await readFdBounded(fh, MAX_FILE_SIZE)
+    } catch (pinErr) {
+      if (pinErr.code === 'ENOTREG') throw clientSafeError('Not a regular file')
+      if (pinErr.code === 'EFBIG') throw clientSafeError('File too large (max 512KB)')
+      if (pinErr.code === 'EACCES') throw Object.assign(new Error('pinned'), { code: 'ELOOP' })
+      throw pinErr
     }
-    buf = await fh.readFile()
   } catch (err) {
     if (err.code === 'ELOOP') {
       // Symlink appeared at the canonical path after validation — reject.
@@ -286,10 +294,15 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
  * @param {{requireMarkdownExt?: boolean, markdownOutside?: string}} [opts] - see resolveConfinedMemoryPath
  * @returns {Promise<{path: string|null, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
  */
+/** The allowed root a resolved path lies beneath (the root its parents are pinned to). */
+function pinRootFor(resolvedPath, allowedRoots) {
+  return allowedRoots.find((r) => isPathWithin(resolvedPath, r)) ?? null
+}
+
 async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, opts = {}) {
   const { resolvedPath, skipEntry } = await resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, opts)
   if (skipEntry) return skipEntry
-  return readResolvedMemoryFile(resolvedPath)
+  return readResolvedMemoryFile(resolvedPath, undefined, pinRootFor(resolvedPath, allowedRoots))
 }
 
 /**
@@ -314,7 +327,7 @@ async function collectImports(content, importingFileAbsPath, allowedRoots, visit
     const key = resolvedPath || lexicalTarget
     if (visited.has(key)) continue // cycle/dup guard — before any read
     visited.add(key)
-    const entry = skipEntry ?? await readResolvedMemoryFile(resolvedPath)
+    const entry = skipEntry ?? await readResolvedMemoryFile(resolvedPath, undefined, pinRootFor(resolvedPath, allowedRoots))
     outEntries.push({ ...entry, scope: 'import', importedFrom: importingFileAbsPath })
     if (entry.exists && entry.content && !entry.skipped && !entry.error) {
       await collectImports(entry.content, entry.path, allowedRoots, visited, depth + 1, outEntries)

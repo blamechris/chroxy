@@ -14,9 +14,11 @@
  *   - BOUND_OUTGOING_REDACTED: delivered with the host-wide fields removed.
  *   - BOUND_OUTGOING_ALLOWED: session-scoped or per-connection; delivered (the
  *     broadcaster still withholds one tagged with another session).
- * tests/outgoing-policy.test.js fails when a schema-backed type is in none of
- * them, and when a listed name is not a schema-backed type. A frame type with no
- * outbound schema is not covered by this roster and passes through.
+ * Frames with no outbound schema are classified by hand below. Delivery is
+ * DENY BY DEFAULT: a type that is in none of the lists is not delivered.
+ * tests/outgoing-policy.test.js checks both directions (every schema-backed type
+ * and every type the source emits by name is classified; every classified name
+ * is real).
  */
 
 /** @type {readonly string[]} */
@@ -74,33 +76,94 @@ export const BOUND_OUTGOING_ALLOWED = Object.freeze([
   'tool_start', 'tunnel_url_changed', 'user_question', 'write_file_result',
 ])
 
-const DENIED = new Set(BOUND_OUTGOING_DENIED)
+/**
+ * Frames with NO outbound schema. They are emitted by name from handlers, the
+ * forwarder and the server itself, so the schema roster cannot see them; they are
+ * listed here by hand and tests/outgoing-policy.test.js derives the emitted names
+ * from the source (both directions) so a new one must be decided.
+ * @type {readonly string[]}
+ */
+export const BOUND_OUTGOING_SCHEMALESS_ALLOWED = Object.freeze([
+  'agent_list', 'available_permission_modes', 'budget_resumed', 'confirm_permission_mode',
+  'conversations_list', 'file_list', 'file_listing', 'history_replay_end', 'history_replay_start',
+  'log_entry', 'permission_rules_updated', 'primary_changed', 'search_results', 'server_mode',
+  'server_status', 'session_context', 'session_destroyed', 'session_role', 'session_switched',
+  'slash_commands', 'status', 'subscriptions_updated', 'user_input',
+])
+
+/** Schema-less frames a session-scoped connection never receives. @type {readonly string[]} */
+export const BOUND_OUTGOING_SCHEMALESS_DENIED = Object.freeze([
+  // Carries the daemon's own credential.
+  'token_rotated',
+  // A host-wide signal.
+  'pairing_refreshed',
+  // Host-wide rosters and spend; their requests are unavailable to these connections.
+  'repo_list', 'cost_summary',
+  // Previews are unavailable to these connections.
+  'dev_preview', 'dev_preview_stopped',
+])
+
+/**
+ * Names the source emits that are not frames to a client (agent-control and
+ * supervisor messages, provider stream events, backend plumbing). Listed so the
+ * emitted-name scan in the roster test can tell them apart from a new frame.
+ * @type {readonly string[]}
+ */
+export const NOT_CLIENT_FRAMES = Object.freeze([
+  'budget_cap_reached', 'drain', 'drain_complete', 'input', 'interrupt', 'list_sessions',
+  'permission_response', 'ping', 'ready', 'response', 'shutdown', 'stdin', 'stdin_end',
+  'subscribe_sessions', 'system',
+])
+
+const DENIED = new Set([...BOUND_OUTGOING_DENIED, ...BOUND_OUTGOING_SCHEMALESS_DENIED])
+const ALLOWED = new Set([...BOUND_OUTGOING_ALLOWED, ...BOUND_OUTGOING_SCHEMALESS_ALLOWED])
+const REDACTED = new Set(BOUND_OUTGOING_REDACTED)
+
+/** The user-level catalog entries are host-wide: only project-level ones pass. */
+const projectLevel = (list) => (Array.isArray(list) ? list.filter((e) => e?.source !== 'user') : list)
 
 /**
  * The frame a session-scoped connection should receive for `message`, or null
- * when it must receive nothing.
+ * when it must receive nothing. DENY BY DEFAULT: a frame type that is not
+ * classified (allowed, or redacted below) is not delivered.
  * @param {object} message
  * @returns {object|null}
  */
 export function frameForBoundClient(message) {
   const type = message?.type
-  if (typeof type !== 'string') return message
+  if (typeof type !== 'string') return null
   if (DENIED.has(type)) return null
-  if (type === 'mcp_servers' && Array.isArray(message.servers)) {
-    // An authorization URL carries the one-time state that completes a flow
-    // writing a credential shared by every session: it is not for this connection.
-    return {
-      ...message,
-      servers: message.servers.map((s) => {
-        if (!s || typeof s !== 'object' || !('authUrl' in s)) return s
-        const { authUrl: _omitted, ...rest } = s
-        return rest
-      }),
+  if (REDACTED.has(type)) {
+    if (type === 'mcp_servers' && Array.isArray(message.servers)) {
+      // An authorization URL carries the one-time state that completes a flow
+      // writing a credential shared by every session: it is not for this connection.
+      return {
+        ...message,
+        servers: message.servers.map((s) => {
+          if (!s || typeof s !== 'object' || !('authUrl' in s)) return s
+          const { authUrl: _omitted, ...rest } = s
+          return rest
+        }),
+      }
     }
+    if (type === 'auth_ok') {
+      // Host-wide fields: the billing snapshot, the host's feature flags and its
+      // exposure summary.
+      const { billingCanary: _b, webFeatures: _w, exposure: _e, ...rest } = message
+      return rest
+    }
+    if (type === 'auth_bootstrap') {
+      // The provider list carries the host's credential readiness and
+      // connections; the catalogs are the project's own entries only.
+      return {
+        ...message,
+        providers: [],
+        ...(Array.isArray(message.slashCommands) ? { slashCommands: projectLevel(message.slashCommands) } : {}),
+        ...(Array.isArray(message.agents) ? { agents: projectLevel(message.agents) } : {}),
+      }
+    }
+    return message
   }
-  if (type === 'auth_ok' && 'billingCanary' in message) {
-    const { billingCanary: _omitted, ...rest } = message
-    return rest
-  }
-  return message
+  if (ALLOWED.has(type)) return message
+  return null
 }

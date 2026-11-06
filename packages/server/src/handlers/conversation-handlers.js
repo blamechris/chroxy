@@ -10,10 +10,11 @@ import { scanConversations as defaultScanConversations } from '../conversation-s
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
 import { readConversationTranscriptStrictAsync as defaultReadConversationTranscript, transcriptReadLimiter } from '../jsonl-reader.js'
 import { resolveTranscriptSource } from '../transcript-sources.js'
+import { projectSlug } from '../jsonl-reader.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient, boundConversationId } from '../conversation-scope.js'
 import { isBoundClient } from '../environments/authority.js'
-import { ReadLimitError, ReadCancelledError } from '../utils/read-limiter.js'
+import { ReadLimitError, ReadCancelledError, admissionFor } from '../utils/read-limiter.js'
 import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
@@ -55,12 +56,24 @@ async function handleListConversations(ws, client, msg, ctx) {
   try {
     // Pass provider-driven sources when available (#2965, #7828).
     const scanOpts = scanOptsFor(ctx)
-    const all = await scan(scanOpts)
+    // Scanning reads the head of every transcript in the store, so it is admitted
+    // through the same limiter as every other transcript read.
+    const closing = signalOnClose(ws)
+    let all
+    try {
+      all = await defaultTranscriptReadLimiter.submit(
+        { key: `scan\0${JSON.stringify(scanOpts)}`, ...admissionFor(client, isBoundClient), signal: closing.signal },
+        () => scan(scanOpts),
+      )
+    } finally {
+      closing.dispose()
+    }
     // Adversary A8: scope results so a bound pairing-issued client
     // cannot enumerate conversations outside its session cwd.
     const conversations = scopeConversationsToClient(all, client, ctx)
     ctx.transport.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
+    if (err instanceof ReadCancelledError) return
     log.warn(`Failed to scan conversations: ${err.message}`)
     ctx.transport.send(ws, { type: 'conversations_list', conversations: [] })
   }
@@ -76,11 +89,16 @@ async function handleSearchConversations(ws, client, msg, ctx) {
     // truncated, so what other conversations contain cannot change the answer.
     const scoped = isBoundClient(client)
     const own = scoped ? boundConversationId(client, ctx) : null
-    const searchOpts = scoped ? { maxResults, conversationId: own } : { maxResults }
-    const all = scoped && !own
+    const ownCwd = scoped ? ctx.sessions.sessionManager?.getSession?.(client.boundSessionId)?.cwd : null
+    // Source selection needs BOTH the conversation association and the project
+    // that association lives in (the daemon's own derivation from the session's cwd).
+    const searchOpts = scoped
+      ? { maxResults, conversationId: own, projectDirName: typeof ownCwd === 'string' && ownCwd ? projectSlug(ownCwd) : null }
+      : { maxResults }
+    const all = scoped && (!own || !searchOpts.projectDirName)
       ? []
       : await (ctx.transcriptReadLimiter || defaultTranscriptReadLimiter).submit(
-        { key: `search\0${query}\0${maxResults ?? ''}\0${own ?? ''}`, clientKey: String(client?.id ?? ''), signal: closing.signal },
+        { key: `search\0${query}\0${maxResults ?? ''}\0${own ?? ''}`, ...admissionFor(client, isBoundClient), signal: closing.signal },
         () => search(query, searchOpts),
       )
     // The cwd check still applies to what comes back.
@@ -341,7 +359,7 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     // Duplicate in-flight requests for the same file share one read.
     const readKey = `${source.path}\0${source.identity ? `${source.identity.dev}:${source.identity.ino}` : ''}`
     const read = await limiter.submit(
-      { key: readKey, clientKey: String(client?.id ?? ''), signal: closing.signal },
+      { key: readKey, ...admissionFor(client, isBoundClient), signal: closing.signal },
       (signal) => readTranscript(source.path, undefined, { expectedIdentity: source.identity, signal, admitted: true }),
     )
     if (Array.isArray(read)) {
@@ -447,7 +465,13 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
   const closing = signalOnClose(ws)
   let history
   try {
-    history = await sessionManager.getFullHistoryAsync(targetId, { clientKey: String(client?.id ?? ''), signal: closing.signal })
+    history = await sessionManager.getFullHistoryAsync(targetId, { ...admissionFor(client, isBoundClient), signal: closing.signal })
+  } catch (err) {
+    if (err instanceof ReadLimitError) {
+      sendSessionError(ws, ctx, `${err.message}. Try again shortly.`)
+      return
+    }
+    throw err
   } finally {
     closing.dispose()
   }

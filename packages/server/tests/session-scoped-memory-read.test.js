@@ -2,9 +2,9 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { createFileOps } from '../src/ws-file-ops/index.js'
-import { encodeProjectPath } from '../src/jsonl-reader.js'
+import { projectSlug } from '../src/jsonl-reader.js'
 import { fileHandlers } from '../src/handlers/file-handlers.js'
 
 // A project-confined memory read returns the project's own memory, and nothing
@@ -17,19 +17,21 @@ describe('memory_read for a session-scoped connection', () => {
   const text = (reply) => JSON.stringify(reply)
 
   before(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-memscope-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-memscope-')))
     home = join(root, 'home')
     cwd = join(root, 'work', 'mine')
     const otherCwd = join(root, 'work', 'other')
     const cfg = join(home, '.claude')
     mkdirSync(cwd, { recursive: true })
-    mkdirSync(join(cfg, 'projects', encodeProjectPath(cwd), 'memory'), { recursive: true })
-    mkdirSync(join(cfg, 'projects', encodeProjectPath(otherCwd), 'memory'), { recursive: true })
+    mkdirSync(join(cfg, 'projects', projectSlug(cwd), 'memory'), { recursive: true })
+    mkdirSync(join(cfg, 'projects', projectSlug(otherCwd), 'memory'), { recursive: true })
     writeFileSync(join(cfg, 'CLAUDE.md'), 'USER-LEVEL-MARKER\n')
-    writeFileSync(join(cfg, 'projects', encodeProjectPath(cwd), 'memory', 'MEMORY.md'), 'OWN-PROJECT-MEMORY\n')
-    const siblingMemory = join(cfg, 'projects', encodeProjectPath(otherCwd), 'memory', 'MEMORY.md')
+    writeFileSync(join(cfg, 'projects', projectSlug(cwd), 'memory', 'MEMORY.md'), 'OWN-PROJECT-MEMORY\n')
+    const siblingMemory = join(cfg, 'projects', projectSlug(otherCwd), 'memory', 'MEMORY.md')
     writeFileSync(siblingMemory, 'SIBLING-PROJECT-MEMORY\n')
-    writeFileSync(join(cwd, 'CLAUDE.md'), `project rules\n@${siblingMemory}\n@${join(cfg, 'CLAUDE.md')}\n@docs/own.md\n`)
+    // Imports are written relative to the project (the import syntax has no drive letters).
+    const rel = (target) => relative(cwd, target).split(/[\\/]/).join('/')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `project rules\n@${rel(siblingMemory)}\n@${rel(join(cfg, 'CLAUDE.md'))}\n@docs/own.md\n`)
     mkdirSync(join(cwd, 'docs'), { recursive: true })
     writeFileSync(join(cwd, 'docs', 'own.md'), 'OWN-IMPORT-MARKER\n')
     realHome = process.env.HOME; realProfile = process.env.USERPROFILE; realConfig = process.env.CLAUDE_CONFIG_DIR

@@ -4,7 +4,7 @@ import { join } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { constants as fsConstants } from 'fs'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
-import { createReadLimiter } from './utils/read-limiter.js'
+import { createReadLimiter, ReadLimitError } from './utils/read-limiter.js'
 
 // Wire cap for a transcript read: the MOST RECENT 500 parsed messages. This is
 // the JSONL path's OWN truncation, entirely separate from the ring buffer's
@@ -345,7 +345,9 @@ export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = 
   // an empty history (the caller falls back to its in-memory buffer).
   try {
     return await readTranscriptCore(filePath, maxBytes, { ...opts, strict: false })
-  } catch {
+  } catch (err) {
+    // A refusal for load is reported to the caller, not read as "no history".
+    if (err instanceof ReadLimitError) throw err
     return { messages: [], truncated: false }
   }
 }
@@ -396,11 +398,11 @@ export async function readConversationTranscriptStrictAsync(filePath, maxBytes =
  *     made on the opened descriptor;
  *   - bounded, abortable reads.
  */
-async function readTranscriptCore(filePath, maxBytes, { expectedIdentity, signal, strict, admitted = false, limiter = transcriptReadLimiter, clientKey = 'daemon' } = {}) {
+async function readTranscriptCore(filePath, maxBytes, { expectedIdentity, signal, strict, admitted = false, limiter = transcriptReadLimiter, clientKey = 'daemon', restricted = false } = {}) {
   const run = (sig) => readTranscriptBody(filePath, maxBytes, { expectedIdentity, signal: sig, strict })
   if (admitted) return run(signal)
   const key = `${filePath}\0${expectedIdentity ? `${expectedIdentity.dev}:${expectedIdentity.ino}` : ''}\0${maxBytes}\0${strict ? 's' : 'l'}`
-  return limiter.submit({ key, clientKey: String(clientKey), signal }, run)
+  return limiter.submit({ key, clientKey: String(clientKey), signal, restricted }, run)
 }
 
 async function readTranscriptBody(filePath, maxBytes, { expectedIdentity, signal, strict }) {

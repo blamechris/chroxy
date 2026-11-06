@@ -29,6 +29,7 @@ import { listProviders, getProvider, resolveDaemonDefaultProvider } from '../pro
 import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
+import { isBoundClient } from '../environments/authority.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
 import { credentialHandlers } from './credential-handlers.js'
@@ -357,10 +358,10 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       //    and should only be able to use existing permissions, not
       //    escalate. Only the primary API token can flip to auto.
       if (msg.mode === 'auto') {
-        if (client.boundSessionId) {
+        if (isBoundClient(client)) {
           // #4828: session-scoped to the bound session — that's the
           // session the rejection belongs to.
-          loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
+          sessionLogger(client.boundSessionId, 'ws').warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
             'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.',
             undefined, ctx)
@@ -482,7 +483,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // subscribed client can still respond. WS-ONLY by design: a primary HTTP caller
   // has full session authority (§3), so the HTTP path has no analog and must not
   // inherit this restriction.
-  if (!client.boundSessionId && originSessionId) {
+  if (!isBoundClient(client) && originSessionId) {
     if (!isSessionViewer(client, originSessionId)) {
       sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       // #7858: answer with the SAME correlated negative a never-registered id gets
@@ -543,7 +544,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     )
     // #4828: session-scoped to the bound session — the reject belongs to the
     // OWNER of `boundSessionId`, not the mismatched mapped session.
-    loggerForSession('ws', result.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
+    sessionLogger(result.boundSessionId, 'ws').warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
       requestId,
       decision,
       clientId: client.id,
@@ -648,8 +649,8 @@ function handleQueryPermissionAudit(ws, client, msg, ctx) {
   // omit sessionId entirely and pull the GLOBAL cross-session audit log. Bound
   // clients must name their own boundSessionId explicitly; the global query is
   // host-authority (unbound / primary token) only.
-  if (client.boundSessionId && msg.sessionId !== client.boundSessionId) {
-    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to query permission audit for ${msg.sessionId || 'ALL sessions'} — rejected`)
+  if (isBoundClient(client) && msg.sessionId !== client.boundSessionId) {
+    sessionLogger(client.boundSessionId, 'ws').warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to query permission audit for ${msg.sessionId || 'ALL sessions'} — rejected`)
     sendError(ws, msg?.requestId, 'PERMISSION_AUDIT_FORBIDDEN_BOUND_CLIENT',
       "Pairing-issued session tokens can only query their own session's permission audit.",
       undefined, ctx)
@@ -1004,8 +1005,8 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // (share-a-session) client set them is exactly that escalation. The gate is
   // host-authority = an UNBOUND client (no boundSessionId — the primary token,
   // or an unbound linking-mode pairing token), mirroring rejectCredentialWriteIfBound.
-  if (client.boundSessionId) {
-    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to set permission rules — rejected`)
+  if (isBoundClient(client)) {
+    sessionLogger(client.boundSessionId, 'ws').warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to set permission rules — rejected`)
     sendError(ws, msg?.requestId, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT',
       'Pairing-issued session tokens cannot modify permission rules. Use the primary API token from a device with physical access to this machine.',
       undefined, ctx)
@@ -1343,7 +1344,7 @@ function handleGetPermissionInput(ws, client, msg, ctx) {
 
   // Same authority gate as permission_response — a client may only read the
   // input for a permission it could itself answer.
-  if (client.boundSessionId) {
+  if (isBoundClient(client)) {
     if (client.boundSessionId !== sessionId) return notFound('NOT_FOUND', 'No pending permission for that request.')
   } else if (!isSessionViewer(client, sessionId)) {
     return notFound('NOT_FOUND', 'No pending permission for that request.')
