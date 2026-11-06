@@ -3591,7 +3591,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const updater = (ss: { messages: ChatMessage[] }) => ({
           messages: ss.messages.map((m) =>
             m.requestId === permRequestId && m.type === 'prompt'
-              ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt })
+              ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined })
               : m
           ),
         });
@@ -3625,6 +3625,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           // active session for unmapped/legacy requests and would mislabel them.
           // Undefined when the request maps to no session.
           originSessionId: permPayload.sessionId ?? undefined,
+          // #7974 — the permission floor's verdict (#7971); only `true` renders a marker.
+          floored: permPayload.floored ?? undefined,
         };
         {
           const effectiveId = (permTargetId && get().sessionStates[permTargetId]) ? permTargetId : get().activeSessionId;

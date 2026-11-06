@@ -21,7 +21,7 @@ import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { FormattedResponse } from '../MarkdownRenderer';
-import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, PermissionOutcomeRecord, permissionStyles } from '../PermissionDetail';
+import { PermissionDetailOrFallback, PermissionFlooredMarker, PermissionCountdown, PermissionPill, PermissionOutcomeRecord, permissionStyles } from '../PermissionDetail';
 import { PreWriteDiffReview, isReviewableTool } from '../PreWriteDiffReview';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
@@ -569,6 +569,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
           {promptSessionLabel}
         </Text>
       )}
+      {/* #7974 — the permission floor forced this prompt to a human. Live
+          prompts only (an answered one collapses to a pill / carries no marker). */}
+      {isPrompt && !message.answered && <PermissionFlooredMarker floored={message.floored} />}
       {/* #4973 — when the multi-question form / summary renders, suppress
           the body content Text. The top-level `message.content` mirrors
           Q[0]'s question (store-core handleUserQuestion), so rendering it

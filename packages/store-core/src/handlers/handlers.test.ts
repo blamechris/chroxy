@@ -3109,7 +3109,20 @@ describe('handlePermissionRequest', () => {
       input: { command: 'rm -rf /' },
       sessionId: 'sess-1',
       remainingMs: 30000,
+      floored: null,
     })
+  })
+
+  // #7974 -- the floor verdict rides through the shared parse.
+  it('preserves floored: true and floored: false verbatim', () => {
+    expect(handlePermissionRequest({ requestId: 'r', floored: true }).floored).toBe(true)
+    expect(handlePermissionRequest({ requestId: 'r', floored: false }).floored).toBe(false)
+  })
+
+  it('returns null floored when absent (older server) or non-boolean', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).floored).toBeNull()
+    expect(handlePermissionRequest({ requestId: 'r', floored: 'true' }).floored).toBeNull()
+    expect(handlePermissionRequest({ requestId: 'r', floored: 1 }).floored).toBeNull()
   })
 
   it('returns null requestId when missing', () => {

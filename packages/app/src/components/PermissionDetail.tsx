@@ -446,6 +446,33 @@ export function PermissionDetailOrFallback({
 }
 
 // ---------------------------------------------------------------------------
+// Protected-path marker (#7974)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shown on a live permission prompt the permission floor (#7971) forced to a
+ * human: a write under the repo's hooks dir, a write to the agent settings, a read
+ * of `.env`. Renders for `floored === true` ONLY: `false` and absent (a server
+ * older than the field) show nothing. Static and non-interactive, so there is no
+ * tap target to size.
+ */
+export function PermissionFlooredMarker({ floored }: { floored?: boolean }) {
+  if (floored !== true) return null;
+  return (
+    <View
+      testID="prompt-floored-marker"
+      style={styles.flooredMarker}
+      accessible
+      accessibilityLabel="Protected path. This request always needs your decision."
+    >
+      <Text testID="prompt-floored-marker-text" style={styles.flooredMarkerText}>
+        Protected path
+      </Text>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Permission countdown timer
 // ---------------------------------------------------------------------------
 
@@ -663,6 +690,22 @@ export function PermissionOutcomeRecord({ message }: { message: ChatMessage }) {
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
 const styles = StyleSheet.create({
+  // #7974 -- protected-path marker on a floored permission prompt.
+  flooredMarker: {
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.accentOrangeSubtle,
+    borderColor: COLORS.accentOrangeBorder,
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 1,
+    marginBottom: 6,
+  },
+  flooredMarkerText: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    fontWeight: '600',
+  },
   // Permission detail block
   permDetailBlock: {
     marginTop: 4,

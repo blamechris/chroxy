@@ -151,3 +151,34 @@ describe('MessageBubble session label render (#5674)', () => {
     expect(tree.root.findAllByProps({ testID: 'prompt-session-label' })).toHaveLength(0);
   });
 });
+
+// #7974 — the permission floor (#7971) forced this prompt to a human; the live
+// card says so. Only `floored === true` shows the marker.
+describe('MessageBubble protected-path marker (#7974)', () => {
+  afterEach(() => {
+    act(() => {
+      while (mountedTrees.length) mountedTrees.pop()!.unmount();
+    });
+  });
+
+  it('renders the marker on a live prompt when floored is true', () => {
+    const tree = render(makePrompt({ floored: true }));
+    expect(tree.root.findAllByProps({ testID: 'prompt-floored-marker' }).length).toBeGreaterThan(0);
+    const text = tree.root.findAllByProps({ testID: 'prompt-floored-marker-text' });
+    expect(text.length).toBeGreaterThan(0);
+    expect(text[0].props.children).toBe('Protected path');
+  });
+
+  it.each([
+    ['false', false],
+    ['absent', undefined],
+  ])('omits the marker when floored is %s', (_label, floored) => {
+    const tree = render(makePrompt({ floored }));
+    expect(tree.root.findAllByProps({ testID: 'prompt-floored-marker' })).toHaveLength(0);
+  });
+
+  it('omits the marker once the prompt is answered', () => {
+    const tree = render(makePrompt({ floored: true, requestId: undefined, answered: 'approve' }));
+    expect(tree.root.findAllByProps({ testID: 'prompt-floored-marker' })).toHaveLength(0);
+  });
+});

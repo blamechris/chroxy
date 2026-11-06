@@ -68,6 +68,11 @@ export interface PermissionRule {
  * - `remainingMs`: numeric value forwarded verbatim, including 0; null for
  *   missing or non-number values. The call site converts to absolute
  *   `expiresAt = Date.now() + remainingMs` only when non-null.
+ * - `floored` (#7974): the server's permission-floor verdict (#7971) -- `true`
+ *   when the protected-path / secret-read floor forced this prompt to a human.
+ *   `null` when the frame carried no boolean (a server older than the field), so
+ *   a renderer can tell "not floored" (`false`) from "no verdict" (`null`); only
+ *   `true` is ever acted on.
  *
  * Side effects (split streaming response, "Allow for Session" provider gate,
  * push session notification) all stay at the call site — they touch
@@ -80,6 +85,7 @@ export interface PermissionRequestPayload {
   input: Record<string, unknown> | null
   sessionId: string | null
   remainingMs: number | null
+  floored: boolean | null
 }
 
 export function handlePermissionRequest(
@@ -91,7 +97,8 @@ export function handlePermissionRequest(
   const input = parseToolInput(msg.input)
   const sessionId = parseRawStringField(msg, 'sessionId')
   const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : null
-  return { requestId, tool, description, input, sessionId, remainingMs }
+  const floored = typeof msg.floored === 'boolean' ? msg.floored : null
+  return { requestId, tool, description, input, sessionId, remainingMs, floored }
 }
 
 /**
