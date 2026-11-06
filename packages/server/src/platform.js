@@ -30,6 +30,33 @@ const SID_SYSTEM = 'S-1-5-18'
 const WIN_SYSTEM32 = `${process.env.SystemRoot || process.env.windir || 'C:\\Windows'}\\System32`
 
 let _cachedUserSid
+
+/**
+ * Shared core (#8983): resolve the current user's SID via `whoami /user`. THROWS on
+ * any failure (tool error, no SID in the output); the best-effort and fail-closed
+ * stampers differ only in what they do with that throw. `exec` is injectable.
+ */
+function lookupUserSid(exec) {
+  const out = exec(`${WIN_SYSTEM32}\\whoami.exe`, ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf-8',
+    windowsHide: true,
+    timeout: 5000,
+  })
+  const m = String(out ?? '').match(/S-1-[0-9-]+/)
+  if (!m) throw new Error('no SID in whoami output')
+  return m[0]
+}
+
+/** Shared core (#8983): strip inheritance and grant Full control to ONLY `sid` + SYSTEM. THROWS on failure. */
+function applyOwnerOnlyAcl(exec, filePath, sid) {
+  exec(`${WIN_SYSTEM32}\\icacls.exe`, [
+    filePath,
+    '/inheritance:r',
+    '/grant:r', `*${sid}:F`,
+    '/grant:r', `*${SID_SYSTEM}:F`,
+  ], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
+}
+
 /**
  * The current user's SID (e.g. `S-1-5-21-…`), resolved once via `whoami /user`
  * and cached for the process. SIDs (not account names) are used for icacls so
@@ -38,17 +65,11 @@ let _cachedUserSid
  */
 function currentUserSid() {
   if (_cachedUserSid !== undefined) return _cachedUserSid
-  _cachedUserSid = null
   try {
-    const out = execFileSync(`${WIN_SYSTEM32}\\whoami.exe`, ['/user', '/fo', 'csv', '/nh'], {
-      encoding: 'utf-8',
-      windowsHide: true,
-      timeout: 5000,
-    })
-    const m = out.match(/S-1-[0-9-]+/)
-    if (m) _cachedUserSid = m[0]
+    _cachedUserSid = lookupUserSid(execFileSync)
   } catch {
     // whoami unavailable / failed — leave null; the file keeps inherited ACLs.
+    _cachedUserSid = null
   }
   return _cachedUserSid
 }
@@ -62,46 +83,6 @@ function currentUserSid() {
  * failure is logged, not thrown — the file is still written (just at inherited
  * perms), and the caller's write must not fail over a hardening step.
  */
-/**
- * FAIL-CLOSED variant of {@link stampWindowsAcl} (#8983). Throws when the SID cannot
- * be resolved or icacls fails, instead of leaving the file under the parent's
- * inherited ACL. For callers that rewrite a document which may carry credentials
- * and must not replace an already-restricted file with a broader one
- * (`updateClaudeConfig`). `stampWindowsAcl` keeps its best-effort contract for every
- * other caller. `_exec` / `_onWindows` are test seams so the REAL command assembly
- * and error handling run on a POSIX runner with the tool invocations mocked.
- */
-export function stampWindowsAclStrict(filePath, { _exec = execFileSync, _onWindows = isWindows } = {}) {
-  if (!_onWindows) return
-  let sid = _cachedUserSid || null
-  if (!sid) {
-    let out
-    try {
-      out = _exec(`${WIN_SYSTEM32}\\whoami.exe`, ['/user', '/fo', 'csv', '/nh'], {
-        encoding: 'utf-8',
-        windowsHide: true,
-        timeout: 5000,
-      })
-    } catch (err) {
-      throw new Error(`could not resolve the current-user SID to stamp an owner-only ACL on ${filePath}: ${err?.message || err}`)
-    }
-    const m = String(out ?? '').match(/S-1-[0-9-]+/)
-    if (!m) throw new Error(`could not resolve the current-user SID to stamp an owner-only ACL on ${filePath}`)
-    sid = m[0]
-    _cachedUserSid = sid
-  }
-  try {
-    _exec(`${WIN_SYSTEM32}\\icacls.exe`, [
-      filePath,
-      '/inheritance:r',
-      '/grant:r', `*${sid}:F`,
-      '/grant:r', `*${SID_SYSTEM}:F`,
-    ], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
-  } catch (err) {
-    throw new Error(`icacls could not stamp the owner-only ACL on ${filePath}: ${err?.message || err}`)
-  }
-}
-
 export function stampWindowsAcl(filePath) {
   // Real-Windows only: icacls/whoami don't exist elsewhere. The `_isWindowsOverride`
   // seam drives the write/rename path on POSIX CI runners, but must NOT shell out
@@ -113,14 +94,39 @@ export function stampWindowsAcl(filePath) {
     return
   }
   try {
-    execFileSync(`${WIN_SYSTEM32}\\icacls.exe`, [
-      filePath,
-      '/inheritance:r',
-      '/grant:r', `*${sid}:F`,
-      '/grant:r', `*${SID_SYSTEM}:F`,
-    ], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
+    applyOwnerOnlyAcl(execFileSync, filePath, sid)
   } catch (err) {
     log.warn(`icacls could not stamp owner-only ACL on ${filePath}: ${err.message}`)
+  }
+}
+
+/**
+ * FAIL-CLOSED variant of {@link stampWindowsAcl} (#8983). Throws when the SID cannot
+ * be resolved or icacls fails, instead of leaving the file under the parent's
+ * inherited ACL. For callers that rewrite a document which may carry credentials
+ * and must not replace an already-restricted file with a broader one
+ * (`updateClaudeConfig`). `stampWindowsAcl` keeps its best-effort contract for every
+ * other caller. `_exec` / `_onWindows` are test seams so the REAL command assembly
+ * and error handling run on a POSIX runner with the tool invocations mocked. An
+ * injected `_exec` BYPASSES the process-wide SID cache (neither reads nor writes
+ * it), so a mocked failure is never masked by an earlier real or mocked success.
+ */
+export function stampWindowsAclStrict(filePath, { _exec, _onWindows = isWindows } = {}) {
+  if (!_onWindows) return
+  const exec = _exec ?? execFileSync
+  let sid = _exec ? null : (_cachedUserSid || null)
+  if (!sid) {
+    try {
+      sid = lookupUserSid(exec)
+    } catch (err) {
+      throw new Error(`could not resolve the current-user SID to stamp an owner-only ACL on ${filePath}: ${err?.message || err}`)
+    }
+    if (!_exec) _cachedUserSid = sid
+  }
+  try {
+    applyOwnerOnlyAcl(exec, filePath, sid)
+  } catch (err) {
+    throw new Error(`icacls could not stamp the owner-only ACL on ${filePath}: ${err?.message || err}`)
   }
 }
 

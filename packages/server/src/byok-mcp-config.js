@@ -1308,7 +1308,10 @@ export function writeClaudeConfigAtomic(
     _rename = renameSync,
     _isWindowsOverride,
     _sleep = sleepSyncMs,
-    _stampAcl = stampWindowsAclStrict,
+    // TEST seam: the exec behind the DEFAULT fail-closed stamper, so a test reaches the
+    // real `stampWindowsAclStrict` (rather than injecting `_stampAcl`) with tools mocked.
+    _aclExec,
+    _stampAcl = (target) => stampWindowsAclStrict(target, { _exec: _aclExec, _onWindows: true }),
   },
 ) {
   const resolved = resolveClaudeConfigWritePath(filePath)

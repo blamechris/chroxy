@@ -37,8 +37,8 @@ export function userSettingsPath() {
  * when it is group/world-readable say so — the document can hold `env` credentials.
  * Returns null when there is nothing to warn about. Never echoes content.
  */
-export function describeSettingsModeWarning({ filePath, mode } = {}) {
-  if (process.platform === 'win32' || typeof mode !== 'number' || (mode & 0o044) === 0) return null
+export function describeSettingsModeWarning({ filePath, mode, _isWindows = process.platform === 'win32' } = {}) {
+  if (_isWindows || typeof mode !== 'number' || (mode & 0o044) === 0) return null
   return `${filePath} is mode ${mode.toString(8)} (readable beyond its owner) and may hold credentials in its env block. Chroxy preserved the existing permissions rather than changing them — tighten it yourself with: chmod 600 ${filePath}`
 }
 

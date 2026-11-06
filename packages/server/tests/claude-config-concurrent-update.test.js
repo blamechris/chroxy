@@ -53,6 +53,9 @@ import { ensureCwdTrusted } from '../src/claude-tui/pty-driver.js'
 
 let dir
 
+// A healthy mocked whoami/icacls for tests that exercise the Windows branch but are not about the ACL.
+const OK_ACL_EXEC = (cmd) => (cmd.includes('whoami') ? '"u","S-1-5-21-1-2-3-1001"' : '')
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'chroxy-cfg-race-'))
 })
@@ -228,6 +231,7 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     const slept = []
     updateClaudeConfig(file, (raw) => { raw.b = 2 }, {
       _isWindowsOverride: true,
+      _aclExec: OK_ACL_EXEC,
       _sleep: (ms) => slept.push(ms),
       _rename: (from, to) => {
         if (failures-- > 0) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
@@ -243,6 +247,7 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     assert.throws(
       () => updateClaudeConfig(file2, (raw) => { raw.b = 2 }, {
         _isWindowsOverride: true,
+        _aclExec: OK_ACL_EXEC,
         _sleep: () => {},
         _rename: () => { throw Object.assign(new Error('still busy'), { code: 'EBUSY' }) },
       }),
@@ -392,6 +397,46 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     })
   })
 
+  describe('the PRODUCTION default stamper is fail-closed (no _stampAcl injected)', () => {
+    const SID_OK = '"u","S-1-5-21-1-2-3-1001"'
+    const attempt = (file, aclExec) => {
+      let fsyncs = 0
+      let renames = 0
+      const go = () => updateClaudeConfig(file, (raw) => { raw.b = 2 }, {
+        _isWindowsOverride: true,
+        _aclExec: aclExec,
+        _fsync: () => { fsyncs++ },
+        _rename: (f, t) => { renames++; renameSync(f, t) },
+      })
+      return { go, counts: () => ({ fsyncs, renames }) }
+    }
+    for (const [label, aclExec, re] of [
+      ['whoami fails', (cmd) => { if (cmd.includes('whoami')) throw new Error('whoami boom'); return '' }, /current-user SID/],
+      ['icacls fails', (cmd) => { if (cmd.includes('icacls')) throw new Error('icacls boom'); return SID_OK }, /icacls could not stamp/],
+    ]) {
+      it(`${label}: nothing written, nothing renamed, destination untouched, temp cleaned`, () => {
+        const file = join(dir, 'settings.json')
+        writeFileSync(file, '{"a":1}')
+        const r = attempt(file, aclExec)
+        assert.throws(() => r.go(), re)
+        assert.equal(readFileSync(file, 'utf8'), '{"a":1}')
+        assert.deepEqual(leftovers(dir), [])
+        assert.deepEqual(r.counts(), { fsyncs: 0, renames: 0 })
+      })
+    }
+
+    it('a failure AFTER an earlier success is still a failure (the SID cache does not mask it)', () => {
+      const file = join(dir, '.claude.json')
+      writeFileSync(file, '{"a":1}')
+      attempt(file, (cmd) => (cmd.includes('whoami') ? SID_OK : '')).go()
+      assert.deepEqual(readJson(file), { a: 1, b: 2 })
+      writeFileSync(file, '{"a":1}')
+      const r = attempt(file, (cmd) => { if (cmd.includes('whoami')) throw new Error('whoami boom'); return '' })
+      assert.throws(() => r.go(), /current-user SID/)
+      assert.equal(readFileSync(file, 'utf8'), '{"a":1}')
+    })
+  })
+
   it('a torn read (truncate-then-write editor caught mid-write) is re-read once after a pause, then merged', () => {
     const file = join(dir, 'torn.json')
     writeFileSync(file, '{"a":')
@@ -471,6 +516,9 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
 
   it('settings.json mode warning: group/world-readable warns, owner-only and Windows do not', () => {
     assert.match(describeSettingsModeWarning({ filePath: '/x/settings.json', mode: 0o644 }), /chmod 600 \/x\/settings\.json/)
+    assert.match(describeSettingsModeWarning({ filePath: '/x', mode: 0o640 }), /readable beyond its owner/, 'group-readable warns')
+    assert.match(describeSettingsModeWarning({ filePath: '/x', mode: 0o604 }), /readable beyond its owner/, 'world-readable warns')
+    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: 0o644, _isWindows: true }), null, 'mode bits are meaningless on win32')
     assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: 0o600 }), null)
     assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: null }), null)
   })
