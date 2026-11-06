@@ -719,6 +719,14 @@ async function handleInput(ws, client, msg, ctx) {
   const releaseSkipLock = () => {
     if (skipLock && _pendingAwaits.get(targetSessionId) === skipLock) _pendingAwaits.delete(targetSessionId)
   }
+  // The skip decision was a wait: the connection may have lost its credential
+  // meanwhile. Nothing below (skip dispatch, cap force-forward, evaluator) runs
+  // for it.
+  if (skipLock && !stillAuthorized(authorizedFor(ctx, client))) {
+    releaseSkipLock()
+    releaseInputRequest(ctx, inputRecord)
+    return
+  }
   if (skipLock && skipDecision) releaseSkipLock()
   if (skipLock && !skipDecision) {
     const counters = _getEvaluatorIterations(ctx)

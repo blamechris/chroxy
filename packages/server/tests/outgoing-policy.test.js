@@ -104,8 +104,8 @@ describe('frames with no outbound schema', () => {
     }
     // The revoke notice passes with any token removed; a scheduled rotation never does.
     assert.deepEqual(
-      frameForBoundClient({ type: 'token_rotated', token: 'primary-secret', expiresAt: 5, reason: 'revoke' }),
-      { type: 'token_rotated', expiresAt: 5, reason: 'revoke' },
+      frameForBoundClient({ type: 'token_rotated', token: 'primary-secret', newToken: 'x', expiresAt: 5, reason: 'revoke', extra: 1 }),
+      { type: 'token_rotated', reason: 'revoke' },
     )
     assert.equal(frameForBoundClient({ type: 'token_rotated', expiresAt: 5, reason: 'scheduled' }), null)
     assert.equal(frameForBoundClient({ type: 'token_rotated', token: 'primary-secret', expiresAt: 5 }), null)

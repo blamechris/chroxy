@@ -39,6 +39,7 @@ import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
 import { frameForBoundClient } from './outgoing-policy.js'
+import { captureBearer, bearerStillValid } from './bearer-recheck.js'
 import { getProviderDataDirs, getProviderTranscriptSources, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape, buildMessageCtx } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
@@ -849,6 +850,8 @@ export class WsServer {
       // own session itself — opt in explicitly.
       validateBearerAuth: (req, res) => self._validateBearerAuth(req, res, { allowScoped: true }),
       validateHookAuth: (req, res) => self._validateHookAuth(req, res),
+      captureBearer: (req) => captureBearer(self, req),
+      bearerStillValid: (captured) => bearerStillValid(self, captured),
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,

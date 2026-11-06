@@ -139,8 +139,7 @@ export function frameForBoundClient(message) {
     // notice passes, with any token removed: it tells a connection whose
     // authentication was stripped that it must re-authenticate.
     if (message.reason !== 'revoke') return null
-    const { token: _token, ...rest } = message
-    return rest
+    return { type: 'token_rotated', reason: 'revoke' }
   }
   if (DENIED.has(type)) return null
   if (REDACTED.has(type)) {

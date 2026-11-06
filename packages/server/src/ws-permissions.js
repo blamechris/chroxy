@@ -160,7 +160,12 @@ const unboundOnly = (client) => !isBoundClient(client)
  * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
+// A hand-built handler (tests) with no wiring behaves as auth-off: nothing to re-check.
+// ws-server.js always passes the real pair (tests/bearer-recheck.test.js checks it).
+const defaultCaptureBearer = () => ({ required: false, token: null, wasPairing: false })
+const defaultBearerStillValid = (captured) => !captured?.required
+
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, captureBearer = defaultCaptureBearer, bearerStillValid = defaultBearerStillValid, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -684,6 +689,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       return
     }
 
+    // Captured now, checked again when the body has arrived (bearer-recheck.js).
+    const bearer = captureBearer(req)
+
     const MAX_BODY = 4096
     // utf8 decoding + byte-accurate cap, checked BEFORE append — see
     // handlePermissionRequest above; the three capped readers stay in lockstep.
@@ -715,6 +723,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // Wrap the whole body; the inner JSON.parse guard is preserved.
       try {
       if (oversized) return
+
+      // A bearer is checked again once the body has arrived: nothing below runs
+      // for a credential that ended while the body was in flight.
+      if (!bearerStillValid(bearer)) {
+        sendJson(res, 403, { error: 'unauthorized' })
+        return
+      }
 
       let parsed
       try {
