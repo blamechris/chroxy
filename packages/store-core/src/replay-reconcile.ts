@@ -657,9 +657,13 @@ let _sweepableLedger: { sessionId: string; ids: Set<string> } | null = null
  * `endedInWindow` holds the row ids whose `stream_end` arrived while a replay
  * window was open; the end of the last window consumes them.
  *
- * Not reset by `resetReplayReconcile`: like the messages themselves, an open
- * stream survives a reconnect, and it is the replay after that reconnect which
- * needs the signal. Bounded per session; see {@link MAX_OPEN_STREAMS_PER_SESSION}.
+ * Lifetime: an ordinary reconnect (`resetReplayReconcile()`) keeps it, because
+ * an in-flight turn is what the replay after that reconnect must carry.
+ * `resetReplayReconcile({ clearCursors: true })` (explicit disconnect, host
+ * switch) clears it, `dropReplaySessionState` drops a session's entry, and a
+ * turn end (`noteTurnEnded`, at `agent_idle` / `result`) clears that session's
+ * open streams. Open streams are carried only while the turn is in flight.
+ * Bounded per session; see {@link MAX_OPEN_STREAMS_PER_SESSION}.
  */
 const _openStreams = new Map<string, { open: Map<string, string>; endedInWindow: Set<string> }>()
 
