@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getLocalConnectionToken } from '../utils/local-auth'
+import { bearerHeaders, getLocalConnectionToken } from '../utils/local-auth'
 import { useConnectionStore } from '../store/connection'
 import './ContinuationOpportunities.css'
 
@@ -36,7 +36,7 @@ export function ContinuationOpportunities({ connected, onContinue }: {
     try {
       const endpoint = wsUrl ? new URL('/api/continuations', wsUrl.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')).href : '/api/continuations'
       const response = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: bearerHeaders(token),
         signal: request.signal,
         cache: 'no-store',
       })

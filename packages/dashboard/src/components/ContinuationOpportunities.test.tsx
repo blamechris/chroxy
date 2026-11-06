@@ -62,6 +62,7 @@ describe('ContinuationOpportunities', () => {
     render(<ContinuationOpportunities connected onContinue={vi.fn()} />)
     await screen.findByRole('button', { name: 'Continue from seed' })
     expect(fetchMock).toHaveBeenCalled()
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toBeUndefined()
   })
   it('stays inert with no token at all', async () => {
     storeState.apiToken = null

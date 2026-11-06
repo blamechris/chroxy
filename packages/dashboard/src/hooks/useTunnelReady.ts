@@ -27,10 +27,10 @@ export function useTunnelReady(isConnected: boolean): boolean {
         // Not in Tauri — check /connect directly
       }
       try {
-        const { getLocalConnectionToken } = await import('../utils/local-auth')
+        const { bearerHeaders, getLocalConnectionToken } = await import('../utils/local-auth')
         const token = getLocalConnectionToken()
         if (token === null) return
-        const res = await fetch('/connect', { headers: { Authorization: `Bearer ${token}` } })
+        const res = await fetch('/connect', { headers: bearerHeaders(token) })
         if (res.ok) { if (!cancelled) setTunnelReady(true); return }
       } catch { /* ignore */ }
       if (!cancelled) { setTunnelReady(false); timer = setTimeout(checkTunnel, 3000) }

@@ -8,9 +8,10 @@ vi.mock('./LogPanel', () => ({
 }))
 
 // Mock useConnectionStore — ConsolePage reads serverPhase and tunnelProgress
+const storeState = vi.hoisted(() => ({ serverPhase: null as string | null, tunnelProgress: null }))
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ serverPhase: null, tunnelProgress: null }),
+    selector(storeState),
 }))
 
 // Mock fetch globally
@@ -61,6 +62,7 @@ describe('ConsolePage', () => {
   })
 
   afterEach(() => {
+    storeState.serverPhase = null
     cleanup()
     vi.unstubAllGlobals()
     vi.stubGlobal('fetch', mockFetch)
@@ -96,6 +98,71 @@ describe('ConsolePage', () => {
     } finally {
       meta.remove()
     }
+  })
+
+  describe('--no-auth token guards (#9046)', () => {
+    function withNoAuthMeta() {
+      const meta = document.createElement('meta')
+      meta.setAttribute('name', 'chroxy-config')
+      meta.setAttribute('content', '{"port":1,"noEncrypt":false,"authRequired":false}')
+      document.head.appendChild(meta)
+      return () => meta.remove()
+    }
+    const authHeaderSent = () =>
+      mockFetch.mock.calls.some((c: unknown[]) => (c[1] as { headers?: Record<string, string> } | undefined)?.headers?.Authorization !== undefined)
+
+    it('sends no Authorization header with an empty token', async () => {
+      setAuthCookie('')
+      const unmeta = withNoAuthMeta()
+      try {
+        mockConnectAndQr({ httpUrl: 'https://x', apiToken: '', tunnelMode: 'quick', wsUrl: 'wss://x', connectionUrl: 'chroxy://x' })
+        render(<ConsolePage />)
+        await waitFor(() => expect(mockFetch.mock.calls.some((c: unknown[]) => c[0] === '/qr')).toBe(true))
+        expect(mockFetch.mock.calls.length).toBeGreaterThan(0)
+        expect(authHeaderSent()).toBe(false)
+      } finally { unmeta() }
+    })
+
+    it('refetches connection info when the server phase turns ready, with no token', async () => {
+      setAuthCookie('')
+      const unmeta = withNoAuthMeta()
+      try {
+        mockFetch.mockImplementation(async () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }), text: async () => '' }))
+        const { rerender } = render(<ConsolePage />)
+        await waitFor(() => expect(mockFetch.mock.calls.some((c: unknown[]) => c[0] === '/qr')).toBe(true))
+        mockFetch.mockClear()
+        storeState.serverPhase = 'ready'
+        rerender(<ConsolePage />)
+        await waitFor(() => expect(mockFetch.mock.calls.some((c: unknown[]) => c[0] === '/connect')).toBe(true))
+        expect(authHeaderSent()).toBe(false)
+      } finally { unmeta() }
+    })
+
+    it('refreshes the QR when the tab becomes visible, with no token', async () => {
+      setAuthCookie('')
+      const unmeta = withNoAuthMeta()
+      try {
+        mockConnectAndQr({ httpUrl: 'https://x', apiToken: '', tunnelMode: 'quick', wsUrl: 'wss://x', connectionUrl: 'chroxy://x' })
+        render(<ConsolePage />)
+        await waitFor(() => expect(mockFetch.mock.calls.some((c: unknown[]) => c[0] === '/qr')).toBe(true))
+        mockFetch.mockClear()
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        document.dispatchEvent(new Event('visibilitychange'))
+        await waitFor(() => expect(mockFetch.mock.calls.some((c: unknown[]) => c[0] === '/qr')).toBe(true))
+        expect(authHeaderSent()).toBe(false)
+      } finally { unmeta() }
+    })
+
+    it('does neither refetch nor refresh with no token when auth is required', async () => {
+      setAuthCookie('')
+      storeState.serverPhase = 'ready'
+      render(<ConsolePage />)
+      await waitFor(() => expect(screen.getByText('No auth token available')).toBeTruthy())
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await new Promise(r => setTimeout(r, 30))
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
   })
 
   it('still reports a missing token when auth is required (#9046)', async () => {

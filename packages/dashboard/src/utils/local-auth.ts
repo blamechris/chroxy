@@ -27,3 +27,12 @@ export function getLocalConnectionToken(): string | null {
   if (token) return token
   return serverRequiresNoAuth() ? '' : null
 }
+
+/**
+ * `Authorization` header for a token from `getLocalConnectionToken()`: none for
+ * the empty `--no-auth` token (never send a bare `Bearer `), so only a real
+ * token produces a header (#9046).
+ */
+export function bearerHeaders(token: string | null): { Authorization: string } | undefined {
+  return token ? { Authorization: `Bearer ${token}` } : undefined
+}

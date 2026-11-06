@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { getLocalConnectionToken } from '../utils/local-auth'
+import { bearerHeaders, getLocalConnectionToken } from '../utils/local-auth'
 
 /** Result of a host-triggered Discord pairing-link delivery (#5513). */
 export type PostPairLinkResult =
@@ -62,9 +62,9 @@ export function useQrModal(
     const isLinkingQr = path === '/qr'
     try {
       const [qrRes, codeRes] = await Promise.all([
-        fetch(path, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(path, { headers: bearerHeaders(token) }),
         isLinkingQr
-          ? fetch('/pairing-code', { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
+          ? fetch('/pairing-code', { headers: bearerHeaders(token) }).catch(() => null)
           : Promise.resolve(null),
       ])
       if (!qrRes.ok) {
@@ -101,7 +101,7 @@ export function useQrModal(
     try {
       const res = await fetch('/pair-discord', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        headers: { ...bearerHeaders(token), Accept: 'application/json' },
       })
       const body = await res.json().catch(() => null)
       if (res.ok && body?.posted) {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
-import { getLocalConnectionToken } from '../utils/local-auth'
+import { bearerHeaders, getLocalConnectionToken } from '../utils/local-auth'
 import { useConnectionStore } from '../store/connection'
 import { LogPanel } from './LogPanel'
 
@@ -46,7 +46,7 @@ export function ConsolePage() {
     async function fetchData() {
       try {
         const res = await fetch('/connect', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: 'Request failed' }))
@@ -75,7 +75,7 @@ export function ConsolePage() {
       // Fetch QR code
       try {
         const qrRes = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (qrRes.ok) {
           const svg = await qrRes.text()
@@ -99,7 +99,7 @@ export function ConsolePage() {
     async function refetch() {
       try {
         const res = await fetch('/connect', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (res.ok) {
           const data = await res.json()
@@ -112,7 +112,7 @@ export function ConsolePage() {
       // Also fetch QR
       try {
         const qrRes = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (qrRes.ok) {
           const svg = await qrRes.text()
@@ -131,7 +131,7 @@ export function ConsolePage() {
     const fetchQr = async () => {
       try {
         const res = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (res.ok) setQrSvg(await res.text())
       } catch { /* QR is optional */ }

@@ -22,7 +22,7 @@ describe('useTunnelReady token handling (#9046)', () => {
     const fetchMock = vi.fn(async () => ({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     renderHook(() => useTunnelReady(true))
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/connect', expect.anything()))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/connect', { headers: undefined }))
   })
 
   it('does not probe when auth is required and there is no token', async () => {
