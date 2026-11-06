@@ -36,3 +36,8 @@ export declare const DeclaredStatusSchema: z.ZodObject<{
     }>;
 }, z.core.$strict>;
 export type DeclaredStatus = z.infer<typeof DeclaredStatusSchema>;
+export declare const DecisionActivityStateSchema: z.ZodObject<{
+    startedAt: z.ZodOptional<z.ZodNumber>;
+    endedAt: z.ZodNumber;
+}, z.core.$strict>;
+export type DecisionActivityState = z.infer<typeof DecisionActivityStateSchema>;

@@ -140,6 +140,7 @@ import {
   // directory_listing / file_listing / file_content / write_file_result —
   // migrated to the shared dispatch table (#5556 slice 3 / #5653).
   buildSessionListPatches as sharedBuildSessionListPatches,
+  reconcileSessionDecision,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
   chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
@@ -2489,6 +2490,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         sessionList,
         removedIds,
         newSessionIds,
+        declaredStatusPatches,
+        decisionActivityPatches,
         isIdlePatches,
         conversationIdPatches,
         cumulativeUsagePatches,
@@ -2588,6 +2591,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // `activeTools` because it is a turn BOUNDARY; a snapshot resync is not,
       // and widening it here would fight #7500's replay synthesis and #7508's
       // pending-question resend for state they own.
+      // Roster metadata restores attention for sessions this client has never viewed.
+      for (const [sid, declaredStatus] of declaredStatusPatches) {
+        updateSession(sid, () => ({ declaredStatus }));
+      }
+      let decisionActivity = get().activity;
+      for (const [sid, lifetime] of decisionActivityPatches) {
+        decisionActivity = reconcileSessionDecision(decisionActivity, sid, lifetime, declaredStatusPatches.get(sid));
+      }
+      if (decisionActivity !== get().activity) set({ activity: decisionActivity });
       for (const [sid, desiredIsIdle] of isIdlePatches) {
         if (!get().sessionStates[sid]) continue;
         // #8965 — an idle resync means no turn runs: drop any stream whose end was missed.

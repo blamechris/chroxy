@@ -2924,6 +2924,7 @@ export class SessionManager extends EventEmitter {
       // round-trip as `0` — matching the strict-boolean pattern used by
       // `stdinForwardingDisabled` so reconnecting clients see a stable
       // numeric shape regardless of provider.
+      const decisionActivity = entry.session.getDecisionActivityState?.()
       const totals = entry.session.stdinDroppedTotals
       const stdinDroppedBytes = totals && Number.isFinite(totals.bytes) ? totals.bytes : 0
       const stdinDroppedCount = totals && Number.isFinite(totals.count) ? totals.count : 0
@@ -2968,6 +2969,7 @@ export class SessionManager extends EventEmitter {
         starting: entry._starting === true,
         isBusy: entry.session.isRunning,
         ...(entry.declaredStatus ? { declaredStatus: { ...entry.declaredStatus } } : {}),
+        ...(decisionActivity ? { decisionActivity } : {}),
         // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
         // "mid-turn" with "idle but a background shell is still tracked"; a
         // client needs to tell them apart to say "waiting on N shells" instead

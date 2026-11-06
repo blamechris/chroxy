@@ -13,3 +13,8 @@ export const DeclaredStatusSchema = DeclaredStatusInputSchema.extend({
     updatedAt: z.number().int().nonnegative(),
     source: z.enum(['marker', 'api', 'hook']),
 });
+// Server-authored lifetime metadata; never accepted by the status write schema.
+export const DecisionActivityStateSchema = z.object({
+    startedAt: z.number().int().nonnegative().safe().optional(),
+    endedAt: z.number().int().nonnegative().safe(),
+}).strict().refine((state) => state.startedAt === undefined || state.startedAt > state.endedAt);
