@@ -13,7 +13,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, existsSync, lstatSync } from 'node:fs'
+import { chmodSync, openSync, rmSync, unlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, existsSync, lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { installHooks, uninstallHooks } from '../src/installer.js'
@@ -73,6 +73,23 @@ describe('settings temp file mode', () => {
     })
   })
 
+  for (const [label, initial, mode, expected] of [
+    ['a new file', undefined, undefined, 0o600],
+    ['an existing 0640 file', JSON.stringify({}), 0o640, 0o640],
+    ['an existing read-only 0444 file', JSON.stringify({}), 0o444, 0o444],
+  ]) {
+    it(`creates the temp with exactly the target mode (${label})`, () => {
+      const path = settingsAt(initial, mode)
+      const created = []
+      const open = (p, flags, m) => {
+        if (String(p).endsWith('.tmp')) created.push([flags, m])
+        return openSync(p, flags, m)
+      }
+      install(path, { open })
+      assert.deepEqual(created, [['wx', expected]])
+    })
+  }
+
   it('applies a read-only preserved mode after the write', () => {
     const path = settingsAt(JSON.stringify({ model: 'opus' }), 0o444)
     install(path)
@@ -116,9 +133,12 @@ describe('Windows owner-only stamp (simulated)', () => {
     const icacls = calls.find((c) => c.tool === 'icacls')
     assert.ok(icacls, 'icacls was not invoked')
     assert.deepEqual(icacls.tmpSizes, [0], 'temp must exist and be empty when the ACL is stamped')
-    assert.ok(icacls.args.includes('/inheritance:r'))
-    assert.ok(icacls.args.includes('*S-1-5-21-1-2-3-1001:F'))
-    assert.ok(icacls.args.includes('*S-1-5-18:F'))
+    assert.ok(icacls.args[0].endsWith('.tmp'), 'icacls targets the temp file')
+    assert.deepEqual(icacls.args.slice(1), [
+      '/inheritance:r',
+      '/grant:r', '*S-1-5-21-1-2-3-1001:F',
+      '/grant:r', '*S-1-5-18:F',
+    ])
     assert.ok(sizesAtRename[0] > 0, 'bytes were written after the stamp')
     assert.ok(JSON.parse(readFileSync(path, 'utf-8')).hooks.SessionStart)
   })
@@ -219,13 +239,105 @@ describe('concurrent change to settings.json', () => {
     assert.deepEqual(tmpFiles(path), [])
   })
 
-  it('gives up after bounded retries and leaves the destination and directory clean', () => {
+  it('gives up after exactly 5 attempts and leaves the destination and directory clean', () => {
     const path = settingsAt(JSON.stringify({ model: 'opus' }))
     let n = 0
     assert.throws(() => install(path, {
       hooks: { beforeRename: () => writeFileSync(path, JSON.stringify({ model: 'opus', n: n++ })) },
     }), /kept changing/)
+    assert.equal(n, 5)
     assert.equal(JSON.parse(readFileSync(path, 'utf-8')).hooks, undefined)
     assert.deepEqual(tmpFiles(path), [])
+  })
+
+  it('treats a mode-only change as a conflict and re-merges with the fresh mode', () => {
+    const path = settingsAt(JSON.stringify({ model: 'opus' }), 0o644)
+    let fired = 0
+    install(path, {
+      hooks: { beforeRename: () => { if (fired++ === 0) chmodSync(path, 0o600) } },
+    })
+    assert.equal(fired, 2, 'the mode change must force a second attempt')
+    assert.equal(statSync(path).mode & 0o777, 0o600, 'the concurrent tightening was undone')
+    assert.ok(JSON.parse(readFileSync(path, 'utf-8')).hooks.SessionStart)
+    assert.deepEqual(tmpFiles(path), [])
+  })
+
+  it('follows a parent directory link retargeted before the rename, leaving no orphan temp', (t) => {
+    const root = tempDir('hooks-parent-')
+    const a = join(root, 'A')
+    const b = join(root, 'B')
+    mkdirSync(a)
+    mkdirSync(b)
+    const same = JSON.stringify({ model: 'opus' })
+    writeFileSync(join(a, 'settings.json'), same)
+    writeFileSync(join(b, 'settings.json'), same)
+    const config = join(root, 'config')
+    try { symlinkSync(a, config) } catch { return t.skip('symlinks unavailable') }
+    let fired = 0
+    install(join(config, 'settings.json'), {
+      hooks: {
+        beforeRename: () => {
+          if (fired++ === 0) { unlinkSync(config); symlinkSync(b, config) }
+        },
+      },
+    })
+    assert.deepEqual(tmpFiles(join(a, 'settings.json')), [], 'temp orphaned in the old directory')
+    assert.deepEqual(tmpFiles(join(b, 'settings.json')), [])
+    assert.equal(readFileSync(join(a, 'settings.json'), 'utf-8'), same, 'old directory was written')
+    assert.ok(JSON.parse(readFileSync(join(b, 'settings.json'), 'utf-8')).hooks.SessionStart)
+  })
+})
+
+describe('temp file cleanup', () => {
+  it('surfaces a failed unlink (not ENOENT) with the temp path and stops retrying', () => {
+    const path = settingsAt(JSON.stringify({ model: 'opus' }))
+    let renames = 0
+    let n = 0
+    const unlink = () => { throw Object.assign(new Error('nope'), { code: 'EPERM' }) }
+    assert.throws(() => install(path, {
+      unlink,
+      hooks: { beforeRename: () => { renames++; writeFileSync(path, JSON.stringify({ n: n++ })) } },
+    }), (err) => /could not remove temp file .*\.tmp: EPERM/.test(err.message))
+    assert.equal(renames, 1, 'retried after a cleanup failure')
+    rmSync(dirname(path), { recursive: true, force: true })
+  })
+
+  it('ignores an unlink that finds the temp already gone', () => {
+    const path = settingsAt(JSON.stringify({ model: 'opus' }))
+    let fired = 0
+    const unlink = (p) => { unlinkSync(p); throw Object.assign(new Error('gone'), { code: 'ENOENT' }) }
+    install(path, {
+      unlink,
+      hooks: { beforeRename: () => { if (fired++ === 0) writeFileSync(path, JSON.stringify({ x: 1 })) } },
+    })
+    assert.equal(JSON.parse(readFileSync(path, 'utf-8')).x, 1)
+  })
+
+  it('reports a temp that cannot be removed after a Windows stamp failure', () => {
+    const path = settingsAt(JSON.stringify({ model: 'opus' }))
+    const exec = () => { throw new Error('whoami boom') }
+    const unlink = () => { throw Object.assign(new Error('nope'), { code: 'EBUSY' }) }
+    assert.throws(() => install(path, { platform: 'win32', exec, unlink }), /could not remove temp file .*EBUSY/)
+  })
+})
+
+describe('uninstall with no settings file', () => {
+  it('touches nothing: no parent directories are created', () => {
+    const root = tempDir('hooks-missing-')
+    const path = join(root, 'deep', 'er', 'settings.json')
+    uninstallHooks({ settingsPath: path })
+    assert.equal(existsSync(join(root, 'deep')), false)
+  })
+
+  it('creates no file in an existing directory', () => {
+    const path = join(tempDir('hooks-missing-'), 'settings.json')
+    uninstallHooks({ settingsPath: path })
+    assert.deepEqual(readdirSync(dirname(path)), [])
+  })
+
+  it('install still creates missing parent directories', () => {
+    const path = join(tempDir('hooks-missing-'), 'deep', 'settings.json')
+    install(path)
+    assert.ok(JSON.parse(readFileSync(path, 'utf-8')).hooks.SessionStart)
   })
 })
