@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { getAuthToken } from '../utils/auth'
+import { getLocalConnectionToken } from '../utils/local-auth'
 
 /** Result of a host-triggered Discord pairing-link delivery (#5513). */
 export type PostPairLinkResult =
@@ -50,8 +50,8 @@ export function useQrModal(
     setQrError(null)
     setQrSvg(null)
     setQrPairingCode(null)
-    const token = getAuthToken()
-    if (!token) {
+    const token = getLocalConnectionToken()
+    if (token === null) {
       setQrLoading(false)
       setQrError('No auth token available')
       return
@@ -96,8 +96,8 @@ export function useQrModal(
   // approval, so the channel grants nothing on its own. Returns a result the
   // QrModal renders inline. Never surfaces token material.
   const handlePostPairLinkToDiscord = useCallback(async (): Promise<PostPairLinkResult> => {
-    const token = getAuthToken()
-    if (!token) return { posted: false as const, reason: 'no_token' }
+    const token = getLocalConnectionToken()
+    if (token === null) return { posted: false as const, reason: 'no_token' }
     try {
       const res = await fetch('/pair-discord', {
         method: 'POST',

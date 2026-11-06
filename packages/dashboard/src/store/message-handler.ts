@@ -921,11 +921,12 @@ function applySettledCredential(ctx: ConnectionContext, credential: SettledCrede
   const entry = state.serverRegistry?.find(s => s.id === serverId);
   const shouldUpdate = credentialSettlements.get(ctx)?.paired || (entry && (entry.token !== credential.token || (credential.pin && entry.pinnedIdentityKey !== credential.pin)));
   if (serverId && serverId === state.activeServerId && shouldUpdate) {
-    state.updateServer(serverId, { token: credential.token, ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) });
+    state.updateServer(serverId, { ...(credential.token !== '' ? { token: credential.token } : {}), ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) });
   }
   const savedUrl = rotation ? entry?.wsUrl ?? ctx.savedConnection?.url ?? ctx.url : ctx.url;
   ctx.savedConnection = { url: savedUrl, token: credential.token, ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) };
-  saveConnection(savedUrl, credential.token);
+  // #9046: an empty token is the `--no-auth` local connect; it must not replace a real saved token for this URL.
+  if (credential.token !== '') saveConnection(savedUrl, credential.token);
   getStore().setState({ connectionPhase: 'connected', socket: ctx.socket, apiToken: credential.token, savedConnection: ctx.savedConnection });
 }
 

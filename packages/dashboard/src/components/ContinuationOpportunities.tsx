@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getAuthToken } from '../utils/auth'
+import { getLocalConnectionToken } from '../utils/local-auth'
 import { useConnectionStore } from '../store/connection'
 import './ContinuationOpportunities.css'
 
@@ -27,8 +27,8 @@ export function ContinuationOpportunities({ connected, onContinue }: {
   const continuing = useRef(false)
 
   const refresh = useCallback(async () => {
-    const token = apiToken || getAuthToken()
-    if (!connected || !token) return null
+    const token = apiToken ?? getLocalConnectionToken()
+    if (!connected || token === null) return null
     controller.current?.abort()
     const request = new AbortController()
     controller.current = request

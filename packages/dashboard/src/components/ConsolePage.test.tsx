@@ -80,6 +80,30 @@ describe('ConsolePage', () => {
     }
   })
 
+  it('loads connection info with no token when the daemon runs --no-auth (#9046)', async () => {
+    setAuthCookie('')
+    const meta = document.createElement('meta')
+    meta.setAttribute('name', 'chroxy-config')
+    meta.setAttribute('content', '{"port":1,"noEncrypt":false,"authRequired":false}')
+    document.head.appendChild(meta)
+    try {
+      mockConnectAndQr({ httpUrl: 'https://noauth.example', apiToken: '', tunnelMode: 'quick', wsUrl: 'wss://x', connectionUrl: 'chroxy://x' })
+      render(<ConsolePage />)
+      await waitFor(() => {
+        expect(screen.getAllByTestId('tunnel-url')[0]!.textContent).toBe('https://noauth.example')
+      })
+      expect(screen.queryByText('No auth token available')).toBeNull()
+    } finally {
+      meta.remove()
+    }
+  })
+
+  it('still reports a missing token when auth is required (#9046)', async () => {
+    setAuthCookie('')
+    render(<ConsolePage />)
+    await waitFor(() => expect(screen.getByText('No auth token available')).toBeTruthy())
+  })
+
   it('renders connection info heading', () => {
     mockConnectAndQr({ httpUrl: 'https://x', apiToken: 'x', tunnelMode: 'quick', wsUrl: 'wss://x', connectionUrl: 'chroxy://x' })
     render(<ConsolePage />)

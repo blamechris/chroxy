@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ContinuationOpportunities } from './ContinuationOpportunities'
 
+const storeState = { apiToken: 'fixture-primary' as string | null, wsUrl: null }
 vi.mock('../store/connection', () => ({
-  useConnectionStore: (select: (state: object) => unknown) => select({ apiToken: 'fixture-primary', wsUrl: null }),
+  useConnectionStore: (select: (state: object) => unknown) => select(storeState),
 }))
 const item = { id: 'seed-1', seedPath: '/vault/NEXT-demo.md', cwd: '/projects/demo', ts: Date.now(), available: true, unavailable: null as string | null }
 const response = (items = [item]) => new Response(JSON.stringify({ continuations: items }))
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { storeState.apiToken = 'fixture-primary'; cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('ContinuationOpportunities', () => {
   it('rechecks before opening the editable seed flow and deduplicates local activation', async () => {
@@ -53,5 +54,21 @@ describe('ContinuationOpportunities', () => {
     rerender(<ContinuationOpportunities connected={false} onContinue={onContinue} />)
     expect(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1].signal.aborted).toBe(true)
     expect(screen.queryByText(item.seedPath)).not.toBeInTheDocument()
+  })
+  it('loads with the empty token of a --no-auth connection (#9046)', async () => {
+    storeState.apiToken = ''
+    const fetchMock = vi.fn().mockImplementation(async () => response())
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ContinuationOpportunities connected onContinue={vi.fn()} />)
+    await screen.findByRole('button', { name: 'Continue from seed' })
+    expect(fetchMock).toHaveBeenCalled()
+  })
+  it('stays inert with no token at all', async () => {
+    storeState.apiToken = null
+    const fetchMock = vi.fn().mockImplementation(async () => response())
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ContinuationOpportunities connected onContinue={vi.fn()} />)
+    await new Promise(r => setTimeout(r, 20))
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

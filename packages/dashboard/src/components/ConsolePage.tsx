@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
-import { getAuthToken } from '../utils/auth'
+import { getLocalConnectionToken } from '../utils/local-auth'
 import { useConnectionStore } from '../store/connection'
 import { LogPanel } from './LogPanel'
 
@@ -33,8 +33,8 @@ export function ConsolePage() {
 
   // Fetch connection info on mount, retry while tunnel is being set up
   useEffect(() => {
-    const token = getAuthToken()
-    if (!token) {
+    const token = getLocalConnectionToken()
+    if (token === null) {
       setError('No auth token available')
       setLoading(false)
       return
@@ -93,8 +93,8 @@ export function ConsolePage() {
   // When server phase transitions to ready, re-fetch connection info
   useEffect(() => {
     if (serverPhase !== 'ready' || connInfo) return
-    const token = getAuthToken()
-    if (!token) return
+    const token = getLocalConnectionToken()
+    if (token === null) return
     let cancelled = false
     async function refetch() {
       try {
@@ -126,8 +126,8 @@ export function ConsolePage() {
 
   // Auto-refresh QR on tab focus and periodically (pairing IDs rotate every 60s)
   useEffect(() => {
-    const token = getAuthToken()
-    if (!token) return
+    const token = getLocalConnectionToken()
+    if (token === null) return
     const fetchQr = async () => {
       try {
         const res = await fetch('/qr', {
