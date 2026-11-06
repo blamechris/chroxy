@@ -39,6 +39,9 @@ function makeHarness({ mapped = 's1', pendingId = 'req-hook' } = {}) {
     sendFn: mock.fn(),
     broadcastFn: httpBroadcast,
     validateBearerAuth: () => true,
+    // Hand-built handler: nothing to re-check once the body has arrived.
+    captureBearer: () => ({ required: false }),
+    bearerStillValid: () => true,
     pushManager: null,
     pendingPermissions,
     permissionSessionMap,

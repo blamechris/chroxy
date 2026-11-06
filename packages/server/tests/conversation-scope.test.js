@@ -10,12 +10,18 @@ import { nsCtx } from './test-helpers.js'
  * session's cwd.
  */
 
-function makeCtx(sessionsByCwd) {
+// `sessionsByCwd` maps session id -> cwd. `convBySession` maps session id -> the
+// conversation id the daemon associates with it (what a session-scoped client may
+// read). A session absent from it has no known conversation.
+function makeCtx(sessionsByCwd, convBySession = {}) {
   return nsCtx({
     sessionManager: {
       getSession(id) {
         if (!id || !(id in sessionsByCwd)) return null
         return { cwd: sessionsByCwd[id] }
+      },
+      getConversationId(id) {
+        return convBySession[id] ?? null
       },
     },
   })
@@ -37,17 +43,42 @@ describe('scopeConversationsToClient', () => {
     assert.equal(result.length, conversations.length)
   })
 
-  it('filters to bound session cwd exact match and subdirectories', () => {
+  it('returns only the bound session\'s own conversation, not others under the same directory', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' })
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' }, { s1: 'a' })
     const result = scopeConversationsToClient(conversations, client, ctx)
-    const ids = result.map((c) => c.conversationId).sort()
-    assert.deepEqual(ids, ['a', 'b'], 'chroxy + packages/server are allowed, others rejected')
+    assert.deepEqual(result.map((c) => c.conversationId), ['a'],
+      'b is beneath the directory but is not this session\'s conversation')
+  })
+
+  it('still requires the own conversation to be recorded inside the session directory', () => {
+    const client = { boundSessionId: 's1' }
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' }, { s1: 'c' })
+    assert.deepEqual(scopeConversationsToClient(conversations, client, ctx), [])
+  })
+
+  it('returns nothing when the daemon does not know the session\'s conversation (no directory fallback)', () => {
+    const client = { boundSessionId: 's1' }
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' }, {})
+    assert.deepEqual(scopeConversationsToClient(conversations, client, ctx), [])
+  })
+
+  it('treats an empty or non-string binding as bound, matching nothing', () => {
+    for (const boundSessionId of ['', 0, false]) {
+      const ctx = makeCtx({ '': '/home/dev/Projects/chroxy' }, { '': 'a' })
+      assert.deepEqual(scopeConversationsToClient(conversations, { boundSessionId }, ctx), [], JSON.stringify(boundSessionId))
+    }
+  })
+
+  it('a manager that cannot report conversations fails closed', () => {
+    const client = { boundSessionId: 's1' }
+    const ctx = nsCtx({ sessionManager: { getSession: () => ({ cwd: '/home/dev/Projects/chroxy' }) } })
+    assert.deepEqual(scopeConversationsToClient(conversations, client, ctx), [])
   })
 
   it('rejects conversations in a sibling directory with the same prefix', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = makeCtx({ s1: '/home/dev/Projects/chrox' })
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chrox' }, { s1: 'a' })
     const result = scopeConversationsToClient(conversations, client, ctx)
     // /home/dev/Projects/chroxy must NOT match /home/dev/Projects/chrox
     assert.deepEqual(result, [], 'prefix collision with sibling dir must not match')
@@ -65,6 +96,7 @@ describe('scopeConversationsToClient', () => {
     const ctx = nsCtx({
       sessionManager: {
         getSession: () => ({ cwd: undefined }),
+        getConversationId: () => 'a',
       },
     })
     const result = scopeConversationsToClient(conversations, client, ctx)
@@ -73,7 +105,7 @@ describe('scopeConversationsToClient', () => {
 
   it('skips conversations with null/missing cwd even when bound', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' })
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' }, { s1: 'e' })
     const result = scopeConversationsToClient(conversations, client, ctx)
     assert.ok(!result.some((c) => c.cwd == null))
   })
@@ -97,7 +129,7 @@ describe('scopeConversationsToClient', () => {
   // observable from the existing cases, all of which pass absolute paths.
   it('fails closed when the BOUND SESSION cwd is not absolute', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = makeCtx({ s1: 'relative/not/absolute' })
+    const ctx = makeCtx({ s1: 'relative/not/absolute' }, { s1: 'a' })
     assert.deepEqual(
       scopeConversationsToClient(conversations, client, ctx), [],
       'an unplaceable bound cwd must reveal nothing, not throw')
@@ -105,13 +137,15 @@ describe('scopeConversationsToClient', () => {
 
   it('drops a conversation whose recorded cwd is not absolute, and keeps the rest', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' })
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' }, { s1: 'ok' })
     const convs = [
-      { id: 'ok', cwd: '/home/dev/Projects/chroxy/packages/server' },
-      { id: 'bad', cwd: 'Projects/chroxy/relative' },
+      { conversationId: 'ok', cwd: '/home/dev/Projects/chroxy/packages/server' },
+      { conversationId: 'bad', cwd: 'Projects/chroxy/relative' },
     ]
     const result = scopeConversationsToClient(convs, client, ctx)
-    assert.deepEqual(result.map((c) => c.id), ['ok'],
+    assert.deepEqual(result.map((c) => c.conversationId), ['ok'],
       'the unplaceable row is dropped; the placeable one still comes through')
+    const ctx2 = makeCtx({ s1: '/home/dev/Projects/chroxy' }, { s1: 'bad' })
+    assert.deepEqual(scopeConversationsToClient(convs, client, ctx2), [], 'an own conversation with an unplaceable cwd is dropped too')
   })
 })

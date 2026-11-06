@@ -96,6 +96,7 @@
  * @property {Array<{provider: string, projectsDir: string}>} transcriptSources - The same dirs tagged with the owning provider (#7828).
  * @property {string[]} userAgentsDirs - Per-provider agents dirs (computed fresh each access).
  * @property {Map} evaluatorIterations - sessionId → stable auto-evaluator iteration counter (#3186/#3637).
+ * @property {Map} pendingEvaluatorAwaits - sessionId → in-flight evaluator-await lock, shared by every message (#3636/#3666).
  * @property {Map} inputDedupRecords - sessionId → bounded clientMessageId acceptance records (#7822).
  *
  * @typedef {Object} WsHandlerContext
@@ -114,7 +115,7 @@
  *
  * Optional, cross-cutting test-injection seams (e.g. `ctx.evaluateDraft`,
  * `ctx.summarizeSession`, `ctx.scanConversations`, `ctx.resolveRepoSet`,
- * `ctx.surveyRunners`, `ctx.realpath`, `ctx._pendingEvaluatorAwaits`) are
+ * `ctx.surveyRunners`, `ctx.realpath`) are
  * deliberately NOT listed here — they are optional DI hooks read with
  * `ctx?.X ?? defaultX` and never present on the production ctx.
  *
@@ -217,8 +218,24 @@ export const CTX_NAMESPACES = {
     'transcriptSources',
     'userAgentsDirs',
     'evaluatorIterations',
+    'pendingEvaluatorAwaits',
     'inputDedupRecords',
   ],
+}
+
+/**
+ * The per-message handler ctx: the long-lived ctx spread with this message's
+ * correlation id. The spread is shallow, so anything that must outlive one
+ * message (a lock, a counter) has to live on a NESTED object (`ctx.runtime.*`),
+ * never as a direct property of the ctx. ws-server.js dispatch and the tests
+ * that exercise cross-message behaviour both build their ctx through this.
+ *
+ * @param {object} baseCtx
+ * @param {string} correlationId
+ * @returns {object}
+ */
+export function buildMessageCtx(baseCtx, correlationId) {
+  return { ...baseCtx, correlationId }
 }
 
 /** All namespace names, in declaration order. */

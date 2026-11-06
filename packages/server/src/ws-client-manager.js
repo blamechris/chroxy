@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
-import { isBoundToOtherSession } from './environments/authority.js'
+import { isBoundToOtherSession, canSeePeer } from './environments/authority.js'
 
 const log = createLogger('ws-client-manager')
 
@@ -414,10 +414,12 @@ export class WsClientManager extends EventEmitter {
    * Get list of connected, authenticated clients for auth_ok payload.
    * @returns {Array<{clientId, deviceName, deviceType, platform}>}
    */
-  getConnectedList() {
+  getConnectedList(forClient) {
     const list = []
     for (const [ws, client] of this.clients) {
       if (client.authenticated && ws.readyState === 1) {
+        // A session-scoped recipient is told only about the peers on its own session.
+        if (forClient && !canSeePeer(forClient, client)) continue
         const info = client.deviceInfo || {}
         list.push({
           clientId: client.id,

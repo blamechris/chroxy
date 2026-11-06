@@ -192,8 +192,8 @@ describe('checkpoint-handlers', () => {
         return { ctx, client }
       }
 
-      for (const mode of ['both', 'conversation', undefined]) {
-        it(`refuses a new-session restore (mode ${mode ?? 'default'}) before creating a session or touching files`, async () => {
+      for (const mode of ['both', 'conversation', 'files', undefined]) {
+        it(`refuses a restore (mode ${mode ?? 'default'}) before creating a session or touching files`, async () => {
           const { ctx, client } = boundSetup()
           await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode }, ctx)
 
@@ -208,18 +208,6 @@ describe('checkpoint-handlers', () => {
           assert.equal(client.activeSessionId, 's1')
         })
       }
-
-      it('still restores files only, staying on the bound session', async () => {
-        const { ctx, client } = boundSetup()
-        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
-
-        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
-        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
-        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
-        assert.ok(restored)
-        assert.equal(restored.filesOnly, true)
-        assert.equal(client.activeSessionId, 's1')
-      })
 
       it('an unbound requester still gets a new-session restore', async () => {
         const { ctx } = boundSetup()
@@ -778,8 +766,8 @@ describe('checkpoint-handlers', () => {
 
         const err = ctx._sent.find(m => m.type === 'session_error')
         assert.ok(err, 'a bound requester is still refused')
-        assert.match(err.message, /same working directory/)
-        assert.equal(/Sibling|sess-other-77/.test(err.message), false, 'no other session name or id in the message')
+        assert.equal(err.code, 'SESSION_TOKEN_MISMATCH')
+        assert.equal(/Sibling|sess-other-77/.test(JSON.stringify(err)), false, 'no other session name or id in the refusal')
         assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0)
       })
 

@@ -17,6 +17,8 @@
  * Claude Code's OAuth credentials here — a Step 1.5 follow-up can add that
  * if missing-key turns out to be the dominant friction point.
  */
+import { isSafeRegexSource } from './utils/safe-regex.js'
+import { boundedRegex } from './utils/bounded-regex.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { createLogger } from './logger.js'
 
@@ -97,6 +99,10 @@ const DEFAULT_SKIP_PATTERN = /^(y|n|yes|no|go|continue|run it|ok|okay|sure|sound
  * @returns {boolean} true if the message should skip the evaluator
  */
 export function shouldSkipEvaluator(message, config = {}) {
+  // Default rules only. A configured custom pattern is NOT run here: that would
+  // run an arbitrary backtracking pattern on the event loop. Use
+  // shouldSkipEvaluatorAsync for the full decision.
+  void config
   if (typeof message !== 'string') return true
   const trimmed = message.trim()
   if (!trimmed) return true
@@ -104,17 +110,38 @@ export function shouldSkipEvaluator(message, config = {}) {
 
   if (DEFAULT_SKIP_PATTERN.test(trimmed)) return true
 
+  return false
+}
+
+/**
+ * The full skip decision: the default rules (synchronous), then the configured
+ * custom pattern, run through the bounded matcher (utils/bounded-regex.js): in a
+ * worker, with a per-match deadline and a cap on the tested text. A pattern that
+ * runs out its deadline counts as NO MATCH, so the message is evaluated normally,
+ * which is the conservative outcome (nothing is skipped on the strength of a
+ * match that was never found). A malformed or pre-filter-refused pattern is
+ * ignored the same way.
+ *
+ * @param {unknown} message
+ * @param {{ promptEvaluatorSkipPattern?: string }} [config]
+ * @param {{ test(source: string, text: string, key?: string): Promise<boolean> }} [matcher] test seam
+ * @param {string} [key] caller identity for the matcher's per-caller queue bound
+ * @returns {Promise<boolean>} true if the message should skip the evaluator
+ */
+export async function shouldSkipEvaluatorAsync(message, config = {}, matcher = boundedRegex, key = '') {
+  if (shouldSkipEvaluator(message)) return true
   const customSource = config?.promptEvaluatorSkipPattern
   if (typeof customSource === 'string' && customSource.length > 0) {
-    const customPattern = _compileSkipPattern(customSource)
-    if (customPattern && customPattern.test(trimmed)) return true
+    // Validated and cached on the main thread (one warning per bad source); the
+    // match itself runs in the worker.
+    if (_compileSkipPattern(customSource) === null) return false
+    return matcher.test(customSource, message.trim(), key)
   }
-
   return false
 }
 
 // Compiled-regex cache keyed by source string. Avoids recompiling on every
-// `shouldSkipEvaluator` call (the auto-evaluator hook will run this on the
+// `shouldSkipEvaluatorAsync` call (the auto-evaluator hook runs this on the
 // `user_input` hot path). Stores `null` for invalid sources so we don't
 // re-warn on every message either.
 //
@@ -136,6 +163,9 @@ function _compileSkipPattern(source) {
   if (_skipPatternCache.has(source)) return _skipPatternCache.get(source)
   let compiled = null
   try {
+    // Pre-filtered before it is accepted (utils/safe-regex.js). The pattern is
+    // never RUN here: matching happens in a bounded worker (utils/bounded-regex.js).
+    if (!isSafeRegexSource(source)) throw new Error('unsafe pattern')
     compiled = new RegExp(source, 'i')
   } catch {
     log.warn('Invalid promptEvaluatorSkipPattern (rejected source); falling back to default skip pattern only')

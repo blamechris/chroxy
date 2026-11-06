@@ -124,34 +124,25 @@ describe('web-task-handlers', () => {
       assert.equal(ctx._sent[0].boundSessionName, null)
     })
 
-    it('A10: bound client cannot override cwd away from session cwd', () => {
-      const ctx = makeCtx()
-      ctx.sessions.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/Projects/chroxy' }) }
-      const client = makeClient({ boundSessionId: 'b1' })
-      webTaskHandlers.launch_web_task(makeWs(), client,
-        { prompt: 'hi', cwd: '/home/dev/Projects/other' }, ctx)
-      assert.equal(ctx._sent[0].type, 'web_task_error')
-      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
-      assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
-      // Issue #2912: unified payload shape.
-      assert.equal(ctx._sent[0].boundSessionId, 'b1')
-      assert.equal(ctx._sent[0].boundSessionName, 'BoundOne')
+    it('a session-scoped client starts no web task, whatever directory it names', () => {
+      for (const cwd of [undefined, '/home/dev/Projects/chroxy', '/home/dev/Projects/other']) {
+        const ctx = makeCtx()
+        ctx.sessions.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/Projects/chroxy' }) }
+        const client = makeClient({ boundSessionId: 'b1' })
+        webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi', ...(cwd ? { cwd } : {}) }, ctx)
+        assert.equal(ctx._sent[0].type, 'web_task_error')
+        assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+        assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
+        assert.equal(ctx._sent[0].boundSessionId, 'b1')
+        assert.equal(ctx._sent[0].boundSessionName, 'BoundOne')
+      }
     })
 
-    it('A10: bound client using matching cwd forces launch in bound cwd', () => {
+    it('an empty binding is scoped too', () => {
       const ctx = makeCtx()
-      ctx.sessions.sessionManager = { getSession: () => ({ cwd: '/home/dev/Projects/chroxy' }) }
-      const client = makeClient({ boundSessionId: 'b1' })
-      // validateCwdAllowed will accept /home paths in most envs; if it
-      // rejects, the test still verifies we short-circuit on a match
-      // BEFORE calling launchTask — so rather than couple to the real
-      // cwd check, we stub it.
-      webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi' }, ctx)
-      // launchTask may still fail the cwd existence check in
-      // validateCwdAllowed — we only care that A10 didn't early-return
-      // via SESSION_TOKEN_MISMATCH.
-      const mismatch = ctx._sent.find((m) => m.code === 'SESSION_TOKEN_MISMATCH')
-      assert.equal(mismatch, undefined, 'bound client with matching cwd should not be rejected as mismatch')
+      webTaskHandlers.launch_web_task(makeWs(), makeClient({ boundSessionId: '' }), { prompt: 'hi' }, ctx)
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
     })
   })
 
@@ -168,17 +159,17 @@ describe('web-task-handlers', () => {
       assert.equal(ctx._sent[0].tasks.length, 1)
     })
 
-    it('A10: scopes list to bound session cwd for bound clients', () => {
+    it('a session-scoped client is shown no tasks, including ones in its own directory', () => {
       const ctx = makeCtx()
       ctx.sessions.sessionManager = { getSession: () => ({ cwd: '/home/dev/ok' }) }
       ctx.services.webTaskManager.listTasks = createSpy(() => [
-        { taskId: 'in-scope', cwd: '/home/dev/ok' },
+        { taskId: 'same-dir', cwd: '/home/dev/ok' },
         { taskId: 'out-of-scope', cwd: '/home/dev/other' },
       ])
       const client = makeClient({ boundSessionId: 'b1' })
       webTaskHandlers.list_web_tasks(makeWs(), client, {}, ctx)
       assert.equal(ctx._sent[0].type, 'web_task_list')
-      assert.deepEqual(ctx._sent[0].tasks.map((t) => t.taskId), ['in-scope'])
+      assert.deepEqual(ctx._sent[0].tasks, [])
     })
   })
 
@@ -205,10 +196,10 @@ describe('web-task-handlers', () => {
       assert.match(ctx._sent[0].message, /task not found/)
     })
 
-    it('A10: rejects bound client teleporting a task outside bound cwd', () => {
+    it('a session-scoped client cannot teleport a task, even one in its own directory', () => {
       const ctx = makeCtx()
       ctx.services.webTaskManager.getTask = (id) => id === 'task-x'
-        ? { taskId: 'task-x', cwd: '/home/dev/other' }
+        ? { taskId: 'task-x', cwd: '/home/dev/ok' }
         : null
       ctx.sessions.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/ok' }) }
       const client = makeClient({ boundSessionId: 'b1' })

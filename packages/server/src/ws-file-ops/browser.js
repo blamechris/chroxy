@@ -1,4 +1,5 @@
-import { readdir, readFile, stat, realpath } from 'fs/promises'
+import { readdir, stat, realpath } from 'fs/promises'
+import { readContainedTextFile } from '../utils/regular-file.js'
 import { homedir } from 'os'
 import { claudeConfigDir } from '../utils/claude-config-dir.js'
 import { join, resolve, normalize, relative, sep } from 'path'
@@ -31,9 +32,12 @@ const LISTING_UNRESOLVABLE_REASONS = {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {{ realpath?: Function, readdir?: Function }} [deps] test seam for the catalog directory scans
  * @returns {Object} browser operation methods
  */
-export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, deps = {}) {
+  const catalogRealpath = deps.realpath ?? realpath
+  const catalogReaddir = deps.readdir ?? readdir
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
@@ -338,7 +342,9 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       // Load .gitignore if it exists
       let gitignoreRules = []
       try {
-        const content = await readFile(join(cwdReal, '.gitignore'), 'utf-8')
+        // One pinned, contained, size-capped read (utils/regular-file.js).
+        const content = await readContainedTextFile(join(cwdReal, '.gitignore'), cwdReal, 1024 * 1024)
+        if (content === null) throw new Error('unreadable')
         gitignoreRules = parseGitignore(content)
       } catch {
         // No .gitignore or unreadable — proceed without
@@ -482,7 +488,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * path (`listSlashCommands`) and the connect-time `auth_bootstrap` burst
    * (#5555) so both produce an identical `commands` array.
    */
-  async function computeSlashCommands(cwd, providerName = null, mcpPrompts = []) {
+  // True when `dirReal` (already a real path) lies within the real path of `cwd`.
+  async function isInsideProject(cwd, dirReal) {
+    try {
+      return isPathWithin(dirReal, await realpath(cwd))
+    } catch {
+      return false
+    }
+  }
+
+  async function computeSlashCommands(cwd, providerName = null, mcpPrompts = [], { projectOnly = false } = {}) {
     const commands = []
     const seen = new Set()
 
@@ -507,7 +522,18 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
     const scanDir = async (dir, source) => {
       try {
-        const entries = await readdir(dir, { withFileTypes: true })
+        const dirReal = await catalogRealpath(dir)
+        // A project-confined caller: the catalog directory must really be inside
+        // the project (a link out to the user-level catalog is not the project's).
+        if (projectOnly && source === 'project' && !(await isInsideProject(cwd, dirReal))) return
+        const entries = await catalogReaddir(dirReal, { withFileTypes: true })
+        // The listing was read from the path as it was a moment ago: check that the
+        // directory still resolves there, so names read through a link swapped in
+        // between are not returned. This narrows a race, it does not close one
+        // (the directory can still change right after this check); what is at
+        // stake is file NAMES only, since the descriptions are read through the
+        // pinned, contained reader.
+        if (projectOnly && source === 'project' && (await catalogRealpath(dir)) !== dirReal) return
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
           if (entry.name.includes('/') || entry.name.includes('\\')) continue
@@ -517,7 +543,9 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
           let description = ''
           try {
-            const content = await readFile(join(dir, entry.name), 'utf-8')
+            // Pinned, contained in the directory, head-capped.
+            const content = await readContainedTextFile(join(dirReal, entry.name), dirReal, 64 * 1024, { head: true })
+            if (content === null) throw new Error('unreadable')
             const lines = content.split('\n')
             for (const line of lines) {
               const trimmed = line.trim()
@@ -539,7 +567,9 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     if (cwd) {
       await scanDir(join(cwd, '.claude', 'commands'), 'project')
     }
-    await scanDir(join(claudeConfigDir(), 'commands'), 'user')
+    // A project-confined caller (a session-scoped connection) is shown the
+    // project's commands only, not the user-level catalog.
+    if (!projectOnly) await scanDir(join(claudeConfigDir(), 'commands'), 'user')
 
     // #6823: MCP-server prompts merged as `source: 'mcp'` slash commands
     // (`/mcp__<server>__<prompt>`). Added last so a same-named built-in / .md
@@ -571,8 +601,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     return commands
   }
 
-  async function listSlashCommands(ws, cwd, sessionId, providerName = null, mcpPrompts = []) {
-    const commands = await computeSlashCommands(cwd, providerName, mcpPrompts)
+  async function listSlashCommands(ws, cwd, sessionId, providerName = null, mcpPrompts = [], opts = {}) {
+    const commands = await computeSlashCommands(cwd, providerName, mcpPrompts, opts)
     const response = { type: 'slash_commands', commands }
     if (sessionId) response.sessionId = sessionId
     sendFn(ws, response)
@@ -601,8 +631,17 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
      * the others (#3024).
      */
     const listDir = async (dir, source) => {
+      const dirArg = dir
       try {
-        const entries = await readdir(dir, { withFileTypes: true })
+        dir = await catalogRealpath(dir)
+        if (opts.projectOnly && source === 'project' && !(await isInsideProject(cwd, dir))) {
+          return { dir, source, filenames: [] }
+        }
+        const entries = await catalogReaddir(dir, { withFileTypes: true })
+        // Same narrowed (not closed) re-check as the commands scan; names only.
+        if (opts.projectOnly && source === 'project' && (await catalogRealpath(dirArg)) !== dir) {
+          return { dir, source, filenames: [] }
+        }
         const filenames = entries
           .filter(e => e.isFile() && e.name.endsWith('.md'))
           .filter(e => !e.name.includes('/') && !e.name.includes('\\'))
@@ -628,8 +667,11 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     if (cwd) {
       dirScans.push(listDir(join(cwd, '.claude', 'agents'), 'project'))
     }
-    for (const dir of userAgentsDirs) {
-      dirScans.push(listDir(dir, 'user'))
+    // A project-confined caller is shown the project's agents only.
+    if (!opts.projectOnly) {
+      for (const dir of userAgentsDirs) {
+        dirScans.push(listDir(dir, 'user'))
+      }
     }
     const dirResults = await Promise.all(dirScans)
 
@@ -651,7 +693,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     const agents = await Promise.all(winners.map(async ({ name, dir, source, filename }) => {
       let description = ''
       try {
-        const content = await readFile(join(dir, filename), 'utf-8')
+        const content = await readContainedTextFile(join(dir, filename), dir, 64 * 1024, { head: true })
+        if (content === null) throw new Error('unreadable')
         const lines = content.split('\n')
         for (const line of lines) {
           const trimmed = line.trim()

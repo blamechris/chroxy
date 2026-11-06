@@ -1,8 +1,10 @@
 import { EventEmitter } from 'events'
 import { assertAuthorized } from './connection-authority.js'
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'fs'
 import { join } from 'path'
+import { tmpdir } from 'os'
+import { stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFileRestricted } from './platform.js'
@@ -321,52 +323,53 @@ export class CheckpointManager extends EventEmitter {
   }
 
   /**
-   * Create a snapshot of the current working tree state using a plain commit
-   * object, without touching the shared git stash stack.
+   * Create a snapshot of the working tree under `cwd` as a plain commit object,
+   * without touching the shared git stash stack or the repository's index.
    *
    * Strategy:
-   *   1. If the working tree is clean, tag HEAD directly.
-   *   2. Otherwise:
-   *      a. Capture the current index state via `git write-tree`.
-   *      b. Stage everything (tracked + untracked) with `git add -A`.
-   *      c. Create a snapshot commit object via `git commit-tree` (no branch
-   *         or ref is updated — the commit is dangling until we tag it).
-   *      d. Tag the snapshot commit SHA.
-   *      e. Restore the pre-snapshot index with `git read-tree` so the
-   *         working tree is left exactly as it was.
+   *   1. If nothing under `cwd` has changed, tag HEAD directly.
+   *   2. Otherwise build the snapshot in a PRIVATE, temporary index
+   *      (GIT_INDEX_FILE): start from HEAD's tree, stage everything under `cwd`
+   *      (tracked + untracked, `add -A -- .`), write that tree, create a
+   *      dangling commit on HEAD with `git commit-tree`, and tag it.
    *
-   * This never modifies refs/stash, so concurrent sessions operating on the
-   * same repository cannot corrupt each other. The per-cwd mutex in the
-   * caller serialises the git index operations within this process.
+   * The repository's own index is never read or rewritten, so staging that
+   * happens concurrently is not clobbered, and only paths at or beneath `cwd`
+   * can differ from HEAD in the snapshot: a sibling directory's uncommitted
+   * content is not captured. It never modifies refs/stash. The per-cwd mutex in
+   * the caller serialises snapshots of one directory.
    */
   async _createGitSnapshot(cwd, checkpointId) {
     const tagName = `chroxy-checkpoint/${checkpointId}`
+    // A private directory (mode 0700) holds the temporary index, so no other user
+    // can read the staged content or swap the file.
+    const indexDir = mkdtempSync(join(tmpdir(), 'ckpt-snapshot-'))
+    const indexFile = join(indexDir, 'index')
 
     try {
       const { stdout: status } = await execFileAsync(
-        GIT, ['status', '--porcelain'],
+        GIT, ['status', '--porcelain', '--', '.'],
         { cwd }
       )
 
       if (!status.trim()) {
-        // Working tree is clean — tag HEAD directly
+        // Nothing under cwd has changed — tag HEAD directly
         await execFileAsync(GIT, ['tag', tagName, 'HEAD'], { cwd })
         return tagName
       }
 
-      // Capture the current index so we can restore it afterwards
-      const { stdout: savedIndexTree } = await execFileAsync(
-        GIT, ['write-tree'],
-        { cwd }
-      )
+      // git-only child: the daemon's inherited secrets are stripped anyway.
+      const env = stripInheritedChroxySecrets({ ...process.env })
+      env.GIT_INDEX_FILE = indexFile
 
-      // Stage everything including untracked files
-      await execFileAsync(GIT, ['add', '-A'], { cwd })
+      // Seed the private index from HEAD, then stage everything under cwd.
+      await execFileAsync(GIT, ['read-tree', 'HEAD'], { cwd, env })
+      await execFileAsync(GIT, ['add', '-A', '--', '.'], { cwd, env })
 
-      // Write the full working tree as a tree object
+      // Write the resulting tree as an object
       const { stdout: snapshotTree } = await execFileAsync(
         GIT, ['write-tree'],
-        { cwd }
+        { cwd, env }
       )
 
       // Create a dangling commit from the snapshot tree
@@ -378,15 +381,12 @@ export class CheckpointManager extends EventEmitter {
       // Tag the snapshot commit for stable retrieval
       await execFileAsync(GIT, ['tag', tagName, snapshotSha.trim()], { cwd })
 
-      // Restore the pre-snapshot index (leaves working tree untouched)
-      await execFileAsync(GIT, ['read-tree', savedIndexTree.trim()], { cwd })
-
       return tagName
     } catch (err) {
-      // Best-effort: restore the index if something went wrong mid-way
-      try { await execFileAsync(GIT, ['reset', 'HEAD'], { cwd }) } catch { /* ignore */ }
       log.warn(`Failed to create git snapshot: ${err.message}`)
       return null
+    } finally {
+      try { rmSync(indexDir, { recursive: true, force: true }) } catch { /* already gone */ }
     }
   }
 

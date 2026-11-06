@@ -39,7 +39,16 @@ function makeBackpressuredWs(readyState = 1) {
   return ws
 }
 
-function build(transcript, { ws = makeOpenWs(), readerResult, reader } = {}) {
+// A real (temporary) transcript store holding a file for CONV_ID, so the handler's
+// source resolution — which now checks that the file exists inside the store —
+// has something to resolve while the reader itself stays injected.
+const STORE = mkdtempSync(join(tmpdir(), 'transcript-store-'))
+const STORE_LOCATOR = `${encodeProjectPath(CONV_CWD)}/${CONV_ID}.jsonl`
+mkdirSync(join(STORE, encodeProjectPath(CONV_CWD)), { recursive: true })
+writeFileSync(join(STORE, STORE_LOCATOR), '{"type":"user"}\n'.repeat(10))
+after(() => { rmSync(STORE, { recursive: true, force: true }) })
+
+function build(transcript, { ws = makeOpenWs(), readerResult, reader, sourceLocator = STORE_LOCATOR, useStore = true } = {}) {
   const sends = []
   const reseeds = []
   // `reader: null` means inject NOTHING, so the handler falls through to its own
@@ -61,7 +70,8 @@ function build(transcript, { ws = makeOpenWs(), readerResult, reader } = {}) {
     ...makeSessionIndexCtx(),
     reseedActiveAgents: createSpy((_ws, sid) => reseeds.push(sid)),
     resendPendingQuestions: createSpy(), // #7457
-    scanConversations: createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: CONV_CWD }]),
+    scanConversations: createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: CONV_CWD, ...(sourceLocator ? { sourceLocator } : {}) }]),
+    ...(useStore ? { transcriptSources: [{ provider: 'claude', projectsDir: STORE }] } : {}),
     ...(readerFn ? { readConversationTranscript: readerFn } : {}),
     sessionManager: {
       getSession: createSpy(() => undefined),
@@ -472,7 +482,7 @@ describe('#7501 — the DEFAULT reader reports the transcript\'s own MAX_MESSAGE
 
   it('a transcript past the 500-message cap replays truncated: true', async () => {
     writeTranscript(userTurns(MAX_MESSAGES + 40))
-    const { ctx, sends, ws } = build(null, { reader: null })
+    const { ctx, sends, ws } = build(null, { reader: null, sourceLocator: null, useStore: false })
 
     await handler(ws, client(), request(), ctx)
     await drain(sends)
@@ -489,7 +499,7 @@ describe('#7501 — the DEFAULT reader reports the transcript\'s own MAX_MESSAGE
     // Without this, a handler that hardcoded `truncated: true` would pass the
     // test above.
     writeTranscript(userTurns(3))
-    const { ctx, sends, ws } = build(null, { reader: null })
+    const { ctx, sends, ws } = build(null, { reader: null, sourceLocator: null, useStore: false })
 
     await handler(ws, client(), request(), ctx)
     await drain(sends)

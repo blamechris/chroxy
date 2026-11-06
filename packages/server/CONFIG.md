@@ -340,7 +340,7 @@ phrase list. The pattern is OR-ed with the default; setting it cannot
 the source fails to compile (unbalanced brackets, etc.) the server logs a
 warning and falls back to the default pattern only.
 
-This config is consumed by the auto-evaluator hook (see `shouldSkipEvaluator`
+This config is consumed by the auto-evaluator hook (see `shouldSkipEvaluatorAsync`
 in `packages/server/src/prompt-evaluator.js`); the on-demand "Evaluate"
 button in the dashboard always evaluates, regardless of this setting.
 

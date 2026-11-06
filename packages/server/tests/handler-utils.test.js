@@ -2577,19 +2577,14 @@ describe('canClientSeeWebTask', () => {
     assert.equal(canClientSeeWebTask({ boundSessionId: null }, null, sessionManager), true)
   })
 
-  it('shows a bound client only a task in its bound session cwd', () => {
+  it('shows a session-scoped client no task, not even one in its own directory', () => {
     const guest = { boundSessionId: 'sess-a' }
-    assert.equal(canClientSeeWebTask(guest, task('/work/a'), sessionManager), true)
+    assert.equal(canClientSeeWebTask(guest, task('/work/a'), sessionManager), false)
     assert.equal(canClientSeeWebTask(guest, task('/work/b'), sessionManager), false)
     assert.equal(canClientSeeWebTask(guest, task(undefined), sessionManager), false)
-  })
-
-  it('shows a bound client nothing when the task is unknown or its bound cwd cannot be resolved', () => {
-    assert.equal(canClientSeeWebTask({ boundSessionId: 'sess-a' }, null, sessionManager), false)
-    assert.equal(canClientSeeWebTask({ boundSessionId: 'sess-a' }, undefined, sessionManager), false)
+    assert.equal(canClientSeeWebTask(guest, null, sessionManager), false)
     assert.equal(canClientSeeWebTask({ boundSessionId: 'gone' }, task('/work/a'), sessionManager), false)
-    assert.equal(canClientSeeWebTask({ boundSessionId: 'sess-nocwd' }, task(undefined), sessionManager), false)
-    assert.equal(canClientSeeWebTask({ boundSessionId: 'sess-a' }, task('/work/a'), null), false)
+    assert.equal(canClientSeeWebTask(guest, task('/work/a'), null), false)
   })
 
   it('treats an empty-string binding as bound', () => {

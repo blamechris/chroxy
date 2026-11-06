@@ -19,6 +19,9 @@ function makeHandlerOpts(overrides = {}) {
     sendFn: mock.fn(),
     broadcastFn: mock.fn(),
     validateBearerAuth: mock.fn(() => true),
+    // Hand-built handler: nothing to re-check once the body has arrived.
+    captureBearer: () => ({ required: false }),
+    bearerStillValid: () => true,
     validateHookAuth: mock.fn(() => true),
     pushManager: null,
     pendingPermissions: new Map(),

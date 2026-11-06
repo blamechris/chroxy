@@ -102,13 +102,14 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   // untouched (fork-capable providers only); 'both' (the default and the pre-#6767
   // behaviour) does both. Any unknown value falls back to 'both'.
   const mode = msg.mode === 'files' || msg.mode === 'conversation' || msg.mode === 'both' ? msg.mode : 'both'
-  // A session-bound (share-a-session) client stays on its bound session. A
-  // 'conversation'/'both' restore creates a new session and makes it the
-  // requester's active one, so refuse it up front — before the working tree or
-  // any session is touched — with the same payload `create_session` returns.
-  // 'files' only reverts the working tree of the client's own active session
-  // (which a bound client holds only as its binding) and is unchanged.
-  if (mode !== 'files' && client.boundSessionId != null) {
+  // A session-scoped (share-a-session) client never restores a checkpoint, in
+  // any mode: a 'conversation'/'both' restore creates a new session and moves the
+  // requester onto it, and a 'files' restore rewrites a working tree that other
+  // sessions may share. Refused up front — before the working tree or any session
+  // is touched — with the same payload `create_session` returns. (The dispatcher
+  // refuses the type for these clients as well; this keeps the handler safe if it
+  // is ever reached another way.)
+  if (isBoundClient(client)) {
     ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({

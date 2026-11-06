@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, statSync } from 'fs'
+import { captureBearer, bearerStillValid } from './bearer-recheck.js'
 import { join, resolve, dirname, relative, sep, isAbsolute } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
@@ -573,6 +574,7 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
       const sessionId = statusMatch[1]
       const token = (req.headers.authorization || '').slice(7)
       const pairing = server._pairingManager
+      const bearer = captureBearer(server, req)
       const isPairing = pairing?.isSessionTokenValid(token) === true
       const bound = isPairing ? pairing.getSessionIdForToken(token) : null
       // Only primary or a token explicitly bound to THIS session may write.
@@ -584,10 +586,8 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
       }
       const body = await readJsonBodyCapped(req, res, 4096)
       if (body === null) return
-      // Reading the body was a wait: the bearer may have been revoked or expired meanwhile.
-      // (With auth off there is no bearer to re-check, as in _validateBearerAuth.)
-      const stillValid = !server.authRequired || (isPairing ? pairing.isSessionTokenLive(token) === true : server._isTokenValid(token) === true)
-      if (!stillValid) {
+      // A bearer is checked again once the body has arrived (bearer-recheck.js).
+      if (!bearerStillValid(server, bearer)) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))
         return
@@ -799,11 +799,18 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
     // matching the other host-write routes — see bearer-token-authority.md §4).
     if (req.method === 'POST' && snapPath === '/api/pages' && server.pagesStore) {
       if (!server._validatePrimaryBearerAuth(req, res)) return
+      const bearer = captureBearer(server, req)
       // Body cap a little above the per-page byte cap to allow JSON overhead.
       const maxBody = server.pagesStore.maxPageBytes + 1024 * 1024
       readJsonBodyCapped(req, res, maxBody)
         .then((parsed) => {
           if (parsed === null) return // 413/400 already sent
+          // A bearer is checked again once the body has arrived (bearer-recheck.js).
+          if (!bearerStillValid(server, bearer)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unauthorized' }))
+            return
+          }
           const title = typeof parsed.title === 'string' ? parsed.title : 'Untitled'
           // Accept either { html } (single self-contained page) or
           // { files: [{ path, content }] } (multi-file). `html` is shorthand.

@@ -9,6 +9,7 @@ import { getPermissionModes } from './handler-utils.js'
 import { buildThinkingLevelChanged } from './thinking-level-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
+import { isBoundClient } from './environments/authority.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
@@ -587,7 +588,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     // If client is bound to a specific session, use that session's cwd
     // instead of the server default to avoid leaking unrelated session info.
-    if (client.boundSessionId) {
+    if (isBoundClient(client)) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
         entry = boundEntry
@@ -860,8 +861,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     ...(dashboardBuildId ? { dashboardBuildId } : {}),
     serverCommit: gitInfo.commit,
     cwd: sessionInfo.cwd,
-    defaultCwd: sessionManager?.defaultCwd || null,
-    connectedClients: getConnectedClientList(),
+    // A session-scoped connection is told about its own session only: not the
+    // host's default working directory, and only the peers sharing its session.
+    defaultCwd: isBoundClient(client) ? null : (sessionManager?.defaultCwd || null),
+    connectedClients: getConnectedClientList(client),
     encryption: requireEncryption ? 'required' : 'disabled',
     protocolVersion,
     minProtocolVersion,
@@ -974,7 +977,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // `daemon_update_action` it exists to drive: strict primary token AND unbound.
   // A paired phone (an unbound pairing token) must not be told which commits are
   // queued for the owner's machine, and a bound client sees nothing host-level.
-  if (daemonUpdate && client?.isPrimaryToken === true && !client.boundSessionId) {
+  if (daemonUpdate && client?.isPrimaryToken === true && !isBoundClient(client)) {
     try {
       send(ws, { type: 'daemon_update_status', ...daemonUpdate.getStatus() })
     } catch (err) {
@@ -985,7 +988,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // Multi-session mode
   if (sessionManager) {
     let sessions = sessionManager.listSessions()
-    if (client.boundSessionId) {
+    if (isBoundClient(client)) {
       sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
     }
     send(ws, { type: 'session_list', sessions })
@@ -993,7 +996,8 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #5665: send the current monthly programmatic-credit meter snapshot so a
     // freshly-connected dashboard shows it immediately, not only after the next
     // billed turn. Machine-wide, so it's sent regardless of boundSessionId.
-    if (typeof sessionManager.getMonthlyBudgetStatus === 'function') {
+    // Not sent to a session-scoped connection: it is the host's spend, not the session's.
+    if (typeof sessionManager.getMonthlyBudgetStatus === 'function' && !isBoundClient(client)) {
       send(ws, { type: 'monthly_budget', ...sessionManager.getMonthlyBudgetStatus() })
     }
 
@@ -1002,7 +1006,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // reconnect after the event fired.
     if (typeof sessionManager.getFailedRestores === 'function') {
       for (const failed of sessionManager.getFailedRestores()) {
-        if (client.boundSessionId && failed.sessionId !== client.boundSessionId) continue
+        if (isBoundClient(client) && failed.sessionId !== client.boundSessionId) continue
         send(ws, {
           type: 'session_restore_failed',
           sessionId: failed.sessionId,
@@ -1061,7 +1065,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // any persisted per-device preference. Fail closed: if the bound session
     // no longer exists, clear the active session rather than silently falling
     // back to a different session (or inheriting an unrelated persisted pref).
-    if (client.boundSessionId) {
+    if (isBoundClient(client)) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
         activeId = client.boundSessionId
@@ -1153,7 +1157,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const bootMcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
       ? entry.session.getMcpPromptCommands()
       : []
-    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
+    sendAuthBootstrap(ctx, ws, { scoped: isBoundClient(client), cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
     return
   }
 
@@ -1196,7 +1200,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   permissions.resendPendingPermissions(ws, client)
   // #5555: legacy single-session bootstrap burst — providers + slash commands
   // + agents for the cliSession's cwd (no provider scoping in legacy mode).
-  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
+  sendAuthBootstrap(ctx, ws, { scoped: isBoundClient(client), cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
 }
 
 /**
@@ -1247,9 +1251,15 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
 
   // providers is a cheap synchronous read off the registry — same source as
   // the list_providers handler.
+  // A session-scoped connection gets neither: the provider list carries the
+  // host's credential readiness and configured connections, and the slash-command
+  // and agent catalogs fall back to the user-level directories when no session
+  // directory resolves. Both still arrive per request for what the connection is
+  // allowed to ask (its own session's catalogs).
+  const scoped = info.scoped === true
   let providers = []
   try {
-    providers = listProviders({ agentConnections })
+    providers = scoped ? [] : listProviders({ agentConnections })
   } catch (err) {
     log.warn(`auth_bootstrap: listProviders failed: ${err.message}`)
     providers = []
@@ -1257,17 +1267,20 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
 
   // slash commands + agents are async disk scans; compute in parallel and
   // tolerate either failing on its own.
-  const slashP = fileOps && typeof fileOps.computeSlashCommands === 'function'
-    ? fileOps.computeSlashCommands(cwd, provider, mcpPrompts).catch(err => {
+  const catalogsAllowed = !scoped || cwd !== null
+  const slashP = catalogsAllowed && fileOps && typeof fileOps.computeSlashCommands === 'function'
+    ? fileOps.computeSlashCommands(cwd, provider, mcpPrompts, { projectOnly: scoped }).catch(err => {
         log.warn(`auth_bootstrap: computeSlashCommands failed: ${err.message}`)
         return []
       })
     : Promise.resolve([])
   const userAgentsDirs = ctx.userAgentsDirs
-  const agentsOpts = Array.isArray(userAgentsDirs) && userAgentsDirs.length > 0
-    ? { userAgentsDirs }
-    : {}
-  const agentsP = fileOps && typeof fileOps.computeAgents === 'function'
+  const agentsOpts = {
+    ...(Array.isArray(userAgentsDirs) && userAgentsDirs.length > 0 ? { userAgentsDirs } : {}),
+    // A session-scoped connection is bootstrapped with the project's agents only.
+    projectOnly: scoped,
+  }
+  const agentsP = catalogsAllowed && fileOps && typeof fileOps.computeAgents === 'function'
     ? fileOps.computeAgents(cwd, agentsOpts).catch(err => {
         log.warn(`auth_bootstrap: computeAgents failed: ${err.message}`)
         return []

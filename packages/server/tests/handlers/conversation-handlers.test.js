@@ -1,9 +1,15 @@
-import { describe, it } from 'node:test'
+import { describe, it, after } from 'node:test'
+import { EventEmitter } from 'node:events'
 import assert from 'node:assert/strict'
 import { conversationHandlers } from '../../src/handlers/conversation-handlers.js'
 import { createSpy, createMockSession, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
 import { CliSession, buildClaudeCliArgs } from '../../src/cli-session.js'
 import { SdkSession } from '../../src/sdk-session.js'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { encodeProjectPath } from '../../src/jsonl-reader.js'
+import { createReadLimiter } from '../../src/utils/read-limiter.js'
 import { CodexSession } from '../../src/codex-session.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -37,6 +43,9 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     searchConversations: createSpy(async () => []),
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
+      // The conversation the daemon associates with a session (what a
+      // session-scoped client is allowed to read).
+      getConversationId: createSpy((id) => sessions.get(id)?.session?.resumeSessionId ?? null),
       createSession: createSpy(() => 'new-id'),
       listSessions: createSpy(() => []),
       getFullHistoryAsync: createSpy(async () => ({ entries: [], source: 'ring', truncated: false })),
@@ -95,15 +104,18 @@ describe('conversation-handlers', () => {
       assert.deepEqual(ctx._sent[0].conversations, [])
     })
 
-    it('Adversary A8: scopes results to bound session cwd', async () => {
+    it('a session-scoped client sees only its own session\'s conversation, not siblings in the same directory', async () => {
       const fakeConvs = [
-        { conversationId: 'in-scope', cwd: '/home/dev/Projects/chroxy' },
-        { conversationId: 'in-scope-child', cwd: '/home/dev/Projects/chroxy/packages/server' },
+        { conversationId: 'own', cwd: '/home/dev/Projects/chroxy' },
+        { conversationId: 'sibling-same-dir', cwd: '/home/dev/Projects/chroxy' },
+        { conversationId: 'sibling-nested', cwd: '/home/dev/Projects/chroxy/packages/server' },
         { conversationId: 'other-repo', cwd: '/home/dev/Projects/secret' },
         { conversationId: 'ssh', cwd: '/home/dev/.ssh' },
       ]
       const sessions = new Map()
-      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const bound = createMockSession()
+      bound.resumeSessionId = 'own'
+      sessions.set('bound-1', { session: bound, name: 'S', cwd: '/home/dev/Projects/chroxy' })
       const ctx = makeCtx(sessions)
       ctx.scanConversations = createSpy(async () => fakeConvs)
       const client = makeClient({ boundSessionId: 'bound-1' })
@@ -111,8 +123,20 @@ describe('conversation-handlers', () => {
       await conversationHandlers.list_conversations(makeWs(), client, {}, ctx)
 
       const ids = ctx._sent[0].conversations.map((c) => c.conversationId).sort()
-      assert.deepEqual(ids, ['in-scope', 'in-scope-child'],
-        'bound client must only see the chroxy repo and subdirs')
+      assert.deepEqual(ids, ['own'],
+        'ownership is the session\'s own conversation, not directory containment')
+    })
+
+    it('a session-scoped client whose session has no known conversation sees nothing', async () => {
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.scanConversations = createSpy(async () => [{ conversationId: 'x', cwd: '/home/dev/Projects/chroxy' }])
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.list_conversations(makeWs(), client, {}, ctx)
+
+      assert.deepEqual(ctx._sent[0].conversations, [])
     })
 
     it('Adversary A8: returns empty list for bound client with missing session', async () => {
@@ -178,13 +202,16 @@ describe('conversation-handlers', () => {
       assert.deepEqual(ctx._sent[0].results, [])
     })
 
-    it('Adversary A8: scopes search results to bound session cwd', async () => {
+    it('a session-scoped client\'s search returns only its own session\'s conversation', async () => {
       const fakeResults = [
-        { conversationId: 'a', cwd: '/home/dev/Projects/chroxy', snippet: 'AKIA...' },
+        { conversationId: 'own', cwd: '/home/dev/Projects/chroxy', snippet: 'ok' },
+        { conversationId: 'sibling', cwd: '/home/dev/Projects/chroxy', snippet: 'same directory' },
         { conversationId: 'b', cwd: '/home/dev/Projects/secret', snippet: 'password' },
       ]
       const sessions = new Map()
-      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const bound = createMockSession()
+      bound.resumeSessionId = 'own'
+      sessions.set('bound-1', { session: bound, name: 'S', cwd: '/home/dev/Projects/chroxy' })
       const ctx = makeCtx(sessions)
       ctx.searchConversations = createSpy(async () => fakeResults)
       const client = makeClient({ boundSessionId: 'bound-1' })
@@ -192,8 +219,46 @@ describe('conversation-handlers', () => {
       await conversationHandlers.search_conversations(makeWs(), client, { query: 'password' }, ctx)
 
       const ids = ctx._sent[0].results.map((r) => r.conversationId)
-      assert.deepEqual(ids, ['a'],
-        'bound client must not see search hits from other projects')
+      assert.deepEqual(ids, ['own'])
+    })
+  })
+
+  describe('search_conversations source selection', () => {
+    function boundSearchCtx(own) {
+      const sessions = new Map()
+      const bound = createMockSession()
+      if (own) bound.resumeSessionId = own
+      sessions.set('bound-1', { session: bound, name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      return makeCtx(sessions)
+    }
+    const guest = () => makeClient({ boundSessionId: 'bound-1' })
+
+    it("a session-scoped client's search is restricted to its own conversation BEFORE reading or ranking", async () => {
+      const ctx = boundSearchCtx('own-conv')
+      ctx.searchConversations = createSpy(async (_q, opts) => {
+        // What the real search does with a restriction: only that file is read.
+        return opts.conversationId === 'own-conv'
+          ? [{ conversationId: 'own-conv', cwd: '/home/dev/Projects/chroxy', snippet: 'x' }]
+          : [{ conversationId: 'sibling', cwd: '/home/dev/Projects/chroxy', snippet: 'higher ranked' }]
+      })
+      await conversationHandlers.search_conversations(makeWs(), guest(), { query: 'x', maxResults: 1 }, ctx)
+      assert.equal(ctx.searchConversations.calls[0][1].conversationId, 'own-conv')
+      assert.deepEqual(ctx._sent[0].results.map((r) => r.conversationId), ['own-conv'])
+    })
+
+    it('with no known conversation nothing is searched at all', async () => {
+      const ctx = boundSearchCtx(null)
+      ctx.searchConversations = createSpy(async () => [{ conversationId: 'sibling', cwd: '/home/dev/Projects/chroxy' }])
+      await conversationHandlers.search_conversations(makeWs(), guest(), { query: 'x' }, ctx)
+      assert.equal(ctx.searchConversations.callCount, 0)
+      assert.deepEqual(ctx._sent[0].results, [])
+    })
+
+    it("an unscoped client's search is not restricted", async () => {
+      const ctx = makeCtx()
+      ctx.searchConversations = createSpy(async () => [])
+      await conversationHandlers.search_conversations(makeWs(), makeClient(), { query: 'x' }, ctx)
+      assert.equal('conversationId' in ctx.searchConversations.calls[0][1], false)
     })
   })
 
@@ -619,9 +684,24 @@ describe('conversation-handlers', () => {
   describe('request_conversation_transcript', () => {
     const CONV_ID = '00000000-0000-0000-0000-0000000c0ffe'
 
+    // A real (temporary) transcript store: source resolution checks that the
+    // conversation's file exists inside the store, while the reader stays injected.
+    const STORE = mkdtempSync(join(tmpdir(), 'conv-handler-store-'))
+    after(() => { rmSync(STORE, { recursive: true, force: true }) })
+    function rec(cwd) {
+      const dir = encodeProjectPath(cwd)
+      mkdirSync(join(STORE, dir), { recursive: true })
+      writeFileSync(join(STORE, dir, `${CONV_ID}.jsonl`), '{"type":"user"}\n'.repeat(10))
+      return { conversationId: CONV_ID, provider: 'claude', cwd, sourceLocator: `${dir}/${CONV_ID}.jsonl` }
+    }
+    function withStore(ctx) {
+      ctx.runtime.transcriptSources = [{ provider: 'claude', projectsDir: STORE }]
+      return ctx
+    }
+
     it('replays a closed conversation from disk WITHOUT spawning a provider', async () => {
-      const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
+      const ctx = withStore(makeCtx())
+      ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
       const transcript = [
         { type: 'user_input', content: 'hello', timestamp: 1 },
         { type: 'response', content: 'hi there', timestamp: 2 },
@@ -664,8 +744,8 @@ describe('conversation-handlers', () => {
     // of subagents still running in the live one. The repair targets the active
     // session for that reason, not the conversation.
     it('re-seeds the ACTIVE session\'s live subagents, not the conversation\'s', async () => {
-      const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
+      const ctx = withStore(makeCtx())
+      ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
         type: 'request_conversation_transcript',
@@ -690,8 +770,8 @@ describe('conversation-handlers', () => {
     // opposite reason: it would inject a live prompt into a transcript view the
     // user opened read-only.
     it('does NOT re-send pending questions (a conversationId has no live session behind it)', async () => {
-      const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
+      const ctx = withStore(makeCtx())
+      ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
         type: 'request_conversation_transcript',
@@ -709,8 +789,8 @@ describe('conversation-handlers', () => {
     })
 
     it('re-seeds nothing when the client has no active session', async () => {
-      const ctx = makeCtx()
-      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, provider: 'claude', cwd: '/tmp/repo' }])
+      const ctx = withStore(makeCtx())
+      ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
       ctx.readConversationTranscript = createSpy(async () => [])
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: null }), {
         type: 'request_conversation_transcript',
@@ -782,10 +862,9 @@ describe('conversation-handlers', () => {
     it('allows a bound client to read a conversation WITHIN its bound cwd', async () => {
       const sessions = new Map()
       sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
-      const ctx = makeCtx(sessions)
-      ctx.scanConversations = createSpy(async () => [
-        { conversationId: CONV_ID, provider: 'claude', cwd: '/home/dev/Projects/chroxy/packages/server' },
-      ])
+      sessions.get('bound-1').session.resumeSessionId = CONV_ID
+      const ctx = withStore(makeCtx(sessions))
+      ctx.scanConversations = createSpy(async () => [rec('/home/dev/Projects/chroxy/packages/server')])
       ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'in scope', timestamp: 1 }])
       const client = makeClient({ boundSessionId: 'bound-1' })
 
@@ -808,10 +887,9 @@ describe('conversation-handlers', () => {
       // to a different (still in-scope) directory it doesn't actually own.
       const sessions = new Map()
       sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
-      const ctx = makeCtx(sessions)
-      ctx.scanConversations = createSpy(async () => [
-        { conversationId: CONV_ID, provider: 'claude', cwd: '/home/dev/Projects/chroxy/real' },
-      ])
+      sessions.get('bound-1').session.resumeSessionId = CONV_ID
+      const ctx = withStore(makeCtx(sessions))
+      ctx.scanConversations = createSpy(async () => [rec('/home/dev/Projects/chroxy/real')])
       let readPath = null
       ctx.readConversationTranscript = createSpy(async (p) => {
         readPath = p
@@ -831,6 +909,118 @@ describe('conversation-handlers', () => {
         'the spoofed cwd hint must not influence the resolved path')
       assert.ok(ctx._sent.find(m => m.type === 'history_replay_start'), 'in-scope recorded read must replay')
       assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
+    describe('a session-scoped client', () => {
+      function boundCtx({ ownConversation = CONV_ID, scan = [] } = {}) {
+        const sessions = new Map()
+        const bound = createMockSession()
+        if (ownConversation) bound.resumeSessionId = ownConversation
+        sessions.set('bound-1', { session: bound, name: 'S', cwd: '/home/dev/Projects/chroxy' })
+        const ctx = withStore(makeCtx(sessions))
+        ctx.scanConversations = createSpy(async () => scan)
+        ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'x', timestamp: 1 }])
+        return ctx
+      }
+      const ask = (ctx, extra = {}) => conversationHandlers.request_conversation_transcript(
+        makeWs(), makeClient({ boundSessionId: 'bound-1' }),
+        { type: 'request_conversation_transcript', conversationId: CONV_ID, ...extra }, ctx)
+
+      it('is refused a sibling conversation recorded in the same directory', async () => {
+        const ctx = boundCtx({ ownConversation: '11111111-1111-4111-8111-111111111111', scan: [rec('/home/dev/Projects/chroxy')] })
+        await ask(ctx)
+        assert.match(ctx._sent.find((m) => m.type === 'session_error')?.message ?? '', /Not authorized/)
+        assert.equal(ctx.readConversationTranscript.callCount, 0)
+        assert.equal(ctx._sent.some((m) => m.type === 'history_replay_start'), false)
+      })
+
+      it('is refused when the daemon does not know its session\'s conversation', async () => {
+        const ctx = boundCtx({ ownConversation: null, scan: [rec('/home/dev/Projects/chroxy')] })
+        await ask(ctx, { cwd: '/home/dev/Projects/chroxy' })
+        assert.match(ctx._sent.find((m) => m.type === 'session_error')?.message ?? '', /Not authorized/)
+        assert.equal(ctx.readConversationTranscript.callCount, 0)
+      })
+
+      it('is decided before any scan or file access', async () => {
+        const ctx = boundCtx({ ownConversation: '11111111-1111-4111-8111-111111111111' })
+        await ask(ctx)
+        assert.equal(ctx.scanConversations.callCount, 0)
+      })
+
+      it('reads its own conversation when the scan misses, from the session\'s own directory and not a supplied hint', async () => {
+        const ctx = boundCtx()
+        rec('/home/dev/Projects/chroxy') // the file the session\'s own directory names
+        let readPath = null
+        ctx.readConversationTranscript = createSpy(async (path) => { readPath = path; return [] })
+        await ask(ctx, { cwd: '/home/dev/Projects/chroxy/other' })
+        assert.equal(ctx._sent.some((m) => m.type === 'session_error'), false)
+        assert.ok(ctx._sent.find((m) => m.type === 'history_replay_start'))
+        assert.match(readPath, /-home-dev-Projects-chroxy[/\\]/)
+        assert.equal(/other/.test(readPath), false)
+      })
+    })
+
+    describe('read admission', () => {
+      const wsWithClose = () => {
+        const ws = new EventEmitter()
+        ws.readyState = 1
+        ws.bufferedAmount = 0
+        return ws
+      }
+      const gate = () => { let release; const done = new Promise((r) => { release = r }); return { done, release } }
+      const settle = () => new Promise((r) => setImmediate(r))
+
+      it('answers a connection that has too many reads outstanding with a retryable error', async () => {
+        const ctx = withStore(makeCtx())
+        ctx.transcriptReadLimiter = createReadLimiter({ maxConcurrent: 1, maxPerClient: 1, maxQueued: 4 })
+        ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
+        const g = gate()
+        ctx.readConversationTranscript = createSpy(() => g.done)
+        const first = conversationHandlers.request_conversation_transcript(wsWithClose(), makeClient(), { conversationId: CONV_ID }, ctx)
+        await settle()
+        const secondCtxSent = ctx._sent.length
+        // A different conversation id would be a different file; here the SAME
+        // client asks again for another file so it needs its own slot.
+        ctx.scanConversations = createSpy(async () => [rec('/tmp/repo-two')])
+        await conversationHandlers.request_conversation_transcript(wsWithClose(), makeClient(), { conversationId: CONV_ID }, ctx)
+        const refusal = ctx._sent.slice(secondCtxSent).find((m) => m.type === 'session_error')
+        assert.equal(refusal?.code, 'TRANSCRIPT_UNAVAILABLE')
+        assert.match(refusal.message, /Try again/)
+        g.release()
+        await first
+      })
+
+      it('shares one read between identical in-flight requests', async () => {
+        const ctx = withStore(makeCtx())
+        ctx.transcriptReadLimiter = createReadLimiter({ maxConcurrent: 2, maxPerClient: 2, maxQueued: 4 })
+        ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
+        const g = gate()
+        ctx.readConversationTranscript = createSpy(() => g.done.then(() => [{ type: 'user_input', content: 'hi', timestamp: 1 }]))
+        const a = conversationHandlers.request_conversation_transcript(wsWithClose(), makeClient({ id: 'A' }), { conversationId: CONV_ID }, ctx)
+        const b = conversationHandlers.request_conversation_transcript(wsWithClose(), makeClient({ id: 'B' }), { conversationId: CONV_ID }, ctx)
+        await settle()
+        g.release()
+        await Promise.all([a, b])
+        assert.equal(ctx.readConversationTranscript.callCount, 1)
+        assert.equal(ctx._sent.filter((m) => m.type === 'history_replay_start').length, 2, 'both requesters are answered')
+      })
+
+      it('stops a read, and sends nothing, when the connection closes while it waits', async () => {
+        const ctx = withStore(makeCtx())
+        ctx.transcriptReadLimiter = createReadLimiter({ maxConcurrent: 1, maxPerClient: 2, maxQueued: 4 })
+        ctx.scanConversations = createSpy(async () => [rec('/tmp/repo')])
+        let aborted = false
+        ctx.readConversationTranscript = createSpy((_p, _m, { signal }) => new Promise((_, reject) => {
+          signal.addEventListener('abort', () => { aborted = true; reject(new Error('stopped')) })
+        }))
+        const ws = wsWithClose()
+        const pending = conversationHandlers.request_conversation_transcript(ws, makeClient(), { conversationId: CONV_ID }, ctx)
+        await settle()
+        ws.emit('close')
+        await pending
+        assert.equal(aborted, true)
+        assert.equal(ctx._sent.length, 0, 'nothing is sent to a closed connection')
+      })
     })
 
     it('validates a client-supplied cwd fallback when the scan can not find the conversation', async () => {

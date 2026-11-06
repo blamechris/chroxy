@@ -25,6 +25,7 @@ import { waitForTunnel } from './tunnel-check.js'
 import { PushManager, settlePush } from './push.js'
 import { ensureIngestSecret } from './event-ingest.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
+import { boundedRegex } from './utils/bounded-regex.js'
 import { probeNodePtyAvailable } from './utils/node-pty-probe.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
@@ -771,6 +772,7 @@ export async function emergencyCleanup({
   try { bonjourInstance?.destroy?.() } catch {}
   try { tokenManager?.destroy() } catch {}
   try { pairingManager?.destroy() } catch {}
+  try { boundedRegex.close() } catch {}
   try { sessionManager?.destroyAll() } catch (err) { logger?.warn?.(`emergencyCleanup: destroyAll failed: ${String(err?.message || err)}`) }
 }
 
@@ -794,6 +796,7 @@ export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, l
   try { sessionManager?.serializeState() } catch (serializeErr) {
     logger?.warn?.(`Failed to serialize state during ${kind}: ${String(serializeErr?.stack || serializeErr)}`)
   }
+  try { boundedRegex.close() } catch {}
   try { sessionManager?.destroyAll() } catch {}
   try { wsServer?.close() } catch {}
   // NO await — see the invariant above.

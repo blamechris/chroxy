@@ -50,6 +50,19 @@ export function isBoundToOtherSession(client, sessionId) {
 }
 
 /**
+ * May `recipient` be told that `peer` is connected? An unscoped recipient may
+ * hear about every peer. A session-scoped one only about peers on its OWN
+ * session (the same binding): the other connections' names and platforms are not
+ * part of its session. Fail-safe like `isBoundClient`: an empty or non-string
+ * binding on the recipient is a binding, and matches no unscoped peer.
+ */
+export function canSeePeer(recipient, peer) {
+  if (!isBoundClient(recipient)) return true
+  const own = recipient?.boundSessionId
+  return typeof own === 'string' && own.length > 0 && peer?.boundSessionId === own
+}
+
+/**
  * Fan an `environment_list` out to UNBOUND (host-authority) clients only. The
  * `environment_list` payload carries the whole descriptor (host metadata + the
  * #7552 sessions roster), so a bound client must not receive it — not on a pull
@@ -63,4 +76,20 @@ export function isBoundToOtherSession(client, sessionId) {
  */
 export function broadcastEnvironmentList(broadcast, environments) {
   broadcast({ type: 'environment_list', environments }, (client) => !isBoundClient(client))
+}
+
+/**
+ * A transcript replay frame names a CONVERSATION in its `sessionId` field (there
+ * is no live session behind a closed conversation), so the "tagged with another
+ * session" delivery rule must not read it as a session id. The handler that
+ * produced it, after authorising the conversation, marks the frame with this
+ * symbol (not serialised, not settable from the wire) and the delivery check
+ * skips the tag test for it.
+ */
+export const CONVERSATION_FRAME = Symbol('conversation-frame')
+
+/** @template T @param {T} frame @returns {T} */
+export function markConversationFrame(frame) {
+  Object.defineProperty(frame, CONVERSATION_FRAME, { value: true, enumerable: false })
+  return frame
 }

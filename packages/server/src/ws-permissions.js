@@ -160,7 +160,12 @@ const unboundOnly = (client) => !isBoundClient(client)
  * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
+// No re-check wired: refuse, like the hook validator default below. ws-server.js
+// always passes the real pair (tests/bearer-recheck.test.js checks it).
+const defaultCaptureBearer = () => null
+const defaultBearerStillValid = () => false
+
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, captureBearer = defaultCaptureBearer, bearerStillValid = defaultBearerStillValid, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -678,11 +683,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       presentedToken &&
       pairingManager.isSessionTokenValid(presentedToken)
     )
-    if (tokenIsPairingToken && callerBoundSessionId === null) {
+    if (tokenIsPairingToken && callerBoundSessionId == null) {
       log.warn('Rejected HTTP /permission-response: an unbound pairing token cannot answer permission requests')
       sendJson(res, 403, { error: 'unbound token cannot answer cross-session permissions' })
       return
     }
+
+    // Captured now, checked again when the body has arrived (bearer-recheck.js).
+    const bearer = captureBearer(req)
 
     const MAX_BODY = 4096
     // utf8 decoding + byte-accurate cap, checked BEFORE append — see
@@ -715,6 +723,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // Wrap the whole body; the inner JSON.parse guard is preserved.
       try {
       if (oversized) return
+
+      // A bearer is checked again once the body has arrived: nothing below runs
+      // for a credential that ended while the body was in flight.
+      if (!bearerStillValid(bearer)) {
+        sendJson(res, 403, { error: 'unauthorized' })
+        return
+      }
 
       let parsed
       try {
@@ -767,13 +782,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           // (PermissionManager → SdkSession → SessionManager → broadcast). The
           // legacy branch has no PermissionManager, so it keeps the inline
           // broadcast (#2905) — sessionId included only when the request was mapped.
-          const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, decision)
+          const effectiveDecision = result.decision ?? decision
+          const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, effectiveDecision)
           if (legacyBroadcast) broadcastFn(legacyBroadcast.frame, legacyBroadcast.filter)
           // #6771 — an allowAlways over the HTTP fallback (iOS notification
           // action) just persisted a durable project rule on the in-process
           // session. Broadcast the updated rule sets so clients' rules surfaces
           // refresh, mirroring the WS handler (settings-handlers.js).
-          if (decision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
+          if (effectiveDecision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
             const rulesSession = getSessionManager()?.getSession?.(result.sessionId)?.session
             if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {
               broadcastFn({

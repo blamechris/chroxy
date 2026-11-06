@@ -36,7 +36,7 @@
  * is further modified, unstaged, in the worktree) must not leak `oldPath`
  * onto the plain 'modified' unstaged half either.
  */
-import { normalize, resolve, join, relative, sep } from 'path'
+import { normalize, resolve, join, relative, sep, isAbsolute } from 'path'
 import { stillAuthorized } from '../connection-authority.js'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -329,8 +329,14 @@ function isDegenerateUntrackedPath(untrackedPath) {
  */
 export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, workspaceRoot, execImpl = execFileAsync) {
 
-  /** Get git status (branch, staged, unstaged, untracked) for a session CWD */
-  async function gitStatus(ws, sessionCwd) {
+  /**
+   * Get git status (branch, staged, unstaged, untracked) for a session CWD.
+   *
+   * `confineToCwd` (a session-scoped connection) limits the answer to paths at
+   * or beneath the session's own directory; without it paths outside are
+   * reported relative to the session directory (`../x`).
+   */
+  async function gitStatus(ws, sessionCwd, { confineToCwd = false } = {}) {
     if (!sessionCwd) {
       sendFn(ws, {
         type: 'git_status_result',
@@ -395,7 +401,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       //    (destination, then source) instead of an ambiguous
       //    `<path> -> <path>` text join, which a path containing the literal
       //    substring ' -> ' would mis-split.
-      const { stdout: statusOutput } = await execFileAsync(GIT, ['status', '--porcelain=v1', '-z'], {
+      const { stdout: statusOutput } = await execFileAsync(GIT, ['status', '--porcelain=v1', '-z', ...(confineToCwd ? ['--', '.'] : [])], {
         cwd: cwdReal,
         maxBuffer: 1024 * 1024,
         timeout: 10000,
@@ -480,12 +486,19 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         }
       }
 
+      // A path that rebases to `..` or beneath it is outside the session directory.
+      // git was already asked only for paths here; this does not rely on that.
+      const inside = (entry) => {
+        const path = typeof entry === 'string' ? entry : entry.path
+        const old = typeof entry === 'string' ? null : entry.oldPath
+        return [path, old].every((p) => p == null || !(p === '..' || p.startsWith('../') || isAbsolute(p)))
+      }
       sendFn(ws, {
         type: 'git_status_result',
         branch,
-        staged,
-        unstaged,
-        untracked,
+        staged: confineToCwd ? staged.filter(inside) : staged,
+        unstaged: confineToCwd ? unstaged.filter(inside) : unstaged,
+        untracked: confineToCwd ? untracked.filter(inside) : untracked,
         error: null,
       })
     } catch (err) {
@@ -501,8 +514,14 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
     }
   }
 
-  /** List git branches (local + remote) with current branch marked */
-  async function gitBranches(ws, sessionCwd) {
+  /**
+   * List git branches (local + remote) with current branch marked.
+   *
+   * `confineToCwd` (a session-scoped connection) reports only the branch the
+   * session's own checkout is on: the rest of the list describes the repository
+   * and the other worktrees and sessions that use it.
+   */
+  async function gitBranches(ws, sessionCwd, { confineToCwd = false } = {}) {
     if (!sessionCwd) {
       sendFn(ws, {
         type: 'git_branches_result',
@@ -551,7 +570,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
 
       sendFn(ws, {
         type: 'git_branches_result',
-        branches,
+        branches: confineToCwd ? branches.filter((b) => b.isCurrent) : branches,
         currentBranch,
         error: null,
       })

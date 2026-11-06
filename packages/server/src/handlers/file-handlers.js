@@ -113,22 +113,22 @@ function handleMemoryRead(ws, client, msg, ctx) {
   // MEMORY.md descriptor. Read-only: no mutation gate needed (a bound/
   // share-a-session client may read memory, matching read_file/get_diff).
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.readMemory(ws, entry?.cwd || null, msg.requestId)
+  ctx.services.fileOps.readMemory(ws, entry?.cwd || null, msg.requestId, { confineToProject: isBoundClient(client) })
 }
 
 function handleGetDiff(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
+  ctx.services.fileOps.getDiff(ws, msg.base, entry?.cwd || null, { confineToCwd: isBoundClient(client) })
 }
 
 function handleGitStatus(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.gitStatus(ws, entry?.cwd || null)
+  ctx.services.fileOps.gitStatus(ws, entry?.cwd || null, { confineToCwd: isBoundClient(client) })
 }
 
 function handleGitBranches(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.gitBranches(ws, entry?.cwd || null)
+  ctx.services.fileOps.gitBranches(ws, entry?.cwd || null, { confineToCwd: isBoundClient(client) })
 }
 
 function handleGitStage(ws, client, msg, ctx) {
@@ -166,6 +166,13 @@ function handleGitCreatePr(ws, client, msg, ctx) {
 function handleListSlashCommands(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
+  // A session-scoped connection is shown its own session's catalog or nothing:
+  // with no resolved session the listing would fall back to the host's
+  // user-level commands.
+  if (isBoundClient(client) && !entry) {
+    ctx.transport.send(ws, { type: 'slash_commands', commands: [], ...(sid ? { sessionId: sid } : {}) })
+    return
+  }
   // #3856: pass the session's provider so listSlashCommands can merge in
   // provider-specific built-ins (`/clear`, `/compact`, `/model`, etc.).
   // Falls back to null in legacy single-cliSession mode — built-ins simply
@@ -177,13 +184,18 @@ function handleListSlashCommands(ws, client, msg, ctx) {
   const mcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
     ? entry.session.getMcpPromptCommands()
     : []
-  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider, mcpPrompts)
+  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider, mcpPrompts, { projectOnly: isBoundClient(client) })
 }
 
 function handleListAgents(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  const opts = ctx.runtime.userAgentsDirs ? { userAgentsDirs: ctx.runtime.userAgentsDirs } : {}
+  // As for slash commands: nothing without a resolved session.
+  if (isBoundClient(client) && !entry) {
+    ctx.transport.send(ws, { type: 'agent_list', agents: [], ...(sid ? { sessionId: sid } : {}) })
+    return
+  }
+  const opts = { ...(ctx.runtime.userAgentsDirs ? { userAgentsDirs: ctx.runtime.userAgentsDirs } : {}), projectOnly: isBoundClient(client) }
   ctx.services.fileOps.listAgents(ws, entry?.cwd || null, sid, opts)
 }
 

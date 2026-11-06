@@ -1,4 +1,4 @@
-import { readFile, stat, mkdir, realpath } from 'fs/promises'
+import { stat, mkdir, realpath } from 'fs/promises'
 import { stillAuthorized } from '../connection-authority.js'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
@@ -10,6 +10,8 @@ import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
+import { isPathWithin } from '../utils/path-containment.js'
+import { readPinnedHandle, readContainedBytes } from '../utils/regular-file.js'
 import { unresolvablePathError, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError, CONFIG_DIR_REFUSAL } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
@@ -52,6 +54,9 @@ const log = createLogger('ws')
 // subcommand, so it is a separate piece of argv from the options after it.
 const DIFF_PIN_CONFIG = ['-c', 'diff.relative=false']
 const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
+// Limits a diff to the directory git runs in (the session cwd). A fixed literal,
+// never client input.
+const DIFF_CWD_PATHSPEC = ['--', '.']
 
 /**
  * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
@@ -363,12 +368,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           // open from hanging on a planted FIFO with no writer, but the
           // content must still not be read from anything but a regular file
           // — re-check on the OPENED fd, which can't be raced the same way.
-          const fhStat = await fh.stat()
-          if (!fhStat.isFile()) {
+          // The opened object must be the file this name denotes inside the
+          // project (parents included), within the size cap, and is read from
+          // the descriptor in bounded steps (utils/regular-file.js).
+          try {
+            buf = await readPinnedHandle(fh, resolvedAbsPath, await resolveSessionCwd(sessionCwd), 512 * 1024)
+          } catch (pinErr) {
             // No path in the text: this reaches the client verbatim.
-            throw clientSafeError('Not a regular file')
+            if (pinErr.code === 'ENOTREG') throw clientSafeError('Not a regular file')
+            if (pinErr.code === 'EFBIG') throw clientSafeError('File too large (max 512KB)')
+            if (pinErr.code === 'EACCES') throw Object.assign(new Error('pinned'), { code: 'ELOOP' })
+            throw pinErr
           }
-          buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
             // Symlink appeared at the canonical path after validation — reject
@@ -792,8 +803,15 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     }
   }
 
-  /** Get git diff for uncommitted changes in the session CWD */
-  async function getDiff(ws, base, sessionCwd) {
+  /**
+   * Get git diff for uncommitted changes in the session CWD.
+   *
+   * `confineToCwd` (a session-scoped connection) limits the answer to files at or
+   * beneath the session's own directory. `git diff` reports the whole
+   * repository, and several sessions can share one repository, so without it the
+   * diff would include files belonging to a sibling's directory.
+   */
+  async function getDiff(ws, base, sessionCwd, { confineToCwd = false } = {}) {
     if (!sessionCwd) {
       sendFn(ws, {
         type: 'diff_result',
@@ -949,7 +967,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : [])], {
+        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : []), ...(confineToCwd ? DIFF_CWD_PATHSPEC : [])], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -974,7 +992,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD', ...(confineToCwd ? DIFF_CWD_PATHSPEC : [])], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -1011,7 +1029,12 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           for (const p of touched) {
             if (await isConfigDirOrDirectChild(resolve(repoRoot, p))) { inConfigDir = true; break }
           }
-          if (!inConfigDir) shown.push(files[i])
+          if (inConfigDir) continue
+          // A confined reader keeps an entry only when EVERY path it touches (a
+          // rename names two) is inside the session directory. The pathspec above
+          // already limits what git reports; this does not trust it to.
+          if (confineToCwd && !touched.every((p) => isPathWithin(resolve(repoRoot, p), cwdReal))) continue
+          shown.push(files[i])
         }
         files = shown
       }
@@ -1063,7 +1086,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
                 lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
                 additions = 0
               } else {
-                const buf = await readFile(validation.realPath)
+                const buf = await readContainedBytes(validation.realPath, cwdReal, MAX_UNTRACKED_SIZE)
+                if (buf === null) continue
                 const checkLen = Math.min(buf.length, 8192)
                 let isBinary = false
                 for (let i = 0; i < checkLen; i++) {

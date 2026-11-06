@@ -1,4 +1,5 @@
-import { readdir, stat, open } from 'fs/promises'
+import { readdir, stat, realpath } from 'fs/promises'
+import { readContainedBytes } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -34,12 +35,15 @@ export function clearScanCache() {
  *
  * @returns {{ preview: string|null, cwd: string|null }}
  */
-async function extractMetadata(filePath) {
-  let handle
+async function extractMetadata(filePath, root) {
   try {
-    handle = await open(filePath, 'r')
-    const buf = Buffer.alloc(PREVIEW_BYTES)
-    const { bytesRead } = await handle.read(buf, 0, PREVIEW_BYTES, 0)
+    // One pinned, contained, non-blocking read of the head of the file: the
+    // listing and this read are separate steps, and the name can be re-pointed in
+    // between (utils/regular-file.js readContainedBytes).
+    const head = await readContainedBytes(filePath, root, PREVIEW_BYTES, { head: true })
+    if (head === null) return { preview: null, cwd: null }
+    const buf = head
+    const bytesRead = head.length
     // Use TextDecoder with stream: true to avoid replacement characters
     // when the read boundary splits a multi-byte UTF-8 character
     const decoder = new TextDecoder('utf-8', { fatal: false })
@@ -91,15 +95,15 @@ async function extractMetadata(filePath) {
     return { preview, cwd }
   } catch {
     return { preview: null, cwd: null }
-  } finally {
-    if (handle) await handle.close()
   }
 }
 
 async function performScan(projectsDir, provider) {
   let projectDirs
+  let rootReal
   try {
-    projectDirs = await readdir(projectsDir, { withFileTypes: true })
+    rootReal = await realpath(projectsDir)
+    projectDirs = await readdir(rootReal, { withFileTypes: true })
   } catch {
     return []
   }
@@ -114,7 +118,7 @@ async function performScan(projectsDir, provider) {
     const decodedPath = decodeProjectPath(encodedName)
     const projectName = decodedPath ? basename(decodedPath) : encodedName
 
-    const dirPath = join(projectsDir, encodedName)
+    const dirPath = join(rootReal, encodedName)
     let files
     try {
       files = await readdir(dirPath)
@@ -146,7 +150,7 @@ async function performScan(projectsDir, provider) {
 
     if (fileStat.size < MIN_FILE_SIZE) return null
 
-    const { preview, cwd } = await extractMetadata(c.filePath)
+    const { preview, cwd } = await extractMetadata(c.filePath, rootReal)
 
     return {
       conversationId: c.conversationId,

@@ -387,3 +387,39 @@ describe('permission-resolver — #6830 tool + persist enrichment', () => {
     assert.equal(audited[0].persist, undefined, 'legacy sessions have no durable-rule concept')
   })
 })
+
+describe('permission-resolver — session-scoped callers', () => {
+  it('a scoped caller\'s "always allow" is applied as a one-time allow on the in-process path', () => {
+    const owner = makeSdkSession({ pending: ['perm-aa'] })
+    const { resolver, audited } = build({ map: [['perm-aa', OWNER]], ownerSession: owner })
+    const r = resolver.resolve('perm-aa', 'allowAlways', OWNER, { clientId: 'c1' })
+    assert.equal(r.kind, 'resolved')
+    assert.equal(r.decision, 'allow')
+    assert.equal(owner.respondToPermission.mock.calls[0].arguments[1], 'allow', 'the session is never told to store a rule')
+    assert.equal(audited[0].decision, 'allow')
+  })
+
+  it('a scoped caller\'s "always allow" is applied as a one-time allow on the legacy path', () => {
+    const { resolver, legacyResolved } = build({ map: [['perm-ab', OWNER]], legacy: ['perm-ab'], ownerSession: {} })
+    const r = resolver.resolve('perm-ab', 'allowAlways', OWNER, { clientId: 'c1' })
+    assert.equal(r.kind, 'resolved')
+    assert.deepEqual(legacyResolved, [{ requestId: 'perm-ab', decision: 'allow' }])
+  })
+
+  it('an unscoped caller\'s "always allow" is passed through unchanged', () => {
+    const owner = makeSdkSession({ pending: ['perm-ac'] })
+    const { resolver } = build({ map: [['perm-ac', OWNER]], ownerSession: owner })
+    const r = resolver.resolve('perm-ac', 'allowAlways', null, { clientId: 'c1' })
+    assert.equal(r.decision, 'allowAlways')
+    assert.equal(owner.respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
+  })
+
+  it('an empty binding is a binding: it answers nothing and stores nothing', () => {
+    const owner = makeSdkSession({ pending: ['perm-ad'] })
+    const { resolver, permissionSessionMap } = build({ map: [['perm-ad', OWNER]], ownerSession: owner })
+    const r = resolver.resolve('perm-ad', 'allowAlways', '', { clientId: 'c1' })
+    assert.equal(r.kind, 'binding_mismatch')
+    assert.equal(owner.respondToPermission.mock.calls.length, 0)
+    assert.equal(permissionSessionMap.has('perm-ad'), true)
+  })
+})

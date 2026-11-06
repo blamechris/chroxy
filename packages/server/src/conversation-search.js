@@ -1,4 +1,5 @@
-import { readdir, stat, readFile, open } from 'fs/promises'
+import { readdir, stat, realpath } from 'fs/promises'
+import { readContainedBytes } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -42,26 +43,17 @@ export function extractSearchableText(entry) {
  * Search a single JSONL conversation file for a query string.
  * Returns null if no match, or a result object if found.
  */
-async function searchFile(filePath, queryLower, conversationId, projectName, decodedPath) {
+async function searchFile(filePath, queryLower, conversationId, projectName, decodedPath, root) {
   let text
   try {
     const fileStat = await stat(filePath)
     if (fileStat.size < MIN_FILE_SIZE) return null
 
-    // Read file content (capped at MAX_FILE_READ)
-    if (fileStat.size <= MAX_FILE_READ) {
-      text = await readFile(filePath, 'utf-8')
-    } else {
-      const buf = Buffer.alloc(MAX_FILE_READ)
-      const handle = await open(filePath, 'r')
-      try {
-        const { bytesRead } = await handle.read(buf, 0, MAX_FILE_READ, 0)
-        const decoder = new TextDecoder('utf-8', { fatal: false })
-        text = decoder.decode(buf.subarray(0, bytesRead))
-      } finally {
-        await handle.close()
-      }
-    }
+    // Read file content (capped at MAX_FILE_READ). The open never blocks and
+    // refuses anything that is not a regular file (utils/regular-file.js).
+    const bytes = await readContainedBytes(filePath, root, MAX_FILE_READ, { head: true })
+    if (bytes === null) return null
+    text = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
   } catch {
     return null
   }
@@ -142,6 +134,8 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
  * @param {Object} [opts] - Options
  * @param {string} [opts.projectsDir] - Root directory to scan
  * @param {number} [opts.maxResults] - Maximum results to return (default 50)
+ * @param {string} [opts.conversationId] - Search only this conversation's file
+ * @param {string} [opts.projectDirName] - Search only this project directory
  * @returns {Promise<Array<{
  *   conversationId: string,
  *   projectName: string,
@@ -164,8 +158,10 @@ export async function searchConversations(query, opts = {}) {
 
   // Collect all JSONL files across projects
   let projectDirs
+  let rootReal
   try {
-    projectDirs = await readdir(projectsDir, { withFileTypes: true })
+    rootReal = await realpath(projectsDir)
+    projectDirs = await readdir(rootReal, { withFileTypes: true })
   } catch {
     return []
   }
@@ -174,9 +170,13 @@ export async function searchConversations(query, opts = {}) {
   for (const dir of projectDirs) {
     if (!dir.isDirectory()) continue
     const encodedName = dir.name
+    // Restricted to one project directory: every other project is skipped before
+    // any of its files is listed or read, so the same conversation id in a
+    // different project cannot take part in the ranking.
+    if (opts.projectDirName && encodedName !== opts.projectDirName) continue
     const decodedPath = decodeProjectPath(encodedName)
     const projectName = decodedPath ? basename(decodedPath) : encodedName
-    const dirPath = join(projectsDir, encodedName)
+    const dirPath = join(rootReal, encodedName)
 
     let files
     try {
@@ -186,6 +186,9 @@ export async function searchConversations(query, opts = {}) {
     }
 
     for (const file of files.filter((f) => f.endsWith('.jsonl'))) {
+      // Restricted to one conversation: every other file is skipped BEFORE it is
+      // read, so what is ranked and truncated below is only what the caller may see.
+      if (opts.conversationId && file !== `${opts.conversationId}.jsonl`) continue
       candidates.push({
         filePath: join(dirPath, file),
         conversationId: file.replace('.jsonl', ''),
@@ -197,7 +200,7 @@ export async function searchConversations(query, opts = {}) {
 
   // Search files in parallel
   const tasks = candidates.map((c) => () =>
-    searchFile(c.filePath, queryLower, c.conversationId, c.projectName, c.decodedPath)
+    searchFile(c.filePath, queryLower, c.conversationId, c.projectName, c.decodedPath, rootReal)
   )
 
   const results = await runWithConcurrency(tasks, CONCURRENCY)

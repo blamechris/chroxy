@@ -1,9 +1,10 @@
 import { statSync, existsSync, readdirSync, realpathSync } from 'fs'
-import { readFile, stat, open } from 'fs/promises'
+
 import { join } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { constants as fsConstants } from 'fs'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
+import { createReadLimiter, ReadLimitError } from './utils/read-limiter.js'
 
 // Wire cap for a transcript read: the MOST RECENT 500 parsed messages. This is
 // the JSONL path's OWN truncation, entirely separate from the ring buffer's
@@ -21,6 +22,13 @@ export const MAX_MESSAGES = 500
 // whole file. 25MB comfortably fits even long real transcripts while bounding
 // worst-case memory. Overridable per-call for tests.
 export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
+
+// One read() call asks for at most this much, so a cancelled read stops within a
+// step (see readConversationTranscriptStrictAsync).
+const READ_STEP_BYTES = 4 * 1024 * 1024
+
+// Admission for every transcript read in the daemon (see readTranscriptCore).
+export const transcriptReadLimiter = createReadLimiter({ maxConcurrent: 4, maxPerClient: 2, maxQueued: 32 })
 
 /**
  * Encode a cwd into the directory name Claude Code uses under
@@ -331,20 +339,17 @@ function parseJsonlContent(raw, { byteTruncated = false, strict = false } = {}) 
  * @param {number} [maxBytes]
  * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
  */
-export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
-  let raw
-  let byteTruncated = false
+export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, opts = {}) {
+  // Same reader, same admission, same descriptor checks as the strict endpoint;
+  // the difference is only that an unreadable file or a corrupt record reads as
+  // an empty history (the caller falls back to its in-memory buffer).
   try {
-    const { size } = await stat(filePath)
-    byteTruncated = size > maxBytes
-    raw = byteTruncated
-      ? await readTailBytesAsync(filePath, maxBytes)
-      : await readFile(filePath, 'utf-8')
-  } catch {
+    return await readTranscriptCore(filePath, maxBytes, { ...opts, strict: false })
+  } catch (err) {
+    // A refusal for load is reported to the caller, not read as "no history".
+    if (err instanceof ReadLimitError) throw err
     return { messages: [], truncated: false }
   }
-
-  return parseJsonlContent(raw, { byteTruncated })
 }
 
 /**
@@ -355,7 +360,7 @@ export class TranscriptDataError extends Error {
   constructor(code, message) {
     super(message)
     this.name = 'TranscriptDataError'
-    this.code = code // 'missing' | 'unreadable' | 'corrupt'
+    this.code = code // 'missing' | 'unreadable' | 'corrupt' | 'cancelled'
   }
 }
 
@@ -377,7 +382,32 @@ export class TranscriptDataError extends Error {
  * @param {{ expectedIdentity?: { dev: bigint, ino: bigint } }} [opts]
  * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
  */
-export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, { expectedIdentity } = {}) {
+export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, opts = {}) {
+  return readTranscriptCore(filePath, maxBytes, { ...opts, strict: true })
+}
+
+/**
+ * The one transcript read. EVERY transcript-reading entry point (the strict
+ * endpoint, the full-history replay) goes through it, so none can skip the
+ * pieces below:
+ *   - admission: a daemon-wide cap on concurrent reads, a per-client cap, a
+ *     bounded queue, identical in-flight reads shared, cancellation by signal
+ *     (`opts.admitted` is for a caller that already holds a slot of the same
+ *     limiter and must not queue behind itself);
+ *   - a non-blocking open, with the regular-file check and the identity check
+ *     made on the opened descriptor;
+ *   - bounded, abortable reads.
+ */
+async function readTranscriptCore(filePath, maxBytes, { expectedIdentity, signal, strict, admitted = false, limiter = transcriptReadLimiter, clientKey = 'daemon', restricted = false } = {}) {
+  const run = (sig) => readTranscriptBody(filePath, maxBytes, { expectedIdentity, signal: sig, strict })
+  if (admitted) return run(signal)
+  const key = `${filePath}\0${expectedIdentity ? `${expectedIdentity.dev}:${expectedIdentity.ino}` : ''}\0${maxBytes}\0${strict ? 's' : 'l'}`
+  return limiter.submit({ key, clientKey: String(clientKey), signal, restricted }, run)
+}
+
+async function readTranscriptBody(filePath, maxBytes, { expectedIdentity, signal, strict }) {
+  const cancelled = () => new TranscriptDataError('cancelled', 'Transcript read cancelled')
+  if (signal?.aborted) throw cancelled()
   let raw
   let byteTruncated = false
   let fh
@@ -397,7 +427,10 @@ export async function readConversationTranscriptStrictAsync(filePath, maxBytes =
     const buf = Buffer.alloc(length)
     let off = 0
     while (off < length) {
-      const { bytesRead } = await fh.read(buf, off, length - off, start + off)
+      // Bounded steps, so a read nobody is waiting for any more stops promptly
+      // instead of finishing a buffer-sized read first.
+      if (signal?.aborted) throw cancelled()
+      const { bytesRead } = await fh.read(buf, off, Math.min(length - off, READ_STEP_BYTES), start + off)
       if (bytesRead === 0) break
       off += bytesRead
     }
@@ -411,23 +444,5 @@ export async function readConversationTranscriptStrictAsync(filePath, maxBytes =
   } finally {
     if (fh) await fh.close().catch(() => {})
   }
-  return parseJsonlContent(raw, { byteTruncated, strict: true })
-}
-
-/**
- * Read the last `maxBytes` of a file so an
- * oversized transcript read stays bounded (see MAX_TRANSCRIPT_BYTES).
- */
-async function readTailBytesAsync(filePath, maxBytes) {
-  const handle = await open(filePath, 'r')
-  try {
-    const { size } = await handle.stat()
-    const start = Math.max(0, size - maxBytes)
-    const length = size - start
-    const buf = Buffer.alloc(length)
-    await handle.read(buf, 0, length, start)
-    return new TextDecoder('utf-8', { fatal: false }).decode(buf)
-  } finally {
-    await handle.close()
-  }
+  return parseJsonlContent(raw, strict ? { byteTruncated, strict: true } : { byteTruncated })
 }

@@ -16,7 +16,8 @@ import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFo
 import { GIT } from './git.js'
 import { isGitRepoSync } from './utils/git-repo.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
-import { resolveJsonlPath, hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { resolveTranscriptSource } from './transcript-sources.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
 import { buildContinuationSeed, coerceContinuationSeed, continuationSeedItem, sanitizeSeedText } from './archive-continuation.js'
 import { readSessionContext } from './session-context.js'
@@ -1920,7 +1921,7 @@ export class SessionManager extends EventEmitter {
    *   skills text). Trimmed + capped to SESSION_PREAMBLE_MAX_LENGTH by
    *   BaseSession. Persisted across reconnects.
    * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
-   *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
+   *   string consulted by `shouldSkipEvaluatorAsync` BEFORE the server-wide
    *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
    *   this per-session override lands here in #3639). Pairs with the
    *   per-session promptEvaluator toggle so different sessions can use
@@ -5404,7 +5405,7 @@ export class SessionManager extends EventEmitter {
    *
    * @returns {Promise<{ entries: Array<{ type, content, tool?, timestamp, messageId? }>, source: 'jsonl'|'ring', truncated: boolean }>}
    */
-  async getFullHistoryAsync(sessionId) {
+  async getFullHistoryAsync(sessionId, readOpts = {}) {
     const entry = this._sessions.get(sessionId)
     // No session (or one being torn down) read NEITHER source. Labelled 'ring'
     // because that is the slice a caller would have got — an empty one — and
@@ -5414,8 +5415,17 @@ export class SessionManager extends EventEmitter {
     const conversationId = entry.session.resumeSessionId
     if (conversationId && entry.session.constructor.nativeResumeDriver !== NATIVE_RESUME_DRIVER) {
       try {
-        const filePath = resolveJsonlPath(entry.cwd, conversationId)
-        const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
+        // Resolved inside the provider store with real-path containment and the
+        // file's identity, like every other transcript read; the reader then
+        // admits it through the shared limiter and checks the opened descriptor.
+        const src = resolveTranscriptSource({ provider: 'claude', conversationId, cwd: entry.cwd })
+        if (!src.ok) throw new Error(src.reason)
+        const { messages, truncated } = await readConversationHistoryWithMetaAsync(src.path, undefined, {
+          expectedIdentity: src.identity,
+          clientKey: readOpts.clientKey,
+          restricted: readOpts.restricted,
+          signal: readOpts.signal,
+        })
         if (messages.length > 0) {
           return {
             entries: withRetainedPermissionOutcomes(messages, this.getHistory(sessionId), truncated),
@@ -5424,6 +5434,8 @@ export class SessionManager extends EventEmitter {
           }
         }
       } catch (err) {
+        // Too many reads in flight: tell the caller, do not substitute the ring buffer.
+        if (err?.name === 'ReadLimitError') throw err
         log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
       }
     }

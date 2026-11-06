@@ -27,10 +27,11 @@
  * @property {number} line      1-indexed line of the declaration.
  * @property {boolean} exported Whether the declaration is exported / public.
  */
-import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
+import { readdir, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 import { isPathWithin } from '../utils/path-containment.js'
 import { makeConfigDirFilter } from '../ws-file-ops/common.js'
+import { readContainedTextFile } from '../utils/regular-file.js'
 
 // Directories never worth walking — build output, vendored deps, VCS metadata,
 // language caches. Keeps the scan bounded and the symbol table signal-rich.
@@ -259,10 +260,9 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
     // part of the symbol table, same as the file viewer; see ide/search.js.
     if (isDaemonState(absPath)) return
     filesRead++
-    let content
-    try {
-      content = await readFile(absPath, 'utf-8')
-    } catch { return }
+    // One checked, pinned open: see readContainedTextFile.
+    const content = await readContainedTextFile(absPath, root, maxFileSize)
+    if (content === null) return
     const rel = relative(root, absPath).split(sep).join('/')
     for (const s of parseSymbols(content, rel)) {
       if (symbols.length >= maxSymbols) { truncated = true; return }

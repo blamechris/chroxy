@@ -62,6 +62,9 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
       sendFn: mock.fn(),
       broadcastFn: mock.fn(),
       validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
       pendingPermissions: new Map(),
       permissionSessionMap: new Map(),
       getSessionManager: () => ({ getSession: () => null }),
@@ -104,6 +107,56 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
     assert.doesNotMatch(String(res.body ?? ''), /unbound token/)
   })
 
+  it('refuses a pairing token whose stored binding is empty instead of reading it as unbound', async () => {
+    pairingTokens.set('empty-binding-token', '')
+    const res = await respond('empty-binding-token')
+    assert.equal(res.statusCode, 403)
+  })
+
+  it('refuses a pairing token whose binding lookup reports nothing (undefined) as unbound', async () => {
+    pairingTokens.set('undefined-binding-token', undefined)
+    const res = await respond('undefined-binding-token')
+    assert.equal(res.statusCode, 403)
+    assert.match(String(res.body), /unbound token/)
+  })
+
+  it('answers a scoped caller\'s "always allow" as a one-time allow', async () => {
+    const calls = []
+    const owner = {
+      _pendingPermissions: { has: () => true },
+      respondToPermission: (...args) => { calls.push(args); return true },
+    }
+    const scopedHandler = createPermissionHandler({
+      sendFn: mock.fn(),
+      broadcastFn: mock.fn(),
+      validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map([['perm-1', 'sess-X']]),
+      getSessionManager: () => ({ getSession: () => ({ session: owner }) }),
+      pairingManager: {
+        isSessionTokenValid: () => true,
+        getSessionIdForToken: () => 'sess-X',
+      },
+    })
+    try {
+      const req = makeReq(
+        JSON.stringify({ requestId: 'perm-1', decision: 'allowAlways' }),
+        { authorization: 'Bearer bound-token' },
+      )
+      const res = makeRes()
+      scopedHandler.handlePermissionResponseHttp(req, res)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0][1], 'allow')
+    } finally {
+      scopedHandler.destroy()
+    }
+  })
+
   it('does NOT 403 when the pairingManager lacks isSessionTokenValid (single-token / partial mode)', async () => {
     // The typeof guard must treat the token as the primary (not a pairing token):
     // it neither throws nor rejects when isSessionTokenValid is absent.
@@ -111,6 +164,9 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
       sendFn: mock.fn(),
       broadcastFn: mock.fn(),
       validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
       pendingPermissions: new Map(),
       permissionSessionMap: new Map(),
       getSessionManager: () => ({ getSession: () => null }),

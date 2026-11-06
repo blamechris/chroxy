@@ -141,7 +141,7 @@ for (const ns of CTX_NAMESPACE_NAMES) {
  * Each known production field is routed into its namespace. Unknown keys —
  * including the optional DI seams handlers read with `ctx?.X ?? defaultX`
  * (`evaluateDraft`, `summarizeSession`, `scanConversations`, `resolveRepoSet`,
- * `surveyRunners`, `realpath`, `_pendingEvaluatorAwaits`, `correlationId`, …)
+ * `surveyRunners`, `realpath`, `correlationId`, …)
  * and the legacy `clientManager` handle from makeSessionIndexCtx — are left at
  * the top level, exactly where the handlers and tests expect them.
  *

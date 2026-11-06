@@ -14,10 +14,11 @@
  * attacker-reachable WS surface's boundary; the regression tests
  * (ide-search.test.js) assert the symlink-escape cases on both.
  */
-import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
+import { readdir, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 import { isPathWithin } from '../utils/path-containment.js'
 import { makeConfigDirFilter } from '../ws-file-ops/common.js'
+import { readContainedTextFile } from '../utils/regular-file.js'
 
 // Directories never worth walking (mirrors symbols.js IGNORED_DIRS).
 const IGNORED_DIRS = new Set([
@@ -145,10 +146,9 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
     // and does not count against the file cap.
     if (isDaemonState(absPath)) return
     filesRead++
-    let content
-    try {
-      content = await readFile(absPath, 'utf-8')
-    } catch { return }
+    // One checked, pinned open: see readContainedTextFile.
+    const content = await readContainedTextFile(absPath, root, maxFileSize)
+    if (content === null) return
     // Skip a file that looks binary (a NUL in the first chunk) despite its ext.
     if (content.indexOf(String.fromCharCode(0)) !== -1) return
     const rel = relative(root, absPath).split(sep).join('/')

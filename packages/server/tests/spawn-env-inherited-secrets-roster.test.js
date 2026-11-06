@@ -107,6 +107,9 @@ const EXEMPT = {
     'leak-prevention boundary is enforced at THAT daemon\'s own ' +
     '_buildChildEnv-style builders (this fix) when it goes on to spawn a ' +
     'provider, not at the self-fork step.',
+  'checkpoint-manager.js':
+    'spawns `git` only (snapshot plumbing under a private index); the inherited ' +
+    'secrets are stripped from its env anyway and it is not a permission-hook consumer.',
   'ws-file-ops/git.js':
     'spawns the `git` binary only, for dashboard repo staging/diff ' +
     'operations — not an AI provider, an MCP server, or an arbitrary ' +
@@ -478,6 +481,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'built-in-tools/bash-exec.js',
       'byok-mcp-client.js',
       'byok-tool-executor.js',
+      'checkpoint-manager.js',
       'claude-tui-session.js',
       'daemon-commit.js', // #8324 — the git spawn that reads the commit the daemon started from
       'instruction-policy.js',

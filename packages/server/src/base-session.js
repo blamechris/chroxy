@@ -513,7 +513,7 @@ export class BaseSession extends EventEmitter {
     // here so JSON.stringify produces `true`/`false` (not `1`/`null`) on
     // the auth_ok / session_list wires.
     this.promptEvaluator = !!promptEvaluator
-    // #3639: per-session regex source string used by `shouldSkipEvaluator`
+    // #3639: per-session regex source string used by `shouldSkipEvaluatorAsync`
     // to extend the default continuation/ack skip list. Mirrors the
     // server-wide `config.promptEvaluatorSkipPattern` from #3187 but is
     // evaluated FIRST in input-handlers.js so a per-session override
@@ -1846,10 +1846,10 @@ export class BaseSession extends EventEmitter {
    * stored value changes and `false` for either invalid input or a
    * redundant set — same idempotent contract as `setPromptEvaluator`.
    *
-   * The compiled regex itself isn't stored: `shouldSkipEvaluator` owns
+   * The compiled regex itself isn't stored: `shouldSkipEvaluatorAsync` owns
    * the compile cache (LRU keyed by source string) so a stale per-session
    * pattern won't pin a closure here. The validation done here is
-   * defence-in-depth — `shouldSkipEvaluator` also try/catches its own
+   * defence-in-depth — `shouldSkipEvaluatorAsync` also try/catches its own
    * compile, so a session that somehow ends up with a bad source still
    * fails-open to default-only skip rules.
    *

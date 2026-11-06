@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import {
   evaluateDraft,
   shouldSkipEvaluator,
+  shouldSkipEvaluatorAsync,
   _resetSkipPatternCache,
 } from '../src/prompt-evaluator.js'
 
@@ -67,7 +68,7 @@ describe('auto-evaluator decision contract (#3189)', () => {
       assert.equal(shouldSkipEvaluator('a'.repeat(20)), false)
     })
 
-    it('custom skip pattern OR-d with the default — pattern source is per-session config', () => {
+    it('custom skip pattern OR-d with the default — pattern source is per-session config', async () => {
       _resetSkipPatternCache()
       try {
         // Draft must be >= 20 chars and NOT match the default pattern, so
@@ -76,10 +77,10 @@ describe('auto-evaluator decision contract (#3189)', () => {
         // before the custom-pattern branch ever runs (Copilot review on
         // PR #3650 caught the original test passing for the wrong reason).
         const cfg = { promptEvaluatorSkipPattern: '^acknowledged for the team$' }
-        assert.equal(shouldSkipEvaluator('acknowledged for the team', cfg), true)
+        assert.equal(await shouldSkipEvaluatorAsync('acknowledged for the team', cfg), true)
         // Default rules still apply when the custom pattern doesn't match —
         // the substantive message still goes to evaluateDraft.
-        assert.equal(shouldSkipEvaluator('this is a substantive draft message', cfg), false)
+        assert.equal(await shouldSkipEvaluatorAsync('this is a substantive draft message', cfg), false)
       } finally {
         _resetSkipPatternCache()
       }

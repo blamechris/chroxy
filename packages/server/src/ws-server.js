@@ -28,7 +28,7 @@ import { getDashboardBuildId } from './dashboard-build.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
-import { broadcastEnvironmentList } from './environments/authority.js'
+import { broadcastEnvironmentList, isBoundClient, isBoundToOtherSession, CONVERSATION_FRAME } from './environments/authority.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
@@ -38,8 +38,10 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
+import { frameForBoundClient } from './outgoing-policy.js'
+import { captureBearer, bearerStillValid } from './bearer-recheck.js'
 import { getProviderDataDirs, getProviderTranscriptSources, resolveDaemonDefaultProvider } from './providers.js'
-import { assertCtxShape } from './ws-handler-context.js'
+import { assertCtxShape, buildMessageCtx } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
@@ -788,6 +790,10 @@ export class WsServer {
     // would never fire in production. Cleaned up by `_sessionDestroyedHandler`
     // so a long-running server doesn't leak entries for destroyed sessions.
     this._evaluatorIterations = new Map() // sessionId -> iteration count
+    // Per-session evaluator-await lock (#3636/#3666). Lives here for the same
+    // reason as the counter above: the handler ctx is spread per message, so a
+    // lock stored on the ctx itself would be a fresh, empty one every time.
+    this._pendingEvaluatorAwaits = new Map() // sessionId -> in-flight promise
     // #7822: bounded process-local input acceptance records. The handler scopes
     // these by session and clientMessageId; session destruction drops the whole
     // bucket. They are intentionally not persisted, so acks describe process
@@ -844,6 +850,8 @@ export class WsServer {
       // own session itself — opt in explicitly.
       validateBearerAuth: (req, res) => self._validateBearerAuth(req, res, { allowScoped: true }),
       validateHookAuth: (req, res) => self._validateHookAuth(req, res),
+      captureBearer: (req) => captureBearer(self, req),
+      bearerStillValid: (captured) => bearerStillValid(self, captured),
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
@@ -1036,6 +1044,7 @@ export class WsServer {
         // #3637: stable per-session auto-evaluator iteration counter (#3186).
         // See WsServer constructor for the lifecycle rationale.
         evaluatorIterations: this._evaluatorIterations,
+        pendingEvaluatorAwaits: this._pendingEvaluatorAwaits,
         inputDedupRecords: this._inputDedupRecords,
       },
     }
@@ -1086,7 +1095,7 @@ export class WsServer {
       get agentConnections() { return self.config?.agentConnections ?? [] },
       send: sendFn,
       broadcast: broadcastFn,
-      getConnectedClientList: () => self._getConnectedClientList(),
+      getConnectedClientList: (forClient) => self._getConnectedClientList(forClient),
       get permissions() { return self._permissions },
       // #3760: effective inactivity timeout, surfaced in auth_ok so clients
       // render their ActivityIndicator timeout warning against the real
@@ -1369,6 +1378,7 @@ export class WsServer {
         // but a long-running server with many session destroys would
         // accumulate dead entries.
         this._evaluatorIterations.delete(sessionId)
+        this._pendingEvaluatorAwaits.delete(sessionId)
         this._inputDedupRecords.delete(sessionId)
         // #7450's survey-throttle prune used to live here, keyed on this
         // EVENT — but #8092 found a teardown path (the restore-rebind branch
@@ -1744,7 +1754,9 @@ export class WsServer {
             // and de-auths instead, so a compromised connection can't gain
             // currency this way. Unencrypted clients get no token, so theirs
             // stays stale (they must reconnect) — handled by the else branch.
-            client.authToken = newToken
+            // A session-scoped connection was not sent the token (see
+            // outgoing-policy.js), so its recorded credential stays its own.
+            if (!isBoundClient(client)) client.authToken = newToken
             encrypted++
           } else {
             this._send(ws, { type: 'token_rotated', expiresAt, reason: 'scheduled' })
@@ -2791,7 +2803,7 @@ export class WsServer {
     log.debug(`[${correlationId}] Handling ${validatedMsg.type} from ${client.id}`)
 
     // Route based on server mode — pass correlationId in context
-    const ctx = { ...this._handlerCtx, correlationId }
+    const ctx = buildMessageCtx(this._handlerCtx, correlationId)
     try {
       if (this.sessionManager) {
         await handleSessionMessage(ws, client, validatedMsg, ctx)
@@ -3165,8 +3177,8 @@ export class WsServer {
   }
 
   /** Get list of connected clients for auth_ok payload */
-  _getConnectedClientList() {
-    return this._clientManager.getConnectedList()
+  _getConnectedClientList(forClient) {
+    return this._clientManager.getConnectedList(forClient)
   }
 
   /** Broadcast client_joined to all OTHER authenticated clients */
@@ -3504,6 +3516,16 @@ export class WsServer {
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
+    // The one outgoing choke point: a session-scoped connection is sent no
+    // host-wide frame and has host-wide fields removed from the rest.
+    if (client && isBoundClient(client)) {
+      // A frame tagged with another session is not for this connection, on a
+      // direct send as on a broadcast.
+      if (message?.[CONVERSATION_FRAME] !== true && typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) return true
+      const frame = frameForBoundClient(message)
+      if (frame === null) return true
+      message = frame
+    }
     // #5721: propagate the delivery boolean so callers gating crypto state on a
     // frame reaching the wire (the eager handshake's auth_ok) can observe a
     // swallowed send failure. Other callers ignore the return, unchanged.
