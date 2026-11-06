@@ -10,6 +10,7 @@ import { isPathWithin } from '../utils/path-containment.js'
 import { realpathOfDeepestAncestor, unresolvablePathError, fileOpErrorMessage } from './common.js'
 import { truncateForLog } from './reader.js'
 import { isGitRepo } from '../utils/git-repo.js'
+import { validateCwdAllowed } from '../handler-utils.js'
 
 const log = createLogger('ws')
 
@@ -26,6 +27,32 @@ const LISTING_UNRESOLVABLE_REASONS = {
   ENOTDIR: 'Not a directory',
 }
 
+const HOME_ONLY_DENIAL = 'Access denied: directory listing is restricted to the home directory'
+const HOME_AND_ROOTS_DENIAL =
+  'Access denied: directory listing is restricted to the home directory and the configured workspace roots'
+
+function hasWorkspaceRoots(config) {
+  return Array.isArray(config?.workspaceRoots) &&
+    config.workspaceRoots.some((r) => typeof r === 'string' && r.length > 0)
+}
+
+/**
+ * The one containment rule for Browse (`list_directory`, `check_git_repo`): $HOME
+ * as before, plus whatever New Session's cwd check (`validateCwdAllowed`, the
+ * credential-directory deny-list then `workspaceRoots`) accepts. Asking the same
+ * function keeps the two from drifting. A session-bound client keeps the
+ * $HOME-only boundary: it cannot create sessions, so it gets nothing from the
+ * create allowlist (docs/security/bearer-token-authority.md section 4).
+ * @param {string} realPath canonical (realpath) target
+ * @param {string} homeReal canonical home
+ * @param {{ config?: object|null, bound?: boolean }} [opts]
+ */
+function isBrowsable(realPath, homeReal, opts = {}) {
+  if (isPathWithin(realPath, homeReal)) return true
+  if (opts.bound !== false || !opts.config) return false
+  return validateCwdAllowed(realPath, opts.config) === null
+}
+
 /**
  * Directory browsing, file listing, slash commands, and agent listing.
  *
@@ -40,7 +67,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
   const catalogReaddir = deps.readdir ?? readdir
 
   /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath) {
+  async function listDirectory(ws, requestedPath, opts = {}) {
     let absPath = null
     try {
       const home = homedir()
@@ -73,7 +100,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
             parentPath: null,
             entries: [],
             error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
+              hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL),
           })
           return
         }
@@ -92,13 +119,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       }
       const homeReal = await realpath(home)
 
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
+      if (containmentUnknown || !isBrowsable(realAbsPath, homeReal, opts)) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
+          error: hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL,
         })
         return
       }
@@ -745,14 +772,14 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     sendFn(ws, msg)
   }
 
-  async function probeGitRepo(trimmed) {
+  async function probeGitRepo(trimmed, opts) {
     try {
       const home = homedir()
       const absPath = normalize(trimmed.startsWith('~')
         ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
         : resolve(trimmed))
       const [realAbs, homeReal] = await Promise.all([realpath(absPath), realpath(home)])
-      if (!isPathWithin(realAbs, homeReal)) return null
+      if (!isBrowsable(realAbs, homeReal, opts)) return null
       if (!(await stat(realAbs)).isDirectory()) return null
       return await isGitRepo(realAbs)
     } catch {
@@ -765,7 +792,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     replyGitRepoCheck(ws, requestedPath, requestId, null)
   }
 
-  async function checkGitRepo(ws, requestedPath, requestId) {
+  async function checkGitRepo(ws, requestedPath, requestId, opts = {}) {
     const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
     if (!trimmed) return replyGitRepoCheck(ws, requestedPath, requestId, null)
     let pending = ws && typeof ws === 'object' ? inFlightChecks.get(ws) : undefined
@@ -776,7 +803,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     let probe = pending.get(trimmed)
     if (!probe) {
       if (pending.size >= MAX_GIT_CHECKS_PER_CLIENT) return replyGitRepoCheck(ws, requestedPath, requestId, null)
-      probe = probeGitRepo(trimmed).finally(() => { pending.delete(trimmed) })
+      probe = probeGitRepo(trimmed, opts).finally(() => { pending.delete(trimmed) })
       pending.set(trimmed, probe)
     }
     return replyGitRepoCheck(ws, requestedPath, requestId, await probe)

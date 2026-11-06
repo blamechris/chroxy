@@ -851,6 +851,23 @@ export function validateCwdAllowed(cwd, config = null) {
 }
 
 /**
+ * Startup advisory for the daemon's default cwd (#8303). A session created with
+ * a blank cwd inherits it without going through {@link validateCwdAllowed}, so a
+ * configured directory that an explicit New Session would refuse (outside
+ * `workspaceRoots`/$HOME, or a credential directory) is otherwise accepted
+ * silently. Advisory only: a blank cwd is still allowed to use it.
+ * @param {string} defaultCwd
+ * @param {object} [config]
+ * @returns {string|null} a warning line, or null when the directory passes
+ */
+export function defaultCwdAdvisory(defaultCwd, config = null) {
+  const denial = validateCwdAllowed(defaultCwd, config)
+  if (!denial) return null
+  return `Default working directory ${defaultCwd} fails the same check New Session applies (${denial}); ` +
+    'a session created with a blank directory will still use it, but picking it explicitly will be refused'
+}
+
+/**
  * @deprecated Use validateCwdAllowed(cwd, config) instead.
  *
  * Kept as a back-compat alias that calls validateCwdAllowed with no
