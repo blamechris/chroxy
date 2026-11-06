@@ -584,6 +584,15 @@ describe('evaluateDraft', () => {
   })
 })
 
+describe('the synchronous skip decision never runs a configured pattern', () => {
+  it('ignores a custom pattern that would match (the bounded async path owns it)', () => {
+    assert.equal(
+      shouldSkipEvaluator('please proceed when you are ready', { promptEvaluatorSkipPattern: '^please proceed' }),
+      false,
+    )
+  })
+})
+
 describe('shouldSkipEvaluator', () => {
   describe('non-string + empty input', () => {
     it('skips when message is undefined', () => {

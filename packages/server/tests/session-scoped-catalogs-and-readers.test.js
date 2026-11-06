@@ -69,6 +69,22 @@ describe('catalogs for a session-scoped connection are the project\'s own', () =
     assert.equal(JSON.stringify(cmds).includes('LINKED-OUT-SECRET'), false)
   })
 
+  it('a project catalog directory that is a link out of the project is not listed as the project\'s', { skip: SKIP_NO_SYMLINK }, async () => {
+    const cwd2 = join(root, 'work', 'linked-catalogs')
+    mkdirSync(join(cwd2, '.claude'), { recursive: true })
+    symlinkSync(join(home, '.claude', 'commands'), join(cwd2, '.claude', 'commands'))
+    symlinkSync(join(home, '.claude', 'agents'), join(cwd2, '.claude', 'agents'))
+    const cmds = await fileOps.computeSlashCommands(cwd2, null, [], { projectOnly: true })
+    assert.equal(cmds.some((c) => c.name === 'hostcmd'), false)
+    assert.equal(JSON.stringify(cmds).includes('HOST-COMMAND-DESCRIPTION'), false)
+    const agents = await fileOps.computeAgents(cwd2, { projectOnly: true })
+    assert.equal(agents.some((a) => a.name === 'hostagent'), false)
+    assert.equal(JSON.stringify(agents).includes('HOST-AGENT-DESCRIPTION'), false)
+    // Unconfined, the same project is listed as before (control).
+    const open = await fileOps.computeSlashCommands(cwd2, null, [])
+    assert.ok(open.some((c) => c.name === 'hostcmd'))
+  })
+
   it('the handlers ask for a project-only listing exactly when the connection is session-scoped', () => {
     const calls = []
     const ctx = {

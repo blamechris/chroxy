@@ -485,6 +485,15 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * path (`listSlashCommands`) and the connect-time `auth_bootstrap` burst
    * (#5555) so both produce an identical `commands` array.
    */
+  // True when `dirReal` (already a real path) lies within the real path of `cwd`.
+  async function isInsideProject(cwd, dirReal) {
+    try {
+      return isPathWithin(dirReal, await realpath(cwd))
+    } catch {
+      return false
+    }
+  }
+
   async function computeSlashCommands(cwd, providerName = null, mcpPrompts = [], { projectOnly = false } = {}) {
     const commands = []
     const seen = new Set()
@@ -511,6 +520,9 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     const scanDir = async (dir, source) => {
       try {
         const dirReal = await realpath(dir)
+        // A project-confined caller: the catalog directory must really be inside
+        // the project (a link out to the user-level catalog is not the project's).
+        if (projectOnly && source === 'project' && !(await isInsideProject(cwd, dirReal))) return
         const entries = await readdir(dirReal, { withFileTypes: true })
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
@@ -611,6 +623,9 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     const listDir = async (dir, source) => {
       try {
         dir = await realpath(dir)
+        if (opts.projectOnly && source === 'project' && !(await isInsideProject(cwd, dir))) {
+          return { dir, source, filenames: [] }
+        }
         const entries = await readdir(dir, { withFileTypes: true })
         const filenames = entries
           .filter(e => e.isFile() && e.name.endsWith('.md'))

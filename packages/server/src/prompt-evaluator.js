@@ -124,23 +124,24 @@ export function shouldSkipEvaluator(message, config = {}) {
  *
  * @param {unknown} message
  * @param {{ promptEvaluatorSkipPattern?: string }} [config]
- * @param {{ test(source: string, text: string): Promise<boolean> }} [matcher] test seam
+ * @param {{ test(source: string, text: string, key?: string): Promise<boolean> }} [matcher] test seam
+ * @param {string} [key] caller identity for the matcher's per-caller queue bound
  * @returns {Promise<boolean>} true if the message should skip the evaluator
  */
-export async function shouldSkipEvaluatorAsync(message, config = {}, matcher = boundedRegex) {
+export async function shouldSkipEvaluatorAsync(message, config = {}, matcher = boundedRegex, key = '') {
   if (shouldSkipEvaluator(message)) return true
   const customSource = config?.promptEvaluatorSkipPattern
   if (typeof customSource === 'string' && customSource.length > 0) {
     // Validated and cached on the main thread (one warning per bad source); the
     // match itself runs in the worker.
     if (_compileSkipPattern(customSource) === null) return false
-    return matcher.test(customSource, message.trim())
+    return matcher.test(customSource, message.trim(), key)
   }
   return false
 }
 
 // Compiled-regex cache keyed by source string. Avoids recompiling on every
-// `shouldSkipEvaluator` call (the auto-evaluator hook will run this on the
+// `shouldSkipEvaluatorAsync` call (the auto-evaluator hook runs this on the
 // `user_input` hot path). Stores `null` for invalid sources so we don't
 // re-warn on every message either.
 //

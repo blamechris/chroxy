@@ -8,8 +8,12 @@
  * persistent worker thread, with
  *   - a deadline per match (`timeoutMs`, default 50 ms) after which the worker is
  *     terminated and replaced, and the match counts as NO MATCH;
- *   - a cap on the tested text (`maxInput`, default 1000 characters; the rest of
- *     the string is not tested);
+ *   - a cap on the tested text (`maxInput`, default 1000 characters): a longer
+ *     string is NOT tested and counts as no match (testing only a prefix would
+ *     let an anchored pattern match a message it never saw the end of);
+ *   - a bound on queued jobs (`maxQueued` overall, `maxQueuedPerKey` per caller
+ *     key): a job over either bound is refused and counts as no match, so one
+ *     caller cannot queue unlimited work on the shared chain;
  *   - one match at a time, so a pattern that runs out its deadline cannot make a
  *     later, harmless match time out beside it.
  * The caller treats "no match" as the conservative answer (for the prompt
@@ -25,14 +29,20 @@ const log = createLogger('bounded-regex')
 
 export const DEFAULT_TIMEOUT_MS = 50
 export const DEFAULT_MAX_INPUT = 1000
+export const DEFAULT_MAX_QUEUED = 32
+export const DEFAULT_MAX_QUEUED_PER_KEY = 4
+const WARN_INTERVAL_MS = 60_000
 const STARTUP_TIMEOUT_MS = 2000
 
 /**
- * @param {{ timeoutMs?: number, maxInput?: number, workerUrl?: URL }} [opts]
+ * @param {{ timeoutMs?: number, maxInput?: number, maxQueued?: number, maxQueuedPerKey?: number, warnIntervalMs?: number, workerUrl?: URL }} [opts]
  */
 export function createBoundedRegexMatcher({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxInput = DEFAULT_MAX_INPUT,
+  maxQueued = DEFAULT_MAX_QUEUED,
+  maxQueuedPerKey = DEFAULT_MAX_QUEUED_PER_KEY,
+  warnIntervalMs = WARN_INTERVAL_MS,
   workerUrl = new URL('./bounded-regex-worker.js', import.meta.url),
 } = {}) {
   let worker = null
@@ -40,6 +50,11 @@ export function createBoundedRegexMatcher({
   let seq = 0
   let chain = Promise.resolve()
   let timeouts = 0
+  let refused = 0
+  let queued = 0
+  const perKey = new Map()
+  let lastWarn = 0
+  let unwarned = 0
 
   function spawn() {
     const w = new Worker(workerUrl)
@@ -80,11 +95,20 @@ export function createBoundedRegexMatcher({
         w.off('exit', onGone)
         resolve(matched)
       }
+      // One job per worker at a time, and this listener is removed in finish(),
+      // so a reply for another job cannot normally arrive here; the id check is
+      // defence in depth, not the thing that keeps jobs apart.
       const onMessage = (m) => { if (m?.id === id) finish(m.matched === true) }
       const onGone = () => finish(false)
       const timer = setTimeout(() => {
         timeouts++
-        log.warn(`a configured pattern ran past ${timeoutMs}ms and was stopped (counted as no match)`)
+        unwarned++
+        const now = Date.now()
+        if (lastWarn === 0 || now - lastWarn >= warnIntervalMs) {
+          lastWarn = now
+          log.warn(`a configured pattern ran past ${timeoutMs}ms and was stopped (counted as no match; ${unwarned} since the last notice)`)
+          unwarned = 0
+        }
         drop(w)
         finish(false)
       }, timeoutMs)
@@ -99,15 +123,27 @@ export function createBoundedRegexMatcher({
     /**
      * @param {string} source pattern source (compiled case-insensitively)
      * @param {string} text
+     * @param {string} [key] caller identity for the per-caller queue bound
      * @returns {Promise<boolean>} true only for a match found within the deadline
      */
-    test(source, text) {
-      const input = String(text).slice(0, maxInput)
-      const p = chain.then(() => run(source, input))
+    test(source, text, key = '') {
+      const str = String(text)
+      if (str.length > maxInput) return Promise.resolve(false)
+      const mine = perKey.get(key) || 0
+      if (queued >= maxQueued || mine >= maxQueuedPerKey) { refused++; return Promise.resolve(false) }
+      queued++
+      perKey.set(key, mine + 1)
+      const p = chain.then(() => run(source, str))
       chain = p.catch(() => {})
+      const done = () => {
+        queued--
+        const n = (perKey.get(key) || 1) - 1
+        if (n <= 0) perKey.delete(key); else perKey.set(key, n)
+      }
+      p.then(done, done)
       return p
     },
-    stats: () => ({ timeouts }),
+    stats: () => ({ timeouts, refused, queued }),
     /** Stop the worker (tests, shutdown). */
     close() { if (worker) drop(worker) },
   }

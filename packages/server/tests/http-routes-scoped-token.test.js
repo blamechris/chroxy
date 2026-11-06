@@ -91,7 +91,15 @@ describe('HTTP routes and a session-scoped bearer token', () => {
       }
       // Only object LITERALS are opt-ins; the destructuring of the option inside
       // _validateBearerAuth is an ObjectPattern.
-      if (node.type === 'Property' && parent?.type === 'ObjectExpression' && !node.computed && node.key?.name === 'allowScoped') optInProps.push({ file, value: node.value })
+      // Identifier-keyed AND string-keyed (`{ 'allowScoped': true }`) properties.
+      if (node.type === 'Property' && parent?.type === 'ObjectExpression' && !node.computed && (node.key?.name === 'allowScoped' || node.key?.value === 'allowScoped')) optInProps.push({ file, value: node.value })
+      // A string or template that spells the option anywhere (a JSON.parse source,
+      // a computed key, a concatenation fragment) is a way to build it without the
+      // identifier. Nothing in src spells it as a string today.
+      if (node.type === 'Literal' && typeof node.value === 'string' && node.value.includes('allowScoped')) stringSpellings.push(file)
+      if (node.type === 'TemplateElement' && node.value?.cooked?.includes('allowScoped')) stringSpellings.push(file)
+      // A destructuring default (`{ allowScoped = true }`) would opt every caller in.
+      if (node.type === 'AssignmentPattern' && node.left?.name === 'allowScoped') defaults.push(`${file}:${node.right.type}:${node.right.value}`)
       if (node.type === 'Property' && node.computed) {
         // A computed key could spell the option without the identifier.
         const k = node.key?.type === 'Literal' ? String(node.key.value) : null
@@ -105,6 +113,8 @@ describe('HTTP routes and a session-scoped bearer token', () => {
     }
     const WATCHED = new Set(['allowScoped', '_isTokenValid', '_validateBearerAuth', '_isSessionScopedToken'])
     const computedKeys = []
+    const stringSpellings = []
+    const defaults = []
     const visit = (dir) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, e.name)
@@ -137,6 +147,13 @@ describe('HTTP routes and a session-scoped bearer token', () => {
     // No computed property key (which could spell the option indirectly) in the
     // two files that hold the opt-ins.
     assert.deepEqual(computedKeys.filter((c) => c.file === 'http-routes.js' || c.file === 'ws-server.js'), [])
+    // The option is never spelled as a string anywhere in src, and its only
+    // destructuring default is the literal `false` (opted out unless asked).
+    assert.deepEqual(stringSpellings, [])
+    assert.deepEqual(defaults, ['ws-server.js:Literal:false'])
+    // No computed key in ANY src file is spelled `allowScoped` (a literal-keyed
+    // computed property is caught above; this names the file if one appears).
+    assert.deepEqual(computedKeys.filter((c) => c.k === 'allowScoped'), [])
     // The http-routes opt-in sits beside the check that binds the token to the
     // path's session.
     const routes = readFileSync(join(SRC, 'http-routes.js'), 'utf8')

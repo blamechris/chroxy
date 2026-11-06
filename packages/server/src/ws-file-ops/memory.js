@@ -421,7 +421,13 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     const resolvedProjectMemoryRoot = await realpathOfDeepestAncestor(lexicalProjectMemoryRoot).catch(() => lexicalProjectMemoryRoot)
     // Kept inside the config tree: a `projects/<slug>` link that leaves it is not
     // followed (the lexical name stays the root, so nothing resolves beneath it).
-    const projectMemoryRoot = isPathWithin(resolvedProjectMemoryRoot, claudeHomeReal) ? resolvedProjectMemoryRoot : lexicalProjectMemoryRoot
+    // It must stay STRICTLY under `<config>/projects/`: a link to the config
+    // directory itself (or to anything else in it, such as the user-level memory)
+    // is within the config tree but is not this project's memory directory.
+    const projectsDir = resolve(claudeHomeReal, 'projects')
+    const projectMemoryRoot = (resolvedProjectMemoryRoot !== projectsDir && isPathWithin(resolvedProjectMemoryRoot, projectsDir))
+      ? resolvedProjectMemoryRoot
+      : lexicalProjectMemoryRoot
     // A project-confined reader (a session-scoped connection) is given the
     // session directory and THIS project's memory directory — not the whole
     // config tree, which also holds the user-level memory and every other

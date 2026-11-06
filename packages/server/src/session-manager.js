@@ -1907,7 +1907,7 @@ export class SessionManager extends EventEmitter {
    *   skills text). Trimmed + capped to SESSION_PREAMBLE_MAX_LENGTH by
    *   BaseSession. Persisted across reconnects.
    * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
-   *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
+   *   string consulted by `shouldSkipEvaluatorAsync` BEFORE the server-wide
    *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
    *   this per-session override lands here in #3639). Pairs with the
    *   per-session promptEvaluator toggle so different sessions can use

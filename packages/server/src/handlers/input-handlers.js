@@ -77,11 +77,11 @@ export function buildHistoryText(text, attCount, contextCount = 0) {
   return stripped ? `${stripped} ${markers.join(' ')}` : markers.join(' ')
 }
 
-// #3639 — build the minimal config object passed into shouldSkipEvaluator.
+// #3639 — build the minimal config object passed into shouldSkipEvaluatorAsync.
 // The per-session promptEvaluatorSkipPattern (string source) takes precedence;
 // the server-wide ctx.services.config.promptEvaluatorSkipPattern (#3187) is the
 // fallback so existing global-config deployments keep working unchanged.
-// shouldSkipEvaluator only reads `config.promptEvaluatorSkipPattern` (verified
+// shouldSkipEvaluatorAsync only reads `config.promptEvaluatorSkipPattern` (verified
 // in prompt-evaluator.js), so we return a single-key object rather than
 // spreading the whole ctx.services.config — this runs on the user_input hot path and
 // the spread was unnecessary allocation/copy work.
@@ -690,11 +690,28 @@ async function handleInput(ws, client, msg, ctx) {
   // (the toggle) is also per-session — the skip pattern shouldn't be the
   // odd one out forced through global config.
   let textToSend = trimmed
-  if (
-    entry.session.promptEvaluator === true
-    && trimmed.length > 0
-    && !(await shouldSkipEvaluatorAsync(trimmed, _resolveSkipConfig(entry, ctx)))
-  ) {
+  // The skip decision is awaited (a configured pattern is matched off the event
+  // loop), so the per-session lock is taken BEFORE that await: otherwise a second
+  // input arriving in the gap passes the entry check above and either overtakes
+  // this one or reaches the evaluator concurrently. The placeholder is replaced by
+  // the evaluator promise below, or released on the skip / cap / error paths.
+  let skipLock = null
+  let skipDecision = true
+  if (entry.session.promptEvaluator === true && trimmed.length > 0) {
+    skipLock = Promise.resolve()
+    _pendingAwaits.set(targetSessionId, skipLock)
+    try {
+      skipDecision = await shouldSkipEvaluatorAsync(trimmed, _resolveSkipConfig(entry, ctx), undefined, String(client.id))
+    } catch (err) {
+      log.warn(`Skip-pattern check failed: ${err?.message || err}; evaluating the draft`)
+      skipDecision = false
+    }
+  }
+  const releaseSkipLock = () => {
+    if (skipLock && _pendingAwaits.get(targetSessionId) === skipLock) _pendingAwaits.delete(targetSessionId)
+  }
+  if (skipLock && skipDecision) releaseSkipLock()
+  if (skipLock && !skipDecision) {
     const counters = _getEvaluatorIterations(ctx)
     const currentIteration = (counters.get(targetSessionId) || 0) + 1
 
@@ -703,12 +720,14 @@ async function handleInput(ws, client, msg, ctx) {
       // session isn't permanently locked out of evaluator gating.
       log.warn(`Evaluator iteration cap hit for session ${targetSessionId}; force-forwarding draft`)
       counters.delete(targetSessionId)
+      releaseSkipLock()
     } else {
       // #3636 — per-session serialization. Reject (don't queue) a second
       // concurrent draft for the same session while an evaluator round-trip
-      // is in flight. The hoisted check at function entry (#3666) already
-      // rejects messages arriving during an in-flight await, so by the time
-      // we reach here the lock is guaranteed empty — we just take it.
+      // is in flight. The check at function entry (#3666) rejects messages
+      // arriving while the lock is held, and the lock is held from before the
+      // skip decision is awaited, so it is ours here: we replace the
+      // placeholder with the evaluator promise.
       const pending = _pendingAwaits
 
       const evaluator = typeof ctx.evaluateDraft === 'function' ? ctx.evaluateDraft : defaultEvaluateDraft

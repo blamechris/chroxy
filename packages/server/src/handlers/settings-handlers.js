@@ -930,7 +930,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
  * window from silently losing the change.
  *
  * Empty string and `null` both clear the override — at that point
- * `shouldSkipEvaluator` falls through to the server-wide
+ * `shouldSkipEvaluatorAsync` falls through to the server-wide
  * `config.promptEvaluatorSkipPattern` (#3187) and the default skip rules.
  *
  * Validation: BaseSession.setPromptEvaluatorSkipPattern returns false for
