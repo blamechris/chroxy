@@ -843,8 +843,15 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    *   hook-held (legacy HTTP) permission with NO known owner is never sent by a
    *   filtered call: it cannot be shown to be this session's, and sending it
    *   would drop another session's prompt into this one's transcript.
+   * @param {string} [opts.excludeSessionId] - Skip this session's prompts
+   *   (#9015). The connect handshake passes the session it is about to replay:
+   *   that replay's exit re-sends the session's pending permissions itself
+   *   (`finishReplay`, AFTER `history_replay_end`, where a full-rebuild swap
+   *   cannot drop it), so a second copy from here would be a duplicate. A
+   *   hook-held permission with NO known owner is not excluded: no replay will
+   *   ever claim it, so this call stays the only path that can deliver it.
    */
-  function resendPendingPermissions(ws, client, { sessionId: onlySessionId } = {}) {
+  function resendPendingPermissions(ws, client, { sessionId: onlySessionId, excludeSessionId } = {}) {
     // A session-bound client (share-a-session pairing token, `boundSessionId`)
     // is re-sent only its own session's pending permissions. The bound id is
     // checked with the fail-safe `!= null` test (`isBoundClient`), so an
@@ -861,6 +868,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       for (const [sessionId, entry] of sm._sessions) {
         if (onlySessionId && sessionId !== onlySessionId) continue
         if (isBound && sessionId !== boundSessionId) continue
+        if (excludeSessionId != null && sessionId === excludeSessionId) continue
         if (entry.session?._pendingPermissions instanceof Map) {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
@@ -946,6 +954,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // A bound client gets only the entries owned by its bound session; an
         // ownerless entry cannot be shown to be that session's, so it is skipped.
         if (isBound && ownerSessionId !== boundSessionId) continue
+        if (excludeSessionId != null && ownerSessionId === excludeSessionId) continue
         const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))

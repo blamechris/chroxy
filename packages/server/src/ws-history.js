@@ -1128,7 +1128,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
     send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(rosterProvider), provider: rosterProvider })
-    permissions.resendPendingPermissions(ws, client)
+    // #9015: the active session's prompts are NOT sent here. `replayHistory`
+    // above always ends in `resendPendingPermissionsForSession` (its empty-history
+    // early return and its `finishReplay` both call it), which delivers them
+    // after `history_replay_end`; sending them here too put two copies on the
+    // wire ~1 ms apart. Every other session, and ownerless hook-held prompts,
+    // still go out through this unfiltered call.
+    permissions.resendPendingPermissions(ws, client, entry ? { excludeSessionId: activeId } : undefined)
     // #5555: fire the connect-time bootstrap burst (providers + slash commands
     // + agents) so a new client never sends its 3-request list_* round trip.
     // Fire-and-forget — the slash/agent compute is async (disk scans) and the
@@ -1781,14 +1787,13 @@ export function resendPendingQuestions(ctx, ws, sessionId) {
  * one have nothing to re-send, hence the optional chain on it alone — the
  * method on a real handler is called unguarded so drift fails loudly.
  *
- * Connect: `sendPostAuthInfo` also does the unfiltered resend, so the ACTIVE
- * session's permission can arrive twice on a (re)connect — once from that call
- * and once from here after `history_replay_end`. Both clients update a prompt
- * in place by `requestId` (dashboard `handlePermissionRequest`, app
- * `case 'permission_request'`), so that is one card, and the second delivery
- * is what rescues a BACKGROUND session's card on connect: its
- * `subscribe_sessions` full-rebuild replay otherwise swaps away the card the
- * unfiltered resend had just placed.
+ * Connect (#9015): `sendPostAuthInfo` also does an unfiltered resend, but it
+ * EXCLUDES the active session it is about to replay — this replay-exit call owns
+ * that session's prompts, so they arrive exactly once, after `history_replay_end`.
+ * The unfiltered call still delivers every other session's prompts (and
+ * ownerless hook-held ones); a BACKGROUND session's later `subscribe_sessions`
+ * full-rebuild replay re-asserts its card via this function, which is the
+ * intended second delivery there (clients update in place by `requestId`).
  *
  * @param {object} ctx
  * @param {WebSocket} ws
