@@ -7,8 +7,8 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import type { CumulativeUsage, McpServer, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown, getProviderInfo } from '@chroxy/store-core'
-import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
+import { overlayLiveUsage, useLiveCumulativeUsage } from '../store/live-usage'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import { ViewersIndicator } from './ViewersIndicator'
@@ -162,37 +162,9 @@ function abbreviateTunnel(url: string): string {
 // a referentially-stable identity across renders (avoids render loops).
 const EMPTY_MCP_SERVERS: McpServer[] = []
 
-/**
- * #7793 — overlay live `sessionStates[id].cumulativeUsage` onto the
- * `session_list` snapshot `sessions` array, preferring the live value
- * whenever one exists for that session id.
- *
- * The `session_list` snapshot and the `session_usage` event stream are two
- * separate store slices that update independently (see message-handler.ts:
- * `session_list` replaces `sessions`, `session_usage` patches
- * `sessionStates[id].cumulativeUsage`). On providers whose busy→idle
- * `session_list` broadcast is emitted before usage accounting finishes for
- * the turn (codex, per #7793), the snapshot's `cumulativeUsage` is stale —
- * zero, on a session's first turn — until some later event triggers another
- * `session_list`. The live map is always at least as fresh as the snapshot,
- * so it wins whenever present; `null`/`undefined` in the live map (no
- * `session_usage` received yet for that id) falls back to the snapshot's
- * own value rather than blanking it out.
- *
- * Pure / no React deps so it's unit-testable in isolation from the selector
- * that produces `liveUsage`.
- */
-export function overlayLiveUsage(
-  sessions: SessionInfo[],
-  liveUsage: Record<string, CumulativeUsage | null | undefined>,
-): SessionInfo[] {
-  return sessions.map((session) => {
-    const live = liveUsage[session.sessionId]
-    if (live == null) return session
-    if (live === session.cumulativeUsage) return session
-    return { ...session, cumulativeUsage: live }
-  })
-}
+// #7793/#7801: the live-over-snapshot overlay lives in store/live-usage.ts;
+// re-exported so existing importers keep working.
+export { overlayLiveUsage }
 
 export function Sidebar({
   repos,
@@ -344,41 +316,12 @@ export function Sidebar({
     return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS
   })
 
-  // #7793 — the Tokens panel's source of truth must be the LIVE
-  // `sessionStates[id].cumulativeUsage` (patched by every `session_usage`
-  // event), not the `session_list` snapshot in `sessions`. On providers
-  // whose busy→idle `session_list` broadcast can race ahead of usage
-  // accounting (codex — see #7793) the snapshot still carries the previous
-  // turn's totals — zero, on a session's first turn — for as long as it
-  // takes another `session_list` to land, which can be "until reload".
-  // Read the live map here and overlay it below; same "live overlays
-  // snapshot" shape as App.tsx's `sidebarCumulativeUsage` (#4120), built
-  // for the sibling per-session cost badge.
-  //
-  // `useShallow` is LOAD-BEARING, not idiom (#7797 review). This selector
-  // allocates a fresh `Record` on every call, and zustand 5 subscribes
-  // through `useSyncExternalStore`, which re-invokes `getSnapshot` to check
-  // store consistency and force-re-renders whenever the result is not
-  // reference-equal to the last one. Unwrapped, that is an unbounded render
-  // loop: `Maximum update depth exceeded` (minified React #185 in a
-  // production build) on Sidebar MOUNT — including the empty-`sessionStates`
-  // case, i.e. every fresh page load — which main.tsx's root ErrorBoundary
-  // then turns into a blank dashboard. `activeMcpServers` above can be a
-  // plain selector precisely because it returns an EXISTING reference or the
-  // module-level `EMPTY_MCP_SERVERS` constant; this one cannot.
-  //
-  // Guarded by SidebarRealStore.test.tsx, which renders against the real
-  // store; the store-mocking suites in this package cannot see the loop.
-  const liveCumulativeUsage = useConnectionStore(
-    useShallow((s) => {
-      const out: Record<string, CumulativeUsage | null | undefined> = {}
-      const states = s.sessionStates ?? {}
-      for (const id in states) {
-        out[id] = states[id]!.cumulativeUsage
-      }
-      return out
-    }),
-  )
+  // #7793 — the Tokens panel reads the LIVE per-session cumulativeUsage
+  // overlaid onto the `session_list` snapshot (the snapshot can lag on codex).
+  // The selector, its load-bearing `useShallow` (#7797) and the overlay rule
+  // are shared with App.tsx's cost badge via store/live-usage.ts (#7801).
+  // Guarded by SidebarRealStore.test.tsx and live-usage.test.tsx.
+  const liveCumulativeUsage = useLiveCumulativeUsage()
 
   // Sessions with the live cumulativeUsage overlaid — this, not the raw
   // `sessions` snapshot prop, is what the Tokens panel reads.
