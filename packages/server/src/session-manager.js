@@ -78,6 +78,11 @@ export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 's
  */
 export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed'])
 
+function ownsDeclarationEvent(entry, data) {
+  if (entry?.session?.constructor?.declarationTurnOwnership !== true) return true
+  return typeof entry._declarationTurnId === 'string' && data?.declarationTurnId === entry._declarationTurnId
+}
+
 function sessionHasCanonicalResponses(session) {
   return session?.constructor?.canonicalAssistantResponses === true
 }
@@ -5596,14 +5601,14 @@ export class SessionManager extends EventEmitter {
       // only a bounded parsed candidate waits for the turn's normal result.
       entry._pendingDeclaredStatus = typeof completedAssistant === 'string' ? extractDeclaredStatus(completedAssistant) : null
     }
-    if (event === 'result' && entry) {
+    if (event === 'result' && entry && ownsDeclarationEvent(entry, data)) {
       const pending = entry._pendingDeclaredStatus
       delete entry._pendingDeclaredStatus
       const eligible = sessionHasCanonicalResponses(entry.session) ? data?.declarationEligible === true : data?.declarationEligible !== false
       if (pending && eligible && data?.interrupted !== true && (!data?.turnOutcome || data.turnOutcome === 'completed')) {
         this.setDeclaredStatus(sessionId, pending, 'marker')
       }
-    } else if (event === 'error' && data?.recoverable !== true && entry) {
+    } else if (event === 'error' && data?.recoverable !== true && entry && ownsDeclarationEvent(entry, data)) {
       delete entry._pendingDeclaredStatus
     }
     if (persistNeeded) {
@@ -5818,9 +5823,15 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
+    session.on('declaration_turn', (data) => {
+      const entry = this._sessions.get(sessionId)
+      if (!entry || entry._destroying || typeof data?.declarationTurnId !== 'string') return
+      entry._declarationTurnId = data.declarationTurnId
+      delete entry._pendingDeclaredStatus
+    })
     session.on('assistant_response', (response) => {
       const entry = this._sessions.get(sessionId)
-      if (entry && !entry._destroying) entry._pendingDeclaredStatus = extractDeclaredStatus(response?.text)
+      if (entry && !entry._destroying && ownsDeclarationEvent(entry, response)) entry._pendingDeclaredStatus = extractDeclaredStatus(response?.text)
     })
     // #5431: background_tasks_changed — claude-tui's idle transcript re-scan
     // reporting that outstanding background work changed (a task-notification
@@ -5899,10 +5910,12 @@ export class SessionManager extends EventEmitter {
       this._setTurnInFlight(sessionId, session, active === true)
     })
     // A user Stop is a terminal outcome too (cli/tui emit it instead of a result).
-    session.on('stopped', () => {
+    session.on('stopped', (data) => {
       const entry = this._sessions.get(sessionId)
-      if (entry) delete entry._pendingDeclaredStatus
-      this._noteTurnEnded(sessionId, session)
+      if (entry && ownsDeclarationEvent(entry, data)) {
+        delete entry._pendingDeclaredStatus
+        this._noteTurnEnded(sessionId, session)
+      }
     })
 
     for (const event of PROXIED_EVENTS) {
@@ -5925,7 +5938,7 @@ export class SessionManager extends EventEmitter {
         // and a restart in that window must not call a finished turn interrupted. Every
         // provider's outcome passes this listener. A recoverable error (a rejected
         // follow-up, say) does not end the turn.
-        if (event === 'result' || (event === 'error' && data?.recoverable !== true)) {
+        if ((event === 'result' || (event === 'error' && data?.recoverable !== true)) && ownsDeclarationEvent(this._sessions.get(sessionId), data)) {
           this._noteTurnEnded(sessionId, session)
         }
         this.emit('session_event', { sessionId, event, data })

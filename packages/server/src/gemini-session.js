@@ -403,6 +403,13 @@ export class GeminiSession extends JsonlSubprocessSession {
     if (!event || !event.type) return
 
     switch (event.type) {
+      case 'error': {
+        const terminalWarning = typeof event.message === 'string'
+          && /^(?:Loop detected, stopping execution|Maximum session turns exceeded|Agent execution blocked:)/i.test(event.message)
+        if (event.severity === 'error' || terminalWarning) ctx.declarationStopped = true
+        break
+      }
+
       case 'message': {
         if (event.role !== 'assistant') break
         if (typeof event.content !== 'string') {
@@ -489,7 +496,7 @@ export class GeminiSession extends JsonlSubprocessSession {
         this.emit('result', {
           cost: null,
           duration: null,
-          declarationEligible: !event.error && (event.status === 'success' || (event.status === undefined && ctx.legacyAssistantFormat === true)),
+          declarationEligible: ctx.declarationStopped !== true && !event.error && (event.status === 'success' || (event.status === undefined && ctx.legacyAssistantFormat === true)),
           usage: {
             input_tokens: inputTokens,
             output_tokens: outputTokens,

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -120,14 +120,49 @@ test('archive native restore retains decision on real recovery recipe', async ()
   } finally { h.close() }
 })
 
-test('abrupt child SIGKILL then boot restore keeps persisted decision without shutdown cleanup', () => {
+async function writeThenCrash(dir, mode = 'kill') {
+  const child = spawn(process.execPath, ['--import', './tests/_setup.mjs', '--experimental-test-module-mocks', fileURLToPath(new URL('./fixtures/declared-status-crash-writer.mjs', import.meta.url)), dir, mode], {
+    cwd: fileURLToPath(new URL('../', import.meta.url)), stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  })
+  let stderr = '', timer
+  child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8192) })
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('exit', (code, signal) => resolve({ code, signal }))
+  })
+  const ready = new Promise((resolve) => child.on('message', (message) => {
+    if (message?.type === 'declared-state-ready') resolve()
+  }))
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Crash writer exceeded 5 second ceiling')), 5000) })
+  try {
+    await Promise.race([ready, exited.then(() => { throw new Error(`Child exited before state ready: ${stderr}`) }), deadline])
+    const saved = JSON.parse(readFileSync(join(dir, 'crash.json'), 'utf8')).sessions[0]
+    assert.equal(saved.declaredStatus.decision, 'Pick crash target', 'readiness must follow successful persistence')
+    if (mode === 'graceful') child.send('finish-gracefully')
+    else assert.equal(child.kill('SIGKILL'), true, 'parent must actually issue the abrupt termination')
+    const exit = await Promise.race([exited, deadline])
+    assert.equal(exit.signal, 'SIGKILL', 'recovery proof requires parent-triggered SIGKILL')
+    assert.equal(existsSync(join(dir, 'graceful-exit')), false, 'no shutdown cleanup may run')
+    return saved
+  } finally {
+    clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      let cleanupTimer
+      try {
+        await Promise.race([exited, new Promise((_, reject) => {
+          cleanupTimer = setTimeout(() => reject(new Error('Crash writer did not exit after cleanup kill')), 2000)
+        })])
+      } finally { clearTimeout(cleanupTimer) }
+    }
+  }
+}
+
+test('abrupt parent SIGKILL after ready then boot restore keeps persisted decision without shutdown cleanup', { timeout: 10000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'declared-status-crash-'))
   let sm
   try {
-    const child = spawnSync(process.execPath, ['--import', './tests/_setup.mjs', '--experimental-test-module-mocks', fileURLToPath(new URL('./fixtures/declared-status-crash-writer.mjs', import.meta.url)), dir], { cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8', timeout: 10000 })
-    assert.equal(child.signal, 'SIGKILL', child.stderr)
-    const saved = JSON.parse(readFileSync(join(dir, 'crash.json'), 'utf8')).sessions[0]
-    assert.equal(saved.declaredStatus.decision, 'Pick crash target')
+    const saved = await writeThenCrash(dir)
     sm = new SessionManager({ skipPreflight: true, stateFilePath: join(dir, 'crash.json') })
     sm.restoreState()
     assert.equal(sm.getSession(saved.id).declaredStatus.decision, 'Pick crash target')
@@ -135,6 +170,22 @@ test('abrupt child SIGKILL then boot restore keeps persisted decision without sh
     assert.equal(sm.getSession(saved.id).session.getActivitySnapshot().entries[0].startedAt, saved.decisionActivity.startedAt)
     assert.ok(saved.decisionActivity.startedAt > saved.decisionActivity.endedAt)
   } finally { sm?.destroyAll(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('crash recovery proof rejects a child exiting before persistence readiness', { timeout: 10000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'declared-status-early-exit-'))
+  try {
+    await assert.rejects(writeThenCrash(dir, 'exit-before-ready'), /Child exited before state ready/)
+    assert.equal(existsSync(join(dir, 'crash.json')), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('crash recovery proof rejects graceful shutdown after persistence readiness', { timeout: 10000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'declared-status-graceful-'))
+  try {
+    await assert.rejects(writeThenCrash(dir, 'graceful'), /requires parent-triggered SIGKILL/)
+    assert.equal(existsSync(join(dir, 'graceful-exit')), true, 'negative control actually ran exit cleanup')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 

@@ -44,13 +44,25 @@ line retains its task text and maps `🟢 RUNNING`, `⚪ IDLE`, `🔴 BLOCKED`, 
 is recorded as `unknown`; Chroxy does not guess that work is done. A standalone
 trailing `Next:` line is a compatibility alias and carries no decision change.
 
-Only the latest complete assistant response of a normally completed turn is
-considered. SDK and Claude CLI full assistant records join the text blocks of
+A declaration is applied from the latest complete assistant response at
+provider-reported normal completion. SDK and Claude CLI full assistant records join the text blocks of
 that message; Codex uses completed assistant items independently of its display
 stream. Gemini CLI 0.46 assistant `message` deltas form one bounded response up
 to its next tool request or result. A later response without a valid declaration
 replaces the parsed candidate. A separate internal success flag gates application
 at the result; stop, failure and interrupted or truncated outcomes discard it.
+SDK responses and terminal events carry an internal immutable request identity.
+A superseded query's accounting result still records usage, but cannot apply,
+replace or discard the successor's declaration candidate. These identities stay
+in memory and are separate from the public status model.
+
+Gemini limit, loop-stop and blocked diagnostics veto declaration application,
+even if a later result says success. Informational warnings remain distinct.
+Gemini CLI 0.46 also has a native stop path that emits the same success result
+without a stream-json diagnostic; that wire cannot distinguish the stop from
+normal completion. Chroxy uses the provider-reported completion in that case and
+does not invent a missing stop signal.
+
 Deltas, user/system messages,
 reasoning, oversized or truncated responses, quoted or fenced code, marked
 examples, malformed footers and declarations followed by narrative are ignored.
