@@ -918,6 +918,14 @@ export class CodexAppServerSession extends BaseSession {
    * (see `_buildTurnParams`). There is no separate "set the effort" RPC that
    * works on an idle thread, and `turn/settings/update` only applies to a turn
    * already running.
+   *
+   * #7786 — `null` CLEARS the override: `thinkingLevel` then shows codex's own
+   * `thread/start` echo again and `turn/start` carries no `effort`, so codex
+   * re-resolves its default from `~/.codex/config.toml`. A client reaches this
+   * with `set_thinking_level { level: null }`; the handler passes that null
+   * through without a roster check (a clear names no level). An empty string
+   * also clears, as defence in depth — the wire schema and the handler both
+   * refuse it before it gets here.
    */
   setThinkingLevel(level) {
     const next = typeof level === 'string' && level.length > 0 ? level : null

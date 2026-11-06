@@ -103,6 +103,18 @@ describe('SdkSession effort (#8700) — the level reaches the query() options', 
     assert.equal(captured[0].options.maxThinkingTokens, undefined)
   })
 
+  it('level:null (the wire clear, #7786) is Auto: the override is dropped and neither effort nor budget is sent', async () => {
+    const { s, captured } = capturing({ model: 'claude-opus-5-5' })
+    await hearModels(s)
+    await s.setThinkingLevel('high')
+    await s.setThinkingLevel(null)
+    assert.equal(s.thinkingLevel, null)
+    await s.sendMessage('go')
+    s.destroy()
+    assert.equal(Object.hasOwn(captured[0].options, 'effort'), false)
+    assert.equal(captured[0].options.maxThinkingTokens, undefined)
+  })
+
   it('sends a model that predates effort its budget, not an effort it would drop', async () => {
     const { s, captured } = capturing({ model: 'claude-haiku-4-5' })
     await hearModels(s)

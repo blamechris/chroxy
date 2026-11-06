@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
-import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, createSpy, waitFor } from './test-helpers.js'
 import { setLogListener, addLogListener } from '../src/logger.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 import { CliSession } from '../src/cli-session.js'
@@ -3254,6 +3254,43 @@ describe('session-targeted routing (#611)', () => {
     assert.equal(entryA.session.setModel.callCount, 0, 'session-a should NOT have model changed')
     assert.equal(entryB.session.setModel.callCount, 1, 'session-b should have model changed')
     assert.equal(entryB.session.setModel.lastCall[0], 'sonnet')
+
+    ws.close()
+  })
+
+  // #7786 — the REAL wire: a client frame with `level: null` goes through the
+  // socket, ClientMessageSchema and the router, and reaches the session's
+  // setThinkingLevel as null. The unit test that used to cover the clear passed
+  // `null` straight to the setter, an argument no client could produce.
+  it('set_thinking_level with level:null reaches session.setThinkingLevel(null) and broadcasts the result (#7786)', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+    for (const { session } of sessionsMap.values()) {
+      session.setThinkingLevel = createSpy(async () => {})
+      session.thinkingLevel = null
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'set_thinking_level', level: null, sessionId: 'session-b', requestId: 'r-clear' })
+
+    const entryB = sessionsMap.get('session-b')
+    await waitFor(() => entryB.session.setThinkingLevel.callCount >= 1, { label: 'session-b setThinkingLevel called' })
+
+    assert.equal(entryB.session.setThinkingLevel.lastCall[0], null, 'the wire null reaches the setter as null')
+    assert.equal(sessionsMap.get('session-a').session.setThinkingLevel.callCount, 0, 'session-a untouched')
+    const changed = await waitForMessageMatch(messages, (m) => m.type === 'thinking_level_changed', 2000, 'thinking_level_changed')
+    assert.equal(changed.level, 'default', 'a cleared session reports its resolved level (default when none)')
+    assert.equal(messages.filter((m) => m.type === 'error').length, 0)
 
     ws.close()
   })

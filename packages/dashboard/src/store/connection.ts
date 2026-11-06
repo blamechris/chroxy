@@ -5250,7 +5250,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  setThinkingLevel: (level: string) => {
+  setThinkingLevel: (level: string | null) => {
     const { socket, activeSessionId } = get();
     // #5731 T9: remember the level we're switching FROM, keyed by a requestId the
     // server echoes on a THINKING_LEVEL_NOT_APPLIED rejection, so the error
@@ -5284,7 +5284,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // `<select>` doesn't snap back to the prior value before the server's
     // `thinking_level_changed` broadcast lands. Idempotent — the broadcast
     // re-sets the same value when it arrives. thinkingLevel is per-session only.
-    if (activeSessionId && get().sessionStates[activeSessionId]) {
+    // #7786: a CLEAR (`level: null`) has no level to apply optimistically — what
+    // the session falls back to is the provider's to say, so the dropdown keeps
+    // showing the current level until the server's `thinking_level_changed`
+    // names the resolved one. A rejection restores `previousLevel`, which is
+    // already what is showing.
+    if (level !== null && activeSessionId && get().sessionStates[activeSessionId]) {
       updateActiveSession(() => ({
         thinkingLevel: level as SessionState['thinkingLevel'],
         ...(previousEffective !== undefined ? { effectiveThinkingLevel: null } : {}),

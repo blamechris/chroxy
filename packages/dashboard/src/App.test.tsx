@@ -1363,7 +1363,8 @@ describe('App', () => {
         'gpt-5.5',
       )
       render(<App />)
-      expect(levelOptions()).toEqual(['low', 'zzz', 'xhigh'])
+      // The trailing '' is the "Model default" entry (#7786): App wires the clear on a roster with no `default` of its own.
+      expect(levelOptions()).toEqual(['low', 'zzz', 'xhigh', ''])
     })
 
     it('falls back to the legacy triple for a model row that advertises none WHERE THAT FALLBACK APPLIES', () => {
@@ -1413,7 +1414,7 @@ describe('App', () => {
         'claude-sonnet-4-6',
       )
       render(<App />)
-      expect(levelOptions()).toEqual(['low', 'zzz'])
+      expect(levelOptions()).toEqual(['low', 'zzz', ''])
     })
   })
 

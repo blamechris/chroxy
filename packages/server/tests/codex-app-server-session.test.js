@@ -2673,7 +2673,13 @@ describe('CodexAppServerSession — reasoning effort (#7730)', () => {
     }
   })
 
-  it('a null / empty level clears the override rather than storing a falsy string', () => {
+  // #7786 — the setter's clear branch IS reachable from the wire now: a client
+  // sends `set_thinking_level` with `level: null` and the handler passes exactly
+  // that null here (driven end to end, with a real session, in
+  // tests/handlers/settings-handlers.test.js "clearing the override"). This
+  // unit test pins the setter's half of that contract. The empty string is
+  // defence in depth only — the schema and the handler both refuse it first.
+  it('level:null — the exact value the wire clear delivers — clears the override rather than storing a falsy string', () => {
     const { s, cleanup } = mkSession()
     try {
       s.setThinkingLevel('xhigh')

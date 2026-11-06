@@ -721,6 +721,24 @@ describe('#8086 — setThinkingLevel does not leave a phantom level or dangling 
     expect(_testThinkingLevelRevertPendingSize()).toBe(1)
   })
 
+  // #7786 — the clear goes on the wire as an explicit `level: null`, and writes
+  // NOTHING optimistically: what the session falls back to is the provider's to
+  // report, so the dropdown keeps the current level until thinking_level_changed.
+  it('setThinkingLevel(null) sends level:null, leaves the shown level alone, and arms the revert', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    store.setState((st: any) => ({ sessionStates: { 'sess-1': { ...st.sessionStates['sess-1'], thinkingLevel: 'xhigh', effectiveThinkingLevel: 'medium' } } }))
+    const { _testThinkingLevelRevertPendingSize } = await import('./message-handler')
+    store.getState().setThinkingLevel(null)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toEqual(expect.objectContaining({ type: 'set_thinking_level', level: null, sessionId: 'sess-1' }))
+    expect('level' in sent[0]! && sent[0]!.level === null).toBe(true)
+    expect(store.getState().sessionStates['sess-1']!.thinkingLevel).toBe('xhigh')
+    expect(store.getState().sessionStates['sess-1']!.effectiveThinkingLevel).toBe('medium')
+    expect(_testThinkingLevelRevertPendingSize()).toBe(1)
+  })
+
   // #8700 — the optimistic write clears the reported effective level; the
   // revert it arms must carry that level so a rejection can put it back.
   it('arms the revert with the effective level the optimistic write cleared', async () => {

@@ -240,6 +240,47 @@ describe('ChatSettingsDropdown', () => {
       expect(onThinkingLevelChange).toHaveBeenCalledWith('zzz')
     })
 
+    // #7786 — clearing the override from the picker.
+    describe('Model default entry (#7786)', () => {
+      const codexRoster = [{ id: 'low', label: 'Low' }, { id: 'xhigh', label: 'Xhigh' }]
+
+      it('is offered on a roster with no `default` level, and sends the CLEAR, not a level', () => {
+        const onThinkingLevelChange = vi.fn()
+        const onThinkingLevelClear = vi.fn()
+        renderDropdown({ showThinkingLevel: true, thinkingLevel: 'xhigh', thinkingLevels: codexRoster, onThinkingLevelChange, onThinkingLevelClear })
+        expect(optionValues()).toEqual(['low', 'xhigh', ''])
+        expect(Array.from(thinkingSelect().options).map(o => o.textContent)).toEqual(['Low', 'Xhigh', 'Model default'])
+        fireEvent.change(thinkingSelect(), { target: { value: '' } })
+        expect(onThinkingLevelClear).toHaveBeenCalledTimes(1)
+        expect(onThinkingLevelChange).not.toHaveBeenCalled()
+      })
+
+      it('stays offered on a fresh codex session whose current level is the placeholder `default`', () => {
+        renderDropdown({ showThinkingLevel: true, thinkingLevel: 'default', thinkingLevels: codexRoster, onThinkingLevelClear: vi.fn() })
+        // `default` is APPENDED as the current level; the clear entry must not vanish because of it.
+        expect(optionValues()).toEqual(['low', 'xhigh', 'default', ''])
+      })
+
+      it('is NOT offered where `default` is already a level (Claude: Auto is that choice)', () => {
+        renderDropdown({ showThinkingLevel: true, thinkingLevel: 'high', onThinkingLevelClear: vi.fn() })
+        expect(optionValues()).toEqual(['default', 'high', 'max'])
+      })
+
+      it('is NOT offered when the client supplies no clear handler', () => {
+        renderDropdown({ showThinkingLevel: true, thinkingLevel: 'xhigh', thinkingLevels: codexRoster })
+        expect(optionValues()).toEqual(['low', 'xhigh'])
+      })
+
+      it('a normal level still goes through onThinkingLevelChange', () => {
+        const onThinkingLevelChange = vi.fn()
+        const onThinkingLevelClear = vi.fn()
+        renderDropdown({ showThinkingLevel: true, thinkingLevel: 'low', thinkingLevels: codexRoster, onThinkingLevelChange, onThinkingLevelClear })
+        fireEvent.change(thinkingSelect(), { target: { value: 'xhigh' } })
+        expect(onThinkingLevelChange).toHaveBeenCalledWith('xhigh')
+        expect(onThinkingLevelClear).not.toHaveBeenCalled()
+      })
+    })
+
     // The other half of the pair: a row with no reasoning levels — every Claude
     // provider today — renders exactly what it always did.
     it('falls back to the Claude triple when the model advertises no levels', () => {
