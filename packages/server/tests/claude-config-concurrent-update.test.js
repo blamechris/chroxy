@@ -514,13 +514,20 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     })
   }
 
-  it('settings.json mode warning: group/world-readable warns, owner-only and Windows do not', () => {
-    assert.match(describeSettingsModeWarning({ filePath: '/x/settings.json', mode: 0o644 }), /chmod 600 \/x\/settings\.json/)
-    assert.match(describeSettingsModeWarning({ filePath: '/x', mode: 0o640 }), /readable beyond its owner/, 'group-readable warns')
-    assert.match(describeSettingsModeWarning({ filePath: '/x', mode: 0o604 }), /readable beyond its owner/, 'world-readable warns')
-    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: 0o644, _isWindows: true }), null, 'mode bits are meaningless on win32')
-    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: 0o600 }), null)
-    assert.equal(describeSettingsModeWarning({ filePath: '/x', mode: null }), null)
+  it('settings.json mode warning: group/world-readable warns, owner-only and Windows do not (platform-independent)', () => {
+    // `_isWindows` is passed EXPLICITLY in every case: the default reads the host platform,
+    // which would make this test depend on the runner it happens to execute on.
+    const warn = (mode, filePath = '/x', _isWindows = false) => describeSettingsModeWarning({ filePath, mode, _isWindows })
+    const expectWarning = (w, re, why) => {
+      assert.ok(typeof w === 'string', `${why}: expected a warning string, got ${w === null ? 'null' : typeof w}`)
+      assert.ok(re.test(w), `${why}: warning text did not match ${re}`)
+    }
+    expectWarning(warn(0o644, '/x/settings.json'), /chmod 600 \/x\/settings\.json/, '0644')
+    expectWarning(warn(0o640), /readable beyond its owner/, 'group-readable')
+    expectWarning(warn(0o604), /readable beyond its owner/, 'world-readable')
+    assert.equal(warn(0o644, '/x', true), null, 'mode bits are meaningless on win32')
+    assert.equal(warn(0o600), null)
+    assert.equal(warn(null), null)
   })
 
   it('hook register on a 0644 settings.json preserves the mode and warns', { skip: process.platform === 'win32' }, async () => {
