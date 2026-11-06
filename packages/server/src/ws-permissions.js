@@ -678,7 +678,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       presentedToken &&
       pairingManager.isSessionTokenValid(presentedToken)
     )
-    if (tokenIsPairingToken && callerBoundSessionId === null) {
+    if (tokenIsPairingToken && callerBoundSessionId == null) {
       log.warn('Rejected HTTP /permission-response: an unbound pairing token cannot answer permission requests')
       sendJson(res, 403, { error: 'unbound token cannot answer cross-session permissions' })
       return
@@ -767,13 +767,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           // (PermissionManager → SdkSession → SessionManager → broadcast). The
           // legacy branch has no PermissionManager, so it keeps the inline
           // broadcast (#2905) — sessionId included only when the request was mapped.
-          const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, decision)
+          const effectiveDecision = result.decision ?? decision
+          const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, effectiveDecision)
           if (legacyBroadcast) broadcastFn(legacyBroadcast.frame, legacyBroadcast.filter)
           // #6771 — an allowAlways over the HTTP fallback (iOS notification
           // action) just persisted a durable project rule on the in-process
           // session. Broadcast the updated rule sets so clients' rules surfaces
           // refresh, mirroring the WS handler (settings-handlers.js).
-          if (decision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
+          if (effectiveDecision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
             const rulesSession = getSessionManager()?.getSession?.(result.sessionId)?.session
             if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {
               broadcastFn({

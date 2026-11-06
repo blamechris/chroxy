@@ -22,6 +22,10 @@ export const MAX_MESSAGES = 500
 // worst-case memory. Overridable per-call for tests.
 export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
 
+// One read() call asks for at most this much, so a cancelled read stops within a
+// step (see readConversationTranscriptStrictAsync).
+const READ_STEP_BYTES = 4 * 1024 * 1024
+
 /**
  * Encode a cwd into the directory name Claude Code uses under
  * `~/.claude/projects/` — the ONE implementation of this mapping (#7283).
@@ -355,7 +359,7 @@ export class TranscriptDataError extends Error {
   constructor(code, message) {
     super(message)
     this.name = 'TranscriptDataError'
-    this.code = code // 'missing' | 'unreadable' | 'corrupt'
+    this.code = code // 'missing' | 'unreadable' | 'corrupt' | 'cancelled'
   }
 }
 
@@ -377,7 +381,9 @@ export class TranscriptDataError extends Error {
  * @param {{ expectedIdentity?: { dev: bigint, ino: bigint } }} [opts]
  * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
  */
-export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, { expectedIdentity } = {}) {
+export async function readConversationTranscriptStrictAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES, { expectedIdentity, signal } = {}) {
+  const cancelled = () => new TranscriptDataError('cancelled', 'Transcript read cancelled')
+  if (signal?.aborted) throw cancelled()
   let raw
   let byteTruncated = false
   let fh
@@ -397,7 +403,10 @@ export async function readConversationTranscriptStrictAsync(filePath, maxBytes =
     const buf = Buffer.alloc(length)
     let off = 0
     while (off < length) {
-      const { bytesRead } = await fh.read(buf, off, length - off, start + off)
+      // Bounded steps, so a read nobody is waiting for any more stops promptly
+      // instead of finishing a buffer-sized read first.
+      if (signal?.aborted) throw cancelled()
+      const { bytesRead } = await fh.read(buf, off, Math.min(length - off, READ_STEP_BYTES), start + off)
       if (bytesRead === 0) break
       off += bytesRead
     }

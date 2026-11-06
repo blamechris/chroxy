@@ -194,3 +194,33 @@ describe('#6598 sessionTokenTtl config validation', () => {
     assert.ok(!warnings.some(w => w.includes("sessionTokenTtl")), warnings.join(' | '))
   })
 })
+
+describe('restored session bindings', () => {
+  const now = Date.now()
+  function restore(entries) {
+    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: makeMemStore(entries) })
+    return pm
+  }
+
+  it('keeps a session binding and keeps an absent binding unscoped', () => {
+    const pm = restore([
+      ['tok-bound-aaaaaaaaaaaaaaaaaaaa', { createdAt: now, sessionId: 'sess-1' }],
+      ['tok-open-aaaaaaaaaaaaaaaaaaaaa', { createdAt: now, sessionId: null }],
+      ['tok-open2-aaaaaaaaaaaaaaaaaaaa', { createdAt: now }],
+    ])
+    assert.equal(pm.getSessionIdForToken('tok-bound-aaaaaaaaaaaaaaaaaaaa'), 'sess-1')
+    assert.equal(pm.isSessionTokenValid('tok-open-aaaaaaaaaaaaaaaaaaaaa'), true)
+    assert.equal(pm.getSessionIdForToken('tok-open-aaaaaaaaaaaaaaaaaaaaa'), null)
+    assert.equal(pm.isSessionTokenValid('tok-open2-aaaaaaaaaaaaaaaaaaaa'), true)
+    pm.destroy()
+  })
+
+  for (const bad of ['', 0, 7, {}, [], false]) {
+    it(`does not restore a token whose binding is ${JSON.stringify(bad)} as an unscoped token`, () => {
+      const pm = restore([['tok-bad-aaaaaaaaaaaaaaaaaaaaaa', { createdAt: now, sessionId: bad }]])
+      assert.equal(pm.isSessionTokenValid('tok-bad-aaaaaaaaaaaaaaaaaaaaaa'), false)
+      assert.equal(pm.getSessionIdForToken('tok-bad-aaaaaaaaaaaaaaaaaaaaaa'), null)
+      pm.destroy()
+    })
+  }
+})

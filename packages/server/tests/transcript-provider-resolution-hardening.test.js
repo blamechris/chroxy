@@ -44,7 +44,8 @@ function makeCtx(extra = {}, getSession = () => undefined) {
     ...makeSessionIndexCtx(),
     reseedActiveAgents: createSpy(),
     resendPendingQuestions: createSpy(),
-    sessionManager: { getSession: createSpy(getSession), createSession: createSpy() },
+    // A session-scoped client may read only the conversation its session runs.
+    sessionManager: { getSession: createSpy(getSession), getConversationId: createSpy((sid) => (getSession(sid) ? ID : null)), createSession: createSpy() },
     ...extra,
   })
   ctx.runtime.transcriptSources = [

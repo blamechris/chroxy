@@ -1,4 +1,5 @@
-import { readdir, stat, readFile, open } from 'fs/promises'
+import { readdir, stat } from 'fs/promises'
+import { readRegularFileHead } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -48,20 +49,9 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
     const fileStat = await stat(filePath)
     if (fileStat.size < MIN_FILE_SIZE) return null
 
-    // Read file content (capped at MAX_FILE_READ)
-    if (fileStat.size <= MAX_FILE_READ) {
-      text = await readFile(filePath, 'utf-8')
-    } else {
-      const buf = Buffer.alloc(MAX_FILE_READ)
-      const handle = await open(filePath, 'r')
-      try {
-        const { bytesRead } = await handle.read(buf, 0, MAX_FILE_READ, 0)
-        const decoder = new TextDecoder('utf-8', { fatal: false })
-        text = decoder.decode(buf.subarray(0, bytesRead))
-      } finally {
-        await handle.close()
-      }
-    }
+    // Read file content (capped at MAX_FILE_READ). The open never blocks and
+    // refuses anything that is not a regular file (utils/regular-file.js).
+    ;({ text } = await readRegularFileHead(filePath, MAX_FILE_READ))
   } catch {
     return null
   }

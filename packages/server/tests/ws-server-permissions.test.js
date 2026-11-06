@@ -1149,12 +1149,11 @@ describe('permission/question routing to originating session', () => {
     const taskCwds = new Map()
     // Every frame a client bound to sess-a must not have received: one tagged with
     // another session, an UNTAGGED permission frame (it names no session it could
-    // belong to), or a web-task frame for a task outside sess-a's cwd.
+    // belong to), or any web-task frame.
     const foreign = (messages) => messages.filter((m) => {
       if (typeof m.sessionId === 'string') return m.sessionId !== 'sess-a'
       if (m.type === 'permission_request' || m.type === 'permission_resolved') return true
-      if (m.type === 'web_task_created' || m.type === 'web_task_updated') return m.task?.cwd !== '/tmp/a'
-      if (m.type === 'web_task_error') return taskCwds.get(m.taskId) !== '/tmp/a'
+      if (m.type === 'web_task_created' || m.type === 'web_task_updated' || m.type === 'web_task_error') return true
       return false
     })
 
@@ -1222,7 +1221,7 @@ describe('permission/question routing to originating session', () => {
       pairingManager.destroy()
     })
 
-    it('web task frames reach a bound client only for its own cwd and every task reaches the primary client', async () => {
+    it('web task frames reach no bound client, whatever the task directory, and every task reaches the primary client', async () => {
       const { manager, sessionsMap } = createTwoSessionManager()
       manager._sessions = sessionsMap
       const pairingManager = new PairingManager({ wsUrl: null })
@@ -1248,7 +1247,7 @@ describe('permission/question routing to originating session', () => {
       await settle(guest)
 
       const taskFrames = (msgs) => msgs.filter((m) => m.type.startsWith('web_task_')).map((m) => `${m.type}:${m.task?.taskId ?? m.taskId}`)
-      assert.deepEqual(taskFrames(guest.messages), ['web_task_created:task-own', 'web_task_updated:task-own', 'web_task_error:task-own'])
+      assert.deepEqual(taskFrames(guest.messages), [], 'a task records no owning session, so none is shown to a session-scoped client')
       assert.equal(taskFrames(primary.messages).length, 7)
       assert.deepEqual(foreign(guest.messages), [])
 

@@ -157,6 +157,15 @@ export function createPermissionResolver({
     // #8517: the label, normalised once here so no session, journal or broadcast
     // downstream ever sees one that does not ride beside an `allow`.
     const scope = permissionScope(decision, opts.scope)
+    // A caller counts as session-scoped for ANY non-null binding. `''` is a
+    // binding that names no session, and it must be refused below, not read as
+    // unscoped (a truthiness test here would let it answer anything).
+    const callerIsScoped = callerBoundSessionId != null
+    // A standing "always allow" outlives the prompt and applies to every session
+    // in the project, so a session-scoped caller can only give a one-time allow:
+    // the answer is applied to this request and nothing is stored. (After the
+    // scope label above, which was already dropped beside `allowAlways`.)
+    if (callerIsScoped && decision === 'allowAlways') decision = 'allow'
     const scopeResult = scope ? { scope } : {}
     const scopeArg = scope ? [scope] : []
 
@@ -167,7 +176,7 @@ export function createPermissionResolver({
     const mappedSessionId = permissionSessionMap.get(requestId)
 
     // Invariant A: a bound caller may answer only its own bound session's prompts.
-    if (callerBoundSessionId) {
+    if (callerIsScoped) {
       if (!mappedSessionId || mappedSessionId !== callerBoundSessionId) {
         return { kind: 'binding_mismatch', boundSessionId: callerBoundSessionId }
       }
@@ -255,7 +264,7 @@ export function createPermissionResolver({
             }
           }
           audit(clientId, originSessionId, requestId, decision, extra)
-          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null, ...scopeResult }
+          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null, decision, ...scopeResult }
         }
         return { kind: 'expired', sessionId: originSessionId }
       }
@@ -287,7 +296,7 @@ export function createPermissionResolver({
       // `originSessionId`: there that session's own `respondToPermission` accepted
       // the id, which is what makes it the owner.)
       audit(clientId, mappedSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
-      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null, ...scopeResult }
+      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null, decision, ...scopeResult }
     }
 
     return { kind: 'not_found' }

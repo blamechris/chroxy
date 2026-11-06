@@ -1,7 +1,7 @@
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { isSessionViewer } from './handler-utils.js'
-import { isBoundToOtherSession } from './environments/authority.js'
+import { isBoundToOtherSession, canSeePeer } from './environments/authority.js'
 
 const log = createLogger('ws')
 
@@ -327,7 +327,7 @@ export class WsBroadcaster {
       },
     }
     for (const [ws, client] of this._clients) {
-      if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
+      if (ws !== excludeWs && client.authenticated && ws.readyState === 1 && canSeePeer(client, newClient)) {
         this._sendOneWithBackpressure(ws, client, message)
       }
     }
@@ -343,7 +343,7 @@ export class WsBroadcaster {
   _broadcastClientLeft(departingClient) {
     const message = { type: 'client_left', clientId: departingClient.id }
     for (const [ws, client] of this._clients) {
-      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1) {
+      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1 && canSeePeer(client, departingClient)) {
         this._sendOneWithBackpressure(ws, client, message)
       }
     }

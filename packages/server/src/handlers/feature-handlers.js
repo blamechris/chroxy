@@ -91,41 +91,21 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
     return
   }
 
-  // Adversary A10: bound pairing-issued clients must not be able to
-  // pick an arbitrary cwd for a web task. Force the cwd to the bound
-  // session's cwd so the cloud runner (and any later teleport) only
-  // sees files the client already has legitimate access to. Reject
-  // client-supplied cwds that don't match.
-  let effectiveCwd = msg.cwd
-  if (client.boundSessionId) {
-    const entry = ctx.sessions.sessionManager?.getSession?.(client.boundSessionId)
-    const boundCwd = entry?.cwd
-    if (!boundCwd) {
-      ctx.transport.send(ws, {
-        type: 'web_task_error',
-        taskId: null,
-        ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessions.sessionManager,
-          boundSessionId: client.boundSessionId,
-          message: 'Not authorized to launch web tasks from this session',
-        }),
-      })
-      return
-    }
-    if (effectiveCwd && effectiveCwd !== boundCwd) {
-      ctx.transport.send(ws, {
-        type: 'web_task_error',
-        taskId: null,
-        ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessions.sessionManager,
-          boundSessionId: client.boundSessionId,
-          message: 'Bound clients may only launch web tasks inside the bound session cwd',
-        }),
-      })
-      return
-    }
-    effectiveCwd = boundCwd
+  // A session-scoped client starts no web tasks: a task runs independently of
+  // any session and records no owner, so it cannot stay inside the session.
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'web_task_error',
+      taskId: null,
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: client.boundSessionId,
+        message: 'Not available to a session-scoped connection',
+      }),
+    })
+    return
   }
+  const effectiveCwd = msg.cwd
 
   if (effectiveCwd) {
     const cwdError = validateCwdAllowed(effectiveCwd, ctx.services.config)
@@ -161,9 +141,8 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
 
 function handleListWebTasks(ws, client, msg, ctx) {
   const tasks = ctx.services.webTaskManager.listTasks()
-  // Adversary A10: bound clients only see tasks whose cwd matches the
-  // bound session's cwd, so the list endpoint doesn't become a side
-  // channel for enumerating cross-session task state.
+  // A session-scoped client sees no tasks (canClientSeeWebTask): a task records no
+  // owning session, so the list would otherwise be a view of other sessions' work.
   const visible = tasks.filter((t) => canClientSeeWebTask(client, t, ctx.sessions.sessionManager))
   ctx.transport.send(ws, { type: 'web_task_list', tasks: visible })
 }

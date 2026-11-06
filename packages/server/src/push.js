@@ -453,10 +453,11 @@ export class PushManager {
   /**
    * Register a push token from a client. Delegates to the Expo sink —
    * see ExpoPushSink.registerToken for format validation and the
-   * 2026-04-11 audit (blocker 6) history.
+   * 2026-04-11 audit (blocker 6) history. `opts.sessionId` limits the
+   * registration to notifications for that session.
    */
-  registerToken(token, ownerId = null) {
-    return this._expoSink.registerToken(token, ownerId)
+  registerToken(token, ownerId = null, opts = undefined) {
+    return this._expoSink.registerToken(token, ownerId, opts)
   }
 
   /**

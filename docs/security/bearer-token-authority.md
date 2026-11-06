@@ -134,7 +134,32 @@ When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` o
 
 Bound tokens cannot create, destroy, switch, or list sibling sessions. They can chat into their bound session and answer permissions for it. That's it.
 
-A bound client receives frames, subscriptions and pushes for its bound session only. The rule is `isBoundToOtherSession` / `isBoundClient` in [`environments/authority.js`](../../packages/server/src/environments/authority.js), applied at the broadcaster's delivery point (`ws-broadcaster.js`), at the client manager's subscribe/activate (`ws-client-manager.js`), and in web-task visibility (`canClientSeeWebTask` in `handler-utils.js`). A frame that carries no session id (an unattributed permission request or resolution) goes to unbound clients only.
+A bound client receives frames, subscriptions and pushes for its bound session only. The rule is `isBoundToOtherSession` / `isBoundClient` in [`environments/authority.js`](../../packages/server/src/environments/authority.js), applied at the broadcaster's delivery point (`ws-broadcaster.js`), at the client manager's subscribe/activate (`ws-client-manager.js`), and in web-task visibility (`canClientSeeWebTask` in `handler-utils.js`, which shows a session-scoped connection no task). A frame that carries no session id (an unattributed permission request or resolution) goes to unbound clients only.
+
+### Session-scoped connections: an allowlist
+
+A session-scoped ("bound") connection works on its own session and on nothing else. The contract is an allowlist, applied once, at the dispatch point, rather than a set of checks inside each handler:
+
+- **WebSocket messages.** `handleSessionMessage` ([`ws-message-handlers.js`](../../packages/server/src/ws-message-handlers.js)) dispatches a message for a session-scoped connection only when its type is listed in `BOUND_ALLOWED_MESSAGE_TYPES` ([`bound-client-policy.js`](../../packages/server/src/bound-client-policy.js)). Every other type, including one registered later and never classified, is answered with a `session_error` (`SESSION_TOKEN_MISMATCH`, with `requestType` echoing the refused type) before its handler runs. A connection counts as session-scoped for any non-null binding, so an empty or non-string binding is scoped too and matches no session.
+- **Each allowed type** is either session-local by construction (it resolves the connection's own session and refuses a different one) or carries its own ownership check, and the reason is written beside the entry. `tests/bound-client-policy.test.js` fails when a registered handler is in neither the allowed nor the denied list, when a listed name is not a real handler, and when a type is in both.
+- **HTTP routes.** A route behind the bearer check refuses a session-scoped token by default; the one route that accepts it (`POST /permission-response`) limits the request to the token's session. `tests/http-routes-scoped-token.test.js` fails when a route matcher is added without being classified, or when a second route opts in.
+
+What the allowed messages may touch is narrowed to the connection's own session:
+
+| Resource | Rule for a session-scoped connection |
+|----------|--------------------------------------|
+| Conversations and transcripts (`list_conversations`, `search_conversations`, `request_conversation_transcript`) | Only the conversation the daemon associates with the bound session (`getConversationId`), recorded under the session's directory. No association, no access: there is no fallback to directory containment. The transcript path is derived from the daemon's own record of the session and resolved inside the provider's store with real-path containment and file identity checks. |
+| Transcript reads | Admitted through one limiter: a daemon-wide cap on concurrent reads, a per-connection cap, a bounded queue, identical in-flight reads shared, and a read dropped when its connection closes. The directory scanner and search open files non-blocking and check that the opened descriptor is a regular file. |
+| Permission answers (`permission_response`, `POST /permission-response`) | Only the session's own prompts. A standing "always allow" is applied as a one-time allow; it never stores a rule that other sessions would share. |
+| Push registration (`register_push_token`) | The destination receives notifications that name the bound session, and none that name another session or none. A destination registered by an unscoped connection is never narrowed or widened by a scoped one. |
+| Repository reads (`get_diff`, `git_status`, `git_branches`) | Limited to paths at or beneath the session's directory; the branch list is the checked-out branch only. |
+| Checkpoints | Create, list and delete for the session. Restoring one, in any mode, is not available. |
+| Skills, slash commands, agents, memory | The bound session's own; nothing when no session resolves. |
+| Connect-time information | No host default directory, no host spend meter, no provider list or user-level catalogs, and only the peers on the same session in the connected-client list and join/leave events. |
+
+Not available to a session-scoped connection: creating or resuming sessions, any host-wide roster, configuration or credential read or write, notification preferences, web tasks, repository and directory inventory, file and repository mutation, previews, environments, scheduling, orchestration, and MCP authorisation code submission. The authoritative list is `BOUND_DENIED_MESSAGE_TYPES`.
+
+A persisted pairing record whose session binding is present but is not a non-empty string is not restored; it is never read as an unscoped token.
 
 ### Host-level writes a bound token must NOT reach
 
@@ -306,6 +331,7 @@ Each step here tightened a real bug. Read the PRs in order if extending any of t
 
 Before merging any PR that adds a new HTTP route or WebSocket message handler that touches session state:
 
+0. **Classify a new WebSocket message type for session-scoped connections** in `bound-client-policy.js`: add it to `BOUND_ALLOWED_MESSAGE_TYPES` with the reason it is session-local or the ownership check it carries, or to `BOUND_DENIED_MESSAGE_TYPES`. `tests/bound-client-policy.test.js` fails until you do, and an unclassified type is refused for these connections. A new HTTP route needs an entry in `tests/http-routes-scoped-token.test.js`.
 1. **Decide which token classes you accept.** Most HTTP endpoints accept the primary token only. `/permission` and `/permission-floor` accept hook secrets. `/api/events` and `/api/mailbox*` accept the daemon-level ingest secret only (never the primary token). WS handlers accept primary + pairing-bound.
 2. **If the operation is session-scoped**, branch on `client.boundSessionId` (WS) or call the equivalent of `pairingManager.getSessionIdForToken(token)` (HTTP) and reject mismatches with 403 + `buildSessionTokenMismatchPayload()`. **Exception — a session-scoped SURVEY** (a read whose caller is waiting on a reply) refuses with a degraded, schema-valid snapshot instead, so the client cannot hang; see §4's "Session-scoped surveys" note for the two properties that keeps safe. Either way, run the authority check **before** the session lookup, or the reply distinguishes "exists" from "does not exist" for a caller with no right to know.
 3. **If the operation is global** (e.g. listing all sessions, changing config) or **mints/exposes pairing material or the primary token**, explicitly reject bound tokens — do not let them silently see everything. On HTTP, use **`_validatePrimaryBearerAuth(req, res)`** (403 + `primary_token_required`); see §4's HTTP table. `_validateBearerAuth` refuses session-scoped tokens by default; a route a scoped client legitimately calls must opt in with `{ allowScoped: true }` and itself limit the request to the token's bound session (see `POST /permission-response`). If the only legitimate caller is a process on the daemon's own machine (a deploy or maintenance script), ALSO require `isLoopbackPeer(req)` and run it before the token check (`GET /api/daemon/idle`, #8324).

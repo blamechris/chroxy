@@ -141,10 +141,17 @@ export class PairingManager extends EventEmitter {
       try {
         for (const [token, meta] of this._sessionTokenStore.load()) {
           if (typeof token === 'string' && meta && typeof meta.createdAt === 'number') {
-            // Coerce sessionId to string|null — a hand-edited / corrupt store must
-            // not inject a non-string binding that downstream handlers assume.
-            const sessionId = typeof meta.sessionId === 'string' ? meta.sessionId : null
-            this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId })
+            // A stored binding is either absent (an unscoped token: null or
+            // undefined) or a non-empty session id. Anything else — an empty
+            // string, a number, an object — names no session, so it cannot be
+            // read as "unscoped" either: a corrupt or hand-edited store must not
+            // widen a token. Such a token is not restored; the device re-pairs.
+            const stored = meta.sessionId
+            if (stored != null && (typeof stored !== 'string' || stored.length === 0)) {
+              log.warn('dropping a persisted session token whose session binding is not a session id')
+              continue
+            }
+            this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId: stored ?? null })
           }
         }
         // Arm the background TTL sweep so restored-but-expired tokens are reaped

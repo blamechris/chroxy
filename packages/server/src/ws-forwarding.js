@@ -2,6 +2,7 @@ import { createLogger } from './logger.js'
 import { getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { settlePush } from './push.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
+import { isBoundClient } from './environments/authority.js'
 import { broadcastRosterPerRecipient } from './roster-broadcast.js'
 import { getProviderRuntimeInfo } from './providers.js'
 import { MODEL_UNSUPPORTED_CODE } from './codex-model-rejections.js'
@@ -275,7 +276,8 @@ function setupSessionForwarding(normalizer, ctx) {
     // #5665: monthly programmatic-credit meter is machine-wide — broadcast to
     // ALL authenticated clients, not per-session.
     if (event === 'monthly_budget') {
-      broadcast({ type: 'monthly_budget', ...data })
+      // The host's spend meter: not for a session-scoped connection.
+      broadcast({ type: 'monthly_budget', ...data }, (client) => !isBoundClient(client))
       return
     }
 

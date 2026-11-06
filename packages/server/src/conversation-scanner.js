@@ -1,4 +1,5 @@
-import { readdir, stat, open } from 'fs/promises'
+import { readdir, stat } from 'fs/promises'
+import { openRegularFile } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -37,7 +38,9 @@ export function clearScanCache() {
 async function extractMetadata(filePath) {
   let handle
   try {
-    handle = await open(filePath, 'r')
+    // Never blocks on, and never reads from, anything that is not a regular
+    // file — the listing and this open are separate steps (utils/regular-file.js).
+    ;({ handle } = await openRegularFile(filePath))
     const buf = Buffer.alloc(PREVIEW_BYTES)
     const { bytesRead } = await handle.read(buf, 0, PREVIEW_BYTES, 0)
     // Use TextDecoder with stream: true to avoid replacement characters

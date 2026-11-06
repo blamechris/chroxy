@@ -9,6 +9,7 @@ import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
+import { isPathWithin } from '../utils/path-containment.js'
 import { unresolvablePathError, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError, CONFIG_DIR_REFUSAL } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
@@ -51,6 +52,9 @@ const log = createLogger('ws')
 // subcommand, so it is a separate piece of argv from the options after it.
 const DIFF_PIN_CONFIG = ['-c', 'diff.relative=false']
 const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
+// Limits a diff to the directory git runs in (the session cwd). A fixed literal,
+// never client input.
+const DIFF_CWD_PATHSPEC = ['--', '.']
 
 /**
  * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
@@ -783,8 +787,15 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     }
   }
 
-  /** Get git diff for uncommitted changes in the session CWD */
-  async function getDiff(ws, base, sessionCwd) {
+  /**
+   * Get git diff for uncommitted changes in the session CWD.
+   *
+   * `confineToCwd` (a session-scoped connection) limits the answer to files at or
+   * beneath the session's own directory. `git diff` reports the whole
+   * repository, and several sessions can share one repository, so without it the
+   * diff would include files belonging to a sibling's directory.
+   */
+  async function getDiff(ws, base, sessionCwd, { confineToCwd = false } = {}) {
     if (!sessionCwd) {
       sendFn(ws, {
         type: 'diff_result',
@@ -940,7 +951,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : [])], {
+        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : []), ...(confineToCwd ? DIFF_CWD_PATHSPEC : [])], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -965,7 +976,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD', ...(confineToCwd ? DIFF_CWD_PATHSPEC : [])], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -1002,7 +1013,12 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           for (const p of touched) {
             if (await isConfigDirOrDirectChild(resolve(repoRoot, p))) { inConfigDir = true; break }
           }
-          if (!inConfigDir) shown.push(files[i])
+          if (inConfigDir) continue
+          // A confined reader keeps an entry only when EVERY path it touches (a
+          // rename names two) is inside the session directory. The pathspec above
+          // already limits what git reports; this does not trust it to.
+          if (confineToCwd && !touched.every((p) => isPathWithin(resolve(repoRoot, p), cwdReal))) continue
+          shown.push(files[i])
         }
         files = shown
       }

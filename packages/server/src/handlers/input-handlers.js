@@ -10,6 +10,7 @@ import { InputContextEnvelopeSchema } from '@chroxy/protocol/schemas'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
+import { isBoundClient } from '../environments/authority.js'
 import { createLogger, sessionLogger } from '../logger.js'
 import { answerDigest } from '../question-route-map.js'
 import { INPUT_CONTEXT_CAPABILITIES, InputContextError, prepareInputContext } from '../input-context.js'
@@ -1240,7 +1241,13 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
   // is actually pruned from the registry. Without ref-counting, the
   // first disconnect would strip the token from the second client's
   // active session.
-  const ok = ctx.services.pushManager.registerToken(msg.token, client.id)
+  // A session-scoped connection registers a destination for ITS session's
+  // notifications only; the sink delivers nothing else to it.
+  const ok = ctx.services.pushManager.registerToken(
+    msg.token,
+    client.id,
+    isBoundClient(client) ? { sessionId: client.boundSessionId } : undefined,
+  )
   if (!ok) {
     ctx.transport.send(ws, {
       type: 'push_token_error',

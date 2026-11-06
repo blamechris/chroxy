@@ -1068,7 +1068,7 @@ export class WsServer {
       get agentConnections() { return self.config?.agentConnections ?? [] },
       send: sendFn,
       broadcast: broadcastFn,
-      getConnectedClientList: () => self._getConnectedClientList(),
+      getConnectedClientList: (forClient) => self._getConnectedClientList(forClient),
       get permissions() { return self._permissions },
       // #3760: effective inactivity timeout, surfaced in auth_ok so clients
       // render their ActivityIndicator timeout warning against the real
@@ -3107,8 +3107,8 @@ export class WsServer {
   }
 
   /** Get list of connected clients for auth_ok payload */
-  _getConnectedClientList() {
-    return this._clientManager.getConnectedList()
+  _getConnectedClientList(forClient) {
+    return this._clientManager.getConnectedList(forClient)
   }
 
   /** Broadcast client_joined to all OTHER authenticated clients */

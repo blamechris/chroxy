@@ -13,7 +13,8 @@
 import { realpathSync, statSync } from 'fs'
 import { join, isAbsolute, parse } from 'path'
 import { isPathWithin } from './utils/path-containment.js'
-import { resolveJsonlPath } from './jsonl-reader.js'
+import { projectSlug } from './jsonl-reader.js'
+import { claudeProjectsDir } from './utils/claude-config-dir.js'
 
 const UNSUPPORTED_CODEX =
   'Codex keeps its sessions in ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl in its own record format, ' +
@@ -60,23 +61,30 @@ export function resolveTranscriptSource({ provider, conversationId, cwd = null, 
     return { ok: false, code: 'unsupported', reason: `Transcript view is not supported for ${provider}: ${adapter.unsupported}` }
   }
 
-  // claude-jsonl. Without a locator (the client-hint path, or a scan source
-  // that predates tagging) the historical derivation applies, unchanged.
+  // claude-jsonl. With a locator, the file is the one the scanner found. Without
+  // one (the client-hint path, or a scan source that predates tagging) the cwd
+  // names the file — but that derivation is only a STORAGE KEY: every
+  // non-alphanumeric character encodes to the same `-`, so it can name a
+  // colliding project's directory, and nothing about it has been checked against
+  // the store. It therefore goes through the same containment and identity
+  // checks as a scanner-found file, below.
   if (sourceLocator == null) {
     if (typeof cwd !== 'string' || !cwd) {
       return { ok: false, code: 'invalid_source', reason: 'No source recorded for this conversation' }
     }
-    return { ok: true, provider, path: resolveJsonlPath(cwd, conversationId) }
-  }
-
-  if (!locatorMatches(sourceLocator, conversationId)) {
+  } else if (!locatorMatches(sourceLocator, conversationId)) {
     return { ok: false, code: 'invalid_source', reason: 'Transcript source does not match the conversation' }
   }
-  const root = (sources || []).find((s) => s?.provider === provider)?.projectsDir
+  const registeredRoot = (sources || []).find((s) => s?.provider === provider)?.projectsDir
+  // With no registered store the hint path falls back to the default Claude
+  // store; a locator always needs the store it was found in.
+  const root = sourceLocator == null && registeredRoot == null ? claudeProjectsDir() : registeredRoot
   if (typeof root !== 'string' || !isAbsolute(root)) {
     return { ok: false, code: 'source_unavailable', reason: `No ${provider} transcript store is registered` }
   }
-  const candidate = join(root, sourceLocator)
+  const candidate = sourceLocator == null
+    ? join(root, projectSlug(cwd), `${conversationId}.jsonl`)
+    : join(root, sourceLocator)
   // Containment on the REAL paths, so a symlinked project dir or file cannot
   // point the read outside the provider's root (shared helper, #7287).
   try {

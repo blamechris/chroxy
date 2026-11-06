@@ -21,6 +21,7 @@ import {
 } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
 import { loggerForSession } from '../logger.js'
+import { isBoundClient } from '../environments/authority.js'
 
 // #3250: strict ISO-8601 datetime gate matching the shape z.string().datetime()
 // accepts. Used by handleListSkills to drop malformed timestamps from a
@@ -75,6 +76,14 @@ function rejectSkillTrustIfBound(ws, client, msg, ctx) {
  */
 function handleListSkills(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
+
+  // A session-scoped connection is shown its own session's skills or nothing:
+  // with no resolved session the listing below would fall back to the host's
+  // whole catalog.
+  if (isBoundClient(client) && !entry) {
+    ctx.transport.send(ws, { type: 'skills_list', skills: [] })
+    return
+  }
 
   // #3209: emit the full activation context so the dashboard can
   // render manual-skill toggles. For a bound session, run a fresh

@@ -609,7 +609,8 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // the resolver too, which needs it to prune `permissionInputs[requestId]`
   // (#6559); re-applying it is inert. The resolver's own frame is therefore the
   // success confirmation for BOTH, correlated by requestId + decision.
-  const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, decision)
+  const effectiveDecision = result.decision ?? decision
+  const legacyBroadcast = buildLegacyResolvedBroadcast(result, requestId, effectiveDecision)
   if (legacyBroadcast) ctx.transport.broadcast(legacyBroadcast.frame, legacyBroadcast.filter)
 
   // #6771 — an `allowAlways` that resolved on an in-process session just
@@ -625,7 +626,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // nothing and the rules did not change. For an UNMAPPED prompt `result.sessionId`
   // is also only the answerer's dispatch fallback (#8359), so the frame would be a
   // wasted refresh of an unrelated session's unchanged rules.
-  if (decision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
+  if (effectiveDecision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
     const rulesEntry = ctx.sessions.sessionManager?.getSession?.(result.sessionId)
     const rulesSession = rulesEntry?.session
     if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {

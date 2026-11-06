@@ -1,59 +1,72 @@
 /**
- * Conversation listing / search scope enforcement.
+ * Conversation listing / search / transcript scope.
  *
- * Closes Adversary A8 (2026-04-11 audit). Previously,
- * `list_conversations` and `search_conversations` scanned every JSONL
- * under `~/.claude/projects/**` and returned the full set to any
- * authenticated client — including bound pairing-issued mobile clients
- * that should only see the session they were paired for. A mobile user
- * could enumerate every Claude Code conversation across every project
- * on the operator's machine, grep for secrets-in-transcripts, and
- * identify high-value targets for follow-up attacks.
+ * - **Unbound client** (main API token, desktop dashboard, test client):
+ *   everything, unchanged. Unbound clients already have full-token access, so
+ *   filtering would only hide conversations behind a cosmetic scope.
  *
- * Defense: scope the result set to what the client is allowed to see.
- *
- * - **Bound client** (has `client.boundSessionId`): only conversations
- *   whose recorded `cwd` is the bound session's cwd, or a subdirectory
- *   of it. If the bound session has no cwd (shouldn't happen, but
- *   defensive), return the empty set.
- *
- * - **Unbound client** (main API token, desktop dashboard, test
- *   client): return the full set unchanged. Unbound clients already
- *   have full-token access and can create any session they want;
- *   filtering here would just hide conversations behind a cosmetic
- *   scope.
- *
- * This is a soft defense — an attacker who holds the main API token
- * can already read the files directly. The check exists specifically
- * to shrink the blast radius of a compromised pairing token.
+ * - **Bound client** (`client.boundSessionId` is set, including an empty or
+ *   non-string value — those are bindings that name no session, and they match
+ *   nothing): only the conversation the bound session is itself running.
+ *   Directory containment is NOT ownership. Two sessions can share a project
+ *   directory, and a project can sit beneath another session's directory, so a
+ *   conversation recorded under the bound session's cwd may belong to a
+ *   different session. A conversation is visible to a bound client only when:
+ *     1. its id equals the conversation the daemon associates with the bound
+ *        session (`sessionManager.getConversationId`), AND
+ *     2. its recorded cwd is the bound session's cwd or beneath it.
+ *   When the daemon does not know the association (a session that has not
+ *   started a conversation yet, or a manager that cannot report one) the answer
+ *   is "none": the scope fails closed rather than falling back to the directory.
  */
 import { isAbsolute } from 'path'
 import { isPathWithin } from './handler-utils.js'
+import { isBoundClient } from './environments/authority.js'
 
 /**
- * @param {Array<{ cwd: string|null }>} conversations
+ * The conversation id the daemon associates with the client's bound session, or
+ * null when it is unknown or the client is not usable as a bound client.
+ * @param {object} client
+ * @param {object} ctx
+ * @returns {string|null}
+ */
+export function boundConversationId(client, ctx) {
+  const sid = client?.boundSessionId
+  if (typeof sid !== 'string' || sid.length === 0) return null
+  const id = ctx?.sessions?.sessionManager?.getConversationId?.(sid)
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+/**
+ * May this client read the conversation `conversationId` recorded under `cwd`?
+ * Unbound clients always may. A bound client may only when it is the bound
+ * session's own conversation and `cwd` is inside the session's directory.
+ * @param {{ conversationId: string, cwd: string|null }} conv
+ * @param {object} client
+ * @param {object} ctx
+ * @returns {boolean}
+ */
+export function clientOwnsConversation(conv, client, ctx) {
+  if (!isBoundClient(client)) return true
+  const ownId = boundConversationId(client, ctx)
+  if (!ownId || conv?.conversationId !== ownId) return false
+  const allowedCwd = ctx?.sessions?.sessionManager?.getSession?.(client.boundSessionId)?.cwd
+  if (!allowedCwd || typeof allowedCwd !== 'string' || !isAbsolute(allowedCwd)) return false
+  // `isPathWithin` refuses a non-absolute argument (#7273), and `cwd` is read
+  // out of a record on disk: anything unusable fails closed.
+  const cwd = conv?.cwd
+  if (!cwd || typeof cwd !== 'string' || !isAbsolute(cwd)) return false
+  return isPathWithin(cwd, allowedCwd)
+}
+
+/**
+ * @param {Array<{ conversationId: string, cwd: string|null }>} conversations
  * @param {object} client - Connected client state
- * @param {object} ctx - Handler context (needs `sessionManager.getSession`)
+ * @param {object} ctx - Handler context (needs `sessions.sessionManager`)
  * @returns {Array} Filtered conversation list
  */
 export function scopeConversationsToClient(conversations, client, ctx) {
   if (!Array.isArray(conversations)) return []
-  // Unbound clients: full token, full visibility.
-  if (!client?.boundSessionId) return conversations
-  const entry = ctx?.sessions?.sessionManager?.getSession?.(client.boundSessionId)
-  const allowedCwd = entry?.cwd
-  // Bound-but-cwd-missing: fail closed. A bound client should not see
-  // *any* conversation if we can't confidently scope the result.
-  if (!allowedCwd || typeof allowedCwd !== 'string') return []
-  // #7273 — `isPathWithin` REFUSES a non-absolute argument rather than silently
-  // resolving it against the server process's cwd. `conv.cwd` is read out of a
-  // JSONL record on disk and `allowedCwd` off a session, so neither is
-  // guaranteed well-formed here. Fail CLOSED on anything unusable: a
-  // conversation we cannot confidently place is one a bound client must not see.
-  if (!isAbsolute(allowedCwd)) return []
-  return conversations.filter((conv) => {
-    const cwd = conv?.cwd
-    if (!cwd || typeof cwd !== 'string' || !isAbsolute(cwd)) return false
-    return isPathWithin(cwd, allowedCwd)
-  })
+  if (!isBoundClient(client)) return conversations
+  return conversations.filter((conv) => clientOwnsConversation(conv, client, ctx))
 }

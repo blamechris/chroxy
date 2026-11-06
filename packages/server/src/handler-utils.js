@@ -360,14 +360,13 @@ export function terminalMirrorRecipient(client, sid) {
 
 // The single rule for whether `client` may see a web task (list, teleport and the
 // task_created / task_updated / task_error pushes all route through it): an
-// unbound client sees every task; a session-bound client sees only a task whose
-// cwd equals its bound session's cwd. A bound client with no resolvable bound
-// cwd, or whose task is unknown (`null`/`undefined`) or has no cwd, sees nothing.
-export function canClientSeeWebTask(client, task, sessionManager) {
-  if (!isBoundClient(client)) return true
-  if (!task) return false
-  const boundCwd = sessionManager?.getSession?.(client.boundSessionId)?.cwd
-  return Boolean(boundCwd) && task.cwd === boundCwd
+// unbound client sees every task; a session-scoped client sees none. A task
+// records the directory it was started in but not the session that started it, so
+// there is no way to tell a scoped client's own task from a sibling's in the same
+// directory — and a directory match is not ownership. The parameters after
+// `client` are kept so the call sites read as before.
+export function canClientSeeWebTask(client, _task, _sessionManager) {
+  return !isBoundClient(client)
 }
 
 // #7273 — this WAS a hand-rolled prefix match. It handled the trailing-separator

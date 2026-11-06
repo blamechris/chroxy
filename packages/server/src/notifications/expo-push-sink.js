@@ -95,6 +95,11 @@ export class ExpoPushSink extends NotificationSink {
     // review on PR #2806). Owner IDs are client connection IDs in
     // production; tests can use any unique string.
     this._tokenOwners = new Map()
+    // Session scope of a registration: token -> Map<ownerId, sessionId> for the
+    // owners that registered it on behalf of ONE session (a session-scoped
+    // connection). An owner absent from the inner map registered it unscoped.
+    // See `_sessionsFor`.
+    this._ownerSessions = new Map()
     this._loadFromDisk()
   }
 
@@ -127,7 +132,10 @@ export class ExpoPushSink extends NotificationSink {
     try {
       mkdirSync(dirname(this._storagePath), { recursive: true })
       writeFileRestricted(this._storagePath, JSON.stringify({
-        tokens: [...this.tokens],
+        // A session-scoped registration lasts as long as its connection (it is
+        // released when that connection goes), so it is never written down:
+        // restored from disk it would come back without its scope.
+        tokens: [...this.tokens].filter((t) => this._sessionsFor(t) === null),
         liveActivityTokens: [...this._liveActivityTokens],
       }))
     } catch (err) {
@@ -150,7 +158,14 @@ export class ExpoPushSink extends NotificationSink {
    * registered token to the connection that registered it, so tokens get
    * pruned on client disconnect.
    */
-  registerToken(token, ownerId = null) {
+  registerToken(token, ownerId = null, { sessionId = null } = {}) {
+    // A registration made on behalf of one session (`sessionId`) needs an owner:
+    // its scope is tracked per owner and ends with it. Without one there would be
+    // nothing to release it, and it would outlive the connection unscoped.
+    if (sessionId != null && ownerId == null) {
+      log.warn('Rejected session-scoped push credential without an owner')
+      return false
+    }
     if (typeof token !== 'string' || token.length === 0) {
       log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
       return false
@@ -159,10 +174,11 @@ export class ExpoPushSink extends NotificationSink {
       log.warn(`Rejected malformed push credential (unrecognized format): ${token.slice(0, 40)}`)
       return false
     }
-    if (!this.tokens.has(token)) {
-      this.tokens.add(token)
-      this._persistToDisk()
-    }
+    const isNew = !this.tokens.has(token)
+    if (isNew) this.tokens.add(token)
+    // An unscoped owner joining a token that only scoped owners held makes it
+    // unscoped, which is what the persisted set is keyed on.
+    const widens = sessionId == null && this._ownerSessions.has(token)
     // Track ownership for ref-counted prune-on-disconnect (2026-04-11
     // audit blocker 6 + Copilot review on PR #2806). Multiple clients
     // may register the same token (reconnect race, multi-device); the
@@ -174,9 +190,49 @@ export class ExpoPushSink extends NotificationSink {
         this._tokenOwners.set(token, owners)
       }
       owners.add(ownerId)
+      let scoped = this._ownerSessions.get(token)
+      if (sessionId != null) {
+        if (!scoped) {
+          scoped = new Map()
+          this._ownerSessions.set(token, scoped)
+        }
+        scoped.set(ownerId, sessionId)
+      } else if (scoped) {
+        scoped.delete(ownerId)
+        if (scoped.size === 0) this._ownerSessions.delete(token)
+      }
     }
+    // After the owner and scope bookkeeping above: what is written to disk
+    // depends on it (a session-scoped registration is never persisted).
+    if (isNew || widens) this._persistToDisk()
     log.info(`Registered push credential ${token.slice(0, 30)}...`)
     return true
+  }
+
+  /**
+   * The sessions a registered token may receive notifications for, or null when
+   * it may receive all of them.
+   *
+   * A token is limited only when EVERY owner holding it registered it for a
+   * session; one unscoped owner (the host's own device) makes it unscoped, and a
+   * token with no recorded owner (restored from disk) is unscoped. So a
+   * session-scoped connection can narrow what it receives but can never widen the
+   * delivery of a token someone else registered.
+   * @param {string} token
+   * @returns {Set<string>|null}
+   */
+  _sessionsFor(token) {
+    const scoped = this._ownerSessions.get(token)
+    if (!scoped || scoped.size === 0) return null
+    const owners = this._tokenOwners.get(token)
+    if (!owners || owners.size === 0) return null
+    const sessions = new Set()
+    for (const owner of owners) {
+      const sid = scoped.get(owner)
+      if (sid === undefined) return null
+      sessions.add(sid)
+    }
+    return sessions
   }
 
   /**
@@ -195,10 +251,19 @@ export class ExpoPushSink extends NotificationSink {
       return this.removeToken(token)
     }
     owners.delete(ownerId)
+    const scoped = this._ownerSessions.get(token)
+    let hadScope = false
+    if (scoped) {
+      hadScope = scoped.delete(ownerId)
+      if (scoped.size === 0) this._ownerSessions.delete(token)
+    }
     if (owners.size === 0) {
       this._tokenOwners.delete(token)
       return this.removeToken(token)
     }
+    // The registration that was limited to a session may have been the only thing
+    // keeping the token off disk: persist now that it may be unscoped.
+    if (hadScope) this._persistToDisk()
     return false
   }
 
@@ -242,6 +307,7 @@ export class ExpoPushSink extends NotificationSink {
   removeToken(token) {
     if (this.tokens.delete(token)) {
       this._tokenOwners.delete(token)
+      this._ownerSessions.delete(token)
       this._persistToDisk()
       return true
     }
@@ -314,7 +380,13 @@ export class ExpoPushSink extends NotificationSink {
     const shouldBypassQuietHours = context.shouldBypassQuietHours ?? (() => false)
 
     const eligibleTokens = []
+    const notificationSession = typeof data?.sessionId === 'string' ? data.sessionId : null
     for (const token of this.tokens) {
+      // A token registered for specific sessions receives only notifications
+      // that name one of them. One with no session (a host-wide notice) is not
+      // for it.
+      const sessions = this._sessionsFor(token)
+      if (sessions && !(notificationSession !== null && sessions.has(notificationSession))) continue
       if (!isCategoryEnabled(category, token)) continue
       if (isInQuietHours(now, token) && !shouldBypassQuietHours(category, token)) continue
       eligibleTokens.push(token)
