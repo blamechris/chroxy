@@ -710,7 +710,7 @@ async function handleInput(ws, client, msg, ctx) {
     skipLock = Promise.resolve()
     _pendingAwaits.set(targetSessionId, skipLock)
     try {
-      skipDecision = await shouldSkipEvaluatorAsync(trimmed, _resolveSkipConfig(entry, ctx), ctx.skipPatternMatcher, String(client.id))
+      skipDecision = await shouldSkipEvaluatorAsync(trimmed, _resolveSkipConfig(entry, ctx), undefined, String(client.id))
     } catch (err) {
       log.warn(`Skip-pattern check failed: ${err?.message || err}; evaluating the draft`)
       skipDecision = false

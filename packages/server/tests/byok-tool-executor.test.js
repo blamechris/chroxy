@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs'
 import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -19,7 +19,7 @@ describe('executeBuiltinTool', () => {
   let dir
   let cwdRealCache
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-byok-exec-')))
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-byok-exec-'))
     cwdRealCache = new Map()
   })
   afterEach(() => {
@@ -2378,6 +2378,7 @@ describe('executeBuiltinTool', () => {
       // (not from call start), so the measurement is of the walk's own
       // response latency, not of an unrelated setTimeout's scheduling slop.
       it('walkGlob itself stops within a bounded time of state.stop being set (direct)', { timeout: 15_000 }, async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         buildBigTree(dir, 15, 1000) // 15,000 files
         const { matchers } = compileCaseCheck('**/*.ts')
         const state = { stop: null, visited: 0 }
@@ -2606,6 +2607,7 @@ describe('executeBuiltinTool', () => {
       // this swap straight into the attacker's target and returned matches
       // from OUTSIDE the workspace, reported under a workspace-looking path.
       it('re-verifies a plain-directory entry immediately before opening it, closing a symlink-swap race (security #7910 review)', { timeout: 15_000 }, async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-outer-'))
         try {
           writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
@@ -2653,6 +2655,7 @@ describe('executeBuiltinTool', () => {
       // a real race — the honest way to test a fix whose whole point is a
       // window measured in microseconds.
       it('closes the swap even when it lands in the EXACT window between the pre-open check and opendir (security #7910 review round 2, deterministic)', async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-seam-outer-'))
         try {
           writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
@@ -2709,6 +2712,7 @@ describe('executeBuiltinTool', () => {
       // HANDLE itself, never a fresh path lookup — this drives exactly the
       // swap-then-restore timing above via the seam's two phases.
       it('closes the ABA where a swap-then-restore straddles the open, not just check-then-use (security #7910 review round 3)', async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-aba-outer-'))
         try {
           writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
@@ -2789,6 +2793,7 @@ describe('executeBuiltinTool', () => {
       describe('walk stays inside the workspace when a folder changes during the walk', {
         skip: process.platform === 'win32' ? 'Windows refuses to rename a folder with an open handle under it' : false,
       }, () => {
+        beforeEach(() => { dir = realpathSync(dir) })
         const SIBLINGS = 6
         function setup() {
           const other = mkdtempSync(join(tmpdir(), 'chroxy-walk-other-'))
@@ -2817,14 +2822,14 @@ describe('executeBuiltinTool', () => {
             it(`lists nothing from the replacement for ${pattern}${forceFallback ? ' (path-based listing)' : ''}`, async () => {
               const other = setup()
               try {
-                let swaps = 0
+                let replacements = 0
                 const results = await run(pattern, async (target, phase) => {
-                  if (phase !== 'before-open' || swaps > 0 || !target.startsWith(join(dir, 'p', 'd'))) return
-                  swaps++
+                  if (phase !== 'before-open' || replacements > 0 || !target.startsWith(join(dir, 'p', 'd'))) return
+                  replacements++
                   await renameAsync(join(dir, 'p'), join(dir, 'p.bak'))
                   await symlinkAsync(other, join(dir, 'p'))
                 }, forceFallback)
-                assert.equal(swaps, 1, 'the folder must have been replaced for this to test anything')
+                assert.equal(replacements, 1, 'the folder must have been replaced for this to test anything')
                 assert.equal(results.some((r) => r.includes('OUTSIDE')), false, `unexpected entries: ${results.filter((r) => r.includes('OUTSIDE')).join(', ')}`)
                 if (process.platform === 'linux' && !forceFallback) {
                   for (let i = 0; i < SIBLINGS; i++) assert.ok(results.includes(`p/d${i}/INSIDE.txt`), `p/d${i}/INSIDE.txt must still be listed from the folder that was opened`)
@@ -2845,15 +2850,15 @@ describe('executeBuiltinTool', () => {
                 mkdirSync(join(dir, 'alt', `d${i}`))
                 writeFileSync(join(dir, 'alt', `d${i}`, 'ALT.txt'), '1')
               }
-              let swaps = 0
+              let replacements = 0
               const results = await run('p/*/*', async (target, phase) => {
-                if (phase !== 'before-open' || swaps > 0 || !target.startsWith(join(dir, 'p', 'd'))) return
-                swaps++
+                if (phase !== 'before-open' || replacements > 0 || !target.startsWith(join(dir, 'p', 'd'))) return
+                replacements++
                 await renameAsync(join(dir, 'p'), join(dir, 'p.bak'))
                 if (kind === 'link to') await symlinkAsync(join(dir, 'alt'), join(dir, 'p'))
                 else await renameAsync(join(dir, 'alt'), join(dir, 'p'))
               }, false)
-              assert.equal(swaps, 1)
+              assert.equal(replacements, 1)
               assert.equal(results.some((r) => r.includes('ALT.txt')), false)
             } finally {
               rmSync(other, { recursive: true, force: true })
@@ -2869,14 +2874,14 @@ describe('executeBuiltinTool', () => {
               mkdirSync(join(dir, 'a', 'p', `d${i}`))
               writeFileSync(join(dir, 'a', 'p', `d${i}`, 'INSIDE.txt'), '1')
             }
-            let swaps = 0
+            let replacements = 0
             const results = await run('a/p/*/*', async (target, phase) => {
-              if (phase !== 'before-open' || swaps > 0 || !target.startsWith(join(dir, 'a', 'p', 'd'))) return
-              swaps++
+              if (phase !== 'before-open' || replacements > 0 || !target.startsWith(join(dir, 'a', 'p', 'd'))) return
+              replacements++
               await renameAsync(join(dir, 'a'), join(other, 'a'))
               await symlinkAsync(join(other, 'a'), join(dir, 'a'))
             }, true)
-            assert.equal(swaps, 1)
+            assert.equal(replacements, 1)
             assert.deepEqual(results.filter((r) => r.includes('INSIDE.txt')), [])
           } finally {
             rmSync(other, { recursive: true, force: true })
@@ -2892,14 +2897,14 @@ describe('executeBuiltinTool', () => {
             writeFileSync(join(other, 't', 'OUTSIDE.txt'), '1')
             symlinkSync('real/t', join(dir, 'l1'))
             for (const forceFallback of [false, true]) {
-              let swaps = 0
+              let replacements = 0
               const results = await run('l1/*', async (target, phase) => {
-                if (phase !== 'before-stat' || swaps > 0 || target !== join(dir, 'real', 't')) return
-                swaps++
+                if (phase !== 'before-stat' || replacements > 0 || target !== join(dir, 'real', 't')) return
+                replacements++
                 await renameAsync(join(dir, 'real'), join(dir, 'real.bak'))
                 await symlinkAsync(other, join(dir, 'real'))
               }, forceFallback)
-              assert.equal(swaps, 1)
+              assert.equal(replacements, 1)
               assert.equal(results.some((r) => r.includes('OUTSIDE')), false)
               await rmAsync(join(dir, 'real'), { force: true })
               await renameAsync(join(dir, 'real.bak'), join(dir, 'real'))
@@ -2922,15 +2927,18 @@ describe('executeBuiltinTool', () => {
             }
             writeFileSync(join(other, 'OUTSIDE.txt'), '1')
             for (const forceFallback of [false, true]) {
-              let swaps = 0
+              let replacements = 0
               const results = await run('**', async (target, phase) => {
-                if (phase !== 'before-open' || swaps > 0 || target !== join(ws, 'p')) return
-                swaps++
+                if (phase !== 'before-open' || replacements > 0 || target !== join(ws, 'p')) return
+                replacements++
                 await renameAsync(ws, join(dir, 'ws.bak'))
                 await symlinkAsync(other, ws)
               }, forceFallback, ws)
-              assert.equal(swaps, 1)
+              assert.equal(replacements, 1)
               assert.equal(results.some((r) => r.includes('OUTSIDE')), false)
+              if (process.platform === 'linux' && !forceFallback) {
+                for (let i = 0; i < SIBLINGS; i++) assert.ok(results.includes(`p/d${i}/INSIDE.txt`), `p/d${i}/INSIDE.txt must still be listed from the folder that was opened`)
+              }
               await rmAsync(ws, { force: true })
               await renameAsync(join(dir, 'ws.bak'), ws)
             }
@@ -2939,18 +2947,93 @@ describe('executeBuiltinTool', () => {
           }
         })
 
-        it('a workspace reached through a link lists the same entries as its real path', async () => {
-          mkdirSync(join(dir, 'real', 'x', 'y'), { recursive: true })
-          writeFileSync(join(dir, 'real', 'x', 'y', 'f.txt'), '1')
-          writeFileSync(join(dir, 'real', 'g.txt'), '1')
-          symlinkSync(join(dir, 'real'), join(dir, 'viaLink'))
-          for (const pattern of ['**', '**/*.txt', 'x/*/*']) {
-            for (const forceFallback of [false, true]) {
-              const viaLink = await run(pattern, undefined, forceFallback, join(dir, 'viaLink'))
-              const direct = await run(pattern, undefined, forceFallback, join(dir, 'real'))
-              assert.ok(direct.length > 0, `${pattern} must list something`)
-              assert.deepEqual(viaLink.sort(), direct.sort(), `${pattern}${forceFallback ? ' (path-based)' : ''}`)
+        describe('the search root is the validated path', () => {
+          function fixture() {
+            const other = mkdtempSync(join(tmpdir(), 'chroxy-walk-other-'))
+            writeFileSync(join(other, 'OUTSIDE.txt'), '1')
+            mkdirSync(join(dir, 'ws', 'sub'), { recursive: true })
+            writeFileSync(join(dir, 'ws', 'sub', 'INSIDE.txt'), '1')
+            return other
+          }
+          async function queued(input, cwd, replace) {
+            const saved = process.env.CHROXY_GLOB_MAX_CONCURRENT
+            process.env.CHROXY_GLOB_MAX_CONCURRENT = '1'
+            const held = acquireGlobWalkSlot(1)
+            const releaseHeld = await held.granted
+            try {
+              const call = executeBuiltinTool({ toolName: 'Glob', input, cwd, cwdRealCache: new Map(), cwdCacheTtl: 30_000 })
+              await new Promise((r) => setTimeout(r, 50)) // the call has validated its root and is waiting for a slot
+              await replace()
+              releaseHeld()
+              return await call
+            } finally {
+              if (saved === undefined) delete process.env.CHROXY_GLOB_MAX_CONCURRENT
+              else process.env.CHROXY_GLOB_MAX_CONCURRENT = saved
             }
+          }
+
+          it('a path: search root replaced while the call waits for a slot lists nothing from the replacement', async () => {
+            const other = fixture()
+            try {
+              const r = await queued({ pattern: '*', path: 'sub' }, join(dir, 'ws'), async () => {
+                await renameAsync(join(dir, 'ws', 'sub'), join(dir, 'ws', 'sub.bak'))
+                await symlinkAsync(other, join(dir, 'ws', 'sub'))
+              })
+              assert.equal(r.content.includes('OUTSIDE'), false)
+            } finally { rmSync(other, { recursive: true, force: true }) }
+          })
+
+          it('the session root replaced while the call waits for a slot lists nothing from the replacement', async () => {
+            const other = fixture()
+            try {
+              const r = await queued({ pattern: '*' }, join(dir, 'ws'), async () => {
+                await renameAsync(join(dir, 'ws'), join(dir, 'ws.bak'))
+                await symlinkAsync(other, join(dir, 'ws'))
+              })
+              assert.equal(r.content.includes('OUTSIDE'), false)
+            } finally { rmSync(other, { recursive: true, force: true }) }
+          })
+
+          it('lists the root normally when nothing is replaced (control)', async () => {
+            const other = fixture()
+            try {
+              const r = await queued({ pattern: '*', path: 'sub' }, join(dir, 'ws'), async () => {})
+              assert.equal(r.content, 'INSIDE.txt')
+            } finally { rmSync(other, { recursive: true, force: true }) }
+          })
+
+          it('a parent of the root replaced before the root is opened lists nothing from the replacement', async () => {
+            const other = mkdtempSync(join(tmpdir(), 'chroxy-walk-other-'))
+            try {
+              mkdirSync(join(dir, 'a', 'ws'), { recursive: true })
+              writeFileSync(join(dir, 'a', 'ws', 'INSIDE.txt'), '1')
+              mkdirSync(join(other, 'ws'))
+              writeFileSync(join(other, 'ws', 'OUTSIDE.txt'), '1')
+              const root = join(dir, 'a', 'ws')
+              let replacements = 0
+              const results = await run('*', async (target, phase) => {
+                if (phase !== 'before-stat' || replacements > 0 || target !== root) return
+                replacements++
+                await renameAsync(join(dir, 'a'), join(dir, 'a.bak'))
+                await symlinkAsync(other, join(dir, 'a'))
+              }, false, root)
+              assert.equal(replacements, 1)
+              assert.equal(results.some((r) => r.includes('OUTSIDE')), false)
+            } finally { rmSync(other, { recursive: true, force: true }) }
+          })
+        })
+
+        it('a listing whose entries cannot be checked is an error, not an empty result', {
+          skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+            ? 'needs permission bits that the platform or user does not enforce' : false,
+        }, async () => {
+          mkdirSync(join(dir, 'locked'))
+          writeFileSync(join(dir, 'locked', 'a.txt'), '1')
+          chmodSync(join(dir, 'locked'), 0o444) // names can be read, entries cannot be looked up
+          try {
+            await assert.rejects(run('*', undefined, true, join(dir, 'locked')))
+          } finally {
+            chmodSync(join(dir, 'locked'), 0o755)
           }
         })
 
@@ -2977,6 +3060,7 @@ describe('executeBuiltinTool', () => {
       // fallback, so this runs — and bites — on every CI platform, not only
       // on a macOS dev box.
       describe('path-based fallback: per-entry post-verification (#7919)', () => {
+        beforeEach(() => { dir = realpathSync(dir) })
         function setupSwapFixture() {
           const outer = mkdtempSync(join(tmpdir(), 'chroxy-7919-outer-'))
           writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
@@ -3094,6 +3178,7 @@ describe('executeBuiltinTool', () => {
       // (a check that withholds everything would also make the test above
       // pass, for the wrong reason — docs/false-safety-guards.md).
       it('still descends normally when the seam fires but nothing is swapped (positive control, #7910 review round 2)', async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         mkdirSync(join(dir, 'subtree'))
         const targetAbs = join(dir, 'subtree', 'target')
         mkdirSync(targetAbs)
@@ -3128,6 +3213,7 @@ describe('executeBuiltinTool', () => {
       // it: entering a real directory that is already an ancestor on THIS
       // path is refused before any of its entries are read.
       it('does not grow unbounded on a self-referential symlink loop reached via a determinate segment inside \'**\' (DoS #7910 review round 2)', { timeout: 10_000 }, async () => {
+        dir = realpathSync(dir) // walkGlob takes a canonical root
         mkdirSync(join(dir, 'sub'))
         symlinkSync('.', join(dir, 'sub', 'selfloop'))
         for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
