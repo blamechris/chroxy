@@ -1279,7 +1279,7 @@ function dispatchAgentIdle<S extends DispatchSessionBase>(
 ): void {
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
   const idlePatch = handleAgentIdle()
-  noteTurnEnded(targetId) // #8965: streams whose stream_end was missed are over
+  noteTurnEnded(targetId, 'agent_idle') // #8965: streams whose stream_end was missed are over
   if (targetId && adapter.hasSession(targetId)) {
     adapter.updateSession(targetId, () => idlePatch as unknown as Partial<S>)
   } else {

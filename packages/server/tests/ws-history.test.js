@@ -2485,6 +2485,34 @@ describe('replayHistory', () => {
     assert.equal(agentIdle.sessionId, 'sess-1', 'agent_idle carries the session id')
   })
 
+  // #8965: the synthesized agent_idle is an OLD turn's end. While the session is
+  // busy it would flip the client to idle, and nothing flips it back until the next
+  // stream_start, so a second replay of the same turn would see an idle session.
+  for (const [busy, expectIdle] of [[true, false], [false, true]]) {
+    it(`${expectIdle ? 'still emits' : 'does not emit'} agent_idle after a replayed result when the session is ${busy ? 'busy' : 'idle'} (#8965)`, async () => {
+      const history = [
+        { type: 'user_input', content: 'q' },
+        { type: 'result', cost: null, duration: 100 },
+      ]
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+      ])
+      manager.getHistory = () => history
+      manager.isHistoryTruncated = () => false
+      manager.isSessionBusy = (id) => id === 'sess-1' && busy
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      replayHistory(ctx, ws, 'sess-1')
+      await new Promise(r => setImmediate(r))
+
+      const types = ctx._sends.map(m => m.type)
+      assert.ok(types.includes('result'), 'the result entry itself is still replayed')
+      assert.equal(types.includes('agent_idle'), expectIdle)
+    })
+  }
+
   it('does not emit agent_idle for histories without a result entry (#4628)', async () => {
     const history = [
       { type: 'user_message', content: 'hi' },

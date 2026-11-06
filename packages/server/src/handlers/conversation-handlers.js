@@ -442,6 +442,10 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
   // and CLOSE the client: "Sync Full History" — the button a user presses
   // BECAUSE the view looks wrong — was the action that could drop the
   // connection.
+  // #8965: no synthesized agent_idle for a replayed result while the session runs.
+  const replayBusy = typeof sessionManager.isSessionBusy === 'function'
+    ? sessionManager.isSessionBusy(targetId)
+    : false
   sendChunkedWithBackpressure(ws, fullHistory, {
     emit: (entry) => {
       if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
@@ -458,7 +462,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
         // `_seq` → `historySeq` map (#7454) and the `result` → `agent_idle`
         // synthesis (#7459 / #4628) — come from ws-history.js's shared emitter
         // rather than a copy that can drift away from it again.
-        sendHistoryEntry(send, ws, targetId, entry, client)
+        sendHistoryEntry(send, ws, targetId, entry, client, replayBusy)
       }
     },
     onDone: () => {

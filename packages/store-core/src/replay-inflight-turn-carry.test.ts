@@ -174,12 +174,42 @@ describe('in-flight turn content across a full replay swap (#8965)', () => {
       expect(swapped.map((m) => m.id)).toEqual(['old-1'])
     })
 
-    it('a result replayed inside an open window does not end the live turn', () => {
+    it('a result replayed inside an open window (stamped with historySeq) ends nothing', () => {
       const before = stale()
-      const swapped = fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true }, () => {
-        handleResultUsage({ sessionId: SID }, SID)
+      fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true }, () => {
+        handleResultUsage({ sessionId: SID, historySeq: 3 }, SID)
       })
-      expect(swapped.map((m) => m.id)).toEqual(['old-1', 'live-1'])
+      // The next window still sees the stream open: the replayed result deferred nothing.
+      const next = fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true })
+      expect(next.map((m) => m.id)).toEqual(['old-1', 'live-1'])
+    })
+
+    it('agent_idle inside an open window is ignored (it may be the synthesized one)', () => {
+      const before = stale()
+      fullReplay(before, [], { streamingMessageId: null, turnInFlight: true }, () => noteTurnEnded(SID, 'agent_idle'))
+      const next = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true })
+      expect(next.map((m) => m.id)).toContain('live-1')
+    })
+
+    it('a LIVE turn end inside the window is deferred to its close, not lost (S-1)', () => {
+      let before = stale()
+      // window 1: a live session_activity{isBusy:false} lands inside it
+      fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true }, () => noteTurnEnded(SID))
+      // then turn B starts and a full swap runs mid-B
+      before = streamStart(before, 'turn-b')
+      const swapped = fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true })
+      expect(swapped.map((m) => m.id)).toEqual(['old-1', 'turn-b'])
+    })
+
+    it('a stream opened AFTER the live turn end inside the window is left open', () => {
+      const before = stale()
+      let after: ChatMessage[] = before
+      fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true }, () => {
+        noteTurnEnded(SID)
+        after = streamStart(before, 'turn-b')
+      })
+      const swapped = fullReplay(after, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true })
+      expect(swapped.map((m) => m.id)).toEqual(['old-1', 'turn-b'])
     })
   })
 

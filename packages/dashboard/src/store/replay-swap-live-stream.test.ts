@@ -135,6 +135,57 @@ describe('a streaming response survives a full replay swap (#8960)', () => {
     expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1)
   })
 
+  it('two full replays in one running turn keep the pre-permission text and a running tool card (C-A)', () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', toolUseId: 'tu-1', input: { command: 'sleep 9' } })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'before the prompt' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'permission_request', requestId: 'perm-1', tool: 'Bash', input: { command: 'ls' } })
+    for (let pass = 0; pass < 2; pass++) {
+      // The server skips the synthesized agent_idle while the session is busy (#8965).
+      send({ type: 'history_replay_start', fullHistory: true })
+      send({ type: 'message', messageType: 'user_input', content: 'old question', timestamp: 1, historySeq: 1 })
+      send({ type: 'result', historySeq: 2 })
+      send({ type: 'message', messageType: 'user_input', content: 'older', timestamp: 3, historySeq: 3 })
+      send({ type: 'result', historySeq: 4 })
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1)
+      expect(msgs().filter((m) => m.id === TURN)[0]!.content).toBe('before the prompt')
+      expect(msgs().filter((m) => m.id === 'tool-1')).toHaveLength(1)
+    }
+  })
+
+  it('a live turn end inside a window does not leave a dead partial for the next turn (S-1)', () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'dead partial' })
+    vi.advanceTimersByTime(500)
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'session_activity', isBusy: false })
+    send({ type: 'history_replay_end' })
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: 'turn-b' })
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(0)
+    expect(msgs().filter((m) => m.id === 'turn-b')).toHaveLength(1)
+  })
+
+  it("a session_list idle patch drops turn A's dead stream before turn B (S-2)", () => {
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: TURN })
+    send({ type: 'stream_delta', messageId: TURN, delta: 'dead partial' })
+    vi.advanceTimersByTime(500)
+    handleMessage({ type: 'session_list', sessions: [{ sessionId: SID, name: 'A', provider: 'claude-tui', isBusy: false }] } as never, ctx() as never)
+    send({ type: 'agent_busy' })
+    send({ type: 'stream_start', messageId: 'turn-b' })
+    send({ type: 'history_replay_start', fullHistory: true })
+    send({ type: 'history_replay_end' })
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(0)
+    expect(msgs().filter((m) => m.id === 'turn-b')).toHaveLength(1)
+  })
+
   it('keeps the in-flight response across a mid-turn reconnect whose history holds an old result + agent_idle', () => {
     send({ type: 'agent_busy' })
     send({ type: 'stream_start', messageId: TURN })

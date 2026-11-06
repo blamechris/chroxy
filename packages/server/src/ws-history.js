@@ -378,7 +378,7 @@ export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_supersed
  *   (`clients.get(ws)`), which is where the auth handshake stores the capabilities
  *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
  */
-export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
+export function sendHistoryEntry(send, ws, sessionId, entry, client = null, sessionBusy = false) {
   // #6630: a recorded error goes only to a client that said it can take one in a
   // replay (see CAPABILITY_HISTORY_ERROR_REPLAY). Skipped, not downgraded: there is
   // no older shape of an error bubble that is safe. Nothing else about the entry
@@ -445,7 +445,15 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
     wireEntry.outcome = 'expired'
   }
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
-  if (entry && entry.type === 'result') {
+  // The synthesized `agent_idle` mirrors the live fan-out so a client clears the
+  // turn-scoped state a dropped event left behind (#4628). It must NOT be sent
+  // while the session is BUSY (#8965): the entry is an OLD turn's result, the
+  // client has nothing to clear for the turn that is still running, and the frame
+  // flips the client's isIdle to true -- where nothing sets it back until the next
+  // stream_start -- so the Send button shows during a run and a second replay of
+  // the same turn sees an idle session. The JSONL heal (conversation-handlers.js)
+  // already holds the same line. An idle session still gets it.
+  if (entry && entry.type === 'result' && !sessionBusy) {
     send(ws, { type: 'agent_idle', sessionId })
   }
 }
@@ -1867,6 +1875,11 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     resendPendingPermissionsForSession(ctx, ws, sessionId)
   }
 
+  // Same predicate as the JSONL heal (a manager that cannot answer reads as idle).
+  const sessionBusy = typeof sessionManager.isSessionBusy === 'function'
+    ? sessionManager.isSessionBusy(sessionId)
+    : false
+
   // #5555.3 — start at the resolved offset: 0 for a full replay, the
   // first-newer-than-cursor index for a delta replay. When the client is
   // already current (startOffset === history.length) sendChunkedWithBackpressure
@@ -1880,7 +1893,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client),
+    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client, sessionBusy),
     onDone: finishReplay,
   })
 }

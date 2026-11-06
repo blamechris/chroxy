@@ -664,15 +664,31 @@ let _sweepableLedger: { sessionId: string; ids: Set<string> } | null = null
  * `endedInWindow` holds the row ids whose `stream_end` arrived while a replay
  * window was open; the end of the last window consumes them.
  *
- * Lifetime: an ordinary reconnect (`resetReplayReconcile()`) keeps it, because
- * an in-flight turn is what the replay after that reconnect must carry.
- * `resetReplayReconcile({ clearCursors: true })` (explicit disconnect, host
- * switch) clears it, `dropReplaySessionState` drops a session's entry, and a
- * turn end (`noteTurnEnded`, at `agent_idle` / `result`) clears that session's
- * open streams. Open streams are carried only while the turn is in flight.
- * Bounded per session; see {@link MAX_OPEN_STREAMS_PER_SESSION}.
+ * `endAtClose` holds the wire ids that were open when a live turn-end signal
+ * landed INSIDE a window; the last end of the window closes exactly those (a
+ * stream opened after the signal belongs to a newer turn and stays).
+ *
+ * Lifetime. Cleared per session by a turn end: `agent_idle` and a live `result`
+ * (shared handlers, both clients), and an idle resync (`session_activity`
+ * isBusy=false, `session_list` isIdle=true). Inside an open window those signals
+ * are DEFERRED to the window's last end rather than applied or dropped, because
+ * a window must keep the live turn it is protecting, yet a real end during it is
+ * never replayed and would otherwise be lost for good. Two things inside a window
+ * are ignored outright: a REPLAYED `result` (it carries `historySeq`) and
+ * `agent_idle` (the server no longer synthesizes one after a replayed result
+ * while the session is busy; from an older server it is an old turn's end, and
+ * an idle session has nothing open to keep). An ordinary reconnect
+ * (`resetReplayReconcile()`) keeps the ledger, because an in-flight turn is what
+ * the replay after that reconnect must carry; `resetReplayReconcile({
+ * clearCursors: true })` (explicit disconnect, host switch) clears it and
+ * `dropReplaySessionState` drops a session's entry. Open streams are carried
+ * only while the turn is in flight. Bounded per session; see
+ * {@link MAX_OPEN_STREAMS_PER_SESSION}.
  */
-const _openStreams = new Map<string, { open: Map<string, string>; endedInWindow: Set<string> }>()
+const _openStreams = new Map<
+  string,
+  { open: Map<string, string>; endedInWindow: Set<string>; endAtClose: Set<string> }
+>()
 
 /**
  * Per-session cap on {@link _openStreams}. A turn has at most a handful of open
@@ -691,7 +707,7 @@ export function noteStreamOpen(
   if (!sessionId) return
   let entry = _openStreams.get(sessionId)
   if (!entry) {
-    entry = { open: new Map(), endedInWindow: new Set() }
+    entry = { open: new Map(), endedInWindow: new Set(), endAtClose: new Set() }
     _openStreams.set(sessionId, entry)
   }
   entry.open.delete(wireId)
@@ -703,20 +719,29 @@ export function noteStreamOpen(
 }
 
 /**
- * The turn ended (`agent_idle`, `result`): every stream still open for the
- * session is over, whether or not its `stream_end` arrived. A missed one (socket
- * drop, daemon restart, provider crash, interrupted turn) would otherwise stay
- * open and a later full swap would resurrect the partial response (#8965).
- * Streams that ended inside an open window stay for that window's swap.
+ * The turn ended: every stream still open for the session is over, whether or not
+ * its `stream_end` arrived. A missed one (socket drop, daemon restart, provider
+ * crash, interrupted turn) would otherwise stay open and a later full swap would
+ * resurrect the partial response (#8965). Streams that ended inside an open
+ * window stay for that window's swap.
+ *
+ * `source` says what reported it. A `'signal'` (live `result`, `session_activity`
+ * isBusy=false, `session_list` isIdle=true) is never replayed, so inside an open
+ * window it is DEFERRED: the streams open right now are closed when the last
+ * window ends, and a stream opened after it is left alone. `'agent_idle'` is
+ * ignored inside a window: it cannot be told from the one a server synthesizes
+ * after a replayed `result`, which says nothing about the live turn.
  */
-export function noteTurnEnded(sessionId: string | null | undefined): void {
+export function noteTurnEnded(
+  sessionId: string | null | undefined,
+  source: 'signal' | 'agent_idle' = 'signal',
+): void {
   if (!sessionId) return
-  // Not inside a replay window: the server sends an `agent_idle` after every
-  // REPLAYED `result` entry, and an old turn's end says nothing about the live
-  // turn this window must keep. A live turn that truly ends inside the window
-  // is covered by `endedInWindow`.
-  if (isReplayWindowOpen(sessionId)) return
   const entry = _openStreams.get(sessionId)
+  if (isReplayWindowOpen(sessionId)) {
+    if (source === 'signal' && entry) for (const wireId of entry.open.keys()) entry.endAtClose.add(wireId)
+    return
+  }
   if (!entry) return
   entry.open.clear()
   if (entry.endedInWindow.size === 0) _openStreams.delete(sessionId)
@@ -1542,6 +1567,9 @@ function closeReplayWindow(sessionId: string): void {
   _replayWindowOpen.delete(sessionId)
   const streams = _openStreams.get(sessionId)
   if (streams) {
+    // A live turn end that landed inside the window: apply it now (S-1).
+    for (const wireId of streams.endAtClose) streams.open.delete(wireId)
+    streams.endAtClose.clear()
     streams.endedInWindow.clear()
     if (streams.open.size === 0) _openStreams.delete(sessionId)
   }

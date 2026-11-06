@@ -2199,9 +2199,11 @@ export function handleResultUsage(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): ResultUsagePayload {
-  // #8965 — the turn is over: close any stream whose stream_end was missed
-  // (noteTurnEnded ignores a replayed result inside an open window).
-  noteTurnEnded(parseRawStringField(msg, 'sessionId') || activeSessionId)
+  // #8965 — the turn is over: close any stream whose stream_end was missed. A
+  // REPLAYED result (stamped with historySeq) is an old turn's end: skip it.
+  if (typeof msg.historySeq !== 'number') {
+    noteTurnEnded(parseRawStringField(msg, 'sessionId') || activeSessionId)
+  }
   const rawUsage = msg.usage
   const usage =
     rawUsage !== null &&
