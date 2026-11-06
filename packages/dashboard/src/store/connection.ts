@@ -90,7 +90,7 @@ import { isSessionStarting } from '@chroxy/store-core';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
-import { getAuthToken } from '../utils/auth';
+import { getLocalConnectionToken } from '../utils/local-auth';
 import { isLocalDaemonUrl } from '../utils/daemon-origin';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
 import { hasInterruptibleWork, isSessionBusy } from '../lib/session-busy';
@@ -981,7 +981,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // token — i.e. a "this machine" connection is available alongside any remote
   // LAN servers in the registry. Lets the ServerPicker pin a local entry so the
   // user can switch local↔remote (desktop LAN-client, #5281 ①.2).
-  hasLocalServer: typeof window !== 'undefined' && !!getAuthToken(),
+  hasLocalServer: typeof window !== 'undefined' && getLocalConnectionToken() !== null,
   serverMode: null,
   sessionCwd: null,
   defaultCwd: null,
@@ -6513,8 +6513,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    * own host. No-op when no same-origin token is available. (#5281 ①.2)
    */
   connectLocal: () => {
-    const token = getAuthToken();
-    if (!token) return;
+    const token = getLocalConnectionToken();
+    if (token === null) return;
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${proto}://${window.location.host}/ws`;
     // Already on local and connected — nothing to do.
@@ -6563,8 +6563,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return;
     }
     // Local same-origin fallback before any direct connection is admitted.
-    const token = getAuthToken();
-    if (!token) return;
+    const token = getLocalConnectionToken();
+    if (token === null) return;
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${proto}://${window.location.host}/ws`;
     get().connect(wsUrl, token);
