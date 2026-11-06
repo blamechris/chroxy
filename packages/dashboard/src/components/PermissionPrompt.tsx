@@ -55,6 +55,10 @@ const MCP_SOURCE_LABELS: Record<string, string> = {
   user: 'Your user-wide Claude config',
 }
 
+// #7974: tooltip + accessible name for the protected-path badge (title alone is invisible to touch and keyboard users).
+const FLOORED_EXPLANATION =
+  'This request touches a protected path (repo hooks, agent settings or a secret file), so it always needs a human decision.'
+
 export interface PermissionPromptProps {
   requestId: string
   tool: string
@@ -331,7 +335,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         <div
           className="perm-floored"
           data-testid="perm-floored"
-          title="This request touches a protected path (repo hooks, agent settings or a secret file), so it always needs a human decision."
+          role="note"
+          aria-label={FLOORED_EXPLANATION}
+          title={FLOORED_EXPLANATION}
         >
           Protected path
         </div>

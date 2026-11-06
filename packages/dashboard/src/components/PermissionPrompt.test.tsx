@@ -241,6 +241,8 @@ describe('PermissionPrompt', () => {
     const marker = screen.getByTestId('perm-floored')
     expect(marker).toHaveTextContent('Protected path')
     expect(marker.getAttribute('title')).toMatch(/human/i)
+    expect(marker).toHaveAttribute('role', 'note')
+    expect(marker.getAttribute('aria-label')).toMatch(/human/i)
   })
 
   it.each([
