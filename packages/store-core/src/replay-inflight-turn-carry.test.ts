@@ -184,6 +184,17 @@ describe('in-flight turn content across a full replay swap (#8965)', () => {
       expect(next.map((m) => m.id)).toEqual(['old-1', 'live-1'])
     })
 
+    it('a replayed result with NO historySeq (JSONL slice, `replayed: true`) ends nothing; two swaps keep the stream', () => {
+      const before = stale()
+      // Pass 1: JSONL full history carrying the daemon-written interrupted-turn marker, unstamped.
+      fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true }, () => {
+        handleResultUsage({ sessionId: SID, turnOutcome: 'interrupted', replayed: true }, SID)
+      }, { turnInFlight: true })
+      // Pass 2: the ring replay of a later switch_session.
+      const second = fullReplay(before, [response('old-1', 'earlier')], { streamingMessageId: null, turnInFlight: true })
+      expect(second.map((m) => m.id)).toEqual(['old-1', 'live-1'])
+    })
+
     it('agent_idle inside an open window is ignored (it may be the synthesized one)', () => {
       const before = stale()
       fullReplay(before, [], { streamingMessageId: null, turnInFlight: true }, () => noteTurnEnded(SID, 'agent_idle'))
@@ -272,6 +283,27 @@ describe('in-flight turn content across a full replay swap (#8965)', () => {
         { turnInFlight: true },
       )
       expect(swapped.map((m) => m.id)).toEqual(['live-1'])
+    })
+  })
+
+  describe('a window abandoned by a reconnect (resetReplayReconcile)', () => {
+    it('applies the live turn end it deferred, so the dead partial does not return in the next turn', () => {
+      let before = streamStart([], 'turn-a')
+      reconcileReplayStart(SID, true, before)
+      noteTurnEnded(SID) // live session_activity{isBusy:false} inside the window, deferred
+      resetReplayReconcile() // the socket dropped before history_replay_end
+      before = streamStart(before, 'turn-b')
+      const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true })
+      expect(swapped.map((m) => m.id)).toEqual(['turn-b'])
+    })
+
+    it('drops rows that ended inside the abandoned window (their swap never runs)', () => {
+      const before = streamStart(streamStart([], 'turn-a'), 'turn-b')
+      reconcileReplayStart(SID, true, before)
+      handleStreamEnd({ messageId: 'turn-a', sessionId: SID }, SID)
+      resetReplayReconcile()
+      const swapped = fullReplay(before, [], { streamingMessageId: null, turnInFlight: true })
+      expect(swapped.map((m) => m.id)).toEqual(['turn-b'])
     })
   })
 

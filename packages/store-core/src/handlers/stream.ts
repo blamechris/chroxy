@@ -2200,8 +2200,9 @@ export function handleResultUsage(
   activeSessionId: string | null,
 ): ResultUsagePayload {
   // #8965 — the turn is over: close any stream whose stream_end was missed. A
-  // REPLAYED result (stamped with historySeq) is an old turn's end: skip it.
-  if (typeof msg.historySeq !== 'number') {
+  // REPLAYED result (historySeq on the ring path, `replayed` on every path, incl.
+  // the JSONL slice that has no seq) is an old turn's end: skip it.
+  if (typeof msg.historySeq !== 'number' && msg.replayed !== true) {
     noteTurnEnded(parseRawStringField(msg, 'sessionId') || activeSessionId)
   }
   const rawUsage = msg.usage

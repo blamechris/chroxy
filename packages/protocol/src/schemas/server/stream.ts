@@ -458,6 +458,11 @@ export const ServerResultSchema = z.object({
   // #5555.3 delta-replay cursor — and for user_question the #7420
   // live-vs-replayed guard — key on this field's presence.
   historySeq: z.number().optional(),
+  // #8965: `true` on a result the server is REPLAYING from history. The JSONL
+  // full-history slice carries no `historySeq` (its `_seq` is stripped), so
+  // `historySeq` alone cannot tell a client that this result is an old turn's
+  // end rather than the live turn's. Absent on live broadcasts.
+  replayed: z.boolean().optional(),
 })
 
 export const ServerModelChangedSchema = z.object({

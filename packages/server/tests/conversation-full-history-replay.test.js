@@ -195,6 +195,22 @@ describe('#7459 — request_full_history mirrors replayHistory result → agent_
     assert.equal(idleIdx, resultIdx + 1, 'the synthesis must come IMMEDIATELY after its result, in the same order replayHistory emits it')
   })
 
+  it('synthesizes NO agent_idle while the session is busy, and says the result is replayed (#8965)', async () => {
+    const entries = [
+      { type: 'result', durationMs: 12, timestamp: 2, _seq: 2 },
+      { type: 'result', turnOutcome: 'interrupted', timestamp: 3 }, // no _seq: the JSONL-slice shape
+    ]
+    const busy = build(entries, { managerOverrides: { isSessionBusy: () => true } })
+    await handler(busy.ws, client(), { type: 'request_full_history' }, busy.ctx)
+    assert.equal(busy.sends.filter(m => m.type === 'result').length, 2)
+    assert.ok(busy.sends.filter(m => m.type === 'result').every(m => m.replayed === true))
+    assert.equal(busy.sends.some(m => m.type === 'agent_idle'), false)
+
+    const idle = build(entries, { managerOverrides: { isSessionBusy: () => false } })
+    await handler(idle.ws, client(), { type: 'request_full_history' }, idle.ctx)
+    assert.equal(idle.sends.filter(m => m.type === 'agent_idle').length, 2)
+  })
+
   it('emits the SAME shape replayHistory does — { type, sessionId } and nothing else', async () => {
     const { ctx, sends, ws } = build([
       { type: 'result', durationMs: 5, timestamp: 1, _seq: 4 },

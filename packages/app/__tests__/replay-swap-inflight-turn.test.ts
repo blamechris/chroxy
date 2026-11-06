@@ -232,6 +232,31 @@ describe('in-flight turn content survives a full replay swap -- app (#8965)', ()
     expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1);
   });
 
+  it('a JSONL full-history pass with an unstamped interrupted-turn result, then a ring replay, keeps the in-flight text', () => {
+    send({ type: 'agent_busy' });
+    send({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', toolUseId: 'tu-1', input: { command: 'sleep 9' } });
+    send({ type: 'stream_start', messageId: TURN });
+    send({ type: 'stream_delta', messageId: TURN, delta: 'before the prompt' });
+    jest.advanceTimersByTime(500);
+    send({ type: 'permission_request', requestId: 'perm-1', tool: 'Bash', input: { command: 'ls' } });
+    // pass 1: request_full_history's JSONL slice -- no historySeq anywhere
+    send({ type: 'history_replay_start', fullHistory: true });
+    send({ type: 'message', messageType: 'user_input', content: 'old question', timestamp: 1 });
+    send({ type: 'result', turnOutcome: 'interrupted', replayed: true });
+    send({ type: 'message', messageType: 'user_input', content: 'older', timestamp: 3 });
+    send({ type: 'history_replay_end' });
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1);
+    // pass 2: a switch_session ring replay with historySeq stamps
+    send({ type: 'history_replay_start', fullHistory: true });
+    send({ type: 'message', messageType: 'user_input', content: 'old question', timestamp: 1, historySeq: 1 });
+    send({ type: 'result', historySeq: 2, replayed: true });
+    send({ type: 'history_replay_end', latestSeq: 2 });
+    const rows = msgs().filter((m) => m.id === TURN);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toBe('before the prompt');
+    expect(msgs().filter((m) => m.id === 'tool-1')).toHaveLength(1);
+  });
+
   it('two full replays in one running turn keep the pre-permission text and a running tool card (C-A)', () => {
     send({ type: 'agent_busy' });
     send({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', toolUseId: 'tu-1', input: { command: 'sleep 9' } });

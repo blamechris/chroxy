@@ -443,7 +443,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
   // BECAUSE the view looks wrong — was the action that could drop the
   // connection.
   // #8965: no synthesized agent_idle for a replayed result while the session runs.
-  const replayBusy = typeof sessionManager.isSessionBusy === 'function'
+  const replayBusy = () => typeof sessionManager.isSessionBusy === 'function'
     ? sessionManager.isSessionBusy(targetId)
     : false
   sendChunkedWithBackpressure(ws, fullHistory, {

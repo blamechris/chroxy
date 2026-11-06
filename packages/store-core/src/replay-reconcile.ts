@@ -803,6 +803,15 @@ export const MAX_LIVE_REPLAY_LEDGERS = 64
  * and an open stream is only carried while the turn is in flight.
  */
 export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): void {
+  // #8965 — an abandoned window never reaches its `closeReplayWindow`, so settle
+  // what it deferred here: apply each deferred live turn end, drop the
+  // ended-in-window rows (their swap will not run).
+  for (const [sid, streams] of _openStreams) {
+    for (const wireId of streams.endAtClose) streams.open.delete(wireId)
+    streams.endAtClose.clear()
+    streams.endedInWindow.clear()
+    if (streams.open.size === 0) _openStreams.delete(sid)
+  }
   _rebuildBaseline.clear()
   // #7420 — an open window and its live-arrival ids are per-connection state
   // like the baseline, never a cursor: a fresh auth must not inherit either.

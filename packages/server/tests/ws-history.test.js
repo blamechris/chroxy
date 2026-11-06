@@ -2513,6 +2513,55 @@ describe('replayHistory', () => {
     })
   }
 
+  it('asks whether the session is busy for EACH replayed result: a turn that starts mid-replay stops the synthesis (#8965)', async () => {
+    const history = [
+      { type: 'result', cost: null, duration: 1 },
+      { type: 'result', cost: null, duration: 2 },
+      { type: 'result', cost: null, duration: 3 },
+    ]
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    let asked = 0
+    manager.isSessionBusy = () => ++asked > 1 // idle for the first result, busy from then on
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.equal(types.filter(t => t === 'result').length, 3)
+    assert.equal(types.filter(t => t === 'agent_idle').length, 1, 'only the result seen while idle is followed by agent_idle')
+  })
+
+  it('marks a replayed result `replayed: true`, with or without a historySeq (#8965)', async () => {
+    const history = [
+      { type: 'result', cost: null, duration: 1, _seq: 5 },
+      { type: 'result', turnOutcome: 'interrupted' }, // JSONL-slice shape: no _seq
+    ]
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const results = ctx._sends.filter(m => m.type === 'result')
+    assert.equal(results.length, 2)
+    assert.ok(results.every(r => r.replayed === true))
+    assert.equal(results[0].historySeq, 5)
+    assert.equal('historySeq' in results[1], false)
+  })
+
   it('does not emit agent_idle for histories without a result entry (#4628)', async () => {
     const history = [
       { type: 'user_message', content: 'hi' },
