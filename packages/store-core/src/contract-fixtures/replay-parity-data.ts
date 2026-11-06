@@ -126,7 +126,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 2
+          "historySeq": 2,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -301,7 +302,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 3
+          "historySeq": 3,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -443,7 +445,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 3
+          "historySeq": 3,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -618,7 +621,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 4
+          "historySeq": 4,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -835,7 +839,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 6
+          "historySeq": 6,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -1074,7 +1079,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 7
+          "historySeq": 7,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -1201,7 +1207,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 3
+          "historySeq": 3,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -1932,7 +1939,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "turnOutcome": "truncated",
           "timestamp": 1700000001000,
           "sessionId": "s1",
-          "historySeq": 2
+          "historySeq": 2,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -1949,7 +1957,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "turnOutcome": "refused",
           "timestamp": 1700000002000,
           "sessionId": "s1",
-          "historySeq": 3
+          "historySeq": 3,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -1975,7 +1984,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "turnOutcome": "stopped",
           "timestamp": 1700000003000,
           "sessionId": "s1",
-          "historySeq": 5
+          "historySeq": 5,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -2001,7 +2011,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "turnOutcome": "completed",
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 7
+          "historySeq": 7,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -2227,7 +2238,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 5
+          "historySeq": 5,
+          "replayed": true
         },
         {
           "type": "agent_idle",
@@ -2384,7 +2396,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 2
+          "historySeq": 2,
+          "replayed": true
         },
         {
           "type": "agent_idle",

@@ -189,6 +189,13 @@ interface ReplayWindow {
   /** How many replays are in flight for this session right now (>= 1). */
   depth: number
   /**
+   * Whether the session was mid-turn when the window OPENED (#8965). Captured at
+   * the start because the replay itself flips `isIdle`: the server sends an
+   * `agent_idle` after every replayed `result` entry, so at `history_replay_end`
+   * the live flag no longer says whether the turn that is still running was.
+   */
+  turnInFlight: boolean
+  /**
    * The prefix as it stood at the 0->1 transition — the OUTERMOST start,
    * whatever KIND it was (#7492).
    *
@@ -641,6 +648,121 @@ const _liveDuringReplay = new Map<string, Set<string>>()
 let _sweepableLedger: { sessionId: string; ids: Set<string> } | null = null
 
 /**
+ * Response streams that are OPEN for a session (#8965): started by a
+ * `stream_start` and not yet closed by its `stream_end`, keyed by the wire id
+ * the `stream_end` will name and valued with the row id the client resolved it
+ * to (they differ only after a collision remap).
+ *
+ * `streamingMessageId` answers "is a response receiving deltas right now", and
+ * is null at a permission boundary (the response is split off) and after a
+ * `stream_end`. Neither makes the row any less absent from server history: the
+ * server persists a response at its `stream_end`, so until then (and, for a
+ * `stream_end` that lands INSIDE a replay window, until the snapshot taken at
+ * the window's start is superseded) a full swap that cuts the prefix loses it.
+ * This ledger is the generalised "live" signal that covers those windows.
+ *
+ * `endedInWindow` holds the row ids whose `stream_end` arrived while a replay
+ * window was open; the end of the last window consumes them.
+ *
+ * `endAtClose` holds the wire ids that were open when a live turn-end signal
+ * landed INSIDE a window; the last end of the window closes exactly those (a
+ * stream opened after the signal belongs to a newer turn and stays).
+ *
+ * Lifetime. Cleared per session by a turn end: `agent_idle` and a live `result`
+ * (shared handlers, both clients), and an idle resync (`session_activity`
+ * isBusy=false, `session_list` isIdle=true). Inside an open window those signals
+ * are DEFERRED to the window's last end rather than applied or dropped, because
+ * a window must keep the live turn it is protecting, yet a real end during it is
+ * never replayed and would otherwise be lost for good. Two things inside a window
+ * are ignored outright: a REPLAYED `result` (it carries `historySeq`) and
+ * `agent_idle` (the server no longer synthesizes one after a replayed result
+ * while the session is busy; from an older server it is an old turn's end, and
+ * an idle session has nothing open to keep). An ordinary reconnect
+ * (`resetReplayReconcile()`) keeps the ledger, because an in-flight turn is what
+ * the replay after that reconnect must carry; `resetReplayReconcile({
+ * clearCursors: true })` (explicit disconnect, host switch) clears it and
+ * `dropReplaySessionState` drops a session's entry. Open streams are carried
+ * only while the turn is in flight. Bounded per session; see
+ * {@link MAX_OPEN_STREAMS_PER_SESSION}.
+ */
+const _openStreams = new Map<
+  string,
+  { open: Map<string, string>; endedInWindow: Set<string>; endAtClose: Set<string> }
+>()
+
+/**
+ * Per-session cap on {@link _openStreams}. A turn has at most a handful of open
+ * response streams (one per permission/tool split); a stream whose `stream_end`
+ * never arrives would otherwise sit in the ledger forever, so the oldest is
+ * evicted — which only reverts that stream to the pre-#8965 behaviour.
+ */
+export const MAX_OPEN_STREAMS_PER_SESSION = 16
+
+/** A response stream opened for this session (`stream_start`). */
+export function noteStreamOpen(
+  sessionId: string | null | undefined,
+  wireId: string,
+  rowId: string,
+): void {
+  if (!sessionId) return
+  let entry = _openStreams.get(sessionId)
+  if (!entry) {
+    entry = { open: new Map(), endedInWindow: new Set(), endAtClose: new Set() }
+    _openStreams.set(sessionId, entry)
+  }
+  entry.open.delete(wireId)
+  entry.open.set(wireId, rowId)
+  while (entry.open.size > MAX_OPEN_STREAMS_PER_SESSION) {
+    const oldest = entry.open.keys().next().value as string
+    entry.open.delete(oldest)
+  }
+}
+
+/**
+ * The turn ended: every stream still open for the session is over, whether or not
+ * its `stream_end` arrived. A missed one (socket drop, daemon restart, provider
+ * crash, interrupted turn) would otherwise stay open and a later full swap would
+ * resurrect the partial response (#8965). Streams that ended inside an open
+ * window stay for that window's swap.
+ *
+ * `source` says what reported it. A `'signal'` (live `result`, `session_activity`
+ * isBusy=false, `session_list` isIdle=true) is never replayed, so inside an open
+ * window it is DEFERRED: the streams open right now are closed when the last
+ * window ends, and a stream opened after it is left alone. `'agent_idle'` is
+ * ignored inside a window: it cannot be told from the one a server synthesizes
+ * after a replayed `result`, which says nothing about the live turn.
+ */
+export function noteTurnEnded(
+  sessionId: string | null | undefined,
+  source: 'signal' | 'agent_idle' = 'signal',
+): void {
+  if (!sessionId) return
+  const entry = _openStreams.get(sessionId)
+  if (isReplayWindowOpen(sessionId)) {
+    if (source === 'signal' && entry) for (const wireId of entry.open.keys()) entry.endAtClose.add(wireId)
+    return
+  }
+  if (!entry) return
+  entry.open.clear()
+  if (entry.endedInWindow.size === 0) _openStreams.delete(sessionId)
+}
+
+/**
+ * A response stream ended (`stream_end`). Outside a replay window the server
+ * has persisted it and any later replay re-delivers it, so it simply leaves the
+ * ledger. Inside one, the snapshot may predate it: keep the row id for the swap.
+ */
+export function noteStreamClosed(sessionId: string | null | undefined, wireId: string | null): void {
+  if (!sessionId || wireId === null) return
+  const entry = _openStreams.get(sessionId)
+  const rowId = entry?.open.get(wireId)
+  if (!entry || rowId === undefined) return
+  entry.open.delete(wireId)
+  if (isReplayWindowOpen(sessionId)) entry.endedInWindow.add(rowId)
+  else if (entry.open.size === 0 && entry.endedInWindow.size === 0) _openStreams.delete(sessionId)
+}
+
+/**
  * Client-side cap on the per-session cursor map. Mirrors the server's
  * `MAX_HISTORY_CURSORS` (ws-auth.js): the server only honours that many keys
  * from a single `auth`, so retaining/sending more is pure bloat. Holding the
@@ -673,8 +795,23 @@ export const MAX_LIVE_REPLAY_LEDGERS = 64
  * connection doesn't inherit a stale baseline. Does NOT clear cursors by
  * default — those are intentionally retained so a reconnect can present them
  * (pass `clearCursors: true` to wipe them too, e.g. on full disconnect/logout).
+ *
+ * Also leaves `_openStreams` alone unless `clearCursors` is set: an ordinary
+ * reconnect must keep it, because a turn that is still in flight is exactly what
+ * the replay after that reconnect needs to carry. A stream whose end was missed
+ * is not kept alive by that: `noteTurnEnded` clears it at `agent_idle` / `result`,
+ * and an open stream is only carried while the turn is in flight.
  */
 export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): void {
+  // #8965 — an abandoned window never reaches its `closeReplayWindow`, so settle
+  // what it deferred here: apply each deferred live turn end, drop the
+  // ended-in-window rows (their swap will not run).
+  for (const [sid, streams] of _openStreams) {
+    for (const wireId of streams.endAtClose) streams.open.delete(wireId)
+    streams.endAtClose.clear()
+    streams.endedInWindow.clear()
+    if (streams.open.size === 0) _openStreams.delete(sid)
+  }
   _rebuildBaseline.clear()
   // #7420 — an open window and its live-arrival ids are per-connection state
   // like the baseline, never a cursor: a fresh auth must not inherit either.
@@ -692,7 +829,10 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   // a reconnect or host switch must not settle the old server's error into the
   // new server's active session.
   clearPendingCreateFailures()
-  if (opts.clearCursors) _historyCursors.clear()
+  if (opts.clearCursors) {
+    _historyCursors.clear()
+    _openStreams.clear()
+  }
 }
 
 /**
@@ -764,6 +904,7 @@ export function reconcileReplayStart(
   // Accepted for call-site symmetry with the wire frame; deliberately unused —
   // see the doc comment above on why the cursor is not advanced at start.
   _latestSeq?: unknown,
+  live: { turnInFlight?: boolean } = {},
 ): { rebuildInProgress: boolean } {
   if (!sessionId) return { rebuildInProgress: false }
   // #7420 — open the window for BOTH replay kinds. #7455 — as a REFCOUNT, so
@@ -774,9 +915,11 @@ export function reconcileReplayStart(
   const isOutermost = existing === undefined
   const replayWindow: ReplayWindow = existing ?? {
     depth: 0,
+    turnInFlight: false,
     baseline: snapshotPrefix(currentMessages),
   }
   replayWindow.depth += 1
+  if (live.turnInFlight === true) replayWindow.turnInFlight = true
   if (isOutermost) {
     // #7492 — the record (and with it the baseline) is installed here and
     // nowhere else, so the captured prefix is the OUTERMOST start's by
@@ -1143,6 +1286,17 @@ export function reconcileReplayEnd(
   // delta replay's window closes too. The live-arrival ids themselves stay
   // readable for `sweepUnansweredPromptsAtReplayEnd`, which the caller runs
   // after this — see `closeReplayWindow`.
+  // #8965 — read the streams this window saw end BEFORE closing it consumes them.
+  const streams = sessionId ? _openStreams.get(sessionId) : undefined
+  // The turn counts as in flight if it was when the window opened, or is now (a
+  // turn that began inside the window); replayed agent_idle frames only flip the
+  // latter.
+  const turnInFlight =
+    live.turnInFlight === true || (sessionId ? _replayWindowOpen.get(sessionId)?.turnInFlight === true : false)
+  live = { ...live, turnInFlight }
+  const inFlightResponseIds = new Set<string>(
+    streams ? [...(turnInFlight ? streams.open.values() : []), ...streams.endedInWindow] : [],
+  )
   if (sessionId) closeReplayWindow(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
     return { swappedMessages: null }
@@ -1178,7 +1332,7 @@ export function reconcileReplayEnd(
       : tail
   // #8960 — an in-flight response is not in server history, so the replay never
   // re-delivers it and the cut above would discard it with the prefix.
-  const carried = carriedLiveMessages(messages.slice(0, cut), ordered, live)
+  const carried = carriedLiveMessages(messages.slice(0, cut), ordered, live, inFlightResponseIds)
   return { swappedMessages: carried.length === 0 ? ordered : [...ordered, ...carried] }
 }
 
@@ -1194,6 +1348,18 @@ export interface ReplayEndLiveState {
    * regardless, since its liveness is on the row itself.
    */
   streamingMessageId?: string | null
+  /**
+   * Whether the session is mid-turn (`isIdle === false`). A `tool_use` card with
+   * no result yet is only a RUNNING tool while that holds; nothing on the row
+   * says so, and the same card in an idle session is a stale one (#8965). Both
+   * clients derive it from `isIdle`, because the app keeps no `activeTools`.
+   */
+  turnInFlight?: boolean
+  /**
+   * `clientMessageId`s of the session's QUEUED sends. A queued `user_input` bubble
+   * is appended locally mid-turn, so it is not the start of a turn (#8965).
+   */
+  queuedMessageIds?: readonly string[]
 }
 
 /**
@@ -1202,6 +1368,13 @@ export interface ReplayEndLiveState {
  * still flagged `thinkingStreaming`. Later `stream_delta` / `tool_result`
  * frames patch these in place by id, so dropping them loses the received text
  * and strands the deltas.
+ *
+ * #8965 widens "still live" past `streamingMessageId`, which is null at a
+ * permission split and after a `stream_end`: a response stream the session has
+ * OPEN (or that ended inside this window, see `_openStreams`), and a
+ * `tool_use` card without a result while the turn is in flight
+ * (`ReplayEndLiveState.turnInFlight`). One rule, one path: the same dedup
+ * against the replayed tail applies to all of them.
  *
  * An id the replayed tail already holds is NOT carried: the replay is then the
  * authoritative copy and carrying it would duplicate the row. That relies on a
@@ -1215,20 +1388,56 @@ function carriedLiveMessages(
   discardedPrefix: readonly unknown[],
   kept: readonly unknown[],
   live: ReplayEndLiveState,
+  inFlightResponseIds: ReadonlySet<string> = new Set(),
 ): unknown[] {
   const streamingId = live.streamingMessageId
   const keptIds = new Set<string>()
+  const keptToolUseIds = new Set<string>()
   for (const m of kept) {
     const id = idOf(m)
     if (id !== null) keptIds.add(id)
+    const toolUseId = (m as { toolUseId?: unknown } | null)?.toolUseId
+    if (typeof toolUseId === 'string') keptToolUseIds.add(toolUseId)
+  }
+  // A pending tool card belongs to the CURRENT turn only if it comes after the
+  // last user message; an unresulted card from an earlier, interrupted turn is
+  // stale and carrying it would resurrect it out of order (#8965).
+  const queuedIds = new Set(live.queuedMessageIds ?? [])
+  let currentTurnStart = 0
+  for (let i = discardedPrefix.length - 1; i >= 0; i--) {
+    const row = discardedPrefix[i] as { type?: unknown; id?: unknown } | null
+    if (row?.type === 'user_input' && !(typeof row.id === 'string' && queuedIds.has(row.id))) {
+      currentTurnStart = i + 1
+      break
+    }
   }
   const carried: unknown[] = []
-  for (const m of discardedPrefix) {
+  for (const [index, m] of discardedPrefix.entries()) {
     const id = idOf(m)
     if (id === null || keptIds.has(id)) continue
-    const { type, thinkingStreaming } = m as { type?: unknown; thinkingStreaming?: unknown }
-    const isStreamingResponse = type === 'response' && typeof streamingId === 'string' && id === streamingId
-    if (isStreamingResponse || (type === 'thinking' && thinkingStreaming === true)) carried.push(m)
+    const { type, thinkingStreaming, toolUseId, toolResult, toolResultImages } = m as {
+      type?: unknown
+      thinkingStreaming?: unknown
+      toolUseId?: unknown
+      toolResult?: unknown
+      toolResultImages?: unknown
+    }
+    // Known limit shared with `streamingMessageId` (#8965 S4): a collision-remapped
+    // row id never matches the wire id a replayed copy carries, so it is not deduped.
+    const isLiveResponse =
+      type === 'response' && ((typeof streamingId === 'string' && id === streamingId) || inFlightResponseIds.has(id))
+    // Same "resolved" test as the dashboard's findInFlightToolUse: a result, or images.
+    const hasResult = toolResult !== undefined || (Array.isArray(toolResultImages) && toolResultImages.length > 0)
+    const isPendingTool =
+      type === 'tool_use' &&
+      live.turnInFlight === true &&
+      index >= currentTurnStart &&
+      !hasResult &&
+      // `handleToolStart` leaves toolUseId undefined when the wire omits it; such a
+      // card cannot be deduped by toolUseId, so it is never carried (row id still dedups).
+      typeof toolUseId === 'string' &&
+      !keptToolUseIds.has(toolUseId)
+    if (isLiveResponse || isPendingTool || (type === 'thinking' && thinkingStreaming === true)) carried.push(m)
   }
   return carried
 }
@@ -1365,6 +1574,14 @@ function closeReplayWindow(sessionId: string): void {
   // Last (or unmatched) end — the whole record goes, its baseline with it
   // (#7492; the baseline carries `openLen` AND `prefixIds` since #7524).
   _replayWindowOpen.delete(sessionId)
+  const streams = _openStreams.get(sessionId)
+  if (streams) {
+    // A live turn end that landed inside the window: apply it now (S-1).
+    for (const wireId of streams.endAtClose) streams.open.delete(wireId)
+    streams.endAtClose.clear()
+    streams.endedInWindow.clear()
+    if (streams.open.size === 0) _openStreams.delete(sessionId)
+  }
   const ids = _liveDuringReplay.get(sessionId)
   _liveDuringReplay.delete(sessionId)
   _sweepableLedger = ids && ids.size > 0 ? { sessionId, ids } : null
@@ -1417,6 +1634,7 @@ export function dropReplaySessionState(sessionId: string | null | undefined): vo
   _replayWindowOpen.delete(sessionId)
   _liveDuringReplay.delete(sessionId)
   _historyCursors.delete(sessionId)
+  _openStreams.delete(sessionId)
   if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
   // #6808 — a parked checkpoint-restore notice is per-session state too.
   dropPendingRestoreNotice(sessionId)

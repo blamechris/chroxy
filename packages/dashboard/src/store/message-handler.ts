@@ -73,6 +73,7 @@ import {
   recordHistorySeq,
   reconcileReplayStart,
   reconcileReplayEnd,
+  noteTurnEnded,
   applyPendingRestoreNotice,
   settlePendingRestoreNotice,
   // #7456 — per-session teardown for the two paths that drop a session's store
@@ -5400,6 +5401,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // source of truth.
       for (const [sid, desiredIsIdle] of isIdlePatches) {
         if (!get().sessionStates[sid]) continue;
+        // #8965 — an idle resync means no turn runs: drop any stream whose end was missed.
+        if (desiredIsIdle) noteTurnEnded(sid);
         // #7529 — the short-circuit is on the SHELL, and the FLAT mirror is a
         // side effect of `updateSession`, so skipping the write also skips the
         // mirror. For the ACTIVE session that is observable: flat `isIdle` is
@@ -5917,7 +5920,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         // instead of leaving it addressing the wrong element.
         const curMessages =
           (replayTargetId && get().sessionStates[replayTargetId]?.messages) || [];
-        reconcileReplayStart(replayTargetId, fullHistory, curMessages, latestSeq);
+        reconcileReplayStart(replayTargetId, fullHistory, curMessages, latestSeq, {
+          // #8965 — captured now: the replay's own agent_idle frames flip isIdle.
+          turnInFlight: !!replayTargetId && get().sessionStates[replayTargetId]?.isIdle === false,
+        });
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
@@ -6003,7 +6009,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
             endTargetId,
             endSession.messages,
             endLatestSeq,
-            { streamingMessageId: endSession.streamingMessageId },
+            {
+              streamingMessageId: endSession.streamingMessageId,
+              turnInFlight: endSession.isIdle === false,
+              queuedMessageIds: (endSession.queuedMessages ?? [])
+                .map((q) => q.clientMessageId)
+                .filter((id): id is string => typeof id === 'string'),
+            },
           );
           if (swappedMessages) {
             updateSession(endTargetId, () => ({

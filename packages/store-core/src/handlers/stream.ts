@@ -13,7 +13,7 @@
 import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate, completeHeldResponseStream } from '../replay-dedup'
-import { getReplayWindowDepth } from '../replay-reconcile'
+import { getReplayWindowDepth, noteStreamClosed, noteStreamOpen, noteTurnEnded } from '../replay-reconcile'
 import { endsAtSentenceBoundary } from '../sentence-boundary'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
@@ -1157,6 +1157,10 @@ export function handleStreamStart(
   const existing = existingMessages.find((m) => m.id === streamId)
   const { resolvedId, remap } = resolveStreamId(existing, streamId)
 
+  // #8965 — the response is open until its `stream_end`; a full replay swap
+  // must not drop it just because `streamingMessageId` went null (permission split).
+  noteStreamOpen(sessionId, streamId, resolvedId)
+
   const existingResponse = existingMessages.find(message => message.id === resolvedId && message.type === 'response')
   if (existingResponse) {
     // Reuse raw or remapped responses after replay/repeated starts. Keep the
@@ -1757,6 +1761,7 @@ export function handleStreamEnd(
 ): StreamEndPayload {
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const messageId = parseRawStringField(msg, 'messageId')
+  noteStreamClosed(sessionId, messageId)
   return { sessionId, messageId }
 }
 
@@ -2194,6 +2199,12 @@ export function handleResultUsage(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): ResultUsagePayload {
+  // #8965 — the turn is over: close any stream whose stream_end was missed. A
+  // REPLAYED result (historySeq on the ring path, `replayed` on every path, incl.
+  // the JSONL slice that has no seq) is an old turn's end: skip it.
+  if (typeof msg.historySeq !== 'number' && msg.replayed !== true) {
+    noteTurnEnded(parseRawStringField(msg, 'sessionId') || activeSessionId)
+  }
   const rawUsage = msg.usage
   const usage =
     rawUsage !== null &&

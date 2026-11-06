@@ -145,6 +145,8 @@ export {
   // session compose; #7456 — per-session teardown for the `session_list` prune
   // and `session_timeout` paths, plus the diagnostics both are asserted on.
   getReplayWindowDepth,
+  // #8965 — an idle resync outside a replay window ends the turn's open streams.
+  noteTurnEnded,
   getLiveReplayLedgerSessionIds,
   dropReplaySessionState,
   MAX_LIVE_REPLAY_LEDGERS,

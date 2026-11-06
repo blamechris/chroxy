@@ -225,6 +225,7 @@ export declare const ServerResultSchema: z.ZodObject<{
     }>>;
     timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
+    replayed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;

@@ -188,6 +188,7 @@ import {
   QUESTION_INTERRUPTED_PLACEHOLDER,
   QUESTION_SUPERSEDED_PLACEHOLDER,
   isQuestionNoAnswerToken,
+  noteTurnEnded,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, selectModelsForProvider, type ModelsByProvider } from './models-by-provider'
@@ -1278,6 +1279,7 @@ function dispatchAgentIdle<S extends DispatchSessionBase>(
 ): void {
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
   const idlePatch = handleAgentIdle()
+  noteTurnEnded(targetId, 'agent_idle') // #8965: streams whose stream_end was missed are over
   if (targetId && adapter.hasSession(targetId)) {
     adapter.updateSession(targetId, () => idlePatch as unknown as Partial<S>)
   } else {
@@ -1315,6 +1317,7 @@ function dispatchSessionActivity<S extends DispatchSessionBase>(
   const parsed = handleSessionActivity(msg as Record<string, unknown>)
   if (!parsed) return
   if (!adapter.hasSession(parsed.sessionId)) return
+  if (parsed.isIdle) noteTurnEnded(parsed.sessionId) // #8965: an idle resync, outside any replay window
   adapter.updateSession(parsed.sessionId, (ss) =>
     (ss.isIdle === parsed.isIdle ? {} : { isIdle: parsed.isIdle }) as Partial<S>,
   )
