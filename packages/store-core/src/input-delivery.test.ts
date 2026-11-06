@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { InputSchema } from '@chroxy/protocol/schemas'
 import {
   applyInputAcknowledgement,
   beginInputDelivery,
   cancelInputDelivery,
   isRetrySafeNotDispatched,
+  rejectInputDeliveryForConflict,
 } from './input-delivery'
+import { recoverRejectedComposer } from './composer-recovery'
 import { buildInputMessage } from '@chroxy/protocol'
 
 const context = {
@@ -131,5 +133,55 @@ describe('input delivery contract (#7822)', () => {
       context: { version: 1, acceptedItemIds: ['ocr-1'], supportedKinds: ['text', 'image'], supportedLifetimes: ['one_turn'] },
     })
     expect(partial['user-1'].pendingContextItemIds).toEqual(['ocr-2'])
+  })
+})
+
+describe('rejectInputDeliveryForConflict (#9035)', () => {
+  const sent = () => beginInputDelivery({}, 'user-1', undefined, 10, 's1')
+
+  it('resolves an unresolved send to a retry-safe not-dispatched rejection', () => {
+    const next = rejectInputDeliveryForConflict(sent(), 'user-1', 'busy', 20)
+    expect(isRetrySafeNotDispatched(next['user-1'])).toBe(true)
+    expect(next['user-1']).toMatchObject({ reason: 'input_conflict', message: 'busy', sessionId: 's1', updatedAt: 20 })
+  })
+
+  it('does nothing without a matching record or id', () => {
+    const before = sent()
+    expect(rejectInputDeliveryForConflict(before, 'user-other')).toBe(before)
+    expect(rejectInputDeliveryForConflict(before, null)).toBe(before)
+    expect(rejectInputDeliveryForConflict(undefined, 'user-1')).toEqual({})
+  })
+
+  it('never downgrades an input the server already resolved', () => {
+    const accepted = applyInputAcknowledgement(sent(), {
+      type: 'input_ack', sessionId: 's1', clientMessageId: 'user-1',
+      status: 'accepted', delivery: 'dispatch_started', retrySafe: false, dedupScope: 'process',
+    })
+    expect(rejectInputDeliveryForConflict(accepted, 'user-1')).toBe(accepted)
+  })
+
+  it('feeds composer recovery: restores into an empty composer, offers when text was typed since', () => {
+    const delivery = rejectInputDeliveryForConflict(sent(), 'user-1')['user-1']
+    const restore = vi.fn(() => true)
+    expect(recoverRejectedComposer(delivery, 'refused text', {
+      originalSessionActive: true, composerUnchanged: true, restore,
+    })).toBe('restored')
+    expect(restore).toHaveBeenCalledWith('refused text')
+
+    const noOverwrite = vi.fn(() => true)
+    expect(recoverRejectedComposer(delivery, 'refused text', {
+      originalSessionActive: true, composerUnchanged: false, restore: noOverwrite,
+    })).toBe('offer')
+    expect(recoverRejectedComposer(delivery, 'refused text', {
+      originalSessionActive: false, composerUnchanged: true, restore: noOverwrite,
+    })).toBe('offer')
+    expect(noOverwrite).not.toHaveBeenCalled()
+  })
+
+  it('an unmatched refusal leaves nothing to recover', () => {
+    const record = rejectInputDeliveryForConflict(sent(), 'user-other')['user-1']
+    const restore = vi.fn(() => true)
+    expect(recoverRejectedComposer(record, 'x', { originalSessionActive: true, composerUnchanged: true, restore })).toBe('ignored')
+    expect(restore).not.toHaveBeenCalled()
   })
 })

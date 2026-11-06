@@ -74,6 +74,7 @@ export {
   beginInputDelivery,
   applyInputAcknowledgement,
   cancelInputDelivery,
+  rejectInputDeliveryForConflict,
   isRetrySafeNotDispatched,
   MAX_INPUT_DELIVERY_RECORDS,
 } from './input-delivery'

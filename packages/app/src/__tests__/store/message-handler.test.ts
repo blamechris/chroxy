@@ -26,6 +26,7 @@ import {
 } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
+import { beginInputDelivery, isRetrySafeNotDispatched, recoverRejectedComposer } from '@chroxy/store-core';
 import {
   buildChatViewMessages,
   PERMISSION_ALREADY_ANSWERED_NOTICE,
@@ -288,6 +289,58 @@ describe('session_error input_conflict handler (#5589 / #5281)', () => {
     // A calm system notice carrying the server's reason was appended.
     const notice = ss.messages.find((m: any) => m.type === 'system' && m.content === reason);
     expect(notice).toBeDefined();
+  });
+
+  // #9035 — the refused text must be recoverable: the conflict resolves the
+  // send's delivery record so the composer recovery can put the text back.
+  describe('refused input stays recoverable (#9035)', () => {
+    const conflict = (sessionId: string, clientMessageId?: string) => ({
+      type: 'session_error', category: 'input_conflict', sessionId, message: 'busy',
+      ...(clientMessageId ? { clientMessageId } : {}),
+    });
+    const seed = () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+        sessionStates: {
+          s1: { ...createEmptySessionState(), inputDeliveries: beginInputDelivery({}, 'user-1', undefined, 1, 's1') },
+          s2: { ...createEmptySessionState(), inputDeliveries: beginInputDelivery({}, 'user-2', undefined, 1, 's2') },
+        },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockConnectionContext());
+      return (sid: string) => (store.getState() as any).sessionStates[sid].inputDeliveries;
+    };
+
+    it('restores into an empty composer; offers instead of overwriting newer typing', () => {
+      const deliveries = seed();
+      _testMessageHandler.handle(conflict('s1', 'user-1'));
+      const delivery = deliveries('s1')['user-1'];
+      expect(isRetrySafeNotDispatched(delivery)).toBe(true);
+      const restore = jest.fn(() => true);
+      expect(recoverRejectedComposer(delivery, 'refused', { originalSessionActive: true, composerUnchanged: true, restore })).toBe('restored');
+      const guarded = jest.fn(() => true);
+      expect(recoverRejectedComposer(delivery, 'refused', { originalSessionActive: true, composerUnchanged: false, restore: guarded })).toBe('offer');
+      expect(guarded).not.toHaveBeenCalled();
+    });
+
+    it('resolves only the refused session, not the one now on screen', () => {
+      const deliveries = seed();
+      _testMessageHandler.handle(conflict('s2', 'user-2'));
+      expect(isRetrySafeNotDispatched(deliveries('s2')['user-2'])).toBe(true);
+      expect(deliveries('s1')['user-1'].status).toBe('uncertain');
+      const restore = jest.fn(() => true);
+      expect(recoverRejectedComposer(deliveries('s2')['user-2'], 'refused', { originalSessionActive: false, composerUnchanged: true, restore })).toBe('offer');
+      expect(restore).not.toHaveBeenCalled();
+    });
+
+    it('a refusal with no matching sent text changes nothing', () => {
+      const deliveries = seed();
+      _testMessageHandler.handle(conflict('s1'));
+      _testMessageHandler.handle(conflict('s1', 'user-unknown'));
+      expect(deliveries('s1')['user-1'].status).toBe('uncertain');
+      expect(deliveries('s1')['user-unknown']).toBeUndefined();
+    });
   });
 
   it('surfaces a PRIMARY_HELD claim rejection as the same calm notice', () => {

@@ -61,6 +61,7 @@ import {
   cancelAllEnvironmentDestroyTimers,
 } from './message-handler'
 import { createEmptySessionPanels, createEmptySessionState } from './utils'
+import { beginInputDelivery, isRetrySafeNotDispatched, recoverRejectedComposer } from '@chroxy/store-core'
 import {
   buildChatViewMessages,
   isLivePermissionPrompt,
@@ -1979,6 +1980,56 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.streamingMessageId).toBeNull()
       // …but only the rejected send — prior real messages are untouched.
       expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined()
+    })
+
+    // #9035 — the refused text must be recoverable: the conflict resolves the
+    // send's delivery record so the composer recovery can put the text back.
+    describe('refused input stays recoverable (#9035)', () => {
+      const conflict = (sessionId: string, clientMessageId?: string) => ({
+        type: 'session_error', category: 'input_conflict', sessionId, message: 'busy',
+        ...(clientMessageId ? { clientMessageId } : {}),
+      })
+      const seed = () => {
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...createEmptySessionState(), inputDeliveries: beginInputDelivery({}, 'user-1', undefined, 1, 's1') },
+            s2: { ...createEmptySessionState(), inputDeliveries: beginInputDelivery({}, 'user-2', undefined, 1, 's2') },
+          },
+        }))
+        setStore(store)
+      }
+      const deliveries = (sid: string) => (store.getState() as any).sessionStates[sid].inputDeliveries
+
+      it('restores into an empty composer; offers instead of overwriting newer typing', () => {
+        seed()
+        handleMessage(conflict('s1', 'user-1'), ctx() as any)
+        const delivery = deliveries('s1')['user-1']
+        expect(isRetrySafeNotDispatched(delivery)).toBe(true)
+        const restore = vi.fn(() => true)
+        expect(recoverRejectedComposer(delivery, 'refused', { originalSessionActive: true, composerUnchanged: true, restore })).toBe('restored')
+        const guarded = vi.fn(() => true)
+        expect(recoverRejectedComposer(delivery, 'refused', { originalSessionActive: true, composerUnchanged: false, restore: guarded })).toBe('offer')
+        expect(guarded).not.toHaveBeenCalled()
+      })
+
+      it('resolves only the refused session, not the one now on screen', () => {
+        seed()
+        handleMessage(conflict('s2', 'user-2'), ctx() as any)
+        expect(isRetrySafeNotDispatched(deliveries('s2')['user-2'])).toBe(true)
+        expect(deliveries('s1')['user-1'].status).toBe('uncertain')
+        const restore = vi.fn(() => true)
+        expect(recoverRejectedComposer(deliveries('s2')['user-2'], 'refused', { originalSessionActive: false, composerUnchanged: true, restore })).toBe('offer')
+        expect(restore).not.toHaveBeenCalled()
+      })
+
+      it('a refusal with no matching sent text changes nothing', () => {
+        seed()
+        handleMessage(conflict('s1'), ctx() as any)
+        handleMessage(conflict('s1', 'user-unknown'), ctx() as any)
+        expect(deliveries('s1')['user-1'].status).toBe('uncertain')
+        expect(deliveries('s1')['user-unknown']).toBeUndefined()
+      })
     })
 
     it('cleans up root-level (CLI single-session) store mode too', () => {
