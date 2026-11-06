@@ -5267,6 +5267,14 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #9022 -- reply text streamed so far for a still-open stream; see
+   * SessionMessageHistory#getPendingResponseStreams.
+   */
+  getPendingResponseStreams(sessionId) {
+    return this._history.getPendingResponseStreams(sessionId)
+  }
+
+  /**
    * Get the count of messages in the ring buffer for a session.
    * @param {string} sessionId
    * @returns {number}

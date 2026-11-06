@@ -199,6 +199,11 @@ export class SessionMessageHistory extends EventEmitter {
     // carried (what it precedes). The entry is written at stream_end, so the
     // start's hint is held here until then.
     this._streamPrecedes = new Map()
+    // #9022 -- sessionId:messageId -> the seq the NEXT history entry would take when
+    // the stream's first text arrived. A reply is recorded only at stream_end, so while it is open
+    // a replay has no entry for it; this is where that text belongs in the replay
+    // (before every entry recorded after the stream began). Cleared with the stream.
+    this._streamStartSeqs = new Map()
     this._historyTruncated = new Map()  // sessionId -> boolean
     // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
     // Every entry pushed into the ring buffer is stamped with a strictly
@@ -333,9 +338,42 @@ export class SessionMessageHistory extends EventEmitter {
         this._truncatedStreams.delete(key) // #6431 — release the truncation guard
         this._streamKinds.delete(key)
         this._streamPrecedes.delete(key)
+        this._streamStartSeqs.delete(key)
       }
     }
     return closedMessageIds
+  }
+
+  /**
+   * #9022 -- the reply text a session has streamed so far but not yet closed.
+   *
+   * History only ever holds a COMPLETED reply (the entry is pushed at
+   * `stream_end`), so a turn paused mid-stream -- on a permission prompt, say --
+   * has its text in no replay, and a client that reloads shows the tool card and
+   * the prompt but none of what the model already said. This is that text, for
+   * the replay to splice in at its place in the transcript.
+   *
+   * Reasoning streams are left out (they replay as their own kind, on a
+   * capability), as is a stream that has produced no text yet.
+   *
+   * @param {string} sessionId
+   * @returns {Array<{ messageId: string, content: string, startSeq: number }>}
+   *   `startSeq` is the seq the next recorded entry had when its first text arrived:
+   *   the reply belongs before every entry with `_seq >= startSeq`.
+   */
+  getPendingResponseStreams(sessionId) {
+    const prefix = sessionId + ':'
+    const out = []
+    for (const [key, content] of this._pendingStreams) {
+      if (!key.startsWith(prefix) || !content) continue
+      if (this._streamKinds.get(key) === 'thinking') continue
+      out.push({
+        messageId: key.slice(prefix.length),
+        content,
+        startSeq: this._streamStartSeqs.get(key) ?? Infinity,
+      })
+    }
+    return out
   }
 
   /**
@@ -765,6 +803,13 @@ export class SessionMessageHistory extends EventEmitter {
             }
             return { persistNeeded: false, truncated: firstDrop }
           }
+          // #9022: where the reply BEGINS is where its first text arrived, not where
+          // the stream opened. claude-tui and byok open the stream inside sendMessage,
+          // before the input is accepted and `user_input` recorded, so a start-time
+          // seq would put the reply above the prompt it answers.
+          if (data.delta.length > 0 && !this._streamStartSeqs.has(key)) {
+            this._streamStartSeqs.set(key, this._seqCounters.get(sessionId) || 1)
+          }
           this._pendingStreams.set(key, existing + data.delta)
         }
         break
@@ -779,6 +824,7 @@ export class SessionMessageHistory extends EventEmitter {
         this._pendingStreams.delete(key)
         this._streamKinds.delete(key)
         this._streamPrecedes.delete(key)
+        this._streamStartSeqs.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
         // A reasoning stream is recorded even with no text: current Claude models
         // return the block with its signature only, so the SDK opens and closes a
@@ -1144,6 +1190,9 @@ export class SessionMessageHistory extends EventEmitter {
     for (const key of this._streamPrecedes.keys()) {
       if (key.startsWith(prefix)) this._streamPrecedes.delete(key)
     }
+    for (const key of this._streamStartSeqs.keys()) {
+      if (key.startsWith(prefix)) this._streamStartSeqs.delete(key)
+    }
   }
 
   /**
@@ -1155,6 +1204,7 @@ export class SessionMessageHistory extends EventEmitter {
     this._pendingStreams.clear()
     this._streamKinds.clear()
     this._streamPrecedes.clear()
+    this._streamStartSeqs.clear()
     this._seqCounters.clear()
     this._seqReserved.clear()
   }
