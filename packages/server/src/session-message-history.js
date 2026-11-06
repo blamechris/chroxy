@@ -200,7 +200,7 @@ export class SessionMessageHistory extends EventEmitter {
     // start's hint is held here until then.
     this._streamPrecedes = new Map()
     // #9022 -- sessionId:messageId -> the seq the NEXT history entry would take when
-    // the stream opened. A reply is recorded only at stream_end, so while it is open
+    // the stream's first text arrived. A reply is recorded only at stream_end, so while it is open
     // a replay has no entry for it; this is where that text belongs in the replay
     // (before every entry recorded after the stream began). Cleared with the stream.
     this._streamStartSeqs = new Map()
@@ -358,7 +358,7 @@ export class SessionMessageHistory extends EventEmitter {
    *
    * @param {string} sessionId
    * @returns {Array<{ messageId: string, content: string, startSeq: number }>}
-   *   `startSeq` is the seq the next recorded entry had when the stream opened:
+   *   `startSeq` is the seq the next recorded entry had when its first text arrived:
    *   the reply belongs before every entry with `_seq >= startSeq`.
    */
   getPendingResponseStreams(sessionId) {
@@ -777,7 +777,6 @@ export class SessionMessageHistory extends EventEmitter {
       case 'stream_start': {
         const key = `${sessionId}:${data.messageId}`
         this._pendingStreams.set(key, '')
-        this._streamStartSeqs.set(key, this._seqCounters.get(sessionId) || 1)
         // #6630 / #8282: a reasoning stream must not be recorded as a reply.
         if (data.thinking === true) {
           this._streamKinds.set(key, 'thinking')
@@ -803,6 +802,13 @@ export class SessionMessageHistory extends EventEmitter {
               log.warn(`Stream delta exceeded size limit for ${key} — truncating; client will be notified`)
             }
             return { persistNeeded: false, truncated: firstDrop }
+          }
+          // #9022: where the reply BEGINS is where its first text arrived, not where
+          // the stream opened. claude-tui and byok open the stream inside sendMessage,
+          // before the input is accepted and `user_input` recorded, so a start-time
+          // seq would put the reply above the prompt it answers.
+          if (data.delta.length > 0 && !this._streamStartSeqs.has(key)) {
+            this._streamStartSeqs.set(key, this._seqCounters.get(sessionId) || 1)
           }
           this._pendingStreams.set(key, existing + data.delta)
         }

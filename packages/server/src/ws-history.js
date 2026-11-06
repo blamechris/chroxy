@@ -1918,8 +1918,10 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   // #9022 -- a reply is recorded only when its stream closes, so a turn paused
   // mid-stream (on a permission prompt) has its text in no entry. Splice what has
-  // streamed so far in, at its place in the transcript.
-  const pending = pendingStreamEntries(sessionManager, sessionId, fullHistory ? undefined : lastSeq)
+  // streamed so far in, at its place in the transcript. The position matters for a
+  // DELTA replay, which appends in arrival order; a full replay's provenance sort
+  // puts the (unnumbered) snapshot after the numbered entries (#9024).
+  const pending = pendingStreamEntries(sessionManager, sessionId)
   const replayEntries = pending.length > 0
     ? spliceInPendingStreams(history.slice(startOffset), pending)
     : history
@@ -1950,32 +1952,31 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
 /**
  * #9022 -- the still-open reply streams of a session as replayable entries.
  *
- * `afterSeq` is the client's cursor on a delta replay: a stream that opened at or
- * before it is one the client saw start and holds its own (live) copy of -- a
- * replayed copy would be deduped away at best and a stale overwrite at worst --
- * so only a stream that opened after it is sent. Omitted (a full replay), every
- * open stream is sent: the client is about to rebuild its transcript from this.
+ * Sent on a delta replay too, whatever the client's cursor: the client dedups a
+ * reply it already holds by id, completes one it holds only the start of (#8444's
+ * `completeHeldResponseStream`, which also refills deltas missed in a dropped
+ * connection), and keeps one that has run ahead of the snapshot. A cursor filter
+ * would not be a sound "did the client see this stream start" test anyway: live
+ * frames carry no `historySeq`, so a cursor says nothing about a stream's start.
  *
  * The entries carry no `_seq`, so a client advances no cursor off them, and no
  * field the stream's own completed entry lacks: when the stream closes, the
  * recorded entry has the same `messageId`, so a client that kept this one dedups.
  */
-function pendingStreamEntries(sessionManager, sessionId, afterSeq) {
+function pendingStreamEntries(sessionManager, sessionId) {
   if (typeof sessionManager.getPendingResponseStreams !== 'function') return []
   const streams = sessionManager.getPendingResponseStreams(sessionId)
   const now = Date.now()
-  return streams
-    .filter((s) => typeof afterSeq !== 'number' || s.startSeq > afterSeq)
-    .map((s) => ({
-      startSeq: s.startSeq,
-      entry: {
-        type: 'message',
-        messageType: 'response',
-        content: s.content,
-        messageId: s.messageId,
-        timestamp: now,
-      },
-    }))
+  return streams.map((s) => ({
+    startSeq: s.startSeq,
+    entry: {
+      type: 'message',
+      messageType: 'response',
+      content: s.content,
+      messageId: s.messageId,
+      timestamp: now,
+    },
+  }))
 }
 
 /**

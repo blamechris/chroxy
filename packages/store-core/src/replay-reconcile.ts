@@ -75,6 +75,7 @@
 
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 import { clearPendingCreateFailures } from './handlers/session-lifecycle'
+import { isResponseStreamBubbleId } from './replay-dedup'
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
@@ -1359,21 +1360,30 @@ function freshenInFlightReplies(
   inFlightResponseIds: ReadonlySet<string>,
 ): unknown[] {
   const streamingId = live.streamingMessageId
-  const liveCopies = new Map<string, string>()
+  const prefixResponses: { id: string; content: string }[] = []
   for (const m of discardedPrefix) {
     const id = idOf(m)
     const { type, content } = (m ?? {}) as { type?: unknown; content?: unknown }
-    if (id === null || type !== 'response' || typeof content !== 'string') continue
-    if ((typeof streamingId === 'string' && id === streamingId) || inFlightResponseIds.has(id)) liveCopies.set(id, content)
+    if (id !== null && type === 'response' && typeof content === 'string') prefixResponses.push({ id, content })
   }
-  if (liveCopies.size === 0) return kept as unknown[]
+  if (prefixResponses.length === 0) return kept as unknown[]
   return kept.map((m) => {
-    const id = idOf(m)
+    const keptId = idOf(m)
     const row = m as { type?: unknown; content?: unknown }
-    const liveContent = id === null ? undefined : liveCopies.get(id)
-    if (liveContent === undefined || row.type !== 'response' || typeof row.content !== 'string') return m
+    if (keptId === null || row.type !== 'response' || typeof row.content !== 'string') return m
+    // The client's layout of this stream: the bubble itself and every bubble split
+    // off it, in transcript order, joined back into the stream's text.
+    const family = prefixResponses.filter((r) => isResponseStreamBubbleId(r.id, keptId))
+    // Only a stream this client still has LIVE: a finished one is the recorded
+    // entry's to say.
+    const isLive = inFlightResponseIds.has(keptId)
+      || (typeof streamingId === 'string' && family.some((r) => r.id === streamingId))
+    if (!isLive) return m
+    const liveContent = family.map((r) => r.content).join('')
     // Append-only: the live copy is fresher only if it EXTENDS the replayed one.
-    return liveContent.length > row.content.length && liveContent.startsWith(row.content) ? { ...row, content: liveContent } : m
+    return liveContent.length > row.content.length && liveContent.startsWith(row.content)
+      ? { ...row, content: liveContent }
+      : m
   })
 }
 
@@ -1426,8 +1436,10 @@ export interface ReplayEndLiveState {
  * {@link orderByProvenance}, since an in-flight response is newer than history.
  */
 function isSplitOffKeptResponse(id: string, keptResponseIds: ReadonlySet<string>): boolean {
-  const match = /^(.+)-(?:post|cont)-\d+$/.exec(id)
-  return match !== null && keptResponseIds.has(match[1]!)
+  for (const keptId of keptResponseIds) {
+    if (id !== keptId && isResponseStreamBubbleId(id, keptId)) return true
+  }
+  return false
 }
 
 function carriedLiveMessages(
@@ -1465,7 +1477,8 @@ function carriedLiveMessages(
     if (id === null || keptIds.has(id)) continue
     // #9022: a bubble split off a stream the replay now holds whole. A response is
     // one entry for the whole stream, and the client lays a long one out as `m1`,
-    // `m1-post-<ts>` and `m1-cont-<ts>`; the replayed `m1` already has their text.
+    // `m1-response`, `m1-post-<ts>` and chained `m1-cont-<ts>-cont-<ts>` (the shared
+    // family matcher, replay-dedup); the replayed `m1` already has their text.
     if (isSplitOffKeptResponse(id, keptResponseIds)) continue
     const { type, thinkingStreaming, toolUseId, toolResult, toolResultImages } = m as {
       type?: unknown

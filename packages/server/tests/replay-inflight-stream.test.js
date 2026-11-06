@@ -35,7 +35,17 @@ describe('SessionMessageHistory#getPendingResponseStreams (#9022)', () => {
     assert.equal(rest.length, 0)
     assert.equal(only.messageId, 'm1')
     assert.equal(only.content, 'line 1\nline 2\n')
-    assert.equal(only.startSeq, 2, 'the seq the next entry took when the stream opened')
+    assert.equal(only.startSeq, 2, 'the seq the next entry took when the first text arrived')
+  })
+
+  it('stamps where the FIRST TEXT arrived, not where the stream opened (stream opens before the input is recorded)', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'hi' })
+    const [only] = h.getPendingResponseStreams('s1')
+    assert.equal(only.startSeq, 2, 'after user_input (seq 1), so the reply sorts below the prompt')
   })
 
   it('is empty once the stream closes (the recorded entry takes over)', () => {
@@ -86,10 +96,15 @@ async function replay(mgr, sessionId, clientRecord, opts) {
   return sent
 }
 
-/** The owner path: text streams, the tool starts, and the turn waits on a prompt. */
+/**
+ * The owner path, in the order the REAL providers produce it: claude-tui and byok
+ * open their stream inside sendMessage, BEFORE the input is accepted and
+ * `user_input` recorded; the first text follows.
+ */
 function pausedTurn(mgr, sid) {
-  mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
+  mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'first', timestamp: 0 })
   mgr._recordHistory(sid, 'stream_start', { messageId: 'm1' })
+  mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'do it', timestamp: 1 })
   mgr._recordHistory(sid, 'stream_delta', { messageId: 'm1', delta: 'STREAM-LINE 1\n' })
   mgr._recordHistory(sid, 'stream_delta', { messageId: 'm1', delta: 'STREAM-LINE 2\n' })
   mgr._recordHistory(sid, 'tool_start', { messageId: 'toolu_1', toolUseId: 'toolu_1', tool: 'Bash', input: null })
@@ -107,12 +122,12 @@ function withManager(fn) {
 }
 
 describe('a replay carries the reply text streamed so far (#9022)', () => {
-  it('a full replay sends it before the tool that followed it, and nothing twice', withManager(async (mgr, sid) => {
+  it('a full replay sends it after the prompt it answers and before the tool that followed it, once', withManager(async (mgr, sid) => {
     pausedTurn(mgr, sid)
     const sent = await replay(mgr, sid, {}, { forceFull: true })
     const frames = sent.filter((m) => m.type === 'message' || m.type === 'tool_start')
-    assert.deepEqual(frames.map((m) => m.messageType || m.type), ['user_input', 'response', 'tool_start'])
-    const reply = frames[1]
+    assert.deepEqual(frames.map((m) => m.messageType || m.type), ['user_input', 'user_input', 'response', 'tool_start'])
+    const reply = frames[2]
     assert.equal(reply.messageId, 'm1')
     assert.equal(reply.content, 'STREAM-LINE 1\nSTREAM-LINE 2\n')
     assert.equal(reply.historySeq, undefined, 'it is no recorded entry: a client advances no cursor off it')
@@ -128,20 +143,29 @@ describe('a replay carries the reply text streamed so far (#9022)', () => {
     assert.deepEqual(kinds, ['user_input', 'response'])
   }))
 
-  it('a delta replay omits a stream the client already saw open, and sends one it did not', withManager(async (mgr, sid) => {
+  it('a delta replay sends only the entries after the cursor, plus the open reply in place (#9022)', withManager(async (mgr, sid) => {
     pausedTurn(mgr, sid)
-    const lastSeq = mgr.getLatestHistorySeq(sid)
-    // The client is current: it watched the reply stream, and holds its own copy.
-    let sent = await replay(mgr, sid, { historyCursors: { [sid]: lastSeq } })
+    const cursor = mgr.getHistory(sid).find((e) => e.content === 'first')._seq
+    const sent = await replay(mgr, sid, { historyCursors: { [sid]: cursor } })
     assert.equal(sent[0].fullHistory, false)
-    assert.equal(sent.filter((m) => m.type === 'message').length, 0)
+    const frames = sent.filter((m) => m.type === 'message' || m.type === 'tool_start')
+    // The entry the client already has (seq <= cursor) is NOT re-sent.
+    assert.deepEqual(frames.map((m) => m.content || m.type), ['do it', 'STREAM-LINE 1\nSTREAM-LINE 2\n', 'tool_start'])
+  }))
 
-    // The client's cursor predates the stream: it never saw the reply start.
-    sent = await replay(mgr, sid, { historyCursors: { [sid]: 1 } })
+  it('a delta replay from a cursor before the turn puts the reply after its prompt (claude-tui order)', withManager(async (mgr, sid) => {
+    pausedTurn(mgr, sid)
+    const sent = await replay(mgr, sid, { historyCursors: { [sid]: 1 } })
     assert.equal(sent[0].fullHistory, false)
-    const replies = sent.filter((m) => m.type === 'message' && m.messageType === 'response')
-    assert.equal(replies.length, 1)
-    assert.equal(replies[0].content, 'STREAM-LINE 1\nSTREAM-LINE 2\n')
+    const order = sent.filter((m) => m.type === 'message').map((m) => m.messageType)
+    assert.deepEqual(order, ['user_input', 'response'])
+  }))
+
+  it('a client already current still gets the open reply, to dedup or complete (S3)', withManager(async (mgr, sid) => {
+    pausedTurn(mgr, sid)
+    const sent = await replay(mgr, sid, { historyCursors: { [sid]: mgr.getLatestHistorySeq(sid) } })
+    assert.equal(sent[0].fullHistory, false)
+    assert.deepEqual(sent.filter((m) => m.type === 'message').map((m) => m.messageType), ['response'])
   }))
 
   it('once the stream closes the recorded entry replaces it: still one reply', withManager(async (mgr, sid) => {

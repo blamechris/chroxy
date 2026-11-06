@@ -7,8 +7,15 @@
  *  - a client that just reloaded holds nothing live, and keeps the replayed text;
  *  - a client whose live copy has run ahead of the snapshot keeps the live text,
  *    in the replayed row's place, once;
- *  - a bubble the client split off the stream is not carried back beside the
- *    replayed whole.
+ *  - a bubble the client split off the stream (`-response`, `-post-<ts>`, chained
+ *    `-cont-<ts>-cont-<ts>`) is not carried back beside the replayed whole.
+ *
+ * ORDER is deliberately not asserted here. This helper appends the snapshot in
+ * array order; the real client orders the swapped tail by `historySeq` provenance,
+ * and the snapshot carries none, so it lands LAST on a full replay (text below the
+ * cards -- the ordering main already has for a completed reply, tracked in #9024).
+ * The ordering assertions go through the real handler in the dashboard's
+ * replay-partial-reply.test.ts.
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import {
@@ -44,6 +51,9 @@ function fullReplay(messages: ChatMessage[], replayed: ChatMessage[], live: Repl
   return (swappedMessages as ChatMessage[] | null) ?? current
 }
 
+const ids = (rows: ChatMessage[]): string[] => rows.map((m) => m.id).sort()
+const byId = (rows: ChatMessage[], id: string): ChatMessage => rows.find((m) => m.id === id) as ChatMessage
+
 const PAUSED_REPLAY = (): ChatMessage[] => [
   userInput('u-1'),
   response('m1', 'STREAM-LINE 1\nSTREAM-LINE 2\n'),
@@ -55,11 +65,8 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
 
   it('a reload with storage cleared shows the replayed text', () => {
     const swapped = fullReplay([], PAUSED_REPLAY(), { streamingMessageId: null, turnInFlight: true })
-    expect(swapped.map((m) => [m.id, m.content])).toEqual([
-      ['u-1', 'go'],
-      ['m1', 'STREAM-LINE 1\nSTREAM-LINE 2\n'],
-      ['toolu_1', 'ls'],
-    ])
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
+    expect(ids(swapped)).toEqual(['m1', 'toolu_1', 'u-1'])
   })
 
   it('a reload with storage kept shows the text once, not twice', () => {
@@ -69,7 +76,7 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
     expect(swapped.filter((m) => m.type === 'response').map((m) => m.content)).toEqual([
       'STREAM-LINE 1\nSTREAM-LINE 2\n',
     ])
-    expect(swapped.map((m) => m.id)).toEqual(['u-1', 'm1', 'toolu_1'])
+    expect(ids(swapped)).toEqual(['m1', 'toolu_1', 'u-1'])
   })
 
   it('a live copy that ran ahead of the snapshot wins, in the replayed row\'s place', () => {
@@ -77,8 +84,8 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
     before = streamStart(before, 'm1')
     before = before.map((m) => (m.id === 'm1' ? { ...m, content: 'STREAM-LINE 1\nSTREAM-LINE 2\nSTREAM-LINE 3\n' } : m))
     const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1', turnInFlight: true })
-    expect(swapped.map((m) => m.id)).toEqual(['u-1', 'm1', 'toolu_1'])
-    expect(swapped[1]!.content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\nSTREAM-LINE 3\n')
+    expect(ids(swapped)).toEqual(['m1', 'toolu_1', 'u-1'])
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\nSTREAM-LINE 3\n')
   })
 
   it('a live copy that is behind the snapshot gives way to it', () => {
@@ -86,14 +93,14 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
     before = streamStart(before, 'm1')
     before = before.map((m) => (m.id === 'm1' ? { ...m, content: 'STREAM-LINE 1\n' } : m))
     const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1', turnInFlight: true })
-    expect(swapped[1]!.content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
   })
 
   it('a live copy that does not extend the replayed text never replaces it', () => {
     let before: ChatMessage[] = streamStart([userInput('u-1')], 'm1')
     before = before.map((m) => (m.id === 'm1' ? { ...m, content: 'something else entirely, and longer than the replay' } : m))
     const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1', turnInFlight: true })
-    expect(swapped[1]!.content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
   })
 
   it('does not carry a bubble the client split off the stream the replay now holds whole', () => {
@@ -105,7 +112,42 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
       response('m1-cont-5', 'STREAM-LINE 2\n'),
     ]
     const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1-cont-5', turnInFlight: true })
-    expect(swapped.map((m) => m.id)).toEqual(['u-1', 'm1', 'toolu_1'])
+    expect(ids(swapped)).toEqual(['m1', 'toolu_1', 'u-1'])
+  })
+
+  it('does not carry a `-response` bubble or a CHAINED continuation either', () => {
+    const before: ChatMessage[] = [
+      userInput('u-1'),
+      response('m1', 'A '),
+      tool('toolu_1', 'toolu_1'),
+      response('m1-cont-5', 'B '),
+      tool('toolu_2', 'toolu_2'),
+      response('m1-cont-5-cont-9', 'C '),
+      response('m1-response', 'D '),
+    ]
+    const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1-cont-5-cont-9', turnInFlight: true })
+    expect(swapped.filter((m) => m.type === 'response').map((m) => m.id)).toEqual(['m1'])
+  })
+
+  it('a live family that out-ran the snapshot is joined back into the replayed row', () => {
+    const before: ChatMessage[] = [
+      userInput('u-1'),
+      response('m1', 'STREAM-LINE 1\n'),
+      tool('toolu_1', 'toolu_1'),
+      response('m1-cont-5', 'STREAM-LINE 2\nSTREAM-LINE 3\n'),
+    ]
+    const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: 'm1-cont-5', turnInFlight: true })
+    expect(swapped.filter((m) => m.type === 'response').map((m) => m.content)).toEqual([
+      'STREAM-LINE 1\nSTREAM-LINE 2\nSTREAM-LINE 3\n',
+    ])
+  })
+
+  it('a finished stream is the recorded entry\'s to say: no live gate, no freshening', () => {
+    // Not live (no streamingMessageId, no open stream in the ledger): even a live-looking
+    // longer row does not overwrite the replayed one.
+    const before: ChatMessage[] = [userInput('u-1'), response('m1', 'STREAM-LINE 1\nSTREAM-LINE 2\nAND MORE\n')]
+    const swapped = fullReplay(before, PAUSED_REPLAY(), { streamingMessageId: null, turnInFlight: true })
+    expect(byId(swapped, 'm1').content).toBe('STREAM-LINE 1\nSTREAM-LINE 2\n')
   })
 
   it('still carries a live response that belongs to no replayed stream', () => {
@@ -115,6 +157,6 @@ describe('a replayed partial reply across a full replay swap (#9022)', () => {
       PAUSED_REPLAY(),
       { streamingMessageId: 'other', turnInFlight: true },
     )
-    expect(swapped.map((m) => m.id)).toEqual(['u-1', 'm1', 'toolu_1', 'other'])
+    expect(ids(swapped)).toEqual(['m1', 'other', 'toolu_1', 'u-1'])
   })
 })
