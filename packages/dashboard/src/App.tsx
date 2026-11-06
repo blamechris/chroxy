@@ -38,7 +38,8 @@ import {
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
-import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
+import { resolveSessionUsage, useLiveCumulativeUsage } from './store/live-usage'
+import type { ContextOccupancy } from '@chroxy/store-core'
 import type { SessionNotification } from './store/types'
 import { isSessionListed } from './store/utils'
 
@@ -1793,30 +1794,10 @@ export function App() {
   }, [sessionTabs, pendingPermissionCounts, activeSessionId, handleSwitchSession])
 
   // Derive sidebar repo tree from sessions
-  // #4120: dedicated selector for the cumulativeUsage slice the sidebar
-  // reads, with shallow equality so this only updates when a value the
-  // sidebar consumes actually changes — NOT on every stream chunk.
-  // Without this slice the sidebarRepos useMemo below depended on the
-  // entire `sessionStates` object, which gets replaced on every WS
-  // event (every stream_delta, every tool_result), forcing the memo
-  // to recompute + allocate a fresh RepoNode[] hundreds of times per
-  // turn (#4119 review followup #4120).
-  const sidebarCumulativeUsage = useConnectionStore(
-    useShallow((s) => {
-      // for-in + index lookup avoids the per-call Object.entries()
-      // intermediate array allocation. This selector still runs on every
-      // store update (zustand fires the selector to compute the new
-      // value and compare against the previous); only the SHALLOW-EQUAL
-      // RESULT comparison short-circuits the React subscribers.
-      // Skipping the array allocation keeps the hot path tight (#4130
-      // review).
-      const out: Record<string, BaseSessionState['cumulativeUsage']> = {}
-      for (const id in s.sessionStates) {
-        out[id] = s.sessionStates[id]!.cumulativeUsage
-      }
-      return out
-    }),
-  )
+  // #4120/#7801: shared shallow-equal live-usage selector (store/live-usage.ts),
+  // so sidebarRepos below recomputes only when a usage value changes, not on
+  // every stream chunk.
+  const sidebarCumulativeUsage = useLiveCumulativeUsage()
 
   const sidebarRepos: RepoNode[] = useMemo(() => {
     const repoMap = new Map<string, RepoNode>()
@@ -1869,7 +1850,7 @@ export function App() {
         // `sessionStates` directly so this memo only recomputes when
         // a cumulativeUsage value actually changes — not on every
         // stream chunk.
-        cumulativeUsage: sidebarCumulativeUsage[s.sessionId] ?? s.cumulativeUsage ?? null,
+        cumulativeUsage: resolveSessionUsage(sidebarCumulativeUsage, s),
       })
     }
 

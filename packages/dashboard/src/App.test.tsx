@@ -5423,3 +5423,51 @@ it('precommit recovery retains an attachment-only restored owner and releases it
   expect(screen.queryByTestId('composer-recovery')).toBeNull()
   expect(sendInput).toHaveBeenCalledOnce()
 })
+
+// ---------------------------------------------------------------------------
+// #7801 — the sidebar cost badge shows the LIVE usage, falling back to the
+// session_list snapshot. Behavioural, through App: a spelling guard over
+// App.tsx survives a dropped fallback or a private selector.
+// ---------------------------------------------------------------------------
+describe('sidebar cost badge: live usage over snapshot (#7801)', () => {
+  const usage = (costUsd: number) => ({
+    inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0,
+    costUsd, turnsBilled: 1,
+  })
+  const session = (cumulativeUsage?: ReturnType<typeof usage> | null) => ({
+    sessionId: 's1', name: 'Test', cwd: '/tmp/repo-a', type: 'cli', hasTerminal: true,
+    model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null,
+    cumulativeUsage,
+  })
+  const withLive = (u: ReturnType<typeof usage> | null | undefined) => ({
+    s1: { messages: [], activeAgents: [], isIdle: true, cumulativeUsage: u },
+  })
+  const badge = () => screen.queryByLabelText(/^Session cost /)
+
+  it('live usage wins over the snapshot', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [session(usage(1))], activeSessionId: 's1',
+      sessionStates: withLive(usage(7)),
+    }
+    render(<App />)
+    expect(badge()?.getAttribute('aria-label')).toBe('Session cost $7.00')
+  })
+
+  it('falls back to the snapshot when no live usage has arrived', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [session(usage(1))], activeSessionId: 's1',
+      sessionStates: withLive(undefined),
+    }
+    render(<App />)
+    expect(badge()?.getAttribute('aria-label')).toBe('Session cost $1.00')
+  })
+
+  it('shows no badge when neither source has usage', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [session()], activeSessionId: 's1',
+      sessionStates: withLive(null),
+    }
+    render(<App />)
+    expect(badge()).toBeNull()
+  })
+})
