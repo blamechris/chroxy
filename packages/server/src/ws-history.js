@@ -1392,6 +1392,8 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   if (!entry) return
   const session = entry.session
 
+  if (entry.declaredStatus) send(ws, { type: 'session_status', sessionId, declaredStatus: { ...entry.declaredStatus } })
+
   send(ws, {
     type: 'provider_runtime_info',
     sessionId,

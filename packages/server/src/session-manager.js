@@ -1,4 +1,6 @@
 import { EventEmitter } from 'events'
+import { DeclaredStatusInputSchema, DeclaredStatusSchema } from '@chroxy/protocol'
+import { extractDeclaredStatus } from './declared-status.js'
 import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync, realpathSync } from 'fs'
 import { join, resolve, dirname, basename, isAbsolute } from 'path'
@@ -75,6 +77,15 @@ export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 's
  * this list instead of a copy of it.
  */
 export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed'])
+
+function ownsDeclarationEvent(entry, data) {
+  if (entry?.session?.constructor?.declarationTurnOwnership !== true) return true
+  return typeof entry._declarationTurnId === 'string' && data?.declarationTurnId === entry._declarationTurnId
+}
+
+function sessionHasCanonicalResponses(session) {
+  return session?.constructor?.canonicalAssistantResponses === true
+}
 
 const log = createLogger('session-manager')
 /**
@@ -2942,6 +2953,7 @@ export class SessionManager extends EventEmitter {
         // strict boolean so every row carries the same shape.
         starting: entry._starting === true,
         isBusy: entry.session.isRunning,
+        ...(entry.declaredStatus ? { declaredStatus: { ...entry.declaredStatus } } : {}),
         // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
         // "mid-turn" with "idle but a background shell is still tracked"; a
         // client needs to tell them apart to say "waiting on N shells" instead
@@ -3558,8 +3570,11 @@ export class SessionManager extends EventEmitter {
    */
   _serializeSessionEntry(id, entry) {
     const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
+    const decisionActivity = entry.session.getDecisionActivityState?.()
     return {
         id,
+        ...(entry.declaredStatus ? { declaredStatus: { ...entry.declaredStatus } } : {}),
+        ...(decisionActivity ? { decisionActivity } : {}),
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         conversationId: entry.session.resumeSessionId || null,
         nativeResume: entry.session.nativeResumeState || null,
@@ -4007,6 +4022,11 @@ export class SessionManager extends EventEmitter {
       // or corrupt file can carry a fractional / past-2^53 / negative counter straight
       // into the live snapshot. Same coercion as the accumulate path above.
       if (restoredEntry) {
+        const status = DeclaredStatusSchema.safeParse(saved.declaredStatus)
+        if (status.success) {
+          restoredEntry.declaredStatus = status.data
+        }
+        restoredEntry.session.restoreDeclaredStatusActivity?.(status.success ? status.data : null, saved.decisionActivity)
         if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
           const u = saved.cumulativeUsage
           restoredEntry.cumulativeUsage = {
@@ -5556,12 +5576,49 @@ export class SessionManager extends EventEmitter {
     return true
   }
 
-  /**
-   * Record an event into the session's message history ring buffer.
-   * Delegates to SessionMessageHistory and triggers persist when needed.
-   */
+  /** Update durable declared intent without changing provider activity. */
+  setDeclaredStatus(sessionId, input, source = 'api') {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return null
+    const parsed = DeclaredStatusInputSchema.safeParse(input)
+    if (!parsed.success || !['marker', 'api', 'hook'].includes(source)) return null
+    const declaration = parsed.data
+    const decision = declaration.decision === undefined
+      ? entry.declaredStatus?.decision
+      : (/^none$/i.test(declaration.decision) ? undefined : declaration.decision)
+    const status = { ...declaration, source, updatedAt: Date.now() }
+    delete status.decision
+    if (decision) status.decision = decision
+    // Repeat complete messages/replays do not produce duplicate declarations.
+    const previous = entry.declaredStatus
+    if (previous && ['state', 'summary', 'next', 'blockedOn', 'etaMinutes', 'decision', 'source'].every((field) => previous[field] === status[field])) return { ...previous }
+    entry.declaredStatus = status
+    entry.session.setDeclaredStatusActivity?.(status)
+    this._schedulePersist()
+    this.emit('session_event', { sessionId, event: 'session_status', data: { declaredStatus: { ...status } } })
+    return { ...status }
+  }
+
+  /** Record provider output and accept intent only after normal completion. */
   _recordHistory(sessionId, event, data) {
-    const { persistNeeded, truncated } = this._history.recordHistory(sessionId, event, data)
+    const { persistNeeded, truncated, completedAssistant, assistantCompleted } = this._history.recordHistory(sessionId, event, data)
+    const entry = this._sessions.get(sessionId)
+    if (entry && assistantCompleted && sessionHasCanonicalResponses(entry.session) !== true) {
+      // The latest completed assistant response supersedes an intermediate
+      // response even when it carries no usable declaration. Never retain text:
+      // only a bounded parsed candidate waits for the turn's normal result.
+      entry._pendingDeclaredStatus = typeof completedAssistant === 'string' ? extractDeclaredStatus(completedAssistant) : null
+    }
+    if (event === 'result' && entry && ownsDeclarationEvent(entry, data)) {
+      const pending = entry._pendingDeclaredStatus
+      delete entry._pendingDeclaredStatus
+      const eligible = sessionHasCanonicalResponses(entry.session) ? data?.declarationEligible === true : data?.declarationEligible !== false
+      if (pending && eligible && data?.interrupted !== true && (!data?.turnOutcome || data.turnOutcome === 'completed')) {
+        this.setDeclaredStatus(sessionId, pending, 'marker')
+      }
+    } else if (event === 'error' && data?.recoverable !== true && entry && ownsDeclarationEvent(entry, data)) {
+      delete entry._pendingDeclaredStatus
+    }
     if (persistNeeded) {
       this._schedulePersist()
     }
@@ -5774,6 +5831,16 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
+    session.on('declaration_turn', (data) => {
+      const entry = this._sessions.get(sessionId)
+      if (!entry || entry._destroying || typeof data?.declarationTurnId !== 'string') return
+      entry._declarationTurnId = data.declarationTurnId
+      delete entry._pendingDeclaredStatus
+    })
+    session.on('assistant_response', (response) => {
+      const entry = this._sessions.get(sessionId)
+      if (entry && !entry._destroying && ownsDeclarationEvent(entry, response)) entry._pendingDeclaredStatus = extractDeclaredStatus(response?.text)
+    })
     // #5431: background_tasks_changed — claude-tui's idle transcript re-scan
     // reporting that outstanding background work changed (a task-notification
     // landed or a wakeup fired while no turn was running). Deliberately NOT
@@ -5843,9 +5910,21 @@ export class SessionManager extends EventEmitter {
     // edges at once rather than on the 2 s debounce, so a crash right after either
     // leaves the state file saying the truth. Ignored during teardown: a session
     // being destroyed flips busy off, and that is not its turn ending.
-    session.on('turn_state', ({ active } = {}) => this._setTurnInFlight(sessionId, session, active === true))
+    session.on('turn_state', ({ active } = {}) => {
+      if (active === true) {
+        const entry = this._sessions.get(sessionId)
+        if (entry) delete entry._pendingDeclaredStatus
+      }
+      this._setTurnInFlight(sessionId, session, active === true)
+    })
     // A user Stop is a terminal outcome too (cli/tui emit it instead of a result).
-    session.on('stopped', () => this._noteTurnEnded(sessionId, session))
+    session.on('stopped', (data) => {
+      const entry = this._sessions.get(sessionId)
+      if (entry && ownsDeclarationEvent(entry, data)) {
+        delete entry._pendingDeclaredStatus
+        this._noteTurnEnded(sessionId, session)
+      }
+    })
 
     for (const event of PROXIED_EVENTS) {
       session.on(event, (emitted) => {
@@ -5867,7 +5946,7 @@ export class SessionManager extends EventEmitter {
         // and a restart in that window must not call a finished turn interrupted. Every
         // provider's outcome passes this listener. A recoverable error (a rejected
         // follow-up, say) does not end the turn.
-        if (event === 'result' || (event === 'error' && data?.recoverable !== true)) {
+        if ((event === 'result' || (event === 'error' && data?.recoverable !== true)) && ownsDeclarationEvent(this._sessions.get(sessionId), data)) {
           this._noteTurnEnded(sessionId, session)
         }
         this.emit('session_event', { sessionId, event, data })

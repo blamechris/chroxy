@@ -88,10 +88,16 @@ function isTerminal(entry: ActivityEntry): boolean {
 function shouldReplace(existing: ActivityEntry | undefined, incoming: ActivityEntry): boolean {
   if (existing === undefined) return true
 
+  // Only this stable id is reused. A newer lifetime may follow explicit clear;
+  // delayed updates/ends from an older lifetime must not overwrite it.
+  const isSessionDecision = existing.kind === 'decision' && incoming.kind === 'decision' && incoming.id === 'decision:session'
+  if (isSessionDecision && incoming.startedAt < existing.startedAt) return false
+
   const existingTerminal = isTerminal(existing)
   const incomingTerminal = isTerminal(incoming)
 
   if (existingTerminal && !incomingTerminal) {
+    if (isSessionDecision && incoming.startedAt > (existing.endedAt ?? 0)) return true
     // Stale non-terminal update after the entry already ended — ignore it.
     return false
   }

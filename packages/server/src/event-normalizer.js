@@ -641,6 +641,10 @@ Object.assign(EVENT_MAP, {
   // breakdown for the dashboard / app badge). Subscription-only
   // providers (claude-tui) emit `result` without a numeric `cost` so
   // their session_usage never fires and `cumulativeUsage` stays zero.
+  session_status: (data, ctx) => ({
+    messages: [{ msg: { type: 'session_status', sessionId: ctx.sessionId, declaredStatus: data.declaredStatus } }],
+  }),
+
   session_usage: (data) => ({
     messages: [{ msg: { type: 'session_usage', cumulativeUsage: data.cumulativeUsage } }],
   }),

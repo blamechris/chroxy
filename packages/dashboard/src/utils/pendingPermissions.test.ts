@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatMessage } from '@chroxy/store-core'
 import {
+  withDecisionCounts,
   derivePendingPermissionSessions,
   derivePendingPermissionCounts,
   totalPendingPermissions,
@@ -150,4 +151,16 @@ describe('selectNextPendingSession (#5693)', () => {
     expect(selectNextPendingSession(order, { c: 1 }, 'unknown')).toBe('c')
     expect(selectNextPendingSession(order, { c: 1 }, null)).toBe('c')
   })
+})
+
+
+it('counts a stable blocked decision for header/tray without doubling permissions, and clears independently', () => {
+  const counts = { s1: 2 }
+  const decision = { id: 'decision:session', kind: 'decision' as const, label: 'Choose', status: 'blocked' as const, startedAt: 1 }
+  const permission = { id: 'blocked:p', kind: 'tool' as const, label: 'Permission', status: 'blocked' as const, startedAt: 1 }
+  const activity = { bySession: { s1: { byId: { [decision.id]: decision, [permission.id]: permission }, order: [decision.id, permission.id] } } }
+  expect(totalPendingPermissions(withDecisionCounts(counts, activity))).toBe(3)
+  expect(selectNextPendingSession(['s1'], withDecisionCounts({}, activity), null)).toBe('s1')
+  const ended = { ...decision, status: 'done' as const, endedAt: 2 }
+  expect(withDecisionCounts(counts, { bySession: { s1: { ...activity.bySession.s1, byId: { [decision.id]: ended, [permission.id]: permission } } } })).toEqual(counts)
 })

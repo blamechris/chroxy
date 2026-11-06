@@ -28,6 +28,7 @@ export declare const ACTIVITY_SCHEMA_VERSION = 1;
  */
 export declare const ActivityKindSchema: z.ZodEnum<{
     tool: "tool";
+    decision: "decision";
     agent: "agent";
     shell: "shell";
 }>;
@@ -125,6 +126,7 @@ export declare const ActivityEntrySchema: z.ZodObject<{
     id: z.ZodString;
     kind: z.ZodEnum<{
         tool: "tool";
+        decision: "decision";
         agent: "agent";
         shell: "shell";
     }>;
@@ -161,6 +163,7 @@ export declare const ServerActivitySnapshotSchema: z.ZodObject<{
         id: z.ZodString;
         kind: z.ZodEnum<{
             tool: "tool";
+            decision: "decision";
             agent: "agent";
             shell: "shell";
         }>;
@@ -213,6 +216,7 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
         id: z.ZodString;
         kind: z.ZodEnum<{
             tool: "tool";
+            decision: "decision";
             agent: "agent";
             shell: "shell";
         }>;
