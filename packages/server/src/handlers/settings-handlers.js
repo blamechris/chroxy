@@ -4,6 +4,7 @@
  * Handles: set_model, set_permission_mode, permission_response,
  *          query_permission_audit, list_providers, set_permission_rules
  */
+import { getErrorMessage } from '../utils/error-message.js'
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import { buildThinkingLevelChanged } from '../thinking-level-wire.js'
 import {
@@ -795,6 +796,15 @@ export function resolveSessionThinkingLevels(entry) {
   }
 }
 
+/**
+ * A provider's setter may reject with anything: null, undefined or a bare
+ * string. `err.message` on the first two would throw INSIDE the catch block and
+ * the client would never get its THINKING_LEVEL_NOT_APPLIED (#7786 review).
+ */
+function thrownMessage(err) {
+  return getErrorMessage(err, typeof err === 'string' && err.length > 0 ? err : 'unknown error')
+}
+
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // #5731 T9: every rejection path echoes the client's requestId with a single
   // THINKING_LEVEL_NOT_APPLIED code so the dashboard rolls back its optimistic
@@ -849,7 +859,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
       ;sessionLogger(sessionId).info(`Thinking level cleared by ${client.id} on session ${sessionId}: ${previousLevel} → provider default${described ? ` (${described})` : ''}`)
       ctx.transport.broadcastToSession(sessionId, buildThinkingLevelChanged(entry.session) ?? { type: 'thinking_level_changed', level: LEGACY_DEFAULT_THINKING_LEVEL })
     } catch (err) {
-      sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to clear thinking level: ${err.message}`, undefined, ctx)
+      sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to clear thinking level: ${thrownMessage(err)}`, undefined, ctx)
     }
     return
   }
@@ -904,7 +914,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
     ;sessionLogger(sessionId).info(`Thinking level change from ${client.id} on session ${sessionId}: ${previousLevel} → ${level}${described ? ` (${described})` : ''}`)
     ctx.transport.broadcastToSession(sessionId, buildThinkingLevelChanged(entry.session) ?? { type: 'thinking_level_changed', level })
   } catch (err) {
-    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to set thinking level: ${err.message}`, undefined, ctx)
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to set thinking level: ${thrownMessage(err)}`, undefined, ctx)
   }
 }
 

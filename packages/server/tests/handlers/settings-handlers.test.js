@@ -3242,6 +3242,25 @@ describe('settings-handlers', () => {
         }
       })
 
+      // A provider may reject with a non-Error. `err.message` in the catch would
+      // throw inside the handler and the client would get no reply at all.
+      for (const [label, thrown, expected] of [['null', null, 'unknown error'], ['undefined', undefined, 'unknown error'], ['a plain string', 'plain boom', 'plain boom']]) {
+        for (const [verb, level] of [['clear', null], ['set', 'high']]) {
+          it(`a setter that rejects with ${label} on a ${verb} still yields THINKING_LEVEL_NOT_APPLIED + requestId`, async () => {
+            const session = sessionWithThinking(true)
+            session.setThinkingLevel = createSpy(async () => { throw thrown })
+            const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' }]]))
+            const ws = makeWs()
+            await settingsHandlers.set_thinking_level(ws, makeClient({ activeSessionId: 's1' }),
+              wire({ type: 'set_thinking_level', level, requestId: 'r-nonerror' }), ctx)
+            assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+            assert.equal(ws._messages[0].requestId, 'r-nonerror')
+            assert.ok(ws._messages[0].message.endsWith(expected), ws._messages[0].message)
+            assert.equal(ctx._sessionBroadcasts.length, 0)
+          })
+        }
+      }
+
       it('a failing setter on a clear is reported, not swallowed', async () => {
         const session = sessionWithThinking(true)
         session.setThinkingLevel = createSpy(async () => { throw new Error('boom') })

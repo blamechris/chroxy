@@ -3169,14 +3169,14 @@ export class SdkSession extends BaseSession {
       try {
         await query.applyFlagSettings({ effortLevel: this._thinkingLevel })
       } catch (err) {
-        ;(this._log || log).warn(`Failed to apply effort ${level} to the running turn: ${err?.message || err}`)
+        ;(this._log || log).warn(`Failed to apply effort ${level ?? 'default (cleared)'} to the running turn: ${err?.message || err}`)
       }
     }
     if (setsBudget && typeof query.setMaxThinkingTokens === 'function') {
       try {
         await query.setMaxThinkingTokens(opts.maxThinkingTokens ?? null)
       } catch (err) {
-        ;(this._log || log).warn(`Failed to apply the thinking budget for ${level} to the running turn: ${err?.message || err}`)
+        ;(this._log || log).warn(`Failed to apply the thinking budget for ${level ?? 'default (cleared)'} to the running turn: ${err?.message || err}`)
       }
     }
     // Capture ownership before the setters await: an older continuation must
