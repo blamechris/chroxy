@@ -1408,7 +1408,11 @@ a.dev-preview-chip__link:focus-visible {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  column-gap: 6px;
+  /* The toggle's size and the column gap feed the tabs' basis below; one
+     definition each so the row-1 arithmetic cannot drift from the toggle. */
+  --panel-toggle-size: 44px;
+  --panel-header-gap: 6px;
+  column-gap: var(--panel-header-gap);
   padding: 0 8px;
   min-height: 44px;
   font-size: 11px;
@@ -1420,9 +1424,9 @@ a.dev-preview-chip__link:focus-visible {
 .sidebar-panel-slot-tabs {
   display: flex;
   gap: 8px;
-  /* Basis = the row minus the 44px toggle and one column-gap, so the toggle
+  /* Basis = the row minus the toggle and one column-gap, so the toggle
      always shares row 1 and the launcher + metric always take row 2. */
-  flex: 1 1 calc(100% - 50px);
+  flex: 1 1 calc(100% - var(--panel-toggle-size) - var(--panel-header-gap));
   min-width: 0;
   order: 1;
 }
@@ -1500,8 +1504,8 @@ a.dev-preview-chip__link:focus-visible {
   color: var(--text-muted);
   cursor: pointer;
   padding: 2px 4px;
-  min-height: 44px;
-  min-width: 44px;
+  min-height: var(--panel-toggle-size);
+  min-width: var(--panel-toggle-size);
   flex: 0 0 auto;
   order: 2;
   font-size: 11px;

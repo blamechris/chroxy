@@ -1,11 +1,12 @@
 /**
- * #8943 — the collapsed sidebar panel header must not let tab labels overlap
- * the metric (or the launcher). jsdom does no layout, so no bounding-box
- * intersection can be asserted here; this reads what the REAL components.css
- * cascade resolves to for the properties that make overlap impossible, plus
- * the 44px tap-target floor. The pixel-level check (bounding boxes of every
- * control vs the metric at 200/240/320/480px with long values) was run in a
- * real browser; see the PR description.
+ * #8943 — pins the CSS PROPERTIES that make the collapsed sidebar panel
+ * header overlap-free (wrap, 44px floors, no-shrink, metric truncation) as the
+ * real components.css cascade resolves them. jsdom does no layout, so this
+ * proves NO geometry: a property can be present and the layout still wrong.
+ * The executable layout check (bounding boxes of the tabs, launcher, metric and
+ * toggle measured in a real browser at 240/320/480px) is
+ * packages/dashboard/scripts/panel-header-layout.test.mjs, which the Dashboard
+ * Smoke CI job runs on every PR.
  *
  * Negative control: `.sidebar-panel-slot` (never given these props) proves the
  * stylesheet is attached, so "no sheet" cannot read as "compliant".
@@ -30,6 +31,12 @@ beforeAll(() => {
 function px(value: string): number {
   const m = /^(-?[\d.]+)px$/.exec((value ?? '').trim())
   return m ? Number.parseFloat(m[1]!) : Number.NaN
+}
+
+/** Resolve a one-level `var(--x)` against the header's own custom properties. */
+function resolveVar(value: string, header: HTMLElement): string {
+  const m = /^var\((--[\w-]+)\)$/.exec((value ?? '').trim())
+  return m ? getComputedStyle(header).getPropertyValue(m[1]!).trim() : value
 }
 
 function renderCollapsed() {
@@ -85,11 +92,14 @@ describe('#8943 — collapsed header layout', () => {
       screen.getByTestId('sidebar-panel-slot-launcher-control-room'),
       screen.getByTestId('sidebar-panel-slot-collapse-toggle'),
     ]
+    const header = screen.getByTestId('sidebar-panel-slot-header')
     for (const el of controls) {
       const cs = getComputedStyle(el)
       const id = el.getAttribute('data-testid')
-      expect(px(cs.minHeight) >= FLOOR_PX, `${id} min-height ${cs.minHeight}`).toBe(true)
-      expect(px(cs.minWidth) >= FLOOR_PX, `${id} min-width ${cs.minWidth}`).toBe(true)
+      const minH = resolveVar(cs.minHeight, header)
+      const minW = resolveVar(cs.minWidth, header)
+      expect(px(minH) >= FLOOR_PX, `${id} min-height ${minH}`).toBe(true)
+      expect(px(minW) >= FLOOR_PX, `${id} min-width ${minW}`).toBe(true)
       expect(cs.flexShrink, `${id} flex-shrink`).toBe('0')
     }
   })

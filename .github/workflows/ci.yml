@@ -2295,6 +2295,17 @@ jobs:
           node packages/dashboard/scripts/sidebar-layout.test.mjs | tee /tmp/chroxy-sidebar-layout.tap
           node scripts/lib/assert-test-count.mjs --min 11 cat /tmp/chroxy-sidebar-layout.tap > /dev/null
 
+      - name: Verify sidebar panel header layout
+        # #8943 — the real collapsed SidebarPanelSlot measured in a real browser at
+        # 240 / 320 / 480px with a long metric: no two controls intersect, the toggle
+        # shares row 1, every control is at least 44x44, and 480px is one row.
+        # 10 = 3 widths x 3 checks + the 480px single-row case; the floor catches a
+        # run that discovered nothing (#7447's class).
+        run: |
+          set -o pipefail
+          node packages/dashboard/scripts/panel-header-layout.test.mjs | tee /tmp/chroxy-panel-header-layout.tap
+          node scripts/lib/assert-test-count.mjs --min 10 cat /tmp/chroxy-panel-header-layout.tap > /dev/null
+
       - name: Run dashboard smoke test
         working-directory: packages/server
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
