@@ -22,7 +22,7 @@ export type LiveUsageMap = Record<string, CumulativeUsage | null | undefined>
  * Project `sessionStates` down to `{ [id]: cumulativeUsage }`.
  *
  * Allocates a fresh record per call, so it MUST be consumed through
- * `useShallow` (see `useLiveCumulativeUsage`). for-in + index lookup avoids a
+ * `useShallow` (see `useLiveCumulativeUsage`). For-in + index lookup avoids a
  * per-call `Object.entries()` array on the hot path (#4130).
  */
 export function selectLiveCumulativeUsage(

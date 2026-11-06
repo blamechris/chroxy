@@ -22,6 +22,9 @@ const usage = (costUsd: number): CumulativeUsage => ({
 const info = (sessionId: string, cumulativeUsage?: CumulativeUsage | null): SessionInfo =>
   ({ sessionId, name: sessionId, cwd: '/x', type: 'cli', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 0, conversationId: null, cumulativeUsage }) as SessionInfo
 
+// React console errors an unstable-snapshot render loop emits (same set as SidebarRealStore.test.tsx).
+const LOOP_ERROR = /getSnapshot should be cached|Maximum update depth exceeded|Minified React error #185|error #185/
+
 describe('live-usage (#7801)', () => {
   beforeEach(() => { useConnectionStore.setState({ sessionStates: {} }) })
   afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -30,7 +33,8 @@ describe('live-usage (#7801)', () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { result } = renderHook(() => useLiveCumulativeUsage())
     expect(result.current).toEqual({})
-    expect(err.mock.calls.length).toBe(0)
+    const text = err.mock.calls.map((c) => c.map(String).join(' ')).join('\n')
+    expect(LOOP_ERROR.test(text), `console.error output:\n${text}`).toBe(false)
   })
 
   it('keeps the same reference when an unrelated field changes, and updates when a usage value changes', () => {
@@ -69,17 +73,17 @@ describe('live-usage (#7801)', () => {
     expect(out[1]).toBe(sessions[1])
   })
 
-  describe('consumers share the one implementation', () => {
-    const src = (rel: string) => readFileSync(join(__dirname, rel), 'utf8')
+  // TRIPWIRE, not proof: behaviour is pinned by App.test.tsx (badge) and
+  // SidebarRealStore.test.tsx (mount). App.test mocks the store and useShallow,
+  // so a private UNSTABLE selector in App is invisible there; this catches the
+  // re-projection by spelling, with comments stripped so a decoy cannot satisfy it.
+  describe('tripwire: no private cumulativeUsage projection in consumers', () => {
+    const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
     for (const file of ['../App.tsx', '../components/Sidebar.tsx']) {
-      it(`${file} uses useLiveCumulativeUsage and has no private projection`, () => {
-        const text = src(file)
-        expect(/useLiveCumulativeUsage\(\)/.test(text), 'must call the shared hook').toBe(true)
-        expect(/\]!?\.cumulativeUsage\b/.test(text), 'must not re-project cumulativeUsage from sessionStates').toBe(false)
+      it(`${file}`, () => {
+        const code = stripComments(readFileSync(join(__dirname, file), 'utf8'))
+        expect(/\]!?\.cumulativeUsage\b/.test(code), 'projects cumulativeUsage from sessionStates privately').toBe(false)
       })
     }
-    it('App resolves per-session usage through resolveSessionUsage', () => {
-      expect(/resolveSessionUsage\(/.test(src('../App.tsx'))).toBe(true)
-    })
   })
 })

@@ -162,10 +162,6 @@ function abbreviateTunnel(url: string): string {
 // a referentially-stable identity across renders (avoids render loops).
 const EMPTY_MCP_SERVERS: McpServer[] = []
 
-// #7793/#7801: the live-over-snapshot overlay lives in store/live-usage.ts;
-// re-exported so existing importers keep working.
-export { overlayLiveUsage }
-
 export function Sidebar({
   repos,
   activeSessionId,
