@@ -2374,10 +2374,13 @@ describe('SdkSession', () => {
 
     it('removes all listeners', () => {
       session.on('ready', () => {})
-      session.on('error', () => {})
+      const callerErrorListener = () => {}
+      session.on('error', callerErrorListener)
       session.destroy()
       assert.equal(session.listenerCount('ready'), 0)
-      assert.equal(session.listenerCount('error'), 0)
+      // Only the inert listener that keeps a late 'error' from throwing survives.
+      assert.equal(session.listenerCount('error'), 1)
+      assert.equal(session.listeners('error').includes(callerErrorListener), false)
     })
   })
 

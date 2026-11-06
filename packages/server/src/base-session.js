@@ -1365,7 +1365,14 @@ export class BaseSession extends EventEmitter {
       // session is being destroyed, its clients drop its state wholesale, and
       // the listeners come off on the next line anyway.
       this._activeAgents.clear()
-      return super.removeAllListeners()
+      const removed = super.removeAllListeners()
+      // A turn aborted by this teardown can still emit 'error' after the
+      // listeners are gone; with none attached that throws ERR_UNHANDLED_ERROR.
+      // SessionManager.destroySession adds a no-op listener, but the provider's
+      // own destroy() ends here and would drop it. Re-add it for a session that
+      // is being destroyed.
+      if (this._destroying) super.on('error', () => {})
+      return removed
     }
     return super.removeAllListeners(eventName)
   }
