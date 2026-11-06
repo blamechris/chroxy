@@ -11,8 +11,22 @@ import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { readPinnedHandle, readContainedBytes } from '../utils/regular-file.js'
+import { readPinnedHandle, readContainedBytes, assertRegularHandle } from '../utils/regular-file.js'
 import { unresolvablePathError, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError, CONFIG_DIR_REFUSAL } from './common.js'
+
+/**
+ * #7957 — refuse a write target that is not a regular file, on the OPENED
+ * handle and before any byte is written. The text reaches the client verbatim,
+ * so it carries no path.
+ */
+async function refuseNonRegular(fh) {
+  try {
+    await assertRegularHandle(fh)
+  } catch (err) {
+    if (err.code === 'ENOTREG') throw clientSafeError('Not a regular file')
+    throw err
+  }
+}
 
 const execFileAsync = promisify(execFileCb)
 
@@ -582,6 +596,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             ? fsConstants.O_WRONLY | fsConstants.O_TRUNC
             : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
           fh = await openNoFollow(absPath, flags, 0o666)
+          await refuseNonRegular(fh)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -598,6 +613,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             // Retry once using the existing-file path (O_TRUNC without O_EXCL).
             try {
               fh = await openNoFollow(absPath, fsConstants.O_WRONLY | fsConstants.O_TRUNC, 0o666)
+              await refuseNonRegular(fh)
               await fh.writeFile(data)
             } catch (retryErr) {
               if (retryErr.code === 'ELOOP') {
@@ -775,6 +791,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           let flags = fsConstants.O_WRONLY | fsConstants.O_APPEND
           if (filename !== 'AGENTS.md') flags |= fsConstants.O_CREAT
           fh = await openNoFollow(absPath, flags, 0o666)
+          await refuseNonRegular(fh)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ENOENT' && filename === 'AGENTS.md') {

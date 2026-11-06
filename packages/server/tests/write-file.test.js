@@ -6,6 +6,7 @@ import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { runAgainstFifoWithReader } from './helpers/fifo-with-reader.js'
 
 /**
  * Open-and-close a non-blocking READER on `fifo`. A no-op when nothing is
@@ -280,6 +281,24 @@ describe('writeFile handler', () => {
     assert.equal(responses[0].error, null, 'internal parent symlink must not be blocked')
     const content = await readFile(join(realDir, 'legitimate.txt'), 'utf-8')
     assert.equal(content, 'ok content')
+  })
+
+  // #7957 — with a reader attached the O_NONBLOCK open SUCCEEDS, so the handler
+  // used to write the payload into the pipe and report success.
+  it('write_file refuses a FIFO that has a reader attached and writes nothing to it (#7957)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    responses.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-write-fifo-rd-'))
+    const fifo = join(dir, 'evil.fifo')
+    execFileSync('mkfifo', [fifo])
+    try {
+      const piped = await runAgainstFifoWithReader(fifo, () => fileOps.writeFile(mockWs, 'evil.fifo', 'secret-payload', dir))
+      assert.equal(piped, '', 'nothing may be written into the pipe')
+      assert.equal(responses.length, 1)
+      assert.equal(responses[0].type, 'write_file_result')
+      assert.equal(responses[0].error, 'Not a regular file')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   // #7938 — openNoFollow ORs O_NONBLOCK into WRITE opens as well. A FIFO with
