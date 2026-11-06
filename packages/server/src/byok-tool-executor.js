@@ -898,26 +898,12 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     return j
   })
 
-  // #7916 — precomputed ONCE per Glob call: does this pattern contain a `**`
-  // anywhere? Gates whether `openVerifiedDirForDescend`'s ancestor-cycle
-  // refusal (`visitedDirs`, added in #7910 review round 2 for a real,
-  // measured DoS) applies at all — see that function's `enforceCycleGuard`
-  // doc for why a pattern with NO `**` can never need it: every non-`**`
-  // matcher consumes exactly one real path segment, so a walk driven purely
-  // by such matchers can never recurse deeper than `m` (the pattern's own
-  // segment count) REGARDLESS of how many times a symlink resolves back to
-  // an ancestor directory — the recursion DEPTH is bounded by pattern
-  // length, not by directory structure. Its BREADTH is not (#7918 review):
-  // K self-loops in one directory under a determinate `{l1,...,lK}/`
-  // alternation repeated D times open K^D directories — measured K=8, D=6:
-  // the 30s deadline, event loop never blocked more than ~7ms. That is the
-  // same fan-out an ACYCLIC lattice of D directories with K symlinks each
-  // already produced (measured identically: 30s deadline), which this guard
-  // never refused because nothing in it is an ancestor; `maxEntries` and the
-  // deadline bound both. A pattern with even one `**` keeps the existing,
-  // unchanged, fully-enforced guard (round 2's own DoS regression test below
-  // uses `**/selfloop/**`, which still hits this branch every time).
-  const hasGlobstar = matchers.includes(CASE_CHECK_GLOBSTAR)
+  // #7916 — a `**`-free pattern never needs the ancestor refusal: its
+  // matchers each consume one real path segment, so depth is bounded by the
+  // pattern's length. That needs no flag here: the refusal below only applies
+  // while a `**` is active in the child's index set (`hasActiveGlobstar`),
+  // which a `**`-free pattern never has. Breadth is bounded by `maxEntries`
+  // and the deadline, as for an acyclic symlink lattice (#7918 review).
 
   function closeGlobstars(active) {
     for (let k = 0; k < m; k++) {
@@ -982,6 +968,13 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         return
       }
     }
+    // Only the call that ADDED the key may remove it. A re-entry into an
+    // ancestor (a crossing, or a `**`-free chain) arrives with the key already
+    // held by the call further up the path; deleting it on the way out would
+    // leave the parent still inside that directory with no guard, and every
+    // later sibling link would read `ancestor: false` (measured: 3 self-loops
+    // under `**/[abc]/**` went 6ms -> a 30s deadline).
+    const ownsKey = !visitedDirs.has(key)
     visitedDirs.add(key)
     try {
       for await (const dirent of dh) {
@@ -1049,6 +1042,9 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
               // pattern, which is why a crossing may re-enter an ancestor
               // (`**/*` through `sub/selfloop -> .`, which fs.glob also
               // finds) where the persisting-`**` descent below may not.
+              // That bounds DEPTH only. Fan-out (many links, many
+              // directories) is bounded by the same limits as before: the
+              // deadline and `maxEntries`.
               // Containment is untouched: the descent below is the same
               // `validateRawPathWithinCwd` + `openVerifiedDirForDescend` one.
               if (isSymlink && k + 1 < m && matchers[k + 1] !== CASE_CHECK_GLOBSTAR && segmentMatches(matchers[k + 1], name)) {
@@ -1173,7 +1169,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           // check that vouches for it are inseparable — no path is ever
           // handed back for a caller to re-resolve blind.
           const descend = await openVerifiedDirForDescend(
-            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, hasGlobstar, __testDescendSeam, __testForcePathFallback,
+            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam, __testForcePathFallback,
           )
           if (descend) {
             // An ancestor re-entry is only refused while a `**` would persist
@@ -1192,7 +1188,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         }
       }
     } finally {
-      visitedDirs.delete(key)
+      if (ownsKey) visitedDirs.delete(key)
       await dh.close().catch(() => {})
       if (fh) await fh.close().catch(() => {})
     }
@@ -1333,40 +1329,21 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * name satisfies at every depth it is encountered, forever — see `walkGlob`'s
  * `visitedDirs` doc for the measured blowup this replaces.
  *
- * `enforceCycleGuard` (#7916 — parity gap, partial fix) — `walkGlob`'s own
- * `hasGlobstar` (see its doc): when the WHOLE pattern contains no `**` at
- * all, the ancestor-cycle refusal above is skipped for this call. A
- * `**`-free pattern's `m` non-globstar matchers each consume exactly one
- * real path segment to advance, so `walk`'s own recursion can never go
- * deeper than `m` real levels — a hard bound from the pattern's own,
- * already-length-capped segment count (`globPatternComplexityReason`),
- * independent of anything the filesystem's symlink structure does. A
- * `sub/selfloop/file.txt`-shaped pattern (three literal segments, no
- * wildcard) can therefore re-enter `sub` via `selfloop` at most as many
- * times as the pattern spells it out — never unboundedly — which is exactly
- * the fs.glob-parity gap #7916 files: `visitedDirs` was refusing this
- * fully-determinate, finite re-entry. The bound is on DEPTH only: a
- * determinate alternation over several self-loops still fans out
- * exponentially in the pattern's length, exactly as an acyclic symlink
- * lattice always could (see `walkGlob`'s `hasGlobstar` comment for the
- * measurement) — `maxEntries` and the deadline bound that, not this check.
- * A pattern containing even one `**` anywhere keeps the FULL, unchanged
- * check — `**`'s own open-ended absorption is precisely the mechanism the
- * round-2 fix exists for, and nothing here weakens it (the round-2
- * regression test below, `**\/selfloop\/**`, has a `**` and so always takes
- * `hasGlobstar === true`). This is a PARTIAL fix for #7916: it does not
- * address the issue's other half (a `**` immediately followed by more
- * pattern following a symlink reached via a non-determinate segment,
- * `**\/*` missing `src-link/index.ts`) or the globstar-terminated variant of
- * this same re-entry (`sub/selfloop/selfloop/**`) — both stay refused,
- * unchanged, and #7916 stays open for them.
+ * Ancestor re-entry (#7916) — the result carries `ancestor: true` when the
+ * opened directory is already on the current descent path (`visitedDirs`),
+ * and the refusal is the CALLER's: `walk` refuses it only while a `**` would
+ * persist into the child (`hasActiveGlobstar`), because a child whose index
+ * set has no `**` advances the pattern at every hop and is bounded by the
+ * pattern's length (`sub/selfloop/file.txt`, a `**` crossing). Depth only:
+ * fan-out is bounded by the deadline and `maxEntries`. On `ancestor: true`
+ * the handles are still open and the caller must close them.
  *
  * `dh` is a real `fs.Dir` on Linux, and on the macOS/win32 fallback the
  * Dir-shaped verifyEntriesUnderParent wrapper: async-iterable, `close()`,
  * yielding `{ name, isDirectory(), isSymbolicLink(), isFile() }` typed from the
  * verified lstat. `walk` uses only that shared surface.
  *
- * @returns {Promise<{dh: import('fs/promises').Dir | VerifiedDirLike, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
+ * @returns {Promise<{dh: import('fs/promises').Dir | VerifiedDirLike, path: string, key: string, fh: import('fs/promises').FileHandle|null, ancestor: boolean}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 // #7919 — entries the fallback verifies per round (see verifyEntriesUnderParent),
@@ -1376,7 +1353,7 @@ const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 // 33ms at 32, 31ms at 128.
 const FALLBACK_VERIFY_BATCH = 32
 
-async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, enforceCycleGuard, __testSeam, __testForcePathFallback = false) {
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam, __testForcePathFallback = false) {
   let target = candidateAbs
   let preStat = null
   if (!isKnownSymlink) {
@@ -1451,14 +1428,12 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   // path (#7910 review round 2, DoS). Not a diamond — a diamond's target is
   // not yet in `visitedDirs` because `walk` only holds a key while it is
   // actively inside that directory (or one of its descendants), never after
-  // backtracking out of it. #7916 — this is skipped entirely
-  // (`enforceCycleGuard === false`) for a `**`-free pattern; see this
-  // function's own doc for why that is bounded. The refusal itself is the
+  // backtracking out of it. The refusal itself is the
   // CALLER's (`ancestor: true` on the result, handles still open for it to
   // close): a re-entry that only a symlink-crossing `**` asked for is bounded
   // by the pattern and is allowed, while one the persisting `**` asked for is
   // the unbounded shape and is refused — see `walkGlob`'s `crossSet` doc.
-  const ancestor = Boolean(enforceCycleGuard) && visitedDirs.has(key)
+  const ancestor = visitedDirs.has(key)
 
   if (DIR_FD_REOPEN_SUPPORTED && !__testForcePathFallback) {
     // Linux: read entries from the SAME open file description — no further

@@ -86,7 +86,7 @@
 //   - #7916: PARTIALLY FIXED twice over. (1) A fully `**`-free pattern may
 //     re-enter an ancestor through a self-referencing symlink
 //     (`sub/selfloop/file.txt`): `visitedDirs`'s refusal is skipped for such
-//     patterns (`openVerifiedDirForDescend`'s `enforceCycleGuard`). (2) A `**`
+//     patterns (`openVerifiedDirForDescend`'s ancestor re-entry handling). (2) A `**`
 //     followed by a segment that matches a symlink's name crosses it as
 //     fs.glob does (`**/*`, `**/*/*`, `**/selfloop/*`): `walkGlob`'s
 //     `crossSet`, which hands the symlink's children only the index after the
@@ -390,7 +390,7 @@ const PATTERNS = [
   // non-determinately). 'sub/selfloop/*' and 'sub/selfloop/file.txt' are
   // fully `**`-free (a literal segment chain re-entering the ancestor 'sub'
   // via 'selfloop'), which #7916's partial fix now allows — see that fix's
-  // doc on `openVerifiedDirForDescend`'s `enforceCycleGuard`.
+  // doc on `openVerifiedDirForDescend`'s ancestor re-entry handling.
   'sub/**', 'sub/*', 'sub/*/file.txt', 'sub/selfloop/*', 'sub/selfloop/file.txt',
 
   // symlinks escaping the workspace — reached only via a WILDCARD, so no
@@ -516,7 +516,7 @@ const PATTERNS = [
 // #7916 (PARTIAL fix): `visitedDirs` still refuses a re-entry through a
 // self-referencing symlink when a `**` would PERSIST into it — see
 // `walkGlob`'s `crossSet` doc and `openVerifiedDirForDescend`'s
-// `enforceCycleGuard` doc for what WAS fixed (`**`-free chains, and `**`
+// ancestor re-entry doc for what WAS fixed (`**`-free chains, and `**`
 // crossings, now in the main table above) and why these three shapes stay
 // deferred (`**`'s open-ended absorption is the exact mechanism the round-2
 // DoS fix exists for). Missing entries are always beneath `sub/selfloop`
@@ -536,8 +536,8 @@ const KNOWN_UNDERMATCH_7916 = {
   patterns: [
     'sub/selfloop/**', 'sub/selfloop/selfloop/**', '**/selfloop/**',
   ],
-  missingShape: (p) => p.startsWith('src-link/') || p.startsWith('sub/selfloop'),
-  missingShapeDesc: 'reached only beneath src-link or sub/selfloop',
+  missingShape: (p) => p.startsWith('sub/selfloop'),
+  missingShapeDesc: 'reached only beneath sub/selfloop',
   allowExtra: true,
 }
 

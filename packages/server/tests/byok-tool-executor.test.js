@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync, readdirSync } from 'node:fs'
 import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -3165,13 +3165,92 @@ describe('executeBuiltinTool', () => {
         }
       })
 
+      // #7916 review (known gap, pinned) — a brace alternation is ONE segment
+      // token here, so a crossing that one alternative named (`l`) then matches
+      // the symlink's children with every alternative (`a`): `**/{a,l}` with
+      // `b/l -> ..` lists `b/l/a`, which fs.glob (it expands the braces into
+      // separate patterns) does not. An over-match only, and still inside the
+      // workspace. This test pins the exact current output so any other change
+      // to it fails; fixing it means per-alternative crossing.
+      it('pins the brace-alternation over-match through a crossing (known gap #7916)', {
+        skip: process.platform === 'win32',
+      }, async () => {
+        writeFileSync(join(dir, 'a'), '1')
+        mkdirSync(join(dir, 'b'))
+        symlinkSync('..', join(dir, 'b', 'l'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/{a,l}' }, ...ctx() })
+        assert.deepEqual(r.content.split('\n').sort(), ['a', 'b/l', 'b/l/a'])
+      })
+
+      // #7916 review — an ancestor re-entry used to delete the ancestor's key
+      // from `visitedDirs` on its way out, so the parent, still inside that
+      // directory, read `ancestor: false` for every LATER sibling link and a
+      // persisting `**` re-entered without bound. A single self-loop hid it.
+      // Each fixture here has two or more links; the bounds are a deadline and
+      // a line count, never a tick count.
+      for (const [name, pattern, build] of [
+        ['several self-loops in one directory', '**/[abc]/**', () => {
+          mkdirSync(join(dir, 'sub'))
+          for (const n of ['a', 'b', 'c']) symlinkSync('.', join(dir, 'sub', n))
+        }],
+        ['a self-loop plus sibling directories linking to their parent', '**/loop/**', () => {
+          mkdirSync(join(dir, 'r'))
+          symlinkSync('.', join(dir, 'r', 'loop'))
+          for (const n of ['s1', 's2', 's3']) {
+            mkdirSync(join(dir, 'r', n))
+            writeFileSync(join(dir, 'r', n, 'f.txt'), '1')
+            symlinkSync('..', join(dir, 'r', n, 'loop'))
+          }
+        }],
+        ['mutually linking directories', '**/[ab]/**', () => {
+          mkdirSync(join(dir, 'x'))
+          mkdirSync(join(dir, 'y'))
+          for (const n of ['a', 'b']) {
+            symlinkSync('../y', join(dir, 'x', n))
+            symlinkSync('../x', join(dir, 'y', n))
+          }
+        }],
+      ]) {
+        it(`a persisting ** stays bounded with several links: ${name} (DoS #7916 review)`, {
+          timeout: 40_000,
+          skip: process.platform === 'win32',
+        }, async () => {
+          build()
+          const t0 = Date.now()
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+          const ms = Date.now() - t0
+          assert.equal(r.isError, false)
+          const lines = r.content.split('\n').length
+          assert.ok(ms < 2000, `${pattern} must terminate quickly, took ${ms}ms`)
+          assert.ok(lines < 100, `${pattern} must stay bounded, got ${lines} lines`)
+        })
+      }
+
+      // #7916 review — a re-entry the walk declines must still close the
+      // handles it opened to find out.
+      it('declining an ancestor re-entry releases its directory handles (#7916 review)', {
+        skip: process.platform === 'win32' || !existsSync('/dev/fd'),
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        for (let i = 0; i < 40; i++) {
+          mkdirSync(join(dir, 'sub', `d${i}`))
+          symlinkSync('..', join(dir, 'sub', `d${i}`, 'a'))
+        }
+        const fds = () => readdirSync('/dev/fd').length
+        const before = fds()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/*/a/**' }, ...ctx() })
+        assert.equal(r.isError, false)
+        const after = fds()
+        assert.ok(after - before < 10, `open descriptors grew from ${before} to ${after}: refused re-entries leak their handles`)
+      })
+
       // #7916 (partial fix) — `visitedDirs`'s ancestor-cycle refusal used to
       // apply unconditionally, refusing even a fully `**`-free, all-literal
       // pattern's own explicit re-entry through a self-loop
       // (`sub/selfloop/file.txt`, verified directly against Node 22's
       // `glob()` to actually match there). `openVerifiedDirForDescend`'s new
-      // `enforceCycleGuard` parameter (derived from `walkGlob`'s
-      // `hasGlobstar`) skips the refusal specifically when the WHOLE pattern
+      // ancestor handling (the refusal now applies only while a
+      // `**` is active in the child's index set) skips the refusal specifically when the WHOLE pattern
       // contains no `**` at all — see that parameter's doc for why this is
       // safe: a `**`-free pattern's recursion depth is hard-bounded by its
       // own segment count, independent of the filesystem's symlink
