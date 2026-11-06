@@ -13,10 +13,14 @@ import { openSync, closeSync, readSync, constants as fsConstants } from 'fs'
  */
 export async function runAgainstFifoWithReader(fifo, run) {
   const readerFd = openSync(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+  let timer
   try {
     const outcome = await Promise.race([
       run().then(() => 'returned'),
-      new Promise((resolve) => setTimeout(() => resolve('hung'), 3000)),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve('hung'), 3000)
+        timer.unref()
+      }),
     ])
     assert.equal(outcome, 'returned', 'handler did not return promptly')
     const buf = Buffer.alloc(4096)
@@ -28,6 +32,7 @@ export async function runAgainstFifoWithReader(fifo, run) {
     }
     return buf.subarray(0, n).toString('utf-8')
   } finally {
+    clearTimeout(timer)
     closeSync(readerFd)
   }
 }
