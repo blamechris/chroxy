@@ -114,7 +114,7 @@ describe('web-task-handlers', () => {
       const ctx = makeCtx()
       ctx.sessions.sessionManager = { getSession: () => null }
       const client = makeClient({ boundSessionId: 'ghost' })
-      webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi' }, ctx)
+      webTaskHandlers.launch_web_task(makeWs(), client, { type: 'launch_web_task', prompt: 'hi' }, ctx)
       assert.equal(ctx._sent[0].type, 'session_error')
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
@@ -130,7 +130,7 @@ describe('web-task-handlers', () => {
         const ctx = makeCtx()
         ctx.sessions.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/Projects/chroxy' }) }
         const client = makeClient({ boundSessionId: 'b1' })
-        webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi', ...(cwd ? { cwd } : {}) }, ctx)
+        webTaskHandlers.launch_web_task(makeWs(), client, { type: 'launch_web_task', prompt: 'hi', ...(cwd ? { cwd } : {}) }, ctx)
         assert.equal(ctx._sent[0].type, 'session_error')
         assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
         assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
@@ -141,7 +141,7 @@ describe('web-task-handlers', () => {
 
     it('an empty binding is scoped too', () => {
       const ctx = makeCtx()
-      webTaskHandlers.launch_web_task(makeWs(), makeClient({ boundSessionId: '' }), { prompt: 'hi' }, ctx)
+      webTaskHandlers.launch_web_task(makeWs(), makeClient({ boundSessionId: '' }), { type: 'launch_web_task', prompt: 'hi' }, ctx)
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
     })

@@ -6,7 +6,7 @@
  */
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggableValue } from './logger.js'
 import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
@@ -682,7 +682,7 @@ export function handleKeyExchange(ctx, ws, msg) {
 
   // Non-key_exchange message while pending — disconnect
   clearTimeout(client._keyExchangeTimeout)
-  log.error(`Client ${client.id} sent ${msg.type} instead of key_exchange — disconnecting (encryption required)`)
+  log.error(`Client ${client.id} sent ${loggableValue(msg.type)} instead of key_exchange — disconnecting (encryption required)`)
   client.encryptionPending = false
   client.postAuthQueue = null
   try {

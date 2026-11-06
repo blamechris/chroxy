@@ -10,10 +10,12 @@
  * yet, is refused anyway — a handler added without a decision is unavailable to
  * a session-scoped connection rather than silently open to it.
  *
- * The decision is made ONCE, at the dispatch point (`handleSessionMessage` in
- * ws-message-handlers.js), not inside each handler. A per-handler check can be
- * forgotten by the next handler; a check the dispatcher applies to every message
- * cannot.
+ * The allowlist is applied by ONE function, `refuseBoundMessage` (below), not
+ * inside each handler. ws-server calls it before schema validation and
+ * `handleSessionMessage` in ws-message-handlers.js calls it again as the dispatch
+ * gate. A per-handler check can be forgotten by the next handler; a check applied
+ * to every message cannot. A handler may still refuse a scoped connection on its
+ * own account, through `sendBoundRefusal`.
  *
  * Every allowed entry is one of:
  *   - session-local by construction: it only ever reads or acts on the
@@ -27,7 +29,7 @@
  * and every name listed here is a real handler.
  */
 
-import { createLogger } from './logger.js'
+import { createLogger, loggableValue } from './logger.js'
 import { isBoundClient } from './environments/authority.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 
@@ -227,26 +229,22 @@ export const BOUND_REFUSAL_MESSAGE = 'Not available to a session-scoped connecti
 const MAX_ECHOED_LENGTH = 128
 
 /**
- * The single place a session-scoped connection is refused. Returns true when
- * `msg` was refused (and replied to), false when the connection may use it.
+ * Send the one refusal reply to a session-scoped connection. The decision is
+ * the caller's; use `refuseBoundMessage` to decide by the allowlist.
  *
- * Every refused type gets the same `session_error` reply, whatever its shape:
- * ws-server calls this before schema validation so a malformed denied request
- * is refused rather than answered with a schema error, and handleSessionMessage
- * calls it again as the dispatch gate. The reply names only the connection's
- * own session and echoes the request's type and id; the refusal has no other
- * effect and says nothing about other sessions.
+ * The reply names only the connection's own session. `requestType` and
+ * `requestId` are echoed only when they are strings of at most
+ * MAX_ECHOED_LENGTH characters; anything else is dropped, not truncated (a
+ * truncated id cannot correlate with the request).
  *
  * @param {WebSocket} ws
  * @param {object} client
  * @param {object} msg
  * @param {object} ctx
- * @returns {boolean}
  */
-export function refuseBoundMessage(ws, client, msg, ctx) {
-  if (!isBoundClient(client) || isBoundAllowedMessageType(msg?.type)) return false
+export function sendBoundRefusal(ws, client, msg, ctx) {
   const type = msg?.type
-  log.info(`Session-scoped client ${client?.id} refused message type ${typeof type === 'string' ? type.slice(0, MAX_ECHOED_LENGTH) : typeof type}`)
+  log.info(`Session-scoped client ${client?.id} refused message type ${loggableValue(type)}`)
   ctx.transport.send(ws, {
     type: 'session_error',
     ...buildSessionTokenMismatchPayload({
@@ -257,5 +255,25 @@ export function refuseBoundMessage(ws, client, msg, ctx) {
     ...(typeof type === 'string' && type.length <= MAX_ECHOED_LENGTH ? { requestType: type } : {}),
     ...(typeof msg?.requestId === 'string' && msg.requestId.length <= MAX_ECHOED_LENGTH ? { requestId: msg.requestId } : {}),
   })
+}
+
+/**
+ * The single place the allowlist is applied to a session-scoped connection's
+ * request. Returns true when `msg` was refused (and replied to), false when the
+ * connection may use it. A missing or non-string `type` is refused.
+ *
+ * ws-server calls this before schema validation so a malformed denied request
+ * is refused rather than answered with a schema error, and handleSessionMessage
+ * calls it again as the dispatch gate. The refusal has no other effect.
+ *
+ * @param {WebSocket} ws
+ * @param {object} client
+ * @param {object} msg
+ * @param {object} ctx
+ * @returns {boolean}
+ */
+export function refuseBoundMessage(ws, client, msg, ctx) {
+  if (!isBoundClient(client) || isBoundAllowedMessageType(msg?.type)) return false
+  sendBoundRefusal(ws, client, msg, ctx)
   return true
 }

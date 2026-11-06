@@ -34,7 +34,7 @@ import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
 import { writeShellApprovalInfo, removeShellApprovalInfo } from './shell-approval-info.js'
-import { createLogger, addLogListener, removeLogListener } from './logger.js'
+import { createLogger, addLogListener, removeLogListener, loggableValue } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
@@ -2467,7 +2467,7 @@ export class WsServer {
         if (client) client.isAlive = true
         if (client?.encryptionState) {
           if (msg.type !== 'encrypted') {
-            log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
+            log.error(`Plaintext frame from ${client.id} after encryption established (type=${loggableValue(msg?.type)}); closing connection`)
             ws.close(1008, 'encryption required')
             return
           }
@@ -2786,7 +2786,7 @@ export class WsServer {
     // decision is not left to schema validation or to a handler. Applied before
     // both, so a malformed or unknown type is refused, not answered with a
     // schema error. (The dispatcher applies the same gate again.)
-    if (isBoundClient(client) && typeof msg.type === 'string' &&
+    if (isBoundClient(client) &&
         refuseBoundMessage(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId))) {
       return
     }
