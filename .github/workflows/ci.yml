@@ -1556,6 +1556,25 @@ jobs:
           node scripts/__tests__/find-macho.test.mjs | tee /tmp/chroxy-find-macho.tap
           node ../../scripts/lib/assert-test-count.mjs --min 36 cat /tmp/chroxy-find-macho.tap > /dev/null
 
+      - name: Prove npm ci accepts the derived server lockfile (#7985)
+        # Stages packages/server/package.json and derives the lockfile with the
+        # SAME scripts bundle-server.sh runs, then `npm ci --omit=dev
+        # --ignore-scripts --dry-run --offline` against it — the acceptance
+        # check that used to first run at release time. Pins an empty npm cache
+        # itself (dry-run --offline never reads one), so the runner's ~/.npm
+        # cannot flake it. All logic is in the script; its own exit status is
+        # the step's (no pipe).
+        working-directory: packages/desktop
+        run: bash scripts/check-derived-lockfile.sh
+
+      - name: Run check-derived-lockfile.sh tests (#7985)
+        # Real repo accepted; leftover devDependencies, an out-of-sync
+        # lockfile and missing inputs each rejected with their own exit code
+        # and message. EXPECTED_CASES inside the harness fails a run that
+        # executes fewer cases than are written.
+        working-directory: packages/desktop
+        run: bash scripts/check-derived-lockfile.test.sh
+
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)
     # Per-PR Windows compile + unit tests for the Tauri desktop crate on the
