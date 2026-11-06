@@ -32,9 +32,12 @@ const LISTING_UNRESOLVABLE_REASONS = {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {{ realpath?: Function, readdir?: Function }} [deps] test seam for the catalog directory scans
  * @returns {Object} browser operation methods
  */
-export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, deps = {}) {
+  const catalogRealpath = deps.realpath ?? realpath
+  const catalogReaddir = deps.readdir ?? readdir
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
@@ -519,15 +522,18 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
     const scanDir = async (dir, source) => {
       try {
-        const dirReal = await realpath(dir)
+        const dirReal = await catalogRealpath(dir)
         // A project-confined caller: the catalog directory must really be inside
         // the project (a link out to the user-level catalog is not the project's).
         if (projectOnly && source === 'project' && !(await isInsideProject(cwd, dirReal))) return
-        const entries = await readdir(dirReal, { withFileTypes: true })
+        const entries = await catalogReaddir(dirReal, { withFileTypes: true })
         // The listing was read from the path as it was a moment ago: check that the
         // directory still resolves there, so names read through a link swapped in
-        // between are not returned.
-        if (projectOnly && source === 'project' && (await realpath(dir)) !== dirReal) return
+        // between are not returned. This narrows a race, it does not close one
+        // (the directory can still change right after this check); what is at
+        // stake is file NAMES only, since the descriptions are read through the
+        // pinned, contained reader.
+        if (projectOnly && source === 'project' && (await catalogRealpath(dir)) !== dirReal) return
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
           if (entry.name.includes('/') || entry.name.includes('\\')) continue
@@ -627,12 +633,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     const listDir = async (dir, source) => {
       const dirArg = dir
       try {
-        dir = await realpath(dir)
+        dir = await catalogRealpath(dir)
         if (opts.projectOnly && source === 'project' && !(await isInsideProject(cwd, dir))) {
           return { dir, source, filenames: [] }
         }
-        const entries = await readdir(dir, { withFileTypes: true })
-        if (opts.projectOnly && source === 'project' && (await realpath(dirArg)) !== dir) {
+        const entries = await catalogReaddir(dir, { withFileTypes: true })
+        // Same narrowed (not closed) re-check as the commands scan; names only.
+        if (opts.projectOnly && source === 'project' && (await catalogRealpath(dirArg)) !== dir) {
           return { dir, source, filenames: [] }
         }
         const filenames = entries

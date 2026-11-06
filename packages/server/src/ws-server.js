@@ -1358,6 +1358,7 @@ export class WsServer {
         // but a long-running server with many session destroys would
         // accumulate dead entries.
         this._evaluatorIterations.delete(sessionId)
+        this._pendingEvaluatorAwaits.delete(sessionId)
         this._inputDedupRecords.delete(sessionId)
         // #7450's survey-throttle prune used to live here, keyed on this
         // EVENT — but #8092 found a teardown path (the restore-rebind branch

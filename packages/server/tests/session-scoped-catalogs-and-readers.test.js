@@ -85,6 +85,26 @@ describe('catalogs for a session-scoped connection are the project\'s own', () =
     assert.ok(open.some((c) => c.name === 'hostcmd'))
   })
 
+  it('a project catalog directory that stops resolving to where it was listed is dropped (project-only; names only)', async () => {
+    const { readdir: realReaddir, realpath: realRealpath } = await import('node:fs/promises')
+    const { createBrowserOps } = await import('../src/ws-file-ops/browser.js')
+    const catalog = (name) => join(cwd, '.claude', name)
+    for (const swap of [true, false]) {
+      let swapped = false
+      const deps = {
+        readdir: async (...a) => { const r = await realReaddir(...a); swapped = swap; return r },
+        // After the listing is read, the catalog directory resolves somewhere else.
+        realpath: async (p) => (swapped && (p === catalog('commands') || p === catalog('agents')) ? join(root, 'elsewhere') : realRealpath(p)),
+      }
+      const ops = createBrowserOps(() => {}, () => cwd, () => null, deps)
+      const cmds = await ops.computeSlashCommands(cwd, null, [], { projectOnly: true })
+      swapped = false
+      const agents = await ops.computeAgents(cwd, { projectOnly: true })
+      assert.equal(cmds.some((c) => c.name === 'projcmd'), !swap, `commands, swapped=${swap}`)
+      assert.equal(agents.some((a) => a.name === 'projagent'), !swap, `agents, swapped=${swap}`)
+    }
+  })
+
   it('the handlers ask for a project-only listing exactly when the connection is session-scoped', () => {
     const calls = []
     const ctx = {

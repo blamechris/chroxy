@@ -9,6 +9,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { ServerOrchestrator } from '../src/server-cli/server-orchestrator.js'
+import { boundedRegex } from '../src/utils/bounded-regex.js'
 
 let origClearInterval, cleared
 beforeEach(() => { origClearInterval = global.clearInterval; cleared = []; global.clearInterval = (t) => cleared.push(t) })
@@ -139,6 +140,21 @@ describe('ServerOrchestrator — graceful shutdown order (SIGTERM)', () => {
     await orchestrator.shutdown('SIGTERM')
     const order = seq.map((e) => e[0])
     assert.ok(order.indexOf('pool.shutdown') < order.indexOf('wsServer.close'), 'pool drained before wsServer.close')
+  })
+})
+
+describe('ServerOrchestrator — pattern matcher teardown', () => {
+  it('graceful shutdown stops the bounded pattern matcher before destroying sessions', async () => {
+    const real = boundedRegex.close
+    const order = []
+    boundedRegex.close = () => { order.push('matcher.close') }
+    try {
+      const { orchestrator } = build({
+        sessionManager: { serializeState: () => {}, destroyAll: () => order.push('destroyAll') },
+      })
+      await orchestrator.shutdown('SIGTERM')
+    } finally { boundedRegex.close = real }
+    assert.deepEqual(order, ['matcher.close', 'destroyAll'])
   })
 })
 
