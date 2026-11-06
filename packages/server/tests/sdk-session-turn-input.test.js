@@ -924,6 +924,7 @@ describe('SdkSession turn input (#8300)', () => {
       const bState = {}
       let bQuery = null
       let bBusyAfterA = null
+      let bStartedWhileAOpen = null
       wire(session, [
         init(),
         { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
@@ -934,6 +935,7 @@ describe('SdkSession turn input (#8300)', () => {
         () => {
           session._handleHardTimeout(session._currentMessageId, false)
           session._callQuery = (bArgs) => {
+            bStartedWhileAOpen = state.closeCalls === undefined // A has not closed its query yet
             consumeInput(bArgs.prompt, bState)
             bQuery = fakeQuery([init('sdk-2'), { __delayMs: 120 }, () => { bBusyAfterA = session._isBusy }, promptResult(1)], bState)
             return bQuery
@@ -944,6 +946,7 @@ describe('SdkSession turn input (#8300)', () => {
       ], state)
       await session.sendMessage('A')
       await until(() => bQuery && bState.inputEnded === true && !session._isBusy)
+      assert.equal(bStartedWhileAOpen, true, 'precondition: B started before A\'s generator could end (the abandon, not the queue)')
       assert.equal(bBusyAfterA, true, 'A\'s finish did not clear B\'s busy state')
       assert.equal(state.closeCalls, 1, 'A closed its own query')
       assert.equal(bState.closeCalls, undefined, 'and never B\'s')
@@ -956,6 +959,7 @@ describe('SdkSession turn input (#8300)', () => {
       const events = capture(session)
       const bState = {}
       let rosterDuringB = null
+      let bStartedWhileAOpen = null
       wire(session, [
         init(),
         { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
@@ -966,6 +970,7 @@ describe('SdkSession turn input (#8300)', () => {
         () => {
           session._handleHardTimeout(session._currentMessageId, false)
           session._callQuery = (bArgs) => {
+            bStartedWhileAOpen = state.closeCalls === undefined // A has not closed its query yet
             consumeInput(bArgs.prompt, bState)
             return fakeQuery([
               init('sdk-2'),
@@ -984,6 +989,7 @@ describe('SdkSession turn input (#8300)', () => {
       ], state)
       await session.sendMessage('A')
       await until(() => rosterDuringB && events.filter((e) => e.name === 'result').length === 2 && !session._isBusy)
+      assert.equal(bStartedWhileAOpen, true, 'precondition: B started before A\'s generator could end (the abandon, not the queue)')
       assert.deepEqual(rosterDuringB, ['t-B'], 'A\'s finish removed only its own task')
       const synthetic = events.filter((e) => e.name === 'tool_result' && e.toolUseId === 'tu-B' && e.isError === true)
       assert.equal(synthetic.length, 0, 'A\'s result did not sweep B\'s running tool as failed')
@@ -1335,7 +1341,7 @@ describe('SdkSession turn input (#8300)', () => {
               { __parkUntilClosed: true }), bState)
           }
           session.sendMessage('B')
-          await bTracked // A does not finish until B has its shell tracked
+          await Promise.race([bTracked, new Promise((_, reject) => setTimeout(() => reject(new Error('B never started inside A\'s drain')), 2000))]) // A does not finish until B has its shell tracked
         },
       ], state)
 

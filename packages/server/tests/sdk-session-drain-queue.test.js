@@ -42,22 +42,25 @@ const promptResult = { type: 'result', subtype: 'success', session_id: 'sdk-1', 
  * bug is about.
  */
 function harness(session, plans) {
-  const h = { calls: [], live: 0, maxLive: 0, ended: [], order: [], queries: [] }
+  const h = { calls: [], live: 0, maxLive: 0, ended: [], order: [], queries: [], queryAtCall: [] }
   session._callQuery = (args) => {
     const index = h.calls.length
     const plan = plans[index] || {}
     h.calls.push(args)
+    h.queryAtCall.push(session._query)
+    if (plan.onCall) plan.onCall()
     h.order.push(`start-${index}`)
     h.live++
     h.maxLive = Math.max(h.maxLive, h.live)
     let closed = false
     let wake = null
+    const ctx = { isClosed: () => closed, onClose: (fn) => { wake = fn } }
     const gen = (async function* () {
       try {
         yield init()
-        if (plan.hangBeforeResult) await plan.hangBeforeResult()
+        if (plan.hangBeforeResult) await plan.hangBeforeResult(ctx)
         yield promptResult
-        if (plan.linger) await plan.linger({ isClosed: () => closed, onClose: (fn) => { wake = fn } })
+        if (plan.linger) await plan.linger(ctx)
         if (plan.throwAfterResult) throw plan.throwAfterResult
       } finally {
         h.live--
@@ -72,7 +75,7 @@ function harness(session, plans) {
         h.closeCalls = (h.closeCalls || 0) + 1
         if (plan.closeIneffective) return
         closed = true
-        if (wake) wake()
+        if (wake) wake(true)
       },
     }
     h.queries.push(query)
@@ -82,10 +85,20 @@ function harness(session, plans) {
 }
 
 /** A linger that ends when released by the test or when the query is closed. */
-function gatedLinger() {
+function gatedLinger({ abortOnClose = false } = {}) {
   let release
-  const gate = new Promise((r) => { release = r })
-  const linger = async ({ onClose }) => { onClose(release); await gate }
+  let fail
+  const gate = new Promise((resolve, reject) => { release = resolve; fail = reject })
+  const linger = async ({ onClose }) => {
+    // close() ends the wait quietly, or the way the SDK does: an AbortError.
+    onClose(() => {
+      if (!abortOnClose) return release()
+      const err = new Error('Query was aborted')
+      err.name = 'AbortError'
+      fail(err)
+    })
+    await gate
+  }
   return { linger, release }
 }
 
@@ -229,6 +242,133 @@ describe('SdkSession follow-up during a draining query (#8321)', () => {
     releaseA()
     await aDone
     await until(() => !session._isBusy && h.ended.length === 2)
+  })
+
+  it('closing the draining query is not reported as a turn error (AbortError on close)', async () => {
+    SdkSession.DRAIN_WAIT_MS = 20
+    SdkSession.DRAIN_FORCE_GRACE_MS = 1000
+    const { linger } = gatedLinger({ abortOnClose: true })
+    const h = harness(session, [{ linger }, {}])
+    const events = capture(session)
+    session.once('result', () => { setImmediate(() => session.sendMessage('B')) })
+    const aDone = session.sendMessage('A')
+    await aDone
+    await until(() => h.ended.length === 2 && !session._isBusy)
+    assert.equal(h.closeCalls, 1)
+    assert.deepEqual(events.filter((e) => e.name === 'error').map((e) => e.message), [], 'no false error for a turn that succeeded')
+    assert.equal(events.filter((e) => e.name === 'result').length, 2)
+  })
+
+  describe('when the wait starts', () => {
+    it('never closes a lingering query nothing is waiting behind', async () => {
+      SdkSession.DRAIN_WAIT_MS = 100
+      SdkSession.DRAIN_FORCE_GRACE_MS = 20
+      const { linger, release } = gatedLinger()
+      const h = harness(session, [{ linger }])
+      const aDone = session.sendMessage('A')
+      await until(() => session._isBusy === false && session._drainingTurn !== null)
+      assert.equal(session._drainingTurn.waitTimer, null, 'no clock runs with nothing queued')
+      await new Promise((r) => setTimeout(r, 250))
+      assert.equal(h.closeCalls, undefined, 'idle lingering query is left alone')
+      assert.equal(session._drainingTurn.waitTimer, null)
+      release()
+      await aDone
+    })
+
+    it('starts at the busy-clear when a message was already queued mid-turn', async () => {
+      SdkSession.DRAIN_WAIT_MS = 20
+      SdkSession.DRAIN_FORCE_GRACE_MS = 1000
+      const { linger } = gatedLinger()
+      const h = harness(session, [{ linger, hangBeforeResult: () => { session.sendMessage('B') } }, {}])
+      await session.sendMessage('A')
+      await until(() => h.ended.length === 2 && !session._isBusy)
+      assert.equal(h.closeCalls, 1)
+      assert.deepEqual(h.order, ['start-0', 'end-0', 'start-1', 'end-1'])
+    })
+
+    it('starts at query creation when busy had cleared and a message already waits', async () => {
+      SdkSession.DRAIN_WAIT_MS = 20
+      SdkSession.DRAIN_FORCE_GRACE_MS = 1000
+      const { linger: hang } = gatedLinger()
+      const h = harness(session, [{
+        onCall: () => { session._isBusy = false; session.enqueueOutgoingMessage({ prompt: 'B' }) },
+        hangBeforeResult: hang,
+      }, {}])
+      session.sendMessage('A')
+      await until(() => h.closeCalls === 1)
+      await until(() => h.ended.length >= 1)
+    })
+
+    it('does not close the query if the waiting message is gone when the wait ends', async () => {
+      SdkSession.DRAIN_WAIT_MS = 40
+      SdkSession.DRAIN_FORCE_GRACE_MS = 1000
+      const { linger, release } = gatedLinger()
+      const h = harness(session, [{ linger }, {}])
+      session.once('result', () => { setImmediate(() => session.sendMessage('B')) })
+      const aDone = session.sendMessage('A')
+      await until(() => session._outgoingQueue.length === 1)
+      await session.interrupt()
+      await new Promise((r) => setTimeout(r, 120))
+      assert.equal(h.closeCalls, undefined)
+      release()
+      await aDone
+    })
+  })
+
+  describe('a late loop after a force release', () => {
+    it('leaves the successor\'s query handle and drain alone when the old generator finally ends', async () => {
+      SdkSession.DRAIN_WAIT_MS = 20
+      SdkSession.DRAIN_FORCE_GRACE_MS = 20
+      const a = gatedLinger()
+      const b = gatedLinger()
+      const h = harness(session, [{ linger: a.linger, closeIneffective: true }, { linger: b.linger }])
+      session.once('result', () => { setImmediate(() => session.sendMessage('B')) })
+      const aDone = session.sendMessage('A')
+      // B starts by force release and reaches its own drain (result emitted, generator lingering).
+      await until(() => h.calls.length === 2 && session._isBusy === false && session._drainingTurn?.query === h.queries[1])
+      assert.equal(h.queryAtCall[1], null, 'the released query handle was dropped before B started')
+      assert.equal(h.ended.includes(0), false, 'precondition: A\'s generator is still alive')
+      a.release()
+      await aDone
+      assert.equal(h.ended.includes(0), true)
+      assert.equal(session._query, h.queries[1], 'A\'s late finally kept B\'s handle')
+      assert.equal(session._drainingTurn?.query, h.queries[1], 'and B\'s drain')
+      b.release()
+      await until(() => session._drainingTurn === null && session._query === null)
+    })
+  })
+
+  it('a hard timeout abandons the query, so the retry runs at once', async () => {
+    let releaseA
+    const hang = new Promise((r) => { releaseA = r })
+    const h = harness(session, [{ hangBeforeResult: () => hang }, {}])
+    const events = capture(session)
+    const aDone = session.sendMessage('A')
+    await until(() => h.calls.length === 1)
+    session._handleHardTimeout(session._currentMessageId, false)
+    await session.sendMessage('B')
+    assert.equal(h.calls.length, 2)
+    assert.equal(events.filter((e) => e.name === 'message_queued').length, 0)
+    releaseA()
+    await aDone
+    await until(() => !session._isBusy && h.ended.length === 2)
+  })
+
+  it('destroy clears both drain timers, including a close already issued', async () => {
+    SdkSession.DRAIN_WAIT_MS = 20
+    SdkSession.DRAIN_FORCE_GRACE_MS = 40
+    const { linger } = gatedLinger()
+    const h = harness(session, [{ linger, closeIneffective: true }, {}])
+    session.once('result', () => { setImmediate(() => session.sendMessage('B')) })
+    session.sendMessage('A')
+    await until(() => session._drainingTurn?.forceTimer)
+    const drain = session._drainingTurn
+    session.destroy()
+    assert.equal(drain.waitTimer, null)
+    assert.equal(drain.forceTimer, null)
+    assert.equal(session._drainingTurn, null)
+    await new Promise((r) => setTimeout(r, 100))
+    assert.equal(h.calls.length, 1, 'the force release did not run after destroy')
   })
 
   describe('a drain has an end', () => {
