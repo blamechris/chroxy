@@ -1170,6 +1170,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           // handed back for a caller to re-resolve blind.
           const descend = await openVerifiedDirForDescend(
             childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam, __testForcePathFallback,
+            { path: dirAbs, key, fh, name },
           )
           if (descend) {
             // An ancestor re-entry is only refused while a `**` would persist
@@ -1299,6 +1300,22 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * the SAME `openNoFollow`-based verified-open below — there is exactly one
  * implementation of "open and verify", not two.
  *
+ * Plain entries and their PARENT (`parent`: the directory `walk` is inside,
+ * its dev:ino key and, where it has one, its verified fd). `openNoFollow`
+ * refuses a link only at the FINAL component, so on its own it would let a
+ * folder that was swapped while the walk is inside it redirect every later
+ * plain sibling. Two layers, one per platform class:
+ *   - Linux (`DIR_FD_REOPEN_SUPPORTED`), parent held open: the child is
+ *     looked up and opened as `/proc/self/fd/<parentfd>/<name>`, so the
+ *     parent's path is never resolved again. Exact.
+ *   - Everywhere else (macOS, win32, the forced fallback, and a child of the
+ *     walk's root on every platform, which has no held descriptor): opened by
+ *     path, then `confirmPlainEntryStillInside` requires the parent to still
+ *     be the verified directory and the entry's relative path to still
+ *     resolve inside the workspace. This NARROWS the window and does not
+ *     close it: a swap to a link at the open, undone before both checks,
+ *     is not detected.
+ *
  * `__testSeam(target, phase, names?)`, if given, is the ONLY way to hit any of
  * these windows deterministically in a test; a real concurrent race is flaky
  * by construction (see the test file). On every platform it is awaited at
@@ -1346,6 +1363,37 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * @returns {Promise<{dh: import('fs/promises').Dir | VerifiedDirLike, path: string, key: string, fh: import('fs/promises').FileHandle|null, ancestor: boolean}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
+
+/**
+ * Plain-entry confinement for a child opened BY PATH (macOS, win32, a Linux
+ * root-level child, or the forced path fallback): the entry's final component
+ * is checked by `openNoFollow`, but the components above it are resolved again
+ * by the kernel. After the open this therefore requires that
+ *   1. the parent directory the walk is inside is still the directory it
+ *      verified (same dev:ino, not a link), and
+ *   2. the entry's relative path still resolves inside the workspace,
+ *      component by component (`validateRawPathWithinCwd`).
+ * Either failing withholds the entry. Fails closed on any error.
+ *
+ * What this does NOT do: it does not make the open atomic. A folder swapped to
+ * a link for the open and swapped back before both checks complete is narrowed
+ * (the checks must be beaten, not the open alone) but not ruled out on macOS
+ * and win32; the fd-relative open used on Linux does not have that gap. A
+ * child of the walk's root is always opened by path, on every platform.
+ */
+async function confirmPlainEntryStillInside(relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey) {
+  if (!parent) return false
+  try {
+    const [st, resolved] = await Promise.all([
+      lstat(parent.path, { bigint: true }),
+      validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl),
+    ])
+    if (st.isSymbolicLink() || !st.isDirectory() || st.ino === 0n || dirKey(st) !== parent.key) return false
+    return !!resolved && resolved.valid === true
+  } catch {
+    return false
+  }
+}
 // #7919 — entries the fallback verifies per round (see verifyEntriesUnderParent),
 // which is also the most names one timed double swap can disclose. Measured on
 // macOS, `**/*` over 5,050 entries (median of 5): 15ms with no verification,
@@ -1353,12 +1401,20 @@ const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 // 33ms at 32, 31ms at 128.
 const FALLBACK_VERIFY_BATCH = 32
 
-async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam, __testForcePathFallback = false) {
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam, __testForcePathFallback = false, parent = null) {
   let target = candidateAbs
   let preStat = null
+  // A plain entry is opened relative to the parent's verified descriptor where
+  // the platform can (Linux), so the parent's path is never resolved again.
+  // `openPath` is what is handed to the kernel; `target` stays the logical path.
+  const pinnedToParent = !isKnownSymlink && !!parent?.fh && DIR_FD_REOPEN_SUPPORTED && !__testForcePathFallback
+  const openPath = pinnedToParent ? `/proc/self/fd/${parent.fh.fd}/${parent.name}` : candidateAbs
+  // A plain entry opened by path: the parent and the entry's confinement are
+  // re-checked after the open (see `confirmPlainEntryStillInside`).
+  let recheckAfterOpen = false
   if (!isKnownSymlink) {
     try {
-      preStat = await lstat(candidateAbs, { bigint: true })
+      preStat = await lstat(openPath, { bigint: true })
     } catch {
       return null // gone since it was listed — nothing to descend into
     }
@@ -1377,6 +1433,8 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
       preStat = null // that lstat was for the OLD path — the resolved target needs its own
     } else if (!preStat.isDirectory()) {
       return null // no longer a directory (e.g. swapped for a plain file) — nothing to open
+    } else {
+      recheckAfterOpen = !pinnedToParent
     }
   }
 
@@ -1398,7 +1456,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   // by path. See the doc above for exactly why this closes the round-2 gap.
   let fh
   try {
-    fh = await openNoFollow(target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
+    fh = await openNoFollow(pinnedToParent ? openPath : target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
   } catch {
     return null // symlink, gone, or otherwise unopenable at this instant — FAIL CLOSED
   }
@@ -1417,6 +1475,11 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   if (!sameObject) {
     // The object actually opened is not the one we checked — withhold
     // rather than trust it. Nothing has been read from it yet.
+    await fh.close().catch(() => {})
+    return null
+  }
+
+  if (recheckAfterOpen && !(await confirmPlainEntryStillInside(relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey))) {
     await fh.close().catch(() => {})
     return null
   }
