@@ -1801,6 +1801,37 @@ describe('executeBuiltinTool', () => {
         )
         assert.ok(ratio < MAX_RATIO, `30 unmatched "{" made compiling ${ratio.toFixed(1)}x slower (${bestS.toFixed(0)}ms vs ${bestC.toFixed(0)}ms) — pairing is rescanning per "{"`)
       })
+
+      it('compiling a segment is one pass: a long run of unclosed `[` costs no more than the same length of literals (#7965)', { timeout: 120_000 }, () => {
+        // Every `[` of an unclosed run used to ask `parseBracketExpr` for its
+        // class, and each of those scans to the end of the segment for a `]`
+        // that is not there (and allocates a result): quadratic in the run.
+        // Both compile paths pay it — `parseSegmentTokens` at each `[`, and
+        // `braceCloseTable` (reached by any `{`) at each `[` too. The control
+        // is a literal run of the same length, so whatever tokenising a
+        // character costs on this machine cancels out.
+        //
+        // The deadline is a RATIO against a control measured in this same
+        // process, never a tick count. A rescan or per-`[` allocation reads
+        // far above the limit at this size (see the PR for the measured
+        // figures); the linear shape reads a small constant.
+        const MAX_RATIO = 8
+        const N = 40_000
+        const families = {
+          'unclosed [ run': ['['.repeat(N), 'x'.repeat(N)],
+          'unclosed [ run behind {': ['{' + '['.repeat(N), '{' + 'x'.repeat(N)],
+        }
+        for (const [name, [subject, control]] of Object.entries(families)) {
+          assert.equal(subject.length, control.length)
+          const { ratio, bestS, bestC } = bestRatio(
+            () => { compileCaseCheck(subject) },
+            () => { compileCaseCheck(control) },
+            5,
+            MAX_RATIO,
+          )
+          assert.ok(ratio < MAX_RATIO, `${name}: compiling took ${ratio.toFixed(1)}x a literal run of the same length (${bestS.toFixed(1)}ms vs ${bestC.toFixed(1)}ms) — a rescan or per-"[" allocation`)
+        }
+      })
     })
 
     // #7898 round 4 — every prior round (1-3) found a NEW super-linear
@@ -3070,6 +3101,68 @@ describe('executeBuiltinTool', () => {
         const lines = r.content.split('\n')
         assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
         assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
+      })
+
+      // #7916 — `**` followed by a segment that matches a symlink's own name
+      // crosses it, exactly like Node 22's `glob()` (read directly), and
+      // only it: `**/*` and `**/*/*` find content beneath `src-link`, while
+      // `**/index.ts` and `**/*.ts` (no match on the link's name) do not.
+      it('`**` followed by a segment matching a symlinked dir crosses it, like fs.glob (#7916)', {
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'src', 'utils'), { recursive: true })
+        writeFileSync(join(dir, 'src', 'index.ts'), '1')
+        writeFileSync(join(dir, 'src', 'utils', 'helper.ts'), '1')
+        symlinkSync('src', join(dir, 'src-link'))
+
+        const star = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+        assert.ok(star.content.split('\n').includes('src-link/index.ts'), '`**/*` must cross src-link')
+        const two = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*/*' }, ...ctx() })
+        assert.ok(two.content.split('\n').includes('src-link/utils/helper.ts'), '`**/*/*` must cross src-link')
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/index.ts' }, ...ctx() })
+        assert.equal(lit.content, 'src/index.ts', 'a segment that does not match the link name must not cross it')
+      })
+
+      // #7916 — containment is unchanged by the new crossing: a symlink out
+      // of the workspace is never followed, whichever way `**` reached it.
+      it('a `**`-crossing never follows a symlink out of the workspace (#7916 containment)', {
+        skip: process.platform === 'win32',
+      }, async () => {
+        const outside = mkdtempSync(join(tmpdir(), 'glob-outside-'))
+        try {
+          writeFileSync(join(outside, 'secret.txt'), 'x')
+          mkdirSync(join(outside, 'inner'))
+          writeFileSync(join(outside, 'inner', 'deep.txt'), 'x')
+          symlinkSync(outside, join(dir, 'escape'))
+          for (const pattern of ['**/*', '**/*/*', '**/*/*/*', '**/escape/*']) {
+            const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+            const lines = r.content.split('\n')
+            assert.equal(lines.some((l) => l.startsWith('escape/')), false, `${pattern} must not list anything beneath the escaping link: ${r.content}`)
+          }
+        } finally {
+          rmSync(outside, { recursive: true, force: true })
+        }
+      })
+
+      // #7916 — a crossing may re-enter an ancestor (`**/*` through
+      // `selfloop -> .`, which fs.glob also does), so it needs its own
+      // termination proof: repeated, `**`-heavy patterns over a self-loop
+      // with many siblings stay finite and fast.
+      it('`**`-crossing patterns terminate cheaply through a self-loop with many siblings (DoS #7916)', {
+        timeout: 20_000,
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+        for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
+        for (const pattern of ['**/*', '**/*/*', '**/selfloop/*', '**/*/**/*', '**/*/**/*/**/*']) {
+          const t0 = Date.now()
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+          const ms = Date.now() - t0
+          assert.equal(r.isError, false)
+          assert.ok(ms < 2000, `${pattern} must terminate quickly, took ${ms}ms`)
+          assert.ok(r.content.split('\n').length < 400, `${pattern} must stay bounded, got ${r.content.split('\n').length} lines`)
+        }
       })
 
       // #7916 (partial fix) — `visitedDirs`'s ancestor-cycle refusal used to

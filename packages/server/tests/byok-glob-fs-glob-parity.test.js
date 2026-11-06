@@ -83,23 +83,17 @@
 //     token path unchanged.
 //
 // STILL OPEN, PARTIALLY FIXED:
-//   - #7916: `**` does not follow a symlinked directory reached via a
-//     non-determinate trailing segment (`**/*` misses `src-link/index.ts`
-//     even though `src-link -> src` is a real, in-workspace directory), and
-//     the `visitedDirs` ancestor-cycle guard (added in round 2 for a real,
-//     measured DoS) also refused a re-entry through a self-referencing
-//     symlink that `fs.glob` allows. FIXED for the sub-case that is provably
-//     safe without a new DoS-bounding mechanism: a fully `**`-free pattern
-//     (`sub/selfloop/file.txt`, all-literal, no wildcards at all) can never
-//     recurse deeper than its own segment count regardless of symlink
-//     structure, so `visitedDirs`'s refusal is now skipped for such patterns
-//     entirely (`openVerifiedDirForDescend`'s `enforceCycleGuard`). NOT
-//     fixed: a `**` immediately followed by more pattern still refuses to
-//     cross a symlink reached non-determinately, and a `**`-terminated
-//     re-entry (`sub/selfloop/selfloop/**`) still refuses too — both need
-//     the "bounded implicit-crossing budget" the issue itself calls out as
-//     its own adversarial-review-worthy redesign, which this PR does not
-//     attempt.
+//   - #7916: PARTIALLY FIXED twice over. (1) A fully `**`-free pattern may
+//     re-enter an ancestor through a self-referencing symlink
+//     (`sub/selfloop/file.txt`): `visitedDirs`'s refusal is skipped for such
+//     patterns (`openVerifiedDirForDescend`'s `enforceCycleGuard`). (2) A `**`
+//     followed by a segment that matches a symlink's name crosses it as
+//     fs.glob does (`**/*`, `**/*/*`, `**/selfloop/*`): `walkGlob`'s
+//     `crossSet`, which hands the symlink's children only the index after the
+//     `**` and never the `**` itself, so a crossing may also re-enter an
+//     ancestor. NOT fixed: a `**` that would PERSIST into an ancestor
+//     re-entry (`sub/selfloop/**`, `sub/selfloop/selfloop/**`,
+//     `**/selfloop/**`) is still refused, as the round-2 DoS fix requires.
 //
 // A SECOND kind of known-difference bucket, added for #7899: `fs.glob`
 // itself has a candidate-generation bug for a negated bracket class
@@ -378,8 +372,10 @@ async function confinedRawGlobList(pattern) {
 // or a wildcard"), a restriction `fs.glob` itself has no concept of, so a
 // literal-space pattern would test the restriction, not glob parity.
 const PATTERNS = [
-  // ** / wildcard basics ('**/*' itself is #7916 — see the skip buckets below)
-  '**', '**/*.ts', '**/*.js', '*/*', '*/*/*', '*/*/*/*', '*', '*.ts', '*.txt', '*.env',
+  // ** / wildcard basics. '**/*' and '**/*/*' (a `**` immediately followed by
+  // a wildcard that matches a symlink's name) cross the symlink exactly as
+  // fs.glob does (#7916) — see `walkGlob`'s `crossSet` doc.
+  '**', '**/*', '**/*/*', '**/*/*/*', '**/selfloop/*', '**/selfloop/file.txt', '**/*.ts', '**/*.js', '*/*', '*/*/*', '*/*/*/*', '*', '*.ts', '*.txt', '*.env',
   '**/deep/**', '**/deep/**/*.ts',
 
   // in-workspace symlinked dir: src-link -> src
@@ -517,17 +513,14 @@ const PATTERNS = [
 // and `expandBraces` respectively) — their patterns moved to the main
 // strict-equality table above and their buckets are gone from here.
 
-// #7916 (PARTIAL fix): `**` still does not follow a symlinked directory
-// reached via a non-determinate trailing segment, and `visitedDirs` still
-// refuses a `**`-involving re-entry through a self-referencing symlink — see
-// `openVerifiedDirForDescend`'s `enforceCycleGuard` doc for exactly what WAS
-// fixed (a fully `**`-free literal-segment chain re-entering an ancestor,
-// bounded by the pattern's own length — `sub/selfloop/*` and
-// `sub/selfloop/file.txt` moved to the main table above) and why the
-// remaining shapes below are deferred (both still involve `**`'s own
-// open-ended absorption, the exact mechanism the round-2 DoS fix exists
-// for). Missing entries are always beneath `src-link` (the in-workspace
-// symlinked dir) or `sub/selfloop` (the self-referencing one). `allowExtra`
+// #7916 (PARTIAL fix): `visitedDirs` still refuses a re-entry through a
+// self-referencing symlink when a `**` would PERSIST into it — see
+// `walkGlob`'s `crossSet` doc and `openVerifiedDirForDescend`'s
+// `enforceCycleGuard` doc for what WAS fixed (`**`-free chains, and `**`
+// crossings, now in the main table above) and why these three shapes stay
+// deferred (`**`'s open-ended absorption is the exact mechanism the round-2
+// DoS fix exists for). Missing entries are always beneath `sub/selfloop`
+// (the self-referencing symlink). `allowExtra`
 // (unlike every other bucket here): `**/selfloop/**` is the one pattern in
 // this set where `walkGlob` reports MORE than `fs.glob`, not less — the
 // trailing `**`'s zero-width closure lists the bare `sub/selfloop` match (a
@@ -541,8 +534,7 @@ const PATTERNS = [
 const KNOWN_UNDERMATCH_7916 = {
   issue: '#7916',
   patterns: [
-    '**/*', 'sub/selfloop/**', 'sub/selfloop/selfloop/**',
-    '**/selfloop/**', '**/selfloop/*',
+    'sub/selfloop/**', 'sub/selfloop/selfloop/**', '**/selfloop/**',
   ],
   missingShape: (p) => p.startsWith('src-link/') || p.startsWith('sub/selfloop'),
   missingShapeDesc: 'reached only beneath src-link or sub/selfloop',

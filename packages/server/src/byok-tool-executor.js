@@ -926,6 +926,15 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     return active
   }
 
+  function hasActiveGlobstar(active) {
+    for (let k = 0; k < m; k++) if (active[k] && matchers[k] === CASE_CHECK_GLOBSTAR) return true
+    return false
+  }
+
+  function mergeActive(a, b) {
+    return a.map((v, i) => v || b[i])
+  }
+
   function shouldStop() {
     return state.stop !== null || results.length >= GLOB_COLLECT_CEILING
   }
@@ -982,6 +991,10 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
 
         const name = dirent.name
         const next = new Array(m + 1).fill(false)
+        const isSymlink = dirent.isSymbolicLink()
+        // #7916 — see `crossSet`'s doc below.
+        const crossSet = new Array(m + 1).fill(false)
+        let canCross = false
         // `detHandoff[k+1]` — #7910 review — true when `next[k+1]` was set
         // THIS STEP by a determinate, non-globstar segment explicitly
         // matching `name` (as opposed to a `**`'s own absorption, or a
@@ -1021,6 +1034,27 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
             if (dotOk) {
               next[k] = true
               if (k === m - 1) globstarAbsorbedLast = true
+              // #7916 — `crossSet`: Node 22's `glob()` (read directly,
+              // `internal/fs/glob.js`, the GLOBSTAR arm) lets a `**` followed
+              // by more pattern descend a SYMLINKED directory whose own name
+              // the very next segment matches, handing the symlink's children
+              // that next segment again — and ONLY it: the `**` itself is not
+              // carried into the symlink (`**/*` finds `src-link/index.ts`,
+              // `**/*/*` finds `src-link/utils/helper.ts`, `**/index.ts` and
+              // `*/*` find nothing under it). The index set is therefore
+              // `{k+1}` alone, never `next`. That is also what bounds it: a
+              // crossing needs a `**` at k, and the child no longer has one
+              // at k, so each crossing along a path starts from a strictly
+              // later `**` than the last — at most one per `**` in the
+              // pattern, which is why a crossing may re-enter an ancestor
+              // (`**/*` through `sub/selfloop -> .`, which fs.glob also
+              // finds) where the persisting-`**` descent below may not.
+              // Containment is untouched: the descent below is the same
+              // `validateRawPathWithinCwd` + `openVerifiedDirForDescend` one.
+              if (isSymlink && k + 1 < m && matchers[k + 1] !== CASE_CHECK_GLOBSTAR && segmentMatches(matchers[k + 1], name)) {
+                crossSet[k + 1] = true
+                canCross = true
+              }
             }
           } else if (segmentMatches(matchers[k], name)) {
             next[k + 1] = true
@@ -1037,7 +1071,6 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         // collapses to plain `name` (verified: no leading separator), so this
         // needs no separate empty-prefix branch.
         const relPath = join(relPrefix, name)
-        const isSymlink = dirent.isSymbolicLink()
         let childAbs
         if (isSymlink) {
           let resolved
@@ -1125,7 +1158,8 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         // into an ordinary directory carries no symlink risk regardless of
         // how it was reached.
         const canDescendSymlink = !isSymlink || detHandoff.slice(0, m).some(Boolean)
-        if (canContinuePattern && canDescendSymlink && (dirent.isDirectory() || isSymlink)) {
+        const descendNext = canContinuePattern && canDescendSymlink && (dirent.isDirectory() || isSymlink)
+        if (descendNext || canCross) {
           // SECURITY (review of #7901 round 2, TOCTOU) — `childAbs` (for a
           // symlink-flagged entry, `resolved.realPath` from the
           // `validateRawPathWithinCwd` call above; for a plain-directory-
@@ -1141,7 +1175,20 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           const descend = await openVerifiedDirForDescend(
             childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, hasGlobstar, __testDescendSeam, __testForcePathFallback,
           )
-          if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key, fh: descend.fh })
+          if (descend) {
+            // An ancestor re-entry is only refused while a `**` would persist
+            // into it (the round-2 DoS shape); a set with no `**` in it
+            // advances the pattern at every hop and is bounded by its length,
+            // so it is allowed (`**/selfloop/*`). Otherwise keep only the
+            // crossing's own indices, if any.
+            const merged = descendNext ? mergeActive(next, crossSet) : crossSet
+            const childActive = !descend.ancestor || !hasActiveGlobstar(merged) ? merged : (canCross ? crossSet : null)
+            if (childActive) await walk(descend.path, relPath, childActive, { dh: descend.dh, key: descend.key, fh: descend.fh })
+            else {
+              await descend.dh.close().catch(() => {})
+              if (descend.fh) await descend.fh.close().catch(() => {})
+            }
+          }
         }
       }
     } finally {
@@ -1400,17 +1447,18 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   if (__testSeam) await __testSeam(target, 'after-open')
 
   const key = dirKey(openedStat)
-  if (enforceCycleGuard && visitedDirs.has(key)) {
-    // Cycle: this real directory is already an ancestor on the CURRENT
-    // descent path (#7910 review round 2, DoS). Not a diamond — a diamond's
-    // target is not yet in `visitedDirs` because `walk` only holds a key
-    // while it is actively inside that directory (or one of its
-    // descendants), never after backtracking out of it. #7916 — this check
-    // is skipped entirely (`enforceCycleGuard === false`) for a `**`-free
-    // pattern; see this function's own doc for why that is bounded.
-    await fh.close().catch(() => {})
-    return null
-  }
+  // Cycle: this real directory is already an ancestor on the CURRENT descent
+  // path (#7910 review round 2, DoS). Not a diamond — a diamond's target is
+  // not yet in `visitedDirs` because `walk` only holds a key while it is
+  // actively inside that directory (or one of its descendants), never after
+  // backtracking out of it. #7916 — this is skipped entirely
+  // (`enforceCycleGuard === false`) for a `**`-free pattern; see this
+  // function's own doc for why that is bounded. The refusal itself is the
+  // CALLER's (`ancestor: true` on the result, handles still open for it to
+  // close): a re-entry that only a symlink-crossing `**` asked for is bounded
+  // by the pattern and is allowed, while one the persisting `**` asked for is
+  // the unbounded shape and is refused — see `walkGlob`'s `crossSet` doc.
+  const ancestor = Boolean(enforceCycleGuard) && visitedDirs.has(key)
 
   if (DIR_FD_REOPEN_SUPPORTED && !__testForcePathFallback) {
     // Linux: read entries from the SAME open file description — no further
@@ -1424,7 +1472,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
       return null
     }
     if (__testSeam) await __testSeam(target, 'after-verify')
-    return { dh, path: target, key, fh }
+    return { dh, path: target, key, fh, ancestor }
   }
 
   // Fallback (macOS/win32/other — no fd-bound reopen available): a second,
@@ -1458,7 +1506,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
   if (__testSeam) await __testSeam(target, 'after-verify')
-  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam), path: target, key, fh: null }
+  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam), path: target, key, fh: null, ancestor }
 }
 
 /**
@@ -1644,6 +1692,12 @@ function parseSegmentTokens(seg) {
   // doc for the measured cubic cost a per-`{` rescan has once pairing skips
   // bracket expressions.
   let closeTable = null
+  // #7965 — a `[` after the last `]` cannot open a class (there is no `]`
+  // left to close it), so asking {@link parseBracketExpr} about it only buys a
+  // full `indexOf` to the end that finds nothing, plus an allocation: per `[`
+  // of an unclosed run, i.e. quadratic. One lookup up front, then those `[`
+  // are literals without a scan. Same skip as {@link hostBraceNestingDepth}'s.
+  const lastClose = seg.lastIndexOf(']')
   let i = 0
   while (i < seg.length) {
     const c = seg[i]
@@ -1654,7 +1708,7 @@ function parseSegmentTokens(seg) {
       tokens.push({ t: 'any' })
       i++
     } else if (c === '[') {
-      const parsed = parseBracketExpr(seg, i)
+      const parsed = i < lastClose ? parseBracketExpr(seg, i) : null
       if (parsed) {
         // A bracket class only ever tests ONE character at a time (see
         // `advanceToken`'s 'class' arm) — a single-char regex test can never
@@ -1956,12 +2010,17 @@ function braceCloseTable(seg) {
   const n = seg.length
   const closeOf = new Int32Array(n).fill(-1)
   const stack = []
+  // #7965 — only where a class ENDS matters here, so {@link bracketExprEnd}
+  // (no source string, no object) rather than {@link parseBracketExpr}, and a
+  // `[` past the last `]` is skipped without the scan that finds no `]` —
+  // the same two moves {@link hostBraceNestingDepth} makes.
+  const lastClose = seg.lastIndexOf(']')
   let j = 0
   while (j < n) {
     const c = seg[j]
-    if (c === '[') {
-      const parsed = parseBracketExpr(seg, j)
-      if (parsed) { j = parsed.next; continue }
+    if (c === '[' && j < lastClose) {
+      const end = bracketExprEnd(seg, j)
+      if (end !== -1) { j = end; continue }
     }
     if (c === '{') stack.push(j)
     else if (c === '}' && stack.length > 0) closeOf[stack.pop()] = j
