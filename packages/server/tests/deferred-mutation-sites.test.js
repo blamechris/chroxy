@@ -473,7 +473,9 @@ describe('queued follow-ups', () => {
   describe('every session class, found in the source tree', () => {
     const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
     // Every .js file under src/, recursively, as a path relative to src/.
-    const files = readdirSync(SRC, { recursive: true }).filter((f) => f.endsWith('.js')).sort()
+    // readdirSync returns the platform separator (backslashes on Windows); normalise to '/'.
+    const toPosix = (f) => f.split(/[\\/]/).join('/')
+    const files = readdirSync(SRC, { recursive: true }).map(toPosix).filter((f) => f.endsWith('.js')).sort()
 
     // A tripwire, NOT the guarantee (the behaviour tests below are): it parses source and
     // flags an access to a send queue that is not one of
@@ -498,7 +500,10 @@ describe('queued follow-ups', () => {
         if (!node || typeof node.type !== 'string') return
         const m = node.type === 'MethodDefinition' ? (node.key.name ?? node.key.value) : method
         if (node.type === 'MemberExpression') {
-          const name = !node.computed ? node.property.name : (node.property.type === 'Literal' ? node.property.value : null)
+          const prop = node.property
+          const name = !node.computed ? prop.name
+            : prop.type === 'Literal' ? prop.value
+              : (prop.type === 'TemplateLiteral' && prop.expressions.length === 0) ? prop.quasis[0].value.cooked : null
           if (QUEUES.has(name)) found.push({ node, method, name, parent })
         } else if (node.type === 'Literal' && typeof node.value === 'string' && QUEUES.has(node.value)) {
           // a string naming the queue, unless it is the computed key already counted above
@@ -523,7 +528,8 @@ describe('queued follow-ups', () => {
     function harmless({ node, parent: p }) {
       if (!p || node.type !== 'MemberExpression') return false
       if (p.type === 'MemberExpression' && p.object === node && !p.computed && (p.property.name === 'length' || p.property.name === 'push')) return true
-      if (p.type === 'AssignmentExpression' && p.left === node) return true
+      // plain assignment only: `q ||= x` / `q ??= x` hand the queue back as a value
+      if (p.type === 'AssignmentExpression' && p.left === node && p.operator === '=') return true
       if (p.type === 'UnaryExpression' && p.operator === '!') return true
       if (p.type === 'ConditionalExpression' && p.test === node) return true
       if (p.type === 'IfStatement' && p.test === node) return true
@@ -552,6 +558,13 @@ describe('queued follow-ups', () => {
       ])
     })
 
+    it('the path normaliser turns Windows separators into slashes (so the walk checks pass there)', () => {
+      assert.equal(toPosix('server-cli\\server-orchestrator.js'), 'server-cli/server-orchestrator.js')
+      assert.equal(toPosix('a\\b\\c.js'), 'a/b/c.js')
+      assert.equal(toPosix('plain.js'), 'plain.js')
+      assert.equal(toPosix('already/posix.js'), 'already/posix.js')
+    })
+
     it('no source file touches a send queue except through the checked drains', () => {
       const offenders = []
       for (const f of files) offenders.push(...offendersIn(f, readFileSync(join(SRC, f), 'utf8')))
@@ -565,6 +578,9 @@ describe('queued follow-ups', () => {
         'const q = this._pendingQueue; q.shift()',
         'process.nextTick(() => this._outgoingQueue.shift())',
         "this['_pendingQueue'].shift()",
+        'this[`_outgoingQueue`].shift()',
+        '(this._pendingQueue ||= []).shift()',
+        '(this._outgoingQueue ??= []).shift()',
         'const x = this._pendingQueue',
         'x = this._pendingQueue',
         'return this._pendingQueue && other',
