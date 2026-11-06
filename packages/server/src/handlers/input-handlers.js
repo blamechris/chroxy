@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { InputContextEnvelopeSchema } from '@chroxy/protocol/schemas'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
-import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
+import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluatorAsync } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { isBoundClient } from '../environments/authority.js'
 import { createLogger, sessionLogger } from '../logger.js'
@@ -693,7 +693,7 @@ async function handleInput(ws, client, msg, ctx) {
   if (
     entry.session.promptEvaluator === true
     && trimmed.length > 0
-    && !shouldSkipEvaluator(trimmed, _resolveSkipConfig(entry, ctx))
+    && !(await shouldSkipEvaluatorAsync(trimmed, _resolveSkipConfig(entry, ctx)))
   ) {
     const counters = _getEvaluatorIterations(ctx)
     const currentIteration = (counters.get(targetSessionId) || 0) + 1

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { recordTimerArms } from './test-helpers.js'
-import { evaluateDraft, shouldSkipEvaluator } from '../src/prompt-evaluator.js'
+import { evaluateDraft, shouldSkipEvaluator, shouldSkipEvaluatorAsync } from '../src/prompt-evaluator.js'
 
 /**
  * The evaluator wraps a single Anthropic API call and parses its JSON response.
@@ -679,65 +679,65 @@ describe('shouldSkipEvaluator', () => {
   })
 
   describe('config.promptEvaluatorSkipPattern', () => {
-    it('skips when custom pattern matches', () => {
+    it('skips when custom pattern matches', async () => {
       // Default would NOT skip "please proceed when ready" (substantive,
       // doesn't match the default ack regex). Custom pattern adds it.
       const msg = 'please proceed when ready'
-      assert.equal(shouldSkipEvaluator(msg), false)
+      assert.equal(await shouldSkipEvaluatorAsync(msg), false)
       assert.equal(
-        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '^please proceed' }),
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '^please proceed' }),
         true,
       )
     })
 
-    it('still applies the length and default rules when custom pattern does not match', () => {
+    it('still applies the length and default rules when custom pattern does not match', async () => {
       // Custom pattern is unrelated; "y" should still skip via the default.
       assert.equal(
-        shouldSkipEvaluator('y', { promptEvaluatorSkipPattern: '^foo$' }),
+        await shouldSkipEvaluatorAsync('y', { promptEvaluatorSkipPattern: '^foo$' }),
         true,
       )
     })
 
-    it('falls back gracefully when custom pattern is malformed', () => {
+    it('falls back gracefully when custom pattern is malformed', async () => {
       // Unbalanced bracket — should not throw, should fall through to defaults.
       const msg = 'this is a long substantive message that should be evaluated normally'
       assert.equal(
-        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '[invalid' }),
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '[invalid' }),
         false,
       )
       // Default rules still apply with a malformed custom pattern.
       assert.equal(
-        shouldSkipEvaluator('yes', { promptEvaluatorSkipPattern: '[invalid' }),
+        await shouldSkipEvaluatorAsync('yes', { promptEvaluatorSkipPattern: '[invalid' }),
         true,
       )
     })
 
-    it('ignores empty custom pattern', () => {
+    it('ignores empty custom pattern', async () => {
       const msg = 'this message is long enough not to skip on length'
       assert.equal(
-        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '' }),
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '' }),
         false,
       )
     })
 
-    it('ignores non-string custom pattern', () => {
+    it('ignores non-string custom pattern', async () => {
       const msg = 'this message is long enough not to skip on length'
       assert.equal(
-        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: 123 }),
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: 123 }),
         false,
       )
     })
 
-    it('treats custom pattern as case-insensitive', () => {
+    it('treats custom pattern as case-insensitive', async () => {
       assert.equal(
-        shouldSkipEvaluator('PROCEED', { promptEvaluatorSkipPattern: '^proceed$' }),
+        await shouldSkipEvaluatorAsync('PROCEED', { promptEvaluatorSkipPattern: '^proceed$' }),
         true,
       )
     })
 
-    it('accepts an undefined config without throwing', () => {
-      assert.equal(shouldSkipEvaluator('y', undefined), true)
-      assert.equal(shouldSkipEvaluator('y'), true)
+    it('accepts an undefined config without throwing', async () => {
+      assert.equal(await shouldSkipEvaluatorAsync('y', undefined), true)
+      assert.equal(await shouldSkipEvaluatorAsync('y'), true)
     })
   })
 
@@ -758,7 +758,7 @@ describe('shouldSkipEvaluator', () => {
       try {
         const msg = 'this message is long enough to pass the trivial-skip check'
         for (let i = 0; i < 50; i++) {
-          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '^cached pattern$' })
+          await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '^cached pattern$' })
         }
         assert.equal(constructed, 1, 'pattern should compile exactly once across 50 calls')
       } finally {
@@ -784,7 +784,7 @@ describe('shouldSkipEvaluator', () => {
       try {
         const msg = 'this message is long enough to pass the trivial-skip check'
         for (let i = 0; i < 10; i++) {
-          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '[unclosed' })
+          await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: '[unclosed' })
         }
         // The cache stores `null` for invalid sources, so the warning fires
         // once on first compilation, not on every subsequent call.
@@ -813,7 +813,7 @@ describe('shouldSkipEvaluator', () => {
       try {
         const sentinelSource = '[REDACTED-SENTINEL-PATTERN-XYZ123'
         const msg = 'this message is long enough to pass the trivial-skip check'
-        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: sentinelSource })
+        await shouldSkipEvaluatorAsync(msg, { promptEvaluatorSkipPattern: sentinelSource })
         const haystack = writes.join('')
         assert.ok(
           /Invalid promptEvaluatorSkipPattern/.test(haystack),

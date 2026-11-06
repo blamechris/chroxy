@@ -415,7 +415,13 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     const claudeRootUsable = !isFilesystemRoot(claudeHomeReal)
     // The session's own generated-memory directory inside the config tree.
     const encoded = projectSlug(cwdReal)
-    const projectMemoryRoot = resolve(claudeHomeReal, 'projects', encoded)
+    // Resolved before it is used as a root: the readers require a real path, and
+    // `projects/<slug>` is a name inside the config tree that may itself be a link.
+    const lexicalProjectMemoryRoot = resolve(claudeHomeReal, 'projects', encoded)
+    const resolvedProjectMemoryRoot = await realpathOfDeepestAncestor(lexicalProjectMemoryRoot).catch(() => lexicalProjectMemoryRoot)
+    // Kept inside the config tree: a `projects/<slug>` link that leaves it is not
+    // followed (the lexical name stays the root, so nothing resolves beneath it).
+    const projectMemoryRoot = isPathWithin(resolvedProjectMemoryRoot, claudeHomeReal) ? resolvedProjectMemoryRoot : lexicalProjectMemoryRoot
     // A project-confined reader (a session-scoped connection) is given the
     // session directory and THIS project's memory directory — not the whole
     // config tree, which also holds the user-level memory and every other

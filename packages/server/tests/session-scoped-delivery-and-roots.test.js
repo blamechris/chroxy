@@ -11,7 +11,6 @@ import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
 import { projectSlug } from '../src/jsonl-reader.js'
 import { readContainedBytes, readContainedBytesSync } from '../src/utils/regular-file.js'
 import { frameForBoundClient } from '../src/outgoing-policy.js'
-import { isSafeRegexSource } from '../src/utils/safe-regex.js'
 import { createReadLimiter, ReadLimitError } from '../src/utils/read-limiter.js'
 import { createMockSessionManager, waitFor, createSpy, nsCtx, makeSessionIndexCtx } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -268,11 +267,6 @@ describe('smaller items', () => {
     const out = frameForBoundClient({ type: 'cost_update', sessionId: 's', sessionCost: 1.5, totalCost: 99 })
     assert.equal('totalCost' in out, false)
     assert.equal(out.sessionCost, 1.5)
-  })
-
-  it('refuses a bounded repeat of a group holding an unbounded repeat', () => {
-    for (const p of ['(.*a){12}$', '(.*a){20}$', '(a+b){2}c']) assert.equal(isSafeRegexSource(p), false, p)
-    for (const p of ['(ab){3}', '(foo|bar)$']) assert.equal(isSafeRegexSource(p), true, p)
   })
 
   it('an unrestricted caller turned away at the waiter bound does not lift the restriction', async () => {

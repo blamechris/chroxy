@@ -959,14 +959,14 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // malformed regex (setter also returns false). Without this distinction
   // the operator gets no feedback when their pattern is broken.
   if (typeof msg.value === 'string' && msg.value.length > 0) {
-    if (!isSafeRegexSource(msg.value)) {
-      sendSessionError(ws, ctx, 'Invalid pattern: too long or too complex (at most 200 characters and 10 repeated items; no quantifier on a group that contains a quantifier or alternation, no two unbounded repeats in a row, no backreferences or lookaround)')
-      return
-    }
     try {
       new RegExp(msg.value, 'i')
     } catch (err) {
       sendSessionError(ws, ctx, `Invalid pattern: ${err.message || 'malformed regex'}`)
+      return
+    }
+    if (!isSafeRegexSource(msg.value)) {
+      sendSessionError(ws, ctx, 'Pattern not accepted: over 200 characters, uses a backreference, or repeats a group that begins with an unbounded repeat (such as `(a+)+`)')
       return
     }
   }

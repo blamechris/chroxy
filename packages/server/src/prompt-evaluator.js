@@ -18,6 +18,7 @@
  * if missing-key turns out to be the dominant friction point.
  */
 import { isSafeRegexSource } from './utils/safe-regex.js'
+import { boundedRegex } from './utils/bounded-regex.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { createLogger } from './logger.js'
 
@@ -98,6 +99,10 @@ const DEFAULT_SKIP_PATTERN = /^(y|n|yes|no|go|continue|run it|ok|okay|sure|sound
  * @returns {boolean} true if the message should skip the evaluator
  */
 export function shouldSkipEvaluator(message, config = {}) {
+  // Default rules only. A configured custom pattern is NOT run here: that would
+  // run an arbitrary backtracking pattern on the event loop. Use
+  // shouldSkipEvaluatorAsync for the full decision.
+  void config
   if (typeof message !== 'string') return true
   const trimmed = message.trim()
   if (!trimmed) return true
@@ -105,12 +110,32 @@ export function shouldSkipEvaluator(message, config = {}) {
 
   if (DEFAULT_SKIP_PATTERN.test(trimmed)) return true
 
+  return false
+}
+
+/**
+ * The full skip decision: the default rules (synchronous), then the configured
+ * custom pattern, run through the bounded matcher (utils/bounded-regex.js): in a
+ * worker, with a per-match deadline and a cap on the tested text. A pattern that
+ * runs out its deadline counts as NO MATCH, so the message is evaluated normally,
+ * which is the conservative outcome (nothing is skipped on the strength of a
+ * match that was never found). A malformed or pre-filter-refused pattern is
+ * ignored the same way.
+ *
+ * @param {unknown} message
+ * @param {{ promptEvaluatorSkipPattern?: string }} [config]
+ * @param {{ test(source: string, text: string): Promise<boolean> }} [matcher] test seam
+ * @returns {Promise<boolean>} true if the message should skip the evaluator
+ */
+export async function shouldSkipEvaluatorAsync(message, config = {}, matcher = boundedRegex) {
+  if (shouldSkipEvaluator(message)) return true
   const customSource = config?.promptEvaluatorSkipPattern
   if (typeof customSource === 'string' && customSource.length > 0) {
-    const customPattern = _compileSkipPattern(customSource)
-    if (customPattern && customPattern.test(trimmed)) return true
+    // Validated and cached on the main thread (one warning per bad source); the
+    // match itself runs in the worker.
+    if (_compileSkipPattern(customSource) === null) return false
+    return matcher.test(customSource, message.trim())
   }
-
   return false
 }
 
@@ -137,9 +162,8 @@ function _compileSkipPattern(source) {
   if (_skipPatternCache.has(source)) return _skipPatternCache.get(source)
   let compiled = null
   try {
-    // Screened before it is compiled: `.test()` cannot be interrupted, and a
-    // pattern with a repeated group that can match one text several ways blocks
-    // the whole process on a short input (utils/safe-regex.js).
+    // Pre-filtered before it is accepted (utils/safe-regex.js). The pattern is
+    // never RUN here: matching happens in a bounded worker (utils/bounded-regex.js).
     if (!isSafeRegexSource(source)) throw new Error('unsafe pattern')
     compiled = new RegExp(source, 'i')
   } catch {

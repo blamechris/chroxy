@@ -1,113 +1,91 @@
 /**
- * A conservative screen for regular expressions that come from outside and are
- * run on the event loop.
+ * A cheap pre-filter for regular expressions that come from outside, applied
+ * BEFORE a pattern is accepted. It is NOT the safety mechanism.
  *
- * JavaScript's matcher backtracks, and a pattern with a repeated group that can
- * match the same text in more than one way, or with adjacent unbounded repeats
- * of overlapping items, takes exponential or high-polynomial time on a short
- * hostile input — while it runs, nothing else in the process does. There is no
- * way to interrupt a `.test()`, so the pattern is screened before it is ever
- * compiled.
+ * No static screen can prove that a backtracking pattern is fast (overlapping
+ * repeats separated by a literal, adjacent bounded repeats, repeats hidden in
+ * non-capturing groups all defeat one). What keeps the daemon responsive is that
+ * the pattern is never run on the event loop: `utils/bounded-regex.js` runs it in
+ * a worker with a per-match deadline and a cap on the tested text, and a match
+ * that runs out its deadline counts as no match.
  *
- * WHAT THIS GUARANTEES: a pattern is accepted only if none of the following
- * holds. It is a screen over a parse of the pattern, not a proof of linear time,
- * and it errs towards refusing:
- *   - longer than `MAX_PATTERN_LENGTH` characters;
- *   - a backreference (`\1`, `\k<name>`) or a lookaround group;
- *   - a group repeated without a bound (`*`, `+`, `{n,}`) whose body contains
- *     any quantifier (including `?` and `{n,m}`) or an alternation;
- *   - any quantifier on a group whose body holds a quantifier or an alternation
- *     (`(.*a){12}`, `(aa|a){1,40}`, `(a|a)?`). This also refuses harmless
- *     patterns such as `(foo.*)?`: that over-refusal is deliberate;
- *   - more than `MAX_QUANTIFIED_ATOMS` quantified atoms in all;
- *   - two unbounded repeats (`*`, `+`, `{n,}`) with nothing mandatory between
- *     them (optional items in between do not count as mandatory): `a*a*`,
- *     `\s*\s*x`, `a+b*c+`.
- * Plain literals, anchors, character classes, a single unbounded repeat per
- * stretch of the pattern, bounded repeats, optional items and unrepeated
- * alternations pass.
+ * What this screen still refuses, because it is cheap and almost never wanted:
+ *   - a pattern over `MAX_PATTERN_LENGTH` characters;
+ *   - a backreference (`\1`..`\9`, `\k<name>`), read from the parse so that an
+ *     escaped backslash followed by a digit (`\\1`) is not mistaken for one;
+ *   - the classic nested shape: a group repeated without a bound (`*`, `+`,
+ *     `{n,}`) whose body BEGINS with an unbounded repeat, such as `(a+)+`,
+ *     `(.*a)*` or `(\s*x)+`.
+ * Everything else, including other patterns that can backtrack badly, is accepted
+ * and left to the time bound.
  */
 export const MAX_PATTERN_LENGTH = 200
-
-// Many optional or repeated atoms in a row (`a?` x36 then `a` x36) backtrack
-// exponentially on a short input although no single rule above fires, so the
-// number of quantified atoms is capped.
-export const MAX_QUANTIFIED_ATOMS = 10
 
 class Refused extends Error {}
 
 /**
  * @param {unknown} source
- * @returns {boolean} true when the pattern may be compiled and run
+ * @returns {boolean} true when the pattern passes the pre-filter
  */
 export function isSafeRegexSource(source) {
   if (typeof source !== 'string') return false
   if (source.length > MAX_PATTERN_LENGTH) return false
-  if (/\\[1-9]|\\k</.test(source)) return false
-  if (/\(\?<?[=!]/.test(source)) return false
   try {
-    const counter = { quantified: 0 }
-    const end = parseAlternation(source, 0, 0, counter)
-    // An unmatched ')' leaves input unread: not a pattern this screen understands.
+    const end = parseAlternation(source, 0, 0)
     return end.i === source.length
-  } catch (err) {
-    if (err instanceof Refused) return false
+  } catch {
     return false
   }
 }
 
-/** Parse a quantifier at `i`; returns { next, unbounded, optional, any } */
 function parseQuantifier(src, i) {
   const c = src[i]
   let unbounded = false
-  let optional = false
   let any = true
   let j = i + 1
-  if (c === '*') { unbounded = true; optional = true } else if (c === '+') { unbounded = true } else if (c === '?') { optional = true } else if (c === '{') {
+  if (c === '*' || c === '+') {
+    unbounded = true
+  } else if (c === '?') {
+    // optional
+  } else if (c === '{') {
     const m = /^\{(\d+)(,(\d*))?\}/.exec(src.slice(i))
-    if (!m) return { next: i, unbounded: false, optional: false, any: false }
+    if (!m) return { next: i, unbounded: false, any: false }
     j = i + m[0].length
-    const min = Number(m[1])
     unbounded = m[2] !== undefined && m[3] === ''
-    optional = min === 0
   } else {
-    return { next: i, unbounded: false, optional: false, any: false }
+    return { next: i, unbounded: false, any: false }
   }
   if (src[j] === '?') j++ // lazy
-  return { next: j, unbounded, optional, any }
+  return { next: j, unbounded, any }
 }
 
 /**
  * Parse alternatives until the closing ')' or the end. Returns the index reached
- * and whether the body held a quantifier or an alternation.
+ * and whether some alternative BEGINS with an unbounded repeat.
  */
-function parseAlternation(src, start, depth, counter) {
+function parseAlternation(src, start, depth) {
   let i = start
-  let busy = false // body contains a quantifier or an alternation
-  let pending = false // an unbounded repeat with nothing mandatory since
-  let unbounded = false // body contains an unbounded repeat
+  let startsUnbounded = false
+  let first = true // the next atom is the first of its alternative
   while (i < src.length) {
     const c = src[i]
     if (c === ')') {
       if (depth === 0) throw new Refused()
-      return { i, busy, unbounded }
+      return { i, startsUnbounded }
     }
-    if (c === '|') { busy = true; pending = false; i++; continue }
-    // One atom.
-    let atomBusy = false
-    let atomUnbounded = false
+    if (c === '|') { first = true; i++; continue }
+    let atomStartsUnbounded = false
     if (c === '(') {
       let j = i + 1
       if (src[j] === '?') {
-        // (?: ... ) or (?<name> ... ); lookarounds were refused up front.
-        const m = /^\?(:|<[A-Za-z_][\w]*>)/.exec(src.slice(j))
+        // (?: ... ), (?<name> ... ), or a lookaround (?= ?! ?<= ?<!): all parse as a group.
+        const m = /^\?(:|=|!|<=|<!|<[A-Za-z_]\w*>)/.exec(src.slice(j))
         if (!m) throw new Refused()
         j += m[0].length
       }
-      const inner = parseAlternation(src, j, depth + 1, counter)
+      const inner = parseAlternation(src, j, depth + 1)
       if (src[inner.i] !== ')') throw new Refused()
-      atomBusy = inner.busy
-      atomUnbounded = inner.unbounded
+      atomStartsUnbounded = inner.startsUnbounded
       i = inner.i + 1
     } else if (c === '[') {
       let j = i + 1
@@ -116,29 +94,20 @@ function parseAlternation(src, start, depth, counter) {
       if (j >= src.length) throw new Refused()
       i = j + 1
     } else if (c === '\\') {
+      const next = src[i + 1]
+      // A backreference is a backslash that is NOT itself escaped (this walk
+      // consumes `\\` as one atom) followed by 1-9, or \k<.
+      if ((next >= '1' && next <= '9') || (next === 'k' && src[i + 2] === '<')) throw new Refused()
       i += 2
     } else {
       i++
     }
     const q = parseQuantifier(src, i)
-    if (q.any) {
-      busy = true
-      if (++counter.quantified > MAX_QUANTIFIED_ATOMS) throw new Refused()
-    }
-    // ANY quantifier on a group that itself holds a quantifier or an alternation
-    // (`(aa|a){1,40}`, `(a{0,9}){0,9}`, `(a|a)?` repeated) can multiply the work.
-    if (q.any && atomBusy) throw new Refused()
-    if (q.unbounded) {
-      unbounded = true
-      if (pending) throw new Refused()
-      pending = true
-    } else if (!q.optional && !(c === '^' || c === '$')) {
-      pending = false
-    }
-    if (atomBusy) busy = true
-    if (atomUnbounded) unbounded = true
+    if (q.unbounded && atomStartsUnbounded) throw new Refused()
+    if (first && (q.unbounded || atomStartsUnbounded)) startsUnbounded = true
+    first = false
     i = q.next
   }
   if (depth !== 0) throw new Refused()
-  return { i, busy, unbounded }
+  return { i, startsUnbounded }
 }

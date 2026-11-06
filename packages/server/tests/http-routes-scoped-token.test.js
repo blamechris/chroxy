@@ -2,6 +2,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { parse as acornParse } from 'acorn'
 import { fileURLToPath } from 'node:url'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { PairingManager } from '../src/pairing.js'
@@ -77,29 +78,69 @@ describe('HTTP routes and a session-scoped bearer token', () => {
     }
   })
 
-  it('the only opt-ins to scoped tokens are the two reviewed `limited` routes', () => {
-    const hits = []
-    const walk = (dir) => {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, e.name)
-        if (e.isDirectory()) walk(full)
-        else if (e.name.endsWith('.js') && /\{\s*allowScoped\s*:\s*true\s*\}\s*\)/.test(readFileSync(full, 'utf8'))) hits.push(full.slice(SRC.length + 1))
+  it('the only opt-ins to scoped tokens are the two reviewed `limited` routes (parsed, not matched as text)', () => {
+    // Parsed with acorn so no spelling (an options variable, `!0`, a computed key,
+    // a direct token-validity call) goes around a string match.
+    const refs = new Map() // `${file}:${name}` -> count of Identifier nodes with that name
+    const optInProps = [] // every object property keyed `allowScoped`
+    const walk = (node, file, parent = null) => {
+      if (!node || typeof node.type !== 'string') return
+      if (node.type === 'Identifier' && WATCHED.has(node.name)) {
+        const k = `${file}:${node.name}`
+        refs.set(k, (refs.get(k) ?? 0) + 1)
+      }
+      // Only object LITERALS are opt-ins; the destructuring of the option inside
+      // _validateBearerAuth is an ObjectPattern.
+      if (node.type === 'Property' && parent?.type === 'ObjectExpression' && !node.computed && node.key?.name === 'allowScoped') optInProps.push({ file, value: node.value })
+      if (node.type === 'Property' && node.computed) {
+        // A computed key could spell the option without the identifier.
+        const k = node.key?.type === 'Literal' ? String(node.key.value) : null
+        if (k === 'allowScoped' || k === null) computedKeys.push({ file, k })
+      }
+      for (const key of Object.keys(node)) {
+        const v = node[key]
+        if (Array.isArray(v)) v.forEach((x) => walk(x, file, node))
+        else if (v && typeof v.type === 'string') walk(v, file, node)
       }
     }
-    walk(SRC)
-    // Reviewed: POST /permission-response (ws-server.js; answers only the token's
-    // own session's prompts) and POST /api/sessions/:id/status (http-routes.js;
-    // admits a pairing token only when it is bound to the session in the path).
-    // Anything else needs the same review and an entry above.
-    assert.deepEqual(hits.sort(), ['http-routes.js', 'ws-server.js'], 'a new opt-in must be reviewed and classified as `limited` above')
-    const server = readFileSync(join(SRC, 'ws-server.js'), 'utf8')
-    assert.equal((server.match(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/g) ?? []).length, 1)
-    assert.ok(/validateBearerAuth:\s*\(req, res\)\s*=>\s*self\._validateBearerAuth\(req, res, \{ allowScoped: true \}\)/.test(server),
-      'the ws-server opt-in is the permission-response handler\'s bearer check')
+    const WATCHED = new Set(['allowScoped', '_isTokenValid', '_validateBearerAuth', '_isSessionScopedToken'])
+    const computedKeys = []
+    const visit = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name)
+        if (e.isDirectory()) visit(full)
+        else if (e.name.endsWith('.js')) walk(acornParse(readFileSync(full, 'utf8'), { ecmaVersion: 'latest', sourceType: 'module' }), full.slice(SRC.length + 1))
+      }
+    }
+    visit(SRC)
+
+    // Every property keyed `allowScoped` is the literal `true`, in exactly the two
+    // reviewed places: POST /permission-response (ws-server.js; answers only the
+    // token's own session's prompts) and POST /api/sessions/:id/status
+    // (http-routes.js; admits a pairing token only when it is bound to the session
+    // in the path).
+    assert.deepEqual(optInProps.map((p) => `${p.file}:${p.value.type}:${p.value.value}`).sort(),
+      ['http-routes.js:Literal:true', 'ws-server.js:Literal:true'])
+    // Nothing else mentions the option or reaches the token-validity checks: these
+    // counts are the reviewed ones. A new reference (an options variable passed
+    // along, another caller of the validity check that skips the scoped-token
+    // test) changes a count and must be reviewed and classified above.
+    const reviewed = {
+      'http-routes.js:_validateBearerAuth': 6,
+      'http-routes.js:allowScoped': 1,
+      'ws-server.js:_validateBearerAuth': 2,
+      'ws-server.js:allowScoped': 4,
+      'ws-server.js:_isTokenValid': 6,
+      'ws-server.js:_isSessionScopedToken': 4,
+    }
+    assert.deepEqual(Object.fromEntries([...refs].sort()), reviewed)
+    // No computed property key (which could spell the option indirectly) in the
+    // two files that hold the opt-ins.
+    assert.deepEqual(computedKeys.filter((c) => c.file === 'http-routes.js' || c.file === 'ws-server.js'), [])
+    // The http-routes opt-in sits beside the check that binds the token to the
+    // path's session.
     const routes = readFileSync(join(SRC, 'http-routes.js'), 'utf8')
-    assert.equal((routes.match(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/g) ?? []).length, 1)
-    // The opt-in must sit beside the check that binds the token to the path's session.
-    const at = routes.search(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/)
+    const at = routes.search(/allowScoped/)
     assert.ok(/bound !== sessionId/.test(routes.slice(at, at + 900)), 'the status route compares the token binding with the session in the path')
   })
 

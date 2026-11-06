@@ -5,8 +5,8 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isSafeRegexSource, MAX_PATTERN_LENGTH, MAX_QUANTIFIED_ATOMS } from '../src/utils/safe-regex.js'
-import { shouldSkipEvaluator, _resetSkipPatternCache } from '../src/prompt-evaluator.js'
+import { isSafeRegexSource, MAX_PATTERN_LENGTH } from '../src/utils/safe-regex.js'
+import { shouldSkipEvaluatorAsync, _resetSkipPatternCache } from '../src/prompt-evaluator.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { readContainedTextFile, readContainedBytes, readContainedBytesSync, readPinnedHandle } from '../src/utils/regular-file.js'
 import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
@@ -22,47 +22,53 @@ const POSIX = process.platform !== 'win32'
 const SKIP_WIN_RENAME_UNDER_HANDLE = process.platform === 'win32' && 'Windows refuses to rename a directory while a handle beneath it is open (EPERM), so a swap staged between the open and the checks cannot be set up on win32; the same schedule is exercised on POSIX'
 const SERVER = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-describe('screen for patterns the daemon will run', () => {
-  it('refuses repeated groups that contain repeats or alternation, backreferences, lookaround and long patterns', () => {
-    for (const bad of ['(a+)+$', '(a*)*b', '(a|aa)+c', '(x+x+)+y', '((a+))*', '(a|b)*c', '(a)\\1', '(?=a)b', '(?<!a)b', '^(a?a)+$', '\\s*\\s*\\s*x', 'a*a*', 'a+b*c+', '(a{1,2})+b', 'a'.repeat(MAX_PATTERN_LENGTH + 1)]) {
+describe('pre-filter for patterns the daemon will run (the time bound is tested in bounded-regex.test.js)', () => {
+  it('refuses backreferences, the classic nested shape, and long patterns', () => {
+    for (const bad of ['(a+)+$', '(a*)*b', '(.*a)*', '(\\s*x)+y', '((a+))*', '(a)\\1', '(?<n>a)\\k<n>', 'a'.repeat(MAX_PATTERN_LENGTH + 1)]) {
       assert.equal(isSafeRegexSource(bad), false, bad)
     }
   })
 
-  it('refuses bounded or optional repeats of groups that hold repeats, and many quantified atoms', () => {
-    for (const bad of ['(aa|a){1,40}$', '(a|a){0,25}$', '(a{0,9}){0,9}$', '(a|a)?'.repeat(20), 'a?'.repeat(36) + 'a'.repeat(36), '(foo.*)?']) {
-      assert.equal(isSafeRegexSource(bad), false, bad.slice(0, 40))
-    }
-    assert.equal(isSafeRegexSource('a?'.repeat(MAX_QUANTIFIED_ATOMS) + 'b'), true, 'at the cap it is still accepted')
-    assert.equal(isSafeRegexSource('a?'.repeat(MAX_QUANTIFIED_ATOMS + 1) + 'b'), false, 'one past the cap is refused')
+  it('does not mistake an escaped backslash followed by a digit for a backreference', () => {
+    assert.equal(isSafeRegexSource('a\\\\1'), true)
+    assert.equal(isSafeRegexSource('(a)\\1'), false)
   })
 
-  it('accepts ordinary patterns', () => {
-    for (const ok of ['^(foo|bar)$', '\\bfix\\b', '^/(help|clear)', 'a+bc', '(ab)+', 'x?y*', 'a*b?c', '^\\s*fix', '[a-z]{2,5}\\d', '(?:todo|fixme)', 'x?y*']) {
+  it('accepts ordinary patterns, including ones with a delimited or optional repeated group', () => {
+    for (const ok of [
+      '^\\s*(ok|yes)\\s*[.!]*$', '^(retry|again)\\s*!*$', '^(continue|proceed|go ahead)(\\s+please)?[.!]*$',
+      '^(y|yes)?$', '^[a-z]+(-[a-z]+)*$', '^(foo|bar)$', '\\bfix\\b', 'a+bc', '(ab)+', '[a-z]{2,5}\\d', '(?:todo|fixme)', 'x?y*',
+    ]) {
       assert.equal(isSafeRegexSource(ok), true, ok)
     }
     assert.equal(isSafeRegexSource(42), false)
   })
 
-  it('the evaluator never compiles or runs a refused pattern', () => {
+  it('a refused pattern is never matched (the evaluator ignores it and answers fast)', async () => {
     _resetSkipPatternCache()
     const started = Date.now()
-    const verdict = shouldSkipEvaluator('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!', { promptEvaluatorSkipPattern: '^(a+)+$' })
-    assert.ok(Date.now() - started < 500, 'returned without running the pattern')
+    const verdict = await shouldSkipEvaluatorAsync('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!', { promptEvaluatorSkipPattern: '^(a+)+$' })
+    assert.ok(Date.now() - started < 500)
     assert.equal(verdict, false)
   })
 
-  it('the setter refuses an unsafe pattern with an error and changes nothing', () => {
-    const sent = []
-    const session = { setPromptEvaluatorSkipPattern: createSpy(() => true) }
-    const ctx = nsCtx({
-      send: createSpy((_w, m) => sent.push(m)),
-      sessionManager: { getSession: () => ({ session }) },
-    })
-    settingsHandlers.set_prompt_evaluator_skip_pattern({}, { id: 'c', activeSessionId: 's' }, { type: 'set_prompt_evaluator_skip_pattern', sessionId: 's', value: '(a+)+$' }, ctx)
-    assert.equal(sent[0].type, 'session_error')
-    assert.match(sent[0].message, /Invalid pattern/)
-    assert.equal(session.setPromptEvaluatorSkipPattern.callCount, 0)
+  it('the setter reports a malformed pattern as malformed and a refused one as not accepted, and changes nothing', () => {
+    const run = (value) => {
+      const sent = []
+      const session = { setPromptEvaluatorSkipPattern: createSpy(() => true) }
+      const ctx = nsCtx({
+        send: createSpy((_w, m) => sent.push(m)),
+        sessionManager: { getSession: () => ({ session }) },
+      })
+      settingsHandlers.set_prompt_evaluator_skip_pattern({}, { id: 'c', activeSessionId: 's' }, { type: 'set_prompt_evaluator_skip_pattern', sessionId: 's', value }, ctx)
+      return { sent, session }
+    }
+    const malformed = run('[unclosed')
+    assert.match(malformed.sent[0].message, /^Invalid pattern/)
+    assert.doesNotMatch(malformed.sent[0].message, /too complex|not accepted/)
+    const refused = run('(a+)+$')
+    assert.match(refused.sent[0].message, /not accepted/)
+    for (const r of [malformed, refused]) assert.equal(r.session.setPromptEvaluatorSkipPattern.callCount, 0)
   })
 })
 
@@ -203,7 +209,7 @@ describe('containment does not depend on resolving the name twice', () => {
   })
 })
 
-describe('pinning: second pass, descriptor path, lexical roots', () => {
+describe('pinning: second pass, descriptor path, real roots', () => {
   let base
   before(() => { base = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-pin2-'))) })
   after(() => { rmSync(base, { recursive: true, force: true }) })
@@ -275,20 +281,36 @@ describe('pinning: second pass, descriptor path, lexical roots', () => {
     assert.equal(readContainedBytesSync(t.file, t.root, 1024, { deps }), null)
   })
 
-  it('a lexical root (a link spelling, or the unresolved temp directory) reads correctly', { skip: SKIP_NO_SYMLINK }, async () => {
-    const t = tree('lexical')
-    const spelled = join(base, 'lexical-link')
-    symlinkSync(join(base, 'lexical'), spelled)
-    const viaLink = join(spelled, 'proj')
-    assert.equal((await readContainedBytes(join(viaLink, 'sub', 'f.txt'), viaLink, 1024)).toString(), 'SAME-OBJECT\n')
-    assert.equal(readContainedBytesSync(join(viaLink, 'sub', 'f.txt'), viaLink, 1024).toString(), 'SAME-OBJECT\n')
-    const raw = mkdtempSync(join(tmpdir(), 'chroxy-lexical-')) // NOT realpath'd: /var vs /private/var on macOS
+  it('a root that is a link, or sits under one, is refused by all three readers (the root must be a real path)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const t = tree('linked')
+    // The root itself is a link.
+    const linkRoot = join(base, 'linked-root')
+    symlinkSync(t.root, linkRoot)
+    // An ANCESTOR of the root is a link.
+    const linkAncestor = join(base, 'linked-ancestor')
+    symlinkSync(join(base, 'linked'), linkAncestor)
+    for (const root of [linkRoot, join(linkAncestor, 'proj')]) {
+      const file = join(root, 'sub', 'f.txt')
+      assert.equal(await readContainedBytes(file, root, 1024), null, `async ${root}`)
+      assert.equal(readContainedBytesSync(file, root, 1024), null, `sync ${root}`)
+      const fh = await open(join(t.root, 'sub', 'f.txt'), 'r')
+      try {
+        await assert.rejects(readPinnedHandle(fh, file, root, 1024), (e) => e.code === 'EACCES', `handle ${root}`)
+      } finally { await fh.close() }
+    }
+    // The real spelling of the same root reads (control).
+    assert.equal((await readContainedBytes(t.file, t.root, 1024)).toString(), 'SAME-OBJECT\n')
+  })
+
+  it('a real root obtained with realpath reads, including the temp directory (which is a link on macOS)', async () => {
+    const raw = mkdtempSync(join(tmpdir(), 'chroxy-realroot-'))
+    const real = realpathSync.native(raw)
     try {
-      mkdirSync(join(raw, 'd'))
-      writeFileSync(join(raw, 'd', 'x.txt'), 'RAW\n')
-      assert.equal((await readContainedBytes(join(raw, 'd', 'x.txt'), raw, 1024)).toString(), 'RAW\n')
+      mkdirSync(join(real, 'd'))
+      writeFileSync(join(real, 'd', 'x.txt'), 'RAW\n')
+      assert.equal((await readContainedBytes(join(real, 'd', 'x.txt'), real, 1024)).toString(), 'RAW\n')
+      assert.equal(readContainedBytesSync(join(real, 'd', 'x.txt'), real, 1024).toString(), 'RAW\n')
     } finally { rmSync(raw, { recursive: true, force: true }) }
-    void t
   })
 })
 

@@ -8,9 +8,9 @@
  * (fstat), not on a separate stat of the path that may no longer name the same
  * object. A symlink to a regular file is followed, as a plain open does.
  */
-import { constants as fsConstants, openSync, fstatSync, readSync, closeSync, lstatSync, realpathSync, readlinkSync, existsSync } from 'fs'
+import { constants as fsConstants, openSync, fstatSync, readSync, closeSync, lstatSync, readlinkSync, existsSync } from 'fs'
 import { relative, join, sep, isAbsolute, parse } from 'path'
-import { open, lstat, realpath } from 'fs/promises'
+import { open, lstat } from 'fs/promises'
 import { openNoFollow } from '../ws-file-ops/open-nofollow.js'
 
 const READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0)
@@ -219,21 +219,25 @@ async function readHandleBounded(fh, size, maxBytes) {
  * Read a file for a walk or lookup that must stay inside `root`, and consume the
  * very object that was checked.
  *
- * `root` is resolved to its real path once per call, so a lexical root (`/tmp`,
- * `$TMPDIR`) works; `absPath` must lie lexically beneath it. The file is opened
- * ONCE by its real path (no-follow on the final component, non-blocking) and the
- * descriptor must be a regular file within the cap. Containment is then
+ * `root` MUST ALREADY BE A REAL PATH (the caller resolved it, e.g. with
+ * `realpath`/`realpathSync.native`): a root that is a link, or that sits under a
+ * link, is REFUSED (the call returns null), not followed. `absPath` must lie
+ * lexically beneath it. The file is opened ONCE (no-follow on the final component,
+ * non-blocking) and the descriptor must be a regular file within the cap. Containment is then
  * established from identities rather than by resolving the name again: see
  * `verifyPinned` for the checks (directory chain from the filesystem root, the
  * file's device and inode, repeated twice, plus the descriptor's own resolved path
  * where the platform reports it). What is read is always the descriptor.
  *
- * WHAT THIS DOES AND DOES NOT GUARANTEE. A parent swapped to a link and left
- * there, or swapped for the open and restored before the checks, is refused. On
- * Linux the /proc check makes the answer exact. On macOS and Windows a directory
- * toggled between link and real fast enough to be a link at the open and real at
- * every check is narrowed, not ruled out; exploiting it needs local write access
- * inside the store. A hard link inside the root to a file elsewhere is the same
+ * WHAT THIS DOES AND DOES NOT GUARANTEE. A root or ancestor that is already a
+ * link is refused. A parent swapped to a link and left there, or swapped for the
+ * open and restored before the checks, is refused. On Linux, where /proc/self/fd
+ * is mounted, the descriptor's resolved path is compared and the answer is exact;
+ * where /proc is absent it falls back to the two passes. On macOS and Windows a
+ * directory toggled between link and real fast enough to be a link at the open and
+ * real at every check is narrowed, not ruled out (measured: see the PR notes and
+ * the platform-limits paragraph of docs/security/bearer-token-authority.md);
+ * exploiting it needs local write access inside the store. A hard link inside the root to a file elsewhere is the same
  * object and is not distinguishable by identity.
  *
  * `deps` is a test seam: `beforeOpen` / `afterOpen` / `betweenChecks` run at those
@@ -253,15 +257,16 @@ export async function readContainedBytes(absPath, root, maxBytes, { head = false
   if (!comps) return null
   let fh
   try {
-    const rootReal = await realpath(root)
-    const target = join(rootReal, ...comps)
+    // The chain below runs over `root` AS GIVEN: a root that is itself a link, or
+    // sits under a link, fails the directory check (the root must be a real path).
+    const target = join(root, ...comps)
     await deps.beforeOpen?.()
     fh = await openNoFollow(target, READ_FLAGS)
     await deps.afterOpen?.()
     const st = await fh.stat({ bigint: true })
     if (!st.isFile()) return null
     if (!head && st.size > BigInt(maxBytes)) return null
-    if (!(await verifyPinned(fh, target, rootReal, comps, st, deps))) return null
+    if (!(await verifyPinned(fh, target, root, comps, st, deps))) return null
     return await readHandleBounded(fh, Number(st.size), maxBytes)
   } catch {
     return null
@@ -278,23 +283,22 @@ export async function readContainedTextFile(absPath, root, maxBytes, opts) {
 
 /**
  * Synchronous {@link readContainedBytes}, for a caller that cannot be async.
- * Same root resolution, identity checks, `deps` seam and guarantees (including
- * the macOS/Windows limit); a FIFO or device is refused, not waited on.
+ * Same requirement that `root` already be a real path, identity checks, `deps`
+ * seam and guarantees (including the macOS/Windows limit); a FIFO or device is refused, not waited on.
  */
 export function readContainedBytesSync(absPath, root, maxBytes, { head = false, report = {}, deps = {} } = {}) {
   const comps = componentsBelow(root, absPath)
   if (!comps) { report.reason = 'outside'; return null }
   let fd
   try {
-    const rootReal = realpathSync.native(root)
-    const target = join(rootReal, ...comps)
+    const target = join(root, ...comps)
     deps.beforeOpen?.()
     fd = openSync(target, READ_FLAGS | (fsConstants.O_NOFOLLOW || 0))
     deps.afterOpen?.()
     const st = fstatSync(fd, { bigint: true })
     if (!st.isFile()) { report.reason = 'not-regular'; return null }
     if (!head && st.size > BigInt(maxBytes)) { report.reason = 'too-large'; report.size = Number(st.size); return null }
-    if (!verifyPinnedSync(fd, target, rootReal, comps, st, deps)) { report.reason = 'changed'; return null }
+    if (!verifyPinnedSync(fd, target, root, comps, st, deps)) { report.reason = 'changed'; return null }
     const length = Math.min(Number(st.size), maxBytes)
     const buf = Buffer.alloc(length)
     let off = 0
@@ -317,7 +321,7 @@ export function readContainedBytesSync(absPath, root, maxBytes, { head = false, 
  * regular file `absPath` names inside `root` (the same `verifyPinned` checks as
  * {@link readContainedBytes}, with the same limits on macOS and Windows) and read
  * it, never more than `maxBytes`. `absPath` must be the real path the handle was
- * opened by; `root` is resolved here.
+ * opened by; `root` must already be a real path (a linked root is refused).
  * Throws an Error with `code` 'ENOTREG', 'EFBIG' or 'EACCES' (outside/changed).
  * @param {import('fs/promises').FileHandle} fh
  * @param {string} absPath
@@ -333,9 +337,8 @@ export async function readPinnedHandle(fh, absPath, root, maxBytes, deps = {}) {
   if (st.size > BigInt(maxBytes)) throw fail('EFBIG', 'File too large')
   const comps = componentsBelow(root, absPath)
   if (!comps) throw fail('EACCES', 'outside')
-  const rootReal = await realpath(root)
-  const target = join(rootReal, ...comps)
-  if (!(await verifyPinned(fh, target, rootReal, comps, st, deps))) throw fail('EACCES', 'changed')
+  const target = join(root, ...comps)
+  if (!(await verifyPinned(fh, target, root, comps, st, deps))) throw fail('EACCES', 'changed')
   return readHandleBounded(fh, Number(st.size), maxBytes)
 }
 
