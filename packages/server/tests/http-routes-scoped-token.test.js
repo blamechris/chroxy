@@ -53,6 +53,11 @@ const ROUTES = [
   { m: 'GET', p: '/qr', kind: 'refused' },
   { m: 'GET', p: '/assets/xterm.js', kind: 'public' },
   { m: 'GET', p: '/dashboard', kind: 'refused' },
+  // The session's own declared status (#9026). Session-local by construction: the
+  // handler admits a pairing token only when it is bound to the session named in
+  // the path (see the dedicated tests below); an unbound pairing token, or one
+  // bound to another session, is refused with 403.
+  { m: 'POST', p: '/api/sessions/session-1/status', kind: 'limited' },
 ]
 
 describe('HTTP routes and a session-scoped bearer token', () => {
@@ -67,12 +72,12 @@ describe('HTTP routes and a session-scoped bearer token', () => {
     const src = readFileSync(join(SRC, 'http-routes.js'), 'utf8')
     for (const r of ROUTES) {
       if (r.p === '/anything') continue // OPTIONS is matched by method alone
-      const needle = r.p === '/mcp/oauth/callback' ? 'MCP_OAUTH_CALLBACK_PATH' : r.p.replace(/\/(some-slug|x|session-2|xterm\.js)$/, '')
+      const needle = r.p === '/mcp/oauth/callback' ? 'MCP_OAUTH_CALLBACK_PATH' : r.p.startsWith('/api/sessions/') ? 'api\\/sessions\\/' : r.p.replace(/\/(some-slug|x|session-2|session-1\/status|xterm\.js)$/, '')
       assert.ok(src.includes(`'${needle}`) || src.includes(`${needle}'`) || src.includes(needle), `${r.m} ${r.p}: no matcher for ${needle} in http-routes.js`)
     }
   })
 
-  it('only one place opts a route in to scoped tokens', () => {
+  it('the only opt-ins to scoped tokens are the two reviewed `limited` routes', () => {
     const hits = []
     const walk = (dir) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -82,11 +87,20 @@ describe('HTTP routes and a session-scoped bearer token', () => {
       }
     }
     walk(SRC)
-    assert.deepEqual(hits, ['ws-server.js'], 'a new opt-in must be reviewed and classified as `limited` above')
+    // Reviewed: POST /permission-response (ws-server.js; answers only the token's
+    // own session's prompts) and POST /api/sessions/:id/status (http-routes.js;
+    // admits a pairing token only when it is bound to the session in the path).
+    // Anything else needs the same review and an entry above.
+    assert.deepEqual(hits.sort(), ['http-routes.js', 'ws-server.js'], 'a new opt-in must be reviewed and classified as `limited` above')
     const server = readFileSync(join(SRC, 'ws-server.js'), 'utf8')
     assert.equal((server.match(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/g) ?? []).length, 1)
     assert.ok(/validateBearerAuth:\s*\(req, res\)\s*=>\s*self\._validateBearerAuth\(req, res, \{ allowScoped: true \}\)/.test(server),
-      'the single opt-in is the permission-response handler\'s bearer check')
+      'the ws-server opt-in is the permission-response handler\'s bearer check')
+    const routes = readFileSync(join(SRC, 'http-routes.js'), 'utf8')
+    assert.equal((routes.match(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/g) ?? []).length, 1)
+    // The opt-in must sit beside the check that binds the token to the path's session.
+    const at = routes.search(/\{\s*allowScoped\s*:\s*true\s*\}\s*\)/)
+    assert.ok(/bound !== sessionId/.test(routes.slice(at, at + 900)), 'the status route compares the token binding with the session in the path')
   })
 
   describe('over a real socket', () => {
@@ -139,6 +153,26 @@ describe('HTTP routes and a session-scoped bearer token', () => {
         assert.ok(res.status >= 400, `${r.m} ${r.p} accepted a scoped bearer (${res.status})`)
         await res.arrayBuffer()
       }
+    })
+
+    it('the status route admits a scoped token for its own session only', async () => {
+      const { port, scoped } = await start()
+      const post = (path, token, body = '{}') => fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body,
+      })
+      // Another session\'s id in the path: refused.
+      const other = await post('/api/sessions/session-2/status', scoped)
+      assert.equal(other.status, 403)
+      assert.equal((await other.json()).code, 'SESSION_TOKEN_MISMATCH')
+      // An unbound (linking-mode) pairing token is refused for every session.
+      const linking = pm.validatePairing(pm.currentPairingId).sessionToken
+      assert.equal((await post('/api/sessions/session-1/status', linking)).status, 403)
+      // Its own session: past the gate (an empty body fails validation, 400).
+      assert.equal((await post('/api/sessions/session-1/status', scoped)).status, 400)
+      // Control: the primary token is past the gate for any session.
+      assert.equal((await post('/api/sessions/session-2/status', 'primary-tok')).status, 400)
     })
   })
 })

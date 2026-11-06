@@ -22,6 +22,8 @@ class WsServer extends _WsServer {
   start(...args) { super.start(...args); setLogListener(null) }
 }
 
+const SKIP_WIN_RENAME_UNDER_HANDLE = process.platform === 'win32' && 'Windows refuses to rename a directory while a handle beneath it is open (EPERM), so a swap staged between the open and the checks cannot be set up on win32; the same schedule is exercised on POSIX'
+
 const CONV = '99999999-9999-4999-8999-999999999999'
 const SIBLING = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const line = (text) => JSON.stringify({ type: 'user', uuid: 'u', timestamp: '2026-01-01T00:00:00Z', message: { content: [{ type: 'text', text }] } }) + '\n'
@@ -173,12 +175,12 @@ describe('the contained readers check the root and its ancestors', () => {
     assert.equal(await readContainedBytes(file, root, 1024, { deps: swapRoot('a1', false) }), null)
   })
 
-  it('async: a root swapped for the open and restored before the checks is refused', { skip: SKIP_NO_SYMLINK }, async () => {
+  it('async: a root swapped for the open and restored before the checks is refused', { skip: SKIP_NO_SYMLINK || SKIP_WIN_RENAME_UNDER_HANDLE }, async () => {
     const file = fresh('a2')
     assert.equal(await readContainedBytes(file, root, 1024, { deps: swapRoot('a2', true) }), null)
   })
 
-  it('async: an ANCESTOR of the root swapped for the open and restored is refused', { skip: SKIP_NO_SYMLINK }, async () => {
+  it('async: an ANCESTOR of the root swapped for the open and restored is refused', { skip: SKIP_NO_SYMLINK || SKIP_WIN_RENAME_UNDER_HANDLE }, async () => {
     const file = fresh('a3')
     const parent = join(base, 'a3')
     const out = await readContainedBytes(file, root, 1024, {
@@ -211,9 +213,12 @@ describe('the contained readers check the root and its ancestors', () => {
     }
   })
 
-  it('sync: the same root swaps are refused (the sync reader has the same seam)', { skip: SKIP_NO_SYMLINK }, () => {
+  it('sync: a root swapped to a link and left there is refused (the sync reader has the same seam)', { skip: SKIP_NO_SYMLINK }, () => {
     const file = fresh('s1')
     assert.equal(readContainedBytesSync(file, root, 1024, { deps: swapRoot('s1', false) }), null)
+  })
+
+  it('sync: a root swapped for the open and restored before the checks is refused', { skip: SKIP_NO_SYMLINK || SKIP_WIN_RENAME_UNDER_HANDLE }, () => {
     const file2 = fresh('s2')
     assert.equal(readContainedBytesSync(file2, root, 1024, { deps: swapRoot('s2', true) }), null)
   })

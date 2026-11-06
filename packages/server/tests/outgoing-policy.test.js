@@ -113,6 +113,14 @@ describe('frames with no outbound schema', () => {
   })
 })
 
+describe('session_status (agent-declared status)', () => {
+  it('is classified as a session-scoped frame (allowed)', () => {
+    assert.ok(BOUND_OUTGOING_ALLOWED.includes('session_status'))
+    const m = { type: 'session_status', sessionId: 'session-1', declaredStatus: { state: 'working' } }
+    assert.equal(frameForBoundClient(m), m)
+  })
+})
+
 describe('frameForBoundClient', () => {
   it('removes an authorization URL from every server entry and touches nothing else', () => {
     const msg = {
@@ -244,5 +252,18 @@ describe('what a session-scoped connection is sent, over a real socket', () => {
     const all = JSON.stringify(guest.messages)
     assert.equal(all.includes('other session text'), false)
     assert.equal(all.includes('primary-secret'), false)
+  })
+
+  it('session_status is delivered for the bound session and withheld for another', async () => {
+    const port = await start()
+    const scoped = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const guest = await authed(port, scoped)
+    const clientWs = [...server.clients.entries()].find(([, c]) => c.boundSessionId === 'session-1')[0]
+    server._send(clientWs, { type: 'session_status', sessionId: 'session-2', declaredStatus: { state: 'other session status' } })
+    server._send(clientWs, { type: 'session_status', sessionId: 'session-1', declaredStatus: { state: 'own session status' } })
+    await waitFor(() => guest.messages.find((m) => m.type === 'session_status'), { label: 'own status' })
+    const all = JSON.stringify(guest.messages)
+    assert.ok(all.includes('own session status'))
+    assert.equal(all.includes('other session status'), false)
   })
 })

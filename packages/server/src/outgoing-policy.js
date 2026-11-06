@@ -68,7 +68,7 @@ export const BOUND_OUTGOING_ALLOWED = Object.freeze([
   'push_token_error', 'rate_limited', 'references_result', 'result', 'server_error',
   'server_shutdown', 'session_activity', 'session_cost_threshold_crossed', 'session_error',
   'session_list', 'session_persist_failed', 'session_pr_status', 'session_pr_threads',
-  'session_preamble_changed', 'session_restore_failed', 'session_stopped', 'session_timeout',
+  'session_preamble_changed', 'session_restore_failed', 'session_status', 'session_stopped', 'session_timeout',
   'session_updated', 'session_usage', 'session_warning', 'skill_activated', 'skill_changed',
   'skill_deactivated', 'skills_list', 'stdin_dropped_totals', 'stream_delta', 'stream_end',
   'stream_start', 'summarize_session_result', 'symbol_location', 'symbols_snapshot',

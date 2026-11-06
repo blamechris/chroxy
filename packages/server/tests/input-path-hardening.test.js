@@ -19,6 +19,7 @@ import { nsCtx, createSpy } from './test-helpers.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 const POSIX = process.platform !== 'win32'
+const SKIP_WIN_RENAME_UNDER_HANDLE = process.platform === 'win32' && 'Windows refuses to rename a directory while a handle beneath it is open (EPERM), so a swap staged between the open and the checks cannot be set up on win32; the same schedule is exercised on POSIX'
 const SERVER = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 describe('screen for patterns the daemon will run', () => {
@@ -158,7 +159,7 @@ describe('containment does not depend on resolving the name twice', () => {
   })
   after(() => { rmSync(root, { recursive: true, force: true }) })
 
-  it('a parent redirected for the open and restored before the checks is refused', { skip: SKIP_NO_SYMLINK }, async () => {
+  it('a parent redirected for the open and restored before the checks is refused', { skip: SKIP_NO_SYMLINK || SKIP_WIN_RENAME_UNDER_HANDLE }, async () => {
     // Scheduled through the helper's seam: the parent is a link to the outside
     // directory when the file is opened, and a real directory again by the time
     // the helper checks the path. The descriptor is the outside file; the name now
@@ -224,7 +225,7 @@ describe('pinning: second pass, descriptor path, lexical roots', () => {
     name,
   })
 
-  it('a directory turned into a link only between the first and second check is refused (async, sync, pinned handle)', { skip: SKIP_NO_SYMLINK }, async () => {
+  it('a directory turned into a link only between the first and second check is refused (async, sync, pinned handle)', { skip: SKIP_NO_SYMLINK || SKIP_WIN_RENAME_UNDER_HANDLE }, async () => {
     // The first pass sees real directories and the file\'s identity (the outside
     // tree holds a hard link to it, so identity matches either way); the swap lands
     // between the passes, and only a second pass can see it.
