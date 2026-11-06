@@ -300,7 +300,7 @@ describe('buildGrepCommand', () => {
     const cmd = buildGrepCommand({ ...base, rootExpr: '"$__cx_target"' })
     assert.ok(cmd.includes(`-e 'TODO' -- "$__cx_target"; else`), 'rg needs the terminator')
     // The fallback passes the root only to `cd --`, `git -C`, and `grep --` (file root).
-    assert.ok(cmd.includes('cd -- "$root"') && cmd.includes(`-e 'TODO' -- "$root"`), 'the fallback needs it too')
+    assert.ok(cmd.includes('cd -- "$1"') && cmd.includes(`-e 'TODO' -- "$root"`), 'the fallback needs it too')
   })
 
   it('falls back to the quoted literal root when rootExpr is absent or empty', () => {

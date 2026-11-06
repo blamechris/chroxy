@@ -499,7 +499,7 @@ describe('Grep argv option injection (#7295)', () => {
       // the argument of `__gx_search`, reaching `cd --` / `git -C` / `grep --`.
       assert.ok(cmd.includes("else __gx_search '/work'; fi"), cmd)
       assert.match(cmd, /grep -H .* -e 'TODO' -- "\$root"/)
-      assert.ok(cmd.includes('(cd -- "$root" && find .'), 'the lister must not let a root beginning with - be an option')
+      assert.ok(cmd.includes('cd -- "$1" || exit 1'), 'the lister must not let a root beginning with - be an option')
     })
 
     it('POSITIVE CONTROL: an ordinary root still searches normally', POSIX_ONLY, async (t) => {
@@ -558,7 +558,8 @@ describe('Grep argv option injection (#7295)', () => {
       // class this file was written for.
       for (const pattern of ['--pre=/tmp/evil.sh', '-Wall', '--force', '-f/etc/passwd', '--']) {
         const cmd = build(pattern, '/work')
-        const [rgHalf, grepHalf] = cmd.split('; else ')
+        const cut = cmd.lastIndexOf('; else ')
+        const [rgHalf, grepHalf] = [cmd.slice(0, cut), cmd.slice(cut + '; else '.length)]
         assert.ok(rgHalf.includes('rg ') && grepHalf.startsWith('__gx_search '), `unexpected builder shape: ${cmd}`)
         const quoted = `-e '${pattern}'`
         // The fallback's grep invocations live in the function prelude (the

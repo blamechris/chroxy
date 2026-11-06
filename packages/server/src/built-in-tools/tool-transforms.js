@@ -888,9 +888,14 @@ export function buildGrepArgs(input) {
 }
 
 const GREP_GLOB_MAX_EXPANSIONS = 32
-const GREP_ENUMERATE_REFUSAL = 'Grep failed: could not list the files to search, because ripgrep is not installed in this environment and neither git nor find could enumerate the directory'
-// How many files one fallback grep invocation is handed (keeps argv well under ARG_MAX).
+const GREP_ENUMERATE_FIND_REFUSAL = 'Grep failed: could not list the files to search, because ripgrep is not installed in this environment and `find` could not enumerate the directory'
+const GREP_ENUMERATE_GIT_REFUSAL = 'Grep failed: could not list the files to search, because ripgrep is not installed in this environment and `git ls-files` could not enumerate the work tree'
+// How many files, and how many path characters, one fallback grep invocation is
+// handed. The character budget is what bounds argv: 32768 characters is at most
+// ~128 KiB as UTF-8, under the smallest ARG_MAX in play (macOS: 256 KiB, shared
+// with the environment) even before one more path of up to PATH_MAX is added.
 const GREP_FALLBACK_BATCH = 200
+const GREP_FALLBACK_BATCH_CHARS = 32768
 // Bounds on the work/size one glob may cause (Codex review of #7961): the raw
 // glob, and the total length (in characters) of generated --include/--exclude flags.
 const GREP_GLOB_MAX_INPUT = 1024
@@ -1066,32 +1071,39 @@ export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, gre
  * hidden and gitignored files by default; `grep -r` skips neither, so with no
  * rg (every `node:22-slim` container) a plain directory Grep read `.env`,
  * `.claude/settings.local.json` and friends. Rather than hand `grep -r` the
- * directory, the fallback builds the candidate file list itself and greps only
- * that:
+ * directory, the fallback builds the candidate file list itself, COMPLETELY,
+ * and only then greps it:
  *
- *   - inside a git work tree (and git present): `git ls-files -z --cached
- *     --others --exclude-standard`, which honours .gitignore, .git/info/exclude
- *     and the global excludes;
+ *   - inside a git work tree (git present, root not itself gitignored):
+ *     `git ls-files -z --cached --others --exclude-standard` (honours
+ *     .gitignore, .git/info/exclude, the global excludes), minus tracked files
+ *     that are also ignored (`-ci`, subtracted by an in-order merge because
+ *     ripgrep skips them). A directory entry (a nested repo / submodule) is
+ *     expanded with the find lister;
  *   - otherwise `find . -mindepth 1 ( -name '.*' -prune ) -o -type f -print0`.
  *     Without git, gitignored NON-hidden files cannot be known, so they are
- *     still searched: the remaining limit, recorded in
- *     docs/security/permission-floor.md.
+ *     still searched (recorded in docs/security/permission-floor.md). A root
+ *     inside a gitignored directory (`build/`, `node_modules/pkg`) takes this
+ *     path too: git lists nothing there, which would be a silent no-match where
+ *     rg and `grep -r` search it.
  *
- * In both cases any path with a component starting with `.` is dropped (rg's
- * hidden rule). The filter looks only at the path RELATIVE to the root, so a
- * root that is itself hidden or lives under a hidden directory
- * (`/home/u/.config/proj`) is still searched — the #7961 lesson, a filter that
- * matches the root silently skips the whole search. A root that is a FILE is
- * searched as named, hidden or not (rg does the same with an explicit file).
+ * Every candidate must pass: no path component starting with `.` (rg's hidden
+ * rule, judged on the path RELATIVE to the root, so a hidden root or one under
+ * a hidden directory is still searched, the #7961 lesson); the glob; a regular
+ * file; and NO symlinked ancestor under the root (`[ -L ]` on every prefix, with
+ * the last directory's verdict memoised), because a tracked `sub/f.txt` whose
+ * `sub` was later swapped for a link to an outside directory passes `-f` and
+ * `! -L` on the leaf alone. A file root is searched as named, hidden or not.
+ * Unreadable directories under the find lister are pruned with a one-line
+ * stderr note instead of failing the listing.
  *
- * The glob (`grepGlob.includes` / `excludes`) is applied to the same list, by
- * path component, so it needs no grep flags and cannot match the root.
- *
- * FAIL CLOSED: the lister writes an empty record (impossible as a path) after a
- * successful listing; if the loop never sees it, listing failed and the search
- * is refused (exit 2) instead of reporting "no matches". An empty list is a
- * genuine no-match (exit 1). Output stays `<root>/<relative path>:line:text`
- * (the same prefix `grep -r` produced); exit 0 match, 1 none, 2 error.
+ * FAIL CLOSED: each lister writes an empty record (impossible as a path) after
+ * a successful listing. Nothing is grepped until every lister has been seen to
+ * finish, so a listing failure yields NO stdout and exit 2 (both callers treat
+ * non-empty stdout as success, and the container's maskExit turns the status
+ * into 0). An empty list is a genuine no-match (exit 1). A missing root is exit
+ * 2 before the glob is consulted. Output stays `<root>/<relative>:line:text`
+ * (the prefix `grep -r` produced); exit 0 match, 1 none, 2 error.
  *
  * Requires bash (arrays, `read -d ''`, process substitution): the host runs
  * `bash -c` and the container exec is `bash` too (the confinement preamble
@@ -1117,44 +1129,109 @@ function buildGrepFallbackFunctions({ pattern, ci, ln, grepGlob }) {
   if (includes.length) keep.push(`  if ! { ${anyOf(includes, '"$base"')}; }; then return 1; fi`)
   keep.push('  return 0', '}')
   const grepFiles = `grep -H ${ci} ${ln} -e ${shellQuote(pattern)} --`
-  const enumerateRefusal = `printf '%s\\n' ${shellQuote(GREP_ENUMERATE_REFUSAL)} >&2`
+  const refuseWith = (msg) => `printf '%s\\n' ${shellQuote(msg)} >&2`
+  const FIND_LIST = [
+    '    cd -- "$1" || exit 1',
+    '    if find . -maxdepth 0 -readable -executable >/dev/null 2>&1; then',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o \\( -type d \\( ! -readable -o ! -executable \\) -print0 -prune \\) -o -type f -print0",
+    '    elif type -P test >/dev/null 2>&1; then',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o \\( -type d ! -exec test -r {} -a -x {} \\; -print0 -prune \\) -o -type f -print0",
+    '    else',
+    "      find . -mindepth 1 \\( -name '.*' -prune \\) -o -type f -print0",
+    '    fi && printf \'\\0\'',
+  ]
   return [
     // `case $2 in $1)`: the VALUE of $1 is a pattern with no further parsing, so
     // a model-supplied alternative is data here, never shell text.
     '__gx_m() { case $2 in $1) return 0;; esac; return 1; }',
     ...keep,
+    // 0 when no ancestor directory of $1 (under the root) is a symlink.
+    '__gx_safe() {',
+    '  local rel=$1 d acc=',
+    '  case $rel in */*) ;; *) return 0;; esac',
+    '  d=${rel%/*}',
+    '  if [ "$d" = "$__gx_lastdir" ]; then return "$__gx_lastrc"; fi',
+    '  __gx_lastdir=$d; __gx_lastrc=0',
+    '  while :; do',
+    '    acc=$acc${d%%/*}',
+    '    if [ -L "$__gx_root/$acc" ]; then __gx_lastrc=1; break; fi',
+    '    case $d in */*) d=${d#*/}; acc=$acc/;; *) break;; esac',
+    '  done',
+    '  return "$__gx_lastrc"',
+    '}',
+    '__gx_consider() {',
+    '  local f=$1 p',
+    '  case /$f in */.*) return 0;; esac',
+    '  __gx_keep "$f" || return 0',
+    '  __gx_safe "$f" || return 0',
+    '  p=$__gx_root/$f',
+    '  if [ -f "$p" ] && [ ! -L "$p" ]; then __gx_cand+=("$p"); fi',
+    '}',
+    // $1 = directory to list, $2 = path prefix of its entries relative to the root.
+    '__gx_find_dir() {',
+    '  local f ok=0',
+    "  while IFS= read -r -d '' f; do",
+    '    if [ -z "$f" ]; then ok=1; continue; fi',
+    '    f=${f#./}',
+    '    if [ -d "$1/$f" ] && [ ! -L "$1/$f" ]; then',
+    "      printf 'grep: %s: Permission denied (skipped)\\n' \"$__gx_root/$2$f\" >&2",
+    '      continue',
+    '    fi',
+    '    __gx_consider "$2$f"',
+    '  done < <(',
+    ...FIND_LIST,
+    '  )',
+    '  [ "$ok" = 1 ] || __gx_fail=find',
+    '}',
     '__gx_flush() {',
     '  [ "${#__gx_batch[@]}" -gt 0 ] || return 0',
     `  ${grepFiles} "\${__gx_batch[@]}" </dev/null`,
     '  case $? in 0) __gx_rc=0;; 1) ;; *) __gx_err=1;; esac',
     '  __gx_batch=()',
     '}',
-    `__gx_add() { __gx_batch+=("$1"); [ "\${#__gx_batch[@]}" -lt ${GREP_FALLBACK_BATCH} ] || __gx_flush; }`,
     '__gx_search() {',
-    '  local root=$1 f p lister=find ok=0',
-    '  __gx_batch=(); __gx_rc=1; __gx_err=0',
+    '  local root=$1 f p lister=find ok=0 bytes=0',
+    '  __gx_root=${root%/}; __gx_cand=(); __gx_tci=(); __gx_ti=0; __gx_fail=',
+    '  __gx_lastdir=; __gx_lastrc=0; __gx_batch=(); __gx_rc=1; __gx_err=0',
+    '  if [ ! -e "$root" ] && [ ! -L "$root" ]; then',
+    "    printf 'grep: %s: No such file or directory\\n' \"$root\" >&2; return 2",
+    '  fi',
     '  if [ ! -d "$root" ]; then',
     '    __gx_keep "${root##*/}" || return 1',
     `    ${grepFiles} "$root" </dev/null; return`,
     '  fi',
-    '  if command -v git >/dev/null 2>&1 && [ "$(git -C "$root" -c core.fsmonitor=false rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then lister=git; fi',
-    `  if [ "$lister" = find ] && ! command -v find >/dev/null 2>&1; then ${enumerateRefusal}; return 2; fi`,
-    "  while IFS= read -r -d '' f; do",
-    '    if [ -z "$f" ]; then ok=1; continue; fi',
-    '    f=${f#./}',
-    '    case /$f in */.*) continue;; esac',
-    '    __gx_keep "$f" || continue',
-    '    p=${root%/}/$f',
-    '    if [ -f "$p" ] && [ ! -L "$p" ]; then __gx_add "$p"; fi',
-    '  done < <(',
-    '    if [ "$lister" = git ]; then',
-    "      git -C \"$root\" -c core.fsmonitor=false ls-files -z --cached --others --exclude-standard && printf '\\0'",
-    '    else',
-    "      (cd -- \"$root\" && find . -mindepth 1 \\( -name '.*' -prune \\) -o -type f -print0 && printf '\\0')",
-    '    fi',
-    '  )',
+    '  if command -v git >/dev/null 2>&1 && [ "$(git -C "$root" -c core.fsmonitor=false rev-parse --is-inside-work-tree 2>/dev/null)" = true ] && { [ -z "$(git -C "$root" -c core.fsmonitor=false rev-parse --show-prefix 2>/dev/null)" ] || ! git -C "$root" -c core.fsmonitor=false check-ignore -q . >/dev/null 2>&1; }; then lister=git; fi',
+    `  if [ "$lister" = find ] && ! command -v find >/dev/null 2>&1; then ${refuseWith(GREP_ENUMERATE_FIND_REFUSAL)}; return 2; fi`,
+    '  if [ "$lister" = git ]; then',
+    "    while IFS= read -r -d '' f; do",
+    '      if [ -z "$f" ]; then ok=1; else __gx_tci+=("$f"); fi',
+    '    done < <(git -C "$root" -c core.fsmonitor=false ls-files -z -ci --exclude-standard && printf \'\\0\')',
+    '    [ "$ok" = 1 ] || __gx_fail=git',
+    '    ok=0',
+    "    while IFS= read -r -d '' f; do",
+    '      if [ -z "$f" ]; then ok=1; continue; fi',
+    // tracked-but-ignored entries arrive in index order, a subsequence of --cached
+    '      if [ "$__gx_ti" -lt "${#__gx_tci[@]}" ] && [ "$f" = "${__gx_tci[$__gx_ti]}" ]; then __gx_ti=$((__gx_ti+1)); continue; fi',
+    '      f=${f%/}',
+    '      case /$f in */.*) continue;; esac',
+    '      if [ -d "$__gx_root/$f" ] && [ ! -L "$__gx_root/$f" ]; then',
+    '        __gx_safe "$f/x" || continue',
+    '        __gx_find_dir "$__gx_root/$f" "$f/"',
+    '        continue',
+    '      fi',
+    '      __gx_consider "$f"',
+    '    done < <(git -C "$root" -c core.fsmonitor=false ls-files -z --cached --others --exclude-standard && printf \'\\0\')',
+    '    [ "$ok" = 1 ] || __gx_fail=git',
+    '  else',
+    '    __gx_find_dir "$root" ""',
+    '  fi',
+    `  if [ "$__gx_fail" = git ]; then ${refuseWith(GREP_ENUMERATE_GIT_REFUSAL)}; return 2; fi`,
+    `  if [ -n "$__gx_fail" ]; then ${refuseWith(GREP_ENUMERATE_FIND_REFUSAL)}; return 2; fi`,
+    '  for p in "${__gx_cand[@]}"; do',
+    '    __gx_batch+=("$p"); bytes=$((bytes+${#p}+1))',
+    `    if [ "\${#__gx_batch[@]}" -ge ${GREP_FALLBACK_BATCH} ] || [ "$bytes" -ge ${GREP_FALLBACK_BATCH_CHARS} ]; then __gx_flush; bytes=0; fi`,
+    '  done',
     '  __gx_flush',
-    `  if [ "$ok" != 1 ]; then ${enumerateRefusal}; return 2; fi`,
     '  if [ "$__gx_err" = 1 ]; then return 2; fi',
     '  return "$__gx_rc"',
     '}',

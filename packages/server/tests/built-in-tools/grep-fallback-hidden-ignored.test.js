@@ -15,7 +15,7 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync,
+  mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, chmodSync,
   accessSync, statSync, constants,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -38,6 +38,7 @@ function findOnPath(name) {
 const GREP = findOnPath('grep')
 const BASH = findOnPath('bash')
 const FIND = findOnPath('find')
+const TEST_BIN = findOnPath('test')
 const GIT = findOnPath('git')
 
 /** Skip reason, or null when the host can run the real-bash tests. */
@@ -339,6 +340,204 @@ describe('Grep grep-fallback skips hidden and ignored files (#7981)', { skip: SK
       const r = run(root, { bin: binGit })
       assert.equal(r.status, 1)
       assert.equal(r.stdout, '')
+    })
+  })
+
+  describe('round-1 review blockers', () => {
+    const POSIX_PERMS = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+      ? 'permission bits are not enforced here (Windows or root)'
+      : false
+
+    // A shim `find`/`git` that is a shell script, so a lister can be made to
+    // emit one valid candidate and then FAIL.
+    function shimBin(name, scripts) {
+      const bin = path.join(base, name)
+      mkdirSync(bin)
+      symlinkSync(GREP, path.join(bin, 'grep'))
+      for (const [n, body] of Object.entries(scripts)) {
+        const f = path.join(bin, n)
+        writeFileSync(f, `#!/bin/sh\n${body}\n`)
+        chmodSync(f, 0o755)
+      }
+      return bin
+    }
+
+    describe('A: a symlinked ancestor must not escape the root', { skip: SKIP_GIT || false }, () => {
+      it('a tracked sub/f.txt whose sub became a symlink to an outside directory reads nothing', () => {
+        const root = path.join(base, 'anc1')
+        const outside = path.join(base, 'anc1-outside')
+        write(path.join(root, 'sub', 'f.txt'), 'NEEDLE tracked\n')
+        write(path.join(root, 'ok.txt'), 'NEEDLE ok\n')
+        write(path.join(outside, 'f.txt'), 'NEEDLE SECRET_OUTSIDE_MARKER\n')
+        const g = gitInit(root)
+        g('add', '-f', 'sub/f.txt', 'ok.txt')
+        rmSync(path.join(root, 'sub'), { recursive: true })
+        symlinkSync(outside, path.join(root, 'sub'))
+        const r = run(root, { bin: binGit })
+        assert.equal(SECRETS.test(r.stdout), false, r.stdout)
+        assert.equal(r.stdout.includes('OUTSIDE'), false, r.stdout)
+        assert.deepEqual(r.files, ['ok.txt'])
+      })
+
+      it('also when the link is several levels up', () => {
+        const root = path.join(base, 'anc2')
+        const outside = path.join(base, 'anc2-outside')
+        write(path.join(root, 'a', 'b', 'c', 'f.txt'), 'NEEDLE tracked\n')
+        write(path.join(outside, 'c', 'f.txt'), 'NEEDLE SECRET_OUTSIDE\n')
+        const g = gitInit(root)
+        g('add', '-f', 'a/b/c/f.txt')
+        rmSync(path.join(root, 'a', 'b'), { recursive: true })
+        symlinkSync(outside, path.join(root, 'a', 'b'))
+        const r = run(root, { bin: binGit })
+        assert.equal(SECRETS.test(r.stdout), false, r.stdout)
+        assert.equal(r.status, 1)
+      })
+    })
+
+    describe('B: a listing failure is an error with no stdout, never a partial success', () => {
+      it('find that emits one candidate then fails: no stdout, exit 2, find named', () => {
+        const root = path.join(base, 'fail-find')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const bin = shimBin('bin-failfind', { find: "printf './a.txt\\0'; exit 1" })
+        for (const maskExit of [false, true]) {
+          const r = run(root, { bin, cmdOpts: { maskExit } })
+          assert.equal(r.stdout, '', `maskExit=${maskExit}`)
+          assert.equal(r.status, maskExit ? 0 : 2, `maskExit=${maskExit}`)
+          assert.ok(r.stderr.includes('`find` could not enumerate'), r.stderr)
+          assert.equal(r.stderr.includes('git'), false, 'must not blame git when git was not used')
+        }
+      })
+
+      it('git that emits one candidate then fails: no stdout, exit 2, git named', () => {
+        const root = path.join(base, 'fail-git')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        const bin = shimBin('bin-failgit', {
+          find: 'exit 1',
+          git: [
+            'case "$*" in',
+            '  *is-inside-work-tree*) echo true;;',
+            '  *show-prefix*) ;;',
+            '  *" -ci "*) ;;',
+            "  *ls-files*) printf 'a.txt\\0'; exit 1;;",
+            'esac',
+          ].join('\n'),
+        })
+        for (const maskExit of [false, true]) {
+          const r = run(root, { bin, cmdOpts: { maskExit } })
+          assert.equal(r.stdout, '', `maskExit=${maskExit}`)
+          assert.equal(r.status, maskExit ? 0 : 2, `maskExit=${maskExit}`)
+          assert.ok(r.stderr.includes('`git ls-files` could not enumerate'), r.stderr)
+        }
+      })
+
+      it('a failure after matches would have flushed still prints nothing (batch > 1)', () => {
+        const root = path.join(base, 'fail-late')
+        let list = ''
+        for (let i = 0; i < 250; i++) {
+          write(path.join(root, `f${i}.txt`), 'NEEDLE x\n')
+          list += `./f${i}.txt\\0`
+        }
+        const bin = shimBin('bin-latefail', { find: `printf '${list}'; exit 1` })
+        const r = run(root, { bin })
+        assert.equal(r.stdout, '')
+        assert.equal(r.status, 2)
+      })
+    })
+
+    describe('C: a root inside a gitignored directory is still searched', { skip: SKIP_GIT || false }, () => {
+      it('build/ and node_modules/pkg roots return their matches; hidden still dropped', () => {
+        const root = path.join(base, 'ignroot')
+        write(path.join(root, '.gitignore'), 'build/\nnode_modules/\n')
+        write(path.join(root, 'build', 'out.js'), 'NEEDLE built\n')
+        write(path.join(root, 'build', '.cache', 'c.js'), 'NEEDLE SECRET_CACHE\n')
+        write(path.join(root, 'node_modules', 'pkg', 'index.js'), 'NEEDLE pkg\n')
+        write(path.join(root, 'src.js'), 'NEEDLE src\n')
+        gitInit(root)
+        const b = run(path.join(root, 'build'), { bin: binGit })
+        assert.equal(b.status, 0, b.stderr)
+        assert.deepEqual(b.files, ['out.js'])
+        const n = run(path.join(root, 'node_modules', 'pkg'), { bin: binGit })
+        assert.deepEqual(n.files, ['index.js'])
+        // ...while the repo root still honours the ignore rules.
+        assert.deepEqual(run(root, { bin: binGit }).files, ['src.js'])
+      })
+    })
+
+    describe('git-specific list shaping', { skip: SKIP_GIT || false }, () => {
+      it('expands a nested repository the way ripgrep searches into it (hidden still dropped)', () => {
+        const root = path.join(base, 'nested1')
+        write(path.join(root, 'top.txt'), 'NEEDLE top\n')
+        write(path.join(root, 'nested', 'n.txt'), 'NEEDLE nested\n')
+        write(path.join(root, 'nested', 'deep', 'd.txt'), 'NEEDLE deep\n')
+        write(path.join(root, 'nested', '.env'), 'NEEDLE SECRET_NESTED\n')
+        gitInit(root)
+        gitInit(path.join(root, 'nested'))
+        const r = run(root, { bin: binGit })
+        assert.equal(r.status, 0, r.stderr)
+        assert.deepEqual(r.files, ['nested/deep/d.txt', 'nested/n.txt', 'top.txt'])
+        assert.equal(SECRETS.test(r.stdout), false)
+      })
+
+      it('skips a tracked file that is also gitignored (ripgrep parity), keeping the in-order merge honest', () => {
+        const root = path.join(base, 'tci')
+        write(path.join(root, '.gitignore'), '*.log\n')
+        for (const f of ['a.txt', 'b.log', 'c.txt', 'd.log', 'e.txt']) write(path.join(root, f), `NEEDLE SECRET_${f}\n`)
+        write(path.join(root, 'z.txt'), 'NEEDLE untracked\n')
+        const g = gitInit(root)
+        g('add', '-f', 'a.txt', 'b.log', 'c.txt', 'd.log', 'e.txt')
+        const r = run(root, { bin: binGit })
+        assert.deepEqual(r.files, ['a.txt', 'c.txt', 'e.txt', 'z.txt'])
+        assert.equal(r.stdout.includes('b.log') || r.stdout.includes('d.log'), false)
+      })
+    })
+
+    describe('find lister details', () => {
+      it('an unreadable subdirectory is skipped with a note; the rest is searched', { skip: POSIX_PERMS }, () => {
+        const root = path.join(base, 'unread')
+        write(path.join(root, 'a.txt'), 'NEEDLE a\n')
+        write(path.join(root, 'priv', 'p.txt'), 'NEEDLE hidden_by_perms\n')
+        write(path.join(root, 'sub', 'ok.txt'), 'NEEDLE ok\n')
+        chmodSync(path.join(root, 'priv'), 0o000)
+        // BSD find has no -readable, so the pruning falls back to the `test` binary.
+        const bin = makeBin('bin-unread', [['grep', GREP], ['find', FIND], ...(TEST_BIN ? [['test', TEST_BIN]] : [])])
+        try {
+          const r = run(root, { bin })
+          assert.equal(r.status, 0, r.stderr)
+          assert.deepEqual(r.files, ['a.txt', 'sub/ok.txt'])
+          assert.ok(r.stderr.includes('Permission denied'), r.stderr)
+          assert.ok(r.stderr.includes('priv'), r.stderr)
+          // ...and with nothing else to find it is a no-match, not a listing failure.
+          const lone = path.join(base, 'unread-lone')
+          write(path.join(lone, 'priv', 'p.txt'), 'NEEDLE x\n')
+          chmodSync(path.join(lone, 'priv'), 0o000)
+          const r2 = run(lone, { bin })
+          chmodSync(path.join(lone, 'priv'), 0o755)
+          assert.equal(r2.status, 1, r2.stderr)
+          assert.equal(r2.stdout, '')
+        } finally {
+          chmodSync(path.join(root, 'priv'), 0o755)
+        }
+      })
+
+      it('a missing root is exit 2 even when the glob would exclude it', () => {
+        for (const glob of ['!*', '!nope', '*.md']) {
+          const r = run(path.join(base, 'nope'), { input: { glob } })
+          assert.equal(r.status, 2, glob)
+          assert.ok(r.stderr.includes('No such file or directory'), r.stderr)
+          assert.equal(r.stdout, '')
+        }
+      })
+
+      it('bounds a batch by path characters as well as by count', () => {
+        const cmd = buildGrepCommand({ pattern: 'x', root: '/w', ...buildGrepArgs({}) })
+        assert.ok(cmd.includes('-ge 200 ]') && cmd.includes('-ge 32768 ]'), 'count and character budgets')
+        const root = path.join(base, 'longnames')
+        const stem = 'n'.repeat(200)
+        for (let i = 0; i < 220; i++) write(path.join(root, `${stem}${i}.txt`), 'NEEDLE long\n')
+        const r = run(root)
+        assert.equal(r.status, 0, r.stderr)
+        assert.equal(r.files.length, 220)
+      })
     })
   })
 })
