@@ -18,7 +18,7 @@
  * audit).
  */
 
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { opendir, lstat, realpath, readlink } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { isIP } from 'node:net'
@@ -497,6 +497,10 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
       return { content: `EACCES: path outside workspace: ${input.path} resolves to ${realRoot}, expected under ${cwdReal}`, isError: true }
     }
   }
+  // The search root is resolved once per walk: checks made during the walk
+  // resolve it from this map rather than from the shared, time-limited cache.
+  const walkCache = new Map([[resolve(realRoot), { resolved: realRoot, ts: Date.now() }]])
+  const walkCacheTtl = Infinity
 
   // #7918 — a brace alternative spanning a '/' (`{dup,nested/dup}`) has no
   // representation in the per-segment compiled matcher below, which splits
@@ -579,7 +583,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   if (patterns.length === 1) {
     const literalPrefix = literalDirPrefix(patterns[0])
     if (literalPrefix) {
-      await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
+      await safeResolveRoot(literalPrefix, realRoot, walkCache, walkCacheTtl)
     }
   }
 
@@ -669,7 +673,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
         if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
         const { matchers } = compileCaseCheck(p)
         const directoryOnly = p.endsWith('/')
-        await walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+        await walkGlob({ realRoot, matchers, cwdRealCache: walkCache, cwdCacheTtl: walkCacheTtl, state, results: files, maxEntries, directoryOnly })
       }
     } finally {
       release()
@@ -1370,18 +1374,18 @@ const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
  *     (`validateRawPathWithinCwd`);
  *   - root (`parent` null): the opened descriptor is the directory the path
  *     names now. Where `/proc/self/fd` exists the kernel's name for the
- *     descriptor must equal the path; on every platform a fresh lstat of the
- *     path must have the descriptor's dev:ino, and the canonical path must
- *     still name itself.
+ *     descriptor must equal the path; on every platform the canonical path
+ *     must still name itself and a fresh lstat of the path must have the
+ *     descriptor's dev:ino.
  * Fails closed on any error.
  */
 export async function confirmEntryStillInside(target, relPath, realRoot, cwdRealCache, cwdCacheTtl, parent, dirKey, opened) {
   try {
     if (parent === null) {
       if (DIR_FD_REOPEN_SUPPORTED && (await readlink(`/proc/self/fd/${opened.fh.fd}`)) !== target) return false
+      if ((await realpath(target)) !== target) return false
       const fresh = await lstat(target, { bigint: true })
-      if (fresh.isSymbolicLink() || fresh.ino === 0n || fresh.dev !== opened.stat.dev || fresh.ino !== opened.stat.ino) return false
-      return (await realpath(target)) === target
+      return !fresh.isSymbolicLink() && fresh.ino !== 0n && fresh.dev === opened.stat.dev && fresh.ino === opened.stat.ino
     }
     const [st, resolved] = await Promise.all([
       lstat(parent.path, { bigint: true }),
@@ -1610,7 +1614,7 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam, isRoot
             if (done) { exhausted = true; break }
             batch.push(value)
           }
-          if (batch.length === 0) return
+          if (batch.length === 0) break
           if (__testSeam) await __testSeam(parentPath, 'before-entry-verify', batch.map((d) => d.name))
           // Step 1, concurrently for the whole batch: does each name exist
           // under the parent PATH right now? Keep the lstat result — it is

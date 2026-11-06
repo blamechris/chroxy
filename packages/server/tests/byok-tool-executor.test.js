@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs'
-import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync, open as openAsync } from 'node:fs/promises'
+import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync, open as openAsync, lstat as lstatAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { createServer } from 'node:http'
@@ -3023,6 +3023,40 @@ describe('executeBuiltinTool', () => {
           })
         })
 
+        it('a root with exactly one full batch of unverifiable entries is an error, not an empty result', {
+          skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+            ? 'needs permission bits that the platform or user does not enforce' : false,
+        }, async () => {
+          mkdirSync(join(dir, 'locked32'))
+          for (let i = 0; i < 32; i++) writeFileSync(join(dir, 'locked32', `f${i}.txt`), '1')
+          chmodSync(join(dir, 'locked32'), 0o444)
+          try {
+            await assert.rejects(run('*', undefined, true, join(dir, 'locked32')))
+          } finally {
+            chmodSync(join(dir, 'locked32'), 0o755)
+          }
+        })
+
+        it('links inside the search root resolve against that root even when the shared cache holds another path for it', async () => {
+          const other = mkdtempSync(join(tmpdir(), 'chroxy-walk-other-'))
+          try {
+            writeFileSync(join(other, 'OUTSIDE.txt'), '1')
+            mkdirSync(join(dir, 'ws', 'sub', 'real'), { recursive: true })
+            writeFileSync(join(dir, 'ws', 'sub', 'real', 'INSIDE.txt'), '1')
+            symlinkSync('real', join(dir, 'ws', 'sub', 'inLink'))
+            symlinkSync(other, join(dir, 'ws', 'sub', 'outLink'))
+            const cache = new Map([[join(dir, 'ws', 'sub'), { resolved: other, ts: Date.now() }]])
+            const glob = (pattern) => executeBuiltinTool({
+              toolName: 'Glob', input: { pattern, path: 'sub' }, cwd: join(dir, 'ws'), cwdRealCache: cache, cwdCacheTtl: 30_000,
+            })
+            const out = await glob('outLink/*')
+            assert.equal(out.content.includes('OUTSIDE'), false)
+            assert.equal(out.isError, true, 'a literal link prefix that leaves the search root is refused')
+            const inside = await glob('inLink/*')
+            assert.equal(inside.content, 'inLink/INSIDE.txt')
+          } finally { rmSync(other, { recursive: true, force: true }) }
+        })
+
         it('a listing whose entries cannot be checked is an error, not an empty result', {
           skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
             ? 'needs permission bits that the platform or user does not enforce' : false,
@@ -3067,6 +3101,21 @@ describe('executeBuiltinTool', () => {
           } finally { rmSync(other, { recursive: true, force: true }) }
         })
 
+        it('the root confirmation requires the descriptor to be the one the kernel names for the path', {
+          skip: process.platform === 'linux' ? false : 'the descriptor name check exists only where /proc/self/fd does',
+        }, async () => {
+          mkdirSync(join(dir, 'one'))
+          mkdirSync(join(dir, 'two'))
+          const fh = await openAsync(join(dir, 'two'), 'r') // a descriptor on another directory
+          try {
+            const stat = await lstatAsync(join(dir, 'one'), { bigint: true })
+            const key = (st) => `${st.dev}:${st.ino}`
+            assert.equal(await confirmEntryStillInside(join(dir, 'one'), '', dir, new Map(), 30_000, null, key, { fh, stat }), false)
+          } finally {
+            await fh.close()
+          }
+        })
+
         it('the root confirmation requires the path to name the directory that was opened', async () => {
           mkdirSync(join(dir, 'one'))
           mkdirSync(join(dir, 'two'))
@@ -3084,7 +3133,7 @@ describe('executeBuiltinTool', () => {
           }
         })
 
-        it('one entry that cannot be checked is skipped and the rest of the tree is listed', {
+        it('a folder whose entries cannot be looked up is listed by name and the rest of the tree is still listed', {
           skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
             ? 'needs permission bits that the platform or user does not enforce' : false,
         }, async () => {
