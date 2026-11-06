@@ -6,7 +6,7 @@ import WebSocket from 'ws'
 import { createLogger } from '../../logger.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 import { assertSafeArgvValue } from '../../utils/argv-safety.js'
-import { remapClaudeSpawn, CONTAINER_UNSET_ENV } from './container-claude-spawn.js'
+import { remapClaudeSpawn, CONTAINER_UNSET_ENV, containerUnsetEnvPrefix } from './container-claude-spawn.js'
 
 const log = createLogger('k8s-backend')
 
@@ -1669,12 +1669,17 @@ export class K8sBackend {
       log.info(`Remapped claude spawn: ${cmd} ${args[0] ?? ''} -> ${containerCmd} ${containerArgs[0] ?? ''}`)
     }
 
-    // A claude spawn runs with CLAUDE_CONFIG_DIR unset (the sidecar removes it from the
-    // merged env), so claude uses its own `<HOME>/.claude`. See container-claude-spawn.js.
+    // A claude spawn runs with CLAUDE_CONFIG_DIR unset, so claude uses its own
+    // `<HOME>/.claude`. Two layers: the command is wrapped in `env -u ...` (holds with
+    // any sidecar image version) and the frame asks the sidecar to remove it from the
+    // merged env (`unsetEnv`; an older sidecar ignores it). See container-claude-spawn.js.
     const unsetEnv = remap.remapped ? [...CONTAINER_UNSET_ENV] : undefined
     const spawnEnv = env && unsetEnv
       ? Object.fromEntries(Object.entries(env).filter(([key]) => !unsetEnv.includes(key)))
       : env
+
+    const spawnCmd = unsetEnv ? containerUnsetEnvPrefix()[0] : containerCmd
+    const spawnArgs = unsetEnv ? [...containerUnsetEnvPrefix().slice(1), containerCmd, ...containerArgs] : containerArgs
 
     // Remap host cwd to /workspace inside the Pod when provided.
     let containerCwd = cwd
@@ -1738,7 +1743,7 @@ export class K8sBackend {
       }
 
       _wireWsToProc(ws, proc, {
-        cmd: containerCmd, args: containerArgs, env: spawnEnv, unsetEnv, cwd: containerCwd, signal, cleanup,
+        cmd: spawnCmd, args: spawnArgs, env: spawnEnv, unsetEnv, cwd: containerCwd, signal, cleanup,
       })
     }).catch((err) => {
       log.warn(`streamCliInEnvironment dial failed for ${podName}: ${err.message}`)

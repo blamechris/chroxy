@@ -630,6 +630,17 @@ describe('budgets and failures in the identity lookups', () => {
     assert.equal(hookFloors('apply_patch', input), false, 'control: the same patch without an override')
   })
 
+  it('a rule that failed floors even when the relation itself would not throw', () => {
+    const root = mkRoot('claude-data')
+    process.env.CLAUDE_CONFIG_DIR = root
+    const target = join(project, 'src', 'a.js')
+    // The root cannot be looked up, so its rule fails; the target is nowhere near it,
+    // so nothing downstream would throw.
+    const stat = (p, o) => { if (p === root) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return statSync(p, o) }
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, stat), true)
+    assert.equal(floorInternalsForTest.hitsConfigRoot(target, false, undefined), false, 'control: lookups working')
+  })
+
   it('a resolver that throws floors rather than escaping', () => {
     const target = join(project, 'src', 'a.js')
     const boom = () => { throw new Error('no home') }
