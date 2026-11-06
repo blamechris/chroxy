@@ -1648,6 +1648,7 @@ export class K8sBackend {
       cmd, args = [], env, cwd, signal,
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
+      hostClaudePath,
     } = opts
     const ns = this._namespaceForCall(opts, 'streamCliInEnvironment')
 
@@ -1661,7 +1662,7 @@ export class K8sBackend {
 
     // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the
     // Pod's claude, mirroring DockerBackend (#8027).
-    const remap = remapClaudeSpawn({ cmd, args, containerCliPath })
+    const remap = remapClaudeSpawn({ cmd, args, containerCliPath, hostClaudePath })
     const containerCmd = remap.cmd
     const containerArgs = remap.args
     if (remap.remapped) {

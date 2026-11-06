@@ -1,3 +1,5 @@
+import { normalize } from 'path'
+
 const JS_CLI_RE = /\.(?:c|m)?js$/i
 
 /**
@@ -10,6 +12,26 @@ function isNativeClaudeCommand(p) {
   if (typeof p !== 'string' || p.length === 0) return false
   const base = p.split(/[\\/]/).pop()
   return base === 'claude' || base === 'claude.exe'
+}
+
+const CLAUDE_CLI_JS_SUFFIX = '@anthropic-ai/claude-code/cli.js'
+
+/**
+ * Is `p` the claude-code cli.js? Separators are normalised first so a Windows
+ * host path matches, and the path must END with the package's cli.js (a mere
+ * substring elsewhere in an argument does not count), or equal the pinned path.
+ */
+function isClaudeJsScript(p, pinned) {
+  if (typeof p !== 'string' || p.length === 0) return false
+  if (isPinnedPath(p, pinned)) return true
+  const norm = p.replace(/\\/g, '/')
+  return norm === CLAUDE_CLI_JS_SUFFIX || norm.endsWith('/' + CLAUDE_CLI_JS_SUFFIX)
+}
+
+function isPinnedPath(cmd, pinned) {
+  if (typeof cmd !== 'string' || cmd.length === 0) return false
+  if (typeof pinned !== 'string' || pinned.length === 0) return false
+  return normalize(cmd) === normalize(pinned)
 }
 
 /**
@@ -30,22 +52,27 @@ function isNativeClaudeCommand(p) {
  * A `containerCliPath` ending in .js/.mjs/.cjs is the npm-installed cli.js and
  * is run via `node`; any other path is itself the container's claude executable.
  *
- * @param {{ cmd: string, args?: string[], containerCliPath: string }} spec
+ * `hostClaudePath` is the pinned host executable the caller gave the SDK as
+ * `pathToClaudeCodeExecutable`; a `cmd` equal to it (after normalisation) is the
+ * claude spawn whatever its basename (`claude.cmd`, a versioned file, ...).
+ *
+ * @param {{ cmd: string, args?: string[], containerCliPath: string, hostClaudePath?: string }} spec
  * @returns {{ cmd: string, args: string[], remapped: boolean }}
  */
-export function remapClaudeSpawn({ cmd, args = [], containerCliPath }) {
+export function remapClaudeSpawn({ cmd, args = [], containerCliPath, hostClaudePath }) {
   const viaNode = JS_CLI_RE.test(containerCliPath)
 
-  if (isNativeClaudeCommand(cmd)) {
+  if (isNativeClaudeCommand(cmd) || isPinnedPath(cmd, hostClaudePath)) {
     return viaNode
       ? { cmd: 'node', args: [containerCliPath, ...args], remapped: true }
       : { cmd: containerCliPath, args: [...args], remapped: true }
   }
 
-  if (typeof args[0] === 'string' && args[0].includes('@anthropic-ai/claude-code/cli.js')) {
-    // Old JS shape: swap the host script for the container's claude.
+  if (isClaudeJsScript(args[0], hostClaudePath)) {
+    // JS shape (`node|bun <host cli.js> ...`): drop the host runtime and script
+    // and run the container's claude, via node when it is a JS file.
     return viaNode
-      ? { cmd, args: [containerCliPath, ...args.slice(1)], remapped: true }
+      ? { cmd: 'node', args: [containerCliPath, ...args.slice(1)], remapped: true }
       : { cmd: containerCliPath, args: args.slice(1), remapped: true }
   }
 

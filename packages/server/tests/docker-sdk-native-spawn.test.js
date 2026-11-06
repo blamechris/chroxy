@@ -49,6 +49,19 @@ describe('DockerSdkSession spawn callback, native SDK shape (#8027)', () => {
     session.removeAllListeners()
   })
 
+  it('treats the pinned pathToClaudeCodeExecutable as claude whatever its basename', () => {
+    const cli = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+    const { getLastSpawn, session } = makeCallback(cli)
+    const pinned = '/Users/me/.local/share/claude/versions/2.1.7'
+    const options = { pathToClaudeCodeExecutable: pinned }
+    session._augmentQueryOptions(options)
+    options.spawnClaudeCodeProcess({ command: pinned, args: ['-p'], cwd: '/tmp/work', env: {} })
+    const { args } = getLastSpawn()
+    assert.deepEqual(args.slice(args.indexOf('ctr-native')), ['ctr-native', 'node', cli, '-p'])
+    assert.ok(!args.includes(pinned))
+    session.removeAllListeners()
+  })
+
   it('still handles the old JS shape', () => {
     const cli = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
     const { callback, getLastSpawn, session } = makeCallback(cli)

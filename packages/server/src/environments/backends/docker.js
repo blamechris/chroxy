@@ -486,6 +486,7 @@ export class DockerBackend {
    * @param {string}   [opts.containerUser]  - Non-root user inside the container (default: 'chroxy')
    * @param {string}   [opts.containerCliPath] - Container path to claude-code CLI (default fallback)
    * @param {string}   [opts.hostCwd]        - Host CWD mount root (default: opts.cwd)
+   * @param {string}   [opts.hostClaudePath] - Pinned host claude executable handed to the SDK; a `cmd` equal to it is the claude spawn
    * @returns {import('child_process').ChildProcess}
    */
   streamCliInEnvironment(containerId, opts = {}) {
@@ -494,6 +495,7 @@ export class DockerBackend {
       containerUser = 'chroxy',
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
+      hostClaudePath,
     } = opts
 
     const dockerArgs = ['exec', '-i', '-u', containerUser]
@@ -531,7 +533,7 @@ export class DockerBackend {
 
     // Remap the SDK's host-path claude spawn (JS cli.js or native binary) to the
     // container's claude (#8027).
-    const remap = remapClaudeSpawn({ cmd, args, containerCliPath })
+    const remap = remapClaudeSpawn({ cmd, args, containerCliPath, hostClaudePath })
     const containerCmd = remap.cmd
     const containerArgs = remap.args
     if (remap.remapped) {
