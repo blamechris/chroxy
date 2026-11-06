@@ -6,7 +6,7 @@ import { PairingManager } from '../src/pairing.js'
 import { TokenManager } from '../src/token-manager.js'
 import { createMockSessionManager, waitFor, createSpy } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
-import { boundedRegex } from '../src/utils/bounded-regex.js'
+import { boundedRegex, createBoundedRegexMatcher } from '../src/utils/bounded-regex.js'
 
 class WsServer extends _WsServer {
   constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
@@ -29,7 +29,9 @@ async function connect(port) {
 const send = (ws, m) => ws.send(JSON.stringify(m))
 const seen = (ms, t) => waitFor(() => ms.find(m => m.type === t), { timeoutMs: 2000, label: t })
 const tick = (ms = 80) => new Promise(r => setTimeout(r, ms))
-after(() => boundedRegex.close())
+// The default 50 ms match deadline can run out on a loaded host; these tests assert dispatch, not the deadline.
+const patientMatcher = createBoundedRegexMatcher({ timeoutMs: 10_000 })
+after(() => { boundedRegex.close(); patientMatcher.close() })
 
 let server, pm, tm
 afterEach(() => { if (server) { server.close(); server = null } if (pm) { pm.destroy(); pm = null } if (tm) { tm.destroy(); tm = null } })
@@ -124,6 +126,7 @@ describe('input from a connection whose credential ended during the skip-pattern
     const [ws, rec] = recordFor(token)
     ready(b)
     let evals = 0
+    server._handlerCtx.skipPatternMatcher = patientMatcher
     server._handlerCtx.evaluateDraft = async () => { evals++; return { verdict: 'forward' } }
     if (opts.iter) server._evaluatorIterations.set('session-1', 3)
     const p = server._handleMessage(ws, { type: 'input', data: opts.data ?? 'please refactor the parser thoroughly today', sessionId: 'session-1' })
@@ -245,6 +248,7 @@ describe('the input request is released even if the authority check throws after
     const [ws] = recordFor(token)
     const msg = { type: 'input', data: 'nomatch refactor the parser thoroughly today', sessionId: 'session-1', clientMessageId: ID }
     let evaluated = false
+    server._handlerCtx.skipPatternMatcher = patientMatcher
     server._handlerCtx.evaluateDraft = async () => { evaluated = true; return { verdict: 'forward' } }
     const real = server._handlerCtx.transport.isConnectionAuthorized
     // Only the check made after the evaluator has run throws.
