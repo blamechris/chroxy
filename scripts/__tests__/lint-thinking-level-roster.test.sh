@@ -33,6 +33,14 @@
 #      as a non-root user, so it SKIPS loudly rather than passing when it
 #      cannot be constructed: a case that reports success without running is
 #      the shape being guarded against.
+#  11. the PRODUCTION `git ls-files` path, in a throwaway git repo: a clean
+#      tracked tree passes
+#  12. ... a roster planted in a tracked packages/*/src file fails BY PATH
+#  13. ... a tracked file the scan cannot open fails BY NAME (skips as root)
+#      Cases 2-8 and 10 reach the lint only through the find-based
+#      LINT_THINKING_SCAN_DIR hook; case 9 proved the real branch green and
+#      nothing could turn it red (#7783, #7633). Case 7 is split in two
+#      (suffix rule / directory rule), hence 14 checks for 13 numbered cases.
 #
 # Drives the lint against a TEMP tree via LINT_THINKING_SCAN_DIR so it never
 # depends on repo state. No test framework — matches the sibling
@@ -47,7 +55,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-thinking-level-roster.sh"
 
 # Asserted EQUAL, not -ge, so removing a case is as loud as skipping one.
-EXPECTED_CASES=10
+EXPECTED_CASES=14
 
 PASS=0
 FAIL=0
@@ -108,10 +116,17 @@ printf "const level = incoming || 'default'\nconst other = ['approve', 'auto', '
 check "a lone 'default' fallback passes (and an unrelated string list does too)" 0 "$(run_lint "$SCAN")"
 rm -f "$SCAN/src/fallback.ts"
 
-# Case 7 — tests are out of scope on purpose; see the lint header.
-printf "expect(levels).toEqual(['default', 'high', 'max'])\n" > "$SCAN/tests/roster.test.ts"
-check "a roster inside a test file passes (tests write the triple by hand)" 0 "$(run_lint "$SCAN")"
-rm -f "$SCAN/tests/roster.test.ts"
+# Case 7 — tests are out of scope on purpose; see the lint header. Two
+# INDEPENDENT exclusions (a `*.test.*` suffix, and a tests/ directory), so one
+# file per rule: a single tests/roster.test.ts satisfied both and left either
+# rule deletable with the case still green (#7783). Two checks, so the count
+# below is 14.
+printf "expect(levels).toEqual(['default', 'high', 'max'])\n" > "$SCAN/src/roster.test.ts"
+check "a roster in a *.test.ts OUTSIDE tests/ passes (suffix rule alone)" 0 "$(run_lint "$SCAN")"
+rm -f "$SCAN/src/roster.test.ts"
+printf "export const fixtureLevels = ['default', 'high', 'max']\n" > "$SCAN/tests/fixture.ts"
+check "a roster in a non-.test file UNDER tests/ passes (directory rule alone)" 0 "$(run_lint "$SCAN")"
+rm -f "$SCAN/tests/fixture.ts"
 
 # Case 8 — fail-closed on a scan that walked too little. The two files in the
 # tree are real and clean, so ONLY the floor can fail this: it proves the
@@ -161,6 +176,56 @@ else
 fi
 chmod 644 "$UNREADABLE" 2>/dev/null || true
 rm -f "$UNREADABLE"
+
+# Cases 11-13 — the PRODUCTION path. Build a throwaway git repo, copy the lint
+# into its scripts/ (the lint cd's to its own parent), UNSET the test hook, and
+# drive the real `git ls-files` branch: negative control, positive control,
+# unreadable tracked file.
+PROD="$TMP/prod"
+PROD_FILE="packages/dashboard/src/store/types.ts"
+mkdir -p "$PROD/scripts" "$PROD/packages/dashboard/src/store"
+git -C "$PROD" init -q
+cp "$LINT" "$PROD/scripts/lint-thinking-level-roster.sh"
+printf "export const ok = 1\n" > "$PROD/$PROD_FILE"
+git -C "$PROD" add scripts/lint-thinking-level-roster.sh "$PROD_FILE"
+
+# run_prod -> the lint's combined output, then "RC=<exit>" as the last line.
+run_prod() {
+  local out rc
+  out="$(cd "$PROD" && env -u LINT_THINKING_SCAN_DIR LINT_THINKING_MIN_FILES=1 bash scripts/lint-thinking-level-roster.sh 2>&1)"
+  rc=$?
+  printf '%s\nRC=%s\n' "$out" "$rc"
+}
+# prod_actual <needle> <output> -> the exit code, annotated when the output never named the needle.
+prod_actual() {
+  local rc
+  rc="$(printf '%s\n' "$2" | tail -n 1 | sed 's/^RC=//')"
+  case "$2" in
+    *"$1"*) echo "$rc" ;;
+    *) echo "$rc (output never NAMED $1)" ;;
+  esac
+}
+
+# Case 11 — negative control: a clean tracked tree is green on the real branch.
+prod_out="$(run_prod)"
+check "production path: a clean tracked tree passes" 0 "$(prod_actual "OK" "$prod_out")"
+
+# Case 12 — positive control: a roster in a tracked packages/*/src file.
+printf "export type L = 'default' | 'high' | 'max'\n" > "$PROD/$PROD_FILE"
+prod_out="$(run_prod)"
+check "production path: a roster in a tracked packages/*/src file fails BY PATH" 1 "$(prod_actual "$PROD_FILE:1" "$prod_out")"
+printf "export const ok = 1\n" > "$PROD/$PROD_FILE"
+
+# Case 13 — a tracked file the production scan cannot open fails by name.
+chmod 000 "$PROD/$PROD_FILE" 2>/dev/null || true
+if [ -r "$PROD/$PROD_FILE" ] || cat "$PROD/$PROD_FILE" >/dev/null 2>&1; then
+  SKIP=$((SKIP + 1))
+  echo "SKIP - production path: an unreadable tracked file fails the scan (cannot make a file unreadable as uid $(id -u))"
+else
+  prod_out="$(run_prod)"
+  check "production path: an unreadable tracked file fails BY NAME" 1 "$(prod_actual "$PROD_FILE" "$prod_out")"
+fi
+chmod 644 "$PROD/$PROD_FILE" 2>/dev/null || true
 
 echo "----"
 BROKEN=0
