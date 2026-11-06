@@ -3518,7 +3518,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } else if (isCredentialInvalidClose(event?.code) && wasConnected && disconnectedAttemptId !== myAttemptId) {
         bumpConnectionAttemptId();
         setDisconnectedAttemptId(connectionAttemptId);
-        markCredentialSuspect(credentialKey(socketCtx), token);
+        markCredentialSuspect(credentialKey(socketCtx), socketCtx.token);
         set({
           connectionPhase: 'disconnected',
           connectionError: getWsCloseMessage(event!.code),

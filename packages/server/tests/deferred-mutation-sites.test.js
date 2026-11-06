@@ -1,8 +1,11 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { EnvironmentManager } from '../src/environment-manager.js'
 import { destroyEnvironmentWithSessions } from '../src/environments/destroy-with-sessions.js'
 import { DockerContainerPool } from '../src/docker-byok-pool.js'
@@ -12,6 +15,9 @@ import { SessionManager } from '../src/session-manager.js'
 import { BaseSession } from '../src/base-session.js'
 import { CliSession } from '../src/cli-session.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { getRegisteredProviderNames, getProvider } from '../src/providers.js'
+import { createAcpSessionClass } from '../src/acp-session.js'
 import { createGitOps } from '../src/ws-file-ops/git.js'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { isAuthorityRevoked } from '../src/connection-authority.js'
@@ -413,19 +419,10 @@ describe('queued follow-ups', () => {
     assert.deepEqual(s.sent, ['first', 'live'])
   })
 
-  it('every provider queues through BaseSession.enqueueOutgoingMessage and the same admission check', () => {
-    // SDK, CLI, Codex app-server and ACP enqueue through the shared base queue
-    // (their send paths call enqueueOutgoingMessage); BYOK and the subprocess
-    // providers never queue. The check lives in the shared admission, not per provider.
-    for (const cls of [CliSession]) {
-      assert.equal(cls.prototype._admitQueuedItem, BaseSession.prototype._admitQueuedItem)
-    }
-  })
-
   describe('the CLI startup queue', () => {
     function cli(items) {
       const s = Object.create(CliSession.prototype)
-      s._pendingQueue = items.map((options) => ({ prompt: 'p', attachments: undefined, options }))
+      s._pendingQueue = items.map(({ prompt, options }) => ({ prompt, attachments: undefined, options }))
       s._isBusy = false
       s._processReady = true
       s._destroying = false
@@ -433,27 +430,158 @@ describe('queued follow-ups', () => {
       s.sendMessage = createSpy()
       return s
     }
+    const sentPrompts = (s) => s.sendMessage.calls.map((c) => c[0])
 
-    it('control: dispatches startup-queued messages from live connections', () => {
-      const s = cli([{ isAuthorized: () => true }, {}])
+    it('control: dispatches startup-queued messages from live connections, in order', () => {
+      const s = cli([{ prompt: 'a', options: { isAuthorized: () => true } }, { prompt: 'b', options: {} }])
       s._drainPendingQueue()
-      assert.equal(s.sendMessage.callCount, 2)
+      assert.deepEqual(sentPrompts(s), ['a', 'b'])
     })
 
     it('drops a startup-queued message whose connection is no longer authorized and reports it', () => {
       const admission = createSpy()
-      const s = cli([{ isAuthorized: () => false, onInputAdmission: admission }, { isAuthorized: () => true }])
+      const s = cli([
+        { prompt: 'revoked', options: { isAuthorized: () => false, onInputAdmission: admission } },
+        { prompt: 'live', options: { isAuthorized: () => true } },
+      ])
       s._drainPendingQueue()
-      assert.equal(s.sendMessage.callCount, 1)
+      assert.deepEqual(sentPrompts(s), ['live'])
       assert.equal(admission.calls[0]?.[0]?.reason, 'connection_not_authorized')
     })
 
-    it('the post-result drain also skips a revoked item and continues with the next', async () => {
-      const s = cli([{ isAuthorized: () => false }, { isAuthorized: () => true }])
+    it('the post-result drain skips a revoked item and sends the live one behind it', async () => {
+      const s = cli([
+        { prompt: 'revoked', options: { isAuthorized: () => false } },
+        { prompt: 'live', options: { isAuthorized: () => true } },
+      ])
       s._drainNextPendingAfterResult()
       await tick()
       await tick()
-      assert.equal(s.sendMessage.callCount, 1)
+      assert.deepEqual(sentPrompts(s), ['live'])
+    })
+
+    it('the post-result drain sends nothing when only revoked items remain', async () => {
+      const s = cli([{ prompt: 'revoked', options: { isAuthorized: () => false } }])
+      s._drainNextPendingAfterResult()
+      await tick()
+      await tick()
+      assert.deepEqual(sentPrompts(s), [])
+    })
+  })
+
+  describe('every session class, found in the source tree', () => {
+    const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+    const files = readdirSync(SRC).filter((f) => f.endsWith('.js'))
+
+    // The ONLY places allowed to take an item off a send queue. Anywhere else is a
+    // drain that can bypass the admission check.
+    const ALLOWED_SHIFTS = new Map([
+      ['base-session.js', { '_outgoingQueue.shift(': 1 }],
+      ['cli-session.js', { '_pendingQueue.shift(': 2 }],
+    ])
+
+    it('no source file takes items off a send queue except the checked drains', () => {
+      const offenders = []
+      for (const f of files) {
+        const text = readFileSync(join(SRC, f), 'utf8')
+        for (const needle of ['_outgoingQueue.shift(', '_pendingQueue.shift(']) {
+          const count = text.split(needle).length - 1
+          const allowed = ALLOWED_SHIFTS.get(f)?.[needle] ?? 0
+          if (count !== allowed) offenders.push(`${f}: ${needle} x${count} (allowed ${allowed})`)
+        }
+      }
+      assert.deepEqual(offenders, [])
+    })
+
+    async function sessionClasses() {
+      const classes = new Map()
+      // Provider session modules only: importing every file would run CLI entry points.
+      for (const f of files.filter((n) => /-session\.js$/.test(n))) {
+        const mod = await import(pathToFileURL(join(SRC, f)).href)
+        for (const [name, C] of Object.entries(mod)) {
+          if (typeof C === 'function' && C !== BaseSession && C.prototype instanceof BaseSession) classes.set(C, `${f}:${name}`)
+        }
+      }
+      for (const name of getRegisteredProviderNames()) {
+        const C = getProvider(name)
+        if (typeof C === 'function' && C.prototype instanceof BaseSession && !classes.has(C)) classes.set(C, `registry:${name}`)
+      }
+      // The ACP provider class is created by a factory, so no module exports it.
+      classes.set(createAcpSessionClass({ id: 'roster-acp', command: process.execPath, args: [], env: {} }), 'acp-session.js:createAcpSessionClass')
+      return [...classes].map(([C, n]) => [n, C])
+    }
+
+    it('the roster is derived from the tree and is not trivially small', async () => {
+      const names = (await sessionClasses()).map(([n]) => n)
+      for (const expected of ['sdk-session.js:SdkSession', 'cli-session.js:CliSession', 'docker-session.js:DockerSession', 'byok-session.js:ClaudeByokSession', 'acp-session.js:createAcpSessionClass']) {
+        assert.ok(names.includes(expected), `${expected} found in ${names.join(', ')}`)
+      }
+    })
+
+    it('no session class overrides the shared queue admission', async () => {
+      for (const [name, C] of await sessionClasses()) {
+        assert.equal(C.prototype._admitQueuedItem, BaseSession.prototype._admitQueuedItem, `${name} overrides _admitQueuedItem`)
+      }
+    })
+
+    it('every session class drops queued input from a revoked connection and sends the live one', async () => {
+      for (const [name, C] of await sessionClasses()) {
+        // shared outgoing queue
+        {
+          const sent = []
+          const s = Object.create(C.prototype)
+          s._outgoingQueue = [
+            { prompt: 'revoked', attachments: undefined, sendOptions: { isAuthorized: () => false } },
+            { prompt: 'live', attachments: undefined, sendOptions: { isAuthorized: () => true } },
+          ]
+          s._destroying = false
+          s._log = { info() {}, warn() {} }
+          s.emit = () => true
+          s.sendMessage = (p) => { sent.push(p) }
+          s.dequeueNextOutgoing()
+          await tick()
+          await tick()
+          assert.deepEqual(sent, ['live'], `${name}: outgoing queue sent ${JSON.stringify(sent)}`)
+        }
+        // startup queue drains, for any class that has them
+        for (const drain of ['_drainPendingQueue', '_drainNextPendingAfterResult']) {
+          if (typeof C.prototype[drain] !== 'function') continue
+          const sent = []
+          const s = Object.create(C.prototype)
+          s._pendingQueue = [
+            { prompt: 'revoked', attachments: [], options: { isAuthorized: () => false } },
+            { prompt: 'live', attachments: [], options: { isAuthorized: () => true } },
+          ]
+          s._isBusy = false
+          s._processReady = true
+          s._destroying = false
+          s._log = { info() {}, warn() {} }
+          s.emit = () => true
+          s.sendMessage = (p) => { sent.push(p) }
+          s[drain]()
+          await tick()
+          await tick()
+          assert.deepEqual(sent, ['live'], `${name}.${drain} sent ${JSON.stringify(sent)}`)
+        }
+      }
+    })
+
+    it('a container session that drains its startup queue when the process comes up drops a revoked item', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      const child = new EventEmitter()
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+      child.kill = () => {}
+      const sent = []
+      const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+      session.sendMessage = (p) => { sent.push(p) }
+      session._pendingQueue.push({ prompt: 'revoked', attachments: [], options: { isAuthorized: () => false } })
+      session._pendingQueue.push({ prompt: 'live', attachments: [], options: { isAuthorized: () => true } })
+      session._containerId = 'c0ffee1234567890'
+      session._spawnDocker = () => child
+      session._spawnPersistentProcess(['-p'])
+      try { session._cleanupReadlines?.() } catch { /* best effort */ }
+      for (const st of [child.stdin, child.stdout, child.stderr]) st.destroy()
+      assert.deepEqual(sent, ['live'])
     })
   })
 })
@@ -478,5 +606,47 @@ describe('BYOK MCP prompt expansion', () => {
     const reasons = admission.calls.map((c) => c[0]?.reason)
     assert.ok(reasons.includes('connection_not_authorized'), `admission reasons: ${reasons.join(',')}`)
     assert.equal(s._isBusy, false, 'the session was released')
+  })
+})
+
+describe('terminal-driven provider input', () => {
+  function tui(f, { authorizedAtProbe }) {
+    const s = Object.create(ClaudeTuiSession.prototype)
+    Object.assign(s, {
+      _spawnRefusal: null, _isBusy: false, _processReady: true, _term: {}, _ptyExited: false,
+      _messageCounter: 0, _messageIdPrefix: 'm', _sessionId: 'x', _activeTurn: null,
+      _log: { info() {}, warn() {} },
+    })
+    s.emit = () => true
+    s._nowMonotonic = () => 0
+    s._logPtyDiagnostic = () => {}
+    s._waitForPrompt = async () => { f.ok = authorizedAtProbe; return true }
+    s._finishTurnStopped = createSpy()
+    s._finishTurnError = createSpy()
+    s._resetFirstOutputWatchdogForTurn = () => {}
+    s._beginAuthFailureWatchForTurn = () => {}
+    s._beginThinkingForTurn = () => {}
+    s._markTurnOutputStart = () => {}
+    s._writePtyTextThrottled = createSpy(async () => true)
+    s._armResultTimeout = () => {} // no timers outlive the test
+    return s
+  }
+
+  it('does not type the prompt when the connection ended during the idle probe', async () => {
+    const f = flag()
+    const s = tui(f, { authorizedAtProbe: false })
+    const admission = createSpy()
+    const r = await s.sendMessage('hello', [], { isAuthorized: f.isAuthorized, onInputAdmission: admission })
+    assert.equal(s._writePtyTextThrottled.callCount, 0)
+    assert.equal(r?.ok, false)
+    assert.equal(admission.calls[0]?.[0]?.reason, 'connection_not_authorized')
+    assert.equal(s._finishTurnStopped.callCount, 1)
+  })
+
+  it('control: types the prompt while the connection stays authorized', async () => {
+    const f = flag()
+    const s = tui(f, { authorizedAtProbe: true })
+    await s.sendMessage('hello', [], { isAuthorized: f.isAuthorized, onInputAdmission: createSpy() }).catch(() => {})
+    assert.equal(s._writePtyTextThrottled.callCount, 1)
   })
 })

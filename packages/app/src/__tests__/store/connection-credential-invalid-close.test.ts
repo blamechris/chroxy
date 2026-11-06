@@ -212,6 +212,28 @@ describe('the credential_invalidated notice', () => {
     ws.restore();
   });
 
+  it('an accepted notice does not clear a saved connection that belongs to a different server', async () => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    const OTHER = { url: 'wss://other.example.com', token: 'other-token' };
+    useConnectionLifecycleStore.setState({ savedConnection: OTHER });
+    encryptedNotice('revoked');
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(OTHER);
+    ws.restore();
+  });
+
+  it('an accepted notice does not clear a saved connection with the same url but a newer token', async () => {
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    const NEWER = { url: SAVED.url, token: 'newer-token' };
+    useConnectionLifecycleStore.setState({ savedConnection: NEWER });
+    encryptedNotice('revoked');
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(NEWER);
+    ws.restore();
+  });
+
   it('does not reconnect after notice then error', async () => {
     const ws = installMockWebSocket();
     const socket = await openConnectedSocket(ws);
@@ -321,6 +343,7 @@ describe('an auth_fail on a later attempt', () => {
     useConnectionLifecycleStore.setState({ savedConnection: SAVED });
     socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
     await openConnectedSocket(ws, true, 'wss://other.example.com');
+    useConnectionLifecycleStore.setState({ savedConnection: SAVED }); // the other server's sign-in re-saved its own
     const back = await openConnectedSocket(ws, false);
     frame(back, { type: 'auth_fail', reason: 'invalid_token' });
     await flushPromises();
@@ -337,6 +360,19 @@ describe('an auth_fail on a later attempt', () => {
     frame(next, { type: 'auth_fail', reason: 'invalid_token' });
     await flushPromises();
     expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(SAVED);
+    ws.restore();
+  });
+
+  it('invalid_token for the suspect token does not clear a saved connection that belongs to a different server', async () => {
+    const ws = installMockWebSocket();
+    const socket = await openConnectedSocket(ws);
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID });
+    const OTHER = { url: 'wss://other.example.com', token: 'other-token' };
+    useConnectionLifecycleStore.setState({ savedConnection: OTHER });
+    const next = await openConnectedSocket(ws, false);
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(OTHER);
     ws.restore();
   });
 

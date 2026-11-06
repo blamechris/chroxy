@@ -564,11 +564,9 @@ export class DockerSession extends CliSession {
     // sendMessage() sets _isBusy, so the loop sends at most one message.
     // Remaining items stay in the queue and are drained one-by-one via
     // _clearMessageState() after each result.
-    while (this._pendingQueue.length > 0 && !this._isBusy) {
-      const pending = this._pendingQueue.shift()
-      log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
-      this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
-    }
+    // Through the inherited drain, so a queued message whose sender is no longer
+    // authorized is dropped instead of dispatched.
+    this._drainPendingQueue()
   }
 
   // #4473: log the container-specific exit line under the docker-session

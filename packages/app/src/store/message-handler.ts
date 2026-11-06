@@ -831,6 +831,18 @@ export function resetReconnectAttempt(): void {
   reconnectAttempt = 0;
 }
 
+/**
+ * Forget the saved connection only if it is the one this connection used (same
+ * token, and the url or tunnel url it connected to), so a notice for an old
+ * connection can never wipe a connection saved since.
+ */
+function forgetSavedConnectionFor(ctx: ConnectionContext, get: () => { clearSavedConnection?: () => Promise<void> }): void {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  if (!saved || saved.token !== ctx.token) return;
+  if (saved.url !== ctx.url && saved.tunnelUrl !== ctx.url) return;
+  void get().clearSavedConnection?.();
+}
+
 export function setDisconnectedAttemptId(id: number): void {
   disconnectedAttemptId = id;
 }
@@ -2395,7 +2407,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       setDisconnectedAttemptId(connectionAttemptId);
       if (action === 'forget') {
         markCredentialSuspect(credentialKey(ctx), null);
-        void get().clearSavedConnection();
+        forgetSavedConnectionFor(ctx, get);
       } else {
         markCredentialSuspect(credentialKey(ctx), ctx.token);
       }
@@ -2411,7 +2423,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         // The token a previous authenticated connection ended on is now refused
         // outright by the server: that is the confirmation a close code is not.
         markCredentialSuspect(credentialKey(ctx), null);
-        void get().clearSavedConnection();
+        forgetSavedConnectionFor(ctx, get);
       }
       ctx.socket.close();
       set({ socket: null });

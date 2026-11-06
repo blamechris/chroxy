@@ -167,6 +167,11 @@ export class PairingManager extends EventEmitter {
     if (autoRefresh) this._scheduleRefresh()
   }
 
+  /** True once destroy() ran: the daemon is tearing down, not revoking anything. */
+  get destroyed() {
+    return this._destroyed === true
+  }
+
   get currentPairingId() {
     if (this._destroyed) return null
     return this._current?.id || null

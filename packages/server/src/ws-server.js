@@ -3237,6 +3237,19 @@ export class WsServer {
    * distinct code so the client re-pairs instead of retrying the dead token.
    */
   _endCredentialConnection(ws, client, reason = 'revoked') {
+    // A destroyed pairing manager means the daemon is shutting down, not that this
+    // credential was revoked: end the connection quietly, with no notice (which would
+    // make the client forget a token that is still valid) and no credential close code.
+    if (this._pairingManager?.destroyed === true) {
+      if (client.authenticated) this._handleClientDeparture(client)
+      client.authenticated = false
+      client.pairingCredential = null
+      client.authToken = undefined
+      if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+      this._clientManager.removeClient(ws)
+      try { ws.close(1001, 'server shutting down') } catch { /* already closing */ }
+      return
+    }
     // Tell the client WHY through the normal (possibly encrypted) channel first:
     // that frame is what lets it forget the credential. The close code that
     // follows only stops the connection.

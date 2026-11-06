@@ -26,6 +26,11 @@ class WsServer extends _WsServer {
   start(...a) { super.start(...a); setLogListener(null) }
 }
 
+function allowFirst(n) {
+  let calls = 0
+  return () => ++calls <= n
+}
+
 function flag() {
   const f = { ok: true, isAuthorized: () => f.ok }
   return f
@@ -206,6 +211,14 @@ describe('checkpoint restore', () => {
     writeFileSync(join(repo, 'a.txt'), 'changed after the checkpoint')
     await cm.restoreCheckpoint('s', cp.id, { isAuthorized: () => true })
     assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'one')
+  })
+
+  it('a refusal at the last check removes the snapshot ref it had just created', async () => {
+    const refsBefore = execFileSync(GIT, ['for-each-ref'], { cwd: repo, encoding: 'utf8' })
+    // allowed at the in-lock check, refused at the last-chance check before persisting
+    await assert.rejects(cm.createCheckpoint({ sessionId: 's3', resumeSessionId: 'r', cwd: repo, name: 'cp', isAuthorized: allowFirst(1) }), (err) => isAuthorityRevoked(err))
+    assert.equal(cm.listCheckpoints('s3').length, 0)
+    assert.equal(execFileSync(GIT, ['for-each-ref'], { cwd: repo, encoding: 'utf8' }), refsBefore, 'no leaked snapshot ref')
   })
 
   it('creates no checkpoint snapshot once the connection is no longer authorized', async () => {
@@ -399,6 +412,36 @@ describe('a connection whose authentication was stripped', () => {
       ws.close()
     } finally {
       server.close()
+    }
+  })
+})
+
+describe('a paired connection whose authentication was stripped', () => {
+  it('receives nothing while its pairing token is still live, except the revoke notices', async () => {
+    const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    const server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    try {
+      server.start('127.0.0.1')
+      await new Promise((resolve) => server.httpServer.once('listening', resolve))
+      clearInterval(server._pingInterval)
+      const token = pm.validatePairing(pm.currentPairingId).sessionToken
+      const ws = new WebSocket(`ws://127.0.0.1:${server.httpServer.address().port}`)
+      const messages = []
+      ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+      await new Promise((resolve) => ws.once('open', resolve))
+      ws.send(JSON.stringify({ type: 'auth', token }))
+      await waitFor(() => messages.find(m => m.type === 'auth_ok'), { timeoutMs: 2000, label: 'auth_ok' })
+      const [sock, client] = [...server.clients].find(([, c]) => c.pairingCredential === token)
+      client.authenticated = false // a primary revoke strips every connection, paired ones too
+      assert.equal(pm.isSessionTokenLive(token), true, 'the pairing token itself is still live')
+      assert.equal(server._send(sock, { type: 'probe_reply' }), false)
+      assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_UNAVAILABLE', message: 'x' }), false, 'only the exact revoke acknowledgement codes are exempt')
+      assert.equal(server._send(sock, { type: 'error', code: 'REVOKE_DURABILITY_UNKNOWN', message: 'x' }), true)
+      ws.close()
+    } finally {
+      server.close()
+      pm.destroy()
     }
   })
 })

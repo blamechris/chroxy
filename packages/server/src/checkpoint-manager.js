@@ -153,8 +153,14 @@ export class CheckpointManager extends EventEmitter {
       }
     }
 
-    // Last chance to refuse before anything is evicted or persisted.
-    assertAuthorized(isAuthorized)
+    // Last chance to refuse before anything is evicted or persisted. A refusal here
+    // must not leave the snapshot ref it just created behind.
+    try {
+      assertAuthorized(isAuthorized)
+    } catch (err) {
+      if (checkpoint.gitRef) this._deleteGitRefTracked(cwd, checkpoint.gitRef)
+      throw err
+    }
 
     // Enforce max checkpoints — remove oldest if at limit. Only now, with the new
     // snapshot in hand: evicting first would lose a rewind point when the creation

@@ -318,6 +318,79 @@ describe('checkpoint creation at the cap', () => {
   })
 })
 
+describe('daemon shutdown: a frame landing mid-shutdown', () => {
+  class WsServer extends _WsServer {
+    constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
+    start(...a) { super.start(...a); setLogListener(null) }
+  }
+
+  async function connected() {
+    const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    const made = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/one' }])
+    const server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: made.manager, authRequired: true, pairingManager: pm })
+    server.start('127.0.0.1')
+    await new Promise((resolve) => server.httpServer.once('listening', resolve))
+    clearInterval(server._pingInterval)
+    const token = pm.validatePairing(pm.generateBoundPairing('session-1').pairingId).sessionToken
+    const ws = new WebSocket(`ws://127.0.0.1:${server.httpServer.address().port}`)
+    const messages = []
+    ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+    const closed = new Promise((resolve) => ws.once('close', (code) => resolve(code)))
+    await new Promise((resolve) => ws.once('open', resolve))
+    ws.send(JSON.stringify({ type: 'auth', token }))
+    await waitFor(() => messages.find((m) => m.type === 'auth_ok'), { timeoutMs: 2000, label: 'auth_ok' })
+    return { pm, server, ws, messages, closed }
+  }
+
+  it('a frame sent while the orchestration engine is still disposing does not look like a revoked credential', async () => {
+    const { pm, server, ws, messages, closed } = await connected()
+    const orchestrator = new ServerOrchestrator({
+      wsServer: server,
+      sessionManager: { serializeState() {}, destroyAll() {} },
+      tunnel: { stop: async () => {} },
+      mdnsService: { stop() {} }, bonjourInstance: { destroy() {} }, tokenManager: { destroy() {} },
+      pairingManager: pm,
+      orchestrationManager: { dispose: () => new Promise((r) => { ws.send(JSON.stringify({ type: 'ping' })); setTimeout(r, 100) }) },
+      getWorktreeReapTimer: () => null, emergencyCleanupSync() {}, removeConnectionInfo() {},
+      isPoolEnabled: () => false, getSharedPool: () => null,
+      logger: { info() {}, warn() {}, error() {} }, exit: () => {}, exitDelayMs: 0,
+    })
+    await orchestrator.shutdown('SIGTERM')
+    const code = await closed
+    assert.notEqual(code, 4401)
+    assert.equal(messages.some((m) => m.type === 'credential_invalidated'), false)
+  })
+
+  it('the pairing manager is destroyed only after the sockets are closed', async () => {
+    const seq = []
+    const orchestrator = new ServerOrchestrator({
+      wsServer: { broadcastShutdown() {}, close: async () => { seq.push('ws.close') } },
+      sessionManager: { serializeState() {}, destroyAll() {} },
+      tunnel: { stop: async () => {} },
+      mdnsService: { stop() {} }, bonjourInstance: { destroy() {} }, tokenManager: { destroy() {} },
+      pairingManager: { destroy: () => seq.push('pairing.destroy') },
+      getWorktreeReapTimer: () => null, emergencyCleanupSync() {}, removeConnectionInfo() {},
+      isPoolEnabled: () => false, getSharedPool: () => null,
+      logger: { info() {}, warn() {}, error() {} }, exit: () => {}, exitDelayMs: 0,
+    })
+    await orchestrator.shutdown('SIGTERM')
+    assert.deepEqual(seq, ['ws.close', 'pairing.destroy'])
+  })
+
+  it('a destroyed pairing manager means shutting down, never an invalid credential', async () => {
+    const { pm, server, ws, messages, closed } = await connected()
+    try {
+      pm.destroy()
+      ws.send(JSON.stringify({ type: 'ping' }))
+      const code = await closed
+      assert.equal(code, 1001)
+      assert.equal(messages.some((m) => m.type === 'credential_invalidated'), false)
+    } finally {
+      server.close()
+    }
+  })
+})
+
 describe('daemon shutdown does not unpair connected devices', () => {
   class WsServer extends _WsServer {
     constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }

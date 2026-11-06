@@ -40,7 +40,7 @@ class MockWebSocket {
 const okFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok' }) })
 
 const { useConnectionStore } = await import('./connection')
-const { resetReconnectAttempt, handleMessage, setEncryptionState } = await import('./message-handler')
+const { resetReconnectAttempt, handleMessage, setEncryptionState, getConnectionContext } = await import('./message-handler')
 
 const URL_A = 'wss://server-a.example.com/ws'
 const URL_B = 'wss://server-b.example.com/ws'
@@ -287,6 +287,23 @@ describe('an auth_fail on a later attempt', () => {
     const next = await laterAttempt()
     frame(next, { type: 'auth_fail', reason: 'invalid_token' })
     expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('tok-a')
+  })
+
+  it('a bare 4401 on the first connection after a pairing marks the SETTLED token suspect', async () => {
+    const { socket, serverId } = await connectToA()
+    // Pairing settles the real token after the connection was dialled with the pairing code's.
+    getConnectionContext()!.token = 'tok-paired'
+    useConnectionStore.getState().updateServer(serverId, { token: 'tok-paired' })
+    useConnectionStore.setState({ savedConnection: { url: URL_A, token: 'tok-paired' } })
+    socket.onclose?.({ code: WS_CLOSE_CREDENTIAL_INVALID })
+    const before = MockWebSocket.instances.length
+    useConnectionStore.getState().connect(URL_A, 'tok-paired')
+    await vi.advanceTimersByTimeAsync(0)
+    const next = MockWebSocket.instances[before]!
+    next.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    frame(next, { type: 'auth_fail', reason: 'invalid_token' })
+    expect(useConnectionStore.getState().serverRegistry.find((e) => e.id === serverId)?.token).toBe('')
   })
 
   it('signing in again clears the suspect token, so a later invalid_token erases nothing', async () => {
