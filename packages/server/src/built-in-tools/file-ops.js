@@ -18,8 +18,11 @@
  * catches and surfaces them as tool errors to the model.
  */
 
-import { readFile, writeFile, stat, mkdir } from 'node:fs/promises'
+import { readFile, stat, mkdir } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { dirname } from 'node:path'
+import { openNoFollow } from '../ws-file-ops/open-nofollow.js'
+import { assertRegularHandle } from '../utils/regular-file.js'
 import { applyEdit, formatNumberedLines } from './tool-transforms.js'
 
 export const DEFAULT_READ_MAX_BYTES = 256_000
@@ -92,6 +95,47 @@ export async function readFileTool({
 }
 
 /**
+ * #9045 — open `filePath` for writing through the same primitives as the
+ * `write_file` / `append_memory` paths (#7957): `openNoFollow` (non-blocking, so
+ * a FIFO cannot hold the call; a final-component symlink is refused) and an
+ * fstat on the OPENED handle before any byte moves. Returns `{ fh }`, or
+ * `{ error }` (whose value is an `{ ok: false }` tool result) for a refusal. The caller closes `fh`.
+ *
+ * Truncation is NOT part of the open flags: O_TRUNC acts at open time, before
+ * the regular-file check could run.
+ */
+async function openRegularForWrite(filePath, flags, mode) {
+  let fh
+  try {
+    fh = await openNoFollow(filePath, flags, mode)
+    await assertRegularHandle(fh)
+    return { fh }
+  } catch (err) {
+    await fh?.close().catch(() => {})
+    // ENXIO: a non-blocking write-open of a FIFO that has no reader.
+    // EISDIR: a directory is a non-regular target too.
+    if (err.code === 'ENOTREG' || err.code === 'ENXIO' || err.code === 'EISDIR') {
+      return { error: { ok: false, code: 'ENOTFILE', message: `not a regular file: ${filePath}` } }
+    }
+    if (err.code === 'ELOOP') {
+      return { error: { ok: false, code: 'ELOOP', message: err.message } }
+    }
+    throw err
+  }
+}
+
+/** Replace the whole content of an opened regular file with `text`. */
+async function replaceContent(fh, text) {
+  const buf = Buffer.from(text, 'utf8')
+  await fh.truncate(0)
+  let off = 0
+  while (off < buf.length) {
+    const { bytesWritten } = await fh.write(buf, off, buf.length - off, off)
+    off += bytesWritten
+  }
+}
+
+/**
  * Write a file, truncating any existing content. Creates the file and
  * any missing parent directories. Returns `created: true` when the
  * path did not exist before.
@@ -126,7 +170,13 @@ export async function writeFileTool({ filePath, content, mode = 0o644 } = {}) {
     await mkdir(dirname(filePath), { recursive: true })
   }
 
-  await writeFile(filePath, content, { mode })
+  const opened = await openRegularForWrite(filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT, mode)
+  if (opened.error) return opened.error
+  try {
+    await replaceContent(opened.fh, content)
+  } finally {
+    await opened.fh.close()
+  }
   return {
     ok: true,
     bytesWritten: Buffer.byteLength(content, 'utf8'),
@@ -165,15 +215,29 @@ export async function editFileTool({
     return { ok: false, code: 'NO_CHANGE', message: 'oldString and newString are identical' }
   }
 
-  let content
+  // One handle for the read AND the write-back, so the object that was checked
+  // is the object that is rewritten, and a FIFO is never read (a read of a FIFO
+  // with no writer would block).
+  let opened
   try {
-    content = await readFile(filePath, 'utf8')
+    opened = await openRegularForWrite(filePath, fsConstants.O_RDWR)
   } catch (err) {
     if (err.code === 'ENOENT') {
       return { ok: false, code: 'ENOENT', message: `file not found: ${filePath}` }
     }
     throw err
   }
+  if (opened.error) return opened.error
+  const fh = opened.fh
+  try {
+    return await applyEditToHandle(fh, { filePath, oldString, newString, replaceAll })
+  } finally {
+    await fh.close()
+  }
+}
+
+async function applyEditToHandle(fh, { filePath, oldString, newString, replaceAll }) {
+  const content = await fh.readFile('utf8')
 
   // Count + strict-uniqueness + LITERAL replacement via the shared transform
   // (also drives the docker-byok container Edit, so the semantics can't drift).
@@ -194,6 +258,6 @@ export async function editFileTool({
     return { ok: false, code: result.code, message: result.message }
   }
 
-  await writeFile(filePath, result.next)
+  await replaceContent(fh, result.next)
   return { ok: true, replacements: result.replacements, bytesWritten: Buffer.byteLength(result.next, 'utf8') }
 }
