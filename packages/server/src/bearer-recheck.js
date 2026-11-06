@@ -36,7 +36,8 @@ export function captureBearer(server, req) {
  * @returns {boolean}
  */
 export function bearerStillValid(server, captured) {
-  if (!captured?.required) return true
+  if (!captured) return false
+  if (!captured.required) return true
   if (!captured.token) return false
   if (captured.wasPairing) {
     return server._pairingManager?.isSessionTokenLive?.(captured.token) === true

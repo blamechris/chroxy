@@ -62,6 +62,9 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
       sendFn: mock.fn(),
       broadcastFn: mock.fn(),
       validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
       pendingPermissions: new Map(),
       permissionSessionMap: new Map(),
       getSessionManager: () => ({ getSession: () => null }),
@@ -127,6 +130,9 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
       sendFn: mock.fn(),
       broadcastFn: mock.fn(),
       validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
       pendingPermissions: new Map(),
       permissionSessionMap: new Map([['perm-1', 'sess-X']]),
       getSessionManager: () => ({ getSession: () => ({ session: owner }) }),
@@ -158,6 +164,9 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
       sendFn: mock.fn(),
       broadcastFn: mock.fn(),
       validateBearerAuth: mock.fn(() => true),
+      // Hand-built handler: nothing to re-check once the body has arrived.
+      captureBearer: () => ({ required: false }),
+      bearerStillValid: () => true,
       pendingPermissions: new Map(),
       permissionSessionMap: new Map(),
       getSessionManager: () => ({ getSession: () => null }),

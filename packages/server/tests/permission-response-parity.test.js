@@ -103,6 +103,9 @@ function runHttp({ requestId, decision, presentedToken, tokenBoundSessionId, map
     sendFn: mock.fn(),
     broadcastFn: mock.fn(),
     validateBearerAuth: () => true,
+    // Hand-built handler: nothing to re-check once the body has arrived.
+    captureBearer: () => ({ required: false }),
+    bearerStillValid: () => true,
     pushManager: null,
     pendingPermissions,
     permissionSessionMap,

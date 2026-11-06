@@ -722,10 +722,18 @@ async function handleInput(ws, client, msg, ctx) {
   // The skip decision was a wait: the connection may have lost its credential
   // meanwhile. Nothing below (skip dispatch, cap force-forward, evaluator) runs
   // for it.
-  if (skipLock && !stillAuthorized(authorizedFor(ctx, client))) {
-    releaseSkipLock()
-    releaseInputRequest(ctx, inputRecord)
-    return
+  if (skipLock) {
+    let authorized = false
+    try {
+      authorized = stillAuthorized(authorizedFor(ctx, client))
+    } finally {
+      // Released on a refusal AND if the check itself throws.
+      if (!authorized) {
+        releaseSkipLock()
+        releaseInputRequest(ctx, inputRecord)
+      }
+    }
+    if (!authorized) return
   }
   if (skipLock && skipDecision) releaseSkipLock()
   if (skipLock && !skipDecision) {

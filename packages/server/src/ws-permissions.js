@@ -160,10 +160,10 @@ const unboundOnly = (client) => !isBoundClient(client)
  * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-// A hand-built handler (tests) with no wiring behaves as auth-off: nothing to re-check.
-// ws-server.js always passes the real pair (tests/bearer-recheck.test.js checks it).
-const defaultCaptureBearer = () => ({ required: false, token: null, wasPairing: false })
-const defaultBearerStillValid = (captured) => !captured?.required
+// No re-check wired: refuse, like the hook validator default below. ws-server.js
+// always passes the real pair (tests/bearer-recheck.test.js checks it).
+const defaultCaptureBearer = () => null
+const defaultBearerStillValid = () => false
 
 export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, captureBearer = defaultCaptureBearer, bearerStillValid = defaultBearerStillValid, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0

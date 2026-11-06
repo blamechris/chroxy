@@ -1,11 +1,14 @@
 import { describe, it, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
+import { EventEmitter } from 'node:events'
+import { createPermissionHandler } from '../src/ws-permissions.js'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse as acornParse } from 'acorn'
 import { WsServer as _WsServer } from '../src/ws-server.js'
+import { captureBearer, bearerStillValid } from '../src/bearer-recheck.js'
 import { PairingManager } from '../src/pairing.js'
 import { TokenManager } from '../src/token-manager.js'
 import { createMockSessionManager, createSpy } from './test-helpers.js'
@@ -129,14 +132,20 @@ describe('a request whose bearer ended while the body was arriving changes nothi
 })
 
 // ---------------------------------------------------------------------------
-// Every route that validates a bearer and then reads a body goes through the
-// shared re-check. Parsed with acorn: the INNERMOST if-statement or function
-// that both calls a bearer validator and reads a body must also call
-// `bearerStillValid`.
+// A tripwire (not a proof) for the shared re-check. Parsed with acorn: the
+// INNERMOST if-statement, function declaration or class method that both calls a
+// bearer validator and calls a NAMED body reader must also call
+// `bearerStillValid` AFTER the first read. A differently spelled reader (an
+// inline stream loop, a reader reached through another helper) is not seen; the
+// per-route tests above are what establish the behaviour.
 // ---------------------------------------------------------------------------
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const VALIDATORS = new Set(['_validateBearerAuth', '_validatePrimaryBearerAuth', 'validateBearerAuth'])
-const BODY_READERS = new Set(['readJsonBodyCapped'])
+const BODY_READERS = new Set(['readJsonBodyCapped', 'readCappedJson'])
+// Reasoned exclusions: these read a body under the per-session hook credential
+// (`_validateHookAuth`, not a bearer) and only create a prompt whose answer returns to
+// the same caller, or read; nothing executes on the strength of the body.
+const REASONED_EXCLUSIONS = ['handlePermissionRequest', 'handlePermissionFloorCheck']
 
 function calleeName(node) {
   const c = node.callee
@@ -153,13 +162,15 @@ function isBodyRead(node) {
 }
 function facts(node) {
   const out = { validates: false, reads: false, rechecks: false }
+  let firstRead = Infinity
+  const rechecks = []
   const walk = (n) => {
     if (!n || typeof n.type !== 'string') return
     if (n.type === 'CallExpression') {
       const name = calleeName(n)
       if (VALIDATORS.has(name)) out.validates = true
-      if (isBodyRead(n)) out.reads = true
-      if (name === 'bearerStillValid') out.rechecks = true
+      if (isBodyRead(n)) { out.reads = true; firstRead = Math.min(firstRead, n.start) }
+      if (name === 'bearerStillValid') rechecks.push(n.start)
     }
     for (const k of Object.keys(n)) {
       const v = n[k]
@@ -168,6 +179,8 @@ function facts(node) {
     }
   }
   walk(node)
+  // The re-check must FOLLOW the read: one before it checks nothing that matters.
+  out.rechecks = rechecks.some((at) => at > firstRead)
   return out
 }
 /** Innermost if/function nodes that validate a bearer and read a body: [{ line, rechecks }] */
@@ -183,8 +196,8 @@ function bodyAfterBearerSites(src) {
       else if (v && typeof v.type === 'string') { if (visit(v)) childHit = true }
     }
     if (childHit) return true
-    if (n.type === 'IfStatement' || n.type === 'FunctionDeclaration') {
-      const f = facts(n.type === 'IfStatement' ? n.consequent : n)
+    if (n.type === 'IfStatement' || n.type === 'FunctionDeclaration' || n.type === 'MethodDefinition') {
+      const f = facts(n.type === 'IfStatement' ? n.consequent : n.type === 'MethodDefinition' ? n.value : n)
       if (f.validates && f.reads) { sites.push({ line: n.loc.start.line, rechecks: f.rechecks }); return true }
     }
     return false
@@ -193,7 +206,7 @@ function bodyAfterBearerSites(src) {
   return sites
 }
 
-describe('every route that reads a body after validating a bearer re-checks it', () => {
+describe('tripwire: a named body reader after bearer validation is followed by the shared re-check', () => {
   it('the real routes all go through the shared re-check, and the scan finds the known three', () => {
     const found = []
     const walkDir = (d) => {
@@ -226,5 +239,103 @@ describe('every route that reads a body after validating a bearer re-checks it',
       }`
     assert.deepEqual(bodyAfterBearerSites(bad).map((s) => s.rechecks), [false])
     assert.deepEqual(bodyAfterBearerSites(good).map((s) => s.rechecks), [true])
+    // A re-check that comes BEFORE the read does not count.
+    const early = `
+      function handler(req, res) {
+        if (!server._validateBearerAuth(req, res)) return
+        if (!bearerStillValid(server, captureBearer(server, req))) return
+        readJsonBodyCapped(req, res, 10).then((b) => { change(b) })
+      }`
+    assert.deepEqual(bodyAfterBearerSites(early).map((s) => s.rechecks), [false])
+    // A class method and the other named reader are scanned too.
+    const method = `
+      class R { handle(req, res) {
+        if (!this._validateBearerAuth(req, res)) return
+        readCappedJson(req, res, 10, (b) => { change(b) })
+      } }`
+    assert.deepEqual(bodyAfterBearerSites(method).map((s) => s.rechecks), [false])
+  })
+
+  it('the reasoned exclusions read a body but use the hook credential, not a bearer', () => {
+    const ast = acornParse(readFileSync(join(SRC, 'ws-permissions.js'), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module' })
+    const fns = new Map()
+    const collect = (n) => {
+      if (!n || typeof n.type !== 'string') return
+      if (n.type === 'FunctionDeclaration' && n.id) fns.set(n.id.name, n)
+      for (const k of Object.keys(n)) {
+        const v = n[k]
+        if (Array.isArray(v)) v.forEach(collect)
+        else if (v && typeof v.type === 'string') collect(v)
+      }
+    }
+    collect(ast)
+    for (const name of REASONED_EXCLUSIONS) {
+      const f = facts(fns.get(name))
+      assert.equal(f.reads, true, `${name} reads a body`)
+      assert.equal(f.validates, false, `${name} must not start validating a bearer without a re-check (it would join the scan)`)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+describe('the shared re-check helper', () => {
+  const pairing = (valid, live) => ({ isSessionTokenValid: () => valid, isSessionTokenLive: () => live })
+  const req = (token) => ({ headers: { authorization: `Bearer ${token}` } })
+
+  it('refuses when nothing was captured', () => {
+    assert.equal(bearerStillValid({ _isTokenValid: () => true }, null), false)
+    assert.equal(bearerStillValid({ _isTokenValid: () => true }, undefined), false)
+  })
+
+  it('auth off: nothing to check', () => {
+    const c = captureBearer({ authRequired: false }, req('x'))
+    assert.equal(bearerStillValid({ _isTokenValid: () => false }, c), true)
+  })
+
+  it('a pairing token must still be live, whatever the general validity check says', () => {
+    const server = { authRequired: true, _pairingManager: pairing(true, true), _isTokenValid: () => true }
+    const c = captureBearer(server, req('t'))
+    assert.equal(c.wasPairing, true)
+    assert.equal(bearerStillValid(server, c), true)
+    const ended = { ...server, _pairingManager: pairing(true, false) }
+    assert.equal(bearerStillValid(ended, c), false, 'ended pairing token refused even though _isTokenValid says true')
+    assert.equal(bearerStillValid({ ...server, _pairingManager: null }, c), false, 'fails closed with no pairing manager')
+  })
+
+  it('any other token is judged by the general validity check, not the pairing one', () => {
+    const server = { authRequired: true, _pairingManager: pairing(false, false), _isTokenValid: (t) => t === 'primary' }
+    const c = captureBearer(server, req('primary'))
+    assert.equal(c.wasPairing, false)
+    assert.equal(bearerStillValid(server, c), true, 'valid although the pairing manager does not know it')
+    assert.equal(bearerStillValid({ ...server, _isTokenValid: () => false }, c), false)
+  })
+
+  it('a request with no bearer header is refused when auth is on', () => {
+    const server = { authRequired: true, _pairingManager: null, _isTokenValid: () => true }
+    assert.equal(bearerStillValid(server, captureBearer(server, { headers: {} })), false)
+  })
+})
+
+describe('a permission handler with no re-check wired refuses', () => {
+  it('POST /permission-response answers 403 and changes nothing', async () => {
+    const answers = []
+    const handler = createPermissionHandler({
+      sendFn() {}, broadcastFn() {},
+      validateBearerAuth: () => true,
+      getSessionManager: () => ({ getSession: () => ({ session: { respondToPermission: (...a) => { answers.push(a); return true } } }) }),
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map([['req-1', 'session-1']]),
+    })
+    const req = new EventEmitter()
+    req.headers = {}
+    req.setEncoding = () => {}
+    let status = null
+    const res = { writeHead: (s) => { status = s }, end() {} }
+    handler.handlePermissionResponseHttp(req, res)
+    req.emit('data', JSON.stringify({ requestId: 'req-1', decision: 'allow' }))
+    req.emit('end')
+    await tick(20)
+    assert.equal(status, 403)
+    assert.equal(answers.length, 0)
   })
 })

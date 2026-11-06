@@ -178,3 +178,55 @@ describe('input from a connection whose credential ended during the skip-pattern
     assert.equal(r2.evals, 0)
   })
 })
+
+describe('the same input id is accepted when retried after the first attempt was dropped', () => {
+  const ID = '0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d'
+  async function authCaps(b, token) {
+    const c = await connect(b.port)
+    send(c.ws, { type: 'auth', token, protocolVersion: 1, capabilities: ['input_context_v1'] })
+    await seen(c.messages, 'auth_ok')
+    await tick(30)
+    return c
+  }
+  const msg = { type: 'input', data: 'please refactor the parser thoroughly today', sessionId: 'session-1', clientMessageId: ID }
+
+  it('retrying the id after re-authenticating is accepted as a first dispatch', async () => {
+    const b = await boot()
+    b.s1.promptEvaluator = true
+    b.s1.promptEvaluatorSkipPattern = '^please'
+    const t1 = b.mint('session-1')
+    await authCaps(b, t1)
+    const [ws] = recordFor(t1)
+    const p = server._handleMessage(ws, msg)
+    pm.revokeSessionTokenById(pm._deviceIdForToken(t1))
+    await p
+    await tick(20)
+    assert.equal(b.s1.sendMessage.callCount, 0, 'the first attempt was not dispatched')
+    const second = await authCaps(b, b.mint('session-1'))
+    send(second.ws, msg)
+    const ack = await waitFor(() => second.messages.find((m) => m.type === 'input_ack' && m.status === 'accepted'), { timeoutMs: 3000, label: 'accepted ack' })
+    assert.equal(ack.delivery, 'dispatch_started')
+    assert.equal(b.s1.sendMessage.callCount, 1)
+  })
+})
+
+describe('the placeholder lock is released even if the authority check throws', () => {
+  it('a later input is accepted', async () => {
+    const b = await boot()
+    b.s1.promptEvaluator = true
+    b.s1.promptEvaluatorSkipPattern = '^please'
+    const token = b.mint('session-1')
+    await b.auth(token)
+    const [ws] = recordFor(token)
+    const real = server._handlerCtx.transport.isConnectionAuthorized
+    server._handlerCtx.transport.isConnectionAuthorized = () => { throw new Error('check failed') }
+    try {
+      await server._handleMessage(ws, { type: 'input', data: 'please refactor the parser thoroughly today', sessionId: 'session-1' })
+    } finally { server._handlerCtx.transport.isConnectionAuthorized = real }
+    assert.equal(server._pendingEvaluatorAwaits.size, 0, 'nothing left locked')
+    assert.equal(b.s1.sendMessage.callCount, 0)
+    await server._handleMessage(ws, { type: 'input', data: 'please refactor the parser thoroughly today', sessionId: 'session-1' })
+    await tick(20)
+    assert.equal(b.s1.sendMessage.callCount, 1, 'a later input was accepted')
+  })
+})
