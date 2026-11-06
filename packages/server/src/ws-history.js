@@ -1903,11 +1903,67 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // second caller of exactly this loop and every hand-copied piece of it has
   // drifted: the `_seq` map (#7454), the `result` → `agent_idle` synthesis
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
-  sendChunkedWithBackpressure(ws, history, {
-    startOffset,
+  // #9022 -- a reply is recorded only when its stream closes, so a turn paused
+  // mid-stream (on a permission prompt) has its text in no entry. Splice what has
+  // streamed so far in, at its place in the transcript.
+  const pending = pendingStreamEntries(sessionManager, sessionId, fullHistory ? undefined : lastSeq)
+  const replayEntries = pending.length > 0
+    ? spliceInPendingStreams(history.slice(startOffset), pending)
+    : history
+  sendChunkedWithBackpressure(ws, replayEntries, {
+    startOffset: pending.length > 0 ? 0 : startOffset,
     emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy),
     onDone: finishReplay,
   })
+}
+
+/**
+ * #9022 -- the still-open reply streams of a session as replayable entries.
+ *
+ * `afterSeq` is the client's cursor on a delta replay: a stream that opened at or
+ * before it is one the client saw start and holds its own (live) copy of -- a
+ * replayed copy would be deduped away at best and a stale overwrite at worst --
+ * so only a stream that opened after it is sent. Omitted (a full replay), every
+ * open stream is sent: the client is about to rebuild its transcript from this.
+ *
+ * The entries carry no `_seq`, so a client advances no cursor off them, and no
+ * field the stream's own completed entry lacks: when the stream closes, the
+ * recorded entry has the same `messageId`, so a client that kept this one dedups.
+ */
+function pendingStreamEntries(sessionManager, sessionId, afterSeq) {
+  if (typeof sessionManager.getPendingResponseStreams !== 'function') return []
+  const streams = sessionManager.getPendingResponseStreams(sessionId)
+  const now = Date.now()
+  return streams
+    .filter((s) => typeof afterSeq !== 'number' || s.startSeq > afterSeq)
+    .map((s) => ({
+      startSeq: s.startSeq,
+      entry: {
+        type: 'message',
+        messageType: 'response',
+        content: s.content,
+        messageId: s.messageId,
+        timestamp: now,
+      },
+    }))
+}
+
+/**
+ * Put each pending-stream entry before the first recorded entry that came after
+ * its stream opened (the end, when none did). Returns a new array; `entries` is
+ * the ring buffer's own and is not touched.
+ */
+function spliceInPendingStreams(entries, pending) {
+  const out = entries.slice()
+  // Latest-opened first, so an earlier splice never shifts the index a later one
+  // was computed for.
+  const ordered = [...pending].sort((a, b) => b.startSeq - a.startSeq)
+  for (const { startSeq, entry } of ordered) {
+    let at = out.findIndex((e) => typeof e._seq === 'number' && e._seq >= startSeq)
+    if (at === -1) at = out.length
+    out.splice(at, 0, entry)
+  }
+  return out
 }
 
 /**
