@@ -62,7 +62,7 @@ function currentUserSid() {
  * failure is logged, not thrown — the file is still written (just at inherited
  * perms), and the caller's write must not fail over a hardening step.
  */
-function stampWindowsAcl(filePath) {
+export function stampWindowsAcl(filePath) {
   // Real-Windows only: icacls/whoami don't exist elsewhere. The `_isWindowsOverride`
   // seam drives the write/rename path on POSIX CI runners, but must NOT shell out
   // to Windows tools there — those tests inject `_stampAcl` to assert this call.

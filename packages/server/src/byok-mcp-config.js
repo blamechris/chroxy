@@ -29,10 +29,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { claudeGlobalConfigPath, parseClaudeConfigText } from './utils/claude-config-dir.js'
-import { fsyncForDurability, confirmRenameDurable } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable, stampWindowsAcl } from './platform.js'
 import { createLogger } from './logger.js'
-
-const log = createLogger('claude-config')
 import {
   MCP_SERVER_NAME_RE,
   UNSAFE_MCP_KEYS,
@@ -44,6 +42,8 @@ import {
   // Previously hand-duplicated in packages/dashboard/src/lib/mcp-server-
   // validation.ts; #6986 and #7001 are what one-copy-drifts looks like.
 } from '@chroxy/protocol/mcp-validation'
+
+const log = createLogger('claude-config')
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -1285,7 +1285,7 @@ export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) 
  *
  * @param {string} filePath
  * @param {object} value — the full config object to serialize
- * @param {{ mode: number|null, expect?: { path?: string, existed: boolean, hash: string|null }, _fsync?: Function }} opts — `null` mode = new file, use 0600.
+ * @param {{ mode: number|null, expect?: { path?: string, existed: boolean, hash: string|null, mode?: number|null }, _fsync?: Function }} opts — `null` mode = new file, use 0600.
  *   `expect` (#8983) is the snapshot the value was merged from: when given, the destination is re-read just
  *   before the rename and a `ClaudeConfigConflictError` is thrown (temp discarded, file untouched) if it differs.
  *   Production code does not pass it directly — it goes through `updateClaudeConfig`, which owns the retry loop.
@@ -1307,6 +1307,7 @@ export function writeClaudeConfigAtomic(
     _rename = renameSync,
     _isWindowsOverride,
     _sleep = sleepSyncMs,
+    _stampAcl = stampWindowsAcl,
   },
 ) {
   const resolved = resolveClaudeConfigWritePath(filePath)
@@ -1327,15 +1328,36 @@ export function writeClaudeConfigAtomic(
   // Per-call random suffix, NOT process.pid: concurrent sessions in one daemon
   // share a pid and would race for the same sidecar path (#3922).
   const tmpPath = `${destPath}.chroxy.${randomUUID()}.tmp`
-  const discardTmp = () => { try { unlinkSync(tmpPath) } catch { /* nothing to clean up */ } }
+  // Cleans up on a THROWN error. A process kill (SIGKILL / OOM / power loss) between
+  // the temp write and the rename can still leave a `.chroxy.<uuid>.tmp` sidecar
+  // beside the config: the destination is never truncated, but the orphan is not
+  // reaped here. Failures other than "already gone" are logged, not swallowed.
+  const discardTmp = () => {
+    try {
+      unlinkSync(tmpPath)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') log.warn(`Failed to remove orphaned ${tmpPath}: ${err?.message || err}`)
+    }
+  }
   try {
     // `mode` is only honoured on create, and umask can strip bits from it — so
     // restate the exact mode afterwards. The intermediate mode can only ever be
     // TIGHTER than the target (umask removes bits, never adds), so there is no
     // window in which the temp file is more permissive than the destination
     // already was.
-    writeFileSync(tmpPath, payload, { mode: targetMode })
-    chmodSync(tmpPath, targetMode)
+    if (onWindows) {
+      // Numeric mode bits are meaningless on NTFS, and a fresh temp would inherit the
+      // parent directory's (possibly broader) ACL. Create it EMPTY, stamp the
+      // owner-only DACL, THEN write — so credentials in the document (env API keys,
+      // OAuth material) never exist in a file readable beyond the owner. The DACL
+      // survives the same-directory rename (same as `writeFileRestricted`).
+      writeFileSync(tmpPath, '')
+      _stampAcl(tmpPath)
+      writeFileSync(tmpPath, payload)
+    } else {
+      writeFileSync(tmpPath, payload, { mode: targetMode })
+      chmodSync(tmpPath, targetMode)
+    }
     _fsync(tmpPath, { isDir: false })
   } catch (err) {
     discardTmp()
@@ -1347,24 +1369,28 @@ export function writeClaudeConfigAtomic(
   // ORIGINAL rename error, not a cleanup-side ENOENT. Same shape as the #4463 fix
   // in byok-mcp-trust.js `recordTrust`.
   //
-  // #8983 — compare-and-swap. `claude` (and a second daemon) take no lock of
+  // #8983 — OPTIMISTIC conflict detection (not an atomic compare-and-swap). `claude` (and a second daemon) take no lock of
   // ours, so the only way to avoid publishing a merge computed from a stale
   // snapshot is to re-read the destination IMMEDIATELY before the rename and
   // refuse if it is no longer what the merge started from. The check sits after
   // the (slow) temp write + fsync so what remains between it and the rename is a
-  // pair of back-to-back syscalls. That window cannot be closed on a filesystem
-  // with no "rename if unchanged" primitive; it is narrowed to microseconds and
-  // stated, not claimed away.
+  // pair of back-to-back syscalls. There is no cross-process lock and POSIX has no
+  // "rename if unchanged", so a write landing in that residual window can still be
+  // lost: this narrows the race to microseconds, it does not eliminate it.
   for (let attempt = 1; ; attempt++) {
     try {
       claudeConfigTestHooks.beforeVerify?.({ path: destPath })
+      // Re-resolve the ORIGINAL path on every attempt (also after a Windows
+      // backoff): a link retargeted, or a regular file swapped for a link with
+      // identical bytes, would otherwise pass the content hash and be clobbered.
+      verifyDestinationUnchanged(filePath, resolved)
       if (expect) verifyUnchanged(destPath, expect)
       _rename(tmpPath, destPath)
       break
     } catch (err) {
       // Windows: claude/AV/Windows Search can hold the destination open without
       // FILE_SHARE_DELETE, failing the replace with a transient EPERM/EACCES/
-      // EBUSY/EEXIST. Bounded retry; the CAS runs again on the next pass.
+      // EBUSY/EEXIST. Bounded retry; the check runs again on the next pass.
       if (onWindows && err && WIN_RENAME_RETRY_CODES.has(err.code) && attempt < WIN_RENAME_ATTEMPTS) {
         _sleep(WIN_RENAME_BACKOFF_MS * attempt)
         continue
@@ -1401,7 +1427,7 @@ function hashConfigBytes(bytes) {
 
 /**
  * TEST-ONLY seam (#8983): `beforeVerify({ path })` runs inside the writer after
- * the temp file is durable and just before the compare-and-swap check, i.e. at
+ * the temp file is durable and just before the conflict check, i.e. at
  * the exact point a concurrent writer's update lands in the bug. A real caller
  * (register/unregister, trust pre-write, MCP add/remove) reaches the writer only
  * through `updateClaudeConfig`, so a test sets this to drive THAT caller end to
@@ -1425,6 +1451,15 @@ export class ClaudeConfigConflictError extends Error {
   }
 }
 
+// A regular file swapped for a symlink (even to identical bytes) changes the RESOLVED
+// path (the link's target), so the path comparison below is what catches it; a
+// separate regular-vs-symlink flag was tried and mutation-tested as redundant.
+function verifyDestinationUnchanged(filePath, initial) {
+  const now = resolveClaudeConfigWritePath(filePath)
+  if (!now.ok) throw new ClaudeConfigConflictError(filePath, `its symlink state changed and is now refused (${now.error})`)
+  if (now.path !== initial.path) throw new ClaudeConfigConflictError(filePath, 'its symlink target changed since it was read')
+}
+
 function verifyUnchanged(destPath, expect) {
   let bytes = null
   try {
@@ -1441,6 +1476,14 @@ function verifyUnchanged(destPath, expect) {
   }
   if (!expect.existed) throw new ClaudeConfigConflictError(destPath, 'it was created by another writer')
   if (hashConfigBytes(bytes) !== expect.hash) throw new ClaudeConfigConflictError(destPath, 'its content changed')
+  // A permission change with identical bytes (e.g. a concurrent `chmod 600`) is a
+  // conflict too: the temp carries the snapshot's mode, and publishing it would
+  // silently undo the tightening. The re-merge picks up the CURRENT mode.
+  if (expect.mode !== null && expect.mode !== undefined) {
+    let current = null
+    try { current = statSync(destPath).mode & 0o777 } catch { /* raced away: the next attempt sorts it out */ }
+    if (current !== expect.mode) throw new ClaudeConfigConflictError(destPath, 'its permissions changed')
+  }
 }
 
 /** Retry budget for `updateClaudeConfig` (#8983). Bounded: a file under constant churn must fail loudly, not spin. */
@@ -1491,7 +1534,7 @@ export function updateClaudeConfig(filePath, mutate, opts = {}) {
     try {
       const { durabilityUnconfirmed } = writeClaudeConfigAtomic(filePath, out.value ?? read.raw, {
         mode: read.mode,
-        expect: { path: resolved.path, existed: read.existed, hash: read.hash },
+        expect: { path: resolved.path, existed: read.existed, hash: read.hash, mode: read.mode },
         ...writerOpts,
       })
       return { ok: true, wrote: true, result: out.result, attempts: attempt, durabilityUnconfirmed, path: resolved.path }
@@ -1572,7 +1615,7 @@ function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = d
   if (!normalized.ok) return { ok: false, error: normalized.error }
 
   // DRY-RUN read (the plan path). The COMMIT re-runs `locateAddTarget` on a fresh
-  // read inside `updateClaudeConfig`, which owns the compare-and-swap (#8983).
+  // read inside `updateClaudeConfig`, which owns the conflict detection (#8983).
   const read = readClaudeConfigForMutation(configPath)
   if (!read.ok) return { ok: false, error: read.error }
   const located = locateAddTarget(read.raw, { scope, cwd, validName, normalized })
@@ -1660,7 +1703,7 @@ export function planAddMcpServerToConfig(opts = {}) {
 export function addMcpServerToConfig(opts = {}) {
   const prepared = prepareAddMcpServer(opts)
   if (!prepared.ok) return prepared.code ? { ok: false, error: prepared.error, code: prepared.code } : { ok: false, error: prepared.error }
-  // The commit re-locates the target on a FRESH read inside the compare-and-swap
+  // The commit re-locates the target on a FRESH read inside the conflict-detection
   // loop (#8983): the plan's tree is advisory and may be stale by now.
   const { scope = 'user', cwd } = opts
   const validName = { name: prepared.name }

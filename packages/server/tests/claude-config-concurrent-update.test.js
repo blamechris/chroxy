@@ -158,7 +158,7 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     assert.equal(mutateCalls, 2)
   })
 
-  it('a crash mid-write (fsync of the temp throws) leaves the original byte-for-byte and no sidecar', () => {
+  it('a thrown error mid-write (fsync of the temp throws) leaves the original byte-for-byte and cleans the sidecar (a process kill can still orphan a sidecar, never truncate the file)', () => {
     const file = join(dir, 'atomic.json')
     const original = '{\n  "keep": "me"\n}\n'
     writeFileSync(file, original)
@@ -250,6 +250,70 @@ describe('#8983 updateClaudeConfig — lost-update protection', () => {
     assert.equal(readFileSync(file2, 'utf8'), '{"a":1}')
     assert.deepEqual(leftovers(dir), [])
   })
+
+  it('a link retargeted after the read is a conflict: the merge lands on the NEW target and the old one is untouched', { skip: process.platform === 'win32' }, () => {
+    const a = join(dir, 'a.json')
+    const b = join(dir, 'b.json')
+    const link = join(dir, 'link.json')
+    writeFileSync(a, JSON.stringify({ from: 'A' }))
+    writeFileSync(b, JSON.stringify({ from: 'B' }))
+    symlinkSync(a, link)
+    claudeConfigTestHooks.beforeVerify = () => {
+      claudeConfigTestHooks.beforeVerify = null
+      rmSync(link)
+      symlinkSync(b, link)
+    }
+    const out = updateClaudeConfig(link, (raw) => { raw.mine = 1 })
+    assert.equal(out.attempts, 2)
+    assert.deepEqual(readJson(a), { from: 'A' }, 'the stale target was not modified')
+    assert.deepEqual(readJson(b), { from: 'B', mine: 1 })
+    assert.equal(readlinkSync(link), b)
+  })
+
+  it('a regular file swapped for a symlink with IDENTICAL bytes is a conflict: the link is not destroyed', { skip: process.platform === 'win32' }, () => {
+    const real = join(dir, 'real.json')
+    const link = join(dir, 'cfg.json')
+    const bytes = JSON.stringify({ same: 1 })
+    writeFileSync(link, bytes)
+    writeFileSync(real, bytes)
+    claudeConfigTestHooks.beforeVerify = () => {
+      claudeConfigTestHooks.beforeVerify = null
+      rmSync(link)
+      symlinkSync(real, link)
+    }
+    const out = updateClaudeConfig(link, (raw) => { raw.mine = 1 })
+    assert.equal(out.attempts, 2)
+    assert.equal(lstatSync(link).isSymbolicLink(), true, 'the symlink survived')
+    assert.deepEqual(readJson(real), { same: 1, mine: 1 })
+  })
+
+  it('a concurrent chmod with no content change is a conflict; the tightened mode is kept', { skip: process.platform === 'win32' }, () => {
+    const file = join(dir, 'perm.json')
+    writeFileSync(file, '{"a":1}')
+    chmodSync(file, 0o644)
+    claudeConfigTestHooks.beforeVerify = () => {
+      claudeConfigTestHooks.beforeVerify = null
+      chmodSync(file, 0o600)
+    }
+    const out = updateClaudeConfig(file, (raw) => { raw.b = 2 })
+    assert.equal(out.attempts, 2)
+    assert.equal(statSync(file).mode & 0o777, 0o600)
+    assert.deepEqual(readJson(file), { a: 1, b: 2 })
+  })
+
+  for (const name of ['settings.json', '.claude.json']) {
+    it(`Windows: the owner-only ACL is stamped on the EMPTY temp before any content is written (${name})`, () => {
+      const file = join(dir, name)
+      writeFileSync(file, '{"env":{"ANTHROPIC_API_KEY":"x"}}')
+      const events = []
+      updateClaudeConfig(file, (raw) => { raw.b = 2 }, {
+        _isWindowsOverride: true,
+        _stampAcl: (tmp) => { events.push(statSync(tmp).size) },
+      })
+      assert.deepEqual(events, [0], 'stamped once, with no content bytes present yet')
+      assert.deepEqual(readJson(file), { env: { ANTHROPIC_API_KEY: 'x' }, b: 2 })
+    })
+  }
 
   it('POSIX does not retry EBUSY (only Windows has the held-handle semantics)', () => {
     const file = join(dir, 'posix.json')
