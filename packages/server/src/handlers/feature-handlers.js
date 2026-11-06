@@ -16,6 +16,7 @@ import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
 import { isBoundClient, broadcastEnvironmentList } from '../environments/authority.js'
+import { sendBoundRefusal } from '../bound-client-policy.js'
 
 const log = createLogger('ws')
 
@@ -95,15 +96,7 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
   // A session-scoped client starts no web tasks: a task runs independently of
   // any session and records no owner, so it cannot stay inside the session.
   if (isBoundClient(client)) {
-    ctx.transport.send(ws, {
-      type: 'web_task_error',
-      taskId: null,
-      ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessions.sessionManager,
-        boundSessionId: client.boundSessionId,
-        message: 'Not available to a session-scoped connection',
-      }),
-    })
+    sendBoundRefusal(ws, client, msg, ctx)
     return
   }
   const effectiveCwd = msg.cwd

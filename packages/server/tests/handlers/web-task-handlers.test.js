@@ -109,15 +109,16 @@ describe('web-task-handlers', () => {
       }
     })
 
+    // The refusal is a session_error: web_task_error is a host-wide frame the outgoing policy never delivers to a session-scoped connection (#9039).
     it('A10: bound client with no resolvable session is rejected', () => {
       const ctx = makeCtx()
       ctx.sessions.sessionManager = { getSession: () => null }
       const client = makeClient({ boundSessionId: 'ghost' })
-      webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi' }, ctx)
-      assert.equal(ctx._sent[0].type, 'web_task_error')
+      webTaskHandlers.launch_web_task(makeWs(), client, { type: 'launch_web_task', prompt: 'hi' }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
-      // Issue #2912: the web_task_error SESSION_TOKEN_MISMATCH payload shape
+      // Issue #2912: the SESSION_TOKEN_MISMATCH payload shape
       // matches the session_error payload — boundSessionId present,
       // boundSessionName null when the binding is stale.
       assert.equal(ctx._sent[0].boundSessionId, 'ghost')
@@ -129,8 +130,8 @@ describe('web-task-handlers', () => {
         const ctx = makeCtx()
         ctx.sessions.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/Projects/chroxy' }) }
         const client = makeClient({ boundSessionId: 'b1' })
-        webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi', ...(cwd ? { cwd } : {}) }, ctx)
-        assert.equal(ctx._sent[0].type, 'web_task_error')
+        webTaskHandlers.launch_web_task(makeWs(), client, { type: 'launch_web_task', prompt: 'hi', ...(cwd ? { cwd } : {}) }, ctx)
+        assert.equal(ctx._sent[0].type, 'session_error')
         assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
         assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
         assert.equal(ctx._sent[0].boundSessionId, 'b1')
@@ -140,7 +141,7 @@ describe('web-task-handlers', () => {
 
     it('an empty binding is scoped too', () => {
       const ctx = makeCtx()
-      webTaskHandlers.launch_web_task(makeWs(), makeClient({ boundSessionId: '' }), { prompt: 'hi' }, ctx)
+      webTaskHandlers.launch_web_task(makeWs(), makeClient({ boundSessionId: '' }), { type: 'launch_web_task', prompt: 'hi' }, ctx)
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
     })

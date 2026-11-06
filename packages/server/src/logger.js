@@ -583,3 +583,15 @@ export function loggerForSession(component, sessionId) {
 export function sessionLogger(sessionId, component = 'ws') {
   return sessionId ? loggerForSession(component, sessionId) : createLogger(component)
 }
+
+/**
+ * A client-supplied value, safe to put in a log line: a JSON-quoted string
+ * capped at 128 characters, so a newline or control character in it cannot
+ * start a second log line. A non-string is named by its type.
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function loggableValue(value) {
+  if (typeof value !== 'string') return typeof value
+  return JSON.stringify(value.slice(0, 128))
+}

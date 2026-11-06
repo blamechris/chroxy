@@ -8,9 +8,7 @@
  * (or create a new one) and add the import here.
  */
 import { createLogger } from './logger.js'
-import { isBoundClient } from './environments/authority.js'
-import { isBoundAllowedMessageType } from './bound-client-policy.js'
-import { buildSessionTokenMismatchPayload } from './handler-utils.js'
+import { refuseBoundMessage } from './bound-client-policy.js'
 import { inputHandlers } from './handlers/input-handlers.js'
 import { sessionHandlers } from './handlers/session-handlers.js'
 import { settingsHandlers } from './handlers/settings-handlers.js'
@@ -110,20 +108,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
   // Applied here, before the handler is even looked up, so a handler cannot be
   // reached by forgetting a check of its own — including one registered at
   // runtime through registerMessageHandler.
-  if (isBoundClient(client) && !isBoundAllowedMessageType(msg.type)) {
-    log.info(`Session-scoped client ${client?.id} refused message type ${msg.type}`)
-    ctx.transport.send(ws, {
-      type: 'session_error',
-      ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessions?.sessionManager,
-        boundSessionId: client?.boundSessionId,
-        message: 'Not available to a session-scoped connection',
-      }),
-      requestType: msg.type,
-      ...(typeof msg.requestId === 'string' ? { requestId: msg.requestId } : {}),
-    })
-    return
-  }
+  if (refuseBoundMessage(ws, client, msg, ctx)) return
   const handler = handlerRegistry.get(msg.type)
   if (handler) {
     // Errors propagate to _handleMessage in ws-server.js, which emits a
