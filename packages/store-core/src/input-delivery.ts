@@ -114,3 +114,37 @@ export function cancelInputDelivery(current: InputDeliveryMap | undefined, clien
     },
   }
 }
+
+/**
+ * An `input_conflict` session_error proves the server refused the send before
+ * dispatch (busy with another device, or an evaluator lock). Not every conflict
+ * path also emits a correlated `input_ack`, so the client resolves the pending
+ * record itself: `uncertain` -> `rejected` / `not_dispatched` / retry-safe, the
+ * same shape an ack would carry, so composer recovery treats both alike.
+ * Only an unresolved (`uncertain`) record is touched: a conflict can never
+ * downgrade an input the server already accepted, and an id with no record
+ * (nothing sent from this client) changes nothing.
+ */
+export function rejectInputDeliveryForConflict(
+  current: InputDeliveryMap | undefined,
+  clientMessageId: string | null | undefined,
+  message?: string,
+  now = Date.now(),
+): InputDeliveryMap {
+  const records = current ?? {}
+  if (!clientMessageId) return records
+  const previous = records[clientMessageId]
+  if (!previous || previous.status !== 'uncertain') return records
+  return {
+    ...records,
+    [clientMessageId]: {
+      ...previous,
+      status: 'rejected',
+      delivery: 'not_dispatched',
+      retrySafe: true,
+      reason: 'input_conflict',
+      ...(message === undefined ? {} : { message }),
+      updatedAt: now,
+    },
+  }
+}

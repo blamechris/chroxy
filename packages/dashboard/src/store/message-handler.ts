@@ -214,6 +214,8 @@ import {
   selectModelsForProvider,
   // #8224 — file a permission-mode roster under the provider it describes.
   mergePermissionModesByProvider,
+  // #9035 — a refused input resolves its delivery record so the composer restores it.
+  rejectInputDeliveryForConflict,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerRestoreArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage } from '@chroxy/protocol'
@@ -5943,6 +5945,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           );
         if (conflictSessionId && get().sessionStates[conflictSessionId]) {
           updateSession(conflictSessionId, (ss) => ({
+            // #9035 — mark the refused send not-dispatched so the composer
+            // recovery (App.tsx) returns its text; it never overwrites newer typing.
+            inputDeliveries: rejectInputDeliveryForConflict(ss.inputDeliveries, rejectedId, parsed.message ?? undefined),
             messages: dropGhost(ss.messages),
             streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
             // #6302 — the optimistic turn is being torn down (server rejected the
