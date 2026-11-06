@@ -1,3 +1,5 @@
+import { MAX_DECLARATION_MESSAGE_CHARS } from './declared-status.js'
+import { assistantResponseText } from './assistant-response.js'
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
 import { GEMINI_CUSTOMIZATION } from './provider-customization.js'
 import { buildBaseSessionOpts } from './base-session.js'
@@ -119,6 +121,8 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
 }
 
 export class GeminiSession extends JsonlSubprocessSession {
+  static canonicalAssistantResponses = true
+
   static get customizationDescriptor() {
     return GEMINI_CUSTOMIZATION
   }
@@ -378,6 +382,14 @@ export class GeminiSession extends JsonlSubprocessSession {
     return msg.includes('DeprecationWarning')
   }
 
+  // Gemini 0.46 supplies deltas, not complete assistant text. This one bounded
+  // message buffer ends at the next tool request or result (native boundaries).
+  _flushAssistantResponse(ctx) {
+    if (ctx.assistantResponseText === undefined) return
+    this.emit('assistant_response', { text: ctx.assistantResponseText })
+    delete ctx.assistantResponseText
+  }
+
   /**
    * Map a Gemini JSONL event to the standard Chroxy event stream.
    * Called once per JSONL line by the base class sendMessage() runtime.
@@ -391,7 +403,36 @@ export class GeminiSession extends JsonlSubprocessSession {
     if (!event || !event.type) return
 
     switch (event.type) {
+      case 'message': {
+        if (event.role !== 'assistant') break
+        if (typeof event.content !== 'string') {
+          ctx.assistantResponseText = null
+          break
+        }
+        if (event.delta !== true) {
+          this._flushAssistantResponse(ctx)
+          this.emit('assistant_response', { responseId: event.id, text: assistantResponseText(event.content) })
+        } else if (ctx.assistantResponseText !== null) {
+          const previous = ctx.assistantResponseText ?? ''
+          ctx.assistantResponseText = previous.length + event.content.length <= MAX_DECLARATION_MESSAGE_CHARS ? previous + event.content : null
+        }
+        if (!ctx.didStreamStart) {
+          this.emit('stream_start', { messageId: ctx.messageId })
+          ctx.didStreamStart = true
+        }
+        this.emit('stream_delta', { messageId: ctx.messageId, delta: event.content })
+        break
+      }
+
+      case 'tool_use': {
+        this._flushAssistantResponse(ctx)
+        this.emit('tool_start', { messageId: ctx.messageId, toolUseId: event.tool_id, tool: event.tool_name || 'unknown', input: event.parameters || {} })
+        break
+      }
+
       case 'assistant': {
+        ctx.legacyAssistantFormat = true
+        this.emit('assistant_response', { responseId: event.id, text: assistantResponseText(event.content) })
         if (!event.content || !Array.isArray(event.content)) break
         for (const block of event.content) {
           if (block.type === 'text') {
@@ -414,7 +455,7 @@ export class GeminiSession extends JsonlSubprocessSession {
       }
 
       case 'tool_result': {
-        const toolUseId = event.tool_use_id || event.id || `gemini-tool-${this._messageCounter}`
+        const toolUseId = event.tool_id || event.tool_use_id || event.id || `gemini-tool-${this._messageCounter}`
         this.emit('tool_result', {
           toolUseId,
           result: event.content || event.output || '',
@@ -423,6 +464,7 @@ export class GeminiSession extends JsonlSubprocessSession {
       }
 
       case 'result': {
+        this._flushAssistantResponse(ctx)
         ctx.didEmitResult = true
         // Close any open stream before emitting result (provider contract)
         if (ctx.didStreamStart) {
@@ -447,6 +489,7 @@ export class GeminiSession extends JsonlSubprocessSession {
         this.emit('result', {
           cost: null,
           duration: null,
+          declarationEligible: !event.error && (event.status === 'success' || (event.status === undefined && ctx.legacyAssistantFormat === true)),
           usage: {
             input_tokens: inputTokens,
             output_tokens: outputTokens,
@@ -499,7 +542,7 @@ export class GeminiSession extends JsonlSubprocessSession {
       }
 
       case 'tool_result': {
-        const toolUseId = event.tool_use_id || event.id || `gemini-tool-${this._messageCounter}`
+        const toolUseId = event.tool_id || event.tool_use_id || event.id || `gemini-tool-${this._messageCounter}`
         this.emit('tool_result', {
           toolUseId,
           result: event.content || event.output || '',

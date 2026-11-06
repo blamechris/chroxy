@@ -1,3 +1,4 @@
+import { assistantResponseText, sdkDeclarationEligible } from './assistant-response.js'
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { performance } from 'node:perf_hooks'
@@ -224,6 +225,8 @@ function toolResultText(block) {
 }
 
 export class SdkSession extends BaseSession {
+  static canonicalAssistantResponses = true
+
   // #5858: marks this as a Claude-family provider — the single source of truth
   // for `isClaudeProvider()` (drives the createSession soft-fallback for stale
   // model ids + the shared models registry). Docker subclasses inherit it.
@@ -1708,6 +1711,7 @@ export class SdkSession extends BaseSession {
           ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
           // #7326: why the turn ended (truncated by max_tokens / max turns /
           // budget, refused, ...). Omitted when the SDK reported nothing we map.
+          declarationEligible: sdkDeclarationEligible(msg),
           ...turnOutcomeField(outcomeFromSdkResult(msg)),
         }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
@@ -2113,6 +2117,7 @@ export class SdkSession extends BaseSession {
             confirmHeldNotice('assistant output followed it')
             // Full assistant message — process content blocks for tool detection
             const content = msg.message?.content
+            this.emit('assistant_response', { responseId: msg.message?.id ?? msg.uuid, text: assistantResponseText(content) })
             if (!Array.isArray(content)) break
 
             for (const block of content) {

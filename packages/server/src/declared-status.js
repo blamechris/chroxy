@@ -3,7 +3,18 @@ export const MAX_DECLARATION_MESSAGE_CHARS = 131072
 const STATES = new Set(['running', 'idle', 'blocked', 'stalled', 'done'])
 const TOKENS = { '🟢': 'running', '⚪': 'idle', '🔴': 'blocked', '🟠': 'stalled' }
 const compact = (value) => value.replace(/\s+/g, ' ').trim().slice(0, 280)
-const plain = (value) => value.replace(/\*\*|__/g, '').trim()
+// Unwrap only structural labels. Payload underscores/asterisks are literal.
+const plain = (value) => value.trim()
+  .replace(/^(\*\*|__)(Status|Next|DECISION)\s*:\1/i, '$2:')
+  .replace(/^(\*\*|__)(Status|Next|DECISION)\1\s*:/i, '$2:')
+
+function introducesExampleOrHistory(line) {
+  const text = line.replace(/^#{1,6}\s*/, '').trim()
+  return /^(?:(?:for\s+)?(?:example|sample|template|format|quoted|literal)(?:\s+(?:footer|status|output|declaration|block))?\s*:)/i.test(text)
+    || /^(?:here(?: is|'s)|the following is)\b.*\b(?:example|sample|quoted|literal)\b.*:\s*$/i.test(text)
+    || /^(?:(?:the|this|an?)\s+|here is (?:the )?)?(?:previous|earlier|old|prior|historical|last)\s+(?:assistant\s+)?(?:response|message|output|footer|status|declaration)\b[^.!?]*:\s*$/i.test(text)
+    || /^(?:previously|earlier)\s*:\s*$/i.test(text)
+}
 
 function nextDeclaration(line) {
   const match = /^Next\s*:\s*(\S+)\s*(.*)$/i.exec(line)
@@ -41,7 +52,7 @@ export function extractDeclaredStatus(text) {
   const exampleBefore = (index) => {
     let previous = index - 1
     while (previous >= 0 && !lines[previous].trim()) previous--
-    return previous >= 0 && /\b(example|sample|template|format|quoted|literal)\b/i.test(eligible[previous] || '')
+    return previous >= 0 && introducesExampleOrHistory(eligible[previous] || '')
   }
   if (next && start >= 0) {
     if (exampleBefore(start)) return null
@@ -58,7 +69,7 @@ export function extractDeclaredStatus(text) {
       else if (!(current === 1 && /^\s{2,}[-*+]\s+\S/.test(lines[index]))) return null
     }
     if (rows.length < 4 || slots.map((slot) => slot[1]).join('') !== '✅🔄⛔🔶') return null
-    const decision = /^DECISION\s*:\s*(.+)$/i.exec(slots[3][2])
+    const decision = /^DECISION\s*:\s*(.+)$/i.exec(plain(slots[3][2]))
     if (!decision || !decision[1].trim() || !next.next) return null
     return {
       state: next.state,

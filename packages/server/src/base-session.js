@@ -1381,6 +1381,14 @@ export class BaseSession extends EventEmitter {
     this._activity.onDeclaredStatus(status)
   }
 
+  getDecisionActivityState() {
+    return this._activity.getDecisionState()
+  }
+
+  restoreDeclaredStatusActivity(status, state) {
+    this._activity.restoreDecisionState(status, state)
+  }
+
   /** Full current tree for fresh subscribers and resync. */
   getActivitySnapshot() {
     return this._activity.getSnapshotMessage()

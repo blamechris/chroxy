@@ -136,6 +136,7 @@ describe('completed assistant declarations', () => {
       h.session._isBusy = true
       for (const delta of [footer().slice(0, 10), footer().slice(10)]) h.session._onNotification({ method: 'item/agentMessage/delta', params: { delta } })
       assert.equal(h.statuses.length, 0)
+      h.session._onNotification({ method: 'item/completed', params: { item: { id: 'response', type: 'agentMessage', text: footer() } } })
       h.session._onNotification({ method: 'turn/completed', params: { turn: { status: 'completed', durationMs: 1 } } })
       assert.equal(h.statuses.length, 1)
       assert.equal(h.session.getActivitySnapshot().entries[0].status, 'blocked')
@@ -144,13 +145,13 @@ describe('completed assistant declarations', () => {
 })
 
 
-it('Gemini completed JSONL messages share the canonical assistant completion seam', () => {
+it('current Gemini JSONL messages share the canonical assistant completion seam', () => {
   const h = harness(GeminiSession)
   try {
     const ctx = { messageId: 'gemini-response', didStreamStart: false }
-    h.session._processJsonlLine({ type: 'assistant', content: [{ type: 'text', text: '[chroxy-status] done: Gemini tests passed' }] }, ctx)
+    h.session._processJsonlLine({ type: 'message', role: 'assistant', content: '[chroxy-status] done: Gemini tests passed', delta: true }, ctx)
     assert.equal(h.statuses.length, 0)
-    h.session._processJsonlLine({ type: 'result', usage: {} }, ctx)
+    h.session._processJsonlLine({ type: 'result', status: 'success', stats: {} }, ctx)
     assert.equal(h.statuses.length, 1)
     assert.equal(h.statuses[0].state, 'done')
   } finally { h.close() }

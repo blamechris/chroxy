@@ -1,3 +1,4 @@
+import { assistantResponseText } from './assistant-response.js'
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
 import { CODEX_EXEC_CUSTOMIZATION } from './provider-customization.js'
 import { buildBaseSessionOpts } from './base-session.js'
@@ -528,6 +529,8 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
 }
 
 export class CodexSession extends JsonlSubprocessSession {
+  static canonicalAssistantResponses = true
+
   static get customizationDescriptor() {
     return CODEX_EXEC_CUSTOMIZATION
   }
@@ -1005,7 +1008,9 @@ export class CodexSession extends JsonlSubprocessSession {
         const item = event.item
         if (!item) break
 
-        if (item.type === 'agent_message' && item.text) {
+        if (item.type === 'agent_message') {
+          this.emit('assistant_response', { responseId: item.id, text: assistantResponseText(item.text) })
+          if (typeof item.text !== 'string' || !item.text) break
           if (!ctx.didStreamStart) {
             this.emit('stream_start', { messageId: ctx.messageId })
             ctx.didStreamStart = true
@@ -1063,6 +1068,7 @@ export class CodexSession extends JsonlSubprocessSession {
           cost: null,
           duration: null,
           usage: this._mapUsage(usage),
+          declarationEligible: !event.error,
           sessionId: this.resumeSessionId,
         })
         break

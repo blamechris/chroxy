@@ -11,6 +11,9 @@ and `decision`, and server-assigned `updatedAt` (epoch milliseconds) and `source
 `done`, and `unknown`. Status updates broadcast `session_status` with the session
 id and this same object. Session-info delivery replays it alongside the activity
 snapshot. Both survive daemon recovery in the existing session-state file.
+Internal decision lifecycle timestamps are saved alongside the declaration,
+including the last ended lifetime after a clear; callers cannot supply this
+metadata.
 
 ## Assistant declarations
 
@@ -32,14 +35,23 @@ Or the established four-slot footer:
 **Next:** 🔴 BLOCKED — Choose the target OWNER: Chris
 ```
 
-Bold Markdown, whitespace and CRLF are accepted. The four slots must be present
+Bold structural labels, whitespace and CRLF are accepted. Literal underscores
+and asterisks inside summaries, decisions and task text are preserved. The four
+slots must be present
 in order. Indented task bullets may follow the in-flight slot. The final `Next`
 line retains its task text and maps `🟢 RUNNING`, `⚪ IDLE`, `🔴 BLOCKED`, and
 `🟠 FAILED` to `running`, `idle`, `blocked`, and `stalled`. An unsupported token
 is recorded as `unknown`; Chroxy does not guess that work is done. A standalone
 trailing `Next:` line is a compatibility alias and carries no decision change.
 
-Only the latest complete assistant response of a normally completed turn is considered. A bounded parsed candidate waits for the result; stop, failure and interrupted or truncated outcomes discard it. Deltas, user/system messages,
+Only the latest complete assistant response of a normally completed turn is
+considered. SDK and Claude CLI full assistant records join the text blocks of
+that message; Codex uses completed assistant items independently of its display
+stream. Gemini CLI 0.46 assistant `message` deltas form one bounded response up
+to its next tool request or result. A later response without a valid declaration
+replaces the parsed candidate. A separate internal success flag gates application
+at the result; stop, failure and interrupted or truncated outcomes discard it.
+Deltas, user/system messages,
 reasoning, oversized or truncated responses, quoted or fenced code, marked
 examples, malformed footers and declarations followed by narrative are ignored.
 Extraction is deterministic, limited to 128 Ki characters, and never asks a model

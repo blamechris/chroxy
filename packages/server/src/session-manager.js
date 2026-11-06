@@ -78,6 +78,10 @@ export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 's
  */
 export const BUILTIN_TRANSIENT_SESSION_EVENTS = Object.freeze(['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared', 'thinking_level_changed'])
 
+function sessionHasCanonicalResponses(session) {
+  return session?.constructor?.canonicalAssistantResponses === true
+}
+
 const log = createLogger('session-manager')
 /**
  * The state file a SessionManager falls back to when no `stateFilePath` is
@@ -3561,9 +3565,11 @@ export class SessionManager extends EventEmitter {
    */
   _serializeSessionEntry(id, entry) {
     const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
+    const decisionActivity = entry.session.getDecisionActivityState?.()
     return {
         id,
         ...(entry.declaredStatus ? { declaredStatus: { ...entry.declaredStatus } } : {}),
+        ...(decisionActivity ? { decisionActivity } : {}),
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         conversationId: entry.session.resumeSessionId || null,
         nativeResume: entry.session.nativeResumeState || null,
@@ -4014,8 +4020,8 @@ export class SessionManager extends EventEmitter {
         const status = DeclaredStatusSchema.safeParse(saved.declaredStatus)
         if (status.success) {
           restoredEntry.declaredStatus = status.data
-          restoredEntry.session.setDeclaredStatusActivity?.(status.data)
         }
+        restoredEntry.session.restoreDeclaredStatusActivity?.(status.success ? status.data : null, saved.decisionActivity)
         if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
           const u = saved.cumulativeUsage
           restoredEntry.cumulativeUsage = {
@@ -5572,7 +5578,7 @@ export class SessionManager extends EventEmitter {
     if (decision) status.decision = decision
     // Repeat complete messages/replays do not produce duplicate declarations.
     const previous = entry.declaredStatus
-    if (previous && JSON.stringify({ ...previous, updatedAt: 0 }) === JSON.stringify({ ...status, updatedAt: 0 })) return { ...previous }
+    if (previous && ['state', 'summary', 'next', 'blockedOn', 'etaMinutes', 'decision', 'source'].every((field) => previous[field] === status[field])) return { ...previous }
     entry.declaredStatus = status
     entry.session.setDeclaredStatusActivity?.(status)
     this._schedulePersist()
@@ -5584,7 +5590,7 @@ export class SessionManager extends EventEmitter {
   _recordHistory(sessionId, event, data) {
     const { persistNeeded, truncated, completedAssistant, assistantCompleted } = this._history.recordHistory(sessionId, event, data)
     const entry = this._sessions.get(sessionId)
-    if (entry && assistantCompleted) {
+    if (entry && assistantCompleted && sessionHasCanonicalResponses(entry.session) !== true) {
       // The latest completed assistant response supersedes an intermediate
       // response even when it carries no usable declaration. Never retain text:
       // only a bounded parsed candidate waits for the turn's normal result.
@@ -5593,7 +5599,8 @@ export class SessionManager extends EventEmitter {
     if (event === 'result' && entry) {
       const pending = entry._pendingDeclaredStatus
       delete entry._pendingDeclaredStatus
-      if (pending && data?.interrupted !== true && (!data?.turnOutcome || data.turnOutcome === 'completed')) {
+      const eligible = sessionHasCanonicalResponses(entry.session) ? data?.declarationEligible === true : data?.declarationEligible !== false
+      if (pending && eligible && data?.interrupted !== true && (!data?.turnOutcome || data.turnOutcome === 'completed')) {
         this.setDeclaredStatus(sessionId, pending, 'marker')
       }
     } else if (event === 'error' && data?.recoverable !== true && entry) {
@@ -5811,6 +5818,10 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
+    session.on('assistant_response', (response) => {
+      const entry = this._sessions.get(sessionId)
+      if (entry && !entry._destroying) entry._pendingDeclaredStatus = extractDeclaredStatus(response?.text)
+    })
     // #5431: background_tasks_changed — claude-tui's idle transcript re-scan
     // reporting that outstanding background work changed (a task-notification
     // landed or a wakeup fired while no turn was running). Deliberately NOT

@@ -27,8 +27,8 @@ import type { ActivityState } from '@chroxy/store-core'
 export function withDecisionCounts(counts: Record<string, number>, activity?: ActivityState): Record<string, number> {
   const result = { ...counts }
   for (const [sessionId, session] of Object.entries(activity?.bySession ?? {})) {
-    const decisions = Object.values(session.byId).filter((entry) => entry.kind === 'decision' && entry.status === 'blocked').length
-    if (decisions) result[sessionId] = (result[sessionId] ?? 0) + decisions
+    const decision = session.byId['decision:session']
+    if (decision?.kind === 'decision' && decision.status === 'blocked') result[sessionId] = (result[sessionId] ?? 0) + 1
   }
   return result
 }

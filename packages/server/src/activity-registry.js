@@ -405,8 +405,21 @@ export class ActivityRegistry {
     this._end(BLOCKED_ID_PREFIX + requestId, 'failed')
   }
 
+  getDecisionState() {
+    const startedAt = this._entries.get('decision:session')?.startedAt
+    if (startedAt === undefined && this._decisionEndedAt === 0) return undefined
+    return { ...(startedAt !== undefined ? { startedAt } : {}), endedAt: this._decisionEndedAt }
+  }
+
+  restoreDecisionState(status, state) {
+    const timestamp = (value) => Number.isSafeInteger(value) && value >= 0
+    this._decisionEndedAt = timestamp(state?.endedAt) ? state.endedAt : 0
+    const startedAt = timestamp(state?.startedAt) && state.startedAt > this._decisionEndedAt ? state.startedAt : undefined
+    this.onDeclaredStatus(status, startedAt)
+  }
+
   /** One durable, session-level decision; permission/question ids stay separate. */
-  onDeclaredStatus(status) {
+  onDeclaredStatus(status, restoredStartedAt) {
     const id = 'decision:session'
     if (!status?.decision || /^none$/i.test(status.decision)) {
       this._end(id, 'done')
@@ -419,7 +432,7 @@ export class ActivityRegistry {
       kind: 'decision',
       label: status.decision,
       status: 'blocked',
-      startedAt: existing?.startedAt ?? Math.max(status.updatedAt, this._decisionEndedAt + 1),
+      startedAt: existing?.startedAt ?? restoredStartedAt ?? Math.max(status.updatedAt, this._decisionEndedAt + 1),
     })
   }
 
