@@ -1,8 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runAgainstFifoWithReader } from '../helpers/fifo-with-reader.js'
 import { readFileTool, writeFileTool, editFileTool } from '../../src/built-in-tools/file-ops.js'
 
 describe('file-ops', () => {
@@ -83,6 +85,62 @@ describe('file-ops', () => {
       assert.equal(r.ok, false)
       assert.equal(r.code, 'EINVAL')
     })
+
+    it('writes with mode 0644 by default on a new file', async () => {
+      const f = join(dir, 'mode.txt')
+      await writeFileTool({ filePath: f, content: 'x' })
+      assert.equal(statSync(f).mode & 0o777 & ~process.umask(), 0o644 & ~process.umask())
+    })
+
+    it('replaces content fully when the new content is shorter', async () => {
+      const f = join(dir, 'shorter.txt')
+      writeFileSync(f, 'a much longer old content')
+      const r = await writeFileTool({ filePath: f, content: 'hi' })
+      assert.equal(r.ok, true)
+      assert.equal(readFileSync(f, 'utf8'), 'hi')
+    })
+
+    it('creates missing parent directories', async () => {
+      const f = join(dir, 'a', 'b', 'c.txt')
+      const r = await writeFileTool({ filePath: f, content: 'deep' })
+      assert.equal(r.ok, true)
+      assert.equal(readFileSync(f, 'utf8'), 'deep')
+    })
+
+    it('refuses a FIFO target with no reader, promptly', async () => {
+      const fifo = join(dir, 'pipe')
+      execFileSync('mkfifo', [fifo])
+      const r = await Promise.race([
+        writeFileTool({ filePath: fifo, content: 'payload' }),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 3000).unref()),
+      ])
+      assert.notEqual(r, 'hung', 'writeFileTool hung on a FIFO')
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
+    })
+
+    it('refuses a FIFO target with a reader attached and writes nothing to it', async () => {
+      const fifo = join(dir, 'pipe-reader')
+      execFileSync('mkfifo', [fifo])
+      let r
+      const received = await runAgainstFifoWithReader(fifo, async () => {
+        r = await writeFileTool({ filePath: fifo, content: 'payload' })
+      })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
+      assert.equal(received, '')
+    })
+
+    it('refuses a final-component symlink (ELOOP) and leaves its target alone', async () => {
+      const real = join(dir, 'real.txt')
+      writeFileSync(real, 'original')
+      const link = join(dir, 'link.txt')
+      symlinkSync(real, link)
+      const r = await writeFileTool({ filePath: link, content: 'changed' })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ELOOP')
+      assert.equal(readFileSync(real, 'utf8'), 'original')
+    })
   })
 
   describe('editFileTool', () => {
@@ -131,6 +189,56 @@ describe('file-ops', () => {
       const r = await editFileTool({ filePath: join(dir, 'nope.txt'), oldString: 'a', newString: 'b' })
       assert.equal(r.ok, false)
       assert.equal(r.code, 'ENOENT')
+    })
+
+    it('writes the replaced content to disk', async () => {
+      const f = join(dir, 'disk.txt')
+      writeFileSync(f, 'foo bar baz long tail')
+      const r = await editFileTool({ filePath: f, oldString: 'foo bar baz long tail', newString: 'x' })
+      assert.equal(r.ok, true)
+      assert.equal(readFileSync(f, 'utf8'), 'x')
+    })
+
+    it('leaves the file untouched when oldString is not found', async () => {
+      const f = join(dir, 'untouched.txt')
+      writeFileSync(f, 'hello')
+      await editFileTool({ filePath: f, oldString: 'zzz', newString: 'abc' })
+      assert.equal(readFileSync(f, 'utf8'), 'hello')
+    })
+
+    it('refuses a FIFO target with no reader, promptly', async () => {
+      const fifo = join(dir, 'pipe')
+      execFileSync('mkfifo', [fifo])
+      const r = await Promise.race([
+        editFileTool({ filePath: fifo, oldString: 'a', newString: 'b' }),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 3000).unref()),
+      ])
+      assert.notEqual(r, 'hung', 'editFileTool hung on a FIFO')
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
+    })
+
+    it('refuses a FIFO target with a reader attached and writes nothing to it', async () => {
+      const fifo = join(dir, 'pipe-reader')
+      execFileSync('mkfifo', [fifo])
+      let r
+      const received = await runAgainstFifoWithReader(fifo, async () => {
+        r = await editFileTool({ filePath: fifo, oldString: 'a', newString: 'b' })
+      })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ENOTFILE')
+      assert.equal(received, '')
+    })
+
+    it('refuses a final-component symlink (ELOOP) and leaves its target alone', async () => {
+      const real = join(dir, 'real.txt')
+      writeFileSync(real, 'original')
+      const link = join(dir, 'link.txt')
+      symlinkSync(real, link)
+      const r = await editFileTool({ filePath: link, oldString: 'original', newString: 'changed' })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'ELOOP')
+      assert.equal(readFileSync(real, 'utf8'), 'original')
     })
   })
 })
