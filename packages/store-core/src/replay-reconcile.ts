@@ -692,6 +692,21 @@ export function noteStreamOpen(
 }
 
 /**
+ * The turn ended (`agent_idle`, `result`): every stream still open for the
+ * session is over, whether or not its `stream_end` arrived. A missed one (socket
+ * drop, daemon restart, provider crash, interrupted turn) would otherwise stay
+ * open and a later full swap would resurrect the partial response (#8965).
+ * Streams that ended inside an open window stay for that window's swap.
+ */
+export function noteTurnEnded(sessionId: string | null | undefined): void {
+  if (!sessionId) return
+  const entry = _openStreams.get(sessionId)
+  if (!entry) return
+  entry.open.clear()
+  if (entry.endedInWindow.size === 0) _openStreams.delete(sessionId)
+}
+
+/**
  * A response stream ended (`stream_end`). Outside a replay window the server
  * has persisted it and any later replay re-delivers it, so it simply leaves the
  * ledger. Inside one, the snapshot may predate it: keep the row id for the swap.
@@ -739,6 +754,12 @@ export const MAX_LIVE_REPLAY_LEDGERS = 64
  * connection doesn't inherit a stale baseline. Does NOT clear cursors by
  * default — those are intentionally retained so a reconnect can present them
  * (pass `clearCursors: true` to wipe them too, e.g. on full disconnect/logout).
+ *
+ * Also leaves `_openStreams` alone unless `clearCursors` is set: an ordinary
+ * reconnect must keep it, because a turn that is still in flight is exactly what
+ * the replay after that reconnect needs to carry. A stream whose end was missed
+ * is not kept alive by that: `noteTurnEnded` clears it at `agent_idle` / `result`,
+ * and an open stream is only carried while the turn is in flight.
  */
 export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): void {
   _rebuildBaseline.clear()
@@ -1214,7 +1235,11 @@ export function reconcileReplayEnd(
   // after this — see `closeReplayWindow`.
   // #8965 — read the streams this window saw end BEFORE closing it consumes them.
   const streams = sessionId ? _openStreams.get(sessionId) : undefined
-  const inFlightResponseIds = new Set<string>(streams ? [...streams.open.values(), ...streams.endedInWindow] : [])
+  // An OPEN stream is only live while the turn is; a stale one (its stream_end
+  // and turn end both missed) must not be resurrected. Ended-in-window is exact.
+  const inFlightResponseIds = new Set<string>(
+    streams ? [...(live.turnInFlight === true ? streams.open.values() : []), ...streams.endedInWindow] : [],
+  )
   if (sessionId) closeReplayWindow(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
     return { swappedMessages: null }
@@ -1312,8 +1337,18 @@ function carriedLiveMessages(
     const toolUseId = (m as { toolUseId?: unknown } | null)?.toolUseId
     if (typeof toolUseId === 'string') keptToolUseIds.add(toolUseId)
   }
+  // A pending tool card belongs to the CURRENT turn only if it comes after the
+  // last user message; an unresulted card from an earlier, interrupted turn is
+  // stale and carrying it would resurrect it out of order (#8965).
+  let currentTurnStart = 0
+  for (let i = discardedPrefix.length - 1; i >= 0; i--) {
+    if ((discardedPrefix[i] as { type?: unknown } | null)?.type === 'user_input') {
+      currentTurnStart = i + 1
+      break
+    }
+  }
   const carried: unknown[] = []
-  for (const m of discardedPrefix) {
+  for (const [index, m] of discardedPrefix.entries()) {
     const id = idOf(m)
     if (id === null || keptIds.has(id)) continue
     const { type, thinkingStreaming, toolUseId, toolResult, toolResultImages } = m as {
@@ -1323,6 +1358,8 @@ function carriedLiveMessages(
       toolResult?: unknown
       toolResultImages?: unknown
     }
+    // Known limit shared with `streamingMessageId` (#8965 S4): a collision-remapped
+    // row id never matches the wire id a replayed copy carries, so it is not deduped.
     const isLiveResponse =
       type === 'response' && ((typeof streamingId === 'string' && id === streamingId) || inFlightResponseIds.has(id))
     // Same "resolved" test as the dashboard's findInFlightToolUse: a result, or images.
@@ -1330,8 +1367,12 @@ function carriedLiveMessages(
     const isPendingTool =
       type === 'tool_use' &&
       live.turnInFlight === true &&
+      index >= currentTurnStart &&
       !hasResult &&
-      !(typeof toolUseId === 'string' && keptToolUseIds.has(toolUseId))
+      // `handleToolStart` leaves toolUseId undefined when the wire omits it; such a
+      // card cannot be deduped by toolUseId, so it is never carried (row id still dedups).
+      typeof toolUseId === 'string' &&
+      !keptToolUseIds.has(toolUseId)
     if (isLiveResponse || isPendingTool || (type === 'thinking' && thinkingStreaming === true)) carried.push(m)
   }
   return carried

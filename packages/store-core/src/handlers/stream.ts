@@ -13,7 +13,7 @@
 import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate, completeHeldResponseStream } from '../replay-dedup'
-import { getReplayWindowDepth, noteStreamClosed, noteStreamOpen } from '../replay-reconcile'
+import { getReplayWindowDepth, noteStreamClosed, noteStreamOpen, noteTurnEnded } from '../replay-reconcile'
 import { endsAtSentenceBoundary } from '../sentence-boundary'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
@@ -2199,6 +2199,10 @@ export function handleResultUsage(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): ResultUsagePayload {
+  // #8965 — the turn is over: close any stream whose stream_end was missed. Not
+  // while a replay window is open, where a replayed `result` is an old turn's.
+  const endedSessionId = parseRawStringField(msg, 'sessionId') || activeSessionId
+  if (endedSessionId && getReplayWindowDepth(endedSessionId) === 0) noteTurnEnded(endedSessionId)
   const rawUsage = msg.usage
   const usage =
     rawUsage !== null &&

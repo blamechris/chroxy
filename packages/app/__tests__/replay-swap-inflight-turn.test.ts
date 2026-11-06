@@ -196,6 +196,7 @@ describe('in-flight turn content survives a full replay swap -- app (#8965)', ()
   });
 
   it('keeps the pre-permission text when a permission prompt split the stream', () => {
+    send({ type: 'agent_busy' });
     send({ type: 'stream_start', messageId: TURN });
     send({ type: 'stream_delta', messageId: TURN, delta: 'before the prompt' });
     jest.advanceTimersByTime(500);
@@ -229,6 +230,19 @@ describe('in-flight turn content survives a full replay swap -- app (#8965)', ()
     send({ type: 'stream_end', messageId: TURN });
     send({ type: 'history_replay_end', latestSeq: 1 });
     expect(msgs().filter((m) => m.id === TURN)).toHaveLength(1);
+  });
+
+  it('does not resurrect a stream whose stream_end was missed once the session went idle', () => {
+    send({ type: 'stream_start', messageId: TURN });
+    send({ type: 'stream_delta', messageId: TURN, delta: 'partial, never persisted' });
+    jest.advanceTimersByTime(500);
+    send({ type: 'agent_idle' });
+    // A NEXT turn is in flight, so the turnInFlight gate alone would let the stale
+    // stream through; only the turn-end clear of the ledger keeps it out.
+    send({ type: 'agent_busy' });
+    send({ type: 'history_replay_start', fullHistory: true });
+    send({ type: 'history_replay_end' });
+    expect(msgs().filter((m) => m.id === TURN)).toHaveLength(0);
   });
 
   it('keeps a tool card that is still running', () => {
