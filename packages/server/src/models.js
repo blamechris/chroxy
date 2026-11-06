@@ -747,6 +747,25 @@ export function createModelsRegistry(hooks = {}) {
    * test on the id itself (#7799 round 2).
    */
   let providerReportedFullIds = new Set()
+  // #8967 — the subset of provider-reported ids a LIVE answer reported in this
+  // process. Unlike `providerReportedFullIds` it is never stamped by
+  // `loadCache`, so it tells a live observation from a cache-warmed one.
+  const liveReportedFullIds = new Set()
+  // #8967 — optional source of model ids live sessions are using right now.
+  let inUseModelsProvider = null
+  function inUseModelFullIds() {
+    const out = new Set()
+    if (!inUseModelsProvider) return out
+    try {
+      for (const id of inUseModelsProvider() || []) {
+        if (typeof id !== 'string' || !id) continue
+        out.add(toFullIdMap.get(id) ?? id)
+      }
+    } catch (err) {
+      log.warn(`in-use models provider threw (ignored): ${err?.message || err}`)
+    }
+    return out
+  }
   // Resolve current declaration ownership structurally, including at load time
   // before synthesis. Removing an override restores the static base's authority.
   function declaringModelId(fullId) {
@@ -1042,7 +1061,10 @@ export function createModelsRegistry(hooks = {}) {
    * other side.
    */
   function persistableModels() {
-    return activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId))
+    // #8967: `offered` is a runtime-only marker; it never reaches the cache.
+    return activeModels
+      .filter((m) => !isUnpersistableDeclaredRow(m.fullId))
+      .map(({ offered: _offered, ...row }) => row)
   }
 
   /**
@@ -1232,6 +1254,14 @@ export function createModelsRegistry(hooks = {}) {
       return activeModels
     },
 
+    /**
+     * #8967 — register a function returning the model ids live sessions are
+     * using; a cache-only row among them survives a live refresh.
+     */
+    setInUseModelsProvider(fn) {
+      inUseModelsProvider = typeof fn === 'function' ? fn : null
+    },
+
     updateModels(sdkModels) {
       if (!Array.isArray(sdkModels)) {
         log.debug(`updateModels: ignoring non-array input (got ${sdkModels === null ? 'null' : typeof sdkModels})`)
@@ -1326,16 +1356,28 @@ export function createModelsRegistry(hooks = {}) {
       // (including the cache-warmed boot), with fresh metadata winning by value.
       // Overlay-only rows are excluded: removing an operator declaration must
       // still remove that row. Other providers retain replacement semantics.
+      //
+      // #8967 — but a SUCCESSFUL live answer is authoritative over the disk
+      // cache. Only rows a live answer reported earlier in THIS process
+      // (`liveReportedFullIds`) ride out a partial observation; a row that is
+      // only here because `loadCache` warmed it is dropped unless a live
+      // session is still using it, in which case it stays selectable, marked
+      // `offered: false`. Live rows lead, in the live answer's order.
       const fresh = new Map(converted.map(m => [m.fullId, m]))
-      const reported = new Map()
+      const reported = new Map(fresh)
       if (isClaudeRegistry) {
+        const inUse = inUseModelFullIds()
         for (const m of activeModels) {
-          if (providerReportedFullIds.has(m.fullId)) {
-            reported.set(m.fullId, fresh.get(m.fullId) ?? m)
+          // (holds for cache rows too: `loadCache` stamps them into providerReportedFullIds)
+          if (fresh.has(m.fullId) || !providerReportedFullIds.has(m.fullId)) continue
+          if (liveReportedFullIds.has(m.fullId)) {
+            reported.set(m.fullId, m)
+          } else if (inUse.has(m.fullId)) {
+            reported.set(m.fullId, { ...m, offered: false })
           }
         }
+        for (const fullId of fresh.keys()) liveReportedFullIds.add(fullId)
       }
-      for (const [fullId, m] of fresh) reported.set(fullId, m)
       converted.splice(0, converted.length, ...reported.values())
 
       // Merge fallback entries that the SDK omitted so the picker stays
@@ -1530,7 +1572,9 @@ export function createModelsRegistry(hooks = {}) {
       // reconciled provider rows (never declaration-only rows); other providers
       // retain the raw replacement snapshot. Re-derive against the new overlay.
       lastSdkModels = isClaudeRegistry
-        ? converted.filter(m => providerReportedFullIds.has(m.fullId)).map(m => ({
+        // #8967: only LIVE-reported rows are replayed by applyOverlay; a kept
+        // in-use cache row must not be laundered into a live observation.
+        ? converted.filter(m => providerReportedFullIds.has(m.fullId) && liveReportedFullIds.has(m.fullId)).map(m => ({
           ...m, value: m.fullId, displayName: m.id === nextDefault ? `Default (${m.label})` : m.label,
         }))
         : sdkModels
@@ -1599,6 +1643,7 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
+      liveReportedFullIds.clear()
       // #7888 re-review — the line above is exactly what makes an overlay
       // override of a base row declaration-only again: without a strip
       // between here and `activeModels`, a row that HAD lost `provenance`
@@ -2447,6 +2492,11 @@ export function getModels() {
 
 export function updateModels(sdkModels) {
   return defaultRegistry.updateModels(sdkModels)
+}
+
+/** #8967 — see the registry method; wired by the daemon to its SessionManager. */
+export function setInUseModelsProvider(fn) {
+  return defaultRegistry.setInUseModelsProvider(fn)
 }
 
 export function updateContextWindow(modelId, contextWindow) {

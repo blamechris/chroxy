@@ -21,19 +21,23 @@ describe('Claude partial discovery (#8260)', () => {
       const initialDefault = r.getDefaultModelId()
       r.updateModels([aliases[2]])
       assert.equal(r.getDefaultModelId(), initialDefault)
-      assert.deepEqual(r.getModels().map(m => m.fullId), first)
+      // Live rows lead (#8967), so the order may change; the membership may not.
+      assert.deepEqual(r.getModels().map(m => m.fullId).sort(), [...first].sort())
       r.updateModels([{ value: 'default', displayName: 'Default' }])
       for (const value of aliases.map(m => m.value)) assert.ok(r.getModels().some(m => m.fullId === value))
       assert.equal(r.getModels().find(m => m.fullId === 'default').label, 'Provider default')
       assert.equal(r.saveCache(cache), true)
       const restarted = createModelsRegistry()
       assert.equal(restarted.loadCache(cache), true)
-      restarted.updateModels([{ value: 'default', displayName: 'Default' }])
-      restarted.applyOverlay(new Map())
       for (const value of first) assert.ok(restarted.getModels().some(m => m.fullId === value), value)
       for (const value of aliases.map(m => m.value)) {
         assert.equal(restarted.resolveModelId(value.replace(/^claude-/, '')), value)
       }
+      // #8967: the first live answer after the restart retires the cache-only rows.
+      restarted.updateModels([{ value: 'default', displayName: 'Default' }])
+      restarted.applyOverlay(new Map())
+      // (Static-seed rows return via the #3075 union; the dated id is cache-only.)
+      assert.ok(!restarted.getModels().some(m => m.fullId === 'claude-haiku-4-5-20251001'))
       restarted.resetModels()
       assert.ok(!restarted.getModels().some(m => m.fullId === 'claude-haiku-4-5-20251001'))
     } finally { rmSync(dir, { recursive: true, force: true }) }
@@ -123,9 +127,11 @@ describe('Claude partial discovery (#8260)', () => {
       assert.equal(r.saveCache(cache), true)
       const restarted = createModelsRegistry()
       assert.equal(restarted.loadCache(cache), true)
-      restarted.updateModels([aliases[2]])
       assert.equal(restarted.getModels().find(m => m.fullId === variant)?.label, 'Provider variant')
       assert.ok(restarted.getAllowedModelIds().has(variant))
+      // #8967: still cache-only after a live answer that omits it -> retired.
+      restarted.updateModels([aliases[2]])
+      assert.ok(!restarted.getModels().some(m => m.fullId === variant))
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('restores persistence of a static 1M variant after its override is removed', () => {
@@ -193,12 +199,14 @@ describe('Claude partial discovery (#8260)', () => {
       writeFileSync(cache, JSON.stringify({ v: 2, models: [real], defaultModelId: 'custom' }))
       const r = createModelsRegistry()
       assert.equal(r.loadCache(cache), true)
-      r.updateModels([aliases[0]])
       assert.deepEqual(r.getModels().find(m => m.fullId === real.fullId), real)
       assert.ok(r.getAllowedModelIds().has(real.id))
-      assert.equal(r.getDefaultModelId(), 'sonnet-5-5')
       assert.equal(r.saveCache(cache), true)
       assert.deepEqual(JSON.parse(readFileSync(cache, 'utf-8')).models.find(m => m.fullId === real.fullId), real)
+      // #8967: a live answer that omits it retires the cache-only row.
+      r.updateModels([aliases[0]])
+      assert.ok(!r.getModels().some(m => m.fullId === real.fullId))
+      assert.equal(r.getDefaultModelId(), 'sonnet-5-5')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('non-Claude discovery remains a replacement', () => {
