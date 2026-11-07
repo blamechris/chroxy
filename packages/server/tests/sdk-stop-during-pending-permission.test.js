@@ -98,7 +98,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     assert.equal(errors.some((e) => e.code === 'tool_cancelled_by_provider'), false)
   })
 
-  it('CONTROL: a real Deny keeps reading as a deny (no termination reason, SDK text intact)', async () => {
+  it('CONTROL: a real Deny keeps reading as a deny (no termination reason, user-facing text, still an error)', async () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       const decision = ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
@@ -112,7 +112,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     assert.equal(results.length, 1)
     assert.equal('terminatedReason' in results[0], false)
     assert.equal(results[0].isError, true)
-    assert.equal(results[0].result, SDK_DENY_TEXT)
+    assert.equal(results[0].result, 'User denied') // #8936
   })
 
   it('CONTROL: an error on a call whose prompt was approved before Stop is the tool\'s own failure', async () => {
@@ -168,7 +168,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     await session.sendMessage('go')
     session.destroy()
     assert.equal('terminatedReason' in results[0], false)
-    assert.equal(results[0].result, SDK_DENY_TEXT)
+    assert.equal(results[0].result, 'User denied') // #8936
   })
 
   it('a Stop-cancelled id left over from an earlier turn does not tag a later turn\'s error', async () => {
@@ -493,7 +493,7 @@ describe('SdkSession -- only the Stop\'s own resolution marks a tool row stopped
   it('an explicit Deny raised in the window keeps its denied row', async () => {
     const row = await windowRun((ctx) => ctx.session.respondToPermission(ctx.requests[1].requestId, 'deny'))
     assert.equal('terminatedReason' in row, false)
-    assert.equal(row.result, SDK_DENY_TEXT)
+    assert.equal(row.result, 'User denied') // #8936
   })
 
   it('a timeout raised in the window keeps its row', async () => {
@@ -586,7 +586,7 @@ describe('SdkSession -- who may mark a tool row stopped, and when (#8430)', () =
     await session.sendMessage('go')
     session.destroy()
     assert.equal('terminatedReason' in results[0], false)
-    assert.equal(results[0].result, SDK_DENY_TEXT)
+    assert.equal(results[0].result, 'Request cancelled') // #8936: the prompt's own cancel sentence
   })
 
   it('a non-user interrupt, with the provider\'s denial read before any resolution, leaves the row alone', async () => {
@@ -637,7 +637,7 @@ describe('SdkSession -- who may mark a tool row stopped, and when (#8430)', () =
     await session.sendMessage('go')
     session.destroy()
     assert.equal('terminatedReason' in results[0], false)
-    assert.equal(results[0].result, SDK_DENY_TEXT)
+    assert.equal(results[0].result, 'User denied') // #8936
   })
 
   it('a user Stop, then a timeout that wins before the abort, keeps its row', async () => {

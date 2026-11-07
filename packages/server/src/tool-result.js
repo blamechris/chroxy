@@ -84,6 +84,23 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
       event.images = images
     }
 
+    // #8936: the provider's own refusal boilerplate ("The user doesn't want to
+    // proceed ... STOP what you are doing and wait ...") is an instruction aimed
+    // at the MODEL. The session swaps it for the short sentence the decision
+    // itself carried (what byok/claude-tui show), here, before the event is
+    // broadcast and journalled, so live and replay read the same. The text
+    // already sent to the provider is untouched. A no-op for any emitter
+    // without the hook.
+    if (typeof emitter._deniedTextForToolResult === 'function') {
+      const denied = emitter._deniedTextForToolResult(block.tool_use_id, block)
+      if (typeof denied === 'string') {
+        event.result = denied
+        event.truncated = false
+        event.isError = true
+        delete event.images
+      }
+    }
+
     // #8363: the provider wrote this result itself because Stop cancelled the
     // tool's pending permission prompt -- its text says the USER declined, which
     // is false. The session names the real cause; the result then says so (the
