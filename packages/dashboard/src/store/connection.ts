@@ -13,6 +13,7 @@ import { reconnectConnectionIdentity, captureConnectionIdentity, connectionMatch
  */
 import type { PermissionEditedInput } from '@chroxy/store-core'
 import { create } from 'zustand';
+import { registerDirectoryListingRequest, clearDirectoryListingRequests } from './directory-listing-requests';
 
 // Re-export server registry types
 export type { ServerEntry } from './types';
@@ -578,6 +579,8 @@ function clearConnectionScopedTrackers(): void {
   // #8407: the destroy-in-flight markers go with the connection (the roster
   // spread); their safety timers go with them.
   cancelAllEnvironmentDestroyTimers();
+  // #8303: id-correlated listing requests belong to the connection being torn down.
+  clearDirectoryListingRequests();
 }
 
 export const selectShowSession = (s: ConnectionState): boolean =>
@@ -5489,6 +5492,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setDirectoryListingCallback: (cb) => {
     set({ _directoryListingCallback: cb });
+  },
+
+  // #8303: a listing request answered ONLY to its own callback (matched by the
+  // echoed requestId), never through the shared slot. Returns a cancel that
+  // drops the registration; nothing is sent (and nothing stays registered) when
+  // the socket is not open.
+  requestDirectoryListingFor: (path: string, requestId: string, cb) => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return () => {};
+    const cancel = registerDirectoryListingRequest(requestId, cb);
+    if (!wsSend(socket, { type: 'list_directory', path, requestId })) cancel();
+    return cancel;
   },
 
   requestDirectoryListing: (path?: string) => {

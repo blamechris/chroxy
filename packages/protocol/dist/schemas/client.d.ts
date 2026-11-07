@@ -878,6 +878,7 @@ export declare const UserQuestionResponseSchema: z.ZodObject<{
 export declare const ListDirectorySchema: z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
     path: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const CheckGitRepoSchema: z.ZodObject<{
     type: z.ZodLiteral<"check_git_repo">;
@@ -1827,6 +1828,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
     path: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"check_git_repo">;
     path: z.ZodString;

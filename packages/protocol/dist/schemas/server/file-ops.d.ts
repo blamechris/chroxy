@@ -95,6 +95,7 @@ export declare const ServerDirectoryListingSchema: z.ZodObject<{
         isDirectory: z.ZodBoolean;
     }, z.core.$strip>>;
     error: z.ZodNullable<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerGitRepoCheckResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"git_repo_check_result">;

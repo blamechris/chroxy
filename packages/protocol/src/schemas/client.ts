@@ -1032,6 +1032,11 @@ export const UserQuestionResponseSchema = z.object({
 export const ListDirectorySchema = z.object({
   type: z.literal('list_directory'),
   path: z.string().max(4096).optional(),
+  // #8303 — optional correlation id, echoed on the `directory_listing` reply so
+  // a caller that wants only ITS answer (the New Session browsability probe)
+  // can tell it from autocomplete's and the picker's. Same bound as the other
+  // client request ids. A request without one is answered exactly as before.
+  requestId: z.string().max(128).optional(),
 })
 
 // #8972 — New Session dialog asks whether a typed/browsed directory is a git

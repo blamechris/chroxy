@@ -66,12 +66,15 @@ function spyOnFunctionExports(actual: Record<string, unknown>): Record<string, u
 }
 vi.mock('./message-handler', async (importOriginal) =>
   spyOnFunctionExports(await importOriginal<Record<string, unknown>>()))
+vi.mock('./directory-listing-requests', async (importOriginal) =>
+  spyOnFunctionExports(await importOriginal<Record<string, unknown>>()))
 vi.mock('@chroxy/store-core', async (importOriginal) =>
   spyOnFunctionExports(await importOriginal<Record<string, unknown>>()))
 
 const { useConnectionStore } = await import('./connection')
 const messageHandler = (await import('./message-handler')) as unknown as Record<string, unknown>
 const storeCore = (await import('@chroxy/store-core')) as unknown as Record<string, unknown>
+const directoryListingRequests = (await import('./directory-listing-requests')) as unknown as Record<string, unknown>
 
 // ---- the source, parsed -----------------------------------------------------------
 
@@ -149,6 +152,8 @@ const TRACKERS_EXPECTED = [
   'clearTerminalWriteBatching',
   // #8407: the destroy-in-flight safety timers.
   'cancelAllEnvironmentDestroyTimers',
+  // #8303: id-correlated list_directory registrations belong to the connection.
+  'clearDirectoryListingRequests',
 ] as const
 
 /**
@@ -244,6 +249,7 @@ describe('#7592 behaviour: a real disconnect() and _resetSessionMemory() each cl
     const from = sources[name]
     if (from === './message-handler') return messageHandler
     if (from === '@chroxy/store-core') return storeCore
+    if (from === './directory-listing-requests') return directoryListingRequests
     throw new Error(
       `${name} is imported from ${String(from)}, which this test does not spy on. Add a vi.mock for that module ` +
       'with spyOnFunctionExports, or the behavioural cells below would prove nothing about it.',

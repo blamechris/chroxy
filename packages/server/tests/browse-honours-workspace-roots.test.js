@@ -1,7 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
-import { isDirectoryListingDenial } from '@chroxy/protocol'
+import { isDirectoryListingDenial, DIRECTORY_LISTING_DENIED_PREFIX } from '@chroxy/protocol'
+import { ListDirectorySchema, ServerDirectoryListingSchema } from '@chroxy/protocol/schemas'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -273,10 +274,71 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       assert.match(sent[2].error, /^Access denied/)
     })
 
+    it('`~\\x` (a backslash after the tilde) is read by the same rule, for both operations', async () => {
+      mkdirSync(join(home, 'bs'))
+      execFileSync(GIT, ['init', '-q', join(home, 'bs')])
+      assert.equal((await list('~\\bs', {})).error, null)
+      assert.equal((await probe('~\\bs', {})).isGitRepo, true)
+    })
+
     it('the server refusal text carries the shared protocol prefix', async () => {
+      assert.ok((await list(outside, {})).error.startsWith(`${DIRECTORY_LISTING_DENIED_PREFIX}: `))
       assert.equal(isDirectoryListingDenial((await list(outside, {})).error), true)
       assert.equal(isDirectoryListingDenial('Directory not found'), false)
       assert.equal(isDirectoryListingDenial(null), false)
+    })
+  })
+
+  describe('list_directory request id (#8303)', () => {
+    function twoClients() {
+      const sent = []
+      const ops = createFileOps((ws, m) => sent.push({ to: ws.name, m }))
+      return { sent, ops, a: { name: 'A' }, b: { name: 'B' } }
+    }
+
+    it('is echoed on every kind of reply, to the requester only', async () => {
+      const { sent, ops, a, b } = twoClients()
+      await ops.listDirectory(a, home, { requestId: 'rid-1' }) // listing
+      await ops.listDirectory(a, outside, { requestId: 'rid-2' }) // refusal
+      await ops.listDirectory(a, join(home, 'missing'), { requestId: 'rid-3' }) // not found
+      await ops.listDirectory(b, home, {}) // another client, no id
+      assert.deepEqual(sent.map((x) => [x.to, x.m.requestId]), [['A', 'rid-1'], ['A', 'rid-2'], ['A', 'rid-3'], ['B', undefined]])
+      assert.equal(sent[0].m.error, null)
+      assert.match(sent[1].m.error, /^Access denied/)
+      assert.equal(sent[2].m.error, 'Directory not found')
+    })
+
+    it('without an id the reply is exactly as before (no requestId key)', async () => {
+      const { sent, ops, a } = twoClients()
+      await ops.listDirectory(a, home, {})
+      await ops.listDirectory(a, outside, {})
+      for (const { m } of sent) assert.equal('requestId' in m, false)
+      assert.deepEqual(Object.keys(sent[0].m).sort(), ['entries', 'error', 'parentPath', 'path', 'type'])
+    })
+
+    it('a malformed id is never echoed', async () => {
+      const { sent, ops, a } = twoClients()
+      for (const bad of [42, {}, '', 'x'.repeat(129)]) await ops.listDirectory(a, home, { requestId: bad })
+      for (const { m } of sent) assert.equal('requestId' in m, false)
+    })
+
+    it('the handler forwards the id from the message', async () => {
+      const sent = []
+      const fileOps = createFileOps((_ws, m) => sent.push(m))
+      fileHandlers.list_directory({}, { id: 'c', boundSessionId: null }, { type: 'list_directory', path: home, requestId: 'h-1' }, { services: { fileOps, config: {} } })
+      for (let i = 0; i < 300 && sent.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      assert.equal(sent[0].requestId, 'h-1')
+    })
+
+    it('the schemas bound the id: over 128 characters or a non-string is refused', () => {
+      assert.ok(ListDirectorySchema.safeParse({ type: 'list_directory', path: '/a', requestId: 'r'.repeat(128) }).success)
+      assert.ok(!ListDirectorySchema.safeParse({ type: 'list_directory', path: '/a', requestId: 'r'.repeat(129) }).success)
+      assert.ok(!ListDirectorySchema.safeParse({ type: 'list_directory', path: '/a', requestId: 7 }).success)
+      assert.ok(ListDirectorySchema.safeParse({ type: 'list_directory', path: '/a' }).success)
+      const reply = { type: 'directory_listing', path: '/a', parentPath: null, entries: [], error: null }
+      assert.ok(ServerDirectoryListingSchema.safeParse(reply).success)
+      assert.ok(ServerDirectoryListingSchema.safeParse({ ...reply, requestId: 'r' }).success)
+      assert.ok(!ServerDirectoryListingSchema.safeParse({ ...reply, requestId: 'r'.repeat(129) }).success)
     })
   })
 

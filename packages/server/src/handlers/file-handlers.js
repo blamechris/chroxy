@@ -55,6 +55,7 @@ function handleListDirectory(ws, client, msg, ctx) {
   ctx.services.fileOps.listDirectory(ws, msg.path, {
     config: ctx.services.config,
     bound: isBoundClient(client),
+    requestId: msg.requestId,
   })
 }
 

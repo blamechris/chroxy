@@ -290,6 +290,12 @@ export function resolveCreateSessionModel(
 // can never match a later mount's request.
 const gitCheckPrefix = Math.random().toString(36).slice(2, 8)
 let gitCheckSeq = 0
+let browseProbeSeq = 0
+function nextBrowseProbeId(): string {
+  browseProbeSeq += 1
+  return `browse-probe-${browseProbeSeq}`
+}
+
 function nextGitCheckRequestId(): string {
   return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`
 }
@@ -362,6 +368,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browseError, setBrowseError] = useState<string | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+  const requestDirectoryListingFor = useConnectionStore(s => s.requestDirectoryListingFor)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   // #5553: per-repo session preset disclosure. When the chosen cwd has an
   // ACTIVE preset, surface a compact, expandable indicator so the operator can
@@ -422,33 +429,28 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setGitRepoCheckCallback(null)
     }
   }, [open, trimmedCwd, requestGitRepoCheck, setGitRepoCheckCallback])
-  // #8303: ask the daemon whether Browse can list the chosen directory, by
-  // sending the same `list_directory` request the picker sends, so the daemon's
-  // one rule decides. Only an explicit "Access denied" refusal for THIS path
-  // raises the note; no reply, a dropped socket, "not found" or any other error
-  // says nothing. Informational only — it never gates Create. The picker owns
-  // the single listing-callback slot while it is open, so this probe stands
-  // down then (and cancels itself instead of clearing the slot).
+  // #8303: ask the daemon whether Browse can list the chosen directory, with the
+  // same `list_directory` the picker sends, so the daemon's one rule decides.
+  // The request carries an id and its reply is routed to THIS callback only —
+  // never through the shared listing slot that path autocomplete and the picker
+  // use — so the probe can neither steal their replies nor be handed one. Only
+  // an explicit "Access denied" refusal raises the note; no reply (an older
+  // daemon does not echo the id), a dropped socket, "not found" or any other
+  // error says nothing. Informational only — it never gates Create.
   const [browseRefused, setBrowseRefused] = useState<string | null>(null)
   useEffect(() => {
-    if (!open || browsing || !trimmedCwd || typeof requestDirectoryListing !== 'function' || typeof setDirectoryListingCallback !== 'function') return
-    let cancelled = false
-    // The callback goes into the shared slot only when the request is sent, so a
-    // picker that just closed (and cleared the slot) is left cleared meanwhile.
+    if (!open || !trimmedCwd || typeof requestDirectoryListingFor !== 'function') return
+    let cancel: (() => void) | null = null
     const t = setTimeout(() => {
-      setDirectoryListingCallback((listing: DirectoryListing) => {
-        if (cancelled) return
-        const responsePath = listing.path || ''
-        if (!responsePath || !browsePathsMatch(trimmedCwd, responsePath)) return // not ours
+      cancel = requestDirectoryListingFor(trimmedCwd, nextBrowseProbeId(), (listing: DirectoryListing) => {
         setBrowseRefused(isDirectoryListingDenial(listing.error) ? trimmedCwd : null)
       })
-      requestDirectoryListing(trimmedCwd)
     }, 300)
     return () => {
-      cancelled = true
       clearTimeout(t)
+      cancel?.() // drops the registration, so a late reply has no callback to reach
     }
-  }, [open, browsing, trimmedCwd, requestDirectoryListing, setDirectoryListingCallback])
+  }, [open, trimmedCwd, requestDirectoryListingFor])
   const showBrowseNote = browseRefused !== null && browseRefused === trimmedCwd
   const knownIsGitRepo = gitCheck && gitCheck.path === trimmedCwd ? gitCheck.isGitRepo : null
   const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree, knownIsGitRepo)
@@ -875,7 +877,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           )}
           {showBrowseNote && (
             <span className="cwd-browse-note" data-testid="cwd-not-browsable">
-              Browse can't list this directory (it is outside your home folder and the configured workspace roots). You can still try to create a session here, or pick a directory inside them.
+              Browse can't list this directory (it is outside your home folder and any workspace roots). You can still try to create a session here, or pick a directory inside your home folder or a workspace root.
             </span>
           )}
           {currentPreset && (

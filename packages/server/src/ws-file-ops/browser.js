@@ -155,6 +155,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath, opts = {}) {
     let absPath = null
+    // #8303 — echo the caller's correlation id on every reply, to this socket
+    // only (sendFn is per-socket). A malformed id is dropped, never echoed; the
+    // schema already refuses one before dispatch.
+    const requestId = typeof opts.requestId === 'string' && opts.requestId.length > 0 && opts.requestId.length <= 128
+      ? opts.requestId
+      : null
+    const send = (message) => sendFn(ws, requestId ? { ...message, requestId } : message)
     try {
       const home = homedir()
       const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
@@ -162,7 +169,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       const rawPath = trimmed ? kernelForm(trimmed, home) : home
       absPath = normalize(resolve(rawPath))
       const denial = hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL
-      const deny = (message = denial) => sendFn(ws, {
+      const deny = (message = denial) => send({
         type: 'directory_listing',
         path: absPath,
         parentPath: null,
@@ -208,7 +215,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       const listedPath = hasDotDot(rawPath) ? realAbsPath : absPath
       const parentPath = dirname(listedPath) === listedPath ? null : dirname(listedPath)
 
-      sendFn(ws, {
+      send({
         type: 'directory_listing',
         path: listedPath,
         parentPath,
@@ -219,7 +226,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       log.error(`list_directory failed: ${truncateForLog(err.message)}`)
       const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
-      sendFn(ws, {
+      send({
         type: 'directory_listing',
         path: absPath || requestedPath || null,
         parentPath: null,
