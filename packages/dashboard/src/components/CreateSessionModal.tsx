@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback, useRef, useMemo, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
+import { isDirectoryListingDenial } from '@chroxy/protocol'
 import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
@@ -289,6 +290,12 @@ export function resolveCreateSessionModel(
 // can never match a later mount's request.
 const gitCheckPrefix = Math.random().toString(36).slice(2, 8)
 let gitCheckSeq = 0
+let browseProbeSeq = 0
+function nextBrowseProbeId(): string {
+  browseProbeSeq += 1
+  return `browse-probe-${browseProbeSeq}`
+}
+
 function nextGitCheckRequestId(): string {
   return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`
 }
@@ -361,6 +368,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browseError, setBrowseError] = useState<string | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+  const requestDirectoryListingFor = useConnectionStore(s => s.requestDirectoryListingFor)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   // #5553: per-repo session preset disclosure. When the chosen cwd has an
   // ACTIVE preset, surface a compact, expandable indicator so the operator can
@@ -421,6 +429,31 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setGitRepoCheckCallback(null)
     }
   }, [open, trimmedCwd, requestGitRepoCheck, setGitRepoCheckCallback])
+  // #8303: ask the daemon whether Browse can list the chosen directory, with the
+  // same `list_directory` the picker sends, so the daemon's one rule decides.
+  // The request carries an id and its reply is routed to THIS callback only —
+  // never through the shared listing slot that path autocomplete and the picker
+  // use — so the probe can neither steal their replies nor be handed one. Only
+  // an explicit "Access denied" refusal raises the note; a daemon that does not
+  // advertise `directoryListingRequestIdV1` is never asked (the store sends
+  // nothing for it, since its untagged reply would land in the shared slot), so
+  // no note shows there; a dropped socket, "not found" or any other error says
+  // nothing either. Informational only — it never gates Create.
+  const [browseRefused, setBrowseRefused] = useState<string | null>(null)
+  useEffect(() => {
+    if (!open || !trimmedCwd || typeof requestDirectoryListingFor !== 'function') return
+    let cancel: (() => void) | null = null
+    const t = setTimeout(() => {
+      cancel = requestDirectoryListingFor(trimmedCwd, nextBrowseProbeId(), (listing: DirectoryListing) => {
+        setBrowseRefused(isDirectoryListingDenial(listing.error) ? trimmedCwd : null)
+      })
+    }, 300)
+    return () => {
+      clearTimeout(t)
+      cancel?.() // drops the registration, so a late reply has no callback to reach
+    }
+  }, [open, trimmedCwd, requestDirectoryListingFor])
+  const showBrowseNote = browseRefused !== null && browseRefused === trimmedCwd
   const knownIsGitRepo = gitCheck && gitCheck.path === trimmedCwd ? gitCheck.isGitRepo : null
   const worktreeSwitch = deriveWorktreeSwitch(trimmedCwd, worktree, knownIsGitRepo)
   const effectiveWorktree = worktreeSwitch.effectiveWorktree
@@ -843,6 +876,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </div>
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {showBrowseNote && (
+            <span className="cwd-browse-note" data-testid="cwd-not-browsable">
+              Browse can't list this directory (it is outside your home folder and any workspace roots). You can still try to create a session here, or pick a directory inside your home folder or a workspace root.
+            </span>
           )}
           {currentPreset && (
             <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">

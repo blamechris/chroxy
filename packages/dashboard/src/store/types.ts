@@ -2169,6 +2169,8 @@ export interface ConnectionState {
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
   requestDirectoryListing: (path?: string) => void;
+  /** #8303 — id-correlated listing request; the reply goes only to `cb`. Returns a cancel. */
+  requestDirectoryListingFor: (path: string, requestId: string, cb: (listing: DirectoryListing) => void) => () => void;
   // #8972 — is `path` a git repo? Reply arrives via the callback (echoes requestId).
   setGitRepoCheckCallback: (cb: ((result: GitRepoCheckResult) => void) | null) => void;
   requestGitRepoCheck: (path: string, requestId: string) => void;

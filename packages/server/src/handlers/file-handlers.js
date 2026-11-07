@@ -49,7 +49,14 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 }
 
 function handleListDirectory(ws, client, msg, ctx) {
-  ctx.services.fileOps.listDirectory(ws, msg.path)
+  // Unbound (host-level) clients browse what New Session accepts. Bound clients
+  // are denied this message before dispatch (bound-client-policy.js); the
+  // $HOME-only branch in browser.js isBrowsable is a second layer.
+  ctx.services.fileOps.listDirectory(ws, msg.path, {
+    config: ctx.services.config,
+    bound: isBoundClient(client),
+    requestId: msg.requestId,
+  })
 }
 
 /**
@@ -67,7 +74,10 @@ function handleCheckGitRepo(ws, client, msg, ctx) {
     ctx.services.fileOps.refuseGitRepoCheck(ws, msg.path, msg.requestId)
     return
   }
-  ctx.services.fileOps.checkGitRepo(ws, msg.path, msg.requestId)
+  ctx.services.fileOps.checkGitRepo(ws, msg.path, msg.requestId, {
+    config: ctx.services.config,
+    bound: false,
+  })
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {

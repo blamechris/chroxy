@@ -156,6 +156,7 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
     assert.ok(Object.prototype.hasOwnProperty.call(authOk, 'connectedClients'))
     assert.ok(Object.prototype.hasOwnProperty.call(authOk, 'webFeatures'))
     assert.equal(authOk.capabilities.agentConnections, true)
+    assert.equal(authOk.capabilities.directoryListingRequestIdV1, true) // #8303
   })
 
   // #8268 — a dashboard page that outlives a daemon update compares its own build id

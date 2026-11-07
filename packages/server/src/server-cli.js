@@ -37,6 +37,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
+import { defaultCwdAdvisory } from './handler-utils.js'
 import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
@@ -1250,6 +1251,9 @@ export async function startCliServer(config) {
     // applies its default (and the operator gets a warn log).
     mcpToolCallTimeoutMs: startupTimeouts.mcpToolCallTimeoutMs,
   })
+  // #8303: a blank New Session cwd inherits this without the explicit-cwd check.
+  const defaultCwdWarning = defaultCwdAdvisory(sessionManager.defaultCwd, config)
+  if (defaultCwdWarning) log.warn(defaultCwdWarning)
 
   // #3749 / #3899: surface the effective inactivity timeouts at startup so
   // operators can verify their config overrides took effect.

@@ -8377,6 +8377,15 @@ button.sidebar-token-view-session-row:hover {
   margin-top: -6px;
 }
 
+/* #8303 — informational note under the cwd field. Own class: .cwd-hint pulls
+   itself up 6px, which made it overlap the "New directory" hint above it. */
+.cwd-browse-note {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  display: block;
+  margin-top: 4px;
+}
+
 /* ---- Terminal Container ---- */
 .terminal-container {
   flex: 1;

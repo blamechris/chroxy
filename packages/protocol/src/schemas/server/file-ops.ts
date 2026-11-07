@@ -111,6 +111,8 @@ export const ServerDirectoryListingSchema = z.object({
     isDirectory: z.boolean(),
   })),
   error: z.string().nullable(),
+  // #8303 — echoes the request's `requestId` when it carried one; absent otherwise.
+  requestId: z.string().max(128).optional(),
 })
 
 // #8972 — `check_git_repo` response. `isGitRepo` is null when the server cannot

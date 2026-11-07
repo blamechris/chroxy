@@ -124,7 +124,7 @@ describe('check_git_repo authority (#8972)', () => {
   it('an unbound client (null or undefined boundSessionId) and a primary client get the real probe', () => {
     for (const client of [{ boundSessionId: null }, {}, { boundSessionId: undefined, isPrimaryToken: true }]) {
       const { probes, refusals, ws } = run(client)
-      assert.deepEqual(probes, [[ws, '/p', 'r9']])
+      assert.deepEqual(probes, [[ws, '/p', 'r9', { config: undefined, bound: false }]])
       assert.equal(refusals.length, 0)
     }
   })

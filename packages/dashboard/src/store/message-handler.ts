@@ -1,3 +1,4 @@
+import { routeDirectoryListing } from './directory-listing-requests';
 import { getWsCloseMessage, WS_CLOSE_CREDENTIAL_INVALID, captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
@@ -6778,11 +6779,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     // dashboard omits setPrimaryClientId (no secondary presence store).
 
     case 'directory_listing': {
-      const cb = get()._directoryListingCallback;
-      if (cb) {
-        const payload = sharedDirectoryListing(msg);
-        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
-      }
+      // #8303: an id-tagged reply belongs to ONE request (the New Session
+      // browsability probe) and never reaches the shared slot; an untagged one
+      // (autocomplete, the picker, an older daemon) goes to the slot as before.
+      const payload = sharedDirectoryListing(msg);
+      const listingRequestId = typeof msg.requestId === 'string' && msg.requestId ? msg.requestId : null;
+      routeDirectoryListing(
+        listingRequestId,
+        { ...payload, entries: payload.entries as DirectoryEntry[] },
+        get()._directoryListingCallback,
+      );
       break;
     }
 

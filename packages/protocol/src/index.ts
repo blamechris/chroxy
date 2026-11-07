@@ -19,6 +19,19 @@
 export const PROTOCOL_VERSION = 2
 
 /**
+ * The prefix of a `directory_listing` refusal ("this path is outside what Browse
+ * may list"). The server writes its refusal text from this and the dashboard
+ * recognises a refusal by it, so the two cannot drift apart (#8303). Other
+ * errors ("Directory not found", "Permission denied") do not carry it.
+ */
+export const DIRECTORY_LISTING_DENIED_PREFIX = 'Access denied'
+
+/** True when a `directory_listing` error is the Browse refusal. */
+export function isDirectoryListingDenial(error: unknown): boolean {
+  return typeof error === 'string' && error.startsWith(`${DIRECTORY_LISTING_DENIED_PREFIX}:`)
+}
+
+/**
  * Client capability sets advertised in the `auth` handshake.
  * Single source of truth so app and dashboard stay in sync with the server.
  */

@@ -448,7 +448,7 @@ function _isSecureRequest(req) {
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message, phase?, tunnelMode?, tunnelUrl?, attempt?, maxAttempts? }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category?, message, recoverable, correlationId?, sessionId? } — server-side error forwarded to app
- *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
+ *   { type: 'directory_listing', path, parentPath, entries, error, requestId? } — directory listing response for file browser (requestId echoes the request's, when it carried one)
  *   { type: 'git_repo_check_result', path, isGitRepo, requestId? } — is the New Session dir a git repo (true/false, null = cannot tell) (#8972)
  *   { type: 'file_listing', path, parentPath, entries, error } — file browser listing response
  *   { type: 'file_content', path, content, language, size, truncated, error, requestId? } — file content response

@@ -1,8 +1,8 @@
-import { readdir, stat, realpath } from 'fs/promises'
+import { readdir, stat, lstat, realpath } from 'fs/promises'
 import { readContainedTextFile } from '../utils/regular-file.js'
 import { homedir } from 'os'
 import { claudeConfigDir } from '../utils/claude-config-dir.js'
-import { join, resolve, normalize, relative, sep } from 'path'
+import { join, resolve, normalize, relative, sep, isAbsolute, dirname, basename } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
@@ -10,6 +10,8 @@ import { isPathWithin } from '../utils/path-containment.js'
 import { realpathOfDeepestAncestor, unresolvablePathError, fileOpErrorMessage } from './common.js'
 import { truncateForLog } from './reader.js'
 import { isGitRepo } from '../utils/git-repo.js'
+import { validateCwdAllowed } from '../handler-utils.js'
+import { DIRECTORY_LISTING_DENIED_PREFIX } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -26,6 +28,117 @@ const LISTING_UNRESOLVABLE_REASONS = {
   ENOTDIR: 'Not a directory',
 }
 
+const HOME_ONLY_DENIAL = `${DIRECTORY_LISTING_DENIED_PREFIX}: directory listing is restricted to the home directory`
+const HOME_AND_ROOTS_DENIAL =
+  `${DIRECTORY_LISTING_DENIED_PREFIX}: directory listing is restricted to the home directory and any usable workspace roots`
+
+function hasWorkspaceRoots(config) {
+  return Array.isArray(config?.workspaceRoots) &&
+    config.workspaceRoots.some((r) => typeof r === 'string' && r.length > 0)
+}
+
+/**
+ * The requested path in the form New Session hands to `validateCwdAllowed`: the
+ * trimmed input with `~` expanded and NOT lexically normalised, so the kernel
+ * resolves any `..` through the links before it (`/tmp/..` is `/private` where
+ * `/tmp` links to `/private/tmp`). `normalize`/`resolve` would collapse it
+ * textually and make Browse and Create answer differently for one input (#8303).
+ * The containment decision is made on the realpath of this form.
+ */
+function kernelForm(trimmed, home) {
+  if (trimmed.startsWith('~')) {
+    // ONE tilde rule for every Browse path: drop every separator after the `~`,
+    // so `~//x` is `<home>/x` for list_directory and check_git_repo alike.
+    const rest = trimmed.slice(1).replace(/^[\\/]+/, '')
+    return rest ? home + sep + rest : home
+  }
+  return isAbsolute(trimmed) ? trimmed : process.cwd() + sep + trimmed
+}
+
+function hasDotDot(p) {
+  return p.split(/[\\/]+/).includes('..')
+}
+
+const MAX_ANCESTOR_STEPS = 256
+
+/**
+ * Resolve `raw` the way the kernel does, and for a target that does not exist
+ * find its deepest EXISTING ancestor (a `..` is applied to the prefix before it,
+ * through links, never textually). Returns `{ real, missing, code }`: `real` is
+ * the resolved target (or ancestor), `missing` whether the target itself is
+ * absent, `code` the first failure (ENOENT or ENOTDIR). A dangling symlink on
+ * the way is followed with realpathOfDeepestAncestor (#8013). Any other error,
+ * or a walk that cannot finish, throws with `walked` set when it happened after
+ * the target was already known to be missing, so the caller can answer with the
+ * uniform denial instead of an error that differs by what exists out there.
+ */
+async function deepestExistingAncestor(raw) {
+  let cur = raw
+  let firstCode = null
+  for (let i = 0; i < MAX_ANCESTOR_STEPS; i++) {
+    try {
+      return { real: await realpath(cur), missing: firstCode !== null, code: firstCode }
+    } catch (err) {
+      if (firstCode === null && err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
+      try {
+        if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
+        firstCode ??= err.code
+        const parent = dirname(cur)
+        if (parent === cur) throw err
+        const leaf = basename(cur)
+        if (leaf !== '..' && leaf !== '.') {
+          let isLink = false
+          try { isLink = (await lstat(cur)).isSymbolicLink() } catch { /* absent */ }
+          if (isLink) {
+            const realParent = await realpath(parent)
+            return { real: await realpathOfDeepestAncestor(join(realParent, leaf)), missing: true, code: firstCode }
+          }
+        }
+        cur = parent
+      } catch (inner) {
+        inner.walked = true
+        throw inner
+      }
+    }
+  }
+  throw Object.assign(new Error('ancestor walk too deep'), { walked: true })
+}
+
+/** The directory to judge for a (possibly missing) target: its nearest existing directory. */
+async function judgedDirectory(real) {
+  let cur = real
+  for (let i = 0; i < MAX_ANCESTOR_STEPS; i++) {
+    try {
+      const st = await stat(cur)
+      return st.isDirectory() ? cur : dirname(cur)
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return null
+      cur = parent
+    }
+  }
+  return null
+}
+
+/**
+ * The one containment rule for Browse (`list_directory`, `check_git_repo`): $HOME
+ * as before, plus whatever New Session's cwd check (`validateCwdAllowed`, the
+ * credential-directory deny-list then `workspaceRoots`) accepts. Asking the same
+ * function keeps the two from drifting. A session-bound client is denied these
+ * message types before dispatch (bound-client-policy.js), so this is a second
+ * layer: should one ever reach here it keeps the $HOME-only boundary, since it
+ * cannot create sessions and gets nothing from the create allowlist
+ * (docs/security/bearer-token-authority.md section 4).
+ * @param {string} realPath canonical (realpath) target
+ * @param {string} homeReal canonical home
+ * @param {{ config?: object|null, bound?: boolean }} [opts]
+ */
+function isBrowsable(realPath, homeReal, opts = {}) {
+  if (isPathWithin(realPath, homeReal)) return true
+  if (opts.bound !== false || !opts.config) return false
+  return validateCwdAllowed(realPath, opts.config) === null
+}
+
 /**
  * Directory browsing, file listing, slash commands, and agent listing.
  *
@@ -40,68 +153,54 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
   const catalogReaddir = deps.readdir ?? readdir
 
   /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath) {
+  async function listDirectory(ws, requestedPath, opts = {}) {
     let absPath = null
+    // #8303 — echo the caller's correlation id on every reply, to this socket
+    // only (sendFn is per-socket). A malformed id is dropped, never echoed; the
+    // schema already refuses one before dispatch.
+    const requestId = typeof opts.requestId === 'string' && opts.requestId.length > 0 && opts.requestId.length <= 128
+      ? opts.requestId
+      : null
+    const send = (message) => sendFn(ws, requestId ? { ...message, requestId } : message)
     try {
       const home = homedir()
-      if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
-        absPath = home
-      } else {
-        const trimmed = requestedPath.trim()
-        absPath = trimmed.startsWith('~')
-          ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
-          : resolve(trimmed)
-      }
-      absPath = normalize(absPath)
+      const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
+      // Create's form (kernelForm); the lexical `absPath` is only the echo.
+      const rawPath = trimmed ? kernelForm(trimmed, home) : home
+      absPath = normalize(resolve(rawPath))
+      const denial = hasWorkspaceRoots(opts.config) && opts.bound === false ? HOME_AND_ROOTS_DENIAL : HOME_ONLY_DENIAL
+      const deny = (message = denial) => send({
+        type: 'directory_listing',
+        path: absPath,
+        parentPath: null,
+        entries: [],
+        error: message,
+      })
 
-      let realAbsPath
-      let containmentUnknown = false
+      let walk
       try {
-        realAbsPath = await realpath(absPath)
+        walk = await deepestExistingAncestor(rawPath)
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
-          // to skip the containment check: the outer catch answered
-          // "Permission denied" / "Not a directory" for a path outside home,
-          // where a readable one answers "Access denied", and sent ELOOP's
-          // raw message with the server path in it. Only a path inside home
-          // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
-          sendFn(ws, {
-            type: 'directory_listing',
-            path: absPath,
-            parentPath: null,
-            entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
-          })
-          return
-        }
-        // #8011 — a MISSING target is contained canonically too: realpath
-        // its deepest existing ancestor. This used to fall back to the raw
-        // lexical `absPath`, so `~/link-to-outside/missing` looked like a
-        // path inside home and answered "Directory not found", while an
-        // EXISTING subdirectory out there answered "Access denied" — two
-        // answers keyed on whether something outside home exists.
-        // A walk that cannot finish denies; it never reads as "not found".
-        try {
-          realAbsPath = await realpathOfDeepestAncestor(absPath)
-        } catch {
-          containmentUnknown = true
-        }
+        if (err.walked) return deny() // cannot establish containment: the uniform denial
+        // #8012 — a first-step failure other than "missing" (EACCES, EPERM,
+        // ELOOP, …) keeps a specific message only for a path inside home.
+        const homeReal = await realpath(home).catch(() => null)
+        deny(await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS, denial))
+        return
       }
       const homeReal = await realpath(home)
 
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
-        sendFn(ws, {
-          type: 'directory_listing',
-          path: absPath,
-          parentPath: null,
-          entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
-        })
-        return
-      }
+      // #8011/#8303 — a MISSING target is judged by its deepest existing
+      // ancestor, resolved as the kernel resolves it, with the SAME rule an
+      // existing one gets. Outside the browsable area the answer is the same
+      // denial whether or not anything exists out there; inside it nothing is
+      // hidden, so the answer is a plain "not found".
+      // (A file is judged by the directory holding it, so a file or a path below
+      // one inside a root is not mistaken for a path outside it.)
+      const judged = await judgedDirectory(walk.real)
+      if (judged === null || !isBrowsable(judged, homeReal, opts)) return deny()
+      if (walk.missing) throw Object.assign(new Error('missing'), { code: walk.code })
+      const realAbsPath = walk.real
 
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
       const entries = dirents
@@ -109,11 +208,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         .sort((a, b) => a.name.localeCompare(b.name))
         .map(d => ({ name: d.name, isDirectory: true }))
 
-      const parentPath = absPath === '/' ? null : resolve(absPath, '..')
+      // Report the directory actually listed. Without a `..` in the input the
+      // lexical form IS that directory (and is what the client asked for); with
+      // one, the lexical collapse can name a different directory, so report the
+      // resolved one.
+      const listedPath = hasDotDot(rawPath) ? realAbsPath : absPath
+      const parentPath = dirname(listedPath) === listedPath ? null : dirname(listedPath)
 
-      sendFn(ws, {
+      send({
         type: 'directory_listing',
-        path: absPath,
+        path: listedPath,
         parentPath,
         entries,
         error: null,
@@ -122,7 +226,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       log.error(`list_directory failed: ${truncateForLog(err.message)}`)
       const errorMessage = fileOpErrorMessage(err, 'Operation failed', { ENOENT: 'Directory not found' })
 
-      sendFn(ws, {
+      send({
         type: 'directory_listing',
         path: absPath || requestedPath || null,
         parentPath: null,
@@ -745,14 +849,12 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     sendFn(ws, msg)
   }
 
-  async function probeGitRepo(trimmed) {
+  async function probeGitRepo(trimmed, opts) {
     try {
       const home = homedir()
-      const absPath = normalize(trimmed.startsWith('~')
-        ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
-        : resolve(trimmed))
-      const [realAbs, homeReal] = await Promise.all([realpath(absPath), realpath(home)])
-      if (!isPathWithin(realAbs, homeReal)) return null
+      // Same form New Session validates (kernel-resolved `..`), see kernelForm.
+      const [realAbs, homeReal] = await Promise.all([realpath(kernelForm(trimmed, home)), realpath(home)])
+      if (!isBrowsable(realAbs, homeReal, opts)) return null
       if (!(await stat(realAbs)).isDirectory()) return null
       return await isGitRepo(realAbs)
     } catch {
@@ -765,7 +867,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     replyGitRepoCheck(ws, requestedPath, requestId, null)
   }
 
-  async function checkGitRepo(ws, requestedPath, requestId) {
+  async function checkGitRepo(ws, requestedPath, requestId, opts = {}) {
     const trimmed = typeof requestedPath === 'string' ? requestedPath.trim() : ''
     if (!trimmed) return replyGitRepoCheck(ws, requestedPath, requestId, null)
     let pending = ws && typeof ws === 'object' ? inFlightChecks.get(ws) : undefined
@@ -776,7 +878,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     let probe = pending.get(trimmed)
     if (!probe) {
       if (pending.size >= MAX_GIT_CHECKS_PER_CLIENT) return replyGitRepoCheck(ws, requestedPath, requestId, null)
-      probe = probeGitRepo(trimmed).finally(() => { pending.delete(trimmed) })
+      probe = probeGitRepo(trimmed, opts).finally(() => { pending.delete(trimmed) })
       pending.set(trimmed, probe)
     }
     return replyGitRepoCheck(ws, requestedPath, requestId, await probe)
