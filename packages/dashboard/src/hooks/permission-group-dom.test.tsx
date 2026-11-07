@@ -96,7 +96,7 @@ function mount(storeMessages: ChatMessage[]) {
     activeSessionCaps: null,
     setViewMode: vi.fn(),
     stalledPromptIds: chat.current.stalledPromptIds,
-    hasPendingAskUserQuestionPermission: false,
+    gatedQuestionIds: new Set<string>(),
     sessions: [],
   } as unknown as UseMessageRendererArgs
   const { result: render_ } = renderHook(() => useMessageRenderer(args))

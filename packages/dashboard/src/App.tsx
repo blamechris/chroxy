@@ -35,7 +35,7 @@ import {
   ComposerRecoveryQueue,
   nextMessageId,
   isSessionStarting,
-  hasPendingAskUserQuestionPermission as hasPendingAskUserQuestionPermissionShared,
+  deriveGatedQuestionIds,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -513,9 +513,12 @@ export function App() {
   // rare but any single un-allowed one is enough to gate every question
   // render in that session — the bug is content leak before consent, not
   // which specific question got which specific permission decision.
-  // #8357 — the predicate itself is shared with the mobile app (store-core).
-  const hasPendingAskUserQuestionPermission = useMemo(
-    () => hasPendingAskUserQuestionPermissionShared(storeMessages, resolvedPermissions),
+  // #8357 — superseded by a per-card derivation shared with the mobile app
+  // (store-core): each question card is paired with its own permission, so one
+  // denied or expired permission no longer hides every later question. The
+  // allow-only rule above still holds for the paired permission.
+  const gatedQuestionIds = useMemo(
+    () => deriveGatedQuestionIds(storeMessages, resolvedPermissions, Date.now()),
     [storeMessages, resolvedPermissions],
   )
 
@@ -2657,7 +2660,7 @@ export function App() {
     activeSessionCaps,
     setViewMode,
     stalledPromptIds,
-    hasPendingAskUserQuestionPermission,
+    gatedQuestionIds,
     sessions,
   })
 

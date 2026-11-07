@@ -1211,7 +1211,7 @@ export {
   readAskUserQuestions,
   askUserQuestionHeadline,
   askUserQuestionSummary,
-  hasPendingAskUserQuestionPermission,
+  deriveGatedQuestionIds,
 } from './ask-user-question-permission'
 
 // #7365 — position-independent turn-end marking. `markTurnBoundary` is

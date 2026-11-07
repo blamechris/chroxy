@@ -83,7 +83,7 @@ function dom(storeMessages: ChatMessage[]): string {
     activeSessionCaps: null,
     setViewMode: vi.fn(),
     stalledPromptIds: built.stalledPromptIds,
-    hasPendingAskUserQuestionPermission: false,
+    gatedQuestionIds: new Set<string>(),
     sessions: [],
   } as unknown as UseMessageRendererArgs
   const { result } = renderHook(() => useMessageRenderer(args))
@@ -258,7 +258,7 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
       activeSessionCaps: null,
       setViewMode: vi.fn(),
       stalledPromptIds: chat.current.stalledPromptIds,
-      hasPendingAskUserQuestionPermission: false,
+      gatedQuestionIds: new Set<string>(),
       sessions: [],
     } as unknown as UseMessageRendererArgs
     const { result: renderer } = renderHook(() => useMessageRenderer(args))

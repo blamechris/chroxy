@@ -168,13 +168,45 @@ describe('AskUserQuestion permission card (#8357, rule 1)', () => {
   });
 });
 
-describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
-  it('withholds the question card while the permission is unanswered', () => {
-    const tree = renderFeed([permissionPrompt(), questionCard()]);
+
+describe('AskUserQuestion permission with no toolInput (#8357)', () => {
+  it('renders the headline, never the raw content JSON', () => {
+    const tree = renderFeed([permissionPrompt({ toolInput: undefined })]);
+    const text = allText(tree);
+    expect(text).toContain('Claude wants to ask you a question');
+    expect(text.includes('{"questions"')).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it('still gates its question card', () => {
+    const tree = renderFeed([permissionPrompt({ toolInput: undefined }), questionCard()]);
     expect(questionCardShown(tree)).toBe(false);
-    // The question text appears once -- on the permission card -- and its
-    // option buttons (answer controls) do not exist yet.
+    act(() => tree.unmount());
+  });
+});
+
+const shown = (tree: renderer.ReactTestRenderer, id: string) =>
+  tree.root.findAll((n) => n.props?.testID === `approval-card-${id}` && typeof n.type === 'string').length > 0;
+
+const perm2 = (o: Partial<ChatMessage> = {}) =>
+  permissionPrompt({ id: 'perm-2', requestId: 'req-2', timestamp: 1002, ...o });
+const card2 = (o: Partial<ChatMessage> = {}) =>
+  questionCard({ id: 'q-2', toolUseId: 'toolu_q2', content: 'Which size?', timestamp: 1003, ...o });
+
+describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
+  it('withholds the question card while ITS permission is unanswered, and the permission card is on screen', () => {
+    const tree = renderFeed([permissionPrompt(), questionCard()]);
+    expect(shown(tree, 'perm-1')).toBe(true);
+    expect(allText(tree)).toContain('Claude wants to ask you a question');
+    expect(questionCardShown(tree)).toBe(false);
     expect(tree.root.findAll((n) => n.props?.testID === 'approval-button-Crimson').length).toBe(0);
+    act(() => tree.unmount());
+  });
+
+  it('gates the card when it arrives BEFORE its permission (the two are raised in parallel)', () => {
+    const tree = renderFeed([questionCard(), permissionPrompt()]);
+    expect(shown(tree, 'perm-1')).toBe(true);
+    expect(questionCardShown(tree)).toBe(false);
     act(() => tree.unmount());
   });
 
@@ -186,15 +218,61 @@ describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
     }
   });
 
-  it.each(['allow', 'allowSession', 'allowAlways'])('reveals the question card once the permission is answered "%s"', (answered) => {
+  it.each(['allow', 'allowSession', 'allowAlways'])('reveals the question card once its permission is answered "%s"', (answered) => {
     const tree = renderFeed([permissionPrompt({ answered }), questionCard()]);
     expect(questionCardShown(tree)).toBe(true);
     act(() => tree.unmount());
   });
 
-  it.each(['deny', '(resolved)'])('keeps the question card withheld when the permission is "%s"', (answered) => {
-    const tree = renderFeed([permissionPrompt({ answered }), questionCard()]);
+  it('keeps a DENIED question\'s own card hidden', () => {
+    const tree = renderFeed([permissionPrompt({ answered: 'deny' }), questionCard()]);
     expect(questionCardShown(tree)).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it('a denied question does not hide a LATER allowed one (the agent can be answered)', () => {
+    const tree = renderFeed([
+      permissionPrompt({ answered: 'deny' }), questionCard(),
+      perm2({ answered: 'allow' }), card2(),
+    ]);
+    expect(questionCardShown(tree)).toBe(false);
+    expect(shown(tree, 'q-2')).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it('an expired permission does not hide a later question', () => {
+    const tree = renderFeed([
+      permissionPrompt({ expiresAt: Date.now() - 1000 }), questionCard(),
+      perm2({ answered: 'allow' }), card2(),
+    ]);
+    expect(questionCardShown(tree)).toBe(true);
+    expect(shown(tree, 'q-2')).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it('a stopped permission does not hide a later question', () => {
+    const tree = renderFeed([permissionPrompt({ permissionOutcome: 'stopped', expiresAt: undefined }), card2({ id: 'q-1' })]);
+    expect(questionCardShown(tree)).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it("a replayed '(resolved)' permission does not hide a later question (after a reload)", () => {
+    const tree = renderFeed([
+      permissionPrompt({ answered: '(resolved)' }), questionCard(),
+      perm2({ answered: 'allow' }), card2(),
+    ]);
+    expect(questionCardShown(tree)).toBe(true);
+    expect(shown(tree, 'q-2')).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it('a pending permission for a later question still hides only that question', () => {
+    const tree = renderFeed([
+      permissionPrompt({ answered: 'allow' }), questionCard({ answered: 'Teal' }),
+      perm2(), card2(),
+    ]);
+    expect(shown(tree, 'perm-2')).toBe(true);
+    expect(shown(tree, 'q-2')).toBe(false);
     act(() => tree.unmount());
   });
 
@@ -221,10 +299,17 @@ describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
     act(() => tree.unmount());
   });
 
-  it('is not opened by a pending permission for a DIFFERENT tool being allowed', () => {
-    const bash = permissionPrompt({ id: 'perm-2', requestId: 'req-2', tool: 'Bash', toolInput: { command: 'ls' }, answered: 'allow' });
-    const tree = renderFeed([permissionPrompt(), bash, questionCard()]);
-    expect(questionCardShown(tree)).toBe(false);
+  it('a pending permission for ANOTHER tool does not hide a question card', () => {
+    const bash = permissionPrompt({ id: 'perm-b', requestId: 'req-b', tool: 'Bash', toolInput: { command: 'ls' } });
+    const tree = renderFeed([bash, questionCard()]);
+    expect(shown(tree, 'perm-b')).toBe(true);
+    expect(questionCardShown(tree)).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it('a prompt with no requestId is never treated as a permission, even naming AskUserQuestion', () => {
+    const tree = renderFeed([questionCard({ id: 'q-0', tool: 'AskUserQuestion', toolInput: TOOL_INPUT }), questionCard()]);
+    expect(questionCardShown(tree)).toBe(true);
     act(() => tree.unmount());
   });
 });

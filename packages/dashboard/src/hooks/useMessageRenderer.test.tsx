@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, renderHook, fireEvent, within } from '@testing-library/react'
-import type { ChatMessage } from '@chroxy/store-core'
+import { deriveGatedQuestionIds, type ChatMessage } from '@chroxy/store-core'
 import { useMessageRenderer, permissionPromptDescription, type UseMessageRendererArgs } from './useMessageRenderer'
 import type { ChatViewMessage } from '../components/ChatView'
 
@@ -87,7 +87,7 @@ function makeArgs(overrides: Partial<UseMessageRendererArgs>): UseMessageRendere
     activeSessionCaps: null,
     setViewMode: vi.fn(),
     stalledPromptIds: new Set<string>(),
-    hasPendingAskUserQuestionPermission: false,
+    gatedQuestionIds: new Set<string>(),
     sessions: [],
     ...overrides,
   } as UseMessageRendererArgs
@@ -426,7 +426,7 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
     const args = makeArgs({
       storeMsgMap: new Map([['p1', perm], ['q1', question]]),
       storeMessages: [perm, question],
-      hasPendingAskUserQuestionPermission: true,
+      gatedQuestionIds: new Set(['q1']),
     })
     const { result } = renderHook(() => useMessageRenderer(args))
     const permNode = result.current({ id: 'p1', type: 'prompt', content: perm.content, timestamp: 0 } as unknown as ChatViewMessage)
@@ -447,11 +447,31 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
     expect(screen.getAllByTestId('permission-prompt')).toHaveLength(1)
   })
 
+  // The gate is derived per card by the shared store-core function, fed the same
+  // messages App.tsx feeds it: a denied question stays hidden, but it must not
+  // hide a later question whose own permission was allowed (#8357).
+  it('a denied question does not hide a later allowed one; the denied one stays hidden', () => {
+    const deniedPerm = { ...perm, answered: 'deny' } as ChatMessage
+    const perm2 = { ...perm, id: 'p2', requestId: 'req-aq2', answered: 'allow' } as ChatMessage
+    const question2 = { ...question, id: 'q2', content: 'Left or right?', questions: [{ question: 'Left or right?', options: [{ label: 'Left', value: 'Left' }] }] } as ChatMessage
+    const messages = [deniedPerm, question, perm2, question2]
+    const args = makeArgs({
+      storeMsgMap: new Map(messages.map((m) => [m.id, m])),
+      storeMessages: messages,
+      gatedQuestionIds: deriveGatedQuestionIds(messages, {}, Date.now()),
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const node = (m: ChatMessage) => result.current({ id: m.id, type: 'prompt', content: m.content, timestamp: 0 } as unknown as ChatViewMessage)
+    render(<div>{node(question)}{node(question2)}</div>)
+    expect(screen.queryByText('Red or blue?')).not.toBeInTheDocument()
+    expect(screen.getByText('Left or right?')).toBeInTheDocument()
+  })
+
   it('reveals the interactive question card once the permission is no longer pending', () => {
     const args = makeArgs({
       storeMsgMap: new Map([['q1', question]]),
       storeMessages: [question],
-      hasPendingAskUserQuestionPermission: false,
+      gatedQuestionIds: new Set<string>(),
     })
     const { result } = renderHook(() => useMessageRenderer(args))
     render(<>{result.current({ id: 'q1', type: 'prompt', content: question.content, timestamp: 0 } as unknown as ChatViewMessage)}</>)

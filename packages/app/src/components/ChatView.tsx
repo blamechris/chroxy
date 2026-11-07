@@ -26,7 +26,7 @@ import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
 import { CompactionMarker } from './CompactionMarker';
 import { TurnOutcomeMarker } from './TurnOutcomeMarker';
 import { insertCompactionMarkers } from './insertCompactionMarkers';
-import { buildChatViewMessages, isRetryableAskUserQuestionError, hasPendingAskUserQuestionPermission } from '@chroxy/store-core';
+import { buildChatViewMessages, isRetryableAskUserQuestionError, deriveGatedQuestionIds } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
 import type { PermissionEditedInput } from '@chroxy/store-core';
@@ -527,11 +527,11 @@ function ChatViewForSession({
     scrollViewRef.current?.scrollToEnd({ animated: true });
   };
 
-  // #8357 / #4685 -- is an AskUserQuestion permission still unresolved-or-denied
-  // in this session? One scan per messages change; every question row gets the
-  // same answer. The predicate is shared with the dashboard.
-  const askUserQuestionPermissionPending = useMemo(
-    () => hasPendingAskUserQuestionPermission(messages),
+  // #8357 / #4685 -- which question cards are still waiting on THEIR OWN
+  // AskUserQuestion permission (pending or denied)? One scan per messages
+  // change; each row asks the set about itself. Shared with the dashboard.
+  const gatedQuestionIds = useMemo(
+    () => deriveGatedQuestionIds(messages, null, Date.now()),
     [messages],
   );
 
@@ -635,7 +635,7 @@ function ChatViewForSession({
           >
             <MessageBubble
               allowSingleMultiSelect={allowSingleMultiSelect}
-              askUserQuestionPermissionPending={askUserQuestionPermissionPending}
+              questionGated={gatedQuestionIds.has(msg.id)}
               message={msg}
               queued={msg.type === 'user_input' && (queuedIds?.has(msg.id) ?? false)}
               onCancelQueued={onCancelQueued}
@@ -682,7 +682,7 @@ function ChatViewForSession({
       onSubmitMultiQuestion,
       allowMultiQuestion,
       allowSingleMultiSelect,
-      askUserQuestionPermissionPending,
+      gatedQuestionIds,
       queuedIds,
       onCancelQueued,
       onEditQueued,

@@ -126,7 +126,7 @@ function ThinkingBubble({ content, streaming, truncated, durationMs, tokens }: {
   );
 }
 
-function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, askUserQuestionPermissionPending, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, questionGated, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
    * #5938 — true when this `user_input` bubble was sent mid-turn and is sitting
@@ -170,15 +170,14 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
    */
   allowSingleMultiSelect?: boolean;
   /**
-   * #8357 / #4685 -- an AskUserQuestion PERMISSION in this session is still
-   * unresolved-or-denied. While true, an unanswered question card renders
+   * #8357 / #4685 -- THIS question card's own AskUserQuestion permission is
+   * still pending or was denied. While true, an unanswered question card renders
    * nothing: the permission card is the one surface for the pending state, and
    * the model-supplied question and options stay withheld until the user allows.
-   * ChatView derives it once per render (store-core
-   * `hasPendingAskUserQuestionPermission`) and passes the same boolean to every
-   * row. Defaults to false so a caller that omits it keeps the old behaviour.
+   * ChatView derives it per card (store-core `deriveGatedQuestionIds`). Defaults
+   * to false so a caller that omits it keeps the old behaviour.
    */
-  askUserQuestionPermissionPending?: boolean;
+  questionGated?: boolean;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -519,7 +518,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // `requestId`) that nobody has answered renders nothing while an AskUserQuestion
   // permission is unresolved-or-denied. Nothing here keys off `message.tool`: the
   // gate holds for every question card, whatever name the payload carries.
-  if (isPrompt && !message.requestId && message.answered == null && askUserQuestionPermissionPending) {
+  if (isPrompt && !message.requestId && message.answered == null && questionGated) {
     return null;
   }
 
@@ -928,7 +927,7 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     // #8357 -- the consent gate flips when the AskUserQuestion permission is
     // allowed; a question bubble must re-render then. The message object itself
     // does not change, so without this the memo would keep it blank.
-    prev.askUserQuestionPermissionPending === next.askUserQuestionPermissionPending &&
+    prev.questionGated === next.questionGated &&
     // #5938 — re-render when the queued flag flips (badge appears/clears on
     // enqueue/flush) or the cancel handler's presence changes.
     // #6628 — likewise for the edit handler's presence.
