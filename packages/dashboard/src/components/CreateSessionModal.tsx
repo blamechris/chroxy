@@ -296,6 +296,13 @@ function nextBrowseProbeId(): string {
   return `browse-probe-${browseProbeSeq}`
 }
 
+// #9065: the Browse picker's own request ids, distinct from the probe's.
+let browseNavSeq = 0
+function nextBrowseNavId(): string {
+  browseNavSeq += 1
+  return `browse-nav-${browseNavSeq}`
+}
+
 function nextGitCheckRequestId(): string {
   return `gitcheck-${gitCheckPrefix}-${++gitCheckSeq}`
 }
@@ -369,6 +376,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const requestDirectoryListingFor = useConnectionStore(s => s.requestDirectoryListingFor)
+  // #9065: a daemon that echoes `requestId` lets the picker route replies by id
+  // instead of comparing path text, which fails when the server resolves the
+  // path (`a/..`). Without it the picker keeps the path-matching fallback.
+  const listingRequestIdCapable = useConnectionStore(s => s.serverCapabilities?.directoryListingRequestIdV1 === true)
+  const browseCancelRef = useRef<(() => void) | null>(null)
+  const cancelBrowseRequest = useCallback(() => {
+    browseCancelRef.current?.()
+    browseCancelRef.current = null
+  }, [])
+  useEffect(() => cancelBrowseRequest, [cancelBrowseRequest]) // unmount
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   // #5553: per-repo session preset disclosure. When the chosen cwd has an
   // ACTIVE preset, surface a compact, expandable indicator so the operator can
@@ -501,6 +518,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowsing(false)
     setBrowseEntries([])
     setDirectoryListingCallback(null)
+    cancelBrowseRequest()
     if (cwdValue) {
       const generated = generateDefaultName(cwdValue, existingNames)
       setName(generated)
@@ -626,34 +644,56 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [nameManuallyEdited, existingNames])
 
+  const applyBrowseListing = useCallback((listing: DirectoryListing, requestedPath: string) => {
+    const responsePath = listing.path || listing.parentPath || ''
+    // Update browsePath to the server's canonical path when it differs
+    if (responsePath && responsePath !== requestedPath) {
+      setBrowsePath(responsePath)
+    }
+    setBrowseLoading(false)
+    if (listing.error) {
+      setBrowseError(listing.error)
+      setBrowseEntries([])
+    } else if (!listing.entries) {
+      setBrowseEntries([])
+    } else {
+      setBrowseError(null)
+      setBrowseEntries(listing.entries)
+    }
+  }, [])
+
   const handleBrowseNavigate = useCallback((path: string) => {
     setBrowsePath(path)
     setBrowseLoading(true)
     setBrowseEntries([])
     setBrowseError(null)
     const requestedPath = path
+    // Any earlier navigation's registration is dropped, so its late reply has
+    // no callback to reach.
+    cancelBrowseRequest()
+    if (listingRequestIdCapable && typeof requestDirectoryListingFor === 'function') {
+      // The echoed id identifies this request, so the reply is ours whatever its
+      // `path` says (the server answers with the resolved directory).
+      browseCancelRef.current = requestDirectoryListingFor(path, nextBrowseNavId(), (listing: DirectoryListing) => {
+        applyBrowseListing(listing, requestedPath)
+      }, () => {
+        // Nothing went out (socket closed / send failed): say so instead of
+        // leaving "Loading..." for a reply that cannot come.
+        setBrowseLoading(false)
+        setBrowseEntries([])
+        setBrowseError(`Could not list ${requestedPath}: not connected to the server`)
+      })
+      return
+    }
     setDirectoryListingCallback((listing: DirectoryListing) => {
       // Guard: ignore stale responses from previous navigations (#1584)
       // Normalize paths before comparing — server may expand ~ or add/strip slashes (#1592)
       const responsePath = listing.path || listing.parentPath || ''
       if (!browsePathsMatch(requestedPath, responsePath)) return // stale
-      // Update browsePath to the server's canonical path when it differs
-      if (responsePath && responsePath !== requestedPath) {
-        setBrowsePath(responsePath)
-      }
-      setBrowseLoading(false)
-      if (listing.error) {
-        setBrowseError(listing.error)
-        setBrowseEntries([])
-      } else if (!listing.entries) {
-        setBrowseEntries([])
-      } else {
-        setBrowseError(null)
-        setBrowseEntries(listing.entries)
-      }
+      applyBrowseListing(listing, requestedPath)
     })
     requestDirectoryListing(path)
-  }, [requestDirectoryListing, setDirectoryListingCallback])
+  }, [requestDirectoryListing, setDirectoryListingCallback, requestDirectoryListingFor, listingRequestIdCapable, cancelBrowseRequest, applyBrowseListing])
 
   const handleBrowseOpen = useCallback(async () => {
     // In Tauri context, use native OS folder picker via IPC command.
@@ -693,17 +733,19 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     cwdValRef.current = path
     setBrowsing(false)
     setDirectoryListingCallback(null)
+    cancelBrowseRequest()
     if (!nameManuallyEdited) {
       const generated = generateDefaultName(path, existingNames)
       setName(generated)
       nameValRef.current = generated
     }
-  }, [nameManuallyEdited, existingNames, setDirectoryListingCallback])
+  }, [nameManuallyEdited, existingNames, setDirectoryListingCallback, cancelBrowseRequest])
 
   const handleBrowseCancel = useCallback(() => {
     setBrowsing(false)
     setDirectoryListingCallback(null)
-  }, [setDirectoryListingCallback])
+    cancelBrowseRequest()
+  }, [setDirectoryListingCallback, cancelBrowseRequest])
 
   const handleCwdKeyDown = useCallback((e: KeyboardEvent) => {
     // #8064 — don't let an IME composition's commit key (usually Enter, but
