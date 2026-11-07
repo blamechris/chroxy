@@ -12,6 +12,9 @@ import { fileHandlers } from '../src/handlers/file-handlers.js'
 import { validateCwdAllowed, defaultCwdAdvisory } from '../src/handler-utils.js'
 import { GIT } from '../src/git.js'
 
+// A path below a regular file is ENOTDIR on POSIX; Windows reports it as ENOENT.
+const BELOW_A_FILE = process.platform === 'win32' ? /^(Not a directory|Directory not found)$/ : /^Not a directory$/
+
 /**
  * #8303 — Browse (`list_directory`, `check_git_repo`) and New Session's cwd check
  * must answer from one rule. HOME is a scratch directory so nothing reads the
@@ -19,7 +22,7 @@ import { GIT } from '../src/git.js'
  * directory outside it.
  */
 describe('Browse honours workspaceRoots (#8303)', () => {
-  let scratch, home, root, outside, savedHome, savedCfg
+  let scratch, home, root, outside, savedHome, savedProfile, savedCfg
 
   async function run(handlerName, msg, { config, bound = false } = {}) {
     const sent = []
@@ -36,7 +39,8 @@ describe('Browse honours workspaceRoots (#8303)', () => {
   const probe = (path, opts) => run('check_git_repo', { path, requestId: 'r' }, opts)
 
   beforeEach(() => {
-    scratch = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-8303-')))
+    // .native expands Windows 8.3 short names (the CI runner's tmpdir uses them), like fs/promises realpath does
+    scratch = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-8303-')))
     home = join(scratch, 'home')
     root = join(scratch, 'root')
     outside = join(scratch, 'outside')
@@ -46,14 +50,20 @@ describe('Browse honours workspaceRoots (#8303)', () => {
     execFileSync(GIT, ['init', '-q', join(root, 'repo')])
     execFileSync(GIT, ['init', '-q', join(outside, 'x')])
     savedHome = process.env.HOME
+    savedProfile = process.env.USERPROFILE
     savedCfg = process.env.CHROXY_CONFIG_DIR
+    // os.homedir() reads HOME on POSIX but USERPROFILE on Windows; without the
+    // latter the real profile is home and a tmpdir fixture is INSIDE it.
     process.env.HOME = home
+    process.env.USERPROFILE = home
     delete process.env.CHROXY_CONFIG_DIR
   })
 
   afterEach(() => {
     if (savedHome === undefined) delete process.env.HOME
     else process.env.HOME = savedHome
+    if (savedProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = savedProfile
     if (savedCfg === undefined) delete process.env.CHROXY_CONFIG_DIR
     else process.env.CHROXY_CONFIG_DIR = savedCfg
     rmSync(scratch, { recursive: true, force: true })
@@ -214,7 +224,7 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       symlinkSync(join(home, 'real'), join(home, 'inlink'))
       assert.equal((await list(`${home}/inlink/../absent`, {})).error, 'Directory not found')
       writeFileSync(join(home, 'afile'), 'x')
-      assert.equal((await list(`${home}/afile/x`, {})).error, 'Not a directory')
+      assert.match((await list(`${home}/afile/x`, {})).error, BELOW_A_FILE)
     })
   })
 
@@ -245,7 +255,7 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       writeFileSync(join(root, 'afile'), 'x')
       const cfg = { workspaceRoots: [root] }
       assert.equal((await list(join(root, 'afile'), { config: cfg })).error, 'Not a directory')
-      assert.equal((await list(`${root}/afile/x`, { config: cfg })).error, 'Not a directory')
+      assert.match((await list(`${root}/afile/x`, { config: cfg })).error, BELOW_A_FILE)
     })
 
     it('a plain path echoes as typed and its parent is the lexical parent (home included)', async () => {
