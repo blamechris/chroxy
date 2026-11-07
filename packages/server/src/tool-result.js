@@ -94,8 +94,8 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
     if (typeof emitter._deniedTextForToolResult === 'function') {
       const denied = emitter._deniedTextForToolResult(block.tool_use_id, block)
       if (typeof denied === 'string') {
-        event.result = denied
-        event.truncated = false
+        event.truncated = denied.length > maxSize
+        event.result = event.truncated ? denied.slice(0, maxSize) : denied
         event.isError = true
         delete event.images
       }
