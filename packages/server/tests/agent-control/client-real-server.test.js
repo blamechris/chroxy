@@ -44,6 +44,7 @@ describe('AgentControlClient against a real encrypted WsServer', () => {
     await client.connect()
     assert.equal(client.daemonInfo.encryption, 'required')
     assert.equal(client.daemonInfo.capabilities.inputContextV1, true)
+    assert.equal(client.daemonInfo.capabilities.createRequestIdV1, true, '#7977: the daemon advertises create requestId echo')
 
     const listed = await client.listSessions()
     assert.equal(listed.sessions.length, 2)

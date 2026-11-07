@@ -503,6 +503,7 @@ export class AgentControlClient extends EventEmitter {
       connectedClients: typeof authOk.connectedClients === 'number' && Number.isFinite(authOk.connectedClients) ? authOk.connectedClients : null,
       capabilities: {
         inputContextV1: rawCaps.inputContextV1 === true,
+        createRequestIdV1: rawCaps.createRequestIdV1 === true,
       },
     }
   }
@@ -562,6 +563,16 @@ export class AgentControlClient extends EventEmitter {
       throw new Error("createSession: permissionMode 'auto' is not permitted through agent-control")
     }
 
+    // #7977: ownership is minted only from a reply echoing our requestId. A
+    // daemon that predates the echo would still CREATE the session (it ignores
+    // the unknown field), never answer with the id, and leave us timed out with
+    // an orphan that a retry would duplicate. Refuse before anything is sent.
+    if (this._daemonMeta?.capabilities?.createRequestIdV1 !== true) {
+      const err = new Error('createSession: this daemon does not advertise create_session requestId support (auth_ok.capabilities.createRequestIdV1), so the create reply cannot be correlated — refusing to create rather than risk an orphaned session. Upgrade the daemon.')
+      err.code = 'CREATE_REQUEST_ID_UNSUPPORTED'
+      throw err
+    }
+
     const payload = {
       type: 'create_session',
       // Explicit, not omitted: a host with `defaultSkipPermissions: true`
@@ -578,24 +589,20 @@ export class AgentControlClient extends EventEmitter {
     if (typeof opts.model === 'string' && opts.model.trim()) payload.model = opts.model.trim()
     if (opts.worktree === true) payload.worktree = true
 
-    // create_session carries no requestId, and `session_switched` is ALSO what
-    // the daemon sends when it re-homes a client whose active session was
-    // destroyed (handleDestroySession -> `firstSessionId`, someone else's
-    // session). A planner starts out active on the daemon's default session,
-    // so a human deleting that session while this create is in flight would
-    // otherwise resolve the create with the HUMAN session's id — and
-    // `_ownedSessions` would then admit input, interrupt and `allow` on it.
-    // A session that already existed before this create cannot be the one it
-    // made, so a `session_switched` naming one is not taken as the reply; the
-    // wait continues for the real one. Residual (not closable client-side
-    // without a correlation id on the wire): a session created by someone
-    // else AFTER this snapshot that is also `firstSessionId` when a re-home
-    // fires, i.e. every older session gone within the same round trip.
-    const { sessions: before } = await this.listSessions()
-    const preexisting = new Set(before.map((s) => s.sessionId))
+    // #7977: `session_switched` is ALSO what the daemon sends when it re-homes
+    // a client whose active session was destroyed (handleDestroySession ->
+    // `firstSessionId`, someone else's session), so the reply type alone cannot
+    // say whose session a frame names. Correlate on a client-chosen `requestId`
+    // the daemon echoes on the create-confirm (and on every error for this
+    // create); a re-home never carries one. A frame without OUR id is never the
+    // reply, whatever it names, so ownership is minted only from a genuine
+    // create reply. Needs a daemon that echoes the id (>= this change): an older
+    // one never answers with it and the create times out rather than guessing.
+    const requestId = `ac-${randomUUID()}`
+    payload.requestId = requestId
     const result = await this._runSerial('create_session', this._requestTimeoutMs, () => {
       this._send(payload)
-    }, { accept: (msg) => !(msg.type === 'session_switched' && preexisting.has(msg.sessionId)) })
+    }, { accept: (msg) => msg.requestId === requestId })
 
     if (result.type === 'session_error') {
       const err = new Error(result.message || 'create_session failed')

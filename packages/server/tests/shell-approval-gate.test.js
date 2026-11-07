@@ -54,6 +54,23 @@ describe('user-shell approval gate (#6277)', () => {
     assert.ok(typeof pending.approvalId === 'string' && pending.approvalId.length > 0)
   })
 
+  it('echoes the create requestId on the held reply, the stored entry, and the token-class refusal (#7977)', () => {
+    const store = new ShellApprovalStore()
+    const createSession = createSpy(() => 'sess-1')
+    const ws = makeWs()
+    sessionHandlers.create_session(ws, primaryClient(), { provider: 'user-shell', requestId: 'ac-req-9' }, gateCtx({ requireApproval: true, store, createSession }))
+    const pending = ws._messages.find((m) => m.type === 'shell_pending_approval')
+    assert.equal(pending.requestId, 'ac-req-9')
+    assert.equal(store.approve(pending.approvalId).entry.requestId, 'ac-req-9', 'the deferred create can echo it on approval')
+
+    const ws2 = makeWs()
+    const paired = { ...primaryClient(), isPrimaryToken: false }
+    sessionHandlers.create_session(ws2, paired, { provider: 'user-shell', requestId: 'ac-req-10' }, gateCtx({ requireApproval: false, store, createSession }))
+    const err = ws2._messages.find((m) => m.type === 'session_error')
+    assert.equal(err.code, 'PRIMARY_TOKEN_REQUIRED')
+    assert.equal(err.requestId, 'ac-req-10')
+  })
+
   it('proceeds synchronously when requireApproval is off (backward-compat)', () => {
     const createSession = createSpy(() => 'sess-1')
     sessionHandlers.create_session(makeWs(), primaryClient(), { provider: 'user-shell' }, gateCtx({ requireApproval: false, store: new ShellApprovalStore(), createSession }))
@@ -66,6 +83,25 @@ describe('user-shell approval gate (#6277)', () => {
     sessionHandlers.create_session(ws, primaryClient(), { provider: 'user-shell' }, gateCtx({ requireApproval: true, store: undefined, createSession }))
     assert.equal(createSession.callCount, 0)
     assert.ok(ws._messages.some((m) => m.type === 'session_error'), 'sends a session_error, never silently allows')
+  })
+
+  it('echoes the requestId on the worktree-without-cwd, env-manager-disabled and approval-unavailable errors (#7977)', () => {
+    const createSession = createSpy(() => 'sess-1')
+    const errorFor = (msg, opts) => {
+      const ws = makeWs()
+      sessionHandlers.create_session(ws, primaryClient(), { ...msg, requestId: 'ac-req-20' }, gateCtx({ createSession, ...opts }))
+      return ws._messages.find((m) => m.type === 'session_error')
+    }
+    const worktree = errorFor({ worktree: true }, { requireApproval: false, store: new ShellApprovalStore() })
+    assert.match(worktree.message, /Worktree requires/)
+    assert.equal(worktree.requestId, 'ac-req-20')
+    const env = errorFor({ environmentId: 'env-1' }, { requireApproval: false, store: new ShellApprovalStore() })
+    assert.match(env.message, /Environment management is not enabled/)
+    assert.equal(env.requestId, 'ac-req-20')
+    const unavailable = errorFor({ provider: 'user-shell' }, { requireApproval: true, store: undefined })
+    assert.match(unavailable.message, /approval service is unavailable/)
+    assert.equal(unavailable.requestId, 'ac-req-20')
+    assert.equal(createSession.callCount, 0)
   })
 
   it('does NOT hold when user-shell is disabled (no doomed approval; create rejects upstream)', () => {

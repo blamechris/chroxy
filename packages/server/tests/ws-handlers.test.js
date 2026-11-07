@@ -42,30 +42,31 @@ async function createClient(port) {
     }),
     2000, 'Connection timeout'
   )
-  await withTimeout(
-    (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-    2000, 'Auth timeout'
-  )
+  await pollUntil(() => messages.find(m => m.type === 'auth_ok'), 2000, 'Auth timeout')
   return { ws, messages }
 }
 
 function send(ws, msg) { ws.send(JSON.stringify(msg)) }
 
+// Polls with its own deadline. Racing an endless loop against a timer rejects on
+// time but leaves the loop running, so one missed message hangs the whole file.
+async function pollUntil(predicate, timeoutMs, msg) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(msg)
+    await new Promise(r => setTimeout(r, 10))
+  }
+}
+
 async function waitForMessage(messages, type, timeout = 1000) {
   const existing = messages.find(m => m.type === type)
   if (existing) return existing
-  await withTimeout(
-    (async () => { while (!messages.find(m => m.type === type)) await new Promise(r => setTimeout(r, 10)) })(),
-    timeout, `Timeout waiting for message type: ${type}`
-  )
+  await pollUntil(() => messages.find(m => m.type === type), timeout, `Timeout waiting for message type: ${type}`)
   return messages.find(m => m.type === type)
 }
 
 async function _waitForMessages(messages, type, count, timeout = 1000) {
-  await withTimeout(
-    (async () => { while (messages.filter(m => m.type === type).length < count) await new Promise(r => setTimeout(r, 10)) })(),
-    timeout, `Timeout waiting for ${count} messages of type: ${type}`
-  )
+  await pollUntil(() => messages.filter(m => m.type === type).length >= count, timeout, `Timeout waiting for ${count} messages of type: ${type}`)
   return messages.filter(m => m.type === type)
 }
 
@@ -132,6 +133,91 @@ describe('WS handler: create_session', () => {
     assert.equal(manager.createSession.callCount, 0, 'Should not call createSession')
 
     ws.close()
+  })
+})
+
+describe('WS handler: create_session requestId correlation (#7977)', () => {
+  let server
+  afterEach(() => { if (server) { server.close(); server = null } })
+
+  async function setup(throwOnCreate = false) {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'Default', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Second', cwd: '/tmp' },
+    ])
+    manager.createSession = createSpy(({ name, cwd }) => {
+      if (throwOnCreate) throw Object.assign(new Error('boom'), { code: 'PROVIDER_BINARY_NOT_FOUND' })
+      const mockSession = createMockSession()
+      mockSession.cwd = cwd || '/tmp'
+      mockSession.resumeSessionId = null
+      sessionsMap.set('sess-new', { session: mockSession, name: name || 'New', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
+      return 'sess-new'
+    })
+    manager.destroySession = createSpy((id) => { sessionsMap.delete(id) })
+    server = new WsServer({ port: 0, apiToken: 'test-token', authRequired: false, sessionManager: manager })
+    const port = await startServerAndGetPort(server)
+    const c = await createClient(port)
+    await new Promise(r => setTimeout(r, 50))
+    c.messages.length = 0
+    return c
+  }
+
+  it('echoes the requestId on the create-confirm session_switched', async () => {
+    const { ws, messages } = await setup()
+    send(ws, { type: 'create_session', name: 'mine', requestId: 'ac-req-1' })
+    const switched = await waitForMessage(messages, 'session_switched')
+    assert.equal(switched.sessionId, 'sess-new')
+    assert.equal(switched.requestId, 'ac-req-1')
+    ws.close()
+  })
+
+  it('omits requestId entirely when the client sent none (old clients)', async () => {
+    const { ws, messages } = await setup()
+    send(ws, { type: 'create_session', name: 'mine' })
+    const switched = await waitForMessage(messages, 'session_switched')
+    assert.equal('requestId' in switched, false)
+    ws.close()
+  })
+
+  it('echoes the requestId on a validation session_error', async () => {
+    const { ws, messages } = await setup()
+    send(ws, { type: 'create_session', cwd: '/etc/shadow', requestId: 'ac-req-2' })
+    const err = await waitForMessage(messages, 'session_error')
+    assert.equal(err.requestId, 'ac-req-2')
+    ws.close()
+  })
+
+  it('echoes the requestId on a createSession failure, with its code', async () => {
+    const { ws, messages } = await setup(true)
+    send(ws, { type: 'create_session', name: 'x', requestId: 'ac-req-3' })
+    const err = await waitForMessage(messages, 'session_error')
+    assert.equal(err.requestId, 'ac-req-3')
+    assert.equal(err.code, 'PROVIDER_BINARY_NOT_FOUND')
+    ws.close()
+  })
+
+  it('a re-home session_switched after destroy_session never carries a create id', async () => {
+    const { ws, messages } = await setup()
+    send(ws, { type: 'create_session', name: 'mine', requestId: 'ac-req-4' })
+    await waitForMessage(messages, 'session_switched')
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-new' })
+    const rehome = await waitForMessage(messages, 'session_switched')
+    assert.notEqual(rehome.sessionId, 'sess-new')
+    assert.equal('requestId' in rehome, false, 'a re-home must never carry a create id')
+    ws.close()
+  })
+
+  it('rejects a malformed requestId at the schema', async () => {
+    const { ws, messages } = await setup()
+    send(ws, { type: 'create_session', name: 'x', requestId: 'bad id!' })
+    try {
+      const rejection = await waitForMessage(messages, 'error')
+      assert.equal(rejection.code, 'INVALID_MESSAGE')
+      assert.equal(messages.some(m => m.type === 'session_switched'), false)
+    } finally {
+      ws.close()
+    }
   })
 })
 
@@ -515,18 +601,8 @@ describe('WS handler: register_push_token', () => {
 
     send(ws, { type: 'register_push_token', token: 'invalid-token' })
 
-    const errorMsg = await withTimeout(
-      new Promise(resolve => {
-        const check = () => {
-          const found = messages.find(m => m.type === 'push_token_error')
-          if (found) return resolve(found)
-          setTimeout(check, 50)
-        }
-        check()
-      }),
-      2000,
-      'Expected push_token_error message'
-    )
+    await pollUntil(() => messages.find(m => m.type === 'push_token_error'), 2000, 'Expected push_token_error message')
+    const errorMsg = messages.find(m => m.type === 'push_token_error')
     assert.equal(errorMsg.type, 'push_token_error')
     assert.ok(errorMsg.message.includes('rejected'))
 

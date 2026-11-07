@@ -7,7 +7,7 @@
 import { z } from 'zod';
 import { MAX_SANE_DURATION_MS } from "./connection.js";
 import { TURN_OUTCOMES } from "../../turn-outcome.js";
-import { PermissionScopeSchema } from "../client.js";
+import { PermissionScopeSchema, CreateSessionRequestIdSchema } from "../client.js";
 // #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
 // stamped on stream messages and the pong reply at broadcast time. Clients use
 // it to measure server→render latency (token-to-render) and to split RTT into
@@ -1144,6 +1144,8 @@ export const ServerShellPendingApprovalSchema = z.object({
     type: z.literal('shell_pending_approval'),
     approvalId: z.string(),
     hint: z.string().optional(),
+    // #7977: echo of the held `create_session`'s correlation id, when it sent one.
+    requestId: CreateSessionRequestIdSchema.optional(),
 });
 // #6323 (batch 1 of #6314): the live PTY mirror channel (#5835). `terminal_output`
 // is raw coalesced ANSI bytes (transient — no history/replay); `terminal_size` is
