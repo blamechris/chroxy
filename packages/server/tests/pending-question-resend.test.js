@@ -144,6 +144,28 @@ describe('replayHistory — pending AskUserQuestion re-send (#7457)', () => {
     assert.ok(questionIdx > permIdx, `the question must follow the permission; got ${JSON.stringify(types)}`)
   })
 
+  // #8357: a failed permission re-send must not lose the question as well.
+  it('still re-sends the pending question when the permission re-send throws (#8357)', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: managerWithPending(
+        [{ type: 'user_question', toolUseId: 'ask-1', questions: QUESTIONS, _seq: 1 }],
+        [{ toolUseId: 'ask-1', questions: QUESTIONS }],
+      ),
+    })
+    ctx.permissions = { resendPendingPermissions: () => { throw new Error('perm resend failed') } }
+    registerClient(ctx, ws)
+
+    try { replayHistory(ctx, ws, 'sess-1') } catch { /* the permission failure is not under test */ }
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    const types = ctx._sends.map((m) => m.type)
+    const endIdx = types.indexOf('history_replay_end')
+    assert.ok(endIdx >= 0 && types.findIndex((t, i) => t === 'user_question' && i > endIdx) > endIdx,
+      `the question must still be re-sent; got ${JSON.stringify(types)}`)
+  })
+
   // The re-sent frame is the client's ONLY signal that this question is still
   // live. `historySeq` on it would make both clients classify it as
   // replay-delivered (#7420's discriminator) and the sweep would be entitled to

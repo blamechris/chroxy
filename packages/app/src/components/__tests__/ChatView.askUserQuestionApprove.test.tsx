@@ -346,13 +346,31 @@ describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
   });
 
   describe('ownership is the id and only the id (no positional fallback)', () => {
-    it('a permission with no id gates nothing, even right next to its card (an older daemon)', () => {
+    it('a DECIDED id-less permission gates nothing, even right next to its card (an older daemon)', () => {
       const toolStart = { id: 'ts-1', type: 'tool_use', tool: 'AskUserQuestion', toolUseId: 'toolu_q1', content: '', timestamp: 1000 } as ChatMessage;
-      for (const feed of [[bare(), questionCard()], [questionCard(), bare()], [bare(), toolStart, questionCard()]]) {
+      for (const feed of [[bare({ answered: 'deny' }), questionCard()], [questionCard(), bare({ answered: 'deny' })], [bare({ answered: 'allow' }), toolStart, questionCard()]]) {
         const tree = renderFeed(feed);
         expect(questionCardShown(tree)).toBe(true);
         act(() => tree.unmount());
       }
+    });
+
+    it('a PENDING id-less permission holds a card with no permission of its own, and releases it on Allow', () => {
+      const q = questionCard();
+      const tree = renderFeed([bare(), q]);
+      expect(questionCardShown(tree)).toBe(false);
+      act(() => {
+        tree.update(feedElement([bare({ answered: 'allow' }), q]));
+      });
+      expect(questionCardShown(tree)).toBe(true);
+      act(() => tree.unmount());
+    });
+
+    it('two cards with two pending permissions are both hidden', () => {
+      const tree = renderFeed([permissionPrompt(), questionCard(), perm2(), card2()]);
+      expect(questionCardShown(tree)).toBe(false);
+      expect(shown(tree, 'q-2')).toBe(false);
+      act(() => tree.unmount());
     });
 
     it('Q1, P1(denied), Q2, P2(allowed): Q2 shows, Q1 stays hidden', () => {

@@ -124,11 +124,33 @@ describe('deriveGatedQuestionIds, paired by id (#4685)', () => {
 })
 
 describe('deriveGatedQuestionIds, ownership is the id and only the id (#4685)', () => {
-  it('a permission with no id gates nothing, however close its card sits (an older daemon)', () => {
-    expect(gated([bare('1'), card('1')])).toEqual([])
-    expect(gated([card('1'), bare('1')])).toEqual([])
-    expect(gated([bare('1'), toolStart('1'), card('1')])).toEqual([])
+  it('a DECIDED or ended id-less permission gates nothing, however close its card sits (an older daemon)', () => {
     expect(gated([bare('1', { answered: 'deny' }), card('1')])).toEqual([])
+    expect(gated([card('1'), bare('1', { answered: 'deny' })])).toEqual([])
+    expect(gated([bare('1', { answered: 'allow' }), toolStart('1'), card('1')])).toEqual([])
+    expect(gated([bare('1', { expiresAt: NOW - 1 }), card('1')])).toEqual([])
+    expect(gated([bare('1', { answered: '(resolved)' }), card('1')])).toEqual([])
+  })
+
+  describe('an id-less permission still awaiting a decision holds the cards that have no permission of their own', () => {
+    it('holds them while pending, whichever order they arrived in, and releases them when it resolves', () => {
+      expect(gated([bare('1'), card('1')])).toEqual(['c1'])
+      expect(gated([card('1'), bare('1')])).toEqual(['c1'])
+      expect(gated([bare('1'), card('1', { toolUseId: undefined })])).toEqual(['c1'])
+      expect(gated([bare('1', { answered: 'allow' }), card('1')])).toEqual([])
+    })
+    it('never holds a card that has a permission of its own, nor an answered one', () => {
+      expect(gated([bare('9'), perm('1', { answered: 'allow' }), card('1')])).toEqual([])
+      expect(gated([bare('9'), card('1', { answered: 'Red' })])).toEqual([])
+    })
+    it('a denied id-less permission cannot hide its card', () => {
+      expect(gated([bare('1', { answered: 'deny' }), card('1')])).toEqual([])
+    })
+  })
+
+  it('two cards with two pending permissions are both hidden (every held id counts, not the last)', () => {
+    expect(gated([perm('1'), card('1'), perm('2'), card('2')])).toEqual(['c1', 'c2'])
+    expect(gated([card('1'), card('2'), perm('2'), perm('1')])).toEqual(['c1', 'c2'])
   })
 
   it('position never pairs: Q1, P1(denied), Q2, P2(allowed) hides only Q1', () => {
@@ -151,6 +173,7 @@ describe('deriveGatedQuestionIds, ownership is the id and only the id (#4685)', 
 
   it('an id-less permission neither gates nor releases a card that has an id-carrying permission', () => {
     expect(gated([bare('9', { answered: 'allow' }), perm('1'), card('1')])).toEqual(['c1'])
+    expect(gated([bare('9', { answered: 'allow' }), perm('1', { answered: 'allow' }), card('1')])).toEqual([])
   })
 
   describe('duplicate ids fail closed: one pending or denied permission among several keeps the card hidden', () => {

@@ -11,6 +11,7 @@ import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
 import { SessionManager } from '../src/session-manager.js'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * #8357 -- the id that pairs an AskUserQuestion permission with its question card.
@@ -135,6 +136,24 @@ describe('#8357 hook-routed permission_request carries the tool-use id', () => {
       } finally { await d.close() }
     })
   }
+})
+
+describe('#8357 an AskUserQuestion prompt with no usable id is visible in the log', () => {
+  const warnings = async (body) => {
+    const entries = []
+    const onLog = (e) => entries.push(e)
+    addLogListener(onLog)
+    const d = await startDaemon()
+    try { await postJson(d.port, body) } finally { await d.close(); removeLogListener(onLog) }
+    return entries.filter((e) => e.level === 'warn' && /no usable tool_use_id/.test(e.message))
+  }
+  it('warns once when the payload names no call', async () => {
+    assert.equal((await warnings({ tool_name: 'AskUserQuestion', tool_input: ASK })).length, 1)
+  })
+  it('says nothing when it does, or for another tool', async () => {
+    assert.equal((await warnings({ tool_name: 'AskUserQuestion', tool_input: ASK, tool_use_id: 'toolu_abc' })).length, 0)
+    assert.equal((await warnings({ tool_name: 'Bash', tool_input: { command: 'ls' } })).length, 0)
+  })
 })
 
 describe('#8357 the same id reaches user_question from the same hook payload field', () => {

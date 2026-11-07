@@ -116,9 +116,13 @@ const isCard = (m: ChatMessage): boolean => m.type === 'prompt' && !m.requestId
  * anything: arrival order and adjacency cannot establish ownership (a denied
  * permission with no card, or a card with no permission, shifts every later
  * pair). So:
- *   - a permission with no id gates nothing (an older daemon, a hook payload that
- *     names no call, or an old journaled permission after an upgrade);
- *   - a card with no `toolUseId`, or whose id matches no permission, is shown.
+ *   - a card with no `toolUseId`, or whose id matches no permission, is shown --
+ *     except for the one temporary case below;
+ *   - an id-less permission (an older daemon, a hook payload that names no call,
+ *     an old journaled permission) is never tied to a card. While one is still
+ *     PENDING, unanswered cards that have no permission of their own are held
+ *     with it, and released when it resolves. Once it is denied or has ended it
+ *     gates nothing, so a denied id-less permission cannot hide its card.
  *
  * Every permission carrying the id counts, not just the last: a hook-supplied id
  * is not guaranteed unique, and one pending or denied permission among several
@@ -148,14 +152,29 @@ export function deriveGatedQuestionIds(
   const gated = new Set<string>()
   if (!messages) return gated
   const holding = new Set<string>() // call ids with a pending or refused permission
+  const owned = new Set<string>() // call ids that have any permission at all
+  let unnamedPending = false // an AskUserQuestion permission with no id is awaiting a decision
   for (const m of messages) {
-    if (!isPermission(m) || !m.permissionToolUseId) continue
+    if (!isPermission(m)) continue
     const state = permissionState(m, resolvedPermissions, now)
+    if (!m.permissionToolUseId) {
+      if (state === 'pending') unnamedPending = true
+      continue
+    }
+    owned.add(m.permissionToolUseId)
     if (state === 'pending' || state === 'refused') holding.add(m.permissionToolUseId)
   }
-  if (holding.size === 0) return gated
+  if (holding.size === 0 && !unnamedPending) return gated
   for (const m of messages) {
-    if (isCard(m) && m.toolUseId && holding.has(m.toolUseId) && awaitingAnswer(m)) gated.add(m.id)
+    if (!isCard(m) || !awaitingAnswer(m)) continue
+    const own = m.toolUseId ? holding.has(m.toolUseId) : false
+    // While an id-less permission is awaiting a decision (the hook payload named
+    // no call, so it cannot be tied to one card), a card with no permission of its
+    // own may be the card it belongs to: hold it until that decision lands. It
+    // clears the moment the permission resolves or ends, so it cannot strand a
+    // session; a DENIED or ended id-less permission gates nothing.
+    const maybeUnnamed = unnamedPending && !(m.toolUseId && owned.has(m.toolUseId))
+    if (own || maybeUnnamed) gated.add(m.id)
   }
   return gated
 }

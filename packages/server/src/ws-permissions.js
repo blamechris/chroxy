@@ -353,6 +353,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         && hookData.tool_use_id.length > 0 && hookData.tool_use_id.length <= 200
         ? hookData.tool_use_id
         : undefined
+      if (tool === 'AskUserQuestion' && !toolUseId) {
+        // #8357: without the id the question card cannot be paired with this
+        // prompt. Say so, so a Claude build that omits it is visible.
+        log.warn(`AskUserQuestion permission ${requestId} arrived with no usable tool_use_id; its question card is gated only while this prompt is pending`)
+      }
 
       // #2831: find the CliSession this hook permission belongs to (via
       // the per-session hook secret from the Authorization header) so we
@@ -964,8 +969,6 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                   floored: permData.floored !== false,
                   explicitConsent: permData.explicitConsent,
                   nonDelegable: permData.nonDelegable,
-                  // #8357: replay the pairing id with the rest of the stash.
-                  toolUseId: typeof permData.toolUseId === 'string' ? permData.toolUseId : undefined,
                 }))
               } catch (err) {
                 log.warn(`Skipping malformed pending permission ${requestId} on resend: ${err?.message ?? err}`)

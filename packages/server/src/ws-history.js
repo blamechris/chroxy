@@ -1928,17 +1928,21 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
       send(ws, { type: 'history_replay_end', sessionId, latestSeq })
       reseedActiveAgents(ctx, ws, sessionId)
     } finally {
-      // #8328: AFTER the end frame. A full-rebuild replay swaps in a
-      // history-only message list at `history_replay_end`, dropping the live
-      // permission card the client held for this session; `permission_request`
-      // is transient, so the replay itself cannot restore it. Sent after the
-      // swap, the re-send lands on the rebuilt list and is kept.
-      resendPendingPermissionsForSession(ctx, ws, sessionId)
+      try {
+        // #8328: AFTER the end frame. A full-rebuild replay swaps in a
+        // history-only message list at `history_replay_end`, dropping the live
+        // permission card the client held for this session; `permission_request`
+        // is transient, so the replay itself cannot restore it. Sent after the
+        // swap, the re-send lands on the rebuilt list and is kept.
+        resendPendingPermissionsForSession(ctx, ws, sessionId)
+      } finally {
+        // #7457: AFTER the end frame, never before it. The client's replay-end
+        // sweep has already run by the time this lands, which is the entire
+        // reason a still-pending question survives the reconnect. In its own
+        // `finally` so a failed permission re-send cannot lose the question.
+        resendPendingQuestions(ctx, ws, sessionId)
+      }
     }
-    // #7457: AFTER the end frame, never before it. The client's replay-end
-    // sweep has already run by the time this lands, which is the entire reason
-    // a still-pending question survives the reconnect.
-    resendPendingQuestions(ctx, ws, sessionId)
   }
 
   // A manager that cannot answer reads as idle, as in the JSONL heal's own check
