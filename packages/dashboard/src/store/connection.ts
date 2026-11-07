@@ -6693,7 +6693,7 @@ if (typeof document !== 'undefined') {
         // doesn't have to hunt for the Reconnect button after every sleep.
         console.log('[ws] Tab became visible while server_down — retrying');
         state.retryConnection();
-      } else if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
+      } else if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken !== null) {
         console.log('[ws] Tab became visible, socket stale — reconnecting');
         state.connect(wsUrl, apiToken);
       } else if (connectionPhase === 'connected' && activeSessionId && sessionStates[activeSessionId]) {

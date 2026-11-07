@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
-import { getAuthToken } from '../utils/auth'
+import { bearerHeaders, getLocalConnectionToken } from '../utils/local-auth'
 import { useConnectionStore } from '../store/connection'
 import { LogPanel } from './LogPanel'
 
@@ -33,8 +33,8 @@ export function ConsolePage() {
 
   // Fetch connection info on mount, retry while tunnel is being set up
   useEffect(() => {
-    const token = getAuthToken()
-    if (!token) {
+    const token = getLocalConnectionToken()
+    if (token === null) {
       setError('No auth token available')
       setLoading(false)
       return
@@ -46,7 +46,7 @@ export function ConsolePage() {
     async function fetchData() {
       try {
         const res = await fetch('/connect', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: 'Request failed' }))
@@ -75,7 +75,7 @@ export function ConsolePage() {
       // Fetch QR code
       try {
         const qrRes = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (qrRes.ok) {
           const svg = await qrRes.text()
@@ -93,13 +93,13 @@ export function ConsolePage() {
   // When server phase transitions to ready, re-fetch connection info
   useEffect(() => {
     if (serverPhase !== 'ready' || connInfo) return
-    const token = getAuthToken()
-    if (!token) return
+    const token = getLocalConnectionToken()
+    if (token === null) return
     let cancelled = false
     async function refetch() {
       try {
         const res = await fetch('/connect', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (res.ok) {
           const data = await res.json()
@@ -112,7 +112,7 @@ export function ConsolePage() {
       // Also fetch QR
       try {
         const qrRes = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (qrRes.ok) {
           const svg = await qrRes.text()
@@ -126,12 +126,12 @@ export function ConsolePage() {
 
   // Auto-refresh QR on tab focus and periodically (pairing IDs rotate every 60s)
   useEffect(() => {
-    const token = getAuthToken()
-    if (!token) return
+    const token = getLocalConnectionToken()
+    if (token === null) return
     const fetchQr = async () => {
       try {
         const res = await fetch('/qr', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: bearerHeaders(token),
         })
         if (res.ok) setQrSvg(await res.text())
       } catch { /* QR is optional */ }

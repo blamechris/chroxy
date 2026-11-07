@@ -5,7 +5,7 @@
  * normal disconnected state is unchanged.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { getLocalConnectionToken } from './local-auth'
+import { bearerHeaders, getLocalConnectionToken } from './local-auth'
 
 function setConfig(content: string | null) {
   document.head.querySelectorAll('meta[name="chroxy-config"]').forEach(m => m.remove())
@@ -15,6 +15,15 @@ function setConfig(content: string | null) {
   m.setAttribute('content', content)
   document.head.appendChild(m)
 }
+
+describe('bearerHeaders', () => {
+  it('builds a bearer header for a real token', () => {
+    expect(bearerHeaders('abc')).toEqual({ Authorization: 'Bearer abc' })
+  })
+  it('sends no header for the empty --no-auth token', () => {
+    expect(bearerHeaders('')).toBeUndefined()
+  })
+})
 
 describe('getLocalConnectionToken', () => {
   beforeEach(() => {
