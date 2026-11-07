@@ -9,10 +9,20 @@ import { isVerifiedDirIdentity } from '../src/byok-tool-executor.js'
 // `isVerifiedDirIdentity`. This guard parses the executor source and fails when
 // any other expression compares a `.dev` or `.ino` member with something that is
 // not a literal, so a second hand-written copy cannot appear unnoticed.
+//
+// Scope: only comparisons written with `.dev` / `.ino` as member expressions are
+// seen. Out of scope: string-key comparisons such as `dirKey(st) !== parent.key`
+// (the key branch of `confirmEntryStillInside` holds a precomputed `dev:ino`
+// string, not a stat, so it has nothing to hand the helper), destructured
+// locals, and template-built keys. The helper is recognised only as a top-level
+// function declaration. A second test counts the helper's call expressions, so a
+// site that stops calling it fails too.
 
 const SRC_PATH = fileURLToPath(new URL('../src/byok-tool-executor.js', import.meta.url))
 const COMPARE_OPS = new Set(['===', '!==', '==', '!='])
 const HELPER = 'isVerifiedDirIdentity'
+// openVerifiedDirForDescend (2), confirmEntryStillInside root branch, isStillVerifiedDir
+const EXPECTED_HELPER_CALLS = 4
 
 function isIdentityMember(node) {
   if (!node || node.type !== 'MemberExpression') return false
@@ -29,10 +39,13 @@ function findStrayIdentityCompares(source) {
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, locations: true })
   const stray = []
   let helperCompares = 0
+  let helperCalls = 0
+  const topLevel = new Set(ast.body)
   const visit = (node, inHelper) => {
     if (!node || typeof node.type !== 'string') return
-    const entering = node.type === 'FunctionDeclaration' && node.id && node.id.name === HELPER
+    const entering = topLevel.has(node) && node.type === 'FunctionDeclaration' && node.id && node.id.name === HELPER
     const here = inHelper || entering
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === HELPER) helperCalls++
     if (node.type === 'BinaryExpression' && COMPARE_OPS.has(node.operator)) {
       const touches = isIdentityMember(node.left) || isIdentityMember(node.right)
       const literalSide = isLiteral(node.left) || isLiteral(node.right)
@@ -48,7 +61,7 @@ function findStrayIdentityCompares(source) {
     }
   }
   visit(ast, false)
-  return { stray, helperCompares }
+  return { stray, helperCompares, helperCalls }
 }
 
 describe('directory identity check in the Glob walk', () => {
@@ -62,6 +75,15 @@ describe('directory identity check in the Glob walk', () => {
   it('has no device/inode comparison outside the helper', () => {
     const { stray } = findStrayIdentityCompares(source)
     assert.ok(stray.length === 0, `hand-written dev/ino comparison at line(s) ${stray.join(', ')}; use ${HELPER}`)
+  })
+
+  it('calls the helper at every expected site', () => {
+    const { helperCalls } = findStrayIdentityCompares(source)
+    assert.equal(
+      helperCalls,
+      EXPECTED_HELPER_CALLS,
+      `${HELPER} is called ${helperCalls} times, expected ${EXPECTED_HELPER_CALLS}; if a site was added or removed on purpose, update EXPECTED_HELPER_CALLS, otherwise restore the call`,
+    )
   })
 
   it('reports a second hand-written comparison (the guard can fail)', () => {
