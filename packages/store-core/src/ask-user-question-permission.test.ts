@@ -123,46 +123,53 @@ describe('deriveGatedQuestionIds, paired by id (#4685)', () => {
   })
 })
 
-describe('deriveGatedQuestionIds, fallback for a daemon that sends no id (#4685)', () => {
-  it('pairs an id-less permission with the card right after or right before it', () => {
-    expect(gated([bare('1'), card('1')])).toEqual(['c1'])
-    expect(gated([card('1'), bare('1')])).toEqual(['c1'])
+describe('deriveGatedQuestionIds, ownership is the id and only the id (#4685)', () => {
+  it('a permission with no id gates nothing, however close its card sits (an older daemon)', () => {
+    expect(gated([bare('1'), card('1')])).toEqual([])
+    expect(gated([card('1'), bare('1')])).toEqual([])
+    expect(gated([bare('1'), toolStart('1'), card('1')])).toEqual([])
+    expect(gated([bare('1', { answered: 'deny' }), card('1')])).toEqual([])
   })
 
-  it("skips only the same call's tool_start bubble between them", () => {
-    expect(gated([bare('1'), toolStart('1'), card('1')])).toEqual(['c1'])
-    expect(gated([toolStart('1'), card('1'), bare('1')])).toEqual(['c1'])
+  it('position never pairs: Q1, P1(denied), Q2, P2(allowed) hides only Q1', () => {
+    expect(gated([card('1'), perm('1', { answered: 'deny' }), card('2'), perm('2', { answered: 'allow' })])).toEqual(['c1'])
   })
 
-  it('does not reach across any other message', () => {
+  it('position never pairs: [P1(pending), response, Q1] still gates Q1 by id', () => {
     const response = ({ id: 'r', type: 'response', content: 'x', timestamp: 1 }) as ChatMessage
-    expect(gated([bare('1', { answered: 'deny' }), response, card('2')])).toEqual([])
-    expect(gated([bare('1'), toolStart('9', 'Bash'), card('1')])).toEqual([])
+    expect(gated([perm('1'), response, card('1')])).toEqual(['c1'])
   })
 
-  it('an unpaired card before a real pair does not shift it', () => {
-    expect(gated([card('1', { answered: 'Red' }), bare('2'), card('2')])).toEqual(['c2'])
-    expect(gated([card('1'), bare('2'), card('2')])).toEqual(['c2'])
+  it('a permission is never read as a card, whatever fields it carries', () => {
+    expect(gated([perm('1', { toolUseId: 't1' })])).toEqual([])
   })
 
-  it('a denied pair does not hide a later allowed pair', () => {
-    expect(gated([bare('1', { answered: 'deny' }), card('1'), bare('2', { answered: 'allow' }), card('2')])).toEqual(['c1'])
-  })
-
-  it("a replayed '(resolved)' card is gated by its adjacent pending permission", () => {
-    expect(gated([bare('1'), card('1', { answered: '(resolved)' })])).toEqual(['c1'])
-  })
-
-  it('mixes: an id-carrying pair and an id-less pair resolve independently', () => {
-    expect(gated([perm('1'), card('1'), bare('2', { answered: 'allow' }), card('2')])).toEqual(['c1'])
-  })
-
-  it('a permission is never mistaken for a card: two adjacent permissions pair with nothing', () => {
-    expect(gated([bare('1', { answered: 'deny' }), bare('2'), card('2')])).toEqual(['c2'])
-  })
-
-  it('an id-carrying permission is never paired by adjacency', () => {
+  it('a card with no toolUseId, or an id no permission carries, is shown', () => {
+    expect(gated([perm('1'), card('1', { toolUseId: undefined })])).toEqual([])
     expect(gated([perm('1'), card('2')])).toEqual([])
+  })
+
+  it('an id-less permission neither gates nor releases a card that has an id-carrying permission', () => {
+    expect(gated([bare('9', { answered: 'allow' }), perm('1'), card('1')])).toEqual(['c1'])
+  })
+
+  describe('duplicate ids fail closed: one pending or denied permission among several keeps the card hidden', () => {
+    const dup = (o: Partial<ChatMessage> = {}) => perm('1', { id: 'pDup', requestId: 'req-dup', ...o })
+    it('pending first, allowed last', () => {
+      expect(gated([perm('1'), card('1'), dup({ answered: 'allow' })])).toEqual(['c1'])
+    })
+    it('allowed first, pending last', () => {
+      expect(gated([perm('1', { answered: 'allow' }), card('1'), dup()])).toEqual(['c1'])
+    })
+    it('denied among allowed', () => {
+      expect(gated([perm('1', { answered: 'allow' }), dup({ answered: 'deny' }), card('1')])).toEqual(['c1'])
+    })
+    it('every duplicate allowed releases the card', () => {
+      expect(gated([perm('1', { answered: 'allow' }), card('1'), dup({ answered: 'allowSession' })])).toEqual([])
+    })
+    it('an expired duplicate beside an allowed one hides nothing', () => {
+      expect(gated([perm('1', { expiresAt: NOW - 1 }), card('1'), dup({ answered: 'allow' })])).toEqual([])
+    })
   })
 })
 

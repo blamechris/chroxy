@@ -5438,6 +5438,28 @@ describe('permission_request message handler', () => {
     expect(msg.toolUseId).toBeUndefined();
   });
 
+  // #8357: a re-sent request (a reconnect resend) updates the held card in place;
+  // it must also supply the pairing id a card created without one is missing.
+  it('a re-sent request supplies the tool-use id to the card already held (#8357)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    clearPermissionSplits();
+    const frame = { type: 'permission_request', sessionId: 's1', requestId: 'perm-ask', tool: 'AskUserQuestion', description: 'x', input: {} };
+    _testMessageHandler.handle(frame);
+    expect(store.getState().sessionStates.s1.messages[0].permissionToolUseId).toBeUndefined();
+    _testMessageHandler.handle({ ...frame, toolUseId: 'toolu_ask' });
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].permissionToolUseId).toBe('toolu_ask');
+    expect(msgs[0].toolUseId).toBeUndefined();
+  });
+
   // #7974: the floor verdict (#7971) is carried onto the prompt so the card can
   // show a "protected path" marker. Only the three wire shapes matter: true,
   // false, and absent (an older server).

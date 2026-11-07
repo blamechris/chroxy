@@ -7779,6 +7779,26 @@ describe('dashboard message-handler dispatch', () => {
       expect(promptMsg.content).not.toContain('undefined')
     })
 
+    // #8357: a re-sent request updates the held card in place; it must also supply
+    // the pairing id a card created without one is missing.
+    it('a re-sent request supplies the tool-use id to the card already held (#8357)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: { 's-perm': createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+      const frame = { type: 'permission_request', sessionId: 's-perm', requestId: 'perm-ask', tool: 'AskUserQuestion', description: 'x', input: {} }
+      handleMessage(frame, ctx() as any)
+      const prompts = () => (store.getState() as any).sessionStates['s-perm'].messages.filter((m: any) => m.type === 'prompt')
+      expect(prompts()[0].permissionToolUseId).toBeUndefined()
+      handleMessage({ ...frame, toolUseId: 'toolu_ask' }, ctx() as any)
+      expect(prompts()).toHaveLength(1)
+      expect(prompts()[0].permissionToolUseId).toBe('toolu_ask')
+      expect(prompts()[0].toolUseId).toBeUndefined()
+    })
+
     // #8357: the tool-use id pairs an AskUserQuestion permission with its question
     // card. It lands on `permissionToolUseId`, never `toolUseId` (a re-delivered
     // `user_question` revives the prompt carrying its `toolUseId`).

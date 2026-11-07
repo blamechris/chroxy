@@ -345,26 +345,41 @@ describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
     act(() => tree.unmount());
   });
 
-  describe('against a daemon that sends no pairing id (adjacent fallback)', () => {
-    it('gates the card next to its permission, with the same call\'s tool_start between', () => {
+  describe('ownership is the id and only the id (no positional fallback)', () => {
+    it('a permission with no id gates nothing, even right next to its card (an older daemon)', () => {
       const toolStart = { id: 'ts-1', type: 'tool_use', tool: 'AskUserQuestion', toolUseId: 'toolu_q1', content: '', timestamp: 1000 } as ChatMessage;
-      const tree = renderFeed([bare(), toolStart, questionCard()]);
-      expect(questionCardShown(tree)).toBe(false);
-      act(() => tree.unmount());
+      for (const feed of [[bare(), questionCard()], [questionCard(), bare()], [bare(), toolStart, questionCard()]]) {
+        const tree = renderFeed(feed);
+        expect(questionCardShown(tree)).toBe(true);
+        act(() => tree.unmount());
+      }
     });
 
-    it('an unpaired card before a real pair does not shift it (A and B)', () => {
-      const tree = renderFeed([questionCard({ id: 'q-0', toolUseId: 'toolu_q0' }), bare({ id: 'perm-2', requestId: 'req-2' }), card2()]);
-      expect(shown(tree, 'q-0')).toBe(true);
-      expect(shown(tree, 'q-2')).toBe(false);
-      act(() => tree.unmount());
-    });
-
-    it('a denied pair does not hide a later allowed pair', () => {
-      const tree = renderFeed([bare({ answered: 'deny' }), questionCard(), bare({ id: 'perm-2', requestId: 'req-2', answered: 'allow' }), card2()]);
+    it('Q1, P1(denied), Q2, P2(allowed): Q2 shows, Q1 stays hidden', () => {
+      const tree = renderFeed([questionCard(), permissionPrompt({ answered: 'deny' }), card2(), perm2({ answered: 'allow' })]);
       expect(questionCardShown(tree)).toBe(false);
       expect(shown(tree, 'q-2')).toBe(true);
       act(() => tree.unmount());
+    });
+
+    it('[P1(pending), response, Q1]: Q1 is gated by id however far away P1 sits', () => {
+      const response = { id: 'r-1', type: 'response', content: 'x', timestamp: 1001 } as ChatMessage;
+      const tree = renderFeed([permissionPrompt(), response, questionCard()]);
+      expect(questionCardShown(tree)).toBe(false);
+      act(() => tree.unmount());
+    });
+
+    it('duplicate ids fail closed, both ways round', () => {
+      const dup = (o: Partial<ChatMessage> = {}) => permissionPrompt({ id: 'perm-dup', requestId: 'req-dup', ...o });
+      for (const feed of [
+        [permissionPrompt(), questionCard(), dup({ answered: 'allow' })],
+        [permissionPrompt({ answered: 'allow' }), questionCard(), dup()],
+        [dup({ answered: 'allow' }), questionCard(), permissionPrompt()],
+      ]) {
+        const tree = renderFeed(feed);
+        expect(questionCardShown(tree)).toBe(false);
+        act(() => tree.unmount());
+      }
     });
   });
 

@@ -421,6 +421,22 @@ describe('permission_outcome outside any replay window (#8348)', () => {
     expect(env.sessions.s1!.messages[0]!.permissionOutcome).toBe('allowed')
   })
 
+  // #8357 -- a held card that never learned its pairing id (it arrived from an
+  // older daemon, or before the field) takes it from the durable record.
+  it('#8357: the record supplies the pairing id to a held card that has none', () => {
+    const env = makeEnv([livePending({ options: undefined, answered: 'allow', answeredAt: NOW })])
+    dispatch(env, outcome({ outcome: 'allowed', toolUseId: 'toolu_ask' }))
+    expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(env.sessions.s1!.messages[0]!.permissionToolUseId).toBe('toolu_ask')
+    expect(env.sessions.s1!.messages[0]!.toolUseId).toBeUndefined()
+  })
+
+  it('#8357: a record with no id leaves a held card\'s id alone', () => {
+    const env = makeEnv([livePending({ options: undefined, answered: 'allow', answeredAt: NOW, permissionToolUseId: 'toolu_held' })])
+    dispatch(env, outcome({ outcome: 'allowed' }))
+    expect(env.sessions.s1!.messages[0]!.permissionToolUseId).toBe('toolu_held')
+  })
+
   it('addMessage fallback when the session is unknown', () => {
     const env = makeEnv([])
     dispatch(env, outcome({ sessionId: 'nope' }))

@@ -3004,6 +3004,8 @@ describe('App', () => {
         content: 'AskUserQuestion: pick your fighter',
         tool: 'AskUserQuestion',
         requestId: 'req-aq-1',
+        // #8357: the id the daemon sends on both frames pairs the card with this permission.
+        permissionToolUseId: 'toolu-aq-1',
         options: [
           { label: 'Allow', value: 'allow' },
           { label: 'Deny', value: 'deny' },
@@ -3014,6 +3016,7 @@ describe('App', () => {
       {
         id: 'q-1',
         type: 'prompt',
+        toolUseId: 'toolu-aq-1',
         content: 'Pick your fighter',
         options: [
           { label: 'Ryu', value: 'ryu' },

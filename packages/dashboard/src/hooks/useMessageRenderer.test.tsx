@@ -451,10 +451,10 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
   // messages App.tsx feeds it: a denied question stays hidden, but it must not
   // hide a later question whose own permission was allowed (#8357).
   it('a denied question does not hide a later allowed one; the denied one stays hidden', () => {
-    const deniedPerm = { ...perm, answered: 'deny' } as ChatMessage
-    const perm2 = { ...perm, id: 'p2', requestId: 'req-aq2', answered: 'allow' } as ChatMessage
-    const question2 = { ...question, id: 'q2', content: 'Left or right?', questions: [{ question: 'Left or right?', options: [{ label: 'Left', value: 'Left' }] }] } as ChatMessage
-    const messages = [deniedPerm, question, perm2, question2]
+    const deniedPerm = { ...perm, answered: 'deny', permissionToolUseId: 't1' } as ChatMessage
+    const perm2 = { ...perm, id: 'p2', requestId: 'req-aq2', answered: 'allow', permissionToolUseId: 't2' } as ChatMessage
+    const question2 = { ...question, id: 'q2', toolUseId: 't2', content: 'Left or right?', questions: [{ question: 'Left or right?', options: [{ label: 'Left', value: 'Left' }] }] } as ChatMessage
+    const messages = [deniedPerm, { ...question, toolUseId: 't1' } as ChatMessage, perm2, question2]
     const args = makeArgs({
       storeMsgMap: new Map(messages.map((m) => [m.id, m])),
       storeMessages: messages,

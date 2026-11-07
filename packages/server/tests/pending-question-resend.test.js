@@ -116,6 +116,34 @@ describe('replayHistory — pending AskUserQuestion re-send (#7457)', () => {
     })
   })
 
+  // #8357: the question card is withheld until its own AskUserQuestion
+  // permission is allowed, and the client can only gate on a permission it has
+  // received. Sent question-first, a reconnecting client can show and answer the
+  // card before the permission lands.
+  it('re-sends the pending PERMISSION before the pending question (#8357)', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: managerWithPending(
+        [{ type: 'user_question', toolUseId: 'ask-1', questions: QUESTIONS, _seq: 1 }],
+        [{ toolUseId: 'ask-1', questions: QUESTIONS }],
+      ),
+    })
+    ctx.permissions = {
+      resendPendingPermissions: () => ctx._sends.push({ type: 'permission_request', requestId: 'perm-1', toolUseId: 'ask-1' }),
+    }
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise((r) => setImmediate(r))
+
+    const types = ctx._sends.map((m) => m.type)
+    const endIdx = types.indexOf('history_replay_end')
+    const permIdx = types.indexOf('permission_request')
+    const questionIdx = types.findIndex((t, i) => t === 'user_question' && i > endIdx)
+    assert.ok(endIdx >= 0 && permIdx > endIdx, `the permission is re-sent after the end frame; got ${JSON.stringify(types)}`)
+    assert.ok(questionIdx > permIdx, `the question must follow the permission; got ${JSON.stringify(types)}`)
+  })
+
   // The re-sent frame is the client's ONLY signal that this question is still
   // live. `historySeq` on it would make both clients classify it as
   // replay-delivered (#7420's discriminator) and the sweep would be entitled to

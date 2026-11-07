@@ -3591,7 +3591,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const updater = (ss: { messages: ChatMessage[] }) => ({
           messages: ss.messages.map((m) =>
             m.requestId === permRequestId && m.type === 'prompt'
-              ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined })
+              ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined, ...(permPayload.toolUseId ? { permissionToolUseId: permPayload.toolUseId } : {}) })
               : m
           ),
         });

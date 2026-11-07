@@ -110,23 +110,24 @@ const isCard = (m: ChatMessage): boolean => m.type === 'prompt' && !m.requestId
  * permission, and again after a reload, since `history_replay_end` stamps old
  * prompts `'(resolved)'` -- so the agent waited on an answer nobody could give.
  *
- * Pairing is by id: the permission's `permissionToolUseId` against the card's
- * `toolUseId`, the provider's one id for the call (the hook payload's
- * `tool_use_id` reaches both frames). A card or permission with no partner
- * affects nothing else.
+ * Pairing is by id and ONLY by id: the permission's `permissionToolUseId`
+ * against the card's `toolUseId`, the provider's one id for the call (the hook
+ * payload's `tool_use_id` reaches both frames). Position in the list never pairs
+ * anything: arrival order and adjacency cannot establish ownership (a denied
+ * permission with no card, or a card with no permission, shifts every later
+ * pair). So:
+ *   - a permission with no id gates nothing (an older daemon, a hook payload that
+ *     names no call, or an old journaled permission after an upgrade);
+ *   - a card with no `toolUseId`, or whose id matches no permission, is shown.
  *
- * Fallback, for a daemon that sends no id (or a hook payload that names none):
- * an id-less permission pairs with an unpaired card ADJACENT to it in the list,
- * and only that. The AskUserQuestion `tool_start` bubble of the same call sits in
- * between in practice (the same PreToolUse raises it first), so that one message
- * is skipped; nothing else is. Adjacency is local, so an unpaired item elsewhere
- * cannot shift a later pair. A permission goes to the card after it when both
- * neighbours are free (the order the hook raises them in is not guaranteed, so
- * this is a choice, not a fact).
+ * Every permission carrying the id counts, not just the last: a hook-supplied id
+ * is not guaranteed unique, and one pending or denied permission among several
+ * for the same id is enough to keep the card hidden.
  *
- * A card with no permission yet is shown: the two are raised at the same instant,
- * so the window is milliseconds, and auto / bypass modes, and a hook that denies
- * a multi-question or multiSelect form before any prompt, never raise one.
+ * A card with no permission yet is shown: the two are raised at the same instant
+ * (a window of milliseconds, and on a reconnect the server re-sends permissions
+ * before questions), and auto / bypass modes, and a hook that denies a
+ * multi-question or multiSelect form before any prompt, never raise one.
  *
  * Only `refused` and `pending` hide a card, and only one still awaiting an answer
  * (the replay placeholder counts as awaiting: after a reload a card whose own
@@ -146,37 +147,15 @@ export function deriveGatedQuestionIds(
 ): Set<string> {
   const gated = new Set<string>()
   if (!messages) return gated
-  // The same call's tool_start bubble sits between its permission and its card.
-  const seq = messages.filter((m) => !(m.type === 'tool_use' && m.tool === ASK_USER_QUESTION_TOOL))
-  const paired = new Set<ChatMessage>()
-  const pairWith = (card: ChatMessage, perm: ChatMessage) => {
-    paired.add(card)
-    paired.add(perm)
-    if (awaitingAnswer(card)) {
-      const state = permissionState(perm, resolvedPermissions, now)
-      if (state === 'pending' || state === 'refused') gated.add(card.id)
-    }
+  const holding = new Set<string>() // call ids with a pending or refused permission
+  for (const m of messages) {
+    if (!isPermission(m) || !m.permissionToolUseId) continue
+    const state = permissionState(m, resolvedPermissions, now)
+    if (state === 'pending' || state === 'refused') holding.add(m.permissionToolUseId)
   }
-
-  // 1. By id.
-  const permById = new Map<string, ChatMessage>()
-  for (const m of seq) {
-    if (isPermission(m) && m.permissionToolUseId) permById.set(m.permissionToolUseId, m)
+  if (holding.size === 0) return gated
+  for (const m of messages) {
+    if (isCard(m) && m.toolUseId && holding.has(m.toolUseId) && awaitingAnswer(m)) gated.add(m.id)
   }
-  for (const m of seq) {
-    if (!isCard(m) || !m.toolUseId) continue
-    const perm = permById.get(m.toolUseId)
-    if (perm && !paired.has(perm)) pairWith(m, perm)
-  }
-
-  // 2. Adjacent, for a permission that carries no id.
-  const free = (m: ChatMessage | undefined): m is ChatMessage => !!m && isCard(m) && !paired.has(m)
-  seq.forEach((m, i) => {
-    if (!isPermission(m) || m.permissionToolUseId || paired.has(m)) return
-    const next = seq[i + 1]
-    const prev = seq[i - 1]
-    if (free(next)) pairWith(next, m)
-    else if (free(prev)) pairWith(prev, m)
-  })
   return gated
 }
