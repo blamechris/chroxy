@@ -2,7 +2,7 @@ import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
-import { claudeConfigDir, isFilesystemRoot } from '../utils/claude-config-dir.js'
+import { claudeConfigDir, isFilesystemRoot, resolveClaudeConfigDirOverride } from '../utils/claude-config-dir.js'
 import { realpathOfDeepestAncestor, isConfigDirOrDirectChild, fileOpErrorMessage, clientSafeError } from './common.js'
 import { truncateForLog } from './reader.js'
 import { createLogger } from '../logger.js'
@@ -399,20 +399,20 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
       return
     }
 
-    // Resolved once. claudeConfigDir() is already canonical and never the
-    // filesystem root, so it is safe as a containment root.
+    // The canonical form is read first and the async resolution second; the
+    // global memory root is used only when the two are equal and not a filesystem
+    // root, otherwise it is unavailable. claudeConfigDir() is canonical for an
+    // override but the default `<home>/.claude` is only lexical, so the canonical
+    // form comes from the same sync resolver for both.
     const claudeHome = claudeConfigDir()
+    const claudeHomeCanonical = resolveClaudeConfigDirOverride(claudeHome)
     let claudeHomeReal
     try {
       claudeHomeReal = await realpathOfDeepestAncestor(claudeHome)
     } catch {
       claudeHomeReal = normalize(claudeHome)
     }
-
-    // Use-site check: the dir was validated earlier, but it is resolved again
-    // here (async), and a filesystem root must never become a containment root.
-    // Treat the global memory root as unavailable instead of installing it.
-    const claudeRootUsable = !isFilesystemRoot(claudeHomeReal)
+    const claudeRootUsable = claudeHomeCanonical !== null && claudeHomeReal === claudeHomeCanonical && !isFilesystemRoot(claudeHomeReal)
     // The session's own generated-memory directory inside the config tree.
     const encoded = projectSlug(cwdReal)
     // The lexical name is the root, always. `projects/<slug>` may itself be a
