@@ -13,7 +13,7 @@
  * file pins the *auto*-flow decisions — when to skip, how each verdict
  * shape is exposed to a consumer that wants to route on it.
  */
-import { describe, it } from 'node:test'
+import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   evaluateDraft,
@@ -21,6 +21,11 @@ import {
   shouldSkipEvaluatorAsync,
   _resetSkipPatternCache,
 } from '../src/prompt-evaluator.js'
+import { createBoundedRegexMatcher } from '../src/utils/bounded-regex.js'
+
+// A match is expected below and a timeout counts as no match: keep the 50 ms default off the critical path.
+const patientMatcher = createBoundedRegexMatcher({ timeoutMs: 5000 })
+after(() => patientMatcher.close())
 
 function makeStubClient(responseJson) {
   return {
@@ -77,10 +82,10 @@ describe('auto-evaluator decision contract (#3189)', () => {
         // before the custom-pattern branch ever runs (Copilot review on
         // PR #3650 caught the original test passing for the wrong reason).
         const cfg = { promptEvaluatorSkipPattern: '^acknowledged for the team$' }
-        assert.equal(await shouldSkipEvaluatorAsync('acknowledged for the team', cfg), true)
+        assert.equal(await shouldSkipEvaluatorAsync('acknowledged for the team', cfg, patientMatcher), true)
         // Default rules still apply when the custom pattern doesn't match —
         // the substantive message still goes to evaluateDraft.
-        assert.equal(await shouldSkipEvaluatorAsync('this is a substantive draft message', cfg), false)
+        assert.equal(await shouldSkipEvaluatorAsync('this is a substantive draft message', cfg, patientMatcher), false)
       } finally {
         _resetSkipPatternCache()
       }

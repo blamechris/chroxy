@@ -1,7 +1,8 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { inputHandlers, buildHistoryText } from '../../src/handlers/input-handlers.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
+import { boundedRegex, createBoundedRegexMatcher } from '../../src/utils/bounded-regex.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
@@ -2094,17 +2095,28 @@ describe('input-handlers', () => {
   // When the session has no pattern, the server-wide config still applies
   // (backward compat with #3187). When neither is set, default rules only.
   describe('input (per-session promptEvaluatorSkipPattern #3639)', () => {
+    // These assert a skip, and a timeout counts as no match, so the default 50 ms deadline could turn a correct
+    // match into an evaluator call on a loaded runner. Delegate the handler's default matcher to a patient one,
+    // for this describe only, and restore and close it on every path.
+    let patient, defaultTest
+    beforeEach(() => {
+      patient = createBoundedRegexMatcher({ timeoutMs: 5000 })
+      defaultTest = boundedRegex.test
+      boundedRegex.test = (source, text, key) => patient.test(source, text, key)
+    })
+    afterEach(() => { boundedRegex.test = defaultTest; patient.close() })
+
     it('per-session pattern matches → skips evaluator (no broadcast, no rewrite)', async () => {
       const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'X', clarification: null, reasoning: '' }))
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
-      session.promptEvaluatorSkipPattern = '^lgtm ship it now$'
+      session.promptEvaluatorSkipPattern = '^lgtm ship it now please thanks$'
       const client = makeClient({ activeSessionId: 's1' })
 
-      await inputHandlers.input(makeWs(), client, { data: 'lgtm ship it now' }, ctx)
+      await inputHandlers.input(makeWs(), client, { data: 'lgtm ship it now please thanks' }, ctx)
 
       assert.equal(evaluator.callCount, 0, 'per-session pattern must short-circuit the evaluator')
       assert.equal(session.sendMessage.callCount, 1)
-      assert.equal(session.sendMessage.lastCall[0], 'lgtm ship it now', 'original draft forwarded as-is')
+      assert.equal(session.sendMessage.lastCall[0], 'lgtm ship it now please thanks', 'original draft forwarded as-is')
       const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
       assert.equal(evals.length, 0, 'no evaluator_* broadcast on skip')
     })
