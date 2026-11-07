@@ -26,7 +26,7 @@ import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
 import { CompactionMarker } from './CompactionMarker';
 import { TurnOutcomeMarker } from './TurnOutcomeMarker';
 import { insertCompactionMarkers } from './insertCompactionMarkers';
-import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
+import { buildChatViewMessages, isRetryableAskUserQuestionError, hasPendingAskUserQuestionPermission } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
 import type { PermissionEditedInput } from '@chroxy/store-core';
@@ -527,6 +527,14 @@ function ChatViewForSession({
     scrollViewRef.current?.scrollToEnd({ animated: true });
   };
 
+  // #8357 / #4685 -- is an AskUserQuestion permission still unresolved-or-denied
+  // in this session? One scan per messages change; every question row gets the
+  // same answer. The predicate is shared with the dashboard.
+  const askUserQuestionPermissionPending = useMemo(
+    () => hasPendingAskUserQuestionPermission(messages),
+    [messages],
+  );
+
   // #5517: stable per-row key. Activity groups carry a synthetic
   // `activity-<firstId>` key (so a group never collapses onto a member id);
   // single rows key by their message id. Identity-stable keys are what let
@@ -627,6 +635,7 @@ function ChatViewForSession({
           >
             <MessageBubble
               allowSingleMultiSelect={allowSingleMultiSelect}
+              askUserQuestionPermissionPending={askUserQuestionPermissionPending}
               message={msg}
               queued={msg.type === 'user_input' && (queuedIds?.has(msg.id) ?? false)}
               onCancelQueued={onCancelQueued}
@@ -673,6 +682,7 @@ function ChatViewForSession({
       onSubmitMultiQuestion,
       allowMultiQuestion,
       allowSingleMultiSelect,
+      askUserQuestionPermissionPending,
       queuedIds,
       onCancelQueued,
       onEditQueued,

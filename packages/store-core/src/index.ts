@@ -1204,6 +1204,16 @@ export {
   findPendingWriteForFile,
 } from './pending-permissions'
 
+// #8264 / #8357 — the AskUserQuestion permission card's readable body and the
+// #4685 consent gate, shared by the dashboard and the mobile app.
+export {
+  ASK_USER_QUESTION_TOOL,
+  readAskUserQuestions,
+  askUserQuestionHeadline,
+  askUserQuestionSummary,
+  hasPendingAskUserQuestionPermission,
+} from './ask-user-question-permission'
+
 // #7365 — position-independent turn-end marking. `markTurnBoundary` is
 // called from `case 'result'` in message-handler.ts (both live and replay —
 // the handler makes no distinction) so a turn's end survives a send-while-busy

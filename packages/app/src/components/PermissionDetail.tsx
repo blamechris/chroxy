@@ -8,7 +8,12 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { isSafeWebUrl } from '@chroxy/store-core';
+import {
+  isSafeWebUrl,
+  ASK_USER_QUESTION_TOOL,
+  readAskUserQuestions,
+  askUserQuestionHeadline,
+} from '@chroxy/store-core';
 import { ChatMessage } from '../store/types';
 import { ICON_CHECK, ICON_CLOSE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -149,7 +154,37 @@ const MCP_SOURCE_LABELS: Record<string, string> = {
 // Permission detail renderer
 // ---------------------------------------------------------------------------
 
+/**
+ * #8357 -- the body of an AskUserQuestion permission card: what is being asked,
+ * as text. The generic body would print the tool input as JSON (the server's
+ * `description` for a tool with no command / path, cut at 200 characters). The
+ * questions are read and worded by store-core, so this card and the dashboard's
+ * cannot disagree. A missing or truncated input renders the headline alone; the
+ * real question card appears after Allow (#4685) and the JSON never does.
+ */
+function AskUserQuestionPermissionBody({ toolInput }: { toolInput?: Record<string, unknown> }) {
+  const questions = readAskUserQuestions(toolInput);
+  return (
+    <View style={styles.permDetailBlock} testID="perm-ask-body">
+      <Text style={styles.messageText} testID="perm-ask-headline">
+        {askUserQuestionHeadline(questions.length)}
+      </Text>
+      {questions.map((q, idx) => (
+        <View key={`q-${idx}`} style={{ marginTop: 6 }} testID={`perm-ask-question-${idx}`}>
+          <Text selectable style={styles.messageText}>{q.question}</Text>
+          {q.options.map((o, oi) => (
+            <Text key={`${oi}-${o.value}`} selectable style={styles.permDetailMcpSource}>
+              {`\u2022 ${o.label}`}
+            </Text>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function renderPermissionDetail(tool?: string, toolInput?: Record<string, unknown>): React.ReactElement | null {
+  if (tool === ASK_USER_QUESTION_TOOL) return <AskUserQuestionPermissionBody toolInput={toolInput} />;
   if (!toolInput || !tool) return null;
 
   const toolName = tool.toLowerCase();
