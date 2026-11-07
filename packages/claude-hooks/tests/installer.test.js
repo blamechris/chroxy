@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync, symlinkSync, lstatSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   installHooks,
   uninstallHooks,
@@ -199,7 +200,7 @@ describe('installHooks', () => {
     assert.ok(read(path).hooks.SessionEnd)
   })
 
-  it('preserves a symlinked settings.json (writes through to the link target)', () => {
+  it('preserves a symlinked settings.json (writes through to the link target)', { skip: SKIP_NO_SYMLINK }, () => {
     // Simulate a dotfile manager (stow/chezmoi/yadm): settings.json is a
     // symlink into a managed store. Install must write through the link, not
     // clobber it with a regular file.
@@ -208,11 +209,11 @@ describe('installHooks', () => {
     writeFileSync(targetPath, JSON.stringify({ model: 'opus' }))
     const linkDir = mkdtempSync(join(tmpdir(), 'hooks-link-'))
     const linkPath = join(linkDir, 'settings.json')
-    // Best-effort: symlink creation is disallowed on some platforms (Windows
-    // CI without Developer Mode / admin, restricted sandboxes). Skip rather
-    // than fail the whole suite — repo precedent, see e.g.
-    // packages/server/tests/skills-loader.test.js:486.
-    try { symlinkSync(targetPath, linkPath) } catch { return }
+    // Symlink creation is disallowed on some hosts (Windows CI without
+    // Developer Mode / admin, restricted sandboxes); the explicit
+    // `skip: SKIP_NO_SYMLINK` above reports that as `# SKIP` rather than a
+    // silent pass. A failure here on a host that passed the probe is real.
+    symlinkSync(targetPath, linkPath)
 
     installHooks({ settingsPath: linkPath, nodePath: NODE, binPath: BIN })
 
