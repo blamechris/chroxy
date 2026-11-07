@@ -3110,7 +3110,15 @@ describe('handlePermissionRequest', () => {
       sessionId: 'sess-1',
       remainingMs: 30000,
       floored: null,
+      toolUseId: null,
     })
+  })
+
+  // #8357 -- the tool-use id that pairs an AskUserQuestion permission with its card.
+  it('reads toolUseId verbatim and treats a missing or non-string one as none', () => {
+    expect(handlePermissionRequest({ requestId: 'r', toolUseId: 'toolu_1' }).toolUseId).toBe('toolu_1')
+    expect(handlePermissionRequest({ requestId: 'r' }).toolUseId).toBeNull()
+    expect(handlePermissionRequest({ requestId: 'r', toolUseId: 7 }).toolUseId).toBeNull()
   })
 
   // #7974 -- the floor verdict rides through the shared parse.

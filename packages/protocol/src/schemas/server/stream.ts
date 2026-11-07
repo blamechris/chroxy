@@ -693,6 +693,13 @@ export const ServerPermissionRequestSchema = z.object({
   floored: z.boolean().optional(),
   explicitConsent: z.boolean().optional(),
   nonDelegable: z.boolean().optional(),
+  // #8357: the provider's id for the tool call this prompt is for -- the SAME
+  // value the `user_question` frame carries as `toolUseId` for an AskUserQuestion,
+  // so a client can tell which question card a permission belongs to instead of
+  // guessing from arrival order. Sent by the hook-routed pipeline when the hook
+  // payload names the call; absent for every other emit site and for an older
+  // server, in which case a client must not assume which card it belongs to.
+  toolUseId: z.string().optional(),
 })
 
 /**
@@ -874,6 +881,9 @@ export const ServerPermissionOutcomeSchema = z.object({
   outcome: PermissionOutcomeSchema,
   input: z.record(z.string(), z.unknown()).optional(),
   decision: z.enum(['allow', 'allowSession', 'allowAlways']).optional(),
+  // #8357: the tool-use id the prompt carried (see ServerPermissionRequestSchema),
+  // kept so a replayed AskUserQuestion record still pairs with its question.
+  toolUseId: z.string().optional(),
   timestamp: z.number().optional(),
   sessionId: z.string().optional(),
   historySeq: z.number().optional(),
@@ -1042,6 +1052,8 @@ export function buildPermissionRequestMessage(fields: {
   description?: string
   remainingMs?: number
   sessionId?: string
+  // #8357: see ServerPermissionRequestSchema.toolUseId.
+  toolUseId?: string
 }): ServerPermissionRequestMessage {
   const msg: Record<string, unknown> = {
     type: 'permission_request',
@@ -1060,6 +1072,7 @@ export function buildPermissionRequestMessage(fields: {
   if (fields.description !== undefined) msg.description = fields.description
   if (fields.remainingMs !== undefined) msg.remainingMs = fields.remainingMs
   if (fields.sessionId !== undefined) msg.sessionId = fields.sessionId
+  if (fields.toolUseId !== undefined) msg.toolUseId = fields.toolUseId
   // An absent policy verdict stays unknown. Only its source may state false.
   if (fields.explicitConsent !== undefined) msg.explicitConsent = fields.explicitConsent
   if (fields.nonDelegable !== undefined) msg.nonDelegable = fields.nonDelegable

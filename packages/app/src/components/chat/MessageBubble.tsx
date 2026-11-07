@@ -518,7 +518,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // `requestId`) that nobody has answered renders nothing while an AskUserQuestion
   // permission is unresolved-or-denied. Nothing here keys off `message.tool`: the
   // gate holds for every question card, whatever name the payload carries.
-  if (isPrompt && !message.requestId && message.answered == null && questionGated) {
+  // `questionGated` already says the card is still awaiting an answer (the replay
+  // sweep's '(resolved)' placeholder counts as awaiting), so no `answered` check
+  // here: one would un-hide a card after a reload while its permission is pending.
+  if (isPrompt && !message.requestId && questionGated) {
     return null;
   }
 

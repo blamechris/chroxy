@@ -335,6 +335,7 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
     floored: z.ZodOptional<z.ZodBoolean>;
     explicitConsent: z.ZodOptional<z.ZodBoolean>;
     nonDelegable: z.ZodOptional<z.ZodBoolean>;
+    toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
  * #7939: which of the three MCP config scopes a spawn-trust request's server
@@ -470,6 +471,7 @@ export declare const ServerPermissionOutcomeSchema: z.ZodObject<{
         allowAlways: "allowAlways";
         allowSession: "allowSession";
     }>>;
+    toolUseId: z.ZodOptional<z.ZodString>;
     timestamp: z.ZodOptional<z.ZodNumber>;
     sessionId: z.ZodOptional<z.ZodString>;
     historySeq: z.ZodOptional<z.ZodNumber>;
@@ -642,6 +644,7 @@ export declare function buildPermissionRequestMessage(fields: {
     description?: string;
     remainingMs?: number;
     sessionId?: string;
+    toolUseId?: string;
 }): ServerPermissionRequestMessage;
 export declare const ServerUserQuestionSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question">;

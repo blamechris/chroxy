@@ -3091,6 +3091,8 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       tool: permPayload.tool ?? undefined,
       requestId: permRequestId,
       toolInput: permPayload.input ?? undefined,
+      // #8357: pairs an AskUserQuestion permission with its question card.
+      permissionToolUseId: permPayload.toolUseId ?? undefined,
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),

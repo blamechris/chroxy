@@ -335,7 +335,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           // that one is pending or denied. An earlier denied or expired
           // permission no longer hides a later question. Already-answered
           // prompts skip the gate so post-answer history renders normally.
-          pendingPermission={!storeMsg.answered && gatedQuestionIds.has(storeMsg.id)}
+          pendingPermission={gatedQuestionIds.has(storeMsg.id)}
           onSelect={(answer) => {
             // #4604 Chunk B / #4735 — answer is `string` for
             // single-question / free-text paths and

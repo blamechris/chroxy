@@ -7779,6 +7779,29 @@ describe('dashboard message-handler dispatch', () => {
       expect(promptMsg.content).not.toContain('undefined')
     })
 
+    // #8357: the tool-use id pairs an AskUserQuestion permission with its question
+    // card. It lands on `permissionToolUseId`, never `toolUseId` (a re-delivered
+    // `user_question` revives the prompt carrying its `toolUseId`).
+    it.each([
+      ['present', { toolUseId: 'toolu_ask' }, 'toolu_ask'],
+      ['absent (an older server)', {}, undefined],
+    ])('carries the tool-use id (%s) onto the prompt as permissionToolUseId (#8357)', (_label, extra, expected) => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: { 's-perm': createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'permission_request', sessionId: 's-perm', requestId: 'perm-ask', tool: 'AskUserQuestion', description: 'x', input: {}, ...extra },
+        ctx() as any,
+      )
+      const promptMsg = (store.getState() as any).sessionStates['s-perm'].messages.find((m: any) => m.type === 'prompt')
+      expect(promptMsg.permissionToolUseId).toBe(expected)
+      expect(promptMsg.toolUseId).toBeUndefined()
+    })
+
     // #7974: the floor verdict (#7971) is carried onto the prompt so the card can
     // show a "protected path" marker. true / false / absent (an older server).
     it.each([

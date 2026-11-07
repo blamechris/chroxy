@@ -92,27 +92,48 @@ function permissionState(
   return 'pending'
 }
 
+/** A question card still waiting on the user: unanswered, or only the replay sweep's placeholder. */
+function awaitingAnswer(card: ChatMessage): boolean {
+  return card.answered == null || card.answered === REPLAY_RESOLVED_PLACEHOLDER
+}
+
+const isPermission = (m: ChatMessage): boolean =>
+  m.type === 'prompt' && !!m.requestId && m.tool === ASK_USER_QUESTION_TOOL
+const isCard = (m: ChatMessage): boolean => m.type === 'prompt' && !m.requestId
+
 /**
  * The ids of the question cards that must render NOTHING right now (#4685).
  *
- * Each question card is paired with ITS OWN AskUserQuestion permission, and only
- * that one decides it. A session-wide check (any unresolved permission hides every
+ * Each question card is gated by ITS OWN AskUserQuestion permission and by
+ * nothing else. A session-wide check (any unresolved permission hides every
  * question) hid a later, allowed question forever after one denied or expired
  * permission, and again after a reload, since `history_replay_end` stamps old
  * prompts `'(resolved)'` -- so the agent waited on an answer nobody could give.
  *
- * Pairing is by arrival order, because the permission frame carries no question id
- * and the two are raised by separate paths at the same PreToolUse (so either can
- * arrive first). Walking the list once: a permission pairs with a card waiting for
- * one, else waits for the next card; a card pairs with a permission waiting for
- * it, else waits for the next permission. The server serialises AskUserQuestion
- * (one in flight per session), so a pair is always adjacent. A card that never
- * pairs (auto / bypass modes raise no permission) is shown, as before.
+ * Pairing is by id: the permission's `permissionToolUseId` against the card's
+ * `toolUseId`, the provider's one id for the call (the hook payload's
+ * `tool_use_id` reaches both frames). A card or permission with no partner
+ * affects nothing else.
  *
- * Only `refused` and `pending` hide a card, and only an unanswered one. A
- * permission is a prompt with a `requestId` and `tool === AskUserQuestion`; a
- * question card is a prompt with no `requestId`. Nothing keys on a card's tool
- * name, and a permission for any other tool never gates a question.
+ * Fallback, for a daemon that sends no id (or a hook payload that names none):
+ * an id-less permission pairs with an unpaired card ADJACENT to it in the list,
+ * and only that. The AskUserQuestion `tool_start` bubble of the same call sits in
+ * between in practice (the same PreToolUse raises it first), so that one message
+ * is skipped; nothing else is. Adjacency is local, so an unpaired item elsewhere
+ * cannot shift a later pair. A permission goes to the card after it when both
+ * neighbours are free (the order the hook raises them in is not guaranteed, so
+ * this is a choice, not a fact).
+ *
+ * A card with no permission yet is shown: the two are raised at the same instant,
+ * so the window is milliseconds, and auto / bypass modes, and a hook that denies
+ * a multi-question or multiSelect form before any prompt, never raise one.
+ *
+ * Only `refused` and `pending` hide a card, and only one still awaiting an answer
+ * (the replay placeholder counts as awaiting: after a reload a card whose own
+ * permission is pending or denied must stay hidden). A permission is a prompt with
+ * a `requestId` and `tool === AskUserQuestion`; a question card is a prompt with
+ * no `requestId`. Nothing keys on a card's tool name, and a permission for any
+ * other tool never gates a question.
  *
  * `resolvedPermissions` is the optional cross-client decision map (the dashboard
  * keeps one); the app has none and relies on the prompt's own `answered` token,
@@ -125,30 +146,37 @@ export function deriveGatedQuestionIds(
 ): Set<string> {
   const gated = new Set<string>()
   if (!messages) return gated
-  let waitingPerm: PermissionState | null = null
-  let waitingCard: ChatMessage | null = null
-  const settle = (card: ChatMessage, state: PermissionState) => {
-    if (card.answered == null && (state === 'pending' || state === 'refused')) gated.add(card.id)
-  }
-  for (const m of messages) {
-    if (m.type !== 'prompt') continue
-    if (m.requestId) {
-      if (m.tool !== ASK_USER_QUESTION_TOOL) continue
-      const state = permissionState(m, resolvedPermissions, now)
-      if (waitingCard) {
-        settle(waitingCard, state)
-        waitingCard = null
-      } else {
-        waitingPerm = state
-      }
-    } else if (waitingPerm) {
-      settle(m, waitingPerm)
-      waitingPerm = null
-    } else {
-      waitingCard = m
+  // The same call's tool_start bubble sits between its permission and its card.
+  const seq = messages.filter((m) => !(m.type === 'tool_use' && m.tool === ASK_USER_QUESTION_TOOL))
+  const paired = new Set<ChatMessage>()
+  const pairWith = (card: ChatMessage, perm: ChatMessage) => {
+    paired.add(card)
+    paired.add(perm)
+    if (awaitingAnswer(card)) {
+      const state = permissionState(perm, resolvedPermissions, now)
+      if (state === 'pending' || state === 'refused') gated.add(card.id)
     }
   }
-  // A card still waiting for a permission that has not arrived is shown: the two
-  // are raised at the same instant, and auto / bypass modes never raise one.
+
+  // 1. By id.
+  const permById = new Map<string, ChatMessage>()
+  for (const m of seq) {
+    if (isPermission(m) && m.permissionToolUseId) permById.set(m.permissionToolUseId, m)
+  }
+  for (const m of seq) {
+    if (!isCard(m) || !m.toolUseId) continue
+    const perm = permById.get(m.toolUseId)
+    if (perm && !paired.has(perm)) pairWith(m, perm)
+  }
+
+  // 2. Adjacent, for a permission that carries no id.
+  const free = (m: ChatMessage | undefined): m is ChatMessage => !!m && isCard(m) && !paired.has(m)
+  seq.forEach((m, i) => {
+    if (!isPermission(m) || m.permissionToolUseId || paired.has(m)) return
+    const next = seq[i + 1]
+    const prev = seq[i - 1]
+    if (free(next)) pairWith(next, m)
+    else if (free(prev)) pairWith(prev, m)
+  })
   return gated
 }

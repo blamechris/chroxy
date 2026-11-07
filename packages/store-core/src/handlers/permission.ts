@@ -86,6 +86,8 @@ export interface PermissionRequestPayload {
   sessionId: string | null
   remainingMs: number | null
   floored: boolean | null
+  /** #8357: the provider's tool-use id (`null` when the frame carried none). */
+  toolUseId: string | null
 }
 
 export function handlePermissionRequest(
@@ -98,7 +100,8 @@ export function handlePermissionRequest(
   const sessionId = parseRawStringField(msg, 'sessionId')
   const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : null
   const floored = typeof msg.floored === 'boolean' ? msg.floored : null
-  return { requestId, tool, description, input, sessionId, remainingMs, floored }
+  const toolUseId = parseRawStringField(msg, 'toolUseId')
+  return { requestId, tool, description, input, sessionId, remainingMs, floored, toolUseId }
 }
 
 /**
@@ -316,6 +319,8 @@ export interface PermissionOutcomePayload {
   outcome: PermissionOutcomeKind
   input: Record<string, unknown> | null
   decision: PermissionAllowDecision | null
+  /** #8357: the provider's tool-use id the prompt carried, when the entry has one. */
+  toolUseId: string | null
   sessionId: string | null
   timestamp: number | null
 }
@@ -343,6 +348,7 @@ export function handlePermissionOutcome(
       outcome === 'allowed' && typeof msg.decision === 'string' && PERMISSION_ALLOW_DECISIONS.includes(msg.decision)
         ? (msg.decision as PermissionAllowDecision)
         : null,
+    toolUseId: parseRawStringField(msg, 'toolUseId'),
     sessionId: parseRawStringField(msg, 'sessionId'),
     timestamp: typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp) ? msg.timestamp : null,
   }
@@ -358,7 +364,7 @@ export function handlePermissionOutcome(
  * leave it unset.
  */
 export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload): ChatMessage {
-  const { requestId, tool, description, outcome, input, decision, sessionId, timestamp } = payload
+  const { requestId, tool, description, outcome, input, decision, sessionId, timestamp, toolUseId } = payload
   const content = tool
     ? (description ? `${tool}: ${description}` : tool)
     : (description || 'Permission required')
@@ -372,6 +378,8 @@ export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload)
     // the record (and a group of them) shows what was approved exactly as the live
     // card did. Absent for an older entry, which then has no input line.
     ...(input ? { toolInput: input } : {}),
+    // #8357: pairs a replayed AskUserQuestion record with its question card.
+    ...(toolUseId ? { permissionToolUseId: toolUseId } : {}),
     permissionOutcome: outcome,
     ...(outcome === 'allowed' ? { answered: decision ?? 'allow' } : {}),
     ...(outcome === 'denied' ? { answered: 'deny' } : {}),

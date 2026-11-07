@@ -87,8 +87,17 @@ describe('handlePermissionOutcome / buildPermissionOutcomeMessage (#8348)', () =
   it('parses the wire shape', () => {
     expect(handlePermissionOutcome(outcome({ timestamp: 99 }))).toEqual({
       requestId: 'perm-1', tool: 'Bash', description: 'ls -la', outcome: 'expired',
-      input: null, decision: null, sessionId: 's1', timestamp: 99,
+      input: null, decision: null, toolUseId: null, sessionId: 's1', timestamp: 99,
     })
+  })
+
+  // #8357 -- a replayed AskUserQuestion record keeps the id that pairs it with its card.
+  it('#8357: carries the tool-use id onto the rebuilt record as permissionToolUseId, never as toolUseId', () => {
+    const withId = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({ toolUseId: 'toolu_1' }))!)
+    expect(withId.permissionToolUseId).toBe('toolu_1')
+    expect(withId.toolUseId).toBeUndefined()
+    const without = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({}))!)
+    expect('permissionToolUseId' in without).toBe(false)
   })
 
   // #8503 -- the journaled tool input rides the entry and is parsed by the SAME

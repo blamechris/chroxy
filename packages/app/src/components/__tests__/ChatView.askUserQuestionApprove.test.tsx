@@ -58,6 +58,8 @@ function permissionPrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
     tool: 'AskUserQuestion',
     toolInput: TOOL_INPUT,
     requestId: 'req-1',
+    // #8357: the provider's id for the call, the same one its question card carries.
+    permissionToolUseId: 'toolu_q1',
     expiresAt: Date.now() + 60_000,
     options: [
       { label: 'Allow', value: 'allow' },
@@ -189,7 +191,9 @@ const shown = (tree: renderer.ReactTestRenderer, id: string) =>
   tree.root.findAll((n) => n.props?.testID === `approval-card-${id}` && typeof n.type === 'string').length > 0;
 
 const perm2 = (o: Partial<ChatMessage> = {}) =>
-  permissionPrompt({ id: 'perm-2', requestId: 'req-2', timestamp: 1002, ...o });
+  permissionPrompt({ id: 'perm-2', requestId: 'req-2', permissionToolUseId: 'toolu_q2', timestamp: 1002, ...o });
+// An older daemon sends no id: the permission is paired by adjacency instead.
+const bare = (o: Partial<ChatMessage> = {}) => permissionPrompt({ permissionToolUseId: undefined, ...o });
 const card2 = (o: Partial<ChatMessage> = {}) =>
   questionCard({ id: 'q-2', toolUseId: 'toolu_q2', content: 'Which size?', timestamp: 1003, ...o });
 
@@ -297,6 +301,71 @@ describe('AskUserQuestion consent gate (#8357, rule 2 / #4685)', () => {
     const tree = renderFeed([questionCard()]);
     expect(questionCardShown(tree)).toBe(true);
     act(() => tree.unmount());
+  });
+
+  // The cases the arrival-order pairing got wrong: one item with no partner must
+  // not shift or poison the others.
+  it('A: an answered card with no permission, then a pending pair: only the pair is gated', () => {
+    const tree = renderFeed([questionCard({ id: 'q-0', toolUseId: 'toolu_q0', answered: 'Teal' }), perm2(), card2()]);
+    expect(shown(tree, 'q-0')).toBe(true);
+    expect(shown(tree, 'perm-2')).toBe(true);
+    expect(shown(tree, 'q-2')).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it('B: an unanswered card with no permission (a denied form), then a pending pair: the orphan stays visible, the pair is gated', () => {
+    const tree = renderFeed([questionCard({ id: 'q-0', toolUseId: 'toolu_q0' }), perm2(), card2()]);
+    expect(shown(tree, 'q-0')).toBe(true);
+    expect(shown(tree, 'q-2')).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it('D: a denied permission with no card does not hide a later auto-mode card', () => {
+    const tree = renderFeed([permissionPrompt({ answered: 'deny' }), card2()]);
+    expect(shown(tree, 'q-2')).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  it('a trimmed history gates only what it still holds', () => {
+    const tree = renderFeed([perm2({ answered: 'allow' }), card2(), permissionPrompt(), questionCard()]);
+    expect(shown(tree, 'q-2')).toBe(true);
+    expect(questionCardShown(tree)).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it("a replayed '(resolved)' card stays hidden while its own permission is pending", () => {
+    const tree = renderFeed([permissionPrompt(), questionCard({ answered: '(resolved)' })]);
+    expect(questionCardShown(tree)).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it("a replayed '(resolved)' card shows once its permission is allowed", () => {
+    const tree = renderFeed([permissionPrompt({ answered: 'allow' }), questionCard({ answered: '(resolved)' })]);
+    expect(questionCardShown(tree)).toBe(true);
+    act(() => tree.unmount());
+  });
+
+  describe('against a daemon that sends no pairing id (adjacent fallback)', () => {
+    it('gates the card next to its permission, with the same call\'s tool_start between', () => {
+      const toolStart = { id: 'ts-1', type: 'tool_use', tool: 'AskUserQuestion', toolUseId: 'toolu_q1', content: '', timestamp: 1000 } as ChatMessage;
+      const tree = renderFeed([bare(), toolStart, questionCard()]);
+      expect(questionCardShown(tree)).toBe(false);
+      act(() => tree.unmount());
+    });
+
+    it('an unpaired card before a real pair does not shift it (A and B)', () => {
+      const tree = renderFeed([questionCard({ id: 'q-0', toolUseId: 'toolu_q0' }), bare({ id: 'perm-2', requestId: 'req-2' }), card2()]);
+      expect(shown(tree, 'q-0')).toBe(true);
+      expect(shown(tree, 'q-2')).toBe(false);
+      act(() => tree.unmount());
+    });
+
+    it('a denied pair does not hide a later allowed pair', () => {
+      const tree = renderFeed([bare({ answered: 'deny' }), questionCard(), bare({ id: 'perm-2', requestId: 'req-2', answered: 'allow' }), card2()]);
+      expect(questionCardShown(tree)).toBe(false);
+      expect(shown(tree, 'q-2')).toBe(true);
+      act(() => tree.unmount());
+    });
   });
 
   it('a pending permission for ANOTHER tool does not hide a question card', () => {
