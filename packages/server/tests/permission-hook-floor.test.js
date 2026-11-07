@@ -462,6 +462,29 @@ describe('permission-hook.sh: the floor forces a PROMPT under auto/acceptEdits (
     assert.equal(daemon.stats.permissionRequests, 0, 'and cleared')
   })
 
+  it('auto + a path-less Glob from an inbox socket directory session → PROBES and PROMPTS', async () => {
+    daemon = await startRealDaemon({ sessionCwd: '/tmp/cc-socks' })
+    await runHook({
+      payload: { tool_name: 'Glob', tool_input: { pattern: '*' }, cwd: '/tmp/cc-socks' },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(daemon.stats.floorRequests, 1, 'a path-less Glob must reach the floor')
+    assert.equal(daemon.stats.permissionRequests, 1, 'and raise a real permission request')
+  })
+
+  it('auto + a path-less Glob from an ordinary cwd → probes, clears, still auto-allowed', async () => {
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Glob', tool_input: { pattern: '*.ts' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+    assert.equal(daemon.stats.floorRequests, 1, 'the probe ran')
+    assert.equal(daemon.stats.permissionRequests, 0, 'and cleared')
+  })
+
   // -- #7043: the pre-filter's completeness guard --
   //
   // The negative pre-filter's justification is "a payload naming no path field

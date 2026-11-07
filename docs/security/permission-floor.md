@@ -25,6 +25,8 @@ providers in #7004.
 | `.git/config`, `.git/credentials`, `.config/git/{config,credentials}`, `.claude/settings*.json` | floored (credential-dense) | floored |
 | Anything else inside `.git/`, `.claude/`, `.vscode/`, `.config/git/` | **not** floored — reading a config file is benign | floored |
 | Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
+| `<claude config dir>/sessions/*.key` (the `*.key` rule above, in the configured directory), and a `Grep` / `Glob` rooted at that `sessions/` directory itself | floored | floored |
+| Anything at or below `/tmp/cc-socks` or `/private/tmp/cc-socks` (Claude Code's inbox sockets), in any letter case | floored | floored |
 | Ordinary project files | not floored | not floored |
 
 Matching is per path segment, on the target **resolved against the session cwd** —
@@ -294,6 +296,62 @@ canonical, symlink-resolved path the rest of the server uses) and apply the
   not identity-checked. A bind mount of only a descendant of the directory is not
   recognised. The floor is path-based, so the time between check and use remains
   (see the TOCTOU note above).
+
+### 1b. Claude Code session keys and inbox sockets
+
+Two path families are floored for reads (and writes) on top of the name rules:
+
+- **Session key files.** `<claude config dir>/sessions/*.key`. The `.key` extension
+  rule already floors every such file, in the default `~/.claude` and under any
+  `CLAUDE_CONFIG_DIR` override. What the name rule could not see is a *search*, so
+  the following floor too:
+  - a `Grep` or `Glob` whose `path` is exactly `<claude config dir>/sessions`;
+  - a `Grep` rooted at the config directory, or at any ancestor of it (`$HOME`,
+    `/`), unless its `glob` provably cannot select a `.key` file. Claude Code's
+    Grep passes `--hidden`, so a route through a dot-named directory counts: a
+    `Grep` from `$HOME` reaches `~/.claude/sessions/*.key` and floors. A search from
+    a directory that does not contain the config dir is unaffected. This is a
+    separate rule from the non-`.claude`-named config-root rule in §1a
+    (`_searchReachToConfigRoot`), which guards `settings*.json`, skips a
+    `.claude`-named root, and is switched off by any include glob. The `sessions`
+    rule applies to the default `~/.claude` as well. **The glob rule:** the rule is
+    switched off only when the glob has an include and every include (under both
+    readings of the field) stays inside the analysable grammar and ends in a fixed
+    extension other than `key`, such as `*.js` or `src/**/*.{js,ts}`. Everything
+    else keeps the floor: `*`, `**`, `sessions/123*`, `sessions/**`, `**/*.key`,
+    `*.{js,key}`, `*.k*`, a class or escape, a directory, and a glob that only
+    excludes. The glob's own secret analysis (§ Grep `glob`) still applies on top;
+  - a `Grep` or `Glob` with **no path field**, which searches from the session
+    cwd: the cwd stands in for the missing root, for all the rules here. A pathless
+    search from an ordinary cwd is unchanged;
+  - `Glob` returns names only, so it floors only when rooted *in* `sessions` (or the
+    socket directory), never from the config directory or above.
+- **Inbox sockets.** Any path at or below `/tmp/cc-socks` or `/private/tmp/cc-socks`,
+  matched on the resolved absolute path (written and symlink-resolved), so a relative
+  path, a `..` route, a symlink into it, and either spelling of `/tmp` on macOS all
+  floor. `/tmp/cc-socks-other`, `/var/tmp/cc-socks` and the same name elsewhere do not.
+
+The protected directories are themselves resolved: `<config>/sessions` and the two
+socket paths each match in their written spelling and their symlink-resolved one, so
+a directory that is a link, or reached through one, is recognised from either side.
+A directory that does not exist yet, or sits below a path component that is not a
+directory, resolves through its deepest existing ancestor and names only itself.
+The sessions directory and the inbox directories are resolved independently. One
+that cannot be resolved at all (for example `EACCES` on a parent) floors every
+target at or under its *written* path and every search reaching it, and nothing
+else: ordinary reads and searches are unaffected, and the other directory is
+unaffected. A config directory that cannot be determined at all names no sessions
+directory here; §1a's rule decides that case. Matching is case-insensitive.
+
+The rules live in `_scanResolvedTarget` (`_hitsInboxSocketDir`, `_isSessionsDir`)
+and `_searchRootFloored`, reached through `isFlooredTarget`, so both pipelines share
+them. `hooks/permission-hook.sh` probes every `Grep` and `Glob` call, because either
+may carry no path field. Tests: `permission-floor-session-keys-inbox.test.js` and the
+hook cases in `permission-hook-floor.test.js`.
+
+**Not covered.** A `Glob` `pattern` is not a path field, so a pattern that names the
+directory (`<claude config dir>/sessions/*.key` with no `path`) is not inspected.
+`Bash` reaches both families, as it does `.env` (see Known limits).
 
 ## 2. Precedence — the floor beats every lenient mode
 
