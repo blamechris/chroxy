@@ -62,15 +62,11 @@ chmod +x "$STAGING/hooks/permission-hook.sh"
 # with --omit=dev, and the derived lockfile below only covers the
 # production closure (#7324).
 cd "$STAGING"
-node -e "
-const pkg = require('./package.json');
-for (const key of Object.keys(pkg.dependencies || {})) {
-  if (key.startsWith('@chroxy/')) delete pkg.dependencies[key];
-}
-delete pkg.devDependencies;
-if (pkg.scripts) delete pkg.scripts.postinstall;
-require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-"
+# The strip lives in strip-server-package-json.mjs, shared with the PR-time
+# acceptance check check-derived-lockfile.sh (#7985) so the check cannot drift
+# from what ships. Relative path for the same MSYS reason as the derive call
+# below.
+node ../../scripts/strip-server-package-json.mjs package.json
 
 # Derive a standalone lockfile covering packages/server's production
 # dependency closure from the ROOT lockfile (#7324) — see

@@ -91,6 +91,7 @@ cp "$SCRIPT_DIR/bundle-server.sh" "$FIXTURE_ROOT/packages/desktop/scripts/bundle
 # their own `../../../scripts/lib/...` import expects.
 cp "$SCRIPT_DIR/derive-server-lockfile.mjs" "$FIXTURE_ROOT/packages/desktop/scripts/derive-server-lockfile.mjs"
 cp "$SCRIPT_DIR/find-macho.mjs" "$FIXTURE_ROOT/packages/desktop/scripts/find-macho.mjs"
+cp "$SCRIPT_DIR/strip-server-package-json.mjs" "$FIXTURE_ROOT/packages/desktop/scripts/strip-server-package-json.mjs"
 cp "$SCRIPT_DIR/../../../scripts/lib/is-entry-point.mjs" "$FIXTURE_ROOT/scripts/lib/is-entry-point.mjs"
 
 cat > "$FIXTURE_ROOT/packages/server/package.json" <<'EOF'
