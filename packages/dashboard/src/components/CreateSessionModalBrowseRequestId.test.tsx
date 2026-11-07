@@ -142,6 +142,37 @@ describe('Browse picker request-id routing (#9065)', () => {
     expect(screen.getByText('proj')).toBeInTheDocument()
   })
 
+  it('Select drops the registration', async () => {
+    await openBrowse('/home/u')
+    expect(pendingDirectoryListingRequestCount()).toBe(1)
+    fireEvent.click(screen.getByLabelText('Select'))
+    expect(pendingDirectoryListingRequestCount()).toBe(0)
+  })
+
+  it('unmounting while a request is pending drops the registration', async () => {
+    mockStore()
+    const { CreateSessionModal } = await import('./CreateSessionModal')
+    const view = render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} initialCwd="/home/u" knownCwds={[]} existingNames={[]} />,
+    )
+    fireEvent.click(screen.getByText('Browse...'))
+    expect(pendingDirectoryListingRequestCount()).toBe(1)
+    view.unmount()
+    expect(pendingDirectoryListingRequestCount()).toBe(0)
+  })
+
+  it('closing the modal while browsing drops the registration', async () => {
+    mockStore()
+    const { CreateSessionModal } = await import('./CreateSessionModal')
+    const props = { onClose: vi.fn(), onCreate: vi.fn(), initialCwd: '/home/u', knownCwds: [], existingNames: [] }
+    const view = render(<CreateSessionModal open {...props} />)
+    fireEvent.click(screen.getByText('Browse...'))
+    expect(pendingDirectoryListingRequestCount()).toBe(1)
+    view.rerender(<CreateSessionModal open={false} {...props} />)
+    view.rerender(<CreateSessionModal open {...props} />)
+    expect(pendingDirectoryListingRequestCount()).toBe(0)
+  })
+
   it('without the capability keeps the path-matching callback', async () => {
     capable = false
     await openBrowse('/home/u')

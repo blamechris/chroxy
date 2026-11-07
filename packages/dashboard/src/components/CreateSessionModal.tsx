@@ -676,6 +676,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       // `path` says (the server answers with the resolved directory).
       browseCancelRef.current = requestDirectoryListingFor(path, nextBrowseNavId(), (listing: DirectoryListing) => {
         applyBrowseListing(listing, requestedPath)
+      }, () => {
+        // Nothing went out (socket closed / send failed): say so instead of
+        // leaving "Loading..." for a reply that cannot come.
+        setBrowseLoading(false)
+        setBrowseEntries([])
+        setBrowseError(`Could not list ${requestedPath}: not connected to the server`)
       })
       return
     }

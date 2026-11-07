@@ -5501,12 +5501,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // `directoryListingRequestIdV1`: an older daemon would answer untagged, and an
   // untagged reply goes to the shared slot, where an error wipes autocomplete's
   // suggestions. No request, no registration, and the caller simply gets no answer.
-  requestDirectoryListingFor: (path: string, requestId: string, cb) => {
+  requestDirectoryListingFor: (path: string, requestId: string, cb, onNotSent) => {
     const { socket, serverCapabilities } = get();
-    if (!socket || socket.readyState !== WebSocket.OPEN) return () => {};
+    if (!socket || socket.readyState !== WebSocket.OPEN) { onNotSent?.(); return () => {}; }
     if (serverCapabilities.directoryListingRequestIdV1 !== true) return () => {};
     const cancel = registerDirectoryListingRequest(requestId, cb);
-    if (!wsSend(socket, { type: 'list_directory', path, requestId })) cancel();
+    if (!wsSend(socket, { type: 'list_directory', path, requestId })) { cancel(); onNotSent?.(); }
     return cancel;
   },
 
