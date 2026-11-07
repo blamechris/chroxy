@@ -7,9 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-11-07
+
+### Added
+
+- **Ended sessions are kept in an archive you can read and continue from (#8865, #8883, #8885, #8887, #8889, #8894).** The sidebar has a new Archived section, and Control Room can open an archived session's history. You can continue an archived session natively, or start a new thread from it. Settings now lets you edit how long archived sessions are kept, including an off switch that can also purge what is already archived. The Archived section stays visible on a short window, and the sidebar sections scroll instead of clipping the footer.
+- **Sessions that are still starting are shown as starting (#8874, #8877, #8879, #8880).** A session whose provider is still settling appears in the list as starting, and the dashboard and the mobile app do not let you open it until it is ready. A provider start that never settles now fails after a deadline instead of hanging, and a burst of start results refreshes the session list once.
+- **Decision alerts are surfaced for agents, including ones in other sessions (#9026, #9032).** When an agent is waiting on a decision, Chroxy raises a durable alert for it, and alerts from sessions you are not looking at are shown too.
+- **Floored permission prompts show a protected-path marker in the dashboard and mobile app (#9055).** A permission prompt for a protected path now says so on the card.
+- **The server can continue from a completed handoff seed (#8912).** A finished handoff seed can be used as the starting point for a new session.
+- **Replies to `create_session` carry the client's request id (#9056).** A client that sends a `requestId` gets it echoed on the matching reply, so concurrent creates are matched correctly.
+
+### Changed
+
+- **The permission floor treats the configured Claude config directory like `.claude` (#9027).** When `CLAUDE_CONFIG_DIR` points at a directory with another name, the floor and the session working-directory check apply to it the same way they apply to `.claude`. Docker and Kubernetes sessions run Claude with its own default config directory.
+- **The permission floor asks for a decision on two more locations (#9063).** A read or search of Claude Code's sessions directory, and any path at or below `/tmp/cc-socks`, now prompts in every mode. A Grep from the config directory or above prompts too, unless its glob fixes another file extension.
+- **Session-scoped connections work only on their own session (#9000, #9028, #9029, #9043).** A connection created from a session-scoped pairing or token is limited to that session's resources, token rotation and device revocation apply to such connections, and every request refused for such a connection now gets a reply.
+- **Browse follows the same allowed roots as Create (#9062).** The New Session Browse picker lists the directories that Create accepts.
+- **The memory view uses its global root only when it matches the canonical config directory (#9059).** Imports outside the project stay skipped otherwise.
+- **The Glob tool handles symlinks and patterns like `fs.glob` (#9051, #9053, #9066).** Glob follows symlinks after a globstar the way `fs.glob` does, compiles an unclosed `[` in linear time, opens its walk from the validated root and confirms each directory it enters.
+- **The built-in write and edit tools only act on regular files (#9041, #9050).** A target that is not a regular file is declined.
+- **Adding an MCP server that a higher-precedence scope already defines is declined (#9042).** The message names the scope that wins.
+- **Error messages for file operations inside the project no longer include absolute server paths (#8994).**
+- **Claude model handling is stricter and clearer (#8928, #8935, #9006, #9011, #8966).** A model request Claude cannot honour is rejected instead of starting a different model, short roster ids resolve for claude-tui and a rejected model fails fast, only the reasoning levels the wire accepts are advertised, a successful live model refresh replaces the cached list, and a claude-tui daemon now refreshes its list.
+- **`CLAUDE_CONFIG_DIR` is honoured throughout (#8973, #8980, #8977, #9001).** Claude's sessions, transcripts, memory, hook settings, statusline and `.claude.json` are found under the configured directory, the auth status check no longer passes `--settings`, and a working directory is resolved with the native realpath before its project slug is encoded.
+- **Codex clients are named and unusable models are marked (#8908, #8914, #8916).** The picker shows which Codex client launched, marks models that client refused (dashboard and mobile app), and a session recovers from a model it cannot use.
+- **The Expo 55 move and dependency updates ship in this release (#8827, #8823, #8824, #8825, #8910).**
+- **The thinking-level override can be cleared from the wire with `level: null` (#9012).**
+
 ### Fixed
 
+- **A denied claude-sdk tool shows its own message (#8936, #9067).** The result of a refused tool now reads as the denial itself ("User denied", the reason you typed, or the rule or timeout sentence) instead of text written for the model, both live and after a reload. Without a recorded decision it reads "Tool use was denied."
+- **Browse no longer stays on "Loading..." for a path ending in `..` (#9065, #9070).** The picker matches each reply to its own request, so the resolved directory is listed. If the request cannot be sent, it says it could not list the path because the server is not connected. A daemon without request-id support keeps the previous behaviour.
+- **The mobile AskUserQuestion permission card is readable, and each question card waits for its own permission (#8357, #9071).** The card says "Claude wants to ask you a question" (or "N questions") with the questions and options as text instead of JSON, and a question card appears only after its own permission is allowed. A denied or expired permission no longer hides later questions. Permission requests now carry the tool-use id, and a reconnect resends permissions before questions.
 - **A parked failed restore is no longer deleted 24 hours after its last activity (#8858).** A session whose restore failed keeps its `lastActivityAt` frozen, so the 24h staleness filter set it aside on the first boot after a day, and it was dropped from `session-state.json` (history included) whenever its container binding resolved, which says nothing about why it was parked. Parked entries are now written with a `failedRestore: { code, message }` marker; a stale entry carrying it is re-registered in Control Room → Failed restores with the original error and stays until Retry, Dismiss or the 30-day failed-restore TTL (worktree-backed entries keep their exemption). A state file written before this change has no marker and behaves as before.
+- **A follow-up sent while an SDK query is draining waits and runs after it ends (#9064).**
+- **A throw during session teardown no longer leaves the session stuck going away (#9049).**
+- **A pending permission request is delivered once on connect (#9019), and a permission timeout on claude-sdk shows as expired and is counted in the end-of-turn summary (#8948).** A decision on a hook-routed request is confirmed and unsubscribed responders are answered (#8926).
+- **Concurrent updates to the Claude config file are preserved (#9017),** and the hooks settings temp file is created with the target's mode (#9025).
+- **A mid-turn reload keeps the reply text already streamed (#9023, #8964, #9009).** A full replay swap also keeps an in-flight turn's content, and a turn cut off by a daemon restart shows as interrupted (#8949).
+- **The dashboard connects without a token when the server does not require auth, and treats the empty `--no-auth` token as a credential (#9044, #9054).**
+- **A rejected input returns its text to the composer (#9037).**
+- **The Tokens panel and cost badge share one live usage overlay (#9010),** and the panel shows "not tracked" when no session reports usage (#8255, #8939).
+- **Dashboard layout fixes (#9061, #8900, #8976, #8997, #8963, #8920).** The collapsed panel header wraps so tab labels do not overlap the metric, the sidebar project tree flows on a short window, the session tab chip updates on a model switch, a non-git directory is flagged before the worktree switch is enabled, and empty assistant rows or empty settled thinking blocks are not shown.
+- **Mobile app fixes (#8968, #8959, #8938, #8971, #8922, #8921, #8924, #8902, #8901).** A switched session opens at its latest message, the chat list remounts per session, the session tab busy dot follows live turn state, the worktree switch explains why it is disabled, the settings summary shows the active session's location and provider, Retry on the Connection Failed alert leaves server-down, the active model chip does nothing and server errors are reported once, the composer stays above the keyboard when the chrome is tall, and the activity-group header has a 44pt tap target.
+- **Session creation failures and auth errors name their cause (#8987, #8992, #8969).** `session_create_failed` shows as a coded chat error, and AUTH_REQUIRED names the API key, container or login that applies.
+- **claude-tui reliability (#8989, #8990, #8942).** A silent child is not reported as ready, the unknown-resume rejection is recognised across wrapped output, and parent Claude session markers are removed from spawned children.
+- **Grep fallbacks behave consistently (#8993, #9004).** The container `grep -r` fallback honours the glob filter, and the host one skips hidden and gitignored files.
+- **Container environments run the container's own Claude for a native SDK spawn (#9002),** and the preflight version probe goes through the same spawn preparation (#9007).
+- **Stale sessions and worktrees recover (#8882, #8859, #8958).** A stale session with no history is kept, a deleted session worktree is recreated on restore, and session-state saving is bounded by a maximum wait.
+- **`chroxy doctor` checks the configured port instead of always 8765 (#8940), and the orphan reaper finds `lsof` under launchd (#8985).**
+- **Desktop startup and tunnel handling (#8891, #8896, #8899, #8895, #8905).** `config.json`'s tunnel and host win and an installed chroxy service is deferred to, a crashed or dying server's own tunnel is cleaned up, the service-wait probe is bounded by its deadline, and the updater builds without zip extraction.
+- **The updater feed is published verified and the MSI is re-signed after Authenticode (#8918).**
+- **Composer fixes (#8830, #8833, #8836, #8838, #8849, #8850, #8798).** The composer resets its pickers and history on Cmd+L or an outside draft replacement, drops late evaluator results for discarded drafts, sizes itself correctly, and the slash palette matches on the command token.
+- **Effort reports stay on the latest setting (#8848).**
 
 ## [0.11.7] - 2026-10-24
 
