@@ -656,14 +656,20 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       // frames carry a conversationId in `sessionId`, which is never a live
       // session id, so both clients' `updateSession` no-ops and the sweep
       // touches nothing.
-      ctx.transport.resendPendingQuestions(ws, targetId)
-      // #8340 / #8328: and the permission card. `permission_request` is
+      // #8357: PERMISSIONS FIRST, as `replayHistory`'s `finishReplay` does -- a
+      // question card is gated by its own permission, which the client must
+      // already hold when the question lands.
+      // #8340 / #8328: the permission card. `permission_request` is
       // transient, so this full rebuild swaps the live Allow/Deny card away and
       // the replay cannot restore it; `replayHistory` re-sends after its own end
       // frame, and this path ends its own, so it must too. Same single
       // implementation (ws-history's resendPendingPermissionsForSession), which
       // keeps the #8342 session-bound-client guard.
-      ctx.transport.resendPendingPermissions(ws, targetId)
+      try {
+        ctx.transport.resendPendingPermissions(ws, targetId)
+      } finally {
+        ctx.transport.resendPendingQuestions(ws, targetId)
+      }
     },
   })
 }

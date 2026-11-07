@@ -35,6 +35,7 @@ import {
   ComposerRecoveryQueue,
   nextMessageId,
   isSessionStarting,
+  deriveGatedQuestionIds,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -512,23 +513,14 @@ export function App() {
   // rare but any single un-allowed one is enough to gate every question
   // render in that session — the bug is content leak before consent, not
   // which specific question got which specific permission decision.
-  const hasPendingAskUserQuestionPermission = useMemo(() => {
-    for (const m of storeMessages) {
-      if (m.type !== 'prompt') continue
-      if (!m.requestId) continue
-      if (m.tool !== 'AskUserQuestion') continue
-      // Per-message `answered` is set by `handlePermissionResolved` on
-      // BOTH allow and deny — gate only flips off for allow variants
-      // (#6771: allowAlways is an allow variant too).
-      if (m.answered === 'allow' || m.answered === 'allowSession' || m.answered === 'allowAlways') continue
-      // Cross-client decision via `resolvedPermissions[requestId]` —
-      // same allow-only rule.
-      const decision = resolvedPermissions?.[m.requestId]
-      if (decision === 'allow' || decision === 'allowSession' || decision === 'allowAlways') continue
-      return true
-    }
-    return false
-  }, [storeMessages, resolvedPermissions])
+  // #8357 — superseded by a per-card derivation shared with the mobile app
+  // (store-core): each question card is paired with its own permission, so one
+  // denied or expired permission no longer hides every later question. The
+  // allow-only rule above still holds for the paired permission.
+  const gatedQuestionIds = useMemo(
+    () => deriveGatedQuestionIds(storeMessages, resolvedPermissions, Date.now()),
+    [storeMessages, resolvedPermissions],
+  )
 
   // #7730: the thinking levels the ACTIVE MODEL offers, from its own roster row
   // (`reasoningLevels` / `defaultReasoningLevel`, put on the wire by
@@ -2668,7 +2660,7 @@ export function App() {
     activeSessionCaps,
     setViewMode,
     stalledPromptIds,
-    hasPendingAskUserQuestionPermission,
+    gatedQuestionIds,
     sessions,
   })
 

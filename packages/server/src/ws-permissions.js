@@ -344,6 +344,20 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const toolInput = hookData.tool_input || {}
       const sanitizedInput = sanitizeToolInput(toolInput)
       const description = buildPermissionDescription(toolInput)
+      // #8357: the provider's id for this tool call, as the hook payload names it.
+      // For an AskUserQuestion it is the very id `user_question` carries (the
+      // session reads the same payload field), which is how a client pairs the
+      // prompt with its question card. Absent when the payload omits it (older
+      // claude builds), in which case no pairing id is claimed.
+      const toolUseId = typeof hookData.tool_use_id === 'string'
+        && hookData.tool_use_id.length > 0 && hookData.tool_use_id.length <= 200
+        ? hookData.tool_use_id
+        : undefined
+      if (tool === 'AskUserQuestion' && !toolUseId) {
+        // #8357: without the id the question card cannot be paired with this
+        // prompt. Say so, so a Claude build that omits it is visible.
+        log.warn(`AskUserQuestion permission ${requestId} arrived with no usable tool_use_id; its question card is gated only while this prompt is pending`)
+      }
 
       // #2831: find the CliSession this hook permission belongs to (via
       // the per-session hook secret from the Authorization header) so we
@@ -410,6 +424,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // `sessionId` entirely (absent, not null) when undefined — the request
         // maps to no chroxy session and clients fall back to the active one.
         sessionId: ownerSessionId || undefined,
+        toolUseId,
       }), ownerSessionId ? undefined : unboundOnly)
 
       // #8348: a hook-routed prompt never passes through a session event, so
@@ -418,7 +433,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // so a session switch or reload can still show it. An unattributable
       // prompt (no owning session) has no transcript to be recorded in.
       if (ownerSessionId) {
-        recordPermissionRaised(ownerSessionId, { requestId, tool, description, input: sanitizedInput, recordDescription: describeByNamedField(toolInput) })
+        recordPermissionRaised(ownerSessionId, { requestId, tool, description, input: sanitizedInput, recordDescription: describeByNamedField(toolInput), toolUseId })
       }
 
       if (pushManager) {
@@ -495,7 +510,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #7968: stash the SAME floor verdict computed above so a reconnect
         // resend (resendPendingPermissions' legacy-HTTP branch) replays it
         // rather than re-deriving (or silently dropping) it.
-        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool) },
+        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool), ...(toolUseId ? { toolUseId } : {}) },
       })
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
@@ -1027,6 +1042,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             floored: pending.data.floored !== false,
             explicitConsent: pending.data.explicitConsent,
             nonDelegable: pending.data.nonDelegable,
+            // #8357: the pairing id stashed at creation, replayed verbatim.
+            toolUseId: typeof pending.data.toolUseId === 'string' ? pending.data.toolUseId : undefined,
           }))
         } catch (err) {
           log.warn(`Skipping malformed pending legacy permission ${requestId} on resend: ${err?.message ?? err}`)

@@ -58,7 +58,7 @@ function liveAnswered(i: number): ChatMessage {
 function replayedOutcome(i: number, input: Record<string, unknown> | null = null): ChatMessage {
   return {
     ...buildPermissionOutcomeMessage({
-      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', input, decision: null, sessionId: null, timestamp: i,
+      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', input, decision: null, toolUseId: null, sessionId: null, timestamp: i,
     }),
     id: `replay-${i}`,
   }
@@ -96,7 +96,7 @@ function mount(storeMessages: ChatMessage[]) {
     activeSessionCaps: null,
     setViewMode: vi.fn(),
     stalledPromptIds: chat.current.stalledPromptIds,
-    hasPendingAskUserQuestionPermission: false,
+    gatedQuestionIds: new Set<string>(),
     sessions: [],
   } as unknown as UseMessageRendererArgs
   const { result: render_ } = renderHook(() => useMessageRenderer(args))

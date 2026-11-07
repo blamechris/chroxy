@@ -998,6 +998,11 @@ export class SessionMessageHistory extends EventEmitter {
           // #8503: which allow it was (see PERMISSION_ALLOW_DECISIONS). Omitted for
           // any other outcome and for an entry from before the field.
           ...decisionField(permissionOutcomeDecision(data.outcome, data.decision)),
+          // #8357: the tool-use id the prompt carried, so a replayed record still
+          // pairs with its AskUserQuestion card. Omitted when there is none.
+          ...(typeof data.toolUseId === 'string' && data.toolUseId.length > 0 && data.toolUseId.length <= 200
+            ? { toolUseId: data.toolUseId }
+            : {}),
           timestamp: Date.now(),
         }, sessionId)
         persistNeeded = true

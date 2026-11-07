@@ -4742,7 +4742,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // sendPermissionResponse the single choke point that clears the count for
     // every caller. Store the canonical decision TOKEN ('allow' | 'deny' |
     // 'allowSession'), not a display label — consumers treat `m.answered` as a
-    // decision enum (App.tsx's hasPendingAskUserQuestionPermission gate checks
+    // decision enum (App.tsx's gatedQuestionIds gate checks
     // `=== 'allow' | 'allowSession'`; PermissionPrompt/ChildAgentEventList map
     // the token to an "Allowed"/"Denied" label for display). Additive to the
     // bubble — PermissionPrompt reads answered from resolvedPermissions, not this.

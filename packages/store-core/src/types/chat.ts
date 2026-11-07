@@ -327,6 +327,17 @@ export interface ChatMessage {
    * record on this field.
    */
   permissionOutcome?: PermissionOutcomeKind;
+  /**
+   * #8357 — on a PERMISSION prompt (one with a `requestId`): the provider's id for
+   * the tool call it is for. For an AskUserQuestion it equals the `toolUseId` of
+   * the question card it belongs to, which is how the card's consent gate finds
+   * ITS permission instead of guessing from arrival order. Deliberately NOT named
+   * `toolUseId`: several paths match a `prompt` by `toolUseId` to find a question
+   * (a re-delivered `user_question` revives the card carrying it), and a
+   * permission prompt must never be matched there. Absent when the server did not
+   * send one (an older daemon, or a hook payload that names no call).
+   */
+  permissionToolUseId?: string;
   timestamp: number;
   /** Attachments on user_input messages (images, documents) */
   attachments?: MessageAttachment[];

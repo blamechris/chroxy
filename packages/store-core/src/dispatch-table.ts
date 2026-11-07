@@ -2563,6 +2563,8 @@ function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now
     ...(record.tool ? { tool: record.tool } : {}),
     permissionOutcome: outcome,
     options: undefined,
+    // #8357: a held card that never learned its pairing id takes it from the record.
+    ...(record.permissionToolUseId ? { permissionToolUseId: record.permissionToolUseId } : {}),
   }
   if (outcome === 'expired' || outcome === 'stopped') {
     base.answered = undefined
@@ -2579,6 +2581,7 @@ function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now
     held.permissionOutcome === base.permissionOutcome &&
     held.content === base.content &&
     held.tool === base.tool &&
+    held.permissionToolUseId === base.permissionToolUseId &&
     held.options === undefined &&
     held.answered === base.answered &&
     held.expiresAt === base.expiresAt

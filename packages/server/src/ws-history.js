@@ -1915,23 +1915,33 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const finishReplay = () => {
     // #9015: the permission re-send is the ONLY delivery of the active
     // session's pending prompt on connect (the post-auth resend excludes it), so
-    // it runs in a `finally`: a throw from the end frame, the agent re-seed or
-    // the question re-send must not drop the sole copy. The success path still
-    // sends it exactly once.
+    // it runs in a `finally`: a throw from the end frame or the agent re-seed
+    // must not drop the sole copy. The success path still sends it exactly once.
+    //
+    // #8357: PERMISSIONS BEFORE QUESTIONS. A question card is withheld until its
+    // own AskUserQuestion permission is allowed, and the client can only know
+    // that permission exists once it has arrived. Sent the other way round, a
+    // reconnecting client holds the re-sent question with no permission to gate
+    // it, and can show and answer it before the permission lands: not a
+    // millisecond race, a whole resend apart.
     try {
       send(ws, { type: 'history_replay_end', sessionId, latestSeq })
       reseedActiveAgents(ctx, ws, sessionId)
-      // #7457: AFTER the end frame, never before it. The client's replay-end
-      // sweep has already run by the time this lands, which is the entire reason
-      // a still-pending question survives the reconnect.
-      resendPendingQuestions(ctx, ws, sessionId)
     } finally {
-      // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
-      // history-only message list at `history_replay_end`, dropping the live
-      // permission card the client held for this session; `permission_request`
-      // is transient, so the replay itself cannot restore it. Sent after the
-      // swap, the re-send lands on the rebuilt list and is kept.
-      resendPendingPermissionsForSession(ctx, ws, sessionId)
+      try {
+        // #8328: AFTER the end frame. A full-rebuild replay swaps in a
+        // history-only message list at `history_replay_end`, dropping the live
+        // permission card the client held for this session; `permission_request`
+        // is transient, so the replay itself cannot restore it. Sent after the
+        // swap, the re-send lands on the rebuilt list and is kept.
+        resendPendingPermissionsForSession(ctx, ws, sessionId)
+      } finally {
+        // #7457: AFTER the end frame, never before it. The client's replay-end
+        // sweep has already run by the time this lands, which is the entire
+        // reason a still-pending question survives the reconnect. In its own
+        // `finally` so a failed permission re-send cannot lose the question.
+        resendPendingQuestions(ctx, ws, sessionId)
+      }
     }
   }
 

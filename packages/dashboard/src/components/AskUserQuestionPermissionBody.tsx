@@ -22,44 +22,15 @@
  * question itself appears on the real card after Allow, and the JSON never does.
  */
 import {
-  normalizeUserQuestion,
-  OTHER_OPTION_VALUE,
-  type ChatMessageQuestion,
+  ASK_USER_QUESTION_TOOL,
+  readAskUserQuestions,
+  askUserQuestionHeadline,
+  askUserQuestionSummary,
 } from '@chroxy/store-core'
 
-/** Tool name the card specialises on. */
-export const ASK_USER_QUESTION_TOOL = 'AskUserQuestion'
-
-/**
- * Parse the questions out of a raw AskUserQuestion tool input. Returns `[]` for
- * anything that is not a usable `{ questions: [...] }`. The synthetic "Other"
- * free-text sentinel the question card appends is dropped: it is a UI affordance
- * the model never wrote, so listing it here would put words in Claude's mouth.
- */
-export function readAskUserQuestions(toolInput: Record<string, unknown> | undefined): ChatMessageQuestion[] {
-  const raw = toolInput?.questions
-  if (!Array.isArray(raw)) return []
-  const out: ChatMessageQuestion[] = []
-  for (const entry of raw) {
-    const q = normalizeUserQuestion(entry)
-    if (!q) continue
-    out.push({ ...q, options: q.options.filter((o) => o.value !== OTHER_OPTION_VALUE) })
-  }
-  return out
-}
-
-/** One-line statement of what is being asked; also the dropped-record text. */
-export function askUserQuestionHeadline(questionCount: number): string {
-  return questionCount > 1
-    ? `Claude wants to ask you ${questionCount} questions`
-    : 'Claude wants to ask you a question'
-}
-
-/** What the card says when it is dropped unanswered: the first question, or the headline. */
-export function askUserQuestionSummary(toolInput: Record<string, unknown> | undefined): string {
-  const questions = readAskUserQuestions(toolInput)
-  return questions[0]?.question ?? askUserQuestionHeadline(1)
-}
+// The parsing and wording live in store-core (#8357) so the mobile app's card
+// reads the same; re-exported here so existing dashboard imports are unchanged.
+export { ASK_USER_QUESTION_TOOL, readAskUserQuestions, askUserQuestionHeadline, askUserQuestionSummary }
 
 export function AskUserQuestionPermissionBody({ toolInput }: { toolInput?: Record<string, unknown> }) {
   const questions = readAskUserQuestions(toolInput)

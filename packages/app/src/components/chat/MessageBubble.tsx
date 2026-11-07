@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, questionEndedNotice, bumpRenderCount, formatThinkingFooter, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
+import { ASK_USER_QUESTION_TOOL, OTHER_OPTION_VALUE, questionEndedNotice, bumpRenderCount, formatThinkingFooter, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -126,7 +126,7 @@ function ThinkingBubble({ content, streaming, truncated, durationMs, tokens }: {
   );
 }
 
-function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, questionGated, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
    * #5938 — true when this `user_input` bubble was sent mid-turn and is sitting
@@ -169,6 +169,15 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
    * via the multi-select reinject path; off for claude-cli.
    */
   allowSingleMultiSelect?: boolean;
+  /**
+   * #8357 / #4685 -- THIS question card's own AskUserQuestion permission is
+   * still pending or was denied. While true, an unanswered question card renders
+   * nothing: the permission card is the one surface for the pending state, and
+   * the model-supplied question and options stay withheld until the user allows.
+   * ChatView derives it per card (store-core `deriveGatedQuestionIds`). Defaults
+   * to false so a caller that omits it keeps the old behaviour.
+   */
+  questionGated?: boolean;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -505,6 +514,17 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
     return <AuthRequiredChip errorText={message.content ?? ''} authCause={message.authCause} />;
   }
 
+  // #8357 / #4685: the consent gate. A question card (a prompt with no
+  // `requestId`) that nobody has answered renders nothing while an AskUserQuestion
+  // permission is unresolved-or-denied. Nothing here keys off `message.tool`: the
+  // gate holds for every question card, whatever name the payload carries.
+  // `questionGated` already says the card is still awaiting an answer (the replay
+  // sweep's '(resolved)' placeholder counts as awaiting), so no `answered` check
+  // here: one would un-hide a card after a reload while its permission is pending.
+  if (isPrompt && !message.requestId && questionGated) {
+    return null;
+  }
+
   // #8348: a permission prompt that has ENDED, rebuilt from the server's durable
   // `permission_outcome` history entry (a session switch or a reload — the live
   // card is not replayed). A compact, non-interactive record. Ahead of the pill so
@@ -578,7 +598,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
           here would duplicate Q[0] above the form. The form / summary
           renders every question itself. */}
       {showMultiQuestionForm || showMultiQuestionSummary ? null :
-        isPrompt && message.toolInput ? (
+        isPrompt && (message.toolInput || (message.requestId && message.tool === ASK_USER_QUESTION_TOOL)) ? (
         <PermissionDetailOrFallback tool={message.tool} toolInput={message.toolInput} fallback={message.content?.trim() || ''} />
       ) : !isUser && !isPrompt && !isError && !isSystem ? (
         <FormattedResponse content={message.content?.trim() || ''} messageTextStyle={styles.messageText} />
@@ -907,6 +927,10 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     // bubble keeps stale gating (the dashboard re-renders via useMessageRenderer's
     // deps; the app relies on this comparator).
     prev.allowSingleMultiSelect === next.allowSingleMultiSelect &&
+    // #8357 -- the consent gate flips when the AskUserQuestion permission is
+    // allowed; a question bubble must re-render then. The message object itself
+    // does not change, so without this the memo would keep it blank.
+    prev.questionGated === next.questionGated &&
     // #5938 — re-render when the queued flag flips (badge appears/clears on
     // enqueue/flush) or the cancel handler's presence changes.
     // #6628 — likewise for the edit handler's presence.

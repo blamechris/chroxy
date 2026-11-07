@@ -5746,6 +5746,9 @@ export class SessionManager extends EventEmitter {
       // sanitized copy the broadcast carries, never the raw one) so the outcome
       // can journal it. The history layer bounds and re-checks it on recording.
       input: request.input,
+      // #8357: the provider's tool-use id, so a replayed AskUserQuestion record
+      // still pairs with its question. Absent for every other prompt.
+      ...(typeof request.toolUseId === 'string' && request.toolUseId ? { toolUseId: request.toolUseId } : {}),
     })
     while (this._permissionRequests.size > MAX_TRACKED_PERMISSION_REQUESTS) {
       const oldest = this._permissionRequests.keys().next().value
@@ -5790,6 +5793,7 @@ export class SessionManager extends EventEmitter {
         outcome,
         input: pending.input,
         decision,
+        toolUseId: pending.toolUseId,
       })
       return true
     } catch (err) {

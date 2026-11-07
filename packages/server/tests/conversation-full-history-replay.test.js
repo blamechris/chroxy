@@ -53,6 +53,7 @@ function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, sourc
   const sends = []
   const reseeds = []
   const resends = [] // #7457
+  const order = [] // #8357: the order the two repair lanes ran in
   const { manager } = createMockSessionManager([{ id: 'sess-1', name: 'Work', cwd: '/repo' }])
   manager.getFullHistoryAsync = async () => (
     legacyArrayShape ? historyEntries : { entries: historyEntries, source, truncated }
@@ -71,11 +72,11 @@ function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, sourc
     sessionManager: manager,
     reseedActiveAgents: (_ws, sid) => reseeds.push(sid),
     // #7457: same post-replay repair lane as the re-seed.
-    resendPendingQuestions: (_ws, sid) => resends.push(sid),
+    resendPendingQuestions: (_ws, sid) => { resends.push(sid); order.push('questions') },
     // #8340: the permission-card repair lane.
-    resendPendingPermissions: () => {},
+    resendPendingPermissions: () => { order.push('permissions') },
   })
-  return { ctx, sends, ws, reseeds, resends }
+  return { ctx, sends, ws, reseeds, resends, order }
 }
 
 const client = () => ({ id: 'c1', activeSessionId: 'sess-1' })
@@ -431,6 +432,18 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     assert.equal(sends[sends.length - 1].type, 'history_replay_end',
       'precondition: the end frame is the last thing the handler itself sent')
     assert.deepEqual(resends, ['sess-1'])
+  })
+
+  // #8357 -- a question card is gated by its own permission, which the client must
+  // already hold when the question lands. Same order as `replayHistory`.
+  it('re-sends the permission BEFORE the question (#8357)', async () => {
+    const history = [{ type: 'user_question', toolUseId: 'ask-1', questions: [], _seq: 1 }]
+    const { ctx, ws, order } = build(history)
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(10)
+
+    assert.deepEqual(order, ['permissions', 'questions'])
   })
 
   it('stops sending when the socket closes while parked on back-pressure', async () => {

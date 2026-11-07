@@ -3066,7 +3066,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === permRequestId && m.type === 'prompt'
-          ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined })
+          ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined, ...(permPayload.toolUseId ? { permissionToolUseId: permPayload.toolUseId } : {}) })
           : m
       ),
     });
@@ -3091,6 +3091,8 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       tool: permPayload.tool ?? undefined,
       requestId: permRequestId,
       toolInput: permPayload.input ?? undefined,
+      // #8357: pairs an AskUserQuestion permission with its question card.
+      permissionToolUseId: permPayload.toolUseId ?? undefined,
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),

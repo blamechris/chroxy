@@ -53,7 +53,7 @@ export interface UseMessageRendererArgs {
   activeSessionCaps?: ProviderCapabilities | null
   setViewMode: ConnectionState['setViewMode']
   stalledPromptIds: Set<string>
-  hasPendingAskUserQuestionPermission: boolean
+  gatedQuestionIds: ReadonlySet<string>
   /**
    * #5667 — all connected sessions, used to label a permission prompt with the
    * session that asked (from the message's `originSessionId`). Only consulted
@@ -176,7 +176,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     activeSessionCaps,
     setViewMode,
     stalledPromptIds,
-    hasPendingAskUserQuestionPermission,
+    gatedQuestionIds,
     sessions,
   } = args
 
@@ -330,12 +330,12 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           // arrived (which the server emits in parallel with the
           // permission_request), leaking the model-supplied question
           // text + options before the user had a chance to click Allow.
-          // The derivation `hasPendingAskUserQuestionPermission` scans
-          // the same session's messages for any AskUserQuestion
-          // permission prompt that is still unresolved on both this
-          // client and across clients. Already-answered prompts skip the
-          // gate so post-answer chat history renders normally.
-          pendingPermission={!storeMsg.answered && hasPendingAskUserQuestionPermission}
+          // `gatedQuestionIds` (store-core `deriveGatedQuestionIds`) pairs this
+          // card with its OWN AskUserQuestion permission and holds it while
+          // that one is pending or denied. An earlier denied or expired
+          // permission no longer hides a later question. Already-answered
+          // prompts skip the gate so post-answer history renders normally.
+          pendingPermission={gatedQuestionIds.has(storeMsg.id)}
           onSelect={(answer) => {
             // #4604 Chunk B / #4735 — answer is `string` for
             // single-question / free-text paths and
@@ -512,5 +512,5 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, permissionExpiredSummaries, permissionPromptGroups, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
+  }, [storeMsgMap, chatToolGroupPayloads, permissionExpiredSummaries, permissionPromptGroups, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, gatedQuestionIds, sessions])
 }
