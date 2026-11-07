@@ -55,6 +55,10 @@ const MCP_SOURCE_LABELS: Record<string, string> = {
   user: 'Your user-wide Claude config',
 }
 
+// #7974: tooltip + accessible name for the protected-path badge (title alone is invisible to touch and keyboard users).
+const FLOORED_EXPLANATION =
+  'This request touches a protected path (repo hooks, agent settings or a secret file), so it always needs a human decision.'
+
 export interface PermissionPromptProps {
   requestId: string
   tool: string
@@ -86,6 +90,13 @@ export interface PermissionPromptProps {
    * already has on the message, not a second network round trip).
    */
   toolInput?: Record<string, unknown>
+  /**
+   * #7974 — the permission floor's verdict (#7971): `true` when the protected-path
+   * / secret-read floor forced this prompt to a human. Shows a "Protected path"
+   * marker for `true` only; `false` and absent (a server older than the field)
+   * render nothing.
+   */
+  floored?: boolean
 }
 
 function formatCountdown(ms: number): string {
@@ -95,7 +106,7 @@ function formatCountdown(ms: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
 }
 
-export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel, toolInput }: PermissionPromptProps) {
+export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel, toolInput, floored }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // #3619: anchor on monotonic `performance.now()` so an NTP sync /
@@ -318,6 +329,17 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       {sessionLabel && (
         <div className="perm-session" data-testid="perm-session" title={`Requested by ${sessionLabel}`}>
           {sessionLabel}
+        </div>
+      )}
+      {floored === true && (
+        <div
+          className="perm-floored"
+          data-testid="perm-floored"
+          role="note"
+          aria-label={FLOORED_EXPLANATION}
+          title={FLOORED_EXPLANATION}
+        >
+          Protected path
         </div>
       )}
       {/* #7365 review (S1) — `tabIndex={-1}` makes this a valid focus target

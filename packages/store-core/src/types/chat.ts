@@ -135,6 +135,14 @@ export interface ChatMessage {
    * pre-#5667 messages.
    */
   originSessionId?: string;
+  /**
+   * #7974: the permission floor's verdict for a permission `prompt` (#7971) --
+   * `true` when the protected-path / secret-read floor forced this prompt to a
+   * human. Renderers show a "protected path" marker only for `true`; absent
+   * (an older server, or a prompt not built from a live `permission_request`)
+   * and `false` show nothing.
+   */
+  floored?: boolean;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   toolResult?: string;

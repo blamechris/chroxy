@@ -288,6 +288,8 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           // #7939 — already-broadcast tool input (no extra pull); currently
           // read only for an mcp_spawn prompt's `mcpServer.source`.
           toolInput={storeMsg.toolInput}
+          // #7974 — the permission floor's verdict (#7971).
+          floored={storeMsg.floored}
         />
       )
     }

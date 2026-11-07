@@ -7779,6 +7779,52 @@ describe('dashboard message-handler dispatch', () => {
       expect(promptMsg.content).not.toContain('undefined')
     })
 
+    // #7974: the floor verdict (#7971) is carried onto the prompt so the card can
+    // show a "protected path" marker. true / false / absent (an older server).
+    it.each([
+      ['true', { floored: true }, true],
+      ['false', { floored: false }, false],
+      ['absent', {}, undefined],
+    ])('carries floored (%s) onto the prompt message (#7974)', (_label, extra, expected) => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: { 's-perm': createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-perm',
+          requestId: 'perm-floor',
+          tool: 'Write',
+          description: '.git/hooks/pre-commit',
+          input: { path: '.git/hooks/pre-commit' },
+          ...extra,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates['s-perm'].messages
+      expect(msgs.find((m: any) => m.type === 'prompt').floored).toBe(expected)
+    })
+
+    it('refreshes floored when a held prompt is re-sent (#7974)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: { 's-perm': createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+      const frame = { type: 'permission_request', sessionId: 's-perm', requestId: 'perm-floor-2', tool: 'Read', description: '.env' }
+      handleMessage({ ...frame }, ctx() as any)
+      handleMessage({ ...frame, floored: true }, ctx() as any)
+      const msgs = (store.getState() as any).sessionStates['s-perm'].messages.filter((m: any) => m.type === 'prompt')
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].floored).toBe(true)
+    })
+
     it('falls back to "Permission required" when both tool and description are missing', () => {
       store = createMockStore(
         baseState({

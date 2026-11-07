@@ -5406,6 +5406,58 @@ describe('permission_request message handler', () => {
     expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession', 'allowAlways']);
   });
 
+  // #7974: the floor verdict (#7971) is carried onto the prompt so the card can
+  // show a "protected path" marker. Only the three wire shapes matter: true,
+  // false, and absent (an older server).
+  it.each([
+    ['true', { floored: true }, true],
+    ['false', { floored: false }, false],
+    ['absent', {}, undefined],
+  ])('carries floored (%s) onto the prompt message (#7974)', (_label, extra, expected) => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-floor',
+      tool: 'Write',
+      description: '.git/hooks/pre-commit',
+      input: { path: '.git/hooks/pre-commit' },
+      ...extra,
+    });
+
+    expect(store.getState().sessionStates.s1.messages[0].floored).toBe(expected);
+  });
+
+  it('refreshes floored when a held prompt is re-sent (#7974)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    clearPermissionSplits();
+    const frame = { type: 'permission_request', sessionId: 's1', requestId: 'perm-floor-2', tool: 'Read', description: '.env' };
+
+    _testMessageHandler.handle({ ...frame });
+    expect(store.getState().sessionStates.s1.messages[0].floored).toBeUndefined();
+    _testMessageHandler.handle({ ...frame, floored: true });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].floored).toBe(true);
+  });
+
   // #3072: when the active session's provider does not declare the
   // sessionRules capability, the "Allow for Session" option must be
   // omitted entirely (the server would reject the follow-up

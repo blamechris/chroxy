@@ -313,6 +313,27 @@ describe('useMessageRenderer — Codex shell permission card has no duplicated l
   })
 })
 
+describe('useMessageRenderer — protected-path marker wiring (#7974)', () => {
+  // The renderer must hand the store message's `floored` to PermissionPrompt;
+  // the prompt-level tests alone cannot see a dropped prop at this call site.
+  it.each([
+    ['true', true, 1],
+    ['false', false, 0],
+    ['absent', undefined, 0],
+  ])('floored %s renders %i marker(s)', (_label, floored, count) => {
+    const msg = { ...promptMsg('m1', 'Write: .git/hooks/pre-commit', 'Write', 'perm-f'), floored } as ChatMessage
+    const args = makeArgs({
+      storeMsgMap: new Map([['m1', msg]]),
+      chatTailMessageId: 'm1',
+      storeMessages: [msg],
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const node = result.current({ id: 'm1', type: 'system', content: msg.content, timestamp: 0 } as ChatViewMessage)
+    render(<>{node}</>)
+    expect(screen.queryAllByTestId('perm-floored')).toHaveLength(count)
+  })
+})
+
 describe('useMessageRenderer — permission-expired-summary wiring (#7365 review S2)', () => {
   // Integration-level coverage the review found missing: the pure aggregator
   // and the presentational component were each tested in isolation, but

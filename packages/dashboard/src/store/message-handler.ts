@@ -3062,7 +3062,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === permRequestId && m.type === 'prompt'
-          ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt })
+          ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt, floored: permPayload.floored ?? undefined })
           : m
       ),
     });
@@ -3097,6 +3097,8 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       // the request maps to no session (contract: originSessionId is the owner
       // or absent).
       originSessionId: permPayload.sessionId ?? undefined,
+      // #7974 — the permission floor's verdict (#7971); only `true` renders a marker.
+      floored: permPayload.floored ?? undefined,
     };
     if (permTargetId && get().sessionStates[permTargetId]) {
       updateSession(permTargetId, (ss) => ({

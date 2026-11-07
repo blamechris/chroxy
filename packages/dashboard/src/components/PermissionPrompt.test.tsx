@@ -224,6 +224,44 @@ describe('PermissionPrompt', () => {
     expect(screen.queryByTestId('perm-session')).not.toBeInTheDocument()
   })
 
+  // #7974 — the permission floor (#7971) forced this prompt to a human; the card
+  // says so. Only `true` shows the marker: `false` and absent (an older server)
+  // render nothing.
+  it('shows a protected-path marker when floored is true (#7974)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description=".git/hooks/pre-commit"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        floored
+      />
+    )
+    const marker = screen.getByTestId('perm-floored')
+    expect(marker).toHaveTextContent('Protected path')
+    expect(marker.getAttribute('title')).toMatch(/human/i)
+    expect(marker).toHaveAttribute('role', 'note')
+    expect(marker.getAttribute('aria-label')).toMatch(/human/i)
+  })
+
+  it.each([
+    ['false', false],
+    ['absent', undefined],
+  ])('omits the protected-path marker when floored is %s (#7974)', (_label, floored) => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="src/index.js"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        floored={floored}
+      />
+    )
+    expect(screen.queryByTestId('perm-floored')).not.toBeInTheDocument()
+  })
+
   it('shows countdown timer', () => {
     render(
       <PermissionPrompt
