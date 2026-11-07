@@ -147,6 +147,15 @@ function settled(state) {
   return Promise.race([state.inputDone, new Promise((r) => setTimeout(r, 200))])
 }
 
+/** Poll until `cond()` holds, bounded so a regression fails instead of hanging. */
+async function until(cond, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('until: condition not met before the deadline')
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
 function capture(session) {
   const events = []
   for (const name of ['ready', 'stream_start', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'stopped', 'permission_request', 'agent_spawned', 'agent_completed']) {
@@ -170,12 +179,16 @@ describe('SdkSession turn input (#8300)', () => {
   let session
   let state
   const defaultConfirmMs = SdkSession.ORPHAN_NOTICE_CONFIRM_MS
+  const defaultDrainWaitMs = SdkSession.DRAIN_WAIT_MS
+  const defaultDrainGraceMs = SdkSession.DRAIN_FORCE_GRACE_MS
   beforeEach(() => {
     session = createSession()
     state = {}
   })
   afterEach(() => {
     SdkSession.ORPHAN_NOTICE_CONFIRM_MS = defaultConfirmMs
+    SdkSession.DRAIN_WAIT_MS = defaultDrainWaitMs
+    SdkSession.DRAIN_FORCE_GRACE_MS = defaultDrainGraceMs
     session.destroy()
   })
 
@@ -911,7 +924,7 @@ describe('SdkSession turn input (#8300)', () => {
       const bState = {}
       let bQuery = null
       let bBusyAfterA = null
-      let bPromise = null
+      let bStartedWhileAOpen = null
       wire(session, [
         init(),
         { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
@@ -922,16 +935,18 @@ describe('SdkSession turn input (#8300)', () => {
         () => {
           session._handleHardTimeout(session._currentMessageId, false)
           session._callQuery = (bArgs) => {
+            bStartedWhileAOpen = state.closeCalls === undefined // A has not closed its query yet
             consumeInput(bArgs.prompt, bState)
             bQuery = fakeQuery([init('sdk-2'), { __delayMs: 120 }, () => { bBusyAfterA = session._isBusy }, promptResult(1)], bState)
             return bQuery
           }
-          bPromise = session.sendMessage('B')
+          session.sendMessage('B')
         },
         { __parkUntilClosed: true },
       ], state)
       await session.sendMessage('A')
-      await bPromise
+      await until(() => bQuery && bState.inputEnded === true && !session._isBusy)
+      assert.equal(bStartedWhileAOpen, true, 'precondition: B started before A\'s generator could end (the abandon, not the queue)')
       assert.equal(bBusyAfterA, true, 'A\'s finish did not clear B\'s busy state')
       assert.equal(state.closeCalls, 1, 'A closed its own query')
       assert.equal(bState.closeCalls, undefined, 'and never B\'s')
@@ -944,7 +959,7 @@ describe('SdkSession turn input (#8300)', () => {
       const events = capture(session)
       const bState = {}
       let rosterDuringB = null
-      let bPromise = null
+      let bStartedWhileAOpen = null
       wire(session, [
         init(),
         { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
@@ -955,6 +970,7 @@ describe('SdkSession turn input (#8300)', () => {
         () => {
           session._handleHardTimeout(session._currentMessageId, false)
           session._callQuery = (bArgs) => {
+            bStartedWhileAOpen = state.closeCalls === undefined // A has not closed its query yet
             consumeInput(bArgs.prompt, bState)
             return fakeQuery([
               init('sdk-2'),
@@ -967,12 +983,13 @@ describe('SdkSession turn input (#8300)', () => {
               promptResult(2),
             ], bState)
           }
-          bPromise = session.sendMessage('B')
+          session.sendMessage('B')
         },
         { __parkUntilClosed: true },
       ], state)
       await session.sendMessage('A')
-      await bPromise
+      await until(() => rosterDuringB && events.filter((e) => e.name === 'result').length === 2 && !session._isBusy)
+      assert.equal(bStartedWhileAOpen, true, 'precondition: B started before A\'s generator could end (the abandon, not the queue)')
       assert.deepEqual(rosterDuringB, ['t-B'], 'A\'s finish removed only its own task')
       const synthetic = events.filter((e) => e.name === 'tool_result' && e.toolUseId === 'tu-B' && e.isError === true)
       assert.equal(synthetic.length, 0, 'A\'s result did not sweep B\'s running tool as failed')
@@ -987,7 +1004,6 @@ describe('SdkSession turn input (#8300)', () => {
       const bState = {}
       let bQuery = null
       let handleDuringB = 'unset'
-      let bPromise = null
       // Turn A: result, then the generator lingers (draining) for a moment.
       session._callQuery = (args) => {
         aState.args = args
@@ -1007,13 +1023,13 @@ describe('SdkSession turn input (#8300)', () => {
               ], bState)
               return bQuery
             }
-            bPromise = session.sendMessage('B')
+            session.sendMessage('B')
           },
           { __delayMs: 20 },
         ], aState)
       }
       await session.sendMessage('A')
-      await bPromise
+      await until(() => bQuery && bState.inputEnded === true && !session._isBusy && session._query === null)
       assert.equal(handleDuringB, 'own', 'A\'s finally must not erase B\'s query handle')
       assert.equal(session._query, null, 'B\'s own finally clears it at the end')
       assert.equal(bState.inputEnded, true)
@@ -1292,6 +1308,64 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session.isRunning, true, 'the foreign shell still holds the session busy')
     })
 
+    // #8321: the turn's `finally` awaits a stop request for each shell still
+    // tracked. The drain stays held across that await, so a send there queues
+    // behind older messages instead of starting a second query() at once.
+    for (const mode of ['hangs', 'throws']) {
+      it(`holds the drain while a leftover shell's stop request ${mode}, then runs the queued sends in order`, async () => {
+        const defaultStop = SdkSession.STOP_TASK_TIMEOUT_MS
+        SdkSession.STOP_TASK_TIMEOUT_MS = 150
+        try {
+          capture(session)
+          let calls = 0
+          const startedWith = []
+          let drainAtSecondQuery = 'unset'
+          session._callQuery = (args) => {
+            calls++
+            if (calls === 1) {
+              consumeInput(args.prompt, state)
+              const q = fakeQuery(shellScript('sh-x',
+                // _isBusy is set by hand because this window needs it: a real turn that
+                // leaves a shell tracked after busy cleared is reached only via paths
+                // (hard timeout, stall) that also abandon the drain.
+                () => { session._isBusy = false }), state)
+              if (mode === 'throws') {
+                q.stopTask = () => new Promise((_, reject) => setTimeout(() => reject(new Error('control channel gone')), 100))
+              } else {
+                state.stopTaskHangs = true
+              }
+              return q
+            }
+            drainAtSecondQuery = session._drainingTurn
+            const bState = {}
+            startedWith.push(bState)
+            consumeInput(args.prompt, bState)
+            return fakeQuery([init('sdk-2'), promptResult(1)], bState)
+          }
+          const aDone = session.sendMessage('A')
+          await until(() => session._isBusy === false && session._drainingTurn !== null && session._pendingBackgroundShells.has('sh-x'))
+          // The stop request is in flight (hanging, or about to reject).
+          await session.sendMessage('B')
+          await session.sendMessage('C')
+          assert.equal(calls, 1, 'no second query() while the first still awaits its shell stop')
+          assert.equal(session._outgoingQueue.length, 2)
+          assert.notEqual(session._drainingTurn, null, 'the drain is still held')
+          await aDone
+          await until(() => calls === 3 && !session._isBusy)
+          assert.equal(drainAtSecondQuery, null, 'the drain had ended before the queued send started')
+          assert.equal(startedWith.length, 2)
+          const texts = []
+          for (const b of startedWith) {
+            await b.inputDone
+            texts.push(b.items[0].message.content[0].text)
+          }
+          assert.deepEqual(texts, ['B', 'C'], 'queued sends ran in arrival order')
+        } finally {
+          SdkSession.STOP_TASK_TIMEOUT_MS = defaultStop
+        }
+      })
+    }
+
     it('does not reap a shell belonging to the turn that is still running', async () => {
       // Turn A ends while turn B (started inside A's drain) holds a tracked shell.
       // Explicit barriers make the ORDER the claim, not a timing hope:
@@ -1303,12 +1377,14 @@ describe('SdkSession turn input (#8300)', () => {
       // A reaper that clears every shell (not just the ending turn's own) clears
       // sh-b in step 2 and fails step 3.
       const bState = {}
-      let bPromise = null
       let markBTracked
       const bTracked = new Promise((resolve) => { markBTracked = resolve })
       let releaseB
       const bGate = new Promise((resolve) => { releaseB = resolve })
       let bBusyAtHold = null
+      // #8321: B can only start inside A's drain once the drain bound releases it.
+      SdkSession.DRAIN_WAIT_MS = 5
+      SdkSession.DRAIN_FORCE_GRACE_MS = 5
       capture(session)
       wire(session, [
         init(),
@@ -1322,8 +1398,8 @@ describe('SdkSession turn input (#8300)', () => {
               promptResult(2),
               { __parkUntilClosed: true }), bState)
           }
-          bPromise = session.sendMessage('B')
-          await bTracked // A does not finish until B has its shell tracked
+          session.sendMessage('B')
+          await Promise.race([bTracked, new Promise((_, reject) => setTimeout(() => reject(new Error('B never started inside A\'s drain')), 2000))]) // A does not finish until B has its shell tracked
         },
       ], state)
 
@@ -1334,7 +1410,7 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(bState.closeCalls, undefined, 'and was not closed by A')
 
       releaseB()
-      await bPromise
+      await until(() => !session._isBusy && session._pendingBackgroundShells.size === 0)
       assert.equal(session._pendingBackgroundShells.has('sh-b'), false, 'B releases its own shell when B ends')
     })
   })
