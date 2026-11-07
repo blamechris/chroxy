@@ -144,6 +144,34 @@ export const SDK_TOOL_CANCELLED_PREFIXES = [
   'Tool permission request failed:',
 ]
 
+// #8936: the sentences Claude Code writes into the error tool_result of a tool
+// that was refused. They address the model ("STOP what you are doing and wait
+// for the user to tell you how to proceed"), so they are never shown to the
+// user. A refusal this session decided is recognised by its tool_use id, not by
+// this wording (the CLI has several spellings and changes them); the prefixes
+// are only the fallback for a refusal block with no decision on record, and the
+// check that makes an unexpected spelling visible in the log.
+export const SDK_TOOL_REJECTED_PREFIXES = [
+  "The user doesn't want to proceed with this tool use.",
+  'Permission for this tool use was denied.',
+  'Permission for this action has been denied.',
+]
+
+// Shown when a refusal is recognised but no decision of this session carries a
+// sentence of its own (a refusal the CLI made from its own settings).
+export const SDK_DENIED_FALLBACK_TEXT = 'Tool use was denied.'
+
+/**
+ * #8936: is this tool_result text one of Claude Code's model-facing refusals?
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function isSdkToolRejectionText(text) {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trimStart()
+  return SDK_TOOL_REJECTED_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
+}
+
 /**
  * #8300: does this tool_result text mean Claude Code cancelled the tool call
  * itself, without consulting chroxy's permission pipeline?
@@ -868,6 +896,10 @@ export class SdkSession extends BaseSession {
     // write its own denial before this session's resolution runs); a decision that
     // lands first -- a Deny, a timeout -- is not confirmed and takes the mark off.
     this._stopResolvedToolUseIds = new Set()
+    // #8936: the user-facing sentence of each denial this session decided
+    // (tool_use id -> PermissionManager's message), read once by the
+    // tool_result path to replace the provider's model-facing refusal text.
+    this._deniedToolMessages = new Map()
 
     // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
     // Set by `interrupt()` immediately before aborting the active SDK query
@@ -1078,6 +1110,7 @@ export class SdkSession extends BaseSession {
     this._stopRequestedThisTurn = false
     this._stopCancelledToolUseIds.clear() // #8363
     this._stopResolvedToolUseIds.clear() // #8430
+    this._deniedToolMessages.clear() // #8936
     // #8430: ...and with no user Stop in flight, whatever the last turn left (a
     // turn superseded before its teardown never reaches `_clearMessageState`).
     this._permissions.clearUserStopInFlight()
@@ -2993,6 +3026,11 @@ export class SdkSession extends BaseSession {
     this._pendingPermissionToolUseIds.add(toolUseId)
     const settled = (result) => {
       this._pendingPermissionToolUseIds.delete(toolUseId)
+      if (result?.behavior === 'deny' && typeof result.message === 'string' && result.message.trim()) {
+        this._deniedToolMessages.set(toolUseId, result.message.trim())
+      } else {
+        this._deniedToolMessages.delete(toolUseId)
+      }
       if (result?.behavior === 'allow') {
         this._stopCancelledToolUseIds.delete(toolUseId)
         this._stopResolvedToolUseIds.delete(toolUseId)
@@ -3006,6 +3044,35 @@ export class SdkSession extends BaseSession {
       (result) => { settled(result); return result },
       (err) => { settled(undefined); throw err },
     )
+  }
+
+  /**
+   * #8936: the user-facing text for a provider `tool_result` that is a refusal,
+   * or undefined. Consulted by `emitToolResults` for every result block.
+   *
+   * Keyed on this session's own decision: an error block whose tool_use id has a
+   * recorded denial shows that denial's message, whatever wording the CLI chose.
+   * Without a record, only a block that reads as one of the CLI's refusals gets
+   * the generic sentence; any other error (a real tool failure) is untouched. A
+   * non-error block never consumes the record.
+   * @param {string} toolUseId
+   * @param {{is_error?: boolean}} block
+   * @returns {string|undefined}
+   */
+  _deniedTextForToolResult(toolUseId, block) {
+    if (block?.is_error !== true) return undefined
+    const text = toolResultText(block)
+    const message = this._deniedToolMessages.get(toolUseId)
+    if (message !== undefined) {
+      this._deniedToolMessages.delete(toolUseId)
+      if (!isSdkToolRejectionText(text)) {
+        ;(this._log || log).warn(
+          `Denied ${toolUseId} came back with an unrecognised refusal text: ${text.trim().split('\n')[0].slice(0, 120)}`,
+        )
+      }
+      return message
+    }
+    return isSdkToolRejectionText(text) ? SDK_DENIED_FALLBACK_TEXT : undefined
   }
 
   /**
@@ -3806,6 +3873,7 @@ export class SdkSession extends BaseSession {
     const userStop = opts?.userStop ?? this._permissions.isUserStopInFlight()
     super._clearMessageState(opts)
     this._permissions.clearAll({ userStop })
+    this._deniedToolMessages.clear() // #8936
     // #8321: busy ends here, possibly with the turn's generator still alive.
     // Bound how long a follow-up can be held behind it.
     if (this._drainingTurn && !this._destroying && this._outgoingQueue.length) this._armDrainRelease()
@@ -3830,6 +3898,7 @@ export class SdkSession extends BaseSession {
    */
   destroy() {
     this._destroying = true
+    this._deniedToolMessages.clear() // #8936
     if (this._drainingTurn) this._endDrain(this._drainingTurn)
     // #5936: tear down the shared outgoing queue silently — no message_dequeued
     // (which signals "sent") for a session that's going away.
