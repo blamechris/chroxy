@@ -1,12 +1,12 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
-import { join } from 'node:path'
+import path, { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { PermissionManager } from '../src/permission-manager.js'
 import { evaluateHookFloorRequest } from '../src/ws-permissions.js'
-import { isFlooredTarget, SEARCH_ROOT_TOOLS, floorInternalsForTest } from '../src/permission-floor.js'
+import { isFlooredTarget, SEARCH_ROOT_TOOLS, floorInternalsForTest, pathPiecesUnder } from '../src/permission-floor.js'
 import { SYMLINK_SUPPORTED, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
@@ -237,7 +237,7 @@ describe('a search with no path starts from the session cwd', () => {
 
   it('leaves a search from an ordinary cwd alone', async () => {
     // Not '/tmp' itself: the fixtures can live under it (TMPDIR=/tmp), which makes it an ancestor of the config dir.
-    const sibling = mkdtempSync(join(tmpdir(), 'floor-keys-sibling-'))
+    const sibling = realpathSync.native(mkdtempSync(join(tmpdir(), 'floor-keys-sibling-')))
     try {
       for (const cwd of [project, sibling, '/tmp/other', '/tmp/cc-socks-other']) {
         for (const [tool, input] of SEARCHES) await assertBoth(tool, input, false, `ordinary cwd ${cwd}`, cwd)
@@ -446,7 +446,7 @@ describe('a config dir that cannot be resolved does not floor ordinary access', 
   it('a sessions root that fails to resolve floors only at or under its written path', () => {
     const fail = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) }
     const v = (target, extra = {}) => floorInternalsForTest.protectedRootVerdicts(target, {
-      configDirFn: () => '/cfg', inboxDirs: ['/tmp/cc-socks'], resolveRootFn: (p) => (p === '/cfg/sessions' ? fail() : p), ...extra,
+      configDirFn: () => '/cfg', inboxDirs: ['/tmp/cc-socks'], resolveRootFn: (p) => (p === join('/cfg', 'sessions') ? fail() : p), ...extra,
     })
     assert.equal(v('/cfg/sessions').sessionsDir, true, 'the directory')
     assert.equal(v('/cfg/sessions/123.json').sessionsDir, true, 'a file inside it')
@@ -470,10 +470,33 @@ describe('a config dir that cannot be resolved does not floor ordinary access', 
   })
 
   it('a path under a non-directory resolves like a missing one', () => {
+    writeFileSync(join(sandbox, 'cfg-is-a-file'), 'x')
     const v = (target) => floorInternalsForTest.protectedRootVerdicts(target, {
       configDirFn: () => join(sandbox, 'cfg-is-a-file', 'nested'), inboxDirs: [],
     })
     assert.equal(v(join(sandbox, 'cfg-is-a-file', 'nested', 'sessions')).sessionsDir, true)
     assert.equal(v(join(sandbox, 'cfg-is-a-file', 'nested', 'sessions', 'x')).sessionsDir, false, 'resolved, not failed')
+  })
+})
+
+describe('root containment compares Windows spellings', () => {
+  // The same primitive the root rules use, with the Windows path module, so the
+  // spellings are exercised on every host.
+  const under = (root, target) => pathPiecesUnder(root, target, path.win32)
+
+  it('treats separators, drive-letter case, letter case and a trailing separator alike', () => {
+    const root = 'C:\\Users\\u\\.claude\\sessions'
+    assert.deepEqual(under(root, 'C:\\Users\\u\\.claude\\sessions'), [])
+    assert.deepEqual(under(root, 'c:/users/u/.claude/sessions'), [])
+    assert.deepEqual(under(root, 'C:\\Users\\u\\.claude\\sessions\\'), [])
+    assert.deepEqual(under(root + '\\', 'C:/Users/u/.claude/Sessions/123.json'), ['123.json'])
+    assert.deepEqual(under('c:/users/u/.claude/sessions', 'C:\\USERS\\U\\.CLAUDE\\SESSIONS\\a\\b.key'), ['a', 'b.key'])
+  })
+
+  it('does not match a sibling prefix, another drive or a parent', () => {
+    const root = 'C:\\Users\\u\\.claude\\sessions'
+    assert.equal(under(root, 'C:\\Users\\u\\.claude\\sessions-old\\a'), null)
+    assert.equal(under(root, 'D:\\Users\\u\\.claude\\sessions\\a'), null)
+    assert.equal(under(root, 'C:\\Users\\u\\.claude'), null)
   })
 })
