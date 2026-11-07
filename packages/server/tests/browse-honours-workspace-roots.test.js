@@ -102,47 +102,53 @@ describe('Browse honours workspaceRoots (#8303)', () => {
     })
 
     // (Paths are built by string concatenation: path.join would collapse `..` itself.)
-    // `..` is read as the kernel reads it (through links), the way Create reads
-    // it, not collapsed textually. link -> <scratch>/root/sub/deep, so
-    // link/.. is root/sub (inside the root) while the TEXTUAL collapse of
-    // <scratch>/link/.. is <scratch> (outside every root and home).
+    // `..` is read the way the platform reads it, which is also how Create reads it:
+    // POSIX resolves it through the link before it, Win32 collapses it textually
+    // before the filesystem sees the path. So the property asserted on every
+    // platform is AGREEMENT with Create; the POSIX-only cells then pin the
+    // through-the-link results. link -> <scratch>/root/sub/deep.
     describe('`..` through a symlink', { skip: SKIP_NO_SYMLINK }, () => {
+      const POSIX = process.platform !== 'win32'
       let link
+
+      /** Browse must answer what Create answers for `p` (inside-root targets: missing is "not found"). */
+      async function assertAgreesWithCreate(p) {
+        const create = validateCwdAllowed(p, cfg())
+        const reply = await list(p, { config: cfg() })
+        if (create === null) assert.equal(reply.error, null, `${p}: Create accepts, Browse says ${reply.error}`)
+        else if (/does not exist/.test(create)) assert.equal(reply.error, 'Directory not found', `${p}: Create says missing`)
+        else assert.match(reply.error, /^Access denied/, `${p}: Create refuses (${create})`)
+        return { create, reply }
+      }
+
       beforeEach(() => {
         link = join(scratch, 'link')
         symlinkSync(join(root, 'sub', 'deep'), link)
       })
 
-      it('link/.. resolves through the link: listed like Create accepts it', async () => {
-        const p = `${link}/..`
-        assert.equal(validateCwdAllowed(p, cfg()), null, 'precondition: Create accepts it')
-        const reply = await list(p, { config: cfg() })
-        assert.equal(reply.error, null)
-        assert.deepEqual(reply.entries.map((e) => e.name), ['deep'])
-        assert.equal((await probe(`${link}/../../repo`, { config: cfg() })).isGitRepo, true)
+      it('link/.. , link/../.. , link/../../..: Browse agrees with Create on every platform', async () => {
+        for (const p of [`${link}/..`, `${link}/../..`, `${link}/../../..`]) await assertAgreesWithCreate(p)
+        assert.equal((await probe(`${link}/../../repo`, { config: cfg() })).isGitRepo,
+          validateCwdAllowed(`${link}/../../repo`, cfg()) === null ? true : null)
       })
 
-      it('link/../../outside: textually inside nothing, really outside: refused like Create', async () => {
-        // really: root/sub/deep -> .. root/sub -> .. root ; so link/../.. is root (accepted)
-        // and link/../../.. is <scratch> (refused). Text collapse would give the opposite.
-        const accepted = `${link}/../..`
-        const refused = `${link}/../../..`
-        assert.equal(validateCwdAllowed(accepted, cfg()), null)
-        assert.notEqual(validateCwdAllowed(refused, cfg()), null)
-        assert.equal((await list(accepted, { config: cfg() })).error, null)
-        assert.match((await list(refused, { config: cfg() })).error, /^Access denied/)
+      it('POSIX: link/.. resolves through the link (root/sub), link/../.. is root, link/../../.. is outside', { skip: !POSIX && 'Win32 collapses `..` textually; agreement is asserted above' }, async () => {
+        const up1 = await list(`${link}/..`, { config: cfg() })
+        assert.equal(up1.error, null)
+        assert.deepEqual(up1.entries.map((e) => e.name), ['deep'])
+        assert.equal((await list(`${link}/../..`, { config: cfg() })).error, null)
+        assert.match((await list(`${link}/../../..`, { config: cfg() })).error, /^Access denied/)
       })
 
-      it('a target that exists only under the textual collapse is not listed (Create calls it missing)', async () => {
-        // <root>/lk -> <root>/sub/deep. Really: <root>/lk/../repo = <root>/sub/repo (missing).
-        // Textually: <root>/repo, which exists and is inside the root.
+      it('a target that exists only under the textual collapse: Browse agrees with Create', async () => {
+        // <root>/lk -> <root>/sub/deep. POSIX: <root>/lk/../repo = <root>/sub/repo (missing);
+        // textually (and on Win32): <root>/repo, which exists inside the root.
         symlinkSync(join(root, 'sub', 'deep'), join(root, 'lk'))
         const p = `${root}/lk/../repo`
-        assert.notEqual(validateCwdAllowed(p, cfg()), null, 'precondition: Create refuses it (missing)')
-        const reply = await list(p, { config: cfg() })
-        assert.notEqual(reply.error, null)
-        assert.deepEqual(reply.entries, [])
-        assert.equal((await probe(p, { config: cfg() })).isGitRepo, null)
+        const { create, reply } = await assertAgreesWithCreate(p)
+        assert.deepEqual(reply.entries, []) // listed (an empty repo) or refused: never another directory's entries
+        assert.equal((await probe(p, { config: cfg() })).isGitRepo, create === null ? true : null)
+        if (POSIX) assert.notEqual(create, null, 'precondition: on POSIX Create calls it missing')
       })
     })
 
@@ -199,21 +205,25 @@ describe('Browse honours workspaceRoots (#8303)', () => {
         writeFileSync(join(outside, 'afile'), 'x')
         symlinkSync(join(outside, 'deep'), join(home, 'link'))
         const config = mk()
+        // [present, absent, viaLink]. A path through the link is outside only where
+        // `..` goes through links (POSIX); on Win32 it collapses to a path inside
+        // home, where "not found" for both is the equal answer.
         const pairs = [
-          [`${home}/link/../candidate`, `${home}/link/../absent`],
-          [`~/link/../candidate`, `~/link/../absent`],
-          [`~//link/../candidate/`, `~//link/../absent/`],
-          [`${home}/link/../candidate/sub`, `${home}/link/../absent/sub`],
-          [`${outside}/afile/x`, `${outside}/nofile/x`],
-          [`${outside}/afile`, `${outside}/nofile`],
-          [`${outside}/candidate//`, `${outside}/absent//`],
+          [`${home}/link/../candidate`, `${home}/link/../absent`, true],
+          [`~/link/../candidate`, `~/link/../absent`, true],
+          [`~//link/../candidate/`, `~//link/../absent/`, true],
+          [`${home}/link/../candidate/sub`, `${home}/link/../absent/sub`, true],
+          [`${outside}/afile/x`, `${outside}/nofile/x`, false],
+          [`${outside}/afile`, `${outside}/nofile`, false],
+          [`${outside}/candidate//`, `${outside}/absent//`, false],
         ]
-        for (const [present, absent] of pairs) {
+        for (const [present, absent, viaLink] of pairs) {
           const a = await list(present, { config })
           const b = await list(absent, { config })
-          assert.match(a.error, /^Access denied/, `${present}: ${a.error}`)
           assert.equal(a.error, b.error, `${present} vs ${absent} differ`)
           assert.deepEqual(a.entries, [])
+          if (viaLink && process.platform === 'win32') continue // collapses to an inside-home path
+          assert.match(a.error, /^Access denied/, `${present}: ${a.error}`)
           assert.equal(a.parentPath, null)
         }
       })
@@ -242,13 +252,20 @@ describe('Browse honours workspaceRoots (#8303)', () => {
       assert.equal(up.parentPath, scratch)
     })
 
-    it('a `..` through a symlink reports the resolved directory, not the textual collapse', { skip: SKIP_NO_SYMLINK }, async () => {
-      // <scratch>/lk -> <root>/sub/deep ; lk/.. is <root>/sub (text collapse: <scratch>)
+    it('a `..` through a symlink reports the directory actually listed (where Create accepts it)', { skip: SKIP_NO_SYMLINK }, async () => {
+      // <scratch>/lk -> <root>/sub/deep. POSIX: lk/.. is <root>/sub. Win32 collapses it
+      // textually to <scratch>, which Create refuses, so Browse must refuse it too.
       symlinkSync(join(root, 'sub', 'deep'), join(scratch, 'lk'))
-      const reply = await list(`${scratch}/lk/..`, { config: { workspaceRoots: [root] } })
-      assert.equal(reply.error, null)
-      assert.equal(reply.path, join(root, 'sub'))
-      assert.equal(reply.parentPath, root)
+      const p = `${scratch}/lk/..`
+      const config = { workspaceRoots: [root] }
+      const reply = await list(p, { config })
+      if (validateCwdAllowed(p, config) === null) {
+        assert.equal(reply.error, null)
+        assert.equal(reply.path, join(root, 'sub'))
+        assert.equal(reply.parentPath, root)
+      } else {
+        assert.match(reply.error, /^Access denied/)
+      }
     })
 
     it('a file, or a path below one, inside a root is not mistaken for a path outside it', async () => {
