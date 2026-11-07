@@ -1385,7 +1385,7 @@ export async function confirmEntryStillInside(target, relPath, realRoot, cwdReal
       if (DIR_FD_REOPEN_SUPPORTED && (await readlink(`/proc/self/fd/${opened.fh.fd}`)) !== target) return false
       if ((await realpath(target)) !== target) return false
       const fresh = await lstat(target, { bigint: true })
-      return !fresh.isSymbolicLink() && fresh.ino !== 0n && fresh.dev === opened.stat.dev && fresh.ino === opened.stat.ino
+      return isVerifiedDirIdentity(fresh, opened.stat)
     }
     const [st, resolved] = await Promise.all([
       lstat(parent.path, { bigint: true }),
@@ -1471,12 +1471,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     await fh.close().catch(() => {})
     return null
   }
-  const sameObject =
-    openedStat.isDirectory() &&
-    openedStat.ino !== 0n &&
-    openedStat.dev === preStat.dev &&
-    openedStat.ino === preStat.ino
-  if (!sameObject) {
+  if (!isVerifiedDirIdentity(openedStat, preStat)) {
     // The object actually opened is not the one we checked — withhold
     // rather than trust it. Nothing has been read from it yet.
     await fh.close().catch(() => {})
@@ -1537,11 +1532,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     await fh.close().catch(() => {})
     return null
   }
-  const stillSameObject =
-    !postStat.isSymbolicLink() &&
-    postStat.ino !== 0n &&
-    postStat.dev === preStat.dev &&
-    postStat.ino === preStat.ino
+  const stillSameObject = isVerifiedDirIdentity(postStat, preStat)
   await fh.close().catch(() => {}) // not used for listing on this path — release it now
   if (!stillSameObject) {
     await dh.close().catch(() => {})
@@ -1660,6 +1651,22 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam, isRoot
   }
 }
 
+/**
+ * The one directory identity check used by the Glob walk: `stat` (taken with
+ * `bigint: true`, from an lstat or from an fstat of an opened handle) describes
+ * a real directory, not a symlink, with a nonzero inode, and has the same
+ * device and inode as `verifiedStat`. Every term is checked at every call site,
+ * so an edit here reaches all of them. `tests/byok-dir-identity-guard.test.js`
+ * fails if another hand-written device/inode comparison appears in this file.
+ */
+function isVerifiedDirIdentity(stat, verifiedStat) {
+  return !stat.isSymbolicLink() &&
+    stat.isDirectory() &&
+    stat.ino !== 0n &&
+    stat.dev === verifiedStat.dev &&
+    stat.ino === verifiedStat.ino
+}
+
 async function isStillVerifiedDir(path, verifiedStat) {
   let st
   try {
@@ -1667,11 +1674,7 @@ async function isStillVerifiedDir(path, verifiedStat) {
   } catch {
     return false
   }
-  return !st.isSymbolicLink() &&
-    st.isDirectory() &&
-    st.ino !== 0n &&
-    st.dev === verifiedStat.dev &&
-    st.ino === verifiedStat.ino
+  return isVerifiedDirIdentity(st, verifiedStat)
 }
 
 /**
@@ -3449,4 +3452,5 @@ export {
   parseRangeGroup,
   hasRangeBrace,
   hostBraceDepthExceeded,
+  isVerifiedDirIdentity,
 }
