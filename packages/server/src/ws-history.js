@@ -748,6 +748,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // New clients require this flag before presenting strong route selection;
     // older clients keep provider-only creation and receive a legacy descriptor.
     agentConnections: true,
+    // #8303 — `list_directory` accepts an optional `requestId` and `directory_listing`
+    // echoes it. The New Session browsability probe sends only to a server that
+    // advertises this: an older one answers untagged, and an untagged reply lands
+    // in the shared listing slot (autocomplete / the picker), where an error wipes
+    // autocomplete's suggestions.
+    directoryListingRequestIdV1: true,
     // #6481 (epic #6469): the opt-in IDE feature surface (file navigator, symbol
     // navigation, go-to-definition, find-references, edit-in-place) is enabled on
     // THIS server (config.features.ide / CHROXY_ENABLE_IDE). Clients gate ALL IDE

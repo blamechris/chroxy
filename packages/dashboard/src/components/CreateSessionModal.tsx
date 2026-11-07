@@ -434,9 +434,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // The request carries an id and its reply is routed to THIS callback only —
   // never through the shared listing slot that path autocomplete and the picker
   // use — so the probe can neither steal their replies nor be handed one. Only
-  // an explicit "Access denied" refusal raises the note; no reply (an older
-  // daemon does not echo the id), a dropped socket, "not found" or any other
-  // error says nothing. Informational only — it never gates Create.
+  // an explicit "Access denied" refusal raises the note; a daemon that does not
+  // advertise `directoryListingRequestIdV1` is never asked (the store sends
+  // nothing for it, since its untagged reply would land in the shared slot), so
+  // no note shows there; a dropped socket, "not found" or any other error says
+  // nothing either. Informational only — it never gates Create.
   const [browseRefused, setBrowseRefused] = useState<string | null>(null)
   useEffect(() => {
     if (!open || !trimmedCwd || typeof requestDirectoryListingFor !== 'function') return

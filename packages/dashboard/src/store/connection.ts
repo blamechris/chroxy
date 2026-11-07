@@ -5497,10 +5497,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #8303: a listing request answered ONLY to its own callback (matched by the
   // echoed requestId), never through the shared slot. Returns a cancel that
   // drops the registration; nothing is sent (and nothing stays registered) when
-  // the socket is not open.
+  // the socket is not open or the daemon does not advertise
+  // `directoryListingRequestIdV1`: an older daemon would answer untagged, and an
+  // untagged reply goes to the shared slot, where an error wipes autocomplete's
+  // suggestions. No request, no registration, and the caller simply gets no answer.
   requestDirectoryListingFor: (path: string, requestId: string, cb) => {
-    const { socket } = get();
+    const { socket, serverCapabilities } = get();
     if (!socket || socket.readyState !== WebSocket.OPEN) return () => {};
+    if (serverCapabilities.directoryListingRequestIdV1 !== true) return () => {};
     const cancel = registerDirectoryListingRequest(requestId, cb);
     if (!wsSend(socket, { type: 'list_directory', path, requestId })) cancel();
     return cancel;
