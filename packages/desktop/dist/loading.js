@@ -68,7 +68,16 @@
     status.textContent = 'Connecting...';
     status.className = 'status';
     clearStartupTimers();
-    invoke('connect_to_daemon').catch(function(err) {
+    invoke('connect_to_daemon').then(function(ok) {
+      // A refusal normally arrives as `server_error`; if the app answered "no"
+      // and the page still says "Connecting...", leave the spinner.
+      if (ok === false && status.textContent === 'Connecting...') {
+        spinner.style.display = 'none';
+        status.textContent = 'Could not connect.';
+        status.className = 'status error';
+        showRetryButton();
+      }
+    }).catch(function(err) {
       spinner.style.display = 'none';
       status.textContent = String(err || 'Could not connect');
       status.className = 'status error';

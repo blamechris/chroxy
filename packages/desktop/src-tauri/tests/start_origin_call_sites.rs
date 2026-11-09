@@ -88,7 +88,7 @@ fn balanced_call(src: &str) -> String {
 fn every_user_entry_point_starts_as_user() {
     let lib = read("src/lib.rs");
 
-    let checked = fn_body(&lib, "handle_start_checked");
+    let checked = fn_body(&lib, "handle_start_checked_with");
     assert!(checked.contains("handle_start(&app, StartOrigin::User)"), "handle_start_checked must start as User");
     assert!(!checked.contains("StartOrigin::Launch"), "handle_start_checked must never start as Launch");
 
@@ -101,7 +101,7 @@ fn every_user_entry_point_starts_as_user() {
 fn every_clickable_surface_goes_through_the_user_start_and_restart() {
     let lib = squash(&read("src/lib.rs"));
     for (what, needle) in [
-        ("start_server command (loading page, dashboard)", "fn start_server(app: tauri::AppHandle) { handle_start_checked(&app); }"),
+        ("start_server command (loading page, dashboard)", "adopt_allowed = caller_may_hand_off(&webview_page(&webview), app_port(&app)); handle_start_checked_with(&app, adopt_allowed); }"),
         ("restart_server command (loading page, dashboard)", "fn restart_server(app: tauri::AppHandle) { handle_restart(&app); }"),
         ("tray Start", "\"start\" => handle_start_checked(app),"),
         ("tray Restart", "\"restart\" => handle_restart(app),"),
@@ -188,7 +188,7 @@ fn the_origin_is_not_remembered_on_the_manager() {
 #[test]
 fn user_start_and_restart_and_the_crash_restart_share_one_gate() {
     let lib = read("src/lib.rs");
-    for name in ["handle_start_checked", "handle_restart"] {
+    for name in ["handle_start_checked_with", "handle_restart"] {
         let body = fn_body(&lib, name);
         assert!(
             body.contains("run_exclusive( &START_RESTART_GATE,"),
@@ -417,7 +417,7 @@ fn every_path_that_could_spawn_knows_whether_a_service_is_installed() {
     // #8890: the service flag reaches the decision on every route that can spawn.
     // A caller of the flag-less spelling would spawn into the service's restart gap.
     let lib = read("src/lib.rs");
-    for name in ["handle_start_checked", "handle_restart"] {
+    for name in ["handle_start_checked_with", "handle_restart"] {
         let body = fn_body(&lib, name);
         assert!(
             body.contains("run_guarded_user_start_with_service(") && body.contains("chroxy_service_installed()"),
@@ -503,7 +503,7 @@ fn the_detector_itself_is_what_reaches_every_decision() {
     // Spelling is not enough: `{ let _ = chroxy_service_installed(); false }` names
     // the detector and still passes a constant. The argument must BE the call.
     let lib = read("src/lib.rs");
-    for name in ["handle_start_checked", "handle_restart"] {
+    for name in ["handle_start_checked_with", "handle_restart"] {
         let body = lib[lib.find(&format!("\nfn {}(", name)).expect("fn")..].to_string();
         let at = body.find("run_guarded_user_start_with_service(").expect("the guarded start");
         let args = call_args(&body[at..]);

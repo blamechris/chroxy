@@ -56,7 +56,7 @@ fn the_port_watcher_runs_each_iteration_through_the_testable_seam() {
     let lib = read("src/lib.rs");
     let body = body_of(&lib, "fn spawn_port_watcher(");
     assert!(body.contains("tray_state::watch_step("), "the watcher must call watch_step");
-    assert!(body.contains("|port| window::emit_server_ready(&app, port),"), "the watcher's handoff must prove again through emit_server_ready");
+    assert!(body.contains("window::emit_server_ready(&app, port)"), "the watcher's handoff must prove again through emit_server_ready");
     assert!(body.contains("|observed| observe_port_folded(&app, observed),"), "the decision must see the FOLDED tray state");
     assert!(
         body.contains("awaiting: window::awaiting_daemon(),") && body.contains("on_app_page: main_window_on_app_page(&app),"),
@@ -77,11 +77,11 @@ fn a_refused_settings_handoff_never_reports_port_zero() {
 #[test]
 fn every_user_attempt_clears_the_waiting_flag_and_every_refusal_reaches_the_page() {
     let lib = read("src/lib.rs");
-    for header in ["fn handle_start_checked(", "fn handle_restart(", "fn connect_to_daemon_now("] {
+    for header in ["fn handle_start_checked_with(", "fn handle_restart(", "fn connect_to_daemon_now("] {
         let body = body_of(&lib, header);
         assert!(body.contains("window::begin_attempt();"), "{} must clear the waiting flag", header);
     }
-    for header in ["fn handle_start_checked(", "fn handle_restart(", "fn await_installed_service("] {
+    for header in ["fn handle_start_checked_with(", "fn handle_restart(", "fn await_installed_service("] {
         let body = body_of(&lib, header);
         assert!(body.contains("show_on_bundled_page("), "{} must show a refusal on the loading page", header);
     }
@@ -92,7 +92,7 @@ fn every_user_attempt_clears_the_waiting_flag_and_every_refusal_reaches_the_page
         "show_on_bundled_page must be gated on the bundled page"
     );
     // A user Start adopts through the one adopt path.
-    let start = body_of(&lib, "fn handle_start_checked(");
+    let start = body_of(&lib, "fn handle_start_checked_with(");
     assert!(start.contains("|port| adopt_external_daemon(&app, port),"), "a user Start must adopt a running daemon");
 }
 
@@ -104,4 +104,53 @@ fn connect_to_daemon_is_declared_everywhere_and_the_page_calls_it() {
     assert!(js.contains("invoke('connect_to_daemon')"), "the Connect button must call connect_to_daemon");
     assert!(js.contains("'connect-btn'"), "the Connect button must exist");
     assert!(!js.contains("?token=") && !js.contains("dashboard?"), "the loading page must not build a dashboard URL");
+}
+
+#[test]
+fn the_commands_that_can_start_a_handoff_check_the_caller_first() {
+    let lib = read("src/lib.rs");
+    let connect = body_of(&lib, "async fn connect_to_daemon(");
+    let check = connect.find("caller_may_hand_off(").expect("connect_to_daemon must check the caller");
+    let run = connect.find("connect_to_daemon_now(").expect("connect_to_daemon runs the connect");
+    assert!(check < run, "the caller check must come before the connect");
+    let start = body_of(&lib, "fn start_server(");
+    assert!(start.contains("caller_may_hand_off("), "start_server must check the caller");
+    assert!(
+        start.contains("handle_start_checked_with(&app, adopt_allowed)"),
+        "start_server must pass the computed value, not a constant"
+    );
+    // The menus always may.
+    assert!(body_of(&lib, "fn handle_start_checked(").contains("handle_start_checked_with(app, true)"));
+}
+
+#[test]
+fn connect_to_daemon_hands_off_only_through_emit_server_ready() {
+    let lib = read("src/lib.rs");
+    let body = body_of(&lib, "fn connect_to_daemon_now(");
+    assert!(body.contains("window::emit_server_ready("), "the connect must hand off through emit_server_ready");
+    assert!(!body.contains("dashboard_url") && !body.contains("token"), "the connect must not handle a token or URL itself");
+}
+
+#[test]
+fn the_waiting_flag_is_set_by_the_error_and_stopped_pages_and_cleared_by_a_handoff() {
+    let window = read("src/window.rs");
+    for header in ["pub fn emit_server_error(", "pub fn emit_server_stopped("] {
+        let body = body_of(&window, header);
+        assert!(body.contains("AWAITING_DAEMON.store(true, Ordering::SeqCst);"), "{} must mark the page as waiting", header);
+    }
+    let announce = body_of(&window, "fn announce(");
+    assert!(announce.contains("begin_attempt();"), "AppSink::announce must clear the waiting flag");
+    assert!(
+        body_of(&window, "pub fn claim_awaiting(").contains("AWAITING_DAEMON.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)"),
+        "claim_awaiting must take the flag atomically"
+    );
+}
+
+#[test]
+fn the_watcher_claims_the_waiting_page_before_it_hands_off() {
+    let lib = read("src/lib.rs");
+    let body = body_of(&lib, "fn spawn_port_watcher(");
+    let claim = body.find("window::claim_awaiting()").expect("the watcher must claim the page");
+    let emit = body.find("window::emit_server_ready(&app, port)").expect("the watcher must hand off");
+    assert!(claim < emit, "the claim must come before the handoff");
 }

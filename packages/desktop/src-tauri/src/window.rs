@@ -18,6 +18,13 @@ pub fn awaiting_daemon() -> bool {
     AWAITING_DAEMON.load(Ordering::SeqCst)
 }
 
+/// Take the waiting state, once: `true` for the one caller that finds the page
+/// still waiting, `false` if an attempt began (or another caller took it) since.
+/// The port watcher claims before it hands off, so it never races an attempt.
+pub fn claim_awaiting() -> bool {
+    AWAITING_DAEMON.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
 /// A new user attempt (Start, Restart, Connect) is beginning: the page is no
 /// longer waiting, whatever it showed before.
 pub fn begin_attempt() {

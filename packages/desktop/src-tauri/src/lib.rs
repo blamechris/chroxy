@@ -162,6 +162,28 @@ fn server_info_token(
     }
 }
 
+/// Whether a command that can point the window at a daemon may act for `page`: the
+/// app's own page, or the dashboard served from `127.0.0.1:<port>` (the same
+/// caller rule `server_info_token` applies). Any other page (another port,
+/// `localhost`, no host or port) may not.
+fn caller_may_hand_off(page: &CallerPage, port: u16) -> bool {
+    match page {
+        CallerPage::App => true,
+        CallerPage::Remote { host, port: page_port } => {
+            host.as_deref() == Some("127.0.0.1") && *page_port == Some(port)
+        }
+    }
+}
+
+/// The page a webview is showing, as a command's caller. An unreadable URL is a
+/// page with no host.
+fn webview_page(webview: &tauri::Webview) -> CallerPage {
+    webview
+        .url()
+        .map(|u| caller_page(&u))
+        .unwrap_or(CallerPage::Remote { host: None, port: None })
+}
+
 #[tauri::command]
 async fn get_server_info(
     app: tauri::AppHandle,
@@ -230,8 +252,15 @@ async fn open_settings(app: tauri::AppHandle) -> Result<bool, String> {
 /// proves itself: the loading page's "Connect" button. Returns whether the window
 /// was pointed at it; otherwise the reason is shown on the bundled page.
 #[tauri::command]
-async fn connect_to_daemon(app: tauri::AppHandle) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || connect_to_daemon_now(&app))
+async fn connect_to_daemon(app: tauri::AppHandle, webview: tauri::Webview) -> Result<bool, String> {
+    let page = webview_page(&webview);
+    tauri::async_runtime::spawn_blocking(move || {
+        // Acts only for the app's own page or the daemon's own dashboard.
+        if !caller_may_hand_off(&page, app_port(&app)) {
+            return false;
+        }
+        connect_to_daemon_now(&app)
+    })
         .await
         .map_err(|e| format!("connect task failed: {e}"))
 }
@@ -240,18 +269,30 @@ fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
     // A new attempt: the watcher must not race it.
     window::begin_attempt();
     let port = app_port(app);
+    // While the app's own server is active the port is its own: the tray must not
+    // show it as somebody else's daemon.
+    let own = app_server_active(app);
     match tray_state::probe_port(port, std::time::Duration::from_millis(1500)) {
         held @ PortState::Chroxy(p) => {
-            update_port_state(app, held);
+            if !own {
+                update_port_state(app, held);
+            }
             window::emit_server_ready(app, p)
         }
         held @ PortState::Free => {
-            update_port_state(app, held);
-            show_on_bundled_page(app, &format!("No Chroxy daemon is running on port {}.", port));
+            let msg = if own {
+                format!("The server on port {} is still starting.", port)
+            } else {
+                update_port_state(app, held);
+                format!("No Chroxy daemon is running on port {}.", port)
+            };
+            show_on_bundled_page(app, &msg);
             false
         }
         held @ PortState::Foreign(p) => {
-            update_port_state(app, held);
+            if !own {
+                update_port_state(app, held);
+            }
             show_on_bundled_page(
                 app,
                 &format!(
@@ -265,8 +306,11 @@ fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
 }
 
 #[tauri::command]
-fn start_server(app: tauri::AppHandle) {
-    handle_start_checked(&app);
+fn start_server(app: tauri::AppHandle, webview: tauri::Webview) {
+    // Only the app's own page or the daemon's own dashboard may have a Start
+    // connect the window to a running daemon.
+    let adopt_allowed = caller_may_hand_off(&webview_page(&webview), app_port(&app));
+    handle_start_checked_with(&app, adopt_allowed);
 }
 
 /// #5281 ③ — browse the LAN for chroxy daemons advertising `_chroxy._tcp` and
@@ -1947,6 +1991,8 @@ fn update_port_state(app: &tauri::AppHandle, port: PortState) {
 /// [`tray_state::next_external`]: leaving `Chroxy` takes two observations, so one
 /// missed challenge does not flip a daemon the tray was showing. The watcher and a
 /// refused handoff both report through here and share the count.
+// Stays a `()` wrapper: callers that only record an observation, and the pinned
+// spelling of `refuse_handoff`'s call, do not use the folded state.
 pub(crate) fn observe_port(app: &tauri::AppHandle, observed: PortState) {
     observe_port_folded(app, observed);
 }
@@ -2063,7 +2109,14 @@ fn spawn_port_watcher(app: tauri::AppHandle) {
                     on_app_page: main_window_on_app_page(&app),
                     first_run: IS_FIRST_RUN.load(Ordering::Relaxed),
                 },
-                |port| window::emit_server_ready(&app, port),
+                |port| {
+                    // Claim the waiting page first: if an attempt began since the view
+                    // was read, do nothing. That is not a refusal, so it is not counted.
+                    if !window::claim_awaiting() {
+                        return true;
+                    }
+                    window::emit_server_ready(&app, port)
+                },
                 &mut refusals,
             );
             std::thread::sleep(PORT_WATCH_INTERVAL);
@@ -2331,6 +2384,13 @@ fn show_on_bundled_page(app: &tauri::AppHandle, msg: &str) {
 /// Probes live rather than trusting the watcher's last sample, which can be up to
 /// one interval old; runs off the caller's thread because the probe can block.
 fn handle_start_checked(app: &tauri::AppHandle) {
+    handle_start_checked_with(app, true);
+}
+
+/// [`handle_start_checked`] for a caller that may or may not have the window
+/// connected to an already-running daemon (`adopt_allowed`, see
+/// [`caller_may_hand_off`]); the tray and the app menu always may.
+fn handle_start_checked_with(app: &tauri::AppHandle, adopt_allowed: bool) {
     let app = app.clone();
     std::thread::spawn(move || {
         tray_state::run_exclusive(
@@ -2343,6 +2403,7 @@ fn handle_start_checked(app: &tauri::AppHandle) {
                     UserAction::Start,
                     app_server_active(&app),
                     tray_state::chroxy_service_installed(),
+                    adopt_allowed,
                     || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
                     |held, msg| {
                         update_port_state(&app, held);
@@ -2696,6 +2757,7 @@ fn handle_restart(app: &tauri::AppHandle) {
                     UserAction::Restart,
                     app_server_active(&app),
                     tray_state::chroxy_service_installed(),
+                    true, // a Restart never adopts
                     || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
                     |held, msg| {
                         update_port_state(&app, held);
@@ -3229,6 +3291,19 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn caller_may_hand_off_is_the_app_page_or_the_daemons_own_dashboard() {
+        let remote = |host: Option<&str>, port: Option<u16>| CallerPage::Remote { host: host.map(str::to_string), port };
+        assert!(caller_may_hand_off(&CallerPage::App, 8765));
+        assert!(caller_may_hand_off(&remote(Some("127.0.0.1"), Some(8765)), 8765));
+        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), Some(9000)), 8765), "another port");
+        assert!(!caller_may_hand_off(&remote(Some("localhost"), Some(8765)), 8765), "another spelling of the host");
+        assert!(!caller_may_hand_off(&remote(Some("example.com"), Some(8765)), 8765), "another host");
+        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), None), 8765), "no port");
+        assert!(!caller_may_hand_off(&remote(None, Some(8765)), 8765), "no host");
+        assert!(!caller_may_hand_off(&remote(None, None), 8765), "an unreadable URL");
+    }
 
     /// Reads `allowAutoPermissionMode` from a config path. Mirrors the
     /// non-IPC half of `get_allow_auto_permission_mode` for testing.
