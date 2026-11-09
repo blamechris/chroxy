@@ -12,6 +12,7 @@ use tauri_build::{AppManifest, Attributes};
 const APP_COMMANDS: &[&str] = &[
     "get_server_info",
     "open_settings",
+    "connect_to_daemon",
     "get_server_logs",
     "get_startup_logs",
     "start_server",

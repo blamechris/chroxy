@@ -20,6 +20,7 @@
     "dialog:allow-open",
     "allow-get-server-info",
     "allow-open-settings",
+    "allow-connect-to-daemon",
     "allow-get-server-logs",
     "allow-get-startup-logs",
     "allow-start-server",

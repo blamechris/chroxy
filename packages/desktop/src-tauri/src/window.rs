@@ -1,8 +1,28 @@
 use crate::handoff;
 use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAIN_LABEL: &str = "main";
+
+/// The bundled loading page is showing an error or stopped state, so nothing is
+/// in flight and the port watcher may point the window at a daemon that comes up
+/// (#9078). Set by [`emit_server_error`] / [`emit_server_stopped`]; cleared when a
+/// handoff begins ([`AppSink::announce`]) and by every new attempt
+/// ([`begin_attempt`]), so an in-progress start, service wait or connect is never
+/// raced.
+static AWAITING_DAEMON: AtomicBool = AtomicBool::new(false);
+
+/// True while the bundled page shows an error or stopped state (see [`AWAITING_DAEMON`]).
+pub fn awaiting_daemon() -> bool {
+    AWAITING_DAEMON.load(Ordering::SeqCst)
+}
+
+/// A new user attempt (Start, Restart, Connect) is beginning: the page is no
+/// longer waiting, whatever it showed before.
+pub fn begin_attempt() {
+    AWAITING_DAEMON.store(false, Ordering::SeqCst);
+}
 
 /// Percent-encode a string for safe use in URL query values.
 /// Encodes everything except unreserved characters (RFC 3986: A-Z a-z 0-9 - _ . ~).
@@ -65,7 +85,11 @@ fn prove_for_handoff(port: u16) -> Option<String> {
 /// takes the observation through its two-observation rule, so one missed
 /// challenge does not by itself flip a daemon the tray was showing.
 fn refuse_handoff(app: &AppHandle, port: u16) {
-    crate::observe_port(app, crate::tray_state::PortState::Foreign(port));
+    // Port 0 is "unset", never a port something holds: reporting it would turn a
+    // tray that correctly shows a daemon into Foreign(0) (#9077).
+    if port != 0 {
+        crate::observe_port(app, crate::tray_state::PortState::Foreign(port));
+    }
     emit_server_error(
         app,
         &format!(
@@ -86,6 +110,8 @@ struct AppSink(AppHandle);
 
 impl handoff::Sink for AppSink {
     fn announce(&self, port: u16, token: &str, url: &str) {
+        // A handoff has begun: the page is no longer waiting for a daemon (#9078).
+        begin_attempt();
         let payload = ServerReadyPayload {
             port,
             token: token.to_string(),
@@ -162,6 +188,7 @@ pub fn open_settings(app: &AppHandle, port: u16) -> bool {
 
 /// Emit `server_stopped` event and update loading page if visible.
 pub fn emit_server_stopped(app: &AppHandle) {
+    AWAITING_DAEMON.store(true, Ordering::SeqCst);
     let _ = app.emit("server_stopped", ());
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.eval(
@@ -178,6 +205,7 @@ pub fn emit_server_stopped(app: &AppHandle) {
 
 /// Emit `server_error` event and update loading page if visible.
 pub fn emit_server_error(app: &AppHandle, message: &str) {
+    AWAITING_DAEMON.store(true, Ordering::SeqCst);
     let payload = ServerErrorPayload {
         message: message.to_string(),
     };

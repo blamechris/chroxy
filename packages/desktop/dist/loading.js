@@ -53,6 +53,27 @@
   function hideRetryButton() {
     var btn = document.getElementById('retry-btn');
     if (btn) btn.parentNode.removeChild(btn);
+    var connect = document.getElementById('connect-btn');
+    if (connect) connect.parentNode.removeChild(connect);
+  }
+
+  // "Connect" (#9078): the way out when a daemon is already running (or has come
+  // up since the error was shown). The app challenges the daemon on its own port;
+  // on success it navigates this window, on failure it shows the reason through
+  // `server_error`. A rejected invoke restores the buttons with the error text.
+  function connectToDaemon() {
+    hideRetryButton();
+    removeStartupLogs();
+    spinner.style.display = '';
+    status.textContent = 'Connecting...';
+    status.className = 'status';
+    clearStartupTimers();
+    invoke('connect_to_daemon').catch(function(err) {
+      spinner.style.display = 'none';
+      status.textContent = String(err || 'Could not connect');
+      status.className = 'status error';
+      showRetryButton();
+    });
   }
 
   function showRetryButton() {
@@ -73,6 +94,14 @@
     });
     // Directly under the status line, above any logs panel.
     status.parentNode.insertBefore(btn, status.nextSibling);
+
+    var connect = document.createElement('button');
+    connect.id = 'connect-btn';
+    connect.textContent = 'Connect';
+    connect.className = 'btn btn-secondary';
+    connect.style.cssText = 'margin-top:1rem;margin-left:0.5rem;';
+    connect.addEventListener('click', connectToDaemon);
+    status.parentNode.insertBefore(connect, btn.nextSibling);
   }
 
   // -- Event listeners for loading view --

@@ -174,10 +174,13 @@ async fn get_server_info(
         .unwrap_or(CallerPage::Remote { host: None, port: None });
     // Blocking (challenge over the network, config and credential store).
     tauri::async_runtime::spawn_blocking(move || {
-        let (port, status, tunnel_mode, running) = {
+        // The port this app talks to, not `ServerManager::port()`: that is 0 until
+        // the app starts a server of its own, which client mode never does (#9077).
+        let port = app_port(&app);
+        let (status, tunnel_mode, running) = {
             let state = app.state::<Mutex<ServerManager>>();
             let mgr = lock_or_recover(&state);
-            (mgr.port(), mgr.status().label().to_string(), mgr.tunnel_mode().to_string(), mgr.is_running())
+            (mgr.status().label().to_string(), mgr.tunnel_mode().to_string(), mgr.is_running())
         };
         let token = server_info_token(
             &page,
@@ -215,15 +218,50 @@ async fn get_server_info(
 #[tauri::command]
 async fn open_settings(app: tauri::AppHandle) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let port = {
-            let state = app.state::<Mutex<ServerManager>>();
-            let port = lock_or_recover(&state).port();
-            port
-        };
+        // Not `ServerManager::port()`: it is 0 in client mode (#9077).
+        let port = app_port(&app);
         window::open_settings(&app, port)
     })
     .await
     .map_err(|e| format!("open settings task failed: {e}"))
+}
+
+/// Connect the main window to the daemon on the app's port (#9078), after it
+/// proves itself: the loading page's "Connect" button. Returns whether the window
+/// was pointed at it; otherwise the reason is shown on the bundled page.
+#[tauri::command]
+async fn connect_to_daemon(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || connect_to_daemon_now(&app))
+        .await
+        .map_err(|e| format!("connect task failed: {e}"))
+}
+
+fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
+    // A new attempt: the watcher must not race it.
+    window::begin_attempt();
+    let port = app_port(app);
+    match tray_state::probe_port(port, std::time::Duration::from_millis(1500)) {
+        held @ PortState::Chroxy(p) => {
+            update_port_state(app, held);
+            window::emit_server_ready(app, p)
+        }
+        held @ PortState::Free => {
+            update_port_state(app, held);
+            show_on_bundled_page(app, &format!("No Chroxy daemon is running on port {}.", port));
+            false
+        }
+        held @ PortState::Foreign(p) => {
+            update_port_state(app, held);
+            show_on_bundled_page(
+                app,
+                &format!(
+                    "Port {} is in use by another program, or its daemon could not prove its identity.",
+                    p
+                ),
+            );
+            false
+        }
+    }
 }
 
 #[tauri::command]
@@ -1042,6 +1080,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_server_info,
             open_settings,
+            connect_to_daemon,
             get_server_logs,
             get_startup_logs,
             start_server,
@@ -1909,20 +1948,28 @@ fn update_port_state(app: &tauri::AppHandle, port: PortState) {
 /// missed challenge does not flip a daemon the tray was showing. The watcher and a
 /// refused handoff both report through here and share the count.
 pub(crate) fn observe_port(app: &tauri::AppHandle, observed: PortState) {
+    observe_port_folded(app, observed);
+}
+
+/// [`observe_port`] that returns the FOLDED state (what the tray now shows), so a
+/// caller that acts on a verified daemon (the watcher's handoff, #9078) acts only
+/// after the two-observation rule, never on a single raw reading.
+pub(crate) fn observe_port_folded(app: &tauri::AppHandle, observed: PortState) -> PortState {
     let Some(runtime) = app.try_state::<Mutex<TrayRuntime>>() else {
-        return;
+        return observed;
     };
-    let changed = {
+    let (changed, folded) = {
         let mut rt = lock_or_recover(&runtime);
         let (next, pending) = tray_state::next_external(rt.port, observed, rt.pending_downgrade);
         rt.pending_downgrade = pending;
         let changed = rt.port != next;
         rt.port = next;
-        changed
+        (changed, next)
     };
     if changed {
         render_tray(app);
     }
+    folded
 }
 
 /// Re-render the menu from the CURRENT [`TrayRuntime`], on the main thread.
@@ -1999,23 +2046,28 @@ const PORT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// the tray in step with it, so it follows a daemon that goes away or comes back.
 /// While the app's own server is active the port is ours and nothing is probed.
 fn spawn_port_watcher(app: tauri::AppHandle) {
-    std::thread::spawn(move || loop {
-        let owned = {
-            let state = app.state::<Mutex<ServerManager>>();
-            let status = lock_or_recover(&state).status();
-            matches!(
-                status,
-                ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
-            )
-        };
-        if owned {
-            update_port_state(&app, PortState::Free);
-        } else {
-            let observed =
-                tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500));
-            observe_port(&app, observed);
+    std::thread::spawn(move || {
+        // Consecutive refused handoffs to the daemon the tray is showing (#9078).
+        let mut refusals = 0u32;
+        loop {
+            // One iteration is `tray_state::watch_step`, so the sequencing (and the
+            // handoff to a daemon that comes up after the launch adopt gave up) is
+            // driven by a test with closures.
+            tray_state::watch_step(
+                app_server_active(&app),
+                || update_port_state(&app, PortState::Free),
+                || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
+                |observed| observe_port_folded(&app, observed),
+                || tray_state::WindowView {
+                    awaiting: window::awaiting_daemon(),
+                    on_app_page: main_window_on_app_page(&app),
+                    first_run: IS_FIRST_RUN.load(Ordering::Relaxed),
+                },
+                |port| window::emit_server_ready(&app, port),
+                &mut refusals,
+            );
+            std::thread::sleep(PORT_WATCH_INTERVAL);
         }
-        std::thread::sleep(PORT_WATCH_INTERVAL);
     });
 }
 
@@ -2211,6 +2263,7 @@ fn await_installed_service(app: &tauri::AppHandle, title: &str, proceed: impl Fn
                 update_port_state(app, last);
             }
             send_notification(app, title, &msg);
+            show_on_bundled_page(app, &msg);
         }
         tray_state::ServiceWait::NotInstalled => proceed(),
     }
@@ -2221,10 +2274,47 @@ fn await_installed_service(app: &tauri::AppHandle, title: &str, proceed: impl Fn
 fn app_server_active(app: &tauri::AppHandle) -> bool {
     let state = app.state::<Mutex<ServerManager>>();
     let status = lock_or_recover(&state).status();
+    status_is_active(&status)
+}
+
+/// The statuses in which the app's own server owns the configured port: the one
+/// definition the port watcher, the user Start/Restart guard and [`app_port`] share.
+fn status_is_active(status: &ServerStatus) -> bool {
     matches!(
         status,
         ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
     )
+}
+
+/// The port this app talks to (#9077): its own server's port while that server is
+/// active, otherwise the configured one ([`tray_state::app_daemon_port`]).
+/// `ServerManager` loads config only in `start()`, so asking it in client mode
+/// yields 0. The manager's lock is released before the config is read.
+fn app_port(app: &tauri::AppHandle) -> u16 {
+    let (active, own_port) = {
+        let state = app.state::<Mutex<ServerManager>>();
+        let mgr = lock_or_recover(&state);
+        (status_is_active(&mgr.status()), mgr.port())
+    };
+    tray_state::app_daemon_port(active, own_port, config::load_port)
+}
+
+/// True when the main window shows this app's own page (the loading or error
+/// page, or the setup wizard), not a dashboard.
+fn main_window_on_app_page(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.url().ok())
+        .map(|u| caller_page(&u) == CallerPage::App)
+        .unwrap_or(false)
+}
+
+/// Show `msg` on the bundled loading page, only when the main window is on it. A
+/// `server_error` sent to a dashboard disconnects it (#9078), so a refusal that
+/// happens while the window shows a dashboard stays a notification.
+fn show_on_bundled_page(app: &tauri::AppHandle, msg: &str) {
+    if main_window_on_app_page(app) {
+        window::emit_server_error(app, msg);
+    }
 }
 
 /// User-initiated Start (tray, app menu, dashboard command). Refuses to start a
@@ -2247,6 +2337,8 @@ fn handle_start_checked(app: &tauri::AppHandle) {
             &START_RESTART_GATE,
             || notify_operation_in_progress(&app),
             || {
+                // A new attempt: the port watcher must not race it (#9078).
+                window::begin_attempt();
                 tray_state::run_guarded_user_start_with_service(
                     UserAction::Start,
                     app_server_active(&app),
@@ -2255,7 +2347,10 @@ fn handle_start_checked(app: &tauri::AppHandle) {
                     |held, msg| {
                         update_port_state(&app, held);
                         send_notification(&app, "Cannot Start Server", &msg);
+                        show_on_bundled_page(&app, &msg);
                     },
+                    // A daemon the app did not start is already serving: connect to it.
+                    |port| adopt_external_daemon(&app, port),
                     || await_installed_service(&app, "Cannot Start Server", || handle_start(&app, StartOrigin::User)),
                     || handle_start(&app, StartOrigin::User),
                 );
@@ -2595,6 +2690,8 @@ fn handle_restart(app: &tauri::AppHandle) {
             &START_RESTART_GATE,
             || notify_operation_in_progress(&app),
             || {
+                // A new attempt: the port watcher must not race it (#9078).
+                window::begin_attempt();
                 tray_state::run_guarded_user_start_with_service(
                     UserAction::Restart,
                     app_server_active(&app),
@@ -2603,7 +2700,11 @@ fn handle_restart(app: &tauri::AppHandle) {
                     |held, msg| {
                         update_port_state(&app, held);
                         send_notification(&app, "Cannot Restart Server", &msg);
+                        show_on_bundled_page(&app, &msg);
                     },
+                    // A Restart never adopts (`UserStartDecision`); showing the daemon
+                    // is the right reading if it ever did.
+                    |port| adopt_external_daemon(&app, port),
                     || await_installed_service(&app, "Cannot Restart Server", || restart_own_server(&app)),
                     || restart_own_server(&app),
                 );
