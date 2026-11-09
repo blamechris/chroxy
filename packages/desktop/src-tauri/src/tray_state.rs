@@ -200,6 +200,18 @@ pub struct WindowView {
     pub on_app_page: bool,
     /// The setup wizard is on that page.
     pub first_run: bool,
+    /// How many user attempts (Start, Restart, Connect) have begun. A change since
+    /// the watcher last looked means one ran between two samples, whatever it left.
+    pub user_attempts: u64,
+}
+
+/// What the watcher carries from one iteration to the next.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WatchState {
+    /// Consecutive refused handoffs to the daemon the tray is showing.
+    pub refusals: u32,
+    /// The `user_attempts` value last seen.
+    pub seen_user_attempts: u64,
 }
 
 /// Consecutive refused watcher handoffs to one daemon before the watcher stops
@@ -233,8 +245,9 @@ pub fn watch_handoff(window: WindowView, folded: PortState, refusals: u32) -> Op
 /// port, `observe` folds that into the tray and returns the FOLDED state, and
 /// when that is a verified daemon `window` is read and, if [`watch_handoff`]
 /// agrees, `hand_off` points the window at it (`false` = refused).
-/// `refusals` counts consecutive refused handoffs: it resets on success and
-/// whenever the folded state is not a verified daemon.
+/// `state.refusals` counts consecutive refused handoffs: it resets on success,
+/// whenever the folded state is not a verified daemon, when the page is not
+/// waiting, and when a user attempt has begun since the last sample.
 pub fn watch_step(
     owned: bool,
     on_owned: impl FnOnce(),
@@ -242,29 +255,31 @@ pub fn watch_step(
     observe: impl FnOnce(PortState) -> PortState,
     window: impl FnOnce() -> WindowView,
     hand_off: impl FnOnce(u16) -> bool,
-    refusals: &mut u32,
+    state: &mut WatchState,
 ) {
     if owned {
         on_owned();
-        *refusals = 0;
+        state.refusals = 0;
         return;
     }
     let folded = observe(probe());
     if !folded.is_external_chroxy() {
-        *refusals = 0;
+        state.refusals = 0;
         return;
     }
     let view = window();
-    if !view.awaiting {
-        // A manual Connect or Retry took over, or an attempt is in flight: the cap
-        // belongs to one waiting episode.
-        *refusals = 0;
+    if !view.awaiting || view.user_attempts != state.seen_user_attempts {
+        // A manual Connect or Retry took over (even one that began and ended
+        // between two samples), or an attempt is in flight: the cap belongs to one
+        // waiting episode.
+        state.refusals = 0;
+        state.seen_user_attempts = view.user_attempts;
     }
-    if let Some(port) = watch_handoff(view, folded, *refusals) {
+    if let Some(port) = watch_handoff(view, folded, state.refusals) {
         if hand_off(port) {
-            *refusals = 0;
+            state.refusals = 0;
         } else {
-            *refusals += 1;
+            state.refusals += 1;
         }
     }
 }
@@ -2357,7 +2372,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     fn view(awaiting: bool, on_app_page: bool, first_run: bool) -> WindowView {
-        WindowView { awaiting, on_app_page, first_run }
+        WindowView { awaiting, on_app_page, first_run, user_attempts: 0 }
     }
 
     #[test]
@@ -2384,6 +2399,7 @@ mod tests {
         handoff_ok: Cell<bool>,
         handoffs: RefCell<Vec<u16>>,
         refusals: Cell<u32>,
+        seen: Cell<u64>,
         owned_calls: Cell<u32>,
     }
 
@@ -2397,12 +2413,13 @@ mod tests {
                 handoff_ok: Cell::new(true),
                 handoffs: RefCell::new(Vec::new()),
                 refusals: Cell::new(0),
+                seen: Cell::new(0),
                 owned_calls: Cell::new(0),
             }
         }
 
         fn tick(&self, owned: bool) {
-            let mut refusals = self.refusals.get();
+            let mut state = WatchState { refusals: self.refusals.get(), seen_user_attempts: self.seen.get() };
             watch_step(
                 owned,
                 || self.owned_calls.set(self.owned_calls.get() + 1),
@@ -2422,9 +2439,10 @@ mod tests {
                     }
                     self.handoff_ok.get()
                 },
-                &mut refusals,
+                &mut state,
             );
-            self.refusals.set(refusals);
+            self.refusals.set(state.refusals);
+            self.seen.set(state.seen_user_attempts);
         }
     }
 
@@ -2601,6 +2619,22 @@ mod tests {
         rig.tick(false);
         assert_eq!(rig.refusals.get(), 0);
         rig.window.set(view(true, true, false));
+        rig.tick(false);
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize + 1, "asks again");
+    }
+
+    #[test]
+    fn a_user_attempt_between_two_samples_resets_the_refusal_count() {
+        use PortState::*;
+        let rig = Rig::new(vec![Chroxy(8765); 8], view(true, true, false));
+        rig.handoff_ok.set(false);
+        for _ in 0..4 {
+            rig.tick(false);
+        }
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize, "capped");
+        // A Connect began and failed between two ticks: the page is waiting on every
+        // sampled tick, but a user attempt ran.
+        rig.window.set(WindowView { user_attempts: 1, ..rig.window.get() });
         rig.tick(false);
         assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize + 1, "asks again");
     }

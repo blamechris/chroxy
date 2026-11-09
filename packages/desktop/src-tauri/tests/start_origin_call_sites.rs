@@ -101,7 +101,7 @@ fn every_user_entry_point_starts_as_user() {
 fn every_clickable_surface_goes_through_the_user_start_and_restart() {
     let lib = squash(&read("src/lib.rs"));
     for (what, needle) in [
-        ("start_server command (loading page, dashboard)", "adopt_allowed = caller_may_hand_off(&webview_page(&webview), app_port(&app)); handle_start_checked_with(&app, adopt_allowed); }"),
+        ("start_server command (loading page, dashboard)", "adopt_allowed = caller_may_hand_off(&webview_page(&webview)); handle_start_checked_with(&app, adopt_allowed); }"),
         ("restart_server command (loading page, dashboard)", "fn restart_server(app: tauri::AppHandle) { handle_restart(&app); }"),
         ("tray Start", "\"start\" => handle_start_checked(app),"),
         ("tray Restart", "\"restart\" => handle_restart(app),"),

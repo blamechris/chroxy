@@ -56,7 +56,7 @@ fn the_port_watcher_runs_each_iteration_through_the_testable_seam() {
     let lib = read("src/lib.rs");
     let body = body_of(&lib, "fn spawn_port_watcher(");
     assert!(body.contains("tray_state::watch_step("), "the watcher must call watch_step");
-    assert!(body.contains("window::emit_server_ready(&app, port)"), "the watcher's handoff must prove again through emit_server_ready");
+    assert!(body.contains("window::emit_server_ready_for_attempt(&app, port, generation)"), "the watcher's handoff must prove again through emit_server_ready_for_attempt");
     assert!(body.contains("|observed| observe_port_folded(&app, observed),"), "the decision must see the FOLDED tray state");
     assert!(
         body.contains("awaiting: window::awaiting_daemon(),") && body.contains("on_app_page: main_window_on_app_page(&app),"),
@@ -110,11 +110,15 @@ fn connect_to_daemon_is_declared_everywhere_and_the_page_calls_it() {
 fn the_commands_that_can_start_a_handoff_check_the_caller_first() {
     let lib = read("src/lib.rs");
     let connect = body_of(&lib, "async fn connect_to_daemon(");
+    assert!(
+        connect.contains("if !caller_may_hand_off(&page) { return false; }"),
+        "connect_to_daemon must return at once for a caller that may not hand off"
+    );
     let check = connect.find("caller_may_hand_off(").expect("connect_to_daemon must check the caller");
     let run = connect.find("connect_to_daemon_now(").expect("connect_to_daemon runs the connect");
     assert!(check < run, "the caller check must come before the connect");
     let start = body_of(&lib, "fn start_server(");
-    assert!(start.contains("caller_may_hand_off("), "start_server must check the caller");
+    assert!(start.contains("let adopt_allowed = caller_may_hand_off(&webview_page(&webview));"), "start_server must check the caller");
     assert!(
         start.contains("handle_start_checked_with(&app, adopt_allowed)"),
         "start_server must pass the computed value, not a constant"
@@ -127,7 +131,11 @@ fn the_commands_that_can_start_a_handoff_check_the_caller_first() {
 fn connect_to_daemon_hands_off_only_through_emit_server_ready() {
     let lib = read("src/lib.rs");
     let body = body_of(&lib, "fn connect_to_daemon_now(");
-    assert!(body.contains("window::emit_server_ready("), "the connect must hand off through emit_server_ready");
+    assert!(body.contains("let generation = window::begin_attempt();"), "the connect must take its generation from begin_attempt");
+    assert!(
+        body.contains("window::emit_server_ready_for_attempt(app, p, generation)") && !body.contains("window::emit_server_ready("),
+        "the connect must hand off through emit_server_ready_for_attempt with that generation"
+    );
     assert!(!body.contains("dashboard_url") && !body.contains("token"), "the connect must not handle a token or URL itself");
 }
 
@@ -139,9 +147,10 @@ fn the_waiting_flag_is_set_by_the_error_and_stopped_pages_and_cleared_by_a_hando
         assert!(body.contains("AWAITING_DAEMON.store(true, Ordering::SeqCst);"), "{} must mark the page as waiting", header);
     }
     let announce = body_of(&window, "fn announce(");
-    assert!(announce.contains("begin_attempt();"), "AppSink::announce must clear the waiting flag");
+    assert!(announce.contains("clear_awaiting();"), "AppSink::announce must clear the waiting flag");
+    assert!(!announce.contains("begin_attempt("), "a handoff must not start a new generation (it would invalidate itself)");
     assert!(
-        body_of(&window, "pub fn claim_awaiting(").contains("AWAITING_DAEMON.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)"),
+        body_of(&window, "pub fn claim_awaiting(").contains(".compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)"),
         "claim_awaiting must take the flag atomically"
     );
 }
@@ -150,7 +159,30 @@ fn the_waiting_flag_is_set_by_the_error_and_stopped_pages_and_cleared_by_a_hando
 fn the_watcher_claims_the_waiting_page_before_it_hands_off() {
     let lib = read("src/lib.rs");
     let body = body_of(&lib, "fn spawn_port_watcher(");
-    let claim = body.find("window::claim_awaiting()").expect("the watcher must claim the page");
-    let emit = body.find("window::emit_server_ready(&app, port)").expect("the watcher must hand off");
-    assert!(claim < emit, "the claim must come before the handoff");
+    assert!(
+        body.contains("match window::claim_awaiting() {")
+            && body.contains("None => true,")
+            && body.contains("Some(generation) => window::emit_server_ready_for_attempt(&app, port, generation),"),
+        "the watcher must claim the page, treat a lost claim as no refusal, and hand off only for the claimed generation"
+    );
+    let claim = body.find("window::claim_awaiting()").unwrap();
+    let none = body.find("None => true,").unwrap();
+    let emit = body.find("emit_server_ready_for_attempt(").unwrap();
+    assert!(claim < none && none < emit, "claim, then the lost-claim arm, then the guarded handoff");
+    assert!(!body.contains("window::emit_server_ready(&app"), "the watcher must not hand off unguarded");
+}
+
+#[test]
+fn a_handoff_for_an_attempt_drops_every_effect_once_a_newer_attempt_began() {
+    let window = read("src/window.rs");
+    let body = body_of(&window, "pub fn emit_server_ready_for_attempt(");
+    assert!(
+        body.contains("is_current: move || attempt_generation() == generation,"),
+        "the guard must compare the attempt's generation with the newest"
+    );
+    // One guarded sink serves the announce, the delayed navigation and the refusal.
+    assert!(body.contains("handoff::Current {"), "every effect goes through the guarded sink");
+    assert!(body.contains("handoff::begin(&prove_for_handoff, &sink, port)"), "the announce uses the guarded sink");
+    assert!(body.contains("handoff::finish(&prove_for_handoff, &sink, port)"), "the delayed navigation uses the guarded sink");
+    assert!(!body.contains("AppSink(app.clone())") || body.matches("AppSink(app.clone())").count() == 1, "no second, unguarded sink");
 }

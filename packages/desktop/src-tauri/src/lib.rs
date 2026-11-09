@@ -162,17 +162,12 @@ fn server_info_token(
     }
 }
 
-/// Whether a command that can point the window at a daemon may act for `page`: the
-/// app's own page, or the dashboard served from `127.0.0.1:<port>` (the same
-/// caller rule `server_info_token` applies). Any other page (another port,
-/// `localhost`, no host or port) may not.
-fn caller_may_hand_off(page: &CallerPage, port: u16) -> bool {
-    match page {
-        CallerPage::App => true,
-        CallerPage::Remote { host, port: page_port } => {
-            host.as_deref() == Some("127.0.0.1") && *page_port == Some(port)
-        }
-    }
+/// Whether a command that can point the window at a daemon may act for `page`: only
+/// the app's own page (the loading page and the setup wizard). Those actions report
+/// their result on that page; a refusal sent to a dashboard would disconnect it, so
+/// a dashboard's Start keeps refusing a running daemon, as before.
+fn caller_may_hand_off(page: &CallerPage) -> bool {
+    matches!(page, CallerPage::App)
 }
 
 /// The page a webview is showing, as a command's caller. An unreadable URL is a
@@ -255,10 +250,8 @@ async fn open_settings(app: tauri::AppHandle) -> Result<bool, String> {
 async fn connect_to_daemon(app: tauri::AppHandle, webview: tauri::Webview) -> Result<bool, String> {
     let page = webview_page(&webview);
     tauri::async_runtime::spawn_blocking(move || {
-        // Acts only for the app's own page or the daemon's own dashboard.
-        if !caller_may_hand_off(&page, app_port(&app)) {
-            return false;
-        }
+        // Acts only for the app's own page.
+        if !caller_may_hand_off(&page) { return false; }
         connect_to_daemon_now(&app)
     })
         .await
@@ -266,8 +259,8 @@ async fn connect_to_daemon(app: tauri::AppHandle, webview: tauri::Webview) -> Re
 }
 
 fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
-    // A new attempt: the watcher must not race it.
-    window::begin_attempt();
+    // A new attempt: the watcher must not race it, and older handoffs are stale.
+    let generation = window::begin_attempt();
     let port = app_port(app);
     // While the app's own server is active the port is its own: the tray must not
     // show it as somebody else's daemon.
@@ -277,7 +270,7 @@ fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
             if !own {
                 update_port_state(app, held);
             }
-            window::emit_server_ready(app, p)
+            window::emit_server_ready_for_attempt(app, p, generation)
         }
         held @ PortState::Free => {
             let msg = if own {
@@ -307,9 +300,9 @@ fn connect_to_daemon_now(app: &tauri::AppHandle) -> bool {
 
 #[tauri::command]
 fn start_server(app: tauri::AppHandle, webview: tauri::Webview) {
-    // Only the app's own page or the daemon's own dashboard may have a Start
+    // Only the app's own page may have a Start
     // connect the window to a running daemon.
-    let adopt_allowed = caller_may_hand_off(&webview_page(&webview), app_port(&app));
+    let adopt_allowed = caller_may_hand_off(&webview_page(&webview));
     handle_start_checked_with(&app, adopt_allowed);
 }
 
@@ -2094,7 +2087,7 @@ const PORT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 fn spawn_port_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         // Consecutive refused handoffs to the daemon the tray is showing (#9078).
-        let mut refusals = 0u32;
+        let mut state = tray_state::WatchState::default();
         loop {
             // One iteration is `tray_state::watch_step`, so the sequencing (and the
             // handoff to a daemon that comes up after the launch adopt gave up) is
@@ -2108,16 +2101,15 @@ fn spawn_port_watcher(app: tauri::AppHandle) {
                     awaiting: window::awaiting_daemon(),
                     on_app_page: main_window_on_app_page(&app),
                     first_run: IS_FIRST_RUN.load(Ordering::Relaxed),
+                    user_attempts: window::user_attempts(),
                 },
-                |port| {
-                    // Claim the waiting page first: if an attempt began since the view
-                    // was read, do nothing. That is not a refusal, so it is not counted.
-                    if !window::claim_awaiting() {
-                        return true;
-                    }
-                    window::emit_server_ready(&app, port)
+                |port| match window::claim_awaiting() {
+                    // An attempt began since the view was read: not a refusal.
+                    None => true,
+                    // Every effect of this handoff is dropped if a newer attempt began.
+                    Some(generation) => window::emit_server_ready_for_attempt(&app, port, generation),
                 },
-                &mut refusals,
+                &mut state,
             );
             std::thread::sleep(PORT_WATCH_INTERVAL);
         }
@@ -3293,16 +3285,16 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn caller_may_hand_off_is_the_app_page_or_the_daemons_own_dashboard() {
+    fn caller_may_hand_off_is_the_apps_own_page_only() {
         let remote = |host: Option<&str>, port: Option<u16>| CallerPage::Remote { host: host.map(str::to_string), port };
-        assert!(caller_may_hand_off(&CallerPage::App, 8765));
-        assert!(caller_may_hand_off(&remote(Some("127.0.0.1"), Some(8765)), 8765));
-        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), Some(9000)), 8765), "another port");
-        assert!(!caller_may_hand_off(&remote(Some("localhost"), Some(8765)), 8765), "another spelling of the host");
-        assert!(!caller_may_hand_off(&remote(Some("example.com"), Some(8765)), 8765), "another host");
-        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), None), 8765), "no port");
-        assert!(!caller_may_hand_off(&remote(None, Some(8765)), 8765), "no host");
-        assert!(!caller_may_hand_off(&remote(None, None), 8765), "an unreadable URL");
+        assert!(caller_may_hand_off(&CallerPage::App));
+        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), Some(8765))), "the daemon's own dashboard");
+        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), Some(9000))), "another port");
+        assert!(!caller_may_hand_off(&remote(Some("localhost"), Some(8765))), "another spelling of the host");
+        assert!(!caller_may_hand_off(&remote(Some("example.com"), Some(8765))), "another host");
+        assert!(!caller_may_hand_off(&remote(Some("127.0.0.1"), None)), "no port");
+        assert!(!caller_may_hand_off(&remote(None, Some(8765))), "no host");
+        assert!(!caller_may_hand_off(&remote(None, None)), "an unreadable URL");
     }
 
     /// Reads `allowAutoPermissionMode` from a config path. Mirrors the

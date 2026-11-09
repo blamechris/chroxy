@@ -1,16 +1,16 @@
 use crate::handoff;
 use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAIN_LABEL: &str = "main";
 
 /// The bundled loading page is showing an error or stopped state, so nothing is
 /// in flight and the port watcher may point the window at a daemon that comes up
 /// (#9078). Set by [`emit_server_error`] / [`emit_server_stopped`]; cleared when a
-/// handoff begins ([`AppSink::announce`]) and by every new attempt
-/// ([`begin_attempt`]), so an in-progress start, service wait or connect is never
-/// raced.
+/// handoff begins ([`AppSink::announce`], through [`clear_awaiting`]) and by every
+/// new attempt ([`begin_attempt`]), so an in-progress start, service wait or
+/// connect is never raced.
 static AWAITING_DAEMON: AtomicBool = AtomicBool::new(false);
 
 /// True while the bundled page shows an error or stopped state (see [`AWAITING_DAEMON`]).
@@ -18,16 +18,49 @@ pub fn awaiting_daemon() -> bool {
     AWAITING_DAEMON.load(Ordering::SeqCst)
 }
 
-/// Take the waiting state, once: `true` for the one caller that finds the page
-/// still waiting, `false` if an attempt began (or another caller took it) since.
-/// The port watcher claims before it hands off, so it never races an attempt.
-pub fn claim_awaiting() -> bool {
-    AWAITING_DAEMON.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+/// Counts every attempt to point the window at a daemon (user and watcher): the
+/// newest one wins, and a handoff whose generation is no longer this value drops
+/// its effects (see [`emit_server_ready_for_attempt`]).
+static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
+/// Counts user attempts only, so the watcher can tell that one began (and
+/// possibly failed) between two of its samples.
+static USER_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+/// The current attempt generation.
+pub fn attempt_generation() -> u64 {
+    ATTEMPT.load(Ordering::SeqCst)
+}
+
+/// How many user attempts have begun.
+pub fn user_attempts() -> u64 {
+    USER_ATTEMPTS.load(Ordering::SeqCst)
+}
+
+/// Take the waiting state, once: `Some(generation)` for the one caller that finds
+/// the page still waiting, `None` if an attempt began (or another caller took it)
+/// since. The claim is itself an attempt (it supersedes older ones) but not a user
+/// attempt. The port watcher claims before it hands off, so it never races an
+/// attempt.
+pub fn claim_awaiting() -> Option<u64> {
+    AWAITING_DAEMON
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1)
 }
 
 /// A new user attempt (Start, Restart, Connect) is beginning: the page is no
-/// longer waiting, whatever it showed before.
-pub fn begin_attempt() {
+/// longer waiting, whatever it showed before, and any older handoff is stale.
+/// Returns the new generation.
+pub fn begin_attempt() -> u64 {
+    AWAITING_DAEMON.store(false, Ordering::SeqCst);
+    USER_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+    ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// A handoff has begun: the page is no longer waiting. Unlike [`begin_attempt`]
+/// this does not start a new generation, so a handoff never invalidates itself.
+pub fn clear_awaiting() {
     AWAITING_DAEMON.store(false, Ordering::SeqCst);
 }
 
@@ -118,7 +151,7 @@ struct AppSink(AppHandle);
 impl handoff::Sink for AppSink {
     fn announce(&self, port: u16, token: &str, url: &str) {
         // A handoff has begun: the page is no longer waiting for a daemon (#9078).
-        begin_attempt();
+        clear_awaiting();
         let payload = ServerReadyPayload {
             port,
             token: token.to_string(),
@@ -185,6 +218,30 @@ pub fn emit_server_ready(app: &AppHandle, port: u16) -> bool {
         refuse_handoff(app, port);
     }
     ok
+}
+
+/// [`emit_server_ready`] for the attempt `generation` (from [`begin_attempt`] or
+/// [`claim_awaiting`]): every effect, including the delayed navigation and the
+/// refusal, happens only while that attempt is still the newest. A superseded
+/// attempt asks for its proofs, does nothing else and returns `true` (it is not a
+/// refusal). Blocking: call it off the main thread.
+pub fn emit_server_ready_for_attempt(app: &AppHandle, port: u16, generation: u64) -> bool {
+    let sink = handoff::Current {
+        inner: AppSink(app.clone()),
+        is_current: move || attempt_generation() == generation,
+    };
+    if !handoff::begin(&prove_for_handoff, &sink, port) {
+        if (sink.is_current)() {
+            handoff::Sink::refuse(&sink, port);
+            return false;
+        }
+        return true;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        handoff::finish(&prove_for_handoff, &sink, port);
+    });
+    true
 }
 
 /// Open the dashboard's settings panel on the daemon at `port`, after it proves
@@ -386,5 +443,24 @@ mod tests {
         let encoded = percent_encode_html("arr[0]");
         assert!(encoded.contains("%5B"), "[ must be percent-encoded");
         assert!(encoded.contains("%5D"), "] must be percent-encoded");
+    }
+
+    #[test]
+    fn attempt_generations_order_handoffs_and_a_handoff_does_not_supersede_itself() {
+        // No other test touches these statics; the counters only grow, so compare deltas.
+        AWAITING_DAEMON.store(true, Ordering::SeqCst);
+        let users = user_attempts();
+        let claimed = claim_awaiting().expect("the page was waiting");
+        assert_eq!(attempt_generation(), claimed);
+        assert_eq!(user_attempts(), users, "a watcher claim is not a user attempt");
+        assert_eq!(claim_awaiting(), None, "a second claim finds nothing waiting");
+
+        clear_awaiting();
+        assert_eq!(attempt_generation(), claimed, "a handoff beginning does not supersede itself");
+
+        let newer = begin_attempt();
+        assert!(newer > claimed && attempt_generation() == newer, "a user attempt supersedes the claim");
+        assert_eq!(user_attempts(), users + 1);
+        assert!(!awaiting_daemon());
     }
 }
