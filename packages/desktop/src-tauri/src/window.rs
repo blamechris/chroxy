@@ -1,67 +1,90 @@
 use crate::handoff;
 use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 const MAIN_LABEL: &str = "main";
 
-/// The bundled loading page is showing an error or stopped state, so nothing is
-/// in flight and the port watcher may point the window at a daemon that comes up
-/// (#9078). Set by [`emit_server_error`] / [`emit_server_stopped`]; cleared when a
-/// handoff begins ([`AppSink::announce`], through [`clear_awaiting`]) and by every
-/// new attempt ([`begin_attempt`]), so an in-progress start, service wait or
-/// connect is never raced.
-static AWAITING_DAEMON: AtomicBool = AtomicBool::new(false);
-
-/// True while the bundled page shows an error or stopped state (see [`AWAITING_DAEMON`]).
-pub fn awaiting_daemon() -> bool {
-    AWAITING_DAEMON.load(Ordering::SeqCst)
+/// The window's attempt bookkeeping, under ONE lock so a check and the change it
+/// licenses are a single step.
+#[derive(Debug)]
+struct AttemptState {
+    /// The bundled loading page is showing an error or stopped state, so nothing is
+    /// in flight and the port watcher may point the window at a daemon that comes
+    /// up (#9078). Set by [`emit_server_error`] / [`emit_server_stopped`]; cleared
+    /// when a handoff begins ([`AppSink::announce`], through [`clear_awaiting`]) and
+    /// by every new attempt ([`begin_attempt`]), so an in-progress start, service
+    /// wait or connect is never raced.
+    awaiting: bool,
+    /// Counts every attempt to point the window at a daemon (user and watcher): the
+    /// newest one wins, and a handoff whose generation is no longer this value drops
+    /// its effects (see [`emit_server_ready_for_attempt`]).
+    generation: u64,
+    /// Counts user attempts only, so the watcher can tell that one began (and
+    /// possibly failed) between two of its samples.
+    user_attempts: u64,
 }
 
-/// Counts every attempt to point the window at a daemon (user and watcher): the
-/// newest one wins, and a handoff whose generation is no longer this value drops
-/// its effects (see [`emit_server_ready_for_attempt`]).
-static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+/// Held only for the bookkeeping, never across an emit, an eval or a window call:
+/// the error and stopped pages can run on the main thread.
+static ATTEMPTS: Mutex<AttemptState> =
+    Mutex::new(AttemptState { awaiting: false, generation: 0, user_attempts: 0 });
 
-/// Counts user attempts only, so the watcher can tell that one began (and
-/// possibly failed) between two of its samples.
-static USER_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+fn attempts() -> MutexGuard<'static, AttemptState> {
+    crate::lock_or_recover(&ATTEMPTS)
+}
+
+/// True while the bundled page shows an error or stopped state.
+pub fn awaiting_daemon() -> bool {
+    attempts().awaiting
+}
 
 /// The current attempt generation.
 pub fn attempt_generation() -> u64 {
-    ATTEMPT.load(Ordering::SeqCst)
+    attempts().generation
 }
 
 /// How many user attempts have begun.
 pub fn user_attempts() -> u64 {
-    USER_ATTEMPTS.load(Ordering::SeqCst)
+    attempts().user_attempts
+}
+
+/// Mark the bundled page as waiting for a daemon.
+fn set_awaiting() {
+    attempts().awaiting = true;
 }
 
 /// Take the waiting state, once: `Some(generation)` for the one caller that finds
 /// the page still waiting, `None` if an attempt began (or another caller took it)
-/// since. The claim is itself an attempt (it supersedes older ones) but not a user
+/// since. The check, the clear and the generation bump are one critical section.
+/// The claim is itself an attempt (it supersedes older ones) but not a user
 /// attempt. The port watcher claims before it hands off, so it never races an
 /// attempt.
 pub fn claim_awaiting() -> Option<u64> {
-    AWAITING_DAEMON
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .ok()
-        .map(|_| ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1)
+    let mut state = attempts();
+    if !state.awaiting {
+        return None;
+    }
+    state.awaiting = false;
+    state.generation += 1;
+    Some(state.generation)
 }
 
 /// A new user attempt (Start, Restart, Connect) is beginning: the page is no
 /// longer waiting, whatever it showed before, and any older handoff is stale.
 /// Returns the new generation.
 pub fn begin_attempt() -> u64 {
-    AWAITING_DAEMON.store(false, Ordering::SeqCst);
-    USER_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-    ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1
+    let mut state = attempts();
+    state.awaiting = false;
+    state.user_attempts += 1;
+    state.generation += 1;
+    state.generation
 }
 
 /// A handoff has begun: the page is no longer waiting. Unlike [`begin_attempt`]
 /// this does not start a new generation, so a handoff never invalidates itself.
 pub fn clear_awaiting() {
-    AWAITING_DAEMON.store(false, Ordering::SeqCst);
+    attempts().awaiting = false;
 }
 
 /// Percent-encode a string for safe use in URL query values.
@@ -252,7 +275,7 @@ pub fn open_settings(app: &AppHandle, port: u16) -> bool {
 
 /// Emit `server_stopped` event and update loading page if visible.
 pub fn emit_server_stopped(app: &AppHandle) {
-    AWAITING_DAEMON.store(true, Ordering::SeqCst);
+    set_awaiting();
     let _ = app.emit("server_stopped", ());
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.eval(
@@ -269,7 +292,7 @@ pub fn emit_server_stopped(app: &AppHandle) {
 
 /// Emit `server_error` event and update loading page if visible.
 pub fn emit_server_error(app: &AppHandle, message: &str) {
-    AWAITING_DAEMON.store(true, Ordering::SeqCst);
+    set_awaiting();
     let payload = ServerErrorPayload {
         message: message.to_string(),
     };
@@ -448,7 +471,7 @@ mod tests {
     #[test]
     fn attempt_generations_order_handoffs_and_a_handoff_does_not_supersede_itself() {
         // No other test touches these statics; the counters only grow, so compare deltas.
-        AWAITING_DAEMON.store(true, Ordering::SeqCst);
+        set_awaiting();
         let users = user_attempts();
         let claimed = claim_awaiting().expect("the page was waiting");
         assert_eq!(attempt_generation(), claimed);

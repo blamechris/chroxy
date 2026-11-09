@@ -93,7 +93,39 @@ fn every_user_attempt_clears_the_waiting_flag_and_every_refusal_reaches_the_page
     );
     // A user Start adopts through the one adopt path.
     let start = body_of(&lib, "fn handle_start_checked_with(");
-    assert!(start.contains("|port| adopt_external_daemon(&app, port),"), "a user Start must adopt a running daemon");
+    assert!(
+        start.contains("|port| adopt_external_daemon_for_attempt(&app, port, generation),"),
+        "a user Start must adopt through its own attempt's generation"
+    );
+    assert!(
+        start.contains("await_installed_service(&app, \"Cannot Start Server\", Some(generation),"),
+        "the Start's service wait must carry its generation"
+    );
+    assert!(
+        body_of(&lib, "fn handle_restart(").contains("await_installed_service(&app, \"Cannot Restart Server\", Some(generation),"),
+        "the Restart's service wait must carry its generation"
+    );
+    let wait = body_of(&lib, "fn await_installed_service(");
+    assert!(
+        wait.contains("Some(generation) => adopt_external_daemon_for_attempt(app, port, generation),"),
+        "a service wait with a generation must adopt through it"
+    );
+    // A Start connects to a running daemon only while the window is on the app's own page.
+    assert!(
+        start.contains("let adopt_allowed = adopt_allowed && main_window_on_app_page(&app);"),
+        "a Start from a dashboard must not re-navigate it"
+    );
+    assert!(start.find("let adopt_allowed = adopt_allowed &&").unwrap() < start.find("run_exclusive(").unwrap());
+    // Both Start and Restart show a busy rejection on the loading page, from one message.
+    for header in ["fn handle_start_checked_with(", "fn handle_restart("] {
+        let body = body_of(&lib, header);
+        assert!(
+            body.contains("notify_operation_in_progress(&app); show_on_bundled_page(&app, BUSY_MESSAGE); }"),
+            "{} must show a busy rejection on the loading page",
+            header
+        );
+    }
+    assert!(body_of(&lib, "fn notify_operation_in_progress(").contains("BUSY_MESSAGE"), "one message text");
 }
 
 #[test]
@@ -144,15 +176,15 @@ fn the_waiting_flag_is_set_by_the_error_and_stopped_pages_and_cleared_by_a_hando
     let window = read("src/window.rs");
     for header in ["pub fn emit_server_error(", "pub fn emit_server_stopped("] {
         let body = body_of(&window, header);
-        assert!(body.contains("AWAITING_DAEMON.store(true, Ordering::SeqCst);"), "{} must mark the page as waiting", header);
+        assert!(body.contains("set_awaiting();"), "{} must mark the page as waiting", header);
     }
     let announce = body_of(&window, "fn announce(");
     assert!(announce.contains("clear_awaiting();"), "AppSink::announce must clear the waiting flag");
     assert!(!announce.contains("begin_attempt("), "a handoff must not start a new generation (it would invalidate itself)");
-    assert!(
-        body_of(&window, "pub fn claim_awaiting(").contains(".compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)"),
-        "claim_awaiting must take the flag atomically"
-    );
+    // The check, the clear and the generation bump are one critical section.
+    let claim = body_of(&window, "pub fn claim_awaiting(");
+    assert_eq!(claim.matches("attempts()").count(), 1, "claim_awaiting must take the lock once");
+    assert!(claim.contains("state.awaiting = false; state.generation += 1;"), "the clear and the bump are together");
 }
 
 #[test]
@@ -185,4 +217,26 @@ fn a_handoff_for_an_attempt_drops_every_effect_once_a_newer_attempt_began() {
     assert!(body.contains("handoff::begin(&prove_for_handoff, &sink, port)"), "the announce uses the guarded sink");
     assert!(body.contains("handoff::finish(&prove_for_handoff, &sink, port)"), "the delayed navigation uses the guarded sink");
     assert!(!body.contains("AppSink(app.clone())") || body.matches("AppSink(app.clone())").count() == 1, "no second, unguarded sink");
+}
+
+#[test]
+fn a_new_attempt_begins_inside_the_gate_after_the_busy_callback() {
+    let lib = read("src/lib.rs");
+    for header in ["fn handle_start_checked_with(", "fn handle_restart("] {
+        let body = body_of(&lib, header);
+        let gate = body.find("run_exclusive(").expect("the gate");
+        let busy = body.find("show_on_bundled_page(&app, BUSY_MESSAGE)").expect("the busy callback");
+        let begin = body.find("let generation = window::begin_attempt();").expect("the attempt begins");
+        assert!(gate < busy && busy < begin, "{}: begin_attempt must sit inside the gate's closure, after its busy callback", header);
+    }
+}
+
+#[test]
+fn connect_to_daemon_leaves_the_tray_alone_while_the_apps_own_server_is_active() {
+    let lib = read("src/lib.rs");
+    let body = body_of(&lib, "fn connect_to_daemon_now(");
+    assert!(body.contains("let own = app_server_active(app);"), "the connect must ask whether the app's own server is active");
+    assert_eq!(body.matches("if !own { update_port_state(app, held); }").count(), 2, "the Chroxy and Foreign arms must not touch the tray for the app's own server");
+    assert!(body.contains("The server on port {} is still starting."), "the Free arm names the starting server");
+    assert!(body.contains("show_on_bundled_page(app, &msg);"), "the Free arm shows its reason on the loading page");
 }

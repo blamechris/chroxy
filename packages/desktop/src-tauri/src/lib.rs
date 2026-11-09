@@ -1984,8 +1984,11 @@ fn update_port_state(app: &tauri::AppHandle, port: PortState) {
 /// [`tray_state::next_external`]: leaving `Chroxy` takes two observations, so one
 /// missed challenge does not flip a daemon the tray was showing. The watcher and a
 /// refused handoff both report through here and share the count.
-// Stays a `()` wrapper: callers that only record an observation, and the pinned
-// spelling of `refuse_handoff`'s call, do not use the folded state.
+// Stays a `()` wrapper: callers that only record an observation do not use the
+// folded state, and the pin `the_window_hands_over_only_through_the_handoff_steps`
+// (tests/start_origin_call_sites.rs) matches `refuse_handoff`'s exact spelling,
+// `crate::observe_port(app, crate::tray_state::PortState::Foreign(port))`; the
+// qr path's `&|p| observe_port(app, PortState::Foreign(p))` is pinned there too.
 pub(crate) fn observe_port(app: &tauri::AppHandle, observed: PortState) {
     observe_port_folded(app, observed);
 }
@@ -2300,9 +2303,21 @@ fn poll_for_daemon_within(
 /// not ruled out): adopt the service once it answers, otherwise say why nothing
 /// was started. `proceed` runs only if the service turned out to be gone by the
 /// time the wait began (it was removed in between).
-fn await_installed_service(app: &tauri::AppHandle, title: &str, proceed: impl FnOnce()) {
+///
+/// `generation` is the caller's attempt (from `window::begin_attempt`): when set, the
+/// adopt drops its effects once a newer attempt began. Callers that are not user
+/// attempts pass `None`.
+fn await_installed_service(
+    app: &tauri::AppHandle,
+    title: &str,
+    generation: Option<u64>,
+    proceed: impl FnOnce(),
+) {
     match wait_for_service(tray_state::chroxy_service_detection()) {
-        tray_state::ServiceWait::Adopt(port) => adopt_external_daemon(app, port),
+        tray_state::ServiceWait::Adopt(port) => match generation {
+            Some(generation) => adopt_external_daemon_for_attempt(app, port, generation),
+            None => adopt_external_daemon(app, port),
+        },
         tray_state::ServiceWait::Refuse(last, msg) => {
             if let Some(last) = last {
                 update_port_state(app, last);
@@ -2385,12 +2400,20 @@ fn handle_start_checked(app: &tauri::AppHandle) {
 fn handle_start_checked_with(app: &tauri::AppHandle, adopt_allowed: bool) {
     let app = app.clone();
     std::thread::spawn(move || {
+        // A Start connects to a running daemon only while the window is on the app's
+        // own page: from a dashboard it refuses with a notification, as before,
+        // instead of navigating the dashboard away (#9078).
+        let adopt_allowed = adopt_allowed && main_window_on_app_page(&app);
         tray_state::run_exclusive(
             &START_RESTART_GATE,
-            || notify_operation_in_progress(&app),
             || {
-                // A new attempt: the port watcher must not race it (#9078).
-                window::begin_attempt();
+                notify_operation_in_progress(&app);
+                show_on_bundled_page(&app, BUSY_MESSAGE);
+            },
+            || {
+                // A new attempt: the port watcher must not race it, and an older
+                // handoff is stale (#9078).
+                let generation = window::begin_attempt();
                 tray_state::run_guarded_user_start_with_service(
                     UserAction::Start,
                     app_server_active(&app),
@@ -2403,8 +2426,8 @@ fn handle_start_checked_with(app: &tauri::AppHandle, adopt_allowed: bool) {
                         show_on_bundled_page(&app, &msg);
                     },
                     // A daemon the app did not start is already serving: connect to it.
-                    |port| adopt_external_daemon(&app, port),
-                    || await_installed_service(&app, "Cannot Start Server", || handle_start(&app, StartOrigin::User)),
+                    |port| adopt_external_daemon_for_attempt(&app, port, generation),
+                    || await_installed_service(&app, "Cannot Start Server", Some(generation), || handle_start(&app, StartOrigin::User)),
                     || handle_start(&app, StartOrigin::User),
                 );
             },
@@ -2417,12 +2440,12 @@ fn handle_start_checked_with(app: &tauri::AppHandle, adopt_allowed: bool) {
 /// a second one tear down the server the first had just spawned (#8393).
 static START_RESTART_GATE: tray_state::OpGate = tray_state::OpGate::new();
 
+/// What a Start or Restart rejected by [`START_RESTART_GATE`] says, in a
+/// notification and on the loading page.
+const BUSY_MESSAGE: &str = "A start or restart is already in progress. Try again in a moment.";
+
 fn notify_operation_in_progress(app: &tauri::AppHandle) {
-    send_notification(
-        app,
-        "Server Busy",
-        "A start or restart is already in progress. Try again in a moment.",
-    );
+    send_notification(app, "Server Busy", BUSY_MESSAGE);
 }
 
 fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
@@ -2693,10 +2716,24 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
 /// not start (#8388). Nothing was spawned and nothing was stopped: show the tray's
 /// external-daemon state (#8267) and open the daemon's dashboard in the window.
 fn adopt_external_daemon(app: &tauri::AppHandle, port: u16) {
+    adopt_external_daemon_with(app, port, || show_adopted_daemon(app, port));
+}
+
+/// [`adopt_external_daemon`] for the user attempt `generation`: the handoff drops
+/// its effects once a newer attempt began (see `window::emit_server_ready_for_attempt`).
+fn adopt_external_daemon_for_attempt(app: &tauri::AppHandle, port: u16, generation: u64) {
+    adopt_external_daemon_with(app, port, || {
+        window::emit_server_ready_for_attempt(app, port, generation)
+    });
+}
+
+/// The one adopt: `show` points the window at the daemon (and reports whether it
+/// did), then the tray and the notification follow.
+fn adopt_external_daemon_with(app: &tauri::AppHandle, port: u16, show: impl FnOnce() -> bool) {
     update_menu_state(app, MenuState::Stopped);
     // The tray shows the daemon, and the user is told, only once it has proved
     // itself again at the handoff; a refused handoff has already shown why.
-    if show_adopted_daemon(app, port) {
+    if show() {
         update_port_state(app, PortState::Chroxy(port));
         send_notification(
             app,
@@ -2741,10 +2778,14 @@ fn handle_restart(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         tray_state::run_exclusive(
             &START_RESTART_GATE,
-            || notify_operation_in_progress(&app),
             || {
-                // A new attempt: the port watcher must not race it (#9078).
-                window::begin_attempt();
+                notify_operation_in_progress(&app);
+                show_on_bundled_page(&app, BUSY_MESSAGE);
+            },
+            || {
+                // A new attempt: the port watcher must not race it, and an older
+                // handoff is stale (#9078).
+                let generation = window::begin_attempt();
                 tray_state::run_guarded_user_start_with_service(
                     UserAction::Restart,
                     app_server_active(&app),
@@ -2759,7 +2800,7 @@ fn handle_restart(app: &tauri::AppHandle) {
                     // A Restart never adopts (`UserStartDecision`); showing the daemon
                     // is the right reading if it ever did.
                     |port| adopt_external_daemon(&app, port),
-                    || await_installed_service(&app, "Cannot Restart Server", || restart_own_server(&app)),
+                    || await_installed_service(&app, "Cannot Restart Server", Some(generation), || restart_own_server(&app)),
                     || restart_own_server(&app),
                 );
             },

@@ -380,8 +380,14 @@ fn every_dashboard_qr_and_ipc_handoff_goes_through_the_verifying_functions() {
 fn adoption_shows_the_daemon_only_after_the_handoff_succeeds() {
     let lib = read("src/lib.rs");
     // Launch / crash-restart adoption.
-    let adopt = fn_body(&lib, "adopt_external_daemon");
-    let shown = pos(&adopt, "if show_adopted_daemon(app, port) {");
+    // Both spellings (plain and for a user attempt) share one body, whose `show` step
+    // is the handoff.
+    let adopt = fn_body(&lib, "adopt_external_daemon_with");
+    let shown = pos(&adopt, "if show() {");
+    assert!(
+        fn_body(&lib, "adopt_external_daemon").contains("adopt_external_daemon_with(app, port, || show_adopted_daemon(app, port))"),
+        "the plain adopt must hand over through show_adopted_daemon"
+    );
     assert!(pos(&adopt, "update_port_state(app, PortState::Chroxy(port))") > shown, "the tray claims the daemon only after the handoff");
     assert!(pos(&adopt, "send_notification(") > shown, "the user is told only after the handoff");
     // Client-mode adoption.

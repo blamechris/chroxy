@@ -30,6 +30,10 @@ pub trait Sink {
 /// A sink that acts only while `is_current()` holds. The proof is still asked
 /// (prove-then-act is unchanged); what a stale handoff may not do is announce,
 /// navigate or show a refusal over a newer attempt's result.
+///
+/// Currency is checked immediately before each effect, not held across it: a
+/// thread descheduled between the check and the effect can still land that one
+/// effect. That window is tracked in #9081.
 pub struct Current<S: Sink, F: Fn() -> bool> {
     pub inner: S,
     pub is_current: F,
