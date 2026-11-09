@@ -27,6 +27,36 @@ pub trait Sink {
     fn refuse(&self, port: u16);
 }
 
+/// A sink that acts only while `is_current()` holds. The proof is still asked
+/// (prove-then-act is unchanged); what a stale handoff may not do is announce,
+/// navigate or show a refusal over a newer attempt's result.
+///
+/// Currency is checked immediately before each effect, not held across it: a
+/// thread descheduled between the check and the effect can still land that one
+/// effect. That window is tracked in #9081.
+pub struct Current<S: Sink, F: Fn() -> bool> {
+    pub inner: S,
+    pub is_current: F,
+}
+
+impl<S: Sink, F: Fn() -> bool> Sink for Current<S, F> {
+    fn announce(&self, port: u16, token: &str, url: &str) {
+        if (self.is_current)() {
+            self.inner.announce(port, token, url);
+        }
+    }
+    fn navigate(&self, url: &str) {
+        if (self.is_current)() {
+            self.inner.navigate(url);
+        }
+    }
+    fn refuse(&self, port: u16) {
+        if (self.is_current)() {
+            self.inner.refuse(port);
+        }
+    }
+}
+
 /// First half of a ready handoff: prove, then announce. `false` when the daemon
 /// did not prove itself; nothing was announced.
 pub fn begin(prove: &dyn Fn(u16) -> Option<String>, sink: &dyn Sink, port: u16) -> bool {
@@ -95,6 +125,18 @@ mod tests {
         }
         fn push(&self, s: String) {
             self.log.borrow_mut().push(s);
+        }
+    }
+
+    impl Sink for &Rec {
+        fn announce(&self, port: u16, token: &str, url: &str) {
+            (**self).announce(port, token, url)
+        }
+        fn navigate(&self, url: &str) {
+            (**self).navigate(url)
+        }
+        fn refuse(&self, port: u16) {
+            (**self).refuse(port)
         }
     }
 
@@ -176,6 +218,38 @@ mod tests {
         let rec = Rec::new();
         assert!(!open_settings(&scripted(&rec, vec![None]), &rec, 8765));
         assert_eq!(rec.log(), vec!["prove 8765", "refuse 8765"]);
+    }
+
+    #[test]
+    fn a_stale_handoff_asks_for_proof_but_announces_navigates_and_refuses_nothing() {
+        let rec = Rec::new();
+        let stale = Current { inner: &rec, is_current: || false };
+        let prove = scripted(&rec, vec![Some("a"), Some("b"), Some("c"), None, None]);
+        assert!(begin(&prove, &stale, 8765));
+        finish(&prove, &stale, 8765);
+        assert!(open_settings(&prove, &stale, 8765));
+        finish(&prove, &stale, 8765); // a lost proof
+        assert!(!open_settings(&prove, &stale, 8765));
+        let log = rec.log();
+        assert_eq!(log.len(), 5, "{:?}", log);
+        assert!(log.iter().all(|l| l.starts_with("prove")), "only proofs: {:?}", log);
+    }
+
+    #[test]
+    fn a_current_handoff_behaves_like_the_unguarded_sink() {
+        let plain = Rec::new();
+        let prove = scripted(&plain, vec![Some("tok"), None, Some("tok")]);
+        begin(&prove, &plain, 8765);
+        finish(&prove, &plain, 8765);
+        open_settings(&prove, &plain, 8765);
+
+        let guarded = Rec::new();
+        let current = Current { inner: &guarded, is_current: || true };
+        let prove = scripted(&guarded, vec![Some("tok"), None, Some("tok")]);
+        begin(&prove, &current, 8765);
+        finish(&prove, &current, 8765);
+        open_settings(&prove, &current, 8765);
+        assert_eq!(plain.log(), guarded.log());
     }
 
     #[test]

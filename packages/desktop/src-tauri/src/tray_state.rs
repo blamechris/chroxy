@@ -177,6 +177,113 @@ pub fn external_port(menu: MenuState, port: PortState) -> Option<u16> {
     }
 }
 
+/// The port this app talks to (#9077): the app's own server's port while that
+/// server is active, otherwise the configured one. `ServerManager` loads config
+/// only in `start()`, so its port is the unset 0 whenever the app never started a
+/// server of its own (client mode); asking it then points every challenge at
+/// port 0. `configured` is read only when it is needed.
+pub fn app_daemon_port(own_server_active: bool, own_port: u16, configured: impl FnOnce() -> u16) -> u16 {
+    if own_server_active {
+        own_port
+    } else {
+        configured()
+    }
+}
+
+/// What the main window shows, as far as the port watcher's handoff is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowView {
+    /// The bundled page is showing an error or stopped state (no start is in
+    /// flight and no handoff has begun since).
+    pub awaiting: bool,
+    /// The window is on this app's own origin, not on a dashboard.
+    pub on_app_page: bool,
+    /// The setup wizard is on that page.
+    pub first_run: bool,
+    /// How many user attempts (Start, Restart, Connect) have begun. A change since
+    /// the watcher last looked means one ran between two samples, whatever it left.
+    pub user_attempts: u64,
+}
+
+/// What the watcher carries from one iteration to the next.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WatchState {
+    /// Consecutive refused handoffs to the daemon the tray is showing.
+    pub refusals: u32,
+    /// The `user_attempts` value last seen.
+    pub seen_user_attempts: u64,
+}
+
+/// Consecutive refused watcher handoffs to one daemon before the watcher stops
+/// asking. The probe and the handoff's proof share `probe_effective`, so lasting
+/// disagreement should not happen; this only stops a transient loop (#9078).
+pub const WATCH_HANDOFF_REFUSAL_CAP: u32 = 3;
+
+/// The port the watcher should hand the window to, or `None` (#9078). Every
+/// condition must hold: the window is waiting for a daemon on the app's own
+/// page (a `server_error` sent to a dashboard would disconnect it, and the
+/// dashboard reconnects by itself), it is not the setup wizard, the tray's
+/// FOLDED state (after the two-observation rule) is a verified daemon, and the
+/// handoff has not been refused [`WATCH_HANDOFF_REFUSAL_CAP`] times in a row.
+pub fn watch_handoff(window: WindowView, folded: PortState, refusals: u32) -> Option<u16> {
+    match folded {
+        PortState::Chroxy(p)
+            if window.awaiting
+                && window.on_app_page
+                && !window.first_run
+                && refusals < WATCH_HANDOFF_REFUSAL_CAP =>
+        {
+            Some(p)
+        }
+        _ => None,
+    }
+}
+
+/// One iteration of the port watcher, with its effects as closures so a test can
+/// drive the sequencing (#9078). While the app's own server is active the port is
+/// its own: `on_owned` runs and nothing is probed. Otherwise `probe` reads the
+/// port, `observe` folds that into the tray and returns the FOLDED state, and
+/// when that is a verified daemon `window` is read and, if [`watch_handoff`]
+/// agrees, `hand_off` points the window at it (`false` = refused).
+/// `state.refusals` counts consecutive refused handoffs: it resets on success,
+/// whenever the folded state is not a verified daemon, when the page is not
+/// waiting, and when a user attempt has begun since the last sample.
+pub fn watch_step(
+    owned: bool,
+    on_owned: impl FnOnce(),
+    probe: impl FnOnce() -> PortState,
+    observe: impl FnOnce(PortState) -> PortState,
+    window: impl FnOnce() -> WindowView,
+    hand_off: impl FnOnce(u16) -> bool,
+    state: &mut WatchState,
+) {
+    if owned {
+        on_owned();
+        state.refusals = 0;
+        return;
+    }
+    let folded = observe(probe());
+    if !folded.is_external_chroxy() {
+        state.refusals = 0;
+        return;
+    }
+    let view = window();
+    if !view.awaiting || view.user_attempts != state.seen_user_attempts {
+        // A manual Connect or Retry took over (even one that began and ended
+        // between two samples), or an attempt is in flight: the cap belongs to one
+        // waiting episode.
+        state.refusals = 0;
+        state.seen_user_attempts = view.user_attempts;
+    }
+    if let Some(port) = watch_handoff(view, folded, state.refusals) {
+        if hand_off(port) {
+            state.refusals = 0;
+        } else {
+            state.refusals += 1;
+        }
+    }
+}
+
 /// The user-initiated actions that would spawn a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAction {
@@ -190,6 +297,9 @@ pub enum UserStartDecision {
     Proceed,
     /// Do nothing; tell the user what holds the port.
     Refuse(PortState),
+    /// A user Start found a verified chroxy daemon the app did not start (#9078):
+    /// spawn nothing and connect to it, the same as the launch adopt.
+    Adopt(u16),
     /// The port is free but a chroxy service is installed and about to take it
     /// (#8890): spawn nothing. Wait for the service, adopt it once it answers,
     /// otherwise refuse with [`service_wait_refusal`].
@@ -197,24 +307,31 @@ pub enum UserStartDecision {
 }
 
 /// While the app's own server is active the port is its own (a Restart of it is
-/// legitimate); otherwise anything holding the port is somebody else's and the
-/// action is refused.
-pub fn user_start_decision(app_server_active: bool, held: PortState) -> UserStartDecision {
-    user_start_decision_with_service(app_server_active, held, false)
-}
-
-/// [`user_start_decision`] that knows whether a chroxy service is installed
-/// (#8890). A free port is then not free for the app's taking: the service is
-/// probably mid-restart, and a server the app spawns into that gap would hold
-/// the port while the service crash-looped on EADDRINUSE. With no service
-/// installed this is exactly [`user_start_decision`].
+/// legitimate). Otherwise a verified chroxy daemon on the port is adopted by a
+/// Start (#9078: refusing left the loading page spinning on "Starting server..."
+/// with the way out only in a notification) and refused for a Restart, which
+/// cannot restart somebody else's daemon; anything else holding the port is
+/// refused.
+///
+/// The adopt is for callers that may hand the window to a daemon (`adopt_allowed`,
+/// see `caller_may_hand_off`); for any other caller a Start on a verified daemon is
+/// refused like any other held port.
+///
+/// A free port is not free for the app's taking when a chroxy service is
+/// installed (#8890): the service is probably mid-restart, and a server the app
+/// spawns into that gap would hold the port while the service crash-looped on
+/// EADDRINUSE.
 pub fn user_start_decision_with_service(
+    action: UserAction,
     app_server_active: bool,
     held: PortState,
     service_installed: bool,
+    adopt_allowed: bool,
 ) -> UserStartDecision {
     if app_server_active {
         UserStartDecision::Proceed
+    } else if let (UserAction::Start, PortState::Chroxy(p), true) = (action, held, adopt_allowed) {
+        UserStartDecision::Adopt(p)
     } else if held.is_occupied() {
         UserStartDecision::Refuse(held)
     } else if service_installed {
@@ -227,6 +344,8 @@ pub fn user_start_decision_with_service(
 /// User-facing explanation of a refusal.
 pub fn refusal_message(action: UserAction, held: PortState) -> String {
     match (action, held) {
+        // A Start adopts a verified daemon when its caller may hand the window over
+        // (`UserStartDecision::Adopt`); any other caller's Start is refused with this.
         (UserAction::Start, PortState::Chroxy(p)) => format!(
             "A chroxy daemon already serves port {}. Use Open Dashboard to connect to it.",
             p
@@ -560,41 +679,26 @@ pub fn chroxy_service_installed() -> bool {
 }
 
 /// Orchestrates a user-initiated Start/Restart: probe live (only when the app's
-/// own server is idle), refuse if the port is held, else proceed. The effects are
-/// closures so the sequencing is testable: a refusal must never reach `proceed`.
-pub fn run_guarded_user_start(
-    action: UserAction,
-    app_server_active: bool,
-    probe: impl FnOnce() -> PortState,
-    on_refuse: impl FnOnce(PortState, String),
-    proceed: impl FnOnce(),
-) {
-    run_guarded_user_start_with_service(
-        action,
-        app_server_active,
-        false,
-        probe,
-        on_refuse,
-        || unreachable!("no service installed, so there is nothing to await"),
-        proceed,
-    );
-}
-
-/// [`run_guarded_user_start`] that knows whether a chroxy service is installed
-/// (#8890): on a free port it calls `await_service` instead of `proceed`, so
-/// nothing is spawned into the service's restart gap.
+/// own server is idle), then refuse, adopt, wait for a service or proceed as
+/// [`user_start_decision_with_service`] says. The effects are closures so the
+/// sequencing is testable: a refusal or an adoption must never reach `proceed`.
+/// `service_installed` is the detector's result (#8890); `adopt_allowed` is whether
+/// the caller may have the window handed to a running daemon.
 pub fn run_guarded_user_start_with_service(
     action: UserAction,
     app_server_active: bool,
     service_installed: bool,
+    adopt_allowed: bool,
     probe: impl FnOnce() -> PortState,
     on_refuse: impl FnOnce(PortState, String),
+    adopt: impl FnOnce(u16),
     await_service: impl FnOnce(),
     proceed: impl FnOnce(),
 ) {
     let held = if app_server_active { PortState::Free } else { probe() };
-    match user_start_decision_with_service(app_server_active, held, service_installed) {
+    match user_start_decision_with_service(action, app_server_active, held, service_installed, adopt_allowed) {
         UserStartDecision::Refuse(h) => on_refuse(h, refusal_message(action, h)),
+        UserStartDecision::Adopt(p) => adopt(p),
         UserStartDecision::AwaitService => await_service(),
         UserStartDecision::Proceed => proceed(),
     }
@@ -1130,52 +1234,86 @@ mod tests {
         assert!(!PortState::Free.is_external_chroxy());
     }
 
+    // Changed for #9078: a user Start used to be refused for a verified chroxy
+    // daemon too; it now adopts it (see `a_user_start_adopts_a_verified_daemon...`).
+    // A Restart is still refused for it, and any Foreign holder still refuses both.
     #[test]
-    fn user_start_is_refused_for_every_held_port_when_the_app_is_idle() {
-        for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
-            assert_eq!(user_start_decision(false, held), UserStartDecision::Refuse(held));
+    fn user_start_is_refused_for_a_foreign_holder_and_a_restart_for_any_holder_when_the_app_is_idle() {
+        for action in [UserAction::Start, UserAction::Restart] {
+            let held = PortState::Foreign(8765);
+            assert_eq!(user_start_decision_with_service(action, false, held, false, true), UserStartDecision::Refuse(held));
+            assert_eq!(user_start_decision_with_service(action, false, PortState::Free, false, true), UserStartDecision::Proceed);
         }
-        assert_eq!(user_start_decision(false, PortState::Free), UserStartDecision::Proceed);
+        let daemon = PortState::Chroxy(8765);
+        assert_eq!(user_start_decision_with_service(UserAction::Restart, false, daemon, false, true), UserStartDecision::Refuse(daemon));
     }
 
     #[test]
     fn user_restart_of_the_apps_own_running_server_proceeds() {
         for held in [PortState::Free, PortState::Chroxy(8765), PortState::Foreign(8765)] {
-            assert_eq!(user_start_decision(true, held), UserStartDecision::Proceed);
+            assert_eq!(user_start_decision_with_service(UserAction::Restart, true, held, false, true), UserStartDecision::Proceed);
         }
     }
 
     #[test]
     fn guarded_start_never_proceeds_on_a_held_port() {
-        for action in [UserAction::Start, UserAction::Restart] {
-            for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
-                let (mut proceeded, mut refused) = (false, None);
-                run_guarded_user_start(action, false, || held, |h, m| refused = Some((h, m)), || proceeded = true);
-                assert!(!proceeded, "{:?} on {:?} must not reach the start path", action, held);
-                let (h, msg) = refused.expect("must refuse");
-                assert_eq!(h, held);
-                assert!(msg.contains("8765"));
-            }
+        // A Start on a verified daemon adopts instead (#9078); every other held
+        // port is refused, and none of them reaches the start path.
+        for (action, held) in [
+            (UserAction::Start, PortState::Foreign(8765)),
+            (UserAction::Restart, PortState::Foreign(8765)),
+            (UserAction::Restart, PortState::Chroxy(8765)),
+        ] {
+            let (mut proceeded, mut refused) = (false, None);
+            run_guarded_user_start_with_service(
+                action,
+                false,
+                false,
+                true,
+                || held,
+                |h, m| refused = Some((h, m)),
+                |_| panic!("{:?} on {:?} must not adopt", action, held),
+                || panic!("a held port does not await a service"),
+                || proceeded = true,
+            );
+            assert!(!proceeded, "{:?} on {:?} must not reach the start path", action, held);
+            let (h, msg) = refused.expect("must refuse");
+            assert_eq!(h, held);
+            assert!(msg.contains("8765"));
         }
     }
 
     #[test]
     fn guarded_start_proceeds_on_a_free_port_and_does_not_probe_an_active_server() {
         let (mut proceeded, mut refused) = (false, false);
-        run_guarded_user_start(UserAction::Start, false, || PortState::Free, |_, _| refused = true, || proceeded = true);
+        run_guarded_user_start_with_service(
+            UserAction::Start,
+            false,
+            false,
+            true,
+            || PortState::Free,
+            |_, _| refused = true,
+            |_| panic!("a free port has nothing to adopt"),
+            || panic!("no service installed"),
+            || proceeded = true,
+        );
         assert!(proceeded && !refused);
 
         // The app's own server is active: its own port must not be probed (it
         // would read as an external daemon) and the action proceeds.
         let (mut probed, mut proceeded) = (false, false);
-        run_guarded_user_start(
+        run_guarded_user_start_with_service(
             UserAction::Restart,
+            true,
+            false,
             true,
             || {
                 probed = true;
                 PortState::Chroxy(8765)
             },
             |_, _| panic!("must not refuse"),
+            |_| panic!("must not adopt"),
+            || panic!("no service installed"),
             || proceeded = true,
         );
         assert!(proceeded && !probed);
@@ -1314,7 +1452,7 @@ mod tests {
     #[test]
     fn a_user_start_awaits_an_installed_service_on_a_free_port() {
         assert_eq!(
-            user_start_decision_with_service(false, PortState::Free, true),
+            user_start_decision_with_service(UserAction::Start, false, PortState::Free, true, true),
             UserStartDecision::AwaitService
         );
     }
@@ -1323,7 +1461,8 @@ mod tests {
     fn user_start_decisions_are_this_table() {
         use PortState::*;
         use UserStartDecision::*;
-        // (app server active, held, service installed, expected)
+        // (app server active, held, service installed, expected), for a Restart:
+        // a Start's difference (adopt a verified daemon, #9078) has its own table.
         for (active, held, service, want) in [
             (false, Free, false, Proceed),
             (false, Free, true, AwaitService),
@@ -1338,7 +1477,7 @@ mod tests {
             (true, Foreign(1), true, Proceed),
         ] {
             assert_eq!(
-                user_start_decision_with_service(active, held, service),
+                user_start_decision_with_service(UserAction::Restart, active, held, service, true),
                 want,
                 "active={} {:?} service={}",
                 active,
@@ -1346,8 +1485,6 @@ mod tests {
                 service
             );
         }
-        assert_eq!(user_start_decision(false, Free), Proceed);
-        assert_eq!(user_start_decision(false, Foreign(1)), Refuse(Foreign(1)));
     }
 
     #[test]
@@ -1357,8 +1494,10 @@ mod tests {
             UserAction::Start,
             false,
             true,
+            true,
             || PortState::Free,
             |_, _| panic!("a free port is not refused"),
+            |_| panic!("a free port has nothing to adopt"),
             || awaited = true,
             || proceeded = true,
         );
@@ -1372,8 +1511,10 @@ mod tests {
             UserAction::Start,
             false,
             false,
+            true,
             || PortState::Free,
             |_, _| panic!("a free port is not refused"),
+            |_| panic!("a free port has nothing to adopt"),
             || awaited = true,
             || proceeded = true,
         );
@@ -2209,5 +2350,292 @@ mod tests {
             l.local_addr().unwrap().port()
         };
         assert_eq!(probe(port, Some(TOKEN)), PortState::Free);
+    }
+
+    // --- one port resolver (#9077) ----------------------------------------
+
+    #[test]
+    fn the_app_port_is_the_configured_one_when_the_app_has_no_server_of_its_own() {
+        // Client mode: ServerManager's port is still the unset 0 (it loads config
+        // only in start()), so the configured port must win.
+        assert_eq!(app_daemon_port(false, 0, || 8765), 8765);
+        assert_eq!(app_daemon_port(false, 9999, || 8765), 8765, "a stale own port is not read");
+    }
+
+    #[test]
+    fn the_app_port_is_its_own_while_its_server_is_active_and_config_is_not_read() {
+        assert_eq!(app_daemon_port(true, 9001, || panic!("config must not be read")), 9001);
+    }
+
+    // --- the watcher hands the window to a verified daemon (#9078) --------
+
+    use std::cell::{Cell, RefCell};
+
+    fn view(awaiting: bool, on_app_page: bool, first_run: bool) -> WindowView {
+        WindowView { awaiting, on_app_page, first_run, user_attempts: 0 }
+    }
+
+    #[test]
+    fn the_watch_decision_needs_every_condition() {
+        let chroxy = PortState::Chroxy(8765);
+        assert_eq!(watch_handoff(view(true, true, false), chroxy, 0), Some(8765));
+        assert_eq!(watch_handoff(view(false, true, false), chroxy, 0), None, "no error shown: a start or the launch adopt may be running");
+        assert_eq!(watch_handoff(view(true, false, false), chroxy, 0), None, "already on a dashboard");
+        assert_eq!(watch_handoff(view(true, true, true), chroxy, 0), None, "the setup wizard is on that page");
+        for held in [PortState::Free, PortState::Foreign(8765)] {
+            assert_eq!(watch_handoff(view(true, true, false), held, 0), None, "{:?}", held);
+        }
+        assert_eq!(watch_handoff(view(true, true, false), chroxy, WATCH_HANDOFF_REFUSAL_CAP - 1), Some(8765));
+        assert_eq!(watch_handoff(view(true, true, false), chroxy, WATCH_HANDOFF_REFUSAL_CAP), None);
+    }
+
+    /// Drives `watch_step` over a scripted sequence of probes, with a window that
+    /// leaves the app page once a handoff succeeds. Records every handoff.
+    struct Rig {
+        probes: RefCell<std::collections::VecDeque<PortState>>,
+        folded: Cell<PortState>,
+        pending: Cell<bool>,
+        window: Cell<WindowView>,
+        handoff_ok: Cell<bool>,
+        handoffs: RefCell<Vec<u16>>,
+        refusals: Cell<u32>,
+        seen: Cell<u64>,
+        owned_calls: Cell<u32>,
+    }
+
+    impl Rig {
+        fn new(probes: Vec<PortState>, window: WindowView) -> Self {
+            Self {
+                probes: RefCell::new(probes.into()),
+                folded: Cell::new(PortState::Free),
+                pending: Cell::new(false),
+                window: Cell::new(window),
+                handoff_ok: Cell::new(true),
+                handoffs: RefCell::new(Vec::new()),
+                refusals: Cell::new(0),
+                seen: Cell::new(0),
+                owned_calls: Cell::new(0),
+            }
+        }
+
+        fn tick(&self, owned: bool) {
+            let mut state = WatchState { refusals: self.refusals.get(), seen_user_attempts: self.seen.get() };
+            watch_step(
+                owned,
+                || self.owned_calls.set(self.owned_calls.get() + 1),
+                || self.probes.borrow_mut().pop_front().expect("probed more often than scripted"),
+                |observed| {
+                    // The tray's real fold: two observations to leave Chroxy.
+                    let (next, pending) = next_external(self.folded.get(), observed, self.pending.get());
+                    self.folded.set(next);
+                    self.pending.set(pending);
+                    next
+                },
+                || self.window.get(),
+                |port| {
+                    self.handoffs.borrow_mut().push(port);
+                    if self.handoff_ok.get() {
+                        self.window.set(WindowView { awaiting: false, on_app_page: false, ..self.window.get() });
+                    }
+                    self.handoff_ok.get()
+                },
+                &mut state,
+            );
+            self.refusals.set(state.refusals);
+            self.seen.set(state.seen_user_attempts);
+        }
+    }
+
+    #[test]
+    fn the_login_race_reaches_the_dashboard_without_a_click() {
+        // The launch adopt gave up before the daemon listened, so the window shows
+        // the error page. Free, Free, Free, then the daemon is up and proves itself.
+        use PortState::*;
+        let rig = Rig::new(vec![Free, Free, Free, Chroxy(8765), Chroxy(8765), Chroxy(8765)], view(true, true, false));
+        for _ in 0..3 {
+            rig.tick(false);
+        }
+        assert!(rig.handoffs.borrow().is_empty());
+        rig.tick(false); // first Chroxy observation: folds straight in from Free
+        assert_eq!(*rig.handoffs.borrow(), vec![8765], "handed off exactly once");
+        rig.tick(false);
+        rig.tick(false);
+        assert_eq!(*rig.handoffs.borrow(), vec![8765], "not again once the window is on the dashboard");
+    }
+
+    #[test]
+    fn the_watcher_hands_off_only_through_the_decision() {
+        use PortState::*;
+        for (name, owned, window, probe) in [
+            ("launch adopt still running", false, view(false, true, false), Chroxy(1)),
+            ("already on a dashboard", false, view(true, false, false), Chroxy(1)),
+            ("first run", false, view(true, true, true), Chroxy(1)),
+            ("the app's own server", true, view(true, true, false), Chroxy(1)),
+            ("something else holds the port", false, view(true, true, false), Foreign(1)),
+            ("nothing listening", false, view(true, true, false), Free),
+        ] {
+            let rig = Rig::new(vec![probe, probe, probe], window);
+            for _ in 0..3 {
+                rig.tick(owned);
+            }
+            assert!(rig.handoffs.borrow().is_empty(), "{}", name);
+        }
+    }
+
+    #[test]
+    fn an_owned_server_probes_nothing_and_reports_the_port_as_its_own() {
+        let rig = Rig::new(vec![], view(true, true, false));
+        rig.tick(true);
+        assert_eq!(rig.owned_calls.get(), 1);
+    }
+
+    #[test]
+    fn a_handoff_refused_three_times_stops_until_the_state_leaves_chroxy() {
+        use PortState::*;
+        let probes = vec![Chroxy(8765); 6];
+        let rig = Rig::new(probes, view(true, true, false));
+        rig.handoff_ok.set(false);
+        for _ in 0..6 {
+            rig.tick(false);
+        }
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize, "capped");
+
+        // The daemon goes away (two observations to leave Chroxy), then returns:
+        // the count starts over.
+        rig.probes.borrow_mut().extend([Free, Free, Chroxy(8765)]);
+        rig.tick(false);
+        rig.tick(false);
+        assert_eq!(rig.refusals.get(), 0, "leaving Chroxy resets the count");
+        rig.handoff_ok.set(true);
+        rig.tick(false);
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize + 1);
+    }
+
+    // --- Start adopts a verified daemon (#9078) ---------------------------
+
+    #[test]
+    fn a_user_start_adopts_a_verified_daemon_and_a_restart_does_not() {
+        use PortState::*;
+        use UserAction::*;
+        use UserStartDecision::*;
+        // (action, app server active, held, service installed, expected)
+        for (action, active, held, service, want) in [
+            (Start, false, Chroxy(1), false, Adopt(1)),
+            (Start, false, Chroxy(1), true, Adopt(1)),
+            (Restart, false, Chroxy(1), false, Refuse(Chroxy(1))),
+            (Restart, false, Chroxy(1), true, Refuse(Chroxy(1))),
+            (Start, false, Foreign(1), false, Refuse(Foreign(1))),
+            (Start, false, Foreign(1), true, Refuse(Foreign(1))),
+            (Restart, false, Foreign(1), false, Refuse(Foreign(1))),
+            (Start, false, Free, true, AwaitService),
+            (Restart, false, Free, true, AwaitService),
+            (Start, false, Free, false, Proceed),
+            // The app's own server is active: the action is the caller's to route.
+            (Start, true, Chroxy(1), false, Proceed),
+            (Restart, true, Chroxy(1), true, Proceed),
+            (Start, true, Foreign(1), true, Proceed),
+            (Start, true, Free, true, Proceed),
+        ] {
+            assert_eq!(
+                user_start_decision_with_service(action, active, held, service, true),
+                want,
+                "{:?} active={} {:?} service={}",
+                action, active, held, service
+            );
+        }
+    }
+
+    #[test]
+    fn a_guarded_start_adopts_instead_of_refusing_or_spawning() {
+        let (mut adopted, mut refused, mut awaited, mut proceeded) = (None, false, false, false);
+        run_guarded_user_start_with_service(
+            UserAction::Start,
+            false,
+            false,
+            true,
+            || PortState::Chroxy(8765),
+            |_, _| refused = true,
+            |p| adopted = Some(p),
+            || awaited = true,
+            || proceeded = true,
+        );
+        assert_eq!(adopted, Some(8765));
+        assert!(!refused && !awaited && !proceeded);
+    }
+
+    #[test]
+    fn a_start_from_a_caller_that_may_not_have_the_window_handed_over_does_not_adopt() {
+        use PortState::*;
+        use UserAction::*;
+        use UserStartDecision::*;
+        // (action, app server active, held, service installed, expected), adopt_allowed = false
+        for (action, active, held, service, want) in [
+            (Start, false, Chroxy(1), false, Refuse(Chroxy(1))),
+            (Start, false, Chroxy(1), true, Refuse(Chroxy(1))),
+            (Start, false, Foreign(1), false, Refuse(Foreign(1))),
+            (Start, false, Free, true, AwaitService),
+            (Start, false, Free, false, Proceed),
+            (Start, true, Chroxy(1), false, Proceed),
+        ] {
+            assert_eq!(
+                user_start_decision_with_service(action, active, held, service, false),
+                want,
+                "{:?} active={} {:?} service={}",
+                action, active, held, service
+            );
+        }
+    }
+
+    #[test]
+    fn a_disallowed_adopt_is_refused_with_the_already_serving_message() {
+        let mut refused = None;
+        run_guarded_user_start_with_service(
+            UserAction::Start,
+            false,
+            false,
+            false,
+            || PortState::Chroxy(8765),
+            |h, m| refused = Some((h, m)),
+            |_| panic!("a disallowed caller must not adopt"),
+            || panic!("a held port does not await a service"),
+            || panic!("a held port does not start a server"),
+        );
+        let (held, msg) = refused.expect("must refuse");
+        assert_eq!(held, PortState::Chroxy(8765));
+        assert!(msg.contains("already serves port 8765"), "{}", msg);
+    }
+
+    #[test]
+    fn the_refusal_count_belongs_to_one_waiting_episode() {
+        use PortState::*;
+        let rig = Rig::new(vec![Chroxy(8765); 8], view(true, true, false));
+        rig.handoff_ok.set(false);
+        for _ in 0..4 {
+            rig.tick(false);
+        }
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize, "capped");
+        // A manual Connect or Retry took over for one tick, then the page waits again.
+        rig.window.set(view(false, true, false));
+        rig.tick(false);
+        assert_eq!(rig.refusals.get(), 0);
+        rig.window.set(view(true, true, false));
+        rig.tick(false);
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize + 1, "asks again");
+    }
+
+    #[test]
+    fn a_user_attempt_between_two_samples_resets_the_refusal_count() {
+        use PortState::*;
+        let rig = Rig::new(vec![Chroxy(8765); 8], view(true, true, false));
+        rig.handoff_ok.set(false);
+        for _ in 0..4 {
+            rig.tick(false);
+        }
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize, "capped");
+        // A Connect began and failed between two ticks: the page is waiting on every
+        // sampled tick, but a user attempt ran.
+        rig.window.set(WindowView { user_attempts: 1, ..rig.window.get() });
+        rig.tick(false);
+        assert_eq!(rig.handoffs.borrow().len(), WATCH_HANDOFF_REFUSAL_CAP as usize + 1, "asks again");
     }
 }
