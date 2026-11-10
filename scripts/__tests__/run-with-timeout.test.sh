@@ -65,8 +65,39 @@ echo "run-with-timeout.sh (#8145)"
 # like /usr/bin: on ubuntu-24.04 /usr/bin carries GNU `timeout`, so a PATH of
 # system dirs silently ran cases 5-7 through GNU timeout instead of perl on
 # the one platform CI uses (#8145 CI).
-NO_TIMEOUT_DIR="$(mktemp -d)"
-trap 'rm -rf "$NO_TIMEOUT_DIR"' EXIT
+#
+# Everything this run creates lives under ONE directory it made for itself,
+# and the EXIT trap removes exactly that directory: nothing shared with another
+# run, nothing matched by a pattern (#8579).
+#
+# The TERM-ignoring fixtures further down used to be allocated with
+# `mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh`. BSD mktemp (stock macOS)
+# substitutes only TRAILING X's, so with the `.sh` suffix it created the
+# template's literal name. Every run on the machine then shared one path: a run
+# cut off before its `rm -f` broke each later one ("mktemp: ... File exists"),
+# and two concurrent runs could remove each other's fixture. A template that ENDS in
+# X's is randomized by BSD and GNU mktemp alike, and a name inside a directory
+# only this run has cannot collide with anything.
+#
+# The template is spelled out, rather than left to a bare `mktemp -d`, so the
+# location follows TMPDIR on both platforms: stock macOS `mktemp -d` ignores it.
+#
+# A failed allocation stops HERE, before any case. An empty RUN_DIR would turn
+# the paths below into `/no-timeout-bin` and `/fixtures`, and the cases would
+# then report on a setup that never existed.
+TMP_ROOT="${TMPDIR:-/tmp}"
+RUN_DIR="$(mktemp -d "${TMP_ROOT%/}/chroxy-rwt.XXXXXX")" || RUN_DIR=""
+if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then
+  echo "run-with-timeout.test.sh: could not allocate a run-owned temp dir under '$TMP_ROOT' — no case was run" >&2
+  exit 1
+fi
+trap 'rm -rf "$RUN_DIR"' EXIT
+NO_TIMEOUT_DIR="$RUN_DIR/no-timeout-bin"
+FIXTURE_DIR="$RUN_DIR/fixtures"
+if ! mkdir "$NO_TIMEOUT_DIR" "$FIXTURE_DIR"; then
+  echo "run-with-timeout.test.sh: could not create the run's directories under '$RUN_DIR' — no case was run" >&2
+  exit 1
+fi
 for tool in bash sh perl true false sleep env; do
   # `type -P`, not `command -v`: `true`/`false` are shell builtins, and
   # `command -v true` prints the bare name, which would make a dangling link.
@@ -175,9 +206,14 @@ fi
 # returned in time" alone would still pass if escalation silently failed to
 # reap anything and the TERM-ignoring process just kept running in the
 # background.
+#
+# The fixture's path is a fixed name inside this run's own FIXTURE_DIR, so it
+# is unique per run through its directory (#8579). A fixture that could not be
+# written stops the run: carrying on would report the missing file as a wrong
+# exit code from the wrapper.
 make_term_ignoring_script() {
   local path="$1"
-  cat > "$path" <<'EOF'
+  cat > "$path" <<'EOF' || return 1
 #!/usr/bin/env bash
 trap '' TERM
 exec sleep 40
@@ -187,10 +223,18 @@ EOF
 
 # 9. Real backend (whatever the unmodified PATH provides — timeout, gtimeout,
 # or perl, same as case 3).
-term_script="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
-make_term_ignoring_script "$term_script"
+term_script="$FIXTURE_DIR/term-ignore-real-backend.sh"
+if ! make_term_ignoring_script "$term_script"; then
+  echo "run-with-timeout.test.sh: could not write the fixture '$term_script' — stopping before its cases" >&2
+  exit 1
+fi
 start=$(date +%s)
-env -i PATH="$PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script'"
+# The lib and the fixture are passed as ARGUMENTS, not spliced into the `-c`
+# source: the fixture path follows TMPDIR, and a TMPDIR containing an
+# apostrophe would otherwise end the quoted string early and make bash exit 2
+# on a syntax error before the wrapper ran (#8579 review).
+# shellcheck disable=SC2016 # `$1`/`$2` belong to the inner bash, not to this shell
+env -i PATH="$PATH" HOME="$HOME" bash -c 'source "$1"; run_with_timeout 1 "$2"' rwt-case "$LIB" "$term_script"
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 # The grace window (perl: hardcoded 10s; GNU timeout: `-k 10`) means this
@@ -215,10 +259,14 @@ rm -f "$term_script"
 # 10. Forced perl fallback — the SAME property, under the backend that has
 # its own, independently-written grace-then-KILL loop (not GNU coreutils'
 # `-k`), so a fix that only patched the GNU path would leave this half red.
-term_script2="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
-make_term_ignoring_script "$term_script2"
+term_script2="$FIXTURE_DIR/term-ignore-perl-fallback.sh"
+if ! make_term_ignoring_script "$term_script2"; then
+  echo "run-with-timeout.test.sh: could not write the fixture '$term_script2' — stopping before its cases" >&2
+  exit 1
+fi
 start=$(date +%s)
-env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script2'"
+# shellcheck disable=SC2016 # `$1`/`$2` belong to the inner bash, not to this shell
+env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c 'source "$1"; run_with_timeout 1 "$2"' rwt-case "$LIB" "$term_script2"
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 40 ]; then
