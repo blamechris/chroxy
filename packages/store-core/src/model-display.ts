@@ -56,8 +56,20 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
       && (other.fullId || other.id).replace(/^claude-/, '') === target.replace(/^claude-/, ''))
     return { ...m, label: ambiguous ? `${label} (${target})` : candidate }
   })
-  return choices.map(m => choices.filter(other => other.label === m.label).length > 1
-    ? { ...m, label: `${baseLabel(m)} (${m.fullId || m.id})` } : m)
+  // Replace the short descriptor using the original row, not its augmented label.
+  const disambiguated = choices.map((m, index) => choices.filter(other => other.label === m.label).length > 1
+    ? { ...m, label: `${baseLabel(unique[index]!)} (${m.fullId || m.id})` } : m)
+  // An authored label can match a newly simplified label. Reserve each result
+  // so further fallbacks cannot silently introduce another collision.
+  const labels = new Set<string>()
+  return disambiguated.map((m, index) => {
+    const targetLabel = `${baseLabel(unique[index]!)} (${m.fullId || m.id})`
+    let label = labels.has(m.label) ? targetLabel : m.label
+    let suffix = 2
+    while (labels.has(label)) label = `${targetLabel} (${suffix++})`
+    labels.add(label)
+    return label === m.label ? m : { ...m, label }
+  })
 }
 
 /** Shared header/status label. The family fallback is display-only, Claude-only,
