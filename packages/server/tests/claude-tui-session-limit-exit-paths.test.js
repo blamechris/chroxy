@@ -109,7 +109,7 @@ describe('claude-tui surfaces a usage limit from the exit paths (#8441)', () => 
     const CASES = [
       ['session limit', SESSION_LIMIT, 'usage_limit', SESSION_MESSAGE],
       ['weekly limit', WEEKLY_LIMIT, 'usage_limit', "Claude's weekly usage limit was reached. It resets Jul 22 at 4pm (America/Los_Angeles); messages will not go through until then."],
-      ['usage credits', CREDITS_LIMIT, 'usage_limit', 'Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.'],
+      ['usage credits', CREDITS_LIMIT, 'usage_limit', 'Usage limit: Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.'],
       ['overload', OVERLOAD, 'api_overloaded', "Claude's API is overloaded (HTTP 529). Wait a moment, then send your message again."],
     ]
     for (const [name, sentence, code, message] of CASES) {

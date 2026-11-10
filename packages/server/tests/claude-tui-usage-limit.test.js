@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
+import { isRateLimitMessage } from '../../protocol/dist/error-categories.js'
 import {
   classifyUsageLimit,
   classifyApiErrorEntry,
@@ -241,4 +242,76 @@ describe('classifyApiErrorEntry — the structured marker decides, the text refi
     assert.equal(classifyApiErrorEntry({ text: "You've hit your session limit" }), null)
     assert.equal(classifyApiErrorEntry(), null)
   })
+})
+
+// #8452's #8426 follow-up: the live client recognizes the returned text.
+describe('usage-limit notices — shipped client alert compatibility', () => {
+  const creditCases = [
+    ['rendered credits fixture', () => classifyUsageLimit(textOf(creditsE))],
+    ['squeezed credits fixture', () => classifyUsageLimit(textOf(creditsE).replace(/\s+/g, ''))],
+    ['structured credits fixture', () => classifyApiErrorEntry({
+      error: creditsE.error, apiErrorStatus: creditsE.apiErrorStatus, text: textOf(creditsE),
+    })],
+  ]
+  for (const [name, classify] of creditCases) {
+    it(`${name}: preserves credits metadata`, () => {
+      const r = classify()
+      assert.deepEqual({ kind: r.kind, code: r.code, resetsAt: r.resetsAt, episodeKey: r.episodeKey }, {
+        kind: 'credits', code: 'usage_limit', resetsAt: null, episodeKey: 'credits|',
+      })
+    })
+
+    it(`${name}: first notice reaches the client alert classifier`, () => {
+      const r = classify()
+      assert.equal(isRateLimitMessage(r.message), true, `${name}: first notice`)
+      assert.equal(r.message, 'Usage limit: Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.')
+    })
+
+    it(`${name}: repeat notice reaches the client alert classifier`, () => {
+      const r = classify()
+      assert.equal(isRateLimitMessage(r.repeatMessage), true, `${name}: repeat notice`)
+      assert.equal(r.repeatMessage, 'Usage limit: Still no usage credits for this model \u2014 switch to another model or add usage credits.')
+      assert.ok(!r.repeatMessage.includes('\n'))
+    })
+  }
+
+  const otherCases = [
+    ['session', textOf(sessionE),
+      "Claude's session usage limit was reached. It resets 11:30pm (America/Los_Angeles); messages will not go through until then.",
+      'Still at the session usage limit \u2014 resets 11:30pm (America/Los_Angeles).'],
+    ['weekly', textOf(weeklyE),
+      "Claude's weekly usage limit was reached. It resets Jul 22 at 4pm (America/Los_Angeles); messages will not go through until then.",
+      'Still at the weekly usage limit \u2014 resets Jul 22 at 4pm (America/Los_Angeles).'],
+    ['usage', "You've hit your limit · resets 4am (America/Los_Angeles)",
+      "Claude's usage limit was reached. It resets 4am (America/Los_Angeles); messages will not go through until then.",
+      'Still at the usage limit \u2014 resets 4am (America/Los_Angeles).'],
+    ['rate_limit', 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit."}}',
+      "Claude's API rate limit was hit (HTTP 429). Wait a moment, then send your message again.",
+      "Claude's API rate limit was hit (HTTP 429). Wait a moment, then send your message again."],
+    ['overloaded', textOf(overloadedE),
+      "Claude's API is overloaded (HTTP 529). Wait a moment, then send your message again.",
+      "Claude's API is overloaded (HTTP 529). Wait a moment, then send your message again."],
+  ]
+  for (const [kind, text, message, repeatMessage] of otherCases) {
+    it(`${kind}: retains first and repeat wording and client alert recognition`, () => {
+      const r = classifyUsageLimit(text)
+      assert.equal(r.kind, kind)
+      assert.equal(r.message, message)
+      assert.equal(r.repeatMessage, repeatMessage)
+      assert.equal(isRateLimitMessage(r.message), true, `${kind}: first notice`)
+      assert.equal(isRateLimitMessage(r.repeatMessage), true, `${kind}: repeat notice`)
+    })
+  }
+
+  for (const text of [
+    'Usage credits are available for selected models.',
+    'Add usage credits from the account settings.',
+    'The model supports usage credits.',
+  ]) {
+    it(`ordinary credits discussion stays outside the alert grammar: ${text}`, () => {
+      assert.equal(classifyUsageLimit(text), null)
+      assert.equal(classifyApiErrorEntry({ error: 'invalid_request', text }), null)
+      assert.equal(isRateLimitMessage(text), false)
+    })
+  }
 })
