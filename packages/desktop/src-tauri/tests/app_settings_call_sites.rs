@@ -46,8 +46,8 @@ fn every_app_settings_command_refuses_a_caller_that_is_not_the_apps_page() {
     }
     let gate = body_of(&lib, "fn require_app_page(");
     assert!(
-        gate.contains("app_settings::caller_may_change_app_settings(&webview_page(webview))"),
-        "the gate must use the shared predicate on the webview's own URL"
+        gate.contains("app_settings::require_app_page(&webview_page(webview))"),
+        "the wrapper must hand the webview's own URL to the pure gate"
     );
 }
 
@@ -81,7 +81,7 @@ fn the_tray_and_app_settings_share_one_write_path() {
 fn the_dashboard_menu_items_follow_the_main_windows_page() {
     let lib = read("src/lib.rs");
     assert!(
-        squash(&lib).contains(".on_page_load(|webview, payload| { if webview.label() == window::MAIN_LABEL"),
+        squash(&lib).contains(".on_page_load(|webview, payload| { if app_settings::page_load_syncs_menu( webview.label(),"),
         "the page-load hook must act for the main window only"
     );
     assert!(squash(&lib).contains("app_settings::dashboard_items_enabled(payload.url())"));
@@ -138,6 +138,35 @@ fn the_bundled_page_offers_the_server_actions_and_app_settings() {
         assert!(js.contains(&format!("'{}'", cmd)), "App Settings must call {}", cmd);
     }
     // Events emitted to the main webview are heard only by a listener that names it.
-    assert!(js.contains("target: 'main'"));
-    assert!(js.contains("'app_settings_changed'") && js.contains("'app_page_action'"));
+    // Both listeners go through the one helper that names it; no bare listen call.
+    assert!(js.contains("{ target: 'main' }"));
+    assert!(js.contains("listenMain('app_settings_changed'") && js.contains("listenMain('app_page_action'"));
+    assert_eq!(js.matches("event.listen(").count(), 1, "only listenMain may call event.listen");
+    let helper = js.find("function listenMain(").expect("listenMain");
+    let call = js.find("event.listen(").unwrap();
+    assert!(call > helper && js[helper..call].len() < 400, "the one listen call lives in listenMain");
+    // The first-run branch defers to an open settings view.
+    let loading = read("../dist/loading.js");
+    assert!(loading.contains("chroxyAppSettings.deferWizard()"), "first run must not activate the wizard beside an open view");
+}
+
+#[test]
+fn the_dashboard_menu_handles_are_the_six_items_each_once() {
+    let lib = read("src/lib.rs");
+    let at = lib.find("dashboard_items: vec![").expect("the handle list");
+    let rest = &lib[at..];
+    let list = &rest[..rest.find("],").unwrap()];
+    let mut ids: Vec<&str> = Vec::new();
+    let mut r = list;
+    while let Some(i) = r.find("(\"") {
+        let after = &r[i + 2..];
+        let end = after.find('"').unwrap();
+        ids.push(&after[..end]);
+        r = &after[end..];
+    }
+    assert!(
+        chroxy_desktop::app_settings::dashboard_handles_match(&ids),
+        "the enable set must be exactly the dashboard-only items, each once: {:?}",
+        ids
+    );
 }

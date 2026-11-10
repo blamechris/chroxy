@@ -261,8 +261,11 @@
 
   invoke('get_setup_state').then(function(state) {
     if (state.isFirstRun) {
-      loading.style.display = 'none';
-      wizard.classList.add('active');
+      // If App Settings is already open, the wizard waits for it to close.
+      if (!(window.chroxyAppSettings && window.chroxyAppSettings.deferWizard())) {
+        loading.style.display = 'none';
+        wizard.classList.add('active');
+      }
       runDependencyCheck();
     } else {
       // Not first run: a start is normally in flight when this page shows.

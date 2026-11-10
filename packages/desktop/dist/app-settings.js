@@ -58,10 +58,10 @@
       document.body.classList.add('settings-open');
       isOpen = true;
     }
+    // Focus once, after the refresh settles (whether it worked or not).
     refresh().then(function() {
       if (section === 'tunnel') focusTunnel();
     });
-    if (section === 'tunnel') focusTunnel();
   }
 
   function focusTunnel() {
@@ -83,6 +83,15 @@
       if (wizard && restore.wizard) wizard.classList.add('active');
     }
     restore = null;
+  }
+
+  // Called by the first-run branch of loading.js: when the view is open, the
+  // wizard is shown on close instead of beside it. Returns whether it deferred.
+  function deferWizard() {
+    if (!isOpen || !restore) return false;
+    restore.wizard = true;
+    restore.loading = 'none';
+    return true;
   }
 
   // -- Reading state --
@@ -114,6 +123,9 @@
     els.tunnelHint.textContent = s.cloudflaredFound
       ? 'Takes effect the next time the server starts.'
       : 'cloudflared was not found: Quick and Named need it. Takes effect the next time the server starts.';
+    // config.json's tunnel / host override the choices above (#8890).
+    setError('as-tunnel-note', s.tunnelNote || '');
+    setError('as-lan-note', s.lanNote || '');
     els.dashboard.disabled = !s.daemonAvailable;
     els.dashboardNote.textContent = s.daemonAvailable
       ? ''
@@ -169,14 +181,22 @@
     }
     if (n === lastPort) { setError('as-port-error', ''); return; }
     apply('set_app_port', { port: n }, 'as-port-error', function() {
-      els.port.value = String(lastPort);
+      // Never write "null": with no snapshot yet, leave what was typed.
+      if (lastPort !== null) els.port.value = String(lastPort);
     }).then(function() {
       if (!$('as-port-error').textContent) lastPort = n;
     });
   }
-  els.port.addEventListener('change', commitPort);
+    // Enter commits once: blur lets the browser fire `change`, which commits. An
+  // unchanged value fires no `change`, so validate directly in that case.
+  var changeFired = false;
+  els.port.addEventListener('change', function() { changeFired = true; commitPort(); });
   els.port.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitPort(); }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    changeFired = false;
+    els.port.blur();
+    if (!changeFired) commitPort();
   });
 
   // -- Actions --
@@ -223,9 +243,12 @@
   // The menu bar's Preferences..., Tunnel > Settings... and Connect to Server...
   // reach this page as `app_page_action` events for the main webview only.
   if (window.__TAURI__ && window.__TAURI__.event) {
-    var target = { target: 'main' };
-    window.__TAURI__.event.listen('app_settings_changed', function() { refresh(); }, target);
-    window.__TAURI__.event.listen('app_page_action', function(event) {
+    // Events sent to the main webview only are heard just by a listener that names it.
+    function listenMain(name, fn) {
+      return window.__TAURI__.event.listen(name, fn, { target: 'main' });
+    }
+    listenMain('app_settings_changed', function() { refresh(); });
+    listenMain('app_page_action', function(event) {
       var p = event.payload || {};
       if (p.action === 'open-settings') {
         open(p.section || undefined);
@@ -236,8 +259,8 @@
           window.chroxyLoading.connect();
         }
       }
-    }, target);
+    });
   }
 
-  window.chroxyAppSettings = { open: open, close: close, refresh: refresh };
+  window.chroxyAppSettings = { open: open, close: close, refresh: refresh, deferWizard: deferWizard };
 })();

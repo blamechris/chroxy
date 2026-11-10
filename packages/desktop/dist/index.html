@@ -130,6 +130,7 @@
     .as-radios label:focus-within { border-color: #4a9eff; }
     .as-error { color: #f87171; font-size: 0.75rem; min-height: 0; padding-bottom: 0.4rem; }
     .as-error:empty { display: none; }
+    .as-note:empty { display: none; }
     .as-note { font-size: 0.75rem; color: #888; padding: 0.25rem 0 0.5rem; }
     .as-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
     .as-actions .btn { min-height: 44px; }
@@ -259,6 +260,7 @@
           <label><input type="radio" name="as-tunnel" value="none"> None</label>
         </div>
         <div class="as-hint" id="as-tunnel-hint" style="padding-bottom:0.4rem">Takes effect the next time the server starts.</div>
+        <div class="as-note" id="as-tunnel-note"></div>
         <div class="as-error" id="as-tunnel-error" role="alert"></div>
         <label class="as-row">
           <input type="checkbox" id="as-lan">
@@ -266,6 +268,7 @@
             <span class="as-hint">Let phones on the same network connect. Takes effect the next time the server starts.</span>
           </span>
         </label>
+        <div class="as-note" id="as-lan-note"></div>
         <div class="as-error" id="as-lan-error" role="alert"></div>
       </div>
 

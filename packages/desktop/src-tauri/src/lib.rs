@@ -103,12 +103,9 @@ struct AppMenuItems {
     /// the main window shows the bundled page, enabled once it shows a dashboard
     /// (see `set_dashboard_menu_items_enabled`). The ids are listed in
     /// `app_settings::DASHBOARD_ONLY_ACTIONS`.
-    new_session: MenuItem<tauri::Wry>,
-    disconnect: MenuItem<tauri::Wry>,
-    view_toggle_sidebar: MenuItem<tauri::Wry>,
-    view_toggle_plan_mode: MenuItem<tauri::Wry>,
-    view_show_qr: MenuItem<tauri::Wry>,
-    view_reload: MenuItem<tauri::Wry>,
+    /// `(action id, item)`, built in one place; the ids are checked against that
+    /// list by `app_settings::dashboard_handles_match` (see tests/app_settings_call_sites.rs).
+    dashboard_items: Vec<(&'static str, MenuItem<tauri::Wry>)>,
 }
 
 // ── Tauri IPC commands ──────────────────────────────────────────────
@@ -220,14 +217,8 @@ async fn get_server_info(
         // app's own setting (#8890), so report that and where it came from.
         // An unrecognised config value is reported as-is, from config.json: the
         // start is refused for it, so it is the value that "applies".
-        let (tunnel_effective, tunnel_source) = match config::load_launch_overrides() {
-            Ok(o) => match launch_env::resolve_tunnel(o.tunnel.as_deref(), &tunnel_mode) {
-                Ok(t) => (t.effective, t.source),
-                Err(_) => (o.tunnel.unwrap_or_default(), launch_env::Source::Config),
-            },
-            // An unreadable config.json refuses the start; report it as the source.
-            Err(_) => ("invalid".to_string(), launch_env::Source::Config),
-        };
+        let (tunnel_effective, tunnel_source) =
+            app_settings::effective_tunnel(&config::load_launch_overrides(), &tunnel_mode);
         serde_json::json!({
             "port": port,
             "token": token,
@@ -445,7 +436,8 @@ fn get_setup_state(
 
 #[tauri::command]
 fn save_setup_config(app: tauri::AppHandle, port: u16, tunnel_mode: String) -> Result<(), String> {
-    // Update port in config.json first, so a refused port leaves nothing half-saved.
+    // Update port in config.json first: an invalid port fails before anything else
+    // is saved (later steps can still fail after the port is written).
     // The one shared writer (also App Settings' port field): it keeps the other keys
     // and the file's 0600 permissions.
     if let Some(path) = config::config_path() {
@@ -1286,9 +1278,10 @@ pub fn run() {
         // #9079 — the menu items that need a dashboard follow what the main window
         // shows: enabled for a dashboard, disabled for the bundled page.
         .on_page_load(|webview, payload| {
-            if webview.label() == window::MAIN_LABEL
-                && payload.event() == tauri::webview::PageLoadEvent::Finished
-            {
+            if app_settings::page_load_syncs_menu(
+                webview.label(),
+                payload.event() == tauri::webview::PageLoadEvent::Finished,
+            ) {
                 #[cfg(target_os = "macos")]
                 set_dashboard_menu_items_enabled(
                     webview.app_handle(),
@@ -1578,12 +1571,14 @@ pub fn run() {
                     tunnel_quick: tunnel_quick_app.clone(),
                     tunnel_named: tunnel_named_app.clone(),
                     tunnel_none: tunnel_none_app.clone(),
-                    new_session: new_session_item.clone(),
-                    disconnect: disconnect_item.clone(),
-                    view_toggle_sidebar: view_toggle_sidebar.clone(),
-                    view_toggle_plan_mode: view_toggle_plan_mode.clone(),
-                    view_show_qr: view_show_qr.clone(),
-                    view_reload: view_reload.clone(),
+                    dashboard_items: vec![
+                        ("new-session", new_session_item.clone()),
+                        ("disconnect", disconnect_item.clone()),
+                        ("view-toggle-sidebar", view_toggle_sidebar.clone()),
+                        ("view-toggle-plan-mode", view_toggle_plan_mode.clone()),
+                        ("view-show-qr", view_show_qr.clone()),
+                        ("view-reload", view_reload.clone()),
+                    ],
                 }));
                 // The window may already have loaded something other than the
                 // bundled page by now; follow its URL rather than assume.
@@ -3142,16 +3137,13 @@ fn app_settings_snapshot(app: &tauri::AppHandle) -> app_settings::AppSettingsSna
         ServerManager::check_cloudflared(),
         &status,
         tray_runtime(app).port,
+        &config::load_launch_overrides(),
     )
 }
 
 /// Refuse a caller that is not the app's own page.
 fn require_app_page(webview: &tauri::Webview) -> Result<(), String> {
-    if app_settings::caller_may_change_app_settings(&webview_page(webview)) {
-        Ok(())
-    } else {
-        Err("App Settings can only be used from the app's own page.".to_string())
-    }
+    app_settings::require_app_page(&webview_page(webview))
 }
 
 /// Enable or disable the dashboard-only items of the macOS app menu. The handles
@@ -3162,14 +3154,7 @@ fn set_dashboard_menu_items_enabled(app: &tauri::AppHandle, enabled: bool) {
     let _ = app.run_on_main_thread(move || {
         let items = handle.try_state::<Mutex<AppMenuItems>>().map(|items| {
             let i = lock_or_recover(&items);
-            [
-                i.new_session.clone(),
-                i.disconnect.clone(),
-                i.view_toggle_sidebar.clone(),
-                i.view_toggle_plan_mode.clone(),
-                i.view_show_qr.clone(),
-                i.view_reload.clone(),
-            ]
+            i.dashboard_items.iter().map(|(_, item)| item.clone()).collect::<Vec<_>>()
         });
         for item in items.iter().flatten() {
             let _ = item.set_enabled(enabled);
