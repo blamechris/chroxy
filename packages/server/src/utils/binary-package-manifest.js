@@ -31,8 +31,14 @@
  *      two bytes are `#!` (a shebang). A native binary's magic bytes (ELF
  *      `\x7fELF`, Mach-O `\xcf\xfa\xed\xfe` / `\xca\xfe\xba\xbe`, PE `MZ`)
  *      never collide with `#!`, so this never misclassifies a native binary.
- *   2. It has an ENCLOSING PACKAGE ROOT — the nearest ancestor directory
- *      whose `package.json` declares a non-empty `name` AND whose `bin`
+ *   2. It has an ENCLOSING PACKAGE ROOT — prefer the root of the nearest
+ *      containing `node_modules/<name>` or `node_modules/@scope/<name>`
+ *      install layout, so a closer claiming package.json cannot narrow a
+ *      valid npm package's tree (#8097). That root must have a non-empty
+ *      `name` AND a `bin` (string or map) or `main` claiming this entry.
+ *      If the layout root is invalid, or outside an npm layout, keep the
+ *      nearest claiming ancestor fallback. Its `package.json` needs a
+ *      non-empty `name` AND its `bin`
  *      (string or map) or `main` field actually resolves to this entry file
  *      (#8093 review S3). Climbing skips a name-less marker file (e.g. a bare
  *      `{"type":"module"}` some build tooling drops partway up a tree), a
@@ -236,9 +242,12 @@ function packageClaimsEntry(root, pkg, entryPath, realpath) {
 }
 
 /**
- * Find the nearest ancestor directory of `entryPath` whose `package.json`
- * declares a non-empty `name` AND claims `entryPath` as one of its own `bin`
- * targets or its `main` (#8093 review S3 — see {@link packageClaimsEntry}).
+ * Prefer the package root in the nearest containing node_modules layout,
+ * provided its named package.json claims the canonical entry (#8097). Use
+ * that root's metadata, not a closer decoy's optionalDependencies. Aliased
+ * installs may have a different package name than the directory spelling.
+ * For an invalid layout root or a non-npm path, retain the nearest claiming
+ * ancestor fallback (#8093 review S3 — see {@link packageClaimsEntry}).
  * Skips a name-less marker file, a malformed one, and a named-but-non-
  * claiming one — none of those are a real package boundary for THIS entry —
  * and keeps climbing past any of them.
@@ -254,22 +263,52 @@ export function findEnclosingPackageRoot(
   entryPath,
   { readFileSync: readFile = readFileSync, existsSync: exists = existsSync, realpathSync: realpath = realpathSync } = {},
 ) {
-  let dir = dirname(entryPath)
-  let prev = null
-  while (dir !== prev) {
-    const pkgPath = join(dir, 'package.json')
+  function readOwner(root) {
+    const pkgPath = join(root, 'package.json')
     if (exists(pkgPath)) {
       try {
         const pkg = JSON.parse(readFile(pkgPath, 'utf8'))
-        if (pkg && typeof pkg.name === 'string' && pkg.name.length > 0 && packageClaimsEntry(dir, pkg, entryPath, realpath)) {
-          return { root: dir, packageJson: pkg }
+        if (pkg && typeof pkg.name === 'string' && pkg.name.length > 0 && packageClaimsEntry(root, pkg, entryPath, realpath)) {
+          return { root, packageJson: pkg }
         }
-        // name-less marker (e.g. `{"type":"module"}`), or a named package
-        // that doesn't claim this entry as its own bin/main — neither is a
-        // boundary for THIS entry — keep climbing.
       } catch {
-        // malformed JSON — not a boundary either, keep climbing.
+        // Malformed JSON is not a package boundary.
       }
+    }
+    return null
+  }
+
+  // Use components rather than a substring, and only the nearest boundary:
+  // a nested dependency belongs to its own install, not an outer package.
+  const parts = dirname(entryPath).split(sep)
+  let boundary = -1
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index] !== 'node_modules') continue
+    boundary = index
+    // Package-name components are not install containers themselves, even
+    // when a scoped package's own directory is named node_modules.
+    index += parts[index + 1]?.startsWith('@') ? 2 : 1
+  }
+  const scope = parts[boundary + 1]
+  const rootLength = boundary + (scope?.startsWith('@') ? 3 : 2)
+  // A malformed scope or the reserved unscoped package name node_modules
+  // does not describe a valid npm install. Keep the old fallback there.
+  const validLayout = boundary >= 0 && parts.length >= rootLength
+    && scope !== '@' && !scope?.includes('@', 1) && scope !== 'node_modules'
+  const preferredRoot = validLayout ? parts.slice(0, rootLength).join(sep) : null
+  if (preferredRoot !== null) {
+    const owner = readOwner(preferredRoot)
+    if (owner) return owner
+  }
+
+  // Keep the existing nearest-claim fallback for non-npm and invalid roots.
+  // The preferred path was already read, so do not read it a second time.
+  let dir = dirname(entryPath)
+  let prev = null
+  while (dir !== prev) {
+    if (dir !== preferredRoot) {
+      const owner = readOwner(dir)
+      if (owner) return owner
     }
     prev = dir
     dir = dirname(dir)
