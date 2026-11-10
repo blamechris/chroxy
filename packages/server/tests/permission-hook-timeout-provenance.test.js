@@ -27,12 +27,11 @@ import { PermissionManager } from '../src/permission-manager.js'
  * non-allow into an allow.
  *
  * WHAT THIS FILE DOES NOT PROVE. It covers the path where the daemon's answer
- * REACHES the hook. The hook's `curl --max-time 300` and the daemon's timer are
- * both 300 s, and curl's clock starts first, so at real clock curl gives up a
- * few milliseconds before the daemon answers and the hook reports its
- * curl-failure wording instead (measured: see the #8529 evidence). The clock is
- * mocked below precisely so the daemon's answer does arrive. Nothing here says
- * which of the two wins in production.
+ * REACHES the hook, with the daemon's clock mocked so that it does. Whether the
+ * answer arrives in time at real clock is a question about three deadlines
+ * (daemon timer, the hook's `curl --max-time`, the host's hook timeout), which
+ * were once all 300 s with curl's clock starting first. Their order is held by
+ * permission-deadline-chain.test.js, not here.
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url))

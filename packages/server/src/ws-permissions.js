@@ -15,11 +15,16 @@ import { isFlooredTarget } from './permission-floor.js'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
 import { isBoundClient } from './environments/authority.js'
 import { NOT_DELEGABLE_TOOLS } from './permission-manager.js'
+import { HOOK_PERMISSION_DECISION_WINDOW_MS } from './permission-deadlines.js'
 
 const log = createLogger('ws')
 
 // -- Permission TTL --
-const PERMISSION_TTL_MS = 300_000 // 5 minutes
+// The hook-routed prompt's decision window (5 minutes). One number for the
+// daemon's auto-deny timer and for the countdown clients are told to show; the
+// hook's transport timeout and the host's hook timeout are derived from it in
+// permission-deadlines.js and must stay longer than it.
+const PERMISSION_TTL_MS = HOOK_PERMISSION_DECISION_WINDOW_MS
 
 // #7004 — body cap for POST /permission-floor. Deliberately MUCH larger than
 // /permission's 64KB, for two reasons:
@@ -413,7 +418,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         tool,
         description,
         input: sanitizedInput,
-        remainingMs: 300_000,
+        remainingMs: PERMISSION_TTL_MS,
         floored,
         explicitConsent: false,
         nonDelegable: NOT_DELEGABLE_TOOLS.has(tool),
@@ -501,7 +506,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // hook that predates the field reads this exactly as it always did. Only
         // this timer sets it: a human's deny goes out through `resolve` below.
         sendJson(res, 200, { decision: 'deny', reason: 'timeout' })
-      }, 300_000)
+      }, PERMISSION_TTL_MS)
 
       pendingPermissions.set(requestId, {
         resolve: (decision) => {
@@ -515,7 +520,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #7968: stash the SAME floor verdict computed above so a reconnect
         // resend (resendPendingPermissions' legacy-HTTP branch) replays it
         // rather than re-deriving (or silently dropping) it.
-        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool), ...(toolUseId ? { toolUseId } : {}) },
+        data: { requestId, tool, description, input: sanitizedInput, remainingMs: PERMISSION_TTL_MS, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool), ...(toolUseId ? { toolUseId } : {}) },
       })
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
@@ -1064,7 +1069,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    * Called when a session reports (via `permission_expired`) that the turn a
    * prompt belonged to has died. The daemon cannot rely on the hook dying to
    * learn this: since #7606 `killProcessTree` does signal the hook's
-   * `bash permission-hook.sh` -> `curl --max-time 300` grandchildren on a
+   * `bash permission-hook.sh` -> `curl --max-time ...` grandchildren on a
    * respawn/destroy, but on a crash nothing runs at all. So the socket can stay
    * open, `req 'aborted'` / `res 'close'` never fire, and the entry sits there
    * with time left on its clock until `resendPendingPermissions` hands it to

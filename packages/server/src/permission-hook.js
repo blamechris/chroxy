@@ -5,6 +5,7 @@ import { createLogger } from './logger.js'
 import { shellQuotePath } from './utils/verify-binary.js'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { updateClaudeConfig } from './byok-mcp-config.js'
+import { HOOK_HOST_TIMEOUT_S } from './permission-deadlines.js'
 
 const log = createLogger('permission-hook')
 
@@ -153,7 +154,11 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
           // non-blocking error (the permission check silently skipped). Quoted only
           // when it needs it, so a plain path is byte-for-byte what it always was.
           command: shellQuotePath(hookScript),
-          timeout: 300,
+          // Longer than the script's budgeted envelope, so that within it the
+          // daemon's answer (a decision, or its no-answer deny) is what ends the
+          // wait and not the host cancelling the hook. A budget, not a
+          // guarantee: see permission-deadlines.js.
+          timeout: HOOK_HOST_TIMEOUT_S,
         },
       ],
     })

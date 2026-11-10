@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
  * `pendingPermissions` entry, and it does not find out on its own: killing the
  * CLI child does NOT kill the hook. `killProcessTree` on POSIX is
  * `child.kill('SIGTERM')` against the direct child only, and the hook is
- * `bash permission-hook.sh` -> `curl --max-time 300`, both grandchildren. So
+ * `bash permission-hook.sh` -> `curl --max-time ...`, both grandchildren. So
  * the socket stays open, the entry stays live with time on its clock, and
  * `resendPendingPermissions` — which runs on EVERY client auth/connect —
  * re-sends the dead prompt with a working Allow button. On a phone over a

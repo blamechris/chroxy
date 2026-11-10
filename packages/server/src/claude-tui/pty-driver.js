@@ -26,6 +26,7 @@ import { CLAUDE_LOGIN_COMMAND } from '../utils/claude-login-command.js'
 // caller that writes this file MUST come through here too.
 import { updateClaudeConfig } from '../byok-mcp-config.js'
 import { claudeNativeRouteSettingsEnv } from '../utils/claude-native-route.js'
+import { HOOK_HOST_TIMEOUT_S } from '../permission-deadlines.js'
 // Imported at call-time only (circular-safe): the writer methods read the
 // PROMPT_CHAR_DELAY_MS / MAX_THROTTLED_CHARS static getters off the class.
 import { ClaudeTuiSession } from '../claude-tui-session.js'
@@ -348,7 +349,9 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
       // #8263: the marker makes this copy — and only this copy — live inside a
       // chroxy-managed TUI child (see SESSION_SETTINGS_HOOK_MARKER).
       command: sessionPermissionHookCommand(permissionHookScript),
-      timeout: 300,
+      // Same number as the user-level registration (permission-hook.js): longer
+      // than the script's budgeted envelope. See permission-deadlines.js.
+      timeout: HOOK_HOST_TIMEOUT_S,
     })
   }
   const settings = {

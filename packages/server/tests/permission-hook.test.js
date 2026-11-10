@@ -91,7 +91,10 @@ describe('createPermissionHookManager', () => {
     assert.equal(settings.hooks.PreToolUse.length, 1)
     assert.equal(settings.hooks.PreToolUse[0]._chroxy, true)
     assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, 'command')
-    assert.equal(settings.hooks.PreToolUse[0].hooks[0].timeout, 300)
+    // #8529: longer than the hook's own curl deadline (310 s), which is in turn
+    // longer than the daemon's no-answer timer (300 s). See
+    // permission-deadline-chain.test.js for the chain.
+    assert.equal(settings.hooks.PreToolUse[0].hooks[0].timeout, 330)
 
     manager.destroy()
   })
