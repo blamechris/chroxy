@@ -19,13 +19,15 @@
 const SENSITIVE_PATTERNS = [
   // Bearer tokens in headers
   /Bearer\s+[A-Za-z0-9_\-./+=]{8,}/gi,
-  // API tokens (base64url, UUID, hex) after common key names
+  // API tokens (base64url, UUID, hex) after common key names and the explicit
+  // AWS secret environment assignment (#8416). The new alias has a word
+  // boundary so a longer identifier ending in that name is not newly matched.
   // The key may be QUOTED (a JSON property: `{"token":"…"}`, or the same JSON inside
   // a string, where each quote is escaped), and so may the value (#6630, #8416). A
   // quoted value is redacted up to its closing quote, whatever it holds; it is bounded
   // (1024 characters, no line break) so the scan stays linear in the input. A value with
   // no closing quote falls through to the unquoted form, which needs 8 token characters.
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
+  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key|\baws_secret_access_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
 ]
 
 // JWT shape: `eyJ` + base64url, a dot, base64url, a dot, base64url, each segment at
@@ -147,6 +149,9 @@ const API_KEY_PATTERNS = [
   // placeholders like .../webhooks/123/abc readable while catching any
   // plausible real token.
   /\bhttps:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
+  // #8416: classic GitHub personal access tokens: ghp_ + 36 alphanumeric
+  // characters. Both word boundaries reject placeholders and longer identifiers.
+  /\bghp_[A-Za-z0-9]{36}\b/g,
 ]
 
 /**
@@ -157,6 +162,7 @@ const API_KEY_PATTERNS = [
 const SENSITIVE_KEY_NAMES = new Set([
   'token', 'password', 'apikey', 'secret', 'authorization',
   'credential', 'private_key', 'api_key',
+  'anthropic_api_key', 'aws_secret_access_key',
 ])
 
 /**
@@ -264,15 +270,18 @@ function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
  * pre-write diff) passes a larger `maxChars` (`PULL_MAX_INPUT_CHARS`) — for an
  * object input (which every real tool_input is), the secret-stripping passes
  * (KEY-NAME + VALUE-SHAPE) run on every value regardless of the cap, so a higher
- * cap never weakens redaction, only the truncation threshold. A non-object input
- * is returned as-is (there is nothing to key/redact); callers always pass the
- * tool_input object.
+ * cap never weakens redaction, only the truncation threshold. Bare strings also
+ * use the bounded per-string path (#8416): they are redacted before truncation,
+ * subject to the same admission ceiling and unsafe-tail rule as string properties.
+ * This intentionally changes oversized root strings from pass-through to bounded
+ * output. Other non-object inputs are returned as-is.
  *
- * @param {object} input
+ * @param {*} input
  * @param {{ maxChars?: number }} [opts]
- * @returns {object}
+ * @returns {*}
  */
 function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
+  if (typeof input === 'string') return redactDeep(input, 0, new WeakSet(), maxChars)
   if (!input || typeof input !== 'object') return input
 
   const seen = new WeakSet()
