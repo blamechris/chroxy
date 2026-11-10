@@ -495,7 +495,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #8348: nobody answered in time. The clients' own countdown shows this
         // as "Timed out"; record it so the transcript still does after a switch.
         recordPermissionEnded(requestId, 'expired')
-        sendJson(res, 200, { decision: 'deny' })
+        // #8529: say WHY. Without `reason` this body is byte-identical to a real
+        // user deny, and permission-hook.sh told the model "Denied by user" about
+        // a prompt nobody answered. `decision` stays 'deny' (fail closed), so a
+        // hook that predates the field reads this exactly as it always did. Only
+        // this timer sets it: a human's deny goes out through `resolve` below.
+        sendJson(res, 200, { decision: 'deny', reason: 'timeout' })
       }, 300_000)
 
       pendingPermissions.set(requestId, {

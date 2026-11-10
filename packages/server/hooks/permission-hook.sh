@@ -330,9 +330,22 @@ route_to_phone() {
 EOF
       ;;
     deny)
-      cat <<EOF
+      # #8529: the daemon's own no-answer timer also answers 200 deny, and marks it
+      # "reason":"timeout". Nobody denied that request, so do not say the user did.
+      # The field only ever picks the WORDING of a deny: it is read here, inside
+      # the deny branch, and matched as the exact token. A daemon that predates
+      # the field sends no reason and keeps the wording below. It is extracted by
+      # the same token grep as DECISION above, not by a JSON parse.
+      DENY_REASON=$(echo "$RESPONSE" | grep -o '"reason":"[^"]*"' | head -1 | cut -d'"' -f4)
+      if [ "$DENY_REASON" = "timeout" ]; then
+        cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"No one answered the Chroxy permission request before it timed out. Failing closed (denied)."}}
+EOF
+      else
+        cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
 EOF
+      fi
       ;;
     *)
       # Reached the daemon but got no recognizable decision — also unanswerable
