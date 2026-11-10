@@ -538,7 +538,9 @@ fn check_capability_no_autostart(cap: &serde_json::Value, path: &std::path::Path
         let id = p
             .as_str()
             .or_else(|| p.get("identifier").and_then(|i| i.as_str()))
-            .unwrap_or("");
+            .unwrap_or_else(|| {
+                panic!("unreadable permission entry in {}: {}", path.display(), p)
+            });
         assert!(
             id != "autostart" && !id.starts_with("autostart:"),
             "remote-admitting capability in {} grants `{}`; the login item is Rust-only",
