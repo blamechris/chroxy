@@ -400,9 +400,14 @@ fn adoption_shows_the_daemon_only_after_the_handoff_succeeds() {
 
 #[test]
 fn the_settings_button_opens_settings_through_the_command_not_a_url() {
-    let js = read("../dist/loading.js");
-    assert!(js.contains("invoke('open_settings')"), "the settings button must call open_settings");
-    assert!(!js.contains("?token=") && !js.contains("dashboard?"), "the loading page must not build a dashboard URL");
+    // Since #9079 the gear opens App Settings; its "Dashboard Settings..." button is
+    // what calls open_settings.
+    let js = read("../dist/app-settings.js");
+    assert!(js.contains("invoke('open_settings')"), "the dashboard settings button must call open_settings");
+    for file in ["../dist/loading.js", "../dist/app-settings.js"] {
+        let js = read(file);
+        assert!(!js.contains("?token=") && !js.contains("dashboard?"), "{} must not build a dashboard URL", file);
+    }
     let build = read("build.rs");
     assert!(build.contains("\"open_settings\""), "open_settings must be a declared command");
     assert!(read("capabilities/default.json").contains("allow-open-settings"), "open_settings must be permitted");

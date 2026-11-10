@@ -3,6 +3,7 @@
 // running Tauri app. The crate is an internal binary support library — no
 // external consumer depends on this surface, so exposing it for testing
 // carries no API stability cost.
+pub mod app_settings;
 pub mod config;
 pub mod discovery;
 pub mod handoff;
@@ -98,6 +99,13 @@ struct AppMenuItems {
     tunnel_quick: CheckMenuItem<tauri::Wry>,
     tunnel_named: CheckMenuItem<tauri::Wry>,
     tunnel_none: CheckMenuItem<tauri::Wry>,
+    /// Items that only make sense with a dashboard loaded (#9079): disabled while
+    /// the main window shows the bundled page, enabled once it shows a dashboard
+    /// (see `set_dashboard_menu_items_enabled`). The ids are listed in
+    /// `app_settings::DASHBOARD_ONLY_ACTIONS`.
+    /// `(action id, item)`, built in one place; the ids are checked against that
+    /// list by `app_settings::dashboard_handles_match` (see tests/app_settings_call_sites.rs).
+    dashboard_items: Vec<(&'static str, MenuItem<tauri::Wry>)>,
 }
 
 // ── Tauri IPC commands ──────────────────────────────────────────────
@@ -209,14 +217,8 @@ async fn get_server_info(
         // app's own setting (#8890), so report that and where it came from.
         // An unrecognised config value is reported as-is, from config.json: the
         // start is refused for it, so it is the value that "applies".
-        let (tunnel_effective, tunnel_source) = match config::load_launch_overrides() {
-            Ok(o) => match launch_env::resolve_tunnel(o.tunnel.as_deref(), &tunnel_mode) {
-                Ok(t) => (t.effective, t.source),
-                Err(_) => (o.tunnel.unwrap_or_default(), launch_env::Source::Config),
-            },
-            // An unreadable config.json refuses the start; report it as the source.
-            Err(_) => ("invalid".to_string(), launch_env::Source::Config),
-        };
+        let (tunnel_effective, tunnel_source) =
+            app_settings::effective_tunnel(&config::load_launch_overrides(), &tunnel_mode);
         serde_json::json!({
             "port": port,
             "token": token,
@@ -434,6 +436,14 @@ fn get_setup_state(
 
 #[tauri::command]
 fn save_setup_config(app: tauri::AppHandle, port: u16, tunnel_mode: String) -> Result<(), String> {
+    // Update port in config.json first: an invalid port fails before anything else
+    // is saved (later steps can still fail after the port is written).
+    // The one shared writer (also App Settings' port field): it keeps the other keys
+    // and the file's 0600 permissions.
+    if let Some(path) = config::config_path() {
+        app_settings::set_port_at(&path, port)?;
+    }
+
     // Update settings
     if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
         let mut settings = lock_or_recover(&settings_state);
@@ -441,19 +451,6 @@ fn save_setup_config(app: tauri::AppHandle, port: u16, tunnel_mode: String) -> R
         settings
             .save()
             .map_err(|e| format!("Failed to save settings: {}", e))?;
-    }
-
-    // Update port in config.json
-    if let Some(path) = config::config_path() {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
-        let mut cfg: serde_json::Value = serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?;
-        cfg["port"] = serde_json::json!(port);
-        let json_str = serde_json::to_string_pretty(&cfg)
-            .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        std::fs::write(&path, json_str)
-            .map_err(|e| format!("Failed to write config {}: {}", path.display(), e))?;
     }
 
     // Apply tunnel mode to server manager
@@ -471,10 +468,7 @@ fn save_setup_config(app: tauri::AppHandle, port: u16, tunnel_mode: String) -> R
 #[tauri::command]
 fn get_tunnel_mode(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> String {
     let settings = lock_or_recover(&settings_state);
-    match settings.tunnel_mode.as_str() {
-        "none" | "quick" | "named" => settings.tunnel_mode.clone(),
-        _ => "none".to_string(),
-    }
+    app_settings::normalize_tunnel_mode(&settings.tunnel_mode)
 }
 
 #[tauri::command]
@@ -524,6 +518,7 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
         let _ = items.tunnel_none.set_checked(mode == "none");
     }
 
+    emit_app_settings_changed(&app);
     Ok(())
 }
 
@@ -627,6 +622,7 @@ fn set_expose_on_lan(app: tauri::AppHandle, expose: bool) -> Result<(), String> 
         mgr.set_expose_on_lan(expose);
     }
 
+    emit_app_settings_changed(&app);
     Ok(())
 }
 
@@ -1133,6 +1129,10 @@ pub fn run() {
             set_tunnel_mode,
             get_expose_on_lan,
             set_expose_on_lan,
+            get_app_settings,
+            set_auto_start_server,
+            set_start_at_login,
+            set_app_port,
             get_summon_hotkey,
             set_summon_hotkey,
             get_allow_auto_permission_mode,
@@ -1247,6 +1247,20 @@ pub fn run() {
                         _ => {}
                     }
                 }
+                // #9079 — on the bundled page there is no dashboard to hear
+                // `menu://…`: Preferences…, Tunnel › Settings… and Connect to
+                // Server… are acted on by the page itself.
+                if let app_settings::MenuRoute::AppPage { action: page_action, section } =
+                    app_settings::route_app_menu(action, main_window_on_app_page(app))
+                {
+                    let _ = app.emit_to(
+                        window::MAIN_LABEL,
+                        app_settings::PAGE_ACTION_EVENT,
+                        serde_json::json!({ "action": page_action, "section": section }),
+                    );
+                    window::show_window(app);
+                    return;
+                }
                 // Default route: emit `menu://<action>` for the
                 // dashboard's `useTauriMenuEvents` hook to consume.
                 // Covers File > New Session, File > Connect to Server…,
@@ -1259,6 +1273,20 @@ pub fn run() {
                 // click with the window minimized would silently
                 // no-op).
                 window::show_window(app);
+            }
+        })
+        // #9079 — the menu items that need a dashboard follow what the main window
+        // shows: enabled for a dashboard, disabled for the bundled page.
+        .on_page_load(|webview, payload| {
+            if app_settings::page_load_syncs_menu(
+                webview.label(),
+                payload.event() == tauri::webview::PageLoadEvent::Finished,
+            ) {
+                #[cfg(target_os = "macos")]
+                set_dashboard_menu_items_enabled(
+                    webview.app_handle(),
+                    app_settings::dashboard_items_enabled(payload.url()),
+                );
             }
         })
         .setup(|app| {
@@ -1306,8 +1334,12 @@ pub fn run() {
                 // chord through the menu bar first when one is
                 // installed, so this entry also serves as the system-
                 // level Cmd+N hint.
+                // The dashboard-only items start disabled: the window starts on the
+                // bundled page, and `on_page_load` enables them once a dashboard
+                // loads (#9079).
                 let new_session_item = MenuItemBuilder::with_id("app_menu:new-session", "New Session")
                     .accelerator("CmdOrCtrl+N")
+                    .enabled(false)
                     .build(app)?;
                 // #4942 — Connect to Server… / Disconnect siblings.
                 // Cmd+O matches "open a connection" muscle memory from
@@ -1324,6 +1356,7 @@ pub fn run() {
                     "Disconnect",
                 )
                 .accelerator("Shift+CmdOrCtrl+D")
+                .enabled(false)
                 .build(app)?;
                 let file_menu = SubmenuBuilder::new(app, "File")
                     .item(&new_session_item)
@@ -1404,24 +1437,28 @@ pub fn run() {
                     "Toggle Sidebar",
                 )
                 .accelerator("CmdOrCtrl+B")
+                .enabled(false)
                 .build(app)?;
                 let view_toggle_plan_mode = MenuItemBuilder::with_id(
                     "app_menu:view-toggle-plan-mode",
                     "Toggle Plan Mode",
                 )
                 .accelerator("Shift+Alt+P")
+                .enabled(false)
                 .build(app)?;
                 let view_show_qr = MenuItemBuilder::with_id(
                     "app_menu:view-show-qr",
                     "Show QR Code",
                 )
                 .accelerator("Shift+CmdOrCtrl+Q")
+                .enabled(false)
                 .build(app)?;
                 let view_reload = MenuItemBuilder::with_id(
                     "app_menu:view-reload",
                     "Reload",
                 )
                 .accelerator("CmdOrCtrl+R")
+                .enabled(false)
                 .build(app)?;
                 let view_menu = SubmenuBuilder::new(app, "View")
                     .item(&view_toggle_sidebar)
@@ -1534,7 +1571,20 @@ pub fn run() {
                     tunnel_quick: tunnel_quick_app.clone(),
                     tunnel_named: tunnel_named_app.clone(),
                     tunnel_none: tunnel_none_app.clone(),
+                    dashboard_items: vec![
+                        ("new-session", new_session_item.clone()),
+                        ("disconnect", disconnect_item.clone()),
+                        ("view-toggle-sidebar", view_toggle_sidebar.clone()),
+                        ("view-toggle-plan-mode", view_toggle_plan_mode.clone()),
+                        ("view-show-qr", view_show_qr.clone()),
+                        ("view-reload", view_reload.clone()),
+                    ],
                 }));
+                // The window may already have loaded something other than the
+                // bundled page by now; follow its URL rather than assume.
+                if let Some(url) = app.get_webview_window(window::MAIN_LABEL).and_then(|w| w.url().ok()) {
+                    set_dashboard_menu_items_enabled(app.handle(), app_settings::dashboard_items_enabled(&url));
+                }
 
                 // Workaround for Tauri bug #13605: Tauri's SubmenuBuilder doesn't
                 // register the Window submenu with NSApp.windowsMenu, so macOS
@@ -2990,35 +3040,168 @@ fn show_qr_popup(app: &tauri::AppHandle) {
 }
 
 fn handle_toggle_login(app: &tauri::AppHandle) {
-    let autolaunch = app.autolaunch();
-    let currently_enabled = autolaunch.is_enabled().unwrap_or(false);
-
-    if currently_enabled {
-        let _ = autolaunch.disable();
-    } else {
-        let _ = autolaunch.enable();
-    }
-
-    // Update the checkbox
-    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-        let items = lock_or_recover(&items);
-        let _ = items.auto_start_login.set_checked(!currently_enabled);
+    let currently_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    if let Err(e) = apply_start_at_login(app, !currently_enabled) {
+        send_notification(app, "Start at Login", &e);
     }
 }
 
 fn handle_toggle_auto_start(app: &tauri::AppHandle) {
-    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
-        let mut settings = lock_or_recover(&settings_state);
-        settings.auto_start_server = !settings.auto_start_server;
-        let _ = settings.save();
-
-        if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-            let items = lock_or_recover(&items);
-            let _ = items
-                .auto_start_server
-                .set_checked(settings.auto_start_server);
-        }
+    let current = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .map(|s| lock_or_recover(&s).auto_start_server)
+        .unwrap_or(true);
+    if let Err(e) = apply_auto_start_server(app, !current) {
+        send_notification(app, "Auto-start Server", &e);
     }
+}
+
+/// Tell the main webview a setting changed, so an open App Settings view re-reads
+/// its state. Sent to the main webview only: a dashboard has its own settings.
+fn emit_app_settings_changed(app: &tauri::AppHandle) {
+    let _ = app.emit_to(window::MAIN_LABEL, app_settings::SETTINGS_CHANGED_EVENT, ());
+}
+
+/// The one write path for "start the server when Chroxy opens": the tray item and
+/// App Settings both end here. On a failed save the in-memory value is put back
+/// and the tray check follows the stored value, not the click.
+fn apply_auto_start_server(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let settings_state = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .ok_or("Settings state unavailable")?;
+    let (saved, now) = {
+        let mut settings = lock_or_recover(&settings_state);
+        let previous = settings.auto_start_server;
+        settings.auto_start_server = enabled;
+        let saved = settings.save().map_err(|e| format!("Failed to save settings: {}", e));
+        if saved.is_err() {
+            settings.auto_start_server = previous;
+        }
+        (saved, settings.auto_start_server)
+    };
+    // The settings lock is released before the menu setter runs.
+    let check = app
+        .try_state::<Mutex<TrayMenuItems>>()
+        .map(|items| lock_or_recover(&items).auto_start_server.clone());
+    if let Some(check) = check {
+        let _ = check.set_checked(now);
+    }
+    saved?;
+    emit_app_settings_changed(app);
+    Ok(())
+}
+
+/// The one write path for "start at login" (the autostart plugin's login item).
+fn apply_start_at_login(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let autolaunch = app.autolaunch();
+    let result = if enabled { autolaunch.enable() } else { autolaunch.disable() }
+        .map_err(|e| format!("Could not {} start at login: {}", if enabled { "enable" } else { "disable" }, e));
+    // Show what the OS now says, so a failure leaves the check where it was.
+    let fallback = if result.is_ok() { enabled } else { !enabled };
+    let now = autolaunch.is_enabled().unwrap_or(fallback);
+    let check = app
+        .try_state::<Mutex<TrayMenuItems>>()
+        .map(|items| lock_or_recover(&items).auto_start_login.clone());
+    if let Some(check) = check {
+        let _ = check.set_checked(now);
+    }
+    result?;
+    emit_app_settings_changed(app);
+    Ok(())
+}
+
+/// The one write path for the daemon port in `config.json`. It takes effect the
+/// next time the server starts.
+fn apply_app_port(app: &tauri::AppHandle, port: u16) -> Result<(), String> {
+    let path = config::config_path().ok_or("Could not determine home directory")?;
+    app_settings::set_port_at(&path, port)?;
+    emit_app_settings_changed(app);
+    Ok(())
+}
+
+/// The App Settings snapshot, from in-memory state and cheap local reads only.
+fn app_settings_snapshot(app: &tauri::AppHandle) -> app_settings::AppSettingsSnapshot {
+    let settings = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .map(|s| lock_or_recover(&s).clone())
+        .unwrap_or_default();
+    let status = {
+        let state = app.state::<Mutex<ServerManager>>();
+        let mgr = lock_or_recover(&state);
+        mgr.status()
+    };
+    app_settings::build_snapshot(
+        &settings,
+        app.autolaunch().is_enabled().unwrap_or(false),
+        config::load_port(),
+        ServerManager::check_cloudflared(),
+        &status,
+        tray_runtime(app).port,
+        &config::load_launch_overrides(),
+    )
+}
+
+/// Refuse a caller that is not the app's own page.
+fn require_app_page(webview: &tauri::Webview) -> Result<(), String> {
+    app_settings::require_app_page(&webview_page(webview))
+}
+
+/// Enable or disable the dashboard-only items of the macOS app menu. The handles
+/// are cloned out and the lock released before any setter runs, on the main thread.
+#[cfg(target_os = "macos")]
+fn set_dashboard_menu_items_enabled(app: &tauri::AppHandle, enabled: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let items = handle.try_state::<Mutex<AppMenuItems>>().map(|items| {
+            let i = lock_or_recover(&items);
+            i.dashboard_items.iter().map(|(_, item)| item.clone()).collect::<Vec<_>>()
+        });
+        for item in items.iter().flatten() {
+            let _ = item.set_enabled(enabled);
+        }
+    });
+}
+
+/// App Settings (#9079): what the bundled page's settings view shows. Only for the
+/// app's own page; works with no daemon running.
+#[tauri::command]
+async fn get_app_settings(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<app_settings::AppSettingsSnapshot, String> {
+    require_app_page(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || app_settings_snapshot(&app))
+        .await
+        .map_err(|e| format!("app settings task failed: {e}"))
+}
+
+/// "Start the server when Chroxy opens" (`DesktopSettings.auto_start_server`).
+#[tauri::command]
+fn set_auto_start_server(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    enabled: bool,
+) -> Result<(), String> {
+    require_app_page(&webview)?;
+    apply_auto_start_server(&app, enabled)
+}
+
+/// Start Chroxy at login (the autostart plugin).
+#[tauri::command]
+fn set_start_at_login(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    enabled: bool,
+) -> Result<(), String> {
+    require_app_page(&webview)?;
+    apply_start_at_login(&app, enabled)
+}
+
+/// The daemon port in `config.json` (1024-65535); applies on the next server start.
+#[tauri::command]
+fn set_app_port(app: tauri::AppHandle, webview: tauri::Webview, port: u16) -> Result<(), String> {
+    require_app_page(&webview)?;
+    apply_app_port(&app, port)
 }
 
 fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
@@ -3076,6 +3259,7 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
         let _ = items.tunnel_none.set_checked(mode == "none");
     }
 
+    emit_app_settings_changed(app);
     send_notification(
         app,
         "Tunnel Mode Changed",

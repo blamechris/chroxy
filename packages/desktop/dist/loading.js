@@ -55,6 +55,8 @@
     if (btn) btn.parentNode.removeChild(btn);
     var connect = document.getElementById('connect-btn');
     if (connect) connect.parentNode.removeChild(connect);
+    var settingsLink = document.getElementById('settings-link-btn');
+    if (settingsLink) settingsLink.parentNode.removeChild(settingsLink);
   }
 
   // "Connect" (#9078): the way out when a daemon is already running (or has come
@@ -75,32 +77,38 @@
         spinner.style.display = 'none';
         status.textContent = 'Could not connect.';
         status.className = 'status error';
-        showRetryButton();
+        showActionButtons();
       }
     }).catch(function(err) {
       spinner.style.display = 'none';
       status.textContent = String(err || 'Could not connect');
       status.className = 'status error';
-      showRetryButton();
+      showActionButtons();
     });
   }
 
-  function showRetryButton() {
+  // "Start Server": the same action as the tray's Start. The element id stays
+  // `retry-btn` (the button was "Retry" before #9079).
+  function startServer() {
+    hideRetryButton();
+    removeStartupLogs();
+    spinner.style.display = '';
+    status.textContent = 'Starting server...';
+    status.className = 'status';
+    armStartupTimeout();
+    invoke('start_server');
+  }
+
+  // The way forward from an error or a stopped server (#9079): start the app's
+  // own server, connect to a daemon that is already running, or open App Settings.
+  function showActionButtons() {
     if (!invoke || document.getElementById('retry-btn')) return;
     var btn = document.createElement('button');
     btn.id = 'retry-btn';
-    btn.textContent = 'Retry';
+    btn.textContent = 'Start Server';
     btn.className = 'btn btn-primary';
-    btn.style.cssText = 'margin-top:1rem;';
-    btn.addEventListener('click', function() {
-      hideRetryButton();
-      removeStartupLogs();
-      spinner.style.display = '';
-      status.textContent = 'Starting server...';
-      status.className = 'status';
-      armStartupTimeout();
-      invoke('start_server');
-    });
+    btn.style.cssText = 'margin-top:1rem;min-height:44px;';
+    btn.addEventListener('click', startServer);
     // Directly under the status line, above any logs panel.
     status.parentNode.insertBefore(btn, status.nextSibling);
 
@@ -108,10 +116,31 @@
     connect.id = 'connect-btn';
     connect.textContent = 'Connect';
     connect.className = 'btn btn-secondary';
-    connect.style.cssText = 'margin-top:1rem;margin-left:0.5rem;';
+    connect.style.cssText = 'margin-top:1rem;margin-left:0.5rem;min-height:44px;';
     connect.addEventListener('click', connectToDaemon);
     status.parentNode.insertBefore(connect, btn.nextSibling);
+
+    var settingsLink = document.createElement('button');
+    settingsLink.id = 'settings-link-btn';
+    settingsLink.textContent = 'Settings\u2026';
+    settingsLink.className = 'btn btn-secondary';
+    settingsLink.style.cssText = 'margin-top:1rem;margin-left:0.5rem;min-height:44px;';
+    settingsLink.addEventListener('click', function() {
+      if (window.chroxyAppSettings) window.chroxyAppSettings.open();
+    });
+    status.parentNode.insertBefore(settingsLink, connect.nextSibling);
   }
+
+  // What app-settings.js drives the page with (the Start Server and Connect
+  // actions of its view, and the menu bar's Connect).
+  window.chroxyLoading = {
+    startServer: startServer,
+    connect: connectToDaemon,
+    showLoadingView: function() {
+      wizard.classList.remove('active');
+      loading.style.display = '';
+    }
+  };
 
   // -- Event listeners for loading view --
   function listenForEvents() {
@@ -131,7 +160,7 @@
       spinner.style.display = 'none';
       status.textContent = event.payload.message || 'Server error';
       status.className = 'status error';
-      showRetryButton();
+      showActionButtons();
       renderStartupLogs(true);
     });
 
@@ -149,6 +178,7 @@
       spinner.style.display = 'none';
       status.textContent = 'Server stopped';
       status.className = 'status';
+      showActionButtons();
     });
   }
 
@@ -231,8 +261,11 @@
 
   invoke('get_setup_state').then(function(state) {
     if (state.isFirstRun) {
-      loading.style.display = 'none';
-      wizard.classList.add('active');
+      // If App Settings is already open, the wizard waits for it to close.
+      if (!(window.chroxyAppSettings && window.chroxyAppSettings.deferWizard())) {
+        loading.style.display = 'none';
+        wizard.classList.add('active');
+      }
       runDependencyCheck();
     } else {
       // Not first run: a start is normally in flight when this page shows.
@@ -357,16 +390,16 @@
 
       armStartupTimeout();
       invoke('start_server');
+    }).catch(function(err) {
+      // e.g. a port outside 1024-65535: say so and let the user fix it.
+      btn.disabled = false;
+      btn.textContent = 'Start Server';
+      var msg = document.getElementById('wizard-error');
+      if (msg) msg.textContent = String(err || 'Could not save the configuration');
     });
   });
 
   // -- Settings --
-  // The app opens the settings panel itself, after the daemon proves it is the
-  // one this app talks to; the page never builds a URL with the access token.
-  var settingsBtn = document.getElementById('settings-btn');
-  if (settingsBtn && invoke) {
-    settingsBtn.addEventListener('click', function() {
-      invoke('open_settings');
-    });
-  }
+  // The gear and the Settings buttons open App Settings (app-settings.js), which
+  // works with no daemon running and links onward to the dashboard's settings.
 })();
