@@ -505,3 +505,51 @@ fn parse_generate_handler_extracts_identifiers_with_multibyte_in_cfg_string() {
         "multi-byte char inside cfg attribute leaked phantom identifiers or dropped real ones"
     );
 }
+
+/// The login item is toggled only from Rust (`app.autolaunch()`), so no page
+/// should ever be able to reach the autostart plugin over IPC.
+#[test]
+fn remote_capabilities_do_not_grant_autostart() {
+    let dir = manifest_dir().join("capabilities");
+    let mut remote_caps = 0;
+    for entry in fs::read_dir(&dir).expect("capabilities dir unreadable") {
+        let path = entry.expect("capabilities dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let cap: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("{} is not valid JSON: {}", path.display(), e));
+        let admits_remote = cap
+            .get("remote")
+            .and_then(|r| r.get("urls"))
+            .and_then(|u| u.as_array())
+            .map_or(false, |u| !u.is_empty());
+        if !admits_remote {
+            continue;
+        }
+        remote_caps += 1;
+        let perms = cap
+            .get("permissions")
+            .and_then(|p| p.as_array())
+            .unwrap_or_else(|| panic!("`permissions` array missing from {}", path.display()));
+        for p in perms {
+            // A permission is either a bare string or `{ "identifier": ... }`.
+            let id = p
+                .as_str()
+                .or_else(|| p.get("identifier").and_then(|i| i.as_str()))
+                .unwrap_or("");
+            assert!(
+                !id.starts_with("autostart:"),
+                "remote-admitting capability {} grants `{}`; the login item is Rust-only",
+                path.display(),
+                id
+            );
+        }
+    }
+    assert!(
+        remote_caps > 0,
+        "found no remote-admitting capability; the scan is likely broken"
+    );
+}
