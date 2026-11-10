@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
 use std::sync::{Mutex, MutexGuard};
 
-const MAIN_LABEL: &str = "main";
+pub(crate) const MAIN_LABEL: &str = "main";
 
 /// The window's attempt bookkeeping, under ONE lock so a check and the change it
 /// licenses are a single step.

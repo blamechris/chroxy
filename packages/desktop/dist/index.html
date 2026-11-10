@@ -100,11 +100,40 @@
     .settings-btn {
       position: absolute; top: 16px; right: 16px;
       background: none; border: 1px solid #252540; border-radius: 8px;
-      color: #888; font-size: 1.1rem; width: 36px; height: 36px;
+      color: #888; font-size: 1.1rem; width: 44px; height: 44px;
       display: flex; align-items: center; justify-content: center;
       cursor: pointer; transition: all 0.2s;
     }
     .settings-btn:hover { border-color: #4a9eff; color: #4a9eff; }
+
+    /* App Settings view (#9079) */
+    body.settings-open { align-items: flex-start; overflow-y: auto; height: auto; min-height: 100vh; }
+    body.settings-open .settings-btn { display: none; }
+    .app-settings { display: none; text-align: left; }
+    .app-settings.active { display: block; }
+    .app-settings h2 { font-size: 1.1rem; color: #4a9eff; margin-bottom: 0.25rem; }
+    .as-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1rem; }
+    .as-section { background: #1a1a2e; border-radius: 8px; padding: 0.25rem 0.75rem; margin-bottom: 0.75rem; }
+    .as-row { display: flex; align-items: center; gap: 0.75rem; min-height: 44px; font-size: 0.85rem; cursor: pointer; }
+    .as-row input[type=checkbox] { width: 22px; height: 22px; flex-shrink: 0; accent-color: #4a9eff; }
+    .as-row .as-label { flex: 1; }
+    .as-row .as-hint, .as-hint { display: block; font-size: 0.7rem; color: #888; margin-top: 2px; }
+    .as-group-title { font-size: 0.8rem; color: #999; font-weight: 500; padding: 0.6rem 0 0.3rem; }
+    .as-port { width: 7rem; min-height: 44px; }
+    .as-radios { display: flex; gap: 0.5rem; flex-wrap: wrap; padding-bottom: 0.4rem; }
+    .as-radios label {
+      flex: 1; min-width: 100px; min-height: 44px; display: flex; align-items: center; gap: 0.4rem;
+      padding: 0.4rem 0.6rem; background: #0f0f1a; border: 1px solid #252540; border-radius: 6px;
+      cursor: pointer; font-size: 0.8rem;
+    }
+    .as-radios input { accent-color: #4a9eff; width: 18px; height: 18px; }
+    .as-radios label:focus-within { border-color: #4a9eff; }
+    .as-error { color: #f87171; font-size: 0.75rem; min-height: 0; padding-bottom: 0.4rem; }
+    .as-error:empty { display: none; }
+    .as-note { font-size: 0.75rem; color: #888; padding: 0.25rem 0 0.5rem; }
+    .as-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .as-actions .btn { min-height: 44px; }
+    .btn:focus-visible, .settings-btn:focus-visible { outline: 2px solid #4a9eff; outline-offset: 2px; }
 
     .ready-summary { text-align: center; margin-bottom: 1.5rem; }
     .ready-summary .token-display {
@@ -188,10 +217,71 @@
           <button class="btn btn-secondary" id="btn-step3-back">Back</button>
           <button class="btn btn-primary" id="btn-step3-start">Start Server</button>
         </div>
+        <div id="wizard-error" class="status error" role="alert"></div>
+      </div>
+    </div>
+
+    <!-- App Settings: the app's own settings, usable with no daemon running (#9079) -->
+    <div id="app-settings" class="app-settings" role="region" aria-label="App Settings">
+      <div class="as-head">
+        <h2>App Settings</h2>
+        <button class="btn btn-secondary" id="as-close" style="min-height:44px">Close</button>
+      </div>
+      <div id="as-error" class="as-error" role="alert"></div>
+
+      <div class="as-section">
+        <label class="as-row">
+          <input type="checkbox" id="as-auto-start">
+          <span class="as-label">Start the server when Chroxy opens</span>
+        </label>
+        <div class="as-error" id="as-auto-start-error" role="alert"></div>
+        <label class="as-row">
+          <input type="checkbox" id="as-login">
+          <span class="as-label">Start Chroxy at login</span>
+        </label>
+        <div class="as-error" id="as-login-error" role="alert"></div>
+      </div>
+
+      <div class="as-section">
+        <div class="as-row" style="cursor:default">
+          <label class="as-label" for="as-port">Port</label>
+          <input type="number" class="config-input as-port" id="as-port" min="1024" max="65535" step="1">
+        </div>
+        <div class="as-hint" style="padding-bottom:0.4rem">1024 to 65535. Takes effect the next time the server starts.</div>
+        <div class="as-error" id="as-port-error" role="alert"></div>
+      </div>
+
+      <div class="as-section" id="as-tunnel-section">
+        <div class="as-group-title" id="as-tunnel-title">Tunnel</div>
+        <div class="as-radios" role="radiogroup" aria-labelledby="as-tunnel-title">
+          <label><input type="radio" name="as-tunnel" value="quick"> Quick</label>
+          <label><input type="radio" name="as-tunnel" value="named"> Named</label>
+          <label><input type="radio" name="as-tunnel" value="none"> None</label>
+        </div>
+        <div class="as-hint" id="as-tunnel-hint" style="padding-bottom:0.4rem">Takes effect the next time the server starts.</div>
+        <div class="as-error" id="as-tunnel-error" role="alert"></div>
+        <label class="as-row">
+          <input type="checkbox" id="as-lan">
+          <span class="as-label">Expose on LAN
+            <span class="as-hint">Let phones on the same network connect. Takes effect the next time the server starts.</span>
+          </span>
+        </label>
+        <div class="as-error" id="as-lan-error" role="alert"></div>
+      </div>
+
+      <div class="as-section">
+        <div class="as-actions">
+          <button class="btn btn-primary" id="as-start">Start Server</button>
+          <button class="btn btn-secondary" id="as-connect">Connect</button>
+          <button class="btn btn-secondary" id="as-dashboard">Dashboard Settings&hellip;</button>
+        </div>
+        <div class="as-note" id="as-dashboard-note"></div>
+        <div class="as-error" id="as-dashboard-error" role="alert"></div>
       </div>
     </div>
   </div>
 
   <script src="loading.js"></script>
+  <script src="app-settings.js"></script>
 </body>
 </html>

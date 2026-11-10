@@ -36,6 +36,7 @@
 //! encode), we test that work directly.
 
 use chroxy_desktop::config::{self, ChroxyConfig};
+use chroxy_desktop::app_settings::set_port_at;
 use chroxy_desktop::lock_or_recover;
 use chroxy_desktop::qrcode;
 use chroxy_desktop::server::ServerManager;
@@ -808,4 +809,41 @@ fn aux_chroxy_config_default_deserialization_matches_load_path() {
     // applied (the dashboard fails to render with port=0).
     let cfg: ChroxyConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(cfg.port, 8765);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// set_app_port / save_setup_config port write (#9079)
+// ────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cmd_set_app_port_keeps_the_token_and_other_keys() {
+    let dir = TempDir::new().unwrap();
+    let path = write_config(&dir, r#"{"apiToken":"tok","port":8765,"tunnel":"quick","allowAutoPermissionMode":true}"#);
+
+    set_port_at(&path, 9321).unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["port"], 9321);
+    assert_eq!(v["apiToken"], "tok");
+    assert_eq!(v["tunnel"], "quick");
+    assert_eq!(v["allowAutoPermissionMode"], true);
+}
+
+#[test]
+fn cmd_set_app_port_refuses_a_missing_config_without_creating_it() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.json");
+    assert!(set_port_at(&path, 9321).is_err());
+    assert!(!path.exists(), "a missing config.json is an error, not a create");
+}
+
+#[test]
+fn cmd_set_app_port_refuses_an_out_of_range_port_and_leaves_the_file_alone() {
+    let dir = TempDir::new().unwrap();
+    let body = r#"{"apiToken":"tok","port":8765}"#;
+    let path = write_config(&dir, body);
+    for port in [0u16, 80, 1023] {
+        assert!(set_port_at(&path, port).is_err(), "{}", port);
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
 }
