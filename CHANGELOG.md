@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-11-10
+
+### Added
+
+- **The desktop app has settings that work without a running daemon (#9084).** The gear, Chroxy › Preferences… (⌘,) and Tunnel › Settings… open a bundled App Settings view while the window shows the loading page. It changes:
+  - starting the server when Chroxy opens;
+  - starting Chroxy at login;
+  - the port, the tunnel mode and LAN exposure.
+
+  It also offers Start Server, Connect and Dashboard Settings…. App-menu items that need the dashboard are disabled on the loading page instead of doing nothing.
+
+### Fixed
+
+- **The desktop app in client mode uses the configured port, and recovers when the daemon comes up after it (#9080).** In client mode (`autoStartServer: false`), the Settings gear used to challenge port 0. When the daemon started after the app (for example at login), the window used to stay on the error page.
+  - The app now resolves the configured port.
+  - The tray's port watcher hands the window to a verified daemon that comes up later.
+  - Retry connects to a daemon that is already running instead of refusing it.
+  - The loading page has a Connect button next to Retry.
+  - A Start or Connect from the app's own page still proves the daemon before the window is pointed at it, and the newest attempt wins.
+
 ## [0.11.8] - 2026-11-07
 
 ### Added
