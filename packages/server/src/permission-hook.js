@@ -133,12 +133,17 @@ function _isChroxyHookEntry(entry) {
  * permission-hook.sh makes the same two checks itself; they are repeated here
  * because here they have to hold when the script cannot be run at all.
  *
+ * Both variables are read as `${NAME-}`. A shell that inherits `nounset` (bash
+ * takes it from an exported SHELLOPTS) treats a bare `$NAME` of an unset
+ * variable as a fatal error, which would fail the command in exactly the
+ * sessions it is meant to leave alone.
+ *
  * @param {string} hookScript
  * @returns {string}
  */
 export function userLevelHookCommand(hookScript) {
   const script = shellQuotePath(hookScript)
-  return `[ -n "$CHROXY_PORT" ] && [ "$CHROXY_TUI_CHILD" != 1 ] || exit 0; exec ${script}`
+  return `[ -n "\${CHROXY_PORT-}" ] && [ "\${CHROXY_TUI_CHILD-}" != 1 ] || exit 0; exec ${script}`
 }
 
 /**

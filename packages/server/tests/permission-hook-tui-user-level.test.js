@@ -39,7 +39,7 @@ const hookPath = join(__dirname, '../hooks/permission-hook.sh')
 const CWD = '/work/project'
 const HOOK_SECRET = 'test-hook-secret'
 // The guard the user-level registration puts in front of the script path.
-const USER_LEVEL_GUARD = '[ -n "$CHROXY_PORT" ] && [ "$CHROXY_TUI_CHILD" != 1 ] || exit 0; exec '
+const USER_LEVEL_GUARD = '[ -n "${CHROXY_PORT-}" ] && [ "${CHROXY_TUI_CHILD-}" != 1 ] || exit 0; exec '
 
 function runCommand({ file, args, shellCommand, env, payload, timeout = 15000 }) {
   return new Promise((resolve, reject) => {

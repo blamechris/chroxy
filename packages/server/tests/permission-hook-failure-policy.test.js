@@ -34,7 +34,7 @@ const realHookScript = join(__dirname, '../hooks/permission-hook.sh')
 const POSIX_ONLY = { skip: process.platform === 'win32' ? 'runs the registered command through /bin/sh' : false }
 
 // Written out, not built by calling the subject.
-const GUARD = '[ -n "$CHROXY_PORT" ] && [ "$CHROXY_TUI_CHILD" != 1 ] || exit 0; exec '
+const GUARD = '[ -n "${CHROXY_PORT-}" ] && [ "${CHROXY_TUI_CHILD-}" != 1 ] || exit 0; exec '
 
 let scratch
 before(() => { scratch = mkdtempSync(join(tmpdir(), 'chroxy-hook-failure-policy-')) })
@@ -122,18 +122,32 @@ describe('user-level permission hook registration: what it writes', () => {
   })
 })
 
-/** Run a command string the way Claude Code runs a hook: through a shell, with stdin. */
+/**
+ * Run a command string the way Claude Code runs a hook: through a shell, with
+ * stdin. Resolves only for a command that EXITED by itself. One that had to be
+ * killed by the watchdog rejects: "did not exit 0" must never be satisfied by
+ * a hang. The command runs in its own process group so the watchdog takes any
+ * child it started down with it.
+ */
 function runThroughShell(shell, command, { env = {}, stdin = '{}' } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(shell, ['-c', command], { env: { PATH: process.env.PATH, ...env } })
+    const child = spawn(shell, ['-c', command], { detached: true, env: { PATH: process.env.PATH, ...env } })
     let stdout = ''
     let stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), 15000)
+    let settled = false
+    const finish = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); fn(value) }
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL') } catch (err) { if (err.code !== 'ESRCH') throw err }
+      finish(reject, new Error(`WATCHDOG: ${shell} -c had not exited after 15 s and was killed\nstdout: ${stdout}\nstderr: ${stderr}`))
+    }, 15000)
     child.stdout.on('data', (c) => { stdout += c })
     child.stderr.on('data', (c) => { stderr += c })
     child.stdin.on('error', () => {})
-    child.on('error', (err) => { clearTimeout(timer); reject(err) })
-    child.on('close', (status, signal) => { clearTimeout(timer); resolve({ status, signal, stdout, stderr }) })
+    child.on('error', (err) => finish(reject, err))
+    child.on('close', (status, signal) => {
+      if (signal) { finish(reject, new Error(`${shell} -c was killed by ${signal}\nstderr: ${stderr}`)); return }
+      finish(resolve, { status, stdout, stderr })
+    })
     child.stdin.end(stdin)
   })
 }
@@ -179,16 +193,40 @@ describe('user-level permission hook registration: what the command does under a
         assert.equal(r.status, 7, 'exec: the script\'s own status, not the shell\'s')
       })
 
-      it('a claude-cli session whose script is gone: the command FAILS (non-zero), it does not exit 0', async () => {
+      // 126 or 127: the two statuses a shell uses for "could not run it". Which
+      // one an `exec` of a missing path gives differs by shell (bash 3.2 says
+      // 126, dash says 127). The helper has already rejected a hang or a kill.
+      it('a claude-cli session whose script is gone: the command FAILS (126 or 127), it does not exit 0', async () => {
         const r = await runThroughShell(shell, userLevelHookCommand(missingScript), { env: { CHROXY_PORT: '8765' } })
-        assert.notEqual(r.status, 0, 'a hook that could not run must not look like a hook that ran and had nothing to say')
+        assert.ok(r.status === 126 || r.status === 127,
+          `a hook that could not run must not look like a hook that ran and had nothing to say (status ${r.status})`)
         assert.equal(r.stdout, '')
       })
 
-      it('a claude-cli session whose script is not executable: the command FAILS', async () => {
+      it('a claude-cli session whose script is not executable: the command FAILS with 126', async () => {
         const r = await runThroughShell(shell, userLevelHookCommand(notExecutable), { env: { CHROXY_PORT: '8765' } })
-        assert.notEqual(r.status, 0)
+        assert.equal(r.status, 126)
         assert.equal(r.stdout, '', 'and the script did not run')
+      })
+
+      // bash, also when run as sh, takes shell options from an exported
+      // SHELLOPTS. Under nounset a bare $NAME of an unset variable is fatal, so
+      // the guard must not read its variables that way.
+      it('an inherited nounset does not turn the guard into a failure outside a Chroxy session', async () => {
+        for (const env of [{ SHELLOPTS: 'nounset' }, { SHELLOPTS: 'nounset', CHROXY_PORT: '8765', CHROXY_TUI_CHILD: '1' }]) {
+          for (const script of [missingScript, stubScript]) {
+            const r = await runThroughShell(shell, userLevelHookCommand(script), { env })
+            assert.equal(r.status, 0, `${JSON.stringify(env)} ${script}: ${r.stderr}`)
+            assert.equal(r.stdout, '')
+          }
+        }
+      })
+
+      it('an inherited nounset does not stop a claude-cli session reaching its script', async () => {
+        // CHROXY_TUI_CHILD is unset here, which is the variable nounset would trip on.
+        const r = await runThroughShell(shell, userLevelHookCommand(stubScript), { env: { SHELLOPTS: 'nounset', CHROXY_PORT: '8765' }, stdin: 'x' })
+        assert.equal(r.stdout, 'ran:x')
+        assert.equal(r.status, 7)
       })
 
       it('CHROXY_TUI_CHILD set to anything but 1 does not switch the hook off', async () => {
@@ -211,6 +249,20 @@ describe('user-level permission hook registration: what the command does under a
     const out = JSON.parse(r.stdout.trim()).hookSpecificOutput
     assert.equal(out.permissionDecision, 'deny')
     assert.ok(/could not reach the daemon/.test(out.permissionDecisionReason), out.permissionDecisionReason)
+  })
+
+  it('the REAL script still decides under inherited nounset, errexit and pipefail', async () => {
+    const srv = createServer()
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+    const port = srv.address().port
+    await new Promise((r) => srv.close(r))
+    const r = await runThroughShell('/bin/sh', userLevelHookCommand(realHookScript), {
+      // No CHROXY_HOOK_SECRET, CHROXY_HOST or mode file: all optional, all unset.
+      env: { SHELLOPTS: 'errexit:nounset:pipefail', CHROXY_PORT: String(port) },
+      stdin: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+    })
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision, 'deny')
   })
 
   it('end to end with the REAL script outside a Chroxy session: nothing', async () => {
@@ -245,10 +297,19 @@ describe('SDK Auto-turn PreToolUse callback: a permission check that fails is a 
     assert.equal('updatedInput' in out.hookSpecificOutput, false)
   }
 
+  // The deny is also RECORDED like any other deny, so the tool row can show why.
+  function assertRecorded(session, toolUseId) {
+    assert.equal(session._pendingPermissionToolUseIds.has(toolUseId), false, 'no longer pending')
+    const recorded = session._deniedToolMessages.get(toolUseId)
+    assert.equal(typeof recorded, 'string')
+    assert.ok(/could not complete the permission check/.test(recorded), recorded)
+  }
+
   it('a check whose promise rejects resolves to a deny, it does not reject', async () => {
     const session = makeSession(() => Promise.reject(new Error('manager failed')))
     try {
       assertDeny(await session._handleAutoPreToolUse(READ, signal(), 'tu-1'))
+      assertRecorded(session, 'tu-1')
     } finally {
       await session.destroy()
     }
@@ -258,6 +319,7 @@ describe('SDK Auto-turn PreToolUse callback: a permission check that fails is a 
     const session = makeSession(() => { throw new Error('manager threw') })
     try {
       assertDeny(await session._handleAutoPreToolUse(READ, signal(), 'tu-1'))
+      assertRecorded(session, 'tu-1')
     } finally {
       await session.destroy()
     }
