@@ -7,7 +7,7 @@ import {
   resolveTargetComponentwiseSync,
   resolveTargetComponentwiseAsync,
   splitPathBelowRoot,
-  assertUnambiguousRoot,
+  walkStart,
   COMPONENTWISE_MAX_SYMLINKS,
   COMPONENTWISE_MAX_COMPONENTS,
   COMPONENTWISE_MAX_PATH_LENGTH,
@@ -250,15 +250,36 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     assert.deepEqual(splitPathBelowRoot('a//b', '', path.posix), ['a', 'b'])
   })
 
-  it('assertUnambiguousRoot rejects drive-relative and root-relative Windows paths only', () => {
-    for (const bad of ['C:foo', 'c:', '\\foo', '/foo', '\\']) {
-      assert.throws(() => assertUnambiguousRoot(bad, path.win32), { code: 'EINVAL' }, bad)
+  it('walkStart anchors a Windows root-relative path to the drive or share resolved so far', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    assert.deepEqual(w('\\foo\\bar', 'C:\\work'), { start: 'C:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('/foo/bar', 'C:\\work'), { start: 'C:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('\\foo', 'D:\\a\\b'), { start: 'D:\\', below: ['foo'] })
+    assert.deepEqual(w('\\foo', '\\\\srv\\share\\w'), { start: '\\\\srv\\share\\', below: ['foo'] })
+    assert.deepEqual(w('\\', 'C:\\work'), { start: 'C:\\', below: [''] })
+  })
+
+  it('walkStart keeps absolute and relative Windows paths where they are', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    assert.deepEqual(w('D:\\foo/bar', 'C:\\work'), { start: 'D:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('foo\\..\\bar', 'C:\\work'), { start: '', below: ['foo', '..', 'bar'] })
+    assert.deepEqual(w('\\\\srv\\share\\x', 'C:\\work'), { start: '\\\\srv\\share\\', below: ['x'] })
+  })
+
+  it('walkStart refuses a Windows drive-relative path, and a root-relative one with no drive to use', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    for (const bad of ['C:foo', 'c:', 'D:..\\x']) {
+      assert.throws(() => w(bad, 'C:\\work'), { code: 'EINVAL' }, bad)
     }
-    for (const ok of ['C:\\foo', 'C:/foo', 'foo\\bar', '..\\x', '\\\\server\\share\\x']) {
-      assert.doesNotThrow(() => assertUnambiguousRoot(ok, path.win32), ok)
-    }
-    // POSIX: none of those spellings has a special root
-    for (const f of ['C:foo', '\\foo']) assert.doesNotThrow(() => assertUnambiguousRoot(f, path.posix), f)
+    assert.throws(() => w('\\foo', 'work'), { code: 'EINVAL' })
+    assert.throws(() => w('\\foo', ''), { code: 'EINVAL' })
+  })
+
+  it('walkStart on POSIX treats those spellings as ordinary names and roots', () => {
+    const w = (p, cur) => walkStart(p, cur, path.posix)
+    assert.deepEqual(w('/foo/bar', '/work'), { start: '/', below: ['foo', 'bar'] })
+    assert.deepEqual(w('C:foo', '/work'), { start: '', below: ['C:foo'] })
+    assert.deepEqual(w('\\foo', '/work'), { start: '', below: ['\\foo'] })
   })
 
   it('a missing component followed by `..` back to an existing directory resumes inspection (both agree)', {
@@ -281,15 +302,19 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
   // directory. The helper is tested with path.win32 above; these run the wiring
   // (beginWalk and the link splice) and need a Windows host.
   const WIN32_ONLY = process.platform === 'win32' ? false : 'needs Windows path rules'
-  it('on Windows, both resolvers reject drive-relative and root-relative targets', { skip: WIN32_ONLY }, async () => {
-    for (const bad of ['C:foo', '\\foo']) {
-      await assertBothThrow(root, bad, 'EINVAL')
-    }
+  it('on Windows, both resolvers place a root-relative target on the base drive and reject a drive-relative one', { skip: WIN32_ONLY }, async () => {
+    const driveRoot = path.parse(root).root
+    await assertParity(root, '\\foo', join(driveRoot, 'foo'))
+    await assertParity(root, '/foo/bar', join(driveRoot, 'foo', 'bar'))
+    await assertBothThrow(root, 'C:foo', 'EINVAL')
   })
 
-  it('on Windows, both resolvers reject a link whose target is root-relative', { skip: WIN32_ONLY || SKIP_NO_SYMLINK }, async () => {
+  it('on Windows, a root-relative link target resolves on the current drive and a drive-relative one is refused', { skip: WIN32_ONLY || SKIP_NO_SYMLINK }, async () => {
+    const driveRoot = path.parse(root).root
     symlinkSync('\\outside', join(root, 'rooted'))
-    await assertBothThrow(root, 'rooted', 'EINVAL')
-    await assertBothThrow(root, 'rooted/x', 'EINVAL')
+    await assertParity(root, 'rooted', join(driveRoot, 'outside'))
+    await assertParity(root, 'rooted/x', join(driveRoot, 'outside', 'x'))
+    symlinkSync('C:rel', join(root, 'driverel'))
+    await assertBothThrow(root, 'driverel', 'EINVAL')
   })
 })

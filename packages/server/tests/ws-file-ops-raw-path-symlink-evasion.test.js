@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { join, parse, resolve, sep } from 'node:path'
 import { validateRawPathWithinCwd, resolveTargetComponentwiseAsync } from '../src/ws-file-ops/common.js'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
 import { SKIP_WIN32_LEXICAL_DOTDOT, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -284,7 +284,7 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
     // A leading-root absolute target: the parsed root (`/`) must be stripped and
     // never treated as a `.`/`..`-poppable component. `..` at the root stays at
     // the root (kernel semantics), so `/../..` resolves to `/`, not underflow.
-    assert.equal(await resolveTargetComponentwiseAsync(root, '/../..'), '/')
+    assert.equal(await resolveTargetComponentwiseAsync(root, '/../..'), process.platform === 'win32' ? parse(root).root : '/')
 
     // A Windows-style backslash path is split component-wise on win32 only; on
     // POSIX the backslashes are part of one filename.

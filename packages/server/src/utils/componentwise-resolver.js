@@ -1,6 +1,6 @@
 import { lstatSync, readlinkSync } from 'node:fs'
 import { lstat, readlink } from 'node:fs/promises'
-import path, { dirname, isAbsolute, join, parse, sep } from 'node:path'
+import path, { dirname, join, sep } from 'node:path'
 
 /**
  * open(2)-faithful, component-by-component path resolver — the SINGLE SOURCE for
@@ -71,20 +71,39 @@ export function splitPathBelowRoot(p, root, pathImpl = path) {
 }
 
 /**
- * Throw EINVAL for a Windows path whose root depends on process state: a
- * drive-relative path (`C:foo`, resolved against that drive's current directory)
- * or a root-relative one (`\foo` / `/foo`, resolved against the current drive).
- * The walk cannot know which directory such a path names, so the decision fails
- * closed. A no-op for the POSIX rules, where neither spelling has a special root.
+ * Where a walk over the raw path `p` starts, and the components below that start.
+ * `current` is the real path resolved so far (the session cwd for a target, the
+ * link's parent for a link target).
+ *   - a relative path starts where `current` is (`start` is `''`);
+ *   - an absolute path starts at its own parsed root;
+ *   - on Windows, a root-relative path (`\foo` or `/foo`, no drive) starts at the
+ *     root of `current`'s drive (or share), exactly as `path.win32.resolve(current, p)`
+ *     places it;
+ *   - on Windows, a drive-relative path (`C:foo`) depends on that drive's current
+ *     directory, which cannot be known here, so it throws EINVAL (callers fail
+ *     closed). So does a root-relative path when `current` has no drive.
  * @param {string} p
- * @param {typeof import('node:path')} [pathImpl]
+ * @param {string} current  the real path resolved so far
+ * @param {typeof import('node:path')} [pathImpl]  `path.win32` / `path.posix` to
+ *   drive the other platform's rules (tests); defaults to the host's `path`
+ * @returns {{ start: string, below: string[] }}
  */
-export function assertUnambiguousRoot(p, pathImpl = path) {
-  if (pathImpl.sep !== '\\') return
+export function walkStart(p, current, pathImpl = path) {
   const { root } = pathImpl.parse(p)
-  if (root === '\\' || root === '/' || /^[A-Za-z]:$/.test(root)) {
-    throw Object.assign(new Error('componentwise resolver: the path root depends on the current drive or directory'), { code: 'EINVAL' })
+  if (pathImpl.sep === '\\') {
+    if (/^[A-Za-z]:$/.test(root)) {
+      throw Object.assign(new Error('componentwise resolver: a drive-relative path depends on the drive\'s current directory'), { code: 'EINVAL' })
+    }
+    if (root === '\\' || root === '/') {
+      const driveRoot = pathImpl.parse(current).root
+      if (!/^[A-Za-z]:[\\/]$/.test(driveRoot) && !/^[\\/]{2}[^\\/]/.test(driveRoot)) {
+        throw Object.assign(new Error('componentwise resolver: a root-relative path has no drive to anchor to'), { code: 'EINVAL' })
+      }
+      return { start: driveRoot, below: splitPathBelowRoot(p, root, pathImpl) }
+    }
   }
+  const start = pathImpl.isAbsolute(p) ? root : ''
+  return { start, below: splitPathBelowRoot(p, start, pathImpl) }
 }
 
 /**
@@ -98,9 +117,8 @@ export function assertUnambiguousRoot(p, pathImpl = path) {
  * @returns {{ resolved: string, pending: string[] }}
  */
 function beginWalk(realBase, target) {
-  assertUnambiguousRoot(target)
-  const targetRoot = isAbsolute(target) ? parse(target).root : ''
-  return { resolved: targetRoot || realBase, pending: splitPathBelowRoot(target, targetRoot) }
+  const { start, below } = walkStart(target, realBase)
+  return { resolved: start || realBase, pending: below }
 }
 
 /**
@@ -153,10 +171,9 @@ function spliceSymlink(pending, i, resolved, link) {
   if (sep === '/' && link.includes('\\')) {
     throw Object.assign(new Error('componentwise resolver: link target holds a backslash'), { code: 'EINVAL' })
   }
-  assertUnambiguousRoot(link)
-  const linkRoot = isAbsolute(link) ? parse(link).root : ''
-  pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
-  return linkRoot || resolved
+  const { start, below } = walkStart(link, resolved)
+  pending.splice(i, 0, ...below)
+  return start || resolved
 }
 
 /**
