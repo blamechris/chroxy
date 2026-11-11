@@ -370,6 +370,32 @@ describe('path-scoped rules match on the target real location', () => {
     assert.equal(match('src', 'src/missing/../sub/b.txt'), 'allow')
   })
 
+  it('a glob scope whose literal prefix is a link matches the files below it', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(join(root, 'src'), join(root, 'alias'))
+    assert.equal(match('alias', 'alias/a.txt'), 'allow')
+    assert.equal(match('alias/**', 'alias/a.txt'), 'allow')
+    assert.equal(match('alias/**', 'alias/sub/b.txt'), 'allow')
+    assert.equal(match('alias/*', 'alias/a.txt'), 'allow')
+    assert.equal(match('alias/**/*.txt', 'alias/sub/b.txt'), 'allow')
+    assert.equal(match('alias/sub/*.txt', 'alias/sub/b.txt'), 'allow')
+    // the glob still decides which files below the prefix match
+    assert.equal(match('alias/*.js', 'alias/a.txt'), null)
+    assert.equal(match('alias/sub/*', 'alias/a.txt'), null)
+    // and a target outside the prefix does not match
+    assert.equal(match('alias/**', 'other/outside.txt'), null)
+  })
+
+  it('a glob scope whose prefix link points outside the session cwd matches nothing', { skip: SKIP_NO_SYMLINK }, () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-scoped-outside-')))
+    try {
+      writeFileSync(join(outside, 'f.txt'), 'x')
+      symlinkSync(outside, join(root, 'ext'))
+      assert.equal(match('ext/**', 'ext/f.txt'), null)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   it('does not match when the session cwd does not exist', () => {
     const missing = new PermissionManager({ log: silentLog, cwd: join(root, 'no-such-dir') })
     missing.setRules([{ tool: 'Write', decision: 'allow', path: 'src' }])

@@ -446,8 +446,17 @@ function realLocationWithinScope(target, scope, base) {
     const realTarget = resolveTargetComponentwiseSync(realBase, target)
     if (_scopeHasGlobMagic(scope)) {
       if (!isPathWithin(realTarget, realBase)) return false
-      const rel = relative(realBase, realTarget)
-      return globToRegExp(scope).test(rel.split(sep).join('/'))
+      // The directory named before the first wildcard may itself be a link, so
+      // resolve it and match the glob against the target's path below it, as
+      // if the target were reached through the prefix's written spelling.
+      const head = scope.slice(0, scope.search(/[*?]/))
+      const prefix = head.slice(0, Math.max(head.lastIndexOf('/'), 0))
+      const written = relative(base, resolve(base, prefix)).split(sep).join('/')
+      const realPrefix = resolveTargetComponentwiseSync(realBase, prefix === '' ? '.' : prefix)
+      if (!isPathWithin(realTarget, realPrefix)) return false
+      const below = relative(realPrefix, realTarget).split(sep).join('/')
+      const through = written === '' ? below : below === '' ? written : `${written}/${below}`
+      return globToRegExp(scope).test(through)
     }
     const realScope = resolveTargetComponentwiseSync(realBase, scope)
     return isPathWithin(realTarget, realScope)
