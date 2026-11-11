@@ -9,7 +9,7 @@ Invoke it at the **start** of an unattended run to establish the run's charter, 
 ## Arguments
 
 - `{{args}}` — all optional:
-  - *(empty)* — look for an existing charter (see "Per-run PRIME charter"); with none, this is a start: go to step 1. With one, reload the directive as written: re-establish the charter + guardrails, read the session log for live state, resume the marathon.
+  - *(empty)* — look for an existing charter (see "Per-run PRIME charter"); with none, this is a start: go to step 2 of the charter section. With one, reload the directive as written: re-establish the charter + guardrails, read the session log for live state, resume the marathon.
   - A path — override the session-log location for this run (default below).
   - A short override in quotes — narrows an existing or proposed charter (e.g. `"only label:ready-to-build"`), without editing the file. It does not by itself count as a charter.
 
@@ -55,15 +55,15 @@ Chroxy has no standing PRIME mission. Each PRIME run starts from a charter the o
 
 First actions of every run and every reload:
 
-1. Look for an existing charter in the ledger STATE header, then in the latest handoff seed.
+1. Look for an existing charter in the ledger STATE header, then in the latest handoff seed. Ignore a `charter-status: DONE` charter, and a seed charter whose done is already met or whose pool is zero; a bare start that finds only those has no charter.
 2. If the owner stated one (in the request, or in an argument or file giving outcome, pool, done and check-in), record it as `charter-status: CONFIRMED`.
-3. Otherwise draft one from current evidence (the pool query's count, the latest seed, the pain-first labels) and record it as `charter-status: PROPOSED`. Ask the owner through the host question UI with a recommendation, put it in the awaiting-user list and in DECISION, end with a `🔴 BLOCKED` Next, and select no work. Read-only evidence gathering for the draft is fine. If the question UI is unavailable, record PROPOSED and put it in DECISION and the seed.
+3. Otherwise draft one from current evidence (the pool query's count, the latest seed, the pain-first labels). At a true start with no ledger, first create it (the verbatim first-line reload trigger plus the STATE header). Record the draft as `charter-status: PROPOSED`, ask the owner through the host question UI with a recommendation, put it in the awaiting-user list and in DECISION, and select no work. Read-only evidence gathering for the draft is fine. If nothing is in flight, end the turn with a `🔴 BLOCKED` Next. If the question UI is unavailable, record PROPOSED and put it in DECISION and the seed.
 
-Only CONFIRMED authorizes picks. This is the one exception to not stopping for routine confirmation. A reload that finds PROPOSED re-asks; it never treats a proposal as confirmed.
+Only CONFIRMED authorizes picks. The owner's answer (accept, or accept with edits recorded verbatim) is rewritten into STATE as CONFIRMED with confirmed-by and UTC date, as the first write after the answer and before any pick; if the UI answers within the turn, proceed. A reload that finds PROPOSED re-asks; it never treats a proposal as confirmed. This is the one exception to not stopping for routine confirmation.
 
-The STATE charter line holds: status; outcome (verbatim); pool as the exact runnable command, its last count and UTC time; done (verbatim); check-in; confirmed by and date. The wave handoff seed carries the confirmed charter verbatim.
+The STATE charter line holds: status; outcome (verbatim); pool as the exact runnable command, its last count and UTC time; done (verbatim); check-in; confirmed by and date. The wave handoff seed carries the confirmed charter verbatim. The pool count is the query result minus items recorded documented-blocked or attempt-exhausted in STATE, and that is what "returns zero" means; the queue is a subset of the pool, and prerequisites and decomposition sub-issues of a picked item are in scope without matching the query.
 
-A run already in flight whose STATE has no charter (started before this rule) finishes its already-selected items through their normal gates, and merge authority covers those items. It selects nothing new and proposes a charter as in step 3.
+A STATE with no charter but live work (an open PR, or a branch or attempt already started for this run) is a pre-rule run. It asks the step 3 question without blocking, keeps Next `🟢 RUNNING` for those in-flight items only, and carries them through their normal gates; merge authority covers them. Items merely queued are not selected. It ends with `🔴 BLOCKED` only once no authorized in-flight work remains and the charter is still PROPOSED. A no-charter STATE with no live work is a fresh start.
 
 A check-in is a non-blocking status report (status block plus pool count) at the stated cadence, by default each wave boundary. Work continues unless the owner replies with a hold. It is never a stop.
 
@@ -103,7 +103,7 @@ There is no invented context ceiling: 150K or a compaction count alone does not 
 
 ## Final step (when the outcome or the charter's pool is complete)
 
-The run ends when the charter's done observable is met or the pool query returns zero (plus the stop reasons in Mission). Verify the agreed acceptance criteria, quote `done` verbatim with its evidence, and report the usable result, its evidence and remaining limits. Run a whole-project audit only if requested or necessary to establish those criteria; completion does not automatically generate a new cleanup backlog.
+The run ends when the charter's done observable is met or the pool query returns zero (plus the stop reasons in Mission). Verify the agreed acceptance criteria, quote `done` verbatim with its evidence, write `charter-status: DONE <UTC>` into STATE and the final seed, and report the usable result, its evidence and remaining limits. Run a whole-project audit only if requested or necessary to establish those criteria; completion does not automatically generate a new cleanup backlog.
 
 ## Hard guardrails
 
