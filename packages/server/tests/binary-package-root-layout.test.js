@@ -464,3 +464,61 @@ for (const row of [
     fs.assertUnchanged()
   })
 }
+
+// An inner node_modules package that does not claim the entry must not stop the
+// scan: a valid outer npm owner is tried before any closer decoy (#8097).
+const nestedLayouts = [
+  { name: 'unscoped', outer: ['provider'], inner: ['helper'] },
+  { name: 'scoped', outer: ['@scope', 'provider'], inner: ['@inner', 'helper'] },
+]
+for (const layout of nestedLayouts) {
+  const build = ({ withDecoy, outerClaims = true }) => {
+    const outer = join(virtual, 'node_modules', ...layout.outer)
+    const inner = join(outer, 'node_modules', ...layout.inner)
+    const entry = join(inner, 'bin', 'launcher.js')
+    const records = [
+      [metadataPath(outer), outerClaims
+        ? { name: layout.outer.join('/'), bin: relative(outer, entry) }
+        : { name: layout.outer.join('/'), main: 'index.js' }],
+      [metadataPath(inner), { name: layout.inner.join('/'), main: 'lib/index.js' }],
+    ]
+    if (withDecoy) records.push([metadataPath(dirname(entry)), { name: 'decoy', main: 'launcher.js' }])
+    return { outer, inner, entry, fs: metadataFs(records) }
+  }
+
+  test(`${layout.name}: outer npm owner wins over a non-claiming inner package`, () => {
+    const { outer, entry, fs } = build({ withDecoy: false })
+    const found = findEnclosingPackageRoot(entry, fs.seams)
+    assert.equal(found.root, outer)
+    fs.assertUnchanged()
+  })
+
+  test(`${layout.name}: a closer decoy does not change the selected outer owner`, () => {
+    const { outer, entry, fs } = build({ withDecoy: true })
+    const found = findEnclosingPackageRoot(entry, fs.seams)
+    assert.equal(found.root, outer)
+    assert.equal(found.packageJson.name, layout.outer.join('/'))
+    fs.assertUnchanged()
+  })
+
+  test(`${layout.name}: innermost claiming npm candidate still wins over an outer claimant`, () => {
+    const { inner, entry } = build({ withDecoy: true })
+    const outer = join(virtual, 'node_modules', ...layout.outer)
+    const fs = metadataFs([
+      [metadataPath(outer), { name: layout.outer.join('/'), bin: relative(outer, entry) }],
+      [metadataPath(inner), { name: layout.inner.join('/'), bin: 'bin/launcher.js' }],
+      [metadataPath(dirname(entry)), { name: 'decoy', main: 'launcher.js' }],
+    ])
+    const found = findEnclosingPackageRoot(entry, fs.seams)
+    assert.equal(found.root, inner)
+    fs.assertUnchanged()
+  })
+
+  test(`${layout.name}: no npm candidate claiming keeps the nearest-ancestor fallback`, () => {
+    const { entry, fs } = build({ withDecoy: true, outerClaims: false })
+    const found = findEnclosingPackageRoot(entry, fs.seams)
+    assert.equal(found.root, dirname(entry))
+    assert.equal(found.packageJson.name, 'decoy')
+    fs.assertUnchanged()
+  })
+}

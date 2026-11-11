@@ -242,7 +242,8 @@ function packageClaimsEntry(root, pkg, entryPath, realpath) {
 }
 
 /**
- * Prefer the package root in the nearest containing node_modules layout,
+ * Prefer a package root in a containing node_modules layout (innermost to
+ * outermost),
  * provided its named package.json claims the canonical entry (#8097). Use
  * that root's metadata, not a closer decoy's optionalDependencies. Aliased
  * installs may have a different package name than the directory spelling.
@@ -278,35 +279,37 @@ export function findEnclosingPackageRoot(
     return null
   }
 
-  // Use components rather than a substring, and only the nearest boundary:
-  // a nested dependency belongs to its own install, not an outer package.
+  // Use components rather than a substring. Collect EVERY containing npm
+  // install root (a non-claiming inner package must not hide a valid outer
+  // owner), then try them innermost to outermost.
   const parts = dirname(entryPath).split(sep)
-  let boundary = -1
+  const npmRoots = []
   for (let index = 0; index < parts.length; index += 1) {
     if (parts[index] !== 'node_modules') continue
-    boundary = index
+    const scope = parts[index + 1]
+    const rootLength = index + (scope?.startsWith('@') ? 3 : 2)
+    // A malformed scope or the reserved unscoped package name node_modules
+    // does not describe a valid npm install. Keep the old fallback there.
+    const valid = parts.length >= rootLength
+      && scope !== '@' && !scope?.includes('@', 1) && scope !== 'node_modules'
+    if (valid) npmRoots.push(parts.slice(0, rootLength).join(sep))
     // Package-name components are not install containers themselves, even
     // when a scoped package's own directory is named node_modules.
-    index += parts[index + 1]?.startsWith('@') ? 2 : 1
+    index += scope?.startsWith('@') ? 2 : 1
   }
-  const scope = parts[boundary + 1]
-  const rootLength = boundary + (scope?.startsWith('@') ? 3 : 2)
-  // A malformed scope or the reserved unscoped package name node_modules
-  // does not describe a valid npm install. Keep the old fallback there.
-  const validLayout = boundary >= 0 && parts.length >= rootLength
-    && scope !== '@' && !scope?.includes('@', 1) && scope !== 'node_modules'
-  const preferredRoot = validLayout ? parts.slice(0, rootLength).join(sep) : null
-  if (preferredRoot !== null) {
-    const owner = readOwner(preferredRoot)
+  const tried = new Set()
+  for (let i = npmRoots.length - 1; i >= 0; i -= 1) {
+    tried.add(npmRoots[i])
+    const owner = readOwner(npmRoots[i])
     if (owner) return owner
   }
 
   // Keep the existing nearest-claim fallback for non-npm and invalid roots.
-  // The preferred path was already read, so do not read it a second time.
+  // The npm candidates were already read, so do not read them a second time.
   let dir = dirname(entryPath)
   let prev = null
   while (dir !== prev) {
-    if (dir !== preferredRoot) {
+    if (!tried.has(dir)) {
       const owner = readOwner(dir)
       if (owner) return owner
     }
