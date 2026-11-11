@@ -333,9 +333,10 @@ const SCOPED_RULE_PATH_FIELD = {
 function _globPatternLeavesRoot(pattern) {
   if (typeof pattern !== 'string') return false
   // The whitespace rule only concerns how a container splits a pattern; a space
-  // does not make a pattern leave its root. Judge the pattern with its spaces
-  // neutralised so every other rule (a `..` segment after a space too) still runs.
-  const reason = globPatternEscapeReason(pattern.replace(/\s/g, '_'))
+  // does not make a pattern leave its root. An unquoted space starts a new word,
+  // so judge each word by turning whitespace into a comma: that is both a
+  // word-start anchor and a segment delimiter for the other rules.
+  const reason = globPatternEscapeReason(pattern.replace(/\s/g, ','))
   return reason !== null || isAbsolute(pattern) || /^[/\\]/.test(pattern)
 }
 

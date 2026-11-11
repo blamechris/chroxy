@@ -435,7 +435,25 @@ describe('path-scoped rules match on the target real location', () => {
     assert.equal(pm._matchesRule('Glob', input), 'allow')
     pm.setRules([{ tool: 'Glob', decision: 'allow', path: 'src' }])
     assert.equal(pm._matchesRule('Glob', input), 'allow')
-    assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: 'a b/../c' }), null, 'a space does not hide a climb')
+  })
+
+  it('a word after whitespace in a Glob pattern is judged on its own', () => {
+    const patterns = [
+      'a ../b', 'a\t../b', 'a\n../b', 'a\u00a0../b', 'a ~/x', 'a /etc/x', 'a C:/x',
+      '{a, ~/x}', '{a, ../x}', '.. ', 'x ..', 'a ..\\b',
+    ]
+    for (const pattern of patterns) {
+      pm.setRules([{ tool: 'Glob', decision: 'allow', path: 'src' }])
+      assert.equal(pm._matchesRule('Glob', { path: 'src', pattern }), null, `allow: ${JSON.stringify(pattern)}`)
+      pm.setRules([{ tool: 'Glob', decision: 'deny', path: 'secrets' }])
+      assert.equal(pm._matchesRule('Glob', { path: 'src', pattern }), 'deny', `deny: ${JSON.stringify(pattern)}`)
+    }
+  })
+
+  it('a whitespace-only Glob pattern names no root-leaving word, so it keeps its target', () => {
+    // every word is empty; the pattern selects nothing outside the search root
+    pm.setRules([{ tool: 'Glob', decision: 'allow', path: 'src' }])
+    assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: '  ' }), 'allow')
   })
 
   it('a scoped deny matches a call whose targets cannot be determined', () => {
