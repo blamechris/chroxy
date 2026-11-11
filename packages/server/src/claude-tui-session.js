@@ -534,6 +534,8 @@ export class ClaudeTuiSession extends BaseSession {
     // skipPermissions disables the whole permission system; permissionMode
     // selects between approve/auto/acceptEdits/plan WITHIN it.
     this.skipPermissions = !!skipPermissions
+    // #8529: true only while _expirePendingPermissions is running. See there.
+    this._abandoningPermissions = false
     // Per-session hook secret — picked up by WsServer's session_created handler
     // (ws-server.js:_registerSessionHookSecretIfMissing reads
     // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
@@ -6155,12 +6157,70 @@ export class ClaudeTuiSession extends BaseSession {
    * `_handleHardTimeout` keeps its existing pending-answer cleanup). Idempotent.
    */
   _suspendBackstopsForPendingQuestion() {
-    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
-    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    this._suspendSilenceBackstops()
     // Disarms + latches the per-turn first-output watchdog. By the time a
     // question is pending the first output (the tool_use) has already arrived,
     // so the watchdog is moot for the rest of this turn anyway.
     this._clearFirstOutputWatchdog()
+  }
+
+  /** Clear the two silence timers (soft inactivity, stream stall). Idempotent. */
+  _suspendSilenceBackstops() {
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+  }
+
+  /**
+   * #8529: a hook-routed permission prompt for this session is waiting on a
+   * human (ws-permissions parked the hook's POST /permission). That wait is not
+   * silence from claude, so the silence backstops are suspended for as long as
+   * one is pending, exactly as they are for a pending AskUserQuestion (#5318)
+   * and as CliSession and SdkSession already do (#2831).
+   *
+   * Without this the stream-stall watchdog (default 300 s, armed when the
+   * PreToolUse event drained) and the daemon's decision window (300 s, armed
+   * when the hook's request arrived) ran side by side on the same prompt, and
+   * whichever clock started first tore the turn down or denied it.
+   *
+   * The HARD cap stays armed, as it does for a pending question. The request
+   * itself proves a hook ran this turn, so the first-output watchdog is
+   * disarmed too.
+   *
+   * The handlers themselves are NOT taught to ignore a pending prompt. With the
+   * timers cleared here and kept clear by `_armResultTimeout`, they cannot fire
+   * under one; and if one ever did, ending the turn through `_teardownTurn`
+   * (which expires the prompt, #7382) is the safe outcome, not a silent return.
+   */
+  _onFirstPermissionPending() {
+    this._suspendBackstopsForPendingQuestion()
+  }
+
+  /** The last pending prompt was answered or timed out by the daemon: the turn goes on. */
+  _onLastPermissionResolved() {
+    // Not when the prompts are being abandoned with their turn (below).
+    if (this._abandoningPermissions) return
+    if (this._isBusy) this._armResultTimeout()
+  }
+
+  /**
+   * #8529: expiring is ABANDONING, not resolving, and must never re-arm.
+   *
+   * The base emits `permission_expired` for each id BEFORE it drops them. In a
+   * running daemon that event releases the daemon's entry, and the release
+   * comes straight back, synchronously, through `notifyPermissionResolved`
+   * (event-normalizer's `release_permission` after-effect, then
+   * ws-permissions' cleanup). Every caller of this method is tearing a turn
+   * down and has not yet cleared `_isBusy`, so without this latch the last
+   * release would look like "answered, turn goes on" and re-arm the timers of
+   * a turn that is ending.
+   */
+  _expirePendingPermissions(message) {
+    this._abandoningPermissions = true
+    try {
+      super._expirePendingPermissions(message)
+    } finally {
+      this._abandoningPermissions = false
+    }
   }
 
   _armResultTimeout() {
@@ -6184,6 +6244,15 @@ export class ClaudeTuiSession extends BaseSession {
     // pending entry, and the next drain-loop _armResultTimeout() falls through.
     if (this._pendingUserAnswers.size > 0) {
       this._suspendBackstopsForPendingQuestion()
+      return
+    }
+    // #8529: the same while a hook-routed permission prompt is pending, so a
+    // hook-drain re-arm cannot resurrect the silence timers under it. The
+    // first-output watchdog is left to its own latch here: a pending id that
+    // outlived its turn must not switch that watchdog off for the next one.
+    if (this._pendingPermissionIds.size > 0) {
+      this._suspendSilenceBackstops()
+      this._armFirstOutputWatchdog()
       return
     }
     this._resultTimeout = setTimeout(() => {
@@ -6985,6 +7054,11 @@ export class ClaudeTuiSession extends BaseSession {
     // runs BEFORE _activeTurn is nulled so the helper still has access
     // to attachmentsDir; no-op when the turn had no attachments.
     this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
+    // The turn is over, so no turn timer may outlive it. _clearTurnEndState and
+    // destroy() clear all three; this path cleared none, which left the others
+    // armed on an idle session after any one of them fired.
+    this._suspendSilenceBackstops()
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     this._cleanupTurnAttachments(this._activeTurn)
     this._endThinkingForTurn() // #7393
     this._activeTurn = null

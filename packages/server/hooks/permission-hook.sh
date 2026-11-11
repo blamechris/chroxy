@@ -278,6 +278,21 @@ emit_daemon_rejected_deny() {
   exit 0
 }
 
+# #8529: curl hit its own --max-time (exit 28) after it had begun uploading the
+# request, and no complete response had arrived. The evidence is exactly that and
+# no more: a positive uploaded-byte count means curl wrote bytes into the socket.
+# It does not show that the whole request left, that the daemon read any of it,
+# or that a prompt was shown. So the wording claims neither delivery nor
+# non-delivery: it must not say the request never reached the phone (it may have
+# been on screen the whole time), and it must not say it did. ALWAYS deny,
+# whatever CHROXY_HOOK_UNREACHABLE_DECISION says: a wait that ran its full length
+# after the request started is the no-answer case, which the daemon itself
+# answers with a deny, and losing that reply must not turn it into an "ask".
+emit_transport_timeout_deny() {
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy began sending the permission request, but did not receive a complete response before the wait expired. Failing closed (denied)."}}'
+  exit 0
+}
+
 # ---- Shared: route a permission request to the phone via HTTP ----
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
@@ -288,26 +303,77 @@ route_to_phone() {
   # curl fail with E2BIG on a big write and the hook then reported the
   # fail-closed deny instead of prompting. Identical bytes either way for a
   # normal payload.
-  CURL_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission" -H "Content-Type: application/json" --data-binary @- --max-time 300)
+  # #8529: --max-time is one layer of three, and the order is what matters:
+  #   daemon no-answer timer (300 s)  <  this --max-time (310 s)  <  the `timeout`
+  #   Claude Code is given for this hook (330 s).
+  # The daemon's timer answers a request nobody answered; this has to still be
+  # listening when it does. At 300 it was not: curl's clock starts before the
+  # daemon's, so curl gave up a few milliseconds before the reply was written.
+  # The 10 s between the first two is a margin, not a guarantee: a daemon whose
+  # timer fires more than that late still loses to this deadline, and the hook
+  # then reports the transport timeout below (a deny either way).
+  # The numbers live in src/permission-deadlines.js, and
+  # tests/permission-deadline-chain.test.js runs this script and fails if the
+  # value handed to curl here stops matching.
+  CURL_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission" -H "Content-Type: application/json" --data-binary @- --max-time 310)
   if [ -n "$TOKEN" ]; then
     CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
   fi
 
-  # #7044: also capture the HTTP status. `-w` appends "\n<code>" after the body, so
-  # the last line is the status and everything before it is the body. Only a 200
-  # can carry a decision a human made; the daemon also answers {"decision":"deny"}
-  # with a 400 (unparseable body), 413 (oversize body) and 5xx (daemon fault), none
-  # of which ever reached the phone.
-  CURL_ARGS+=(-w $'\n%{http_code}')
+  # #7044: also capture the HTTP status. `-w` appends a trailer line after the
+  # body, "\n<code> <bytes uploaded>", so the last line is curl's own and
+  # everything before it is the body. Only a 200 can carry a decision a human
+  # made; the daemon also answers {"decision":"deny"} with a 400 (unparseable
+  # body), 413 (oversize body) and 5xx (daemon fault), none of which ever reached
+  # the phone. curl writes the trailer on a failed transfer too (code 000).
+  CURL_ARGS+=(-w $'\n%{http_code} %{size_upload}')
   RESPONSE_AND_CODE=$(printf '%s' "$REQUEST" | curl "${CURL_ARGS[@]}")
   EXIT_CODE=$?
+  CURL_TRAILER="${RESPONSE_AND_CODE##*$'\n'}"
 
   if [ $EXIT_CODE -ne 0 ]; then
-    # Daemon unreachable / curl timeout — the request never reached the phone.
+    # #8529: curl's exit 28 is its own deadline. What it had seen by then decides
+    # the wording, and both outcomes selected here DENY. Both facts are read only
+    # from a well-formed trailer ("<3 digits> <digits>"); anything else (and a
+    # 200 with no byte uploaded) is not proof of either and falls through to the
+    # unreachable handling below, unchanged, opt-out included.
+    #   - A final non-200 status had already arrived (the daemon sent 401/429/5xx
+    #     headers and then stalled): that is the daemon's rejection, so keep the
+    #     status visible, exactly as a completed non-200 reads (#7044).
+    #   - Otherwise, if curl had BEGUN SENDING the request (uploaded-byte count
+    #     above zero): a transport timeout, not an unreachable daemon. The count
+    #     shows the upload started, not that it finished or was read. This
+    #     includes a 200 whose body never completed. The body is not read on this
+    #     path, so a partial body cannot allow.
+    if [ $EXIT_CODE -eq 28 ]; then
+      TIMEOUT_STATUS=""
+      BYTES_SENT=""
+      case "$CURL_TRAILER" in
+        [0-9][0-9][0-9]' '*)
+          TIMEOUT_STATUS="${CURL_TRAILER%% *}"
+          BYTES_SENT="${CURL_TRAILER#* }"
+          ;;
+      esac
+      case "$BYTES_SENT" in
+        ''|*[!0-9]*) TIMEOUT_STATUS=""; BYTES_SENT="" ;;
+      esac
+      case "$TIMEOUT_STATUS" in
+        200) ;;
+        [2-5][0-9][0-9]) emit_daemon_rejected_deny "$TIMEOUT_STATUS" ;;
+      esac
+      case "$BYTES_SENT" in
+        ''|0*) ;;
+        *) emit_transport_timeout_deny ;;
+      esac
+    fi
+    # Could not connect (refused, unresolvable, or timed out with no byte
+    # uploaded): the request never reached the phone. KNOWN LIMIT: a connection
+    # that drops after the upload began (curl 52/56) also lands here and keeps
+    # this wording.
     emit_unreachable_fallback "Chroxy could not reach the daemon to request your approval; the request never reached your phone. Failing closed (denied). Retry once Chroxy is reachable."
   fi
 
-  HTTP_CODE="${RESPONSE_AND_CODE##*$'\n'}"
+  HTTP_CODE="${CURL_TRAILER%% *}"
   RESPONSE="${RESPONSE_AND_CODE%$'\n'*}"
   # Anything that is not exactly 200 (including a missing/garbled status) is a
   # daemon-side rejection. Always DENY — never the CHROXY_HOOK_UNREACHABLE_DECISION=ask
@@ -330,9 +396,22 @@ route_to_phone() {
 EOF
       ;;
     deny)
-      cat <<EOF
+      # #8529: the daemon's own no-answer timer also answers 200 deny, and marks it
+      # "reason":"timeout". Nobody denied that request, so do not say the user did.
+      # The field only ever picks the WORDING of a deny: it is read here, inside
+      # the deny branch, and matched as the exact token. A daemon that predates
+      # the field sends no reason and keeps the wording below. It is extracted by
+      # the same token grep as DECISION above, not by a JSON parse.
+      DENY_REASON=$(echo "$RESPONSE" | grep -o '"reason":"[^"]*"' | head -1 | cut -d'"' -f4)
+      if [ "$DENY_REASON" = "timeout" ]; then
+        cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"No one answered the Chroxy permission request before it timed out. Failing closed (denied)."}}
+EOF
+      else
+        cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
 EOF
+      fi
       ;;
     *)
       # Reached the daemon but got no recognizable decision — also unanswerable
