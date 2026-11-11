@@ -62,8 +62,9 @@ describe('search calls are judged from their effective root', () => {
     assert.equal(effectiveSearchRoot({ path: 'src', file_path: 'x' }), 'src')
     assert.equal(effectiveSearchRoot({ file_path: 'x' }), '.')
     assert.equal(effectiveSearchRoot({ path: null }), '.')
-    assert.equal(effectiveSearchRoot({ path: '' }), null)
+    assert.equal(effectiveSearchRoot({ path: '' }), '.', 'an empty optional path is the cwd')
     assert.equal(effectiveSearchRoot({ path: 5 }), null)
+    assert.equal(effectiveSearchRoot({ path: ['x'] }), null)
   })
 
   for (const tool of ['Grep', 'Glob']) {
@@ -79,6 +80,25 @@ describe('search calls are judged from their effective root', () => {
       await assertBoth(tool, { pattern: 'x', file_path: 'benign.txt' }, false, 'decoy')
       await assertBoth(tool, { pattern: 'x', path: 'src' }, false, 'explicit path')
     })
+
+    it(`${tool}: an empty optional path is not floored in an ordinary project`, async () => {
+      await assertBoth(tool, { pattern: 'x', path: '' }, false, 'empty path')
+      await assertBoth(tool, { pattern: 'x', path: '' }, true, 'empty path in the sessions dir', sessionsDir)
+    })
+
+    it(`${tool}: a floored directory in an extra path field is still checked`, async () => {
+      await assertBoth(tool, { pattern: 'x', path: 'src', file_path: sessionsDir }, true, 'extra field')
+      await assertBoth(tool, { pattern: 'x', path: 'src', notebook_path: sessionsDir }, true, 'extra notebook field')
+      await assertBoth(tool, { pattern: 'x', path: 'src', file_path: '/tmp/cc-socks' }, true, 'extra field naming the socket directory')
+      await assertBoth(tool, { pattern: 'x', path: 'src', file_path: 'benign.txt' }, false, 'benign extra field')
+    })
+
+    if (tool === 'Grep') {
+      it('Grep: an extra field naming a directory above the sessions directory is still checked', async () => {
+        await assertBoth('Grep', { pattern: 'x', path: 'src', file_path: home }, true, 'extra field above the sessions dir')
+        await assertBoth('Grep', { pattern: 'x', path: 'src', file_path: 'benign' }, false, 'benign extra field')
+      })
+    }
 
     it(`${tool}: an unusable path floors`, async () => {
       await assertBoth(tool, { pattern: 'x', path: 5 }, true, 'non-string path')
@@ -101,6 +121,16 @@ describe('apply_patch needs a complete change list', () => {
   it('does not floor a complete list of ordinary paths (control)', async () => {
     await assertBoth('apply_patch', { file_path: project, changes: [change()] }, false, 'valid')
     await assertBoth('apply_patch', { file_path: project, changes: [change({ kind: 'add' })] }, false, 'legacy string kind')
+  })
+})
+
+describe('a patch call is bounded by its path count, rename destinations included', () => {
+  it('floors a call whose sources and destinations together exceed the target budget', () => {
+    const change = (i) => ({ path: `src/f${i}.js`, kind: { type: 'update', move_path: `dst/f${i}.js` }, diff: '' })
+    const some = Array.from({ length: 10 }, (_, i) => change(i))
+    assert.equal(evaluateHookFloorRequest({ tool_name: 'apply_patch', tool_input: { file_path: project, changes: some } }, project).floor, false)
+    const many = Array.from({ length: 600 }, (_, i) => change(i))
+    assert.equal(evaluateHookFloorRequest({ tool_name: 'apply_patch', tool_input: { file_path: project, changes: many } }, project).floor, true)
   })
 })
 

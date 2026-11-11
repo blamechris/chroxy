@@ -396,6 +396,55 @@ describe('path-scoped rules match on the target real location', () => {
     }
   })
 
+  it('a scoped deny matches any target inside the scope, by text or by real location', { skip: SKIP_NO_SYMLINK }, () => {
+    mkdirSync(join(root, 'secrets'))
+    mkdirSync(join(root, 'pub'))
+    writeFileSync(join(root, 'secrets', 's.txt'), 's')
+    writeFileSync(join(root, 'pub', 'p.txt'), 'p')
+    symlinkSync(join(root, 'secrets'), join(root, 'pub', 'lnk'))
+    pm.setRules([{ tool: 'Write', decision: 'deny', path: 'secrets' }])
+    const w = (file_path) => pm._matchesRule('Write', { file_path })
+    assert.equal(w('secrets/s.txt'), 'deny', 'by text')
+    assert.equal(w('pub/lnk/s.txt'), 'deny', 'through a link into the scope')
+    assert.equal(w('pub/lnk'), 'deny')
+    assert.equal(w('pub/p.txt'), null, 'unrelated call')
+    assert.equal(w('src/a.txt'), null, 'unrelated call')
+    pm.setRules([{ tool: 'Write', decision: 'deny', path: 'secrets/**' }])
+    assert.equal(w('pub/lnk/s.txt'), 'deny', 'glob scope, through a link')
+    assert.equal(w('pub/p.txt'), null)
+  })
+
+  it('a scoped deny on apply_patch matches when any change is in the scope or the list is unusable', () => {
+    mkdirSync(join(root, 'secrets'))
+    pm.setRules([{ tool: 'apply_patch', decision: 'deny', path: 'secrets' }])
+    const c = (path, move_path = null) => ({ path, kind: { type: 'update', move_path }, diff: '' })
+    const patch = (...changes) => pm._matchesRule('apply_patch', { changes })
+    assert.equal(patch(c('src/a.txt'), c('secrets/k.txt')), 'deny', 'one change in scope')
+    assert.equal(patch(c('src/a.txt', 'secrets/k.txt')), 'deny', 'rename into the scope')
+    assert.equal(patch(c('src/a.txt'), c('src/b.txt')), null, 'nothing in scope')
+    assert.equal(pm._matchesRule('apply_patch', { changes: 'diff' }), 'deny', 'incomplete list')
+    assert.equal(pm._matchesRule('apply_patch', { changes: [c('src/a.txt'), {}] }), 'deny', 'malformed member')
+    assert.equal(pm._matchesRule('apply_patch', {}), 'deny', 'no list')
+  })
+
+  it('a scoped deny matches a call whose targets cannot be determined', () => {
+    pm.setRules([{ tool: 'Glob', decision: 'deny', path: 'secrets' }])
+    assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: '../secrets/*' }), 'deny', 'pattern leaves its root')
+    assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: '*.js' }), null)
+    pm.setRules([{ tool: 'Read', decision: 'deny', path: 'secrets' }])
+    assert.equal(pm._matchesRule('Read', {}), 'deny', 'no target')
+    assert.equal(pm._matchesRule('Read', { file_path: '~/x' }), 'deny', 'home-relative')
+    assert.equal(pm._matchesRule('Read', { file_path: 'src/a.txt' }), null)
+  })
+
+  it('a scoped deny matches when the real location cannot be resolved', { skip: SKIP_NO_SYMLINK }, () => {
+    mkdirSync(join(root, 'secrets'))
+    symlinkSync(join(root, 'src', 'loop-b'), join(root, 'src', 'loop-a'))
+    symlinkSync(join(root, 'src', 'loop-a'), join(root, 'src', 'loop-b'))
+    pm.setRules([{ tool: 'Write', decision: 'deny', path: 'secrets' }])
+    assert.equal(pm._matchesRule('Write', { file_path: 'src/loop-a' }), 'deny')
+  })
+
   it('does not match when the session cwd does not exist', () => {
     const missing = new PermissionManager({ log: silentLog, cwd: join(root, 'no-such-dir') })
     missing.setRules([{ tool: 'Write', decision: 'allow', path: 'src' }])
@@ -503,6 +552,22 @@ describe('path-scoped rules collect the targets the tool really uses', () => {
       assert.equal(pm._matchesRule('Glob', { pattern }), null, `no path: ${pattern}`)
     }
     assert.equal(pm._matchesRule('Glob', { pattern: '*.txt' }), 'allow')
+  })
+
+  it('a path starting with ~ names no fixed target, so an allow rule does not match', () => {
+    rule('Read', '**')
+    assert.equal(pm._matchesRule('Read', { file_path: 'src/a.txt' }), 'allow')
+    assert.equal(pm._matchesRule('Read', { file_path: '~/src/a.txt' }), null)
+    assert.equal(pm._matchesRule('Read', { file_path: '~user/src/a.txt' }), null)
+    assert.equal(pm._matchesRule('Read', { file_path: '~' }), null)
+    rule('Grep', '**')
+    assert.equal(pm._matchesRule('Grep', { path: '~/src', pattern: 'x' }), null)
+    assert.equal(pm._matchesRule('Grep', { path: 'src', pattern: 'x' }), 'allow')
+  })
+
+  it('an empty search path is the cwd for Grep and Glob rules', () => {
+    rule('Grep', '**')
+    assert.equal(pm._matchesRule('Grep', { path: '', pattern: 'x' }), 'allow')
   })
 })
 

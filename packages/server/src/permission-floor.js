@@ -1614,7 +1614,7 @@ export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])
 
 /**
  * The directory a Grep / Glob call searches from, as the executor reads it: its
- * `path`, or the session cwd (`'.'`) when `path` is absent or null. Other fields
+ * `path`, or the session cwd (`'.'`) when `path` is absent, null or empty. Other fields
  * never stand in for it. Returns null when `path` is present but not a usable
  * string, so the caller fails closed.
  * @param {object} input
@@ -1622,7 +1622,7 @@ export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])
  */
 export function effectiveSearchRoot(input) {
   const value = input?.path
-  if (value === undefined || value === null) return '.'
+  if (value === undefined || value === null || value === '') return '.'
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
