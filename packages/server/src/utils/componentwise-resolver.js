@@ -1,6 +1,6 @@
 import { lstatSync, readlinkSync } from 'node:fs'
 import { lstat, readlink } from 'node:fs/promises'
-import path, { dirname, join, sep } from 'node:path'
+import path, { dirname, join } from 'node:path'
 
 /**
  * open(2)-faithful, component-by-component path resolver — the SINGLE SOURCE for
@@ -96,7 +96,9 @@ export function walkStart(p, current, pathImpl = path) {
     }
     if (root === '\\' || root === '/') {
       const driveRoot = pathImpl.parse(current).root
-      if (!/^[A-Za-z]:[\\/]$/.test(driveRoot) && !/^[\\/]{2}[^\\/]/.test(driveRoot)) {
+      // Only a real drive or a real share (server and share, the server neither `?` nor
+      // `.`): the `\\?\` and `\\.\` device namespaces have no drive to anchor to.
+      if (!/^[A-Za-z]:[\\/]$/.test(driveRoot) && !/^[\\/]{2}[^\\/?.][^\\/]*[\\/]+[^\\/]+[\\/]?$/.test(driveRoot)) {
         throw Object.assign(new Error('componentwise resolver: a root-relative path has no drive to anchor to'), { code: 'EINVAL' })
       }
       return { start: driveRoot, below: splitPathBelowRoot(p, root, pathImpl) }
@@ -116,8 +118,8 @@ export function walkStart(p, current, pathImpl = path) {
  * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path
  * @returns {{ resolved: string, pending: string[] }}
  */
-function beginWalk(realBase, target) {
-  const { start, below } = walkStart(target, realBase)
+export function beginWalk(realBase, target, pathImpl = path) {
+  const { start, below } = walkStart(target, realBase, pathImpl)
   return { resolved: start || realBase, pending: below }
 }
 
@@ -165,13 +167,13 @@ function resolveComponentLexically(resolved, comp, tail) {
  * @param {string} link      the raw `readlink` target
  * @returns {string}
  */
-function spliceSymlink(pending, i, resolved, link) {
+export function spliceSymlink(pending, i, resolved, link, pathImpl = path) {
   // On POSIX `\` is a name character, which the split below would read as a
   // separator; a link whose target holds one is not walked (callers fail closed).
-  if (sep === '/' && link.includes('\\')) {
+  if (pathImpl.sep === '/' && link.includes('\\')) {
     throw Object.assign(new Error('componentwise resolver: link target holds a backslash'), { code: 'EINVAL' })
   }
-  const { start, below } = walkStart(link, resolved)
+  const { start, below } = walkStart(link, resolved, pathImpl)
   pending.splice(i, 0, ...below)
   return start || resolved
 }

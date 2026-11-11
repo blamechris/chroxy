@@ -8,6 +8,8 @@ import {
   resolveTargetComponentwiseAsync,
   splitPathBelowRoot,
   walkStart,
+  beginWalk,
+  spliceSymlink,
   COMPONENTWISE_MAX_SYMLINKS,
   COMPONENTWISE_MAX_COMPONENTS,
   COMPONENTWISE_MAX_PATH_LENGTH,
@@ -273,6 +275,30 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     }
     assert.throws(() => w('\\foo', 'work'), { code: 'EINVAL' })
     assert.throws(() => w('\\foo', ''), { code: 'EINVAL' })
+  })
+
+  it('walkStart does not anchor a root-relative path to a device namespace', () => {
+    for (const cur of ['\\\\?\\UNC\\srv\\sh\\d', '\\\\.\\pipe\\x', '\\\\?\\GLOBALROOT\\Device\\X\\a', '\\\\?\\C:\\work']) {
+      assert.throws(() => walkStart('\\foo', cur, path.win32), { code: 'EINVAL' }, cur)
+    }
+    // a normal drive and a normal share still anchor
+    assert.deepEqual(walkStart('\\foo', 'C:\\work', path.win32), { start: 'C:\\', below: ['foo'] })
+    assert.deepEqual(walkStart('\\foo', '\\\\srv\\share\\w\\x', path.win32), { start: '\\\\srv\\share\\', below: ['foo'] })
+  })
+
+  it('the walk anchors a root-relative target to the base drive and a root-relative link target to the drive resolved so far', () => {
+    // beginWalk: base C:\work
+    assert.deepEqual(beginWalk('C:\\work', '\\foo', path.win32), { resolved: 'C:\\', pending: ['foo'] })
+    assert.deepEqual(beginWalk('C:\\work', 'rel\\x', path.win32), { resolved: 'C:\\work', pending: ['rel', 'x'] })
+    assert.throws(() => beginWalk('C:\\work', 'C:foo', path.win32), { code: 'EINVAL' })
+    // spliceSymlink: resolved-so-far is on D:, the session base was on C:
+    const pending = ['link', 'tail']
+    const start = spliceSymlink(pending, 1, 'D:\\x', '\\foo', path.win32)
+    assert.equal(start, 'D:\\')
+    assert.deepEqual(pending, ['link', 'foo', 'tail'])
+    assert.throws(() => spliceSymlink(['l'], 1, 'D:\\x', 'C:rel', path.win32), { code: 'EINVAL' })
+    // a relative link target continues from the link's parent
+    assert.equal(spliceSymlink(['l'], 1, 'D:\\x', 'sub\\y', path.win32), 'D:\\x')
   })
 
   it('walkStart on POSIX treats those spellings as ordinary names and roots', () => {
