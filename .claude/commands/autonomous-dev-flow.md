@@ -1,6 +1,6 @@
 # /autonomous-dev-flow
 
-Carry delegated development through scope/design, reuse investigation, a proportional plan, model delegation, TDD, /full-review, gated synchronous merge and verified ledger updates. Both normal development and prime-directive include merge authority under Critical Rule 5. Normal development ends with a seed/status after the selected feature or work package is delivered; prime-directive continues to the next authorized item within its mission and original limits. Owner presence does not select or change that mode.
+Carry delegated development through scope/design, reuse investigation, a proportional plan, model delegation, TDD, /full-review, gated synchronous merge and verified ledger updates. Both normal development and prime-directive include merge authority under Critical Rule 5. Normal development ends with a seed/status after the selected feature or work package is delivered; prime-directive continues to the next authorized item within its charter and original limits. Owner presence does not select or change that mode.
 
 ## Arguments
 
@@ -412,7 +412,7 @@ Output cumulative progress table:
 
 **CRITICAL: A flagged PR blocks only its dependent work.** Record its failed gate and consumed fix attempts, then advance independent authorized work. Before a wait-only handoff, take each ready, independently deliverable slice through review and delivery within the repo's authority. Ask the owner only for the missing prerequisite, decision or retry authority; the agent retains delegated implementation, build and delivery work and resumes it when that prerequisite arrives.
 
-After recording a verified delivery, return to Phase 1 for the next item within the selected work package. Once that package is delivered, normal development writes `/session-lifecycle`'s verified seed and concise status, then ends; prime-directive selects the next authorized item within its mission and original limits. Do not expand a normal feature into backlog cleanup or stop a prime-directive run just because one feature merged.
+After recording a verified delivery, return to Phase 1 for the next item within the selected work package. Once that package is delivered, normal development writes `/session-lifecycle`'s verified seed and concise status, then ends; prime-directive selects the next authorized item within its charter and original limits. Do not expand a normal feature into backlog cleanup or stop a prime-directive run just because one feature merged.
 
 ### Phase 7: Session Summary
 
@@ -467,7 +467,7 @@ One entry per verified self-merged PR — MANDATORY (Unattended Merge Gate rule 
 
 ## Session Boundaries
 
-Preserve the recorded mode, run identity, state and scoped limits from the caller. Normal development ends after its selected feature/work package is delivered and recorded, with `/session-lifecycle`'s seed and concise status. Prime-directive continues across queue checkpoints and supported auto-compaction within the same mission and original limits. Checkpoint every few issues and before a large one; a wave boundary or compaction count does not force a session restart, and owner presence is not a pause request. Measure handoff and reconstruction cost before claiming savings.
+Preserve the recorded mode, run identity, state and scoped limits from the caller. Normal development ends after its selected feature/work package is delivered and recorded, with `/session-lifecycle`'s seed and concise status. Prime-directive continues across queue checkpoints and supported auto-compaction within the same charter and original limits. Checkpoint every few issues and before a large one; a wave boundary or compaction count does not force a session restart, and owner presence is not a pause request. Measure handoff and reconstruction cost before claiming savings.
 
 - **Durable run state.** Keep the queue (`scratchpad/autonomous-queue.json`) with a compact state record: stable run ID, the run's charter (status, outcome, pool command + count, done, check-in), execution mode, selected work package, current wave/session IDs, outcome, observable acceptance, authority and owner-reserved actions, queue position, blockers, last verified merge, and continuation task/session ID when accepted. Preserve per-issue attempts, including failures before any PR, with strategy, result and consumed smoke/review fix counts. Record measured cost and each configured limit's actual scope (`wave`, `session` or `run`), scope identifier and consumed allowance; missing consumption is unknown, not zero. Update state when an attempt starts and when work consumes a capped retry, not only at the final handoff. The seed must carry this state or a pointer verified to survive workspace teardown.
 - **Prime-directive continuation.** Prefer the current host's supported auto-compaction/context management; reload `/prime-directive` after compaction when it owns the run. Test a lower compaction threshold only through an explicitly configured supported setting; do not silently change it.
@@ -480,7 +480,7 @@ Preserve the recorded mode, run identity, state and scoped limits from the calle
   records the boundary reason, carries unresolved decisions and the pulse snapshot, and
   writes/verifies the seed through its canonical writer. Do not substitute a partial raw
   writer call or another skeleton. Preserve the recorded mode: prime checkpoints continue
-  the already authorized mission under the continuation rules above; the lifecycle flow
+  the already authorized charter under the continuation rules above; the lifecycle flow
   grants no new authority and does not make a checkpoint a forced stop.
 
   **① The path.** `$CLAUDE_HANDOFF_DIR/NEXT-<scope>.md`, where `<scope>` is the main worktree's directory basename. Never inside the segment's worktree: `git worktree remove --force` — the fleet's standard teardown — deletes untracked files silently, which is how three earlier versions of this rule lost a seed. Outside every workspace there is nothing to commit, nothing to push, and nothing to gate teardown on.

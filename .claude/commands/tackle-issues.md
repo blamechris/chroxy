@@ -37,7 +37,7 @@ Each wave runs the full Phase 1-6 cycle from `/autonomous-dev-flow` for each iss
 
 ### Session Boundaries and the Session Ledger
 
-A marathon preserves one authorized run across checkpoints, compactions and any necessary sessions. Wave boundaries are checkpoints; they do not force a session restart. Continue a prime-directive run within its mission and original limits. A normal development invocation stops after its selected feature/work package is delivered and recorded, using `/session-lifecycle` for the seed and concise status; owner presence never changes the recorded mode:
+A marathon preserves one authorized run across checkpoints, compactions and any necessary sessions. Wave boundaries are checkpoints; they do not force a session restart. Continue a prime-directive run within its charter and original limits. A normal development invocation stops after its selected feature/work package is delivered and recorded, using `/session-lifecycle` for the seed and concise status; owner presence never changes the recorded mode:
 
 - **Session ledger + STATE header.** Keep an append-only session ledger (`autonomous-session-<date>.md` at repo root — gitignored, never commit). Its top carries a rolling **STATE header** — a compact block (~2K tokens, hard-capped, rewritten in place) holding: stable run identity, the run's charter (status, outcome, pool command + count, done, check-in), execution mode + selected work package, delegated outcome + observable acceptance, usable state + remaining gap, authority, configured limits with their scope (wave/session/run) + cumulative consumption, current wave + position, queue pointer, open blockers, awaiting-user list, the last **verified** merge (PR + SHA), completions from the last wave, and a compact per-issue attempt table (issue# → attempts including failures before a PR exists, last strategy tried, status). Record attempts when they start and reconcile actual usage before another attempt or handoff. After a compaction or on a fresh session, the STATE header is the **only mandatory read**; preserve its consumption across session identifiers. The full history below it is consulted on-demand — allowed, and expected, for three purposes: the **Phase 4 convergence assessment**, **Phase 5 merge accounting**, and the **Phase 6 morning summary**. What is prohibited is the routine post-compaction top-to-bottom re-read as a ritual, not these accounting passes.
 - **Per-wave merge table.** At each wave boundary, append a **"Merged this wave"** table (PR, issue, review, checks, merge SHA) to the ledger history. Phases 5–6 aggregate these tables across all waves — across any session restarts, "merged by this session" means the whole marathon, never just the last wave.
@@ -54,7 +54,7 @@ A marathon preserves one authorized run across checkpoints, compactions and any 
   records the boundary reason, carries unresolved decisions and the pulse snapshot, and
   writes/verifies the seed through its canonical writer. Do not substitute a partial raw
   writer call or another skeleton. Preserve the recorded mode: a prime checkpoint continues
-  the already authorized mission using the continuation rules above; it does not grant new
+  the already authorized charter using the continuation rules above; it does not grant new
   authority or turn a wave boundary into a stop.
 
   **① The path.** `$CLAUDE_HANDOFF_DIR/NEXT-<scope>.md`, where `<scope>` is the main worktree's directory basename — the same key from every wave's worktree, so a marathon's waves all read and write one seed. Never inside a wave's worktree: `git worktree remove --force` deletes untracked files silently, and a wave that loses its seed has not shed context, it has dropped the marathon's continuity. Outside every workspace there is nothing to commit, nothing to push, and nothing to gate teardown on.
@@ -109,7 +109,7 @@ Display the marathon queue:
 | 3 | #18 — Auth integration tests | testing | Implement |
 | — | #16 — Refactor auth module | enhancement | Assigned to @user (skipped) |
 
-**Mode:** {recorded normal-development work package / prime-directive mission}, up to {W} waves
+**Mode:** {recorded normal-development work package / prime-directive charter}, up to {W} waves
 **Self-merge:** {per Critical Rule 5 — Unattended Merge Gate ON / off (`merge:off`) / withheld by this repo}
 **Estimated scope:** {N} issues × {W} max waves
 
@@ -191,7 +191,7 @@ gh issue list --state open --json number,title,labels,assignees,createdAt --limi
 # (user may have labeled new issues while session was running)
 ```
 
-Add new unassigned issues only if they are necessary for the delegated outcome or match the explicitly selected backlog, and are not already in `MASTER_LOG`. Discovery during a review does not itself make work a priority.
+Add new unassigned issues only if they are prerequisites and decomposition sub-issues of picked items, or items the pool query returns, and are not already in `MASTER_LOG`. Discovery during a review does not itself make work a priority.
 
 #### 2c. Check for User Merges
 
@@ -461,7 +461,7 @@ When this wave is part of a PRIME run under an owner-confirmed charter, apply it
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-18. **Wave boundaries use the verified continuation contract** — Preserve the handoff + queue + STATE header, then continue prime-directive using supported host compaction within its mission and original limits. Waves and compaction counts never force a restart. If a fresh session is needed, verify the authorized next run was accepted before ending while work remains; a configured launcher, saved seed or watching owner is insufficient. Normal development ends after its selected work package is delivered and recorded. Preserve actual pause requests, dependencies and limit stops; report genuine host limitations and never require an unsupported compaction command.
+18. **Wave boundaries use the verified continuation contract** — Preserve the handoff + queue + STATE header, then continue prime-directive using supported host compaction within its charter and original limits. Waves and compaction counts never force a restart. If a fresh session is needed, verify the authorized next run was accepted before ending while work remains; a configured launcher, saved seed or watching owner is insufficient. Normal development ends after its selected work package is delivered and recorded. Preserve actual pause requests, dependencies and limit stops; report genuine host limitations and never require an unsupported compaction command.
 19. **STATE header over full re-reads** — After compaction, read only the ledger's STATE header; the full ledger history is on-demand reference, never a mandatory re-read.
 20. **Explicit-path staging** — `git status --short`, then `git add` the changed files by name. Never `git add -A`, `git add .`, `git add -u`, `git add <dir>/`, or `git commit -a`. A marathon runs for hours in a working copy other sessions also use, so a bulk add commits their files into your PR. `-u` is not the safe one: it restages tracked files a clean/smudge filter rewrote behind your back, which is how a tracked 21KB `.docx` was committed as a git-lfs pointer.
 21. **Assert the branch before you write** — record each issue's newly created branch, or its restored branch with ownership verified from this run's durable record, as `SESSION_BRANCH`. Re-check `git branch --show-current` against it immediately before the first edit and again immediately before staging. HEAD is global to the working copy, so a checkout from earlier in the wave proves nothing. Never write to another run's branch or assume ownership from its name alone.
