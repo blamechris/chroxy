@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.10] - 2026-11-11
+
+### Changed
+
+- **A permission check that fails, cannot start, or is cancelled blocks the tool call (#9100).** This holds in the three places Chroxy decides a permission: the claude-tui hook registration, the claude-cli hook registration, and the Agent SDK's check on an Auto turn.
+  - Both hook registrations set `onFailure: "block"`. Claude Code builds that predate the option (2.1.141 was checked) ignore it.
+  - The claude-cli registration lives in your user-level Claude settings, so its command now exits with no decision outside a Chroxy claude-cli session, even when the script it names is gone. Registering replaces an entry in the old form.
+  - The permission hook script resets inherited shell options (`errexit`, `nounset`, `pipefail`) before it runs.
+  - On an Auto turn, an SDK permission check that throws or rejects is recorded as a deny.
+- **Path-scoped permission rules and the permission floor check each tool's real targets (#9096).**
+  - A path-scoped rule matches only when the target is inside the scope both by its path text and by its real filesystem location. A target that does not exist yet still matches.
+  - Targets come from each tool's own field: `file_path` for Read, Write and Edit; `notebook_path` for NotebookEdit; `path` for Glob and Grep, defaulting to the session working directory. apply_patch is checked on its complete change list, its rename destinations and its root.
+  - A Glob whose pattern is absolute or contains `..` does not match a scoped rule.
+  - For Grep and Glob, the floor checks the effective search root. An apply_patch whose change list is missing, empty or incomplete always prompts.
+  - On POSIX, the shared path resolver no longer treats a backslash as a separator. On Windows, it rejects drive-relative and root-relative paths.
+
+### Fixed
+
+- **An unanswered hook-routed permission prompt is denied by the daemon, with its own wording (#9091).** At the end of the 300 s decision window the model and the transcript are told "No one answered the Chroxy permission request before it timed out". They used to read a user deny or an unreachable daemon.
+  - The three deadlines on one request are now ordered: the daemon decides at 300 s, the hook's request waits up to 310 s, and Claude Code gives the hook 330 s. All three were 300 s, and the hook's request used to give up a few milliseconds before the daemon answered.
+  - If the hook's request has begun uploading and then runs out of time, the hook denies, even when `CHROXY_HOOK_UNREACHABLE_DECISION=ask` is set. A failure before the upload begins still honours that setting.
+  - A claude-tui session pauses its inactivity and stream-stall watchdogs while a hook-routed prompt is pending, so a turn waiting on a person is no longer torn down as a stall. The hard cap stays armed.
+
 ## [0.11.9] - 2026-11-10
 
 ### Added
