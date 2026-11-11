@@ -427,6 +427,17 @@ describe('path-scoped rules match on the target real location', () => {
     assert.equal(pm._matchesRule('apply_patch', {}), 'deny', 'no list')
   })
 
+  it('a Glob pattern with spaces keeps a determinable target', () => {
+    const input = { path: 'src', pattern: 'My Docs/*.md' }
+    pm.setRules([{ tool: 'Glob', decision: 'deny', path: 'secrets' }])
+    assert.equal(pm._matchesRule('Glob', input), null)
+    pm.setRules([{ tool: 'Glob', decision: 'allow', path: '**' }])
+    assert.equal(pm._matchesRule('Glob', input), 'allow')
+    pm.setRules([{ tool: 'Glob', decision: 'allow', path: 'src' }])
+    assert.equal(pm._matchesRule('Glob', input), 'allow')
+    assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: 'a b/../c' }), null, 'a space does not hide a climb')
+  })
+
   it('a scoped deny matches a call whose targets cannot be determined', () => {
     pm.setRules([{ tool: 'Glob', decision: 'deny', path: 'secrets' }])
     assert.equal(pm._matchesRule('Glob', { path: 'src', pattern: '../secrets/*' }), 'deny', 'pattern leaves its root')

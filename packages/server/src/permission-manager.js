@@ -332,7 +332,11 @@ const SCOPED_RULE_PATH_FIELD = {
 /** Does a Glob pattern select files outside its search root? */
 function _globPatternLeavesRoot(pattern) {
   if (typeof pattern !== 'string') return false
-  return globPatternEscapeReason(pattern) !== null || isAbsolute(pattern) || /^[/\\]/.test(pattern)
+  // The whitespace rule only concerns how a container splits a pattern; a space
+  // does not make a pattern leave its root. Judge the pattern with its spaces
+  // neutralised so every other rule (a `..` segment after a space too) still runs.
+  const reason = globPatternEscapeReason(pattern.replace(/\s/g, '_'))
+  return reason !== null || isAbsolute(pattern) || /^[/\\]/.test(pattern)
 }
 
 /** A path starting with `~` may be expanded to a home directory, so it names no fixed target. */
@@ -700,12 +704,13 @@ export class PermissionManager extends EventEmitter {
 
   /**
    * #6803 — does this rule's optional `path` SCOPE admit `input`? An UNSCOPED
-   * rule (no `path`) matches every input, exactly as before. A SCOPED rule
-   * matches only when the input names at least one concrete target path AND
-   * EVERY target falls within the scope (a scoped deny matches when ANY does) (resolved against the session cwd) — so
-   * a scoped `allow` never auto-approves an out-of-scope target, and an input
-   * with no path (a command-shaped tool, or a bare `Read` with no file) never
-   * matches a scoped rule and falls through to a prompt.
+   * rule (no `path`) matches every input, exactly as before. For a SCOPED rule:
+   * an allow rule matches only when the input names at least one target and
+   * EVERY target is within the scope (resolved against the session cwd); a deny
+   * rule matches when ANY target is within the scope, or when the targets cannot
+   * be determined. So a scoped `allow` never auto-approves an out-of-scope
+   * target, and an input with no path never matches a scoped allow and falls
+   * through to a prompt.
    * @param {{tool: string, decision: string, path?: string}} rule
    * @param {object} [input]
    * @returns {boolean}
