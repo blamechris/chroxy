@@ -470,6 +470,40 @@ describe('path-scoped rules collect the targets the tool really uses', () => {
     assert.equal(pm._matchesRule('apply_patch', { changes: [{ path: 'src/a.txt', kind: { type: 'update', move_path: 5 } }] }), null)
     assert.equal(pm._matchesRule('apply_patch', { changes: [] }), null)
   })
+
+  it('apply_patch also checks the approval root carried in the top-level file_path', () => {
+    rule('apply_patch', 'src')
+    const changes = [{ path: 'src/a.txt', kind: { type: 'update', move_path: null }, diff: '' }]
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'src', changes }), 'allow')
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'src/sub', changes }), 'allow')
+    assert.equal(pm._matchesRule('apply_patch', { changes }), 'allow')
+    assert.equal(pm._matchesRule('apply_patch', { file_path: '.', changes }), null, 'root above the scope')
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'docs', changes }), null)
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 42, changes }), null, 'non-string root')
+    assert.equal(pm._matchesRule('apply_patch', { file_path: ['src'], changes }), null)
+  })
+
+  it('a change with an unsupported or missing kind is incomplete', () => {
+    rule('apply_patch', 'src')
+    assert.equal(pm._matchesRule('apply_patch', { changes: [{ path: 'src/a.txt' }] }), null)
+    assert.equal(pm._matchesRule('apply_patch', { changes: [{ path: 'src/a.txt', kind: 'rename' }] }), null)
+    assert.equal(pm._matchesRule('apply_patch', { changes: [{ path: 'src/a.txt', kind: 'add' }] }), 'allow')
+  })
+
+  it('a Glob pattern that is absolute or climbs with .. does not match', () => {
+    rule('Glob', 'src')
+    for (const pattern of ['*.txt', 'sub/**/*.js']) {
+      assert.equal(pm._matchesRule('Glob', { path: 'src', pattern }), 'allow', pattern)
+    }
+    for (const pattern of ['/etc/*', '../*', '../other/*.js', 'sub/../../x', '..\\x', '\\x']) {
+      assert.equal(pm._matchesRule('Glob', { path: 'src', pattern }), null, `explicit path: ${pattern}`)
+    }
+    rule('Glob', '**')
+    for (const pattern of ['/etc/*', '../*']) {
+      assert.equal(pm._matchesRule('Glob', { pattern }), null, `no path: ${pattern}`)
+    }
+    assert.equal(pm._matchesRule('Glob', { pattern: '*.txt' }), 'allow')
+  })
 })
 
 describe('the protected-path floor reads rename destinations', () => {

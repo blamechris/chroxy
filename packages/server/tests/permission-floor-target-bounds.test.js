@@ -170,12 +170,12 @@ describe('floor: one call\'s targets share a budget', () => {
 
   it('exactly the call budgets are not floored', () => {
     // FLOOR_MAX_CALL_TARGETS targets, a path field among them.
-    const targets = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `src/f${i}.js` }))
+    const targets = Array.from({ length: FLOOR_MAX_CALL_TARGETS - 1 }, (_, i) => ({ path: `src/f${i}.js`, kind: 'update' }))
     assert.equal(isFlooredTarget('apply_patch', { file_path: 'src', changes: targets }, CWD), false)
     // FLOOR_MAX_CALL_COMPONENTS components across the call.
     const each = FLOOR_MAX_TARGET_COMPONENTS
     const paths = Array.from({ length: FLOOR_MAX_CALL_COMPONENTS / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}`)
-    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, CWD), false)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path, kind: 'update' })) }, CWD), false)
     // FLOOR_MAX_CALL_BYTES bytes across the call.
     // 4096-byte targets of 255-byte names (a name the filesystem accepts).
     const names = ('b'.repeat(255) + '/').repeat(16)
@@ -286,9 +286,9 @@ describe('floor: one call\'s filesystem work is bounded', () => {
     // A trailing `/` is one more walked component, though not a counted one.
     const each = FLOOR_MAX_TARGET_COMPONENTS
     const paths = Array.from({ length: FLOOR_MAX_CALL_WALK / each }, (_, i) => 'd/'.repeat(each - 1) + `f${i}` + (i === 0 ? '/' : ''))
-    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), true)
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path, kind: 'update' })) }, '/work/project'), true)
     paths[0] = paths[0].slice(0, -1)
-    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path })) }, '/work/project'), false, 'exactly the walk budget')
+    assert.equal(isFlooredTarget('apply_patch', { changes: paths.map((path) => ({ path, kind: 'update' })) }, '/work/project'), false, 'exactly the walk budget')
   })
 
   it('a call over the component budget is floored before any target is walked', () => {

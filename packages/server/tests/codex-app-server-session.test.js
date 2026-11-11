@@ -1122,10 +1122,23 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
   it('acceptEdits auto-approves a codex file edit (fileChange) without a prompt', async () => {
     const { s, cleanup, responded } = mkApprovalSession('acceptEdits')
     const reqs = capture(s, ['permission_request'])
-    s._onServerRequest({ id: 30, method: 'item/fileChange/requestApproval', params: { grantRoot: '/repo', reason: 'edit' } })
+    s._pendingFileChanges.set('fc-accept', [{ path: 'src/a.js', kind: 'update', diff: '+x' }])
+    s._onServerRequest({ id: 30, method: 'item/fileChange/requestApproval', params: { itemId: 'fc-accept', grantRoot: '/repo', reason: 'edit' } })
     await tick()
     assert.equal(reqs.length, 0, 'acceptEdits does not prompt for a codex edit')
     assert.deepEqual(responded, [[30, { decision: 'approved' }]])
+    cleanup()
+  })
+
+  it('acceptEdits PROMPTS for a codex file edit that carries no change list', async () => {
+    const { s, cleanup, responded } = mkApprovalSession('acceptEdits')
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 29, method: 'item/fileChange/requestApproval', params: { grantRoot: '/repo', reason: 'edit' } })
+    await tick()
+    assert.equal(reqs.length, 1, 'no change list, so the paths cannot be judged')
+    assert.equal(responded.length, 0)
+    s.respondToPermission(reqs[0][1].requestId, 'deny')
+    await tick()
     cleanup()
   })
 

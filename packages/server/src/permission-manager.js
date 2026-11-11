@@ -18,6 +18,7 @@ import {
   isSecretReadTarget,
   PROTECTED_PATH_INPUT_FIELDS,
   collectChangeTargets,
+  effectiveSearchRoot,
 } from './permission-floor.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -316,8 +317,8 @@ export function buildDenyMessage(reason) {
 
 
 /**
- * Tools whose single path-carrying input field a scoped rule reads. A field a
- * tool does not use never counts as one of its targets.
+ * Tools whose single path-carrying input field a scoped rule reads. Glob and
+ * Grep are handled separately: they search from an effective root.
  */
 const SCOPED_RULE_PATH_FIELD = {
   Read: 'file_path',
@@ -325,20 +326,26 @@ const SCOPED_RULE_PATH_FIELD = {
   Edit: 'file_path',
   MultiEdit: 'file_path',
   NotebookEdit: 'notebook_path',
-  Glob: 'path',
-  Grep: 'path',
+}
+
+/** Does a Glob pattern select files outside its search root (absolute, or a `..` segment)? */
+function _globPatternLeavesRoot(pattern) {
+  if (typeof pattern !== 'string') return false
+  return isAbsolute(pattern) || /^[/\\]/.test(pattern) || pattern.split(/[/\\]+/).includes('..')
 }
 
 /**
  * #6803 — collect every concrete target path a tool call names, for the
  * rule-scope test, so a path-scoped rule can confirm ALL of the call's targets
  * fall inside its scope. Tool-aware: Read/Write/Edit use `file_path`,
- * NotebookEdit uses `notebook_path`, Glob/Grep use `path` and search the session
- * cwd when it is absent, and `apply_patch` uses its complete `changes` list
- * (every `path` and rename destination). Fields a tool does not use are
- * ignored. Returns [] when the call names no usable target (a command-shaped
- * tool, a tool this does not know, a malformed or incomplete patch), so a
- * scoped rule does not match it.
+ * NotebookEdit uses `notebook_path`, Glob/Grep search from their effective root
+ * (`path`, else the session cwd; a Glob pattern that is absolute or climbs with
+ * `..` selects files outside it, so such a call has no target), and `apply_patch`
+ * uses every `changes` path and rename destination plus the approval's
+ * top-level `file_path` (the root the approval grants writes under), requiring a
+ * complete change list. Other fields are ignored. Returns [] when the call names
+ * no usable target (a command-shaped tool, a malformed or incomplete patch), so
+ * a scoped rule does not match it.
  * @param {string} toolName
  * @param {object} input
  * @returns {string[]}
@@ -347,14 +354,23 @@ function collectTargetPaths(toolName, input) {
   if (!input || typeof input !== 'object') return []
   if (toolName === 'apply_patch') {
     const { complete, paths } = collectChangeTargets(input.changes)
-    return complete ? paths : []
+    if (!complete) return []
+    const root = input.file_path
+    if (root !== undefined && root !== null) {
+      if (typeof root !== 'string') return []
+      if (root.length > 0) paths.push(root)
+    }
+    return paths
+  }
+  if (toolName === 'Glob' || toolName === 'Grep') {
+    if (toolName === 'Glob' && _globPatternLeavesRoot(input.pattern)) return []
+    const root = effectiveSearchRoot(input)
+    return root === null ? [] : [root]
   }
   const field = SCOPED_RULE_PATH_FIELD[toolName]
   if (field === undefined) return []
   const value = input[field]
-  if (typeof value === 'string' && value.length > 0) return [value]
-  if ((toolName === 'Glob' || toolName === 'Grep') && value == null) return ['.']
-  return []
+  return typeof value === 'string' && value.length > 0 ? [value] : []
 }
 
 // #6803 — a scope string is a GLOB (vs a plain directory prefix) when it carries

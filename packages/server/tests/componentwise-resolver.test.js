@@ -276,4 +276,20 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     // no link involved: unchanged
     await assertParity(root, 'src/missing/../new.txt', join(root, 'src/new.txt'))
   })
+
+  // The resolvers refuse a path whose root depends on the current drive or
+  // directory. The helper is tested with path.win32 above; these run the wiring
+  // (beginWalk and the link splice) and need a Windows host.
+  const WIN32_ONLY = process.platform === 'win32' ? false : 'needs Windows path rules'
+  it('on Windows, both resolvers reject drive-relative and root-relative targets', { skip: WIN32_ONLY }, async () => {
+    for (const bad of ['C:foo', '\\foo']) {
+      await assertBothThrow(root, bad, 'EINVAL')
+    }
+  })
+
+  it('on Windows, both resolvers reject a link whose target is root-relative', { skip: WIN32_ONLY || SKIP_NO_SYMLINK }, async () => {
+    symlinkSync('\\outside', join(root, 'rooted'))
+    await assertBothThrow(root, 'rooted', 'EINVAL')
+    await assertBothThrow(root, 'rooted/x', 'EINVAL')
+  })
 })
