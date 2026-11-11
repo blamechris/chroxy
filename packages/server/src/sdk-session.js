@@ -3115,10 +3115,17 @@ export class SdkSession extends BaseSession {
     const toolUseId = typeof hookToolUseId === 'string' && hookToolUseId.length > 0
       ? hookToolUseId
       : hookInput?.tool_use_id
-    const result = await this._trackPermissionDecision(
-      toolUseId,
-      this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId),
-    )
+    // This callback is the only gate on an Auto turn (the SDK itself runs in
+    // bypassPermissions), and a callback that rejects gives the SDK no decision.
+    // So a permission check that throws, or whose promise rejects, becomes a
+    // deny RESULT here, before it is tracked: it then goes through the same
+    // bookkeeping as any other deny (the tool row shows this reason).
+    const check = (async () => this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId))()
+      .catch((err) => {
+        ;(this._log || log).warn(`Auto-mode permission check failed for ${toolName}; denying: ${err?.message || err}`)
+        return { behavior: 'deny', message: 'Chroxy could not complete the permission check for this tool call. Failing closed (denied).' }
+      })
+    const result = await this._trackPermissionDecision(toolUseId, check)
     const allow = result?.behavior === 'allow'
     return {
       continue: true,

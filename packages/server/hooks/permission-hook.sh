@@ -25,6 +25,13 @@
 # args. Do NOT use $1/$2/etc for tool parameters — they are untrusted and could
 # contain shell metacharacters that execute arbitrary commands.
 
+# This script reads optional variables and runs commands that are expected to
+# find nothing. A shell that inherits nounset, errexit or pipefail (bash takes
+# them from an exported SHELLOPTS) would turn those into a failed hook, so they
+# are switched off here whatever the environment says.
+set +e +u
+set +o pipefail 2>/dev/null
+
 # If CHROXY_PORT is not set, this isn't a Chroxy session — exit silently
 # so Claude Code uses its normal permission flow without showing a hook prompt.
 if [ -z "$CHROXY_PORT" ]; then

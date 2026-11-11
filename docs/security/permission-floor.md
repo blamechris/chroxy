@@ -421,6 +421,17 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   a plain path is written exactly as before. The claude-cli registration is quoted the
   same way, and `_isChroxyHookEntry` still recognises both the old unquoted and the
   quoted form.
+- **Both hook registrations set `onFailure: "block"`.** A permission hook that Claude
+  Code cancels at its timeout, or that cannot be run, has given no decision; with this
+  key that outcome blocks the tool call. The user-level command first checks that the
+  session is one of Chroxy's claude-cli sessions (`CHROXY_PORT` set, `CHROXY_TUI_CHILD`
+  not `1`, both read so that an inherited `nounset` cannot make the check itself fail)
+  and otherwise exits 0 with no output, without running the script, so an
+  entry left behind does nothing in an ordinary Claude Code session or in a claude-tui
+  child even when the script it names has gone. Claude Code builds that predate the
+  option ignore the key; on those a hook that fails is still non-blocking. The Agent
+  SDK's PreToolUse callback on an Auto turn answers a permission check that throws
+  with a deny.
 - **The hook-routed pipeline's own files are floored by the filesystem, and the base
   dir is checked rather than assumed** (#7337 for `claude-cli`, #7372 for
   `claude-tui`). Both providers keep their per-session state — `settings.json` that

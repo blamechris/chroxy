@@ -474,12 +474,23 @@ describe('Claude Code hook registrations: both sites write the host timeout (#85
     assert.equal(tuiHooks[0].timeout, HOST_TIMEOUT_S)
   })
 
+  it('both registrations block the tool call when the hook itself fails or is cancelled', async () => {
+    const { tuiHooks, userHooks } = await readRegisteredHostTimeouts()
+    assert.equal(tuiHooks.length, 1)
+    assert.equal(tuiHooks[0].onFailure, 'block')
+    assert.equal(tuiHooks[0].type, 'command')
+    // The user-level entry carries it too, behind a command that does nothing
+    // outside a claude-cli session (permission-hook-failure-policy.test.js).
+    assert.equal(userHooks.length, 1)
+    assert.equal(userHooks[0].onFailure, 'block')
+  })
+
   it('the two sites agree', async () => {
     const { userHooks, tuiHooks } = await readRegisteredHostTimeouts()
     assert.equal(userHooks[0].timeout, tuiHooks[0].timeout)
   })
 
-  it('the event-capture hooks beside it are untouched: no timeout was added to them', async () => {
+  it('the event-capture hooks beside it are untouched: no timeout and no failure policy was added to them', async () => {
     const { tuiSettings } = await readRegisteredHostTimeouts()
     const others = [
       ...tuiSettings.hooks.PreToolUse.flatMap((e) => e.hooks),
@@ -488,6 +499,16 @@ describe('Claude Code hook registrations: both sites write the host timeout (#85
     ].filter((h) => !/permission-hook\.sh/.test(h.command))
     assert.ok(others.length >= 3)
     for (const h of others) assert.equal('timeout' in h, false, h.command)
+    // Nor do they block on failure: they only record events, and a capture
+    // hook that cannot write must not stop the tool call.
+    for (const h of others) assert.equal('onFailure' in h, false, h.command)
+    // The SessionStart route check is only written for a native-route session,
+    // so ask for one: it carries no failure policy either.
+    const routeSink = mkdtempSync(join(scratch, 'sink-route-'))
+    const withRoute = JSON.parse(readFileSync(writeHookSettings(routeSink, { permissionsEnabled: true, nativeRouteNonce: 'nonce-for-test' }), 'utf8'))
+    const routeHooks = withRoute.hooks.SessionStart.flatMap((e) => e.hooks)
+    assert.ok(routeHooks.length >= 1)
+    for (const h of routeHooks) assert.equal('onFailure' in h, false, h.command)
   })
 })
 
