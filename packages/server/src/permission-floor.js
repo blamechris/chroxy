@@ -80,6 +80,48 @@ const ENV_FILE_PREFIX = '.env.'
 // path field (a path-redirect would let an edit slip past the protected floor).
 export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
 
+/**
+ * The paths a patch-shaped `changes` array names: each member's `path`, and the
+ * destination of a rename (`kind.move_path`, the app-server `PatchChangeKind`
+ * shape). One extraction, used by the protected-path floor and by path-scoped
+ * rules, so both look at the same set of paths.
+ *
+ * `complete` is false when `changes` is not an array, or any member is not an
+ * object with a non-empty string `path` and a supported `kind` (`add`, `update`
+ * or `delete`, as a string or as `{ type }`), or carries a `move_path` that is
+ * neither absent/null nor a non-empty string. A caller that must see every path
+ * (a scoped rule) treats an incomplete list as no match; the floor uses the
+ * paths that are present.
+ * @param {*} changes
+ * @returns {{ complete: boolean, paths: string[] }}
+ */
+// The change kinds the app-server passes, as a bare string (legacy) or as `type`.
+const PATCH_CHANGE_KINDS = new Set(['add', 'update', 'delete'])
+
+export function collectChangeTargets(changes) {
+  const paths = []
+  if (!Array.isArray(changes)) return { complete: false, paths }
+  let complete = true
+  for (const change of changes) {
+    if (!change || typeof change !== 'object') { complete = false; continue }
+    if (typeof change.path === 'string' && change.path.length > 0) paths.push(change.path)
+    else complete = false
+    const kind = change.kind
+    if (typeof kind === 'string') {
+      // The legacy bare-string form.
+      if (!PATCH_CHANGE_KINDS.has(kind)) complete = false
+    } else if (kind && typeof kind === 'object' && PATCH_CHANGE_KINDS.has(kind.type)) {
+      if (kind.move_path != null) {
+        if (typeof kind.move_path === 'string' && kind.move_path.length > 0) paths.push(kind.move_path)
+        else complete = false
+      }
+    } else {
+      complete = false
+    }
+  }
+  return { complete, paths }
+}
+
 // #6803 — tools whose floor is SECRETS-ONLY (non-mutating reads). handlePermission
 // routes these through isSecretReadTarget (env files + key material) instead of
 // the full config-dir floor. EVERY OTHER path-carrying tool — the mutating ones
@@ -1065,10 +1107,8 @@ function _matchesFloor(input, cwd, secretsOnly) {
   // array is never enumerated past the budget.
   if (Array.isArray(input.changes)) {
     if (targets.length + input.changes.length > FLOOR_MAX_CALL_TARGETS) return true
-    for (const change of input.changes) {
-      if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      targets.push(change.path)
-    }
+    for (const changePath of collectChangeTargets(input.changes).paths) targets.push(changePath)
+    if (targets.length > FLOOR_MAX_CALL_TARGETS) return true
   }
   // The call's component and byte budgets, checked before any target is resolved.
   let components = 0
@@ -1502,6 +1542,9 @@ function grepGlobFloored(input, rootRelative) {
  * @returns {boolean} true when the target is floored (prompt required)
  */
 export function isFlooredTarget(toolName, input, cwd) {
+  // A patch whose change list is missing, malformed or empty names no paths the
+  // floor can judge, so it always prompts.
+  if (toolName === 'apply_patch' && !_hasCompleteChangeList(input)) return true
   if (!SECRET_READ_FLOOR_TOOLS.has(toolName)) return isProtectedPathTarget(input, cwd)
   if (isSecretReadTarget(input, cwd)) return true
   if (SEARCH_ROOT_TOOLS.has(toolName) && _searchRootFloored(toolName, input, cwd)) return true
@@ -1512,6 +1555,17 @@ export function isFlooredTarget(toolName, input, cwd) {
   // No glob narrowing the search: a recursive Grep from the configured root, or
   // from a directory above it, reads the settings files inside it.
   return reach.covers && !globNarrowsSearch(input.glob)
+}
+
+/**
+ * Does a patch input carry a non-empty, well-formed `changes` array?
+ * @param {object} input
+ * @returns {boolean}
+ */
+function _hasCompleteChangeList(input) {
+  if (input === null || typeof input !== 'object') return false
+  if (!Array.isArray(input.changes) || input.changes.length === 0) return false
+  return collectChangeTargets(input.changes).complete
 }
 
 /**
@@ -1559,6 +1613,37 @@ function globAvoidsKeyFiles(glob) {
 export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])
 
 /**
+ * The directory a Grep / Glob call searches from, as the executor reads it: its
+ * `path`, or the session cwd (`'.'`) when `path` is absent, null or empty. Other fields
+ * never stand in for it. Returns null when `path` is present but not a usable
+ * string, so the caller fails closed.
+ * @param {object} input
+ * @returns {string|null}
+ */
+export function effectiveSearchRoot(input) {
+  const value = input?.path
+  if (value === undefined || value === null || value === '') return '.'
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/**
+ * The paths to judge for a search call: its effective root, plus any other flat
+ * path field it carries (which may add checks, never replace the root).
+ * Returns null when the root is unusable.
+ * @param {object} input
+ * @returns {string[]|null}
+ */
+function _searchTargets(input) {
+  const root = effectiveSearchRoot(input)
+  if (root === null) return null
+  const targets = [root]
+  for (const f of PROTECTED_PATH_INPUT_FIELDS) {
+    if (f !== 'path' && typeof input[f] === 'string' && input[f].length > 0) targets.push(input[f])
+  }
+  return targets
+}
+
+/**
  * Where a Grep / Glob searches, against the inbox socket and sessions rules.
  * A call with no path field searches from the session cwd, so the cwd stands
  * in for the missing root; a supplied root is judged in its written and its
@@ -1575,8 +1660,8 @@ export const SEARCH_ROOT_TOOLS = new Set(['Grep', 'Glob'])
 function _searchRootFloored(toolName, input, cwd) {
   if (input === null || typeof input !== 'object') return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
-  const targets = PROTECTED_PATH_INPUT_FIELDS.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0)
-  if (targets.length === 0) targets.push('.')
+  const targets = _searchTargets(input)
+  if (targets === null) return true
   const call = _newCall()
   try {
     const realBase = realpathDeepestAncestorSync(base)
@@ -1623,8 +1708,8 @@ function _searchReachToConfigRoot(input, cwd, statFn) {
   if (rule === null) return { near: false, covers: false }
   if (rule.failed) return { near: true, covers: true }
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
-  const targets = PROTECTED_PATH_INPUT_FIELDS.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0)
-  if (targets.length === 0) targets.push('.')
+  const targets = _searchTargets(input)
+  if (targets === null) return { near: true, covers: true }
   const reach = { near: false, covers: false }
   try {
     const realBase = realpathDeepestAncestorSync(base)

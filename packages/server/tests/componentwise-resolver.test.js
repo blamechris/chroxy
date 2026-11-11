@@ -2,11 +2,14 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import path, { join, sep } from 'node:path'
 import {
   resolveTargetComponentwiseSync,
   resolveTargetComponentwiseAsync,
   splitPathBelowRoot,
+  walkStart,
+  beginWalk,
+  spliceSymlink,
   COMPONENTWISE_MAX_SYMLINKS,
   COMPONENTWISE_MAX_COMPONENTS,
   COMPONENTWISE_MAX_PATH_LENGTH,
@@ -91,20 +94,35 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     await assertParity(root, 'link/nonexistent/../file', join(root, 'real/file'))
   })
 
-  // #6928 — separator-agnostic split: `\` and mixed separators must resolve exactly
-  // like the forward-slash form (a POSIX `sep='/'` split would treat these as one
-  // blob and fall back to a lexical join, reopening the `..`-after-symlink escape).
-  it('#6928: backslash and mixed separators resolve identically to `/` (both agree)', async () => {
+  // #6928 — on Windows `\` and mixed separators must resolve exactly like the
+  // forward-slash form (a `/`-only split would treat them as one blob and fall back
+  // to a lexical join, reopening the `..`-after-symlink escape). On POSIX `\` is an
+  // ordinary filename character, covered by the next test.
+  it('#6928: on Windows, backslash and mixed separators resolve identically to `/` (both agree)', {
+    skip: process.platform === 'win32' ? false : 'a backslash is a filename character on POSIX',
+  }, async () => {
     mkdirSync(join(root, 'real/deep'), { recursive: true })
     symlinkSync(join(root, 'real/deep'), join(root, 'link'))
     const forms = [
-      'link/../sibling',       // POSIX
-      'link\\..\\sibling',     // all backslash
-      'link/..\\sibling',      // mixed
+      'link/../sibling',
+      'link\\..\\sibling',
+      'link/..\\sibling',
     ]
     for (const f of forms) {
       await assertParity(root, f, join(root, 'real/sibling'))
     }
+  })
+
+  it('on POSIX, a backslash is part of a filename: a link named `x\\y` is followed as one component', {
+    skip: process.platform === 'win32' || SKIP_NO_SYMLINK,
+  }, async () => {
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'other'))
+    symlinkSync(join(root, 'other'), join(root, 'src', 'x\\y'))
+    await assertParity(root, 'src/x\\y/a.txt', join(root, 'other/a.txt'))
+    await assertParity(root, join(root, 'src/x\\y/a.txt'), join(root, 'other/a.txt'))
+    // with no such link the same text is one missing name, not two components
+    await assertParity(root, 'src/p\\q', join(root, 'src/p\\q'))
   })
 
   it('#6928: a rooted target strips its root; `..` at the fs root is a no-op', async () => {
@@ -225,10 +243,104 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
   // ==========================================================================
   // splitPathBelowRoot — the #6928 footgun in isolation.
   // ==========================================================================
-  it('splitPathBelowRoot splits on BOTH separators and strips the root', () => {
-    assert.deepEqual(splitPathBelowRoot('a/b\\c', ''), ['a', 'b', 'c'])
-    assert.deepEqual(splitPathBelowRoot('/a/b', '/'), ['a', 'b'])
-    // collapses runs of mixed separators
-    assert.deepEqual(splitPathBelowRoot('a//b\\\\c', ''), ['a', 'b', 'c'])
+  it('splitPathBelowRoot splits on both separators on Windows and on `/` alone on POSIX', () => {
+    assert.deepEqual(splitPathBelowRoot('a/b\\c', '', path.win32), ['a', 'b', 'c'])
+    assert.deepEqual(splitPathBelowRoot('C:\\a/b', 'C:\\', path.win32), ['a', 'b'])
+    assert.deepEqual(splitPathBelowRoot('a//b\\\\c', '', path.win32), ['a', 'b', 'c'])
+    assert.deepEqual(splitPathBelowRoot('a/b\\c', '', path.posix), ['a', 'b\\c'])
+    assert.deepEqual(splitPathBelowRoot('/a/b', '/', path.posix), ['a', 'b'])
+    assert.deepEqual(splitPathBelowRoot('a//b', '', path.posix), ['a', 'b'])
+  })
+
+  it('walkStart anchors a Windows root-relative path to the drive or share resolved so far', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    assert.deepEqual(w('\\foo\\bar', 'C:\\work'), { start: 'C:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('/foo/bar', 'C:\\work'), { start: 'C:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('\\foo', 'D:\\a\\b'), { start: 'D:\\', below: ['foo'] })
+    assert.deepEqual(w('\\foo', '\\\\srv\\share\\w'), { start: '\\\\srv\\share\\', below: ['foo'] })
+    assert.deepEqual(w('\\', 'C:\\work'), { start: 'C:\\', below: [''] })
+  })
+
+  it('walkStart keeps absolute and relative Windows paths where they are', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    assert.deepEqual(w('D:\\foo/bar', 'C:\\work'), { start: 'D:\\', below: ['foo', 'bar'] })
+    assert.deepEqual(w('foo\\..\\bar', 'C:\\work'), { start: '', below: ['foo', '..', 'bar'] })
+    assert.deepEqual(w('\\\\srv\\share\\x', 'C:\\work'), { start: '\\\\srv\\share\\', below: ['x'] })
+  })
+
+  it('walkStart refuses a Windows drive-relative path, and a root-relative one with no drive to use', () => {
+    const w = (p, cur) => walkStart(p, cur, path.win32)
+    for (const bad of ['C:foo', 'c:', 'D:..\\x']) {
+      assert.throws(() => w(bad, 'C:\\work'), { code: 'EINVAL' }, bad)
+    }
+    assert.throws(() => w('\\foo', 'work'), { code: 'EINVAL' })
+    assert.throws(() => w('\\foo', ''), { code: 'EINVAL' })
+  })
+
+  it('walkStart does not anchor a root-relative path to a device namespace', () => {
+    for (const cur of ['\\\\?\\UNC\\srv\\sh\\d', '\\\\.\\pipe\\x', '\\\\?\\GLOBALROOT\\Device\\X\\a', '\\\\?\\C:\\work']) {
+      assert.throws(() => walkStart('\\foo', cur, path.win32), { code: 'EINVAL' }, cur)
+    }
+    // a normal drive and a normal share still anchor
+    assert.deepEqual(walkStart('\\foo', 'C:\\work', path.win32), { start: 'C:\\', below: ['foo'] })
+    assert.deepEqual(walkStart('\\foo', '\\\\srv\\share\\w\\x', path.win32), { start: '\\\\srv\\share\\', below: ['foo'] })
+  })
+
+  it('the walk anchors a root-relative target to the base drive and a root-relative link target to the drive resolved so far', () => {
+    // beginWalk: base C:\work
+    assert.deepEqual(beginWalk('C:\\work', '\\foo', path.win32), { resolved: 'C:\\', pending: ['foo'] })
+    assert.deepEqual(beginWalk('C:\\work', 'rel\\x', path.win32), { resolved: 'C:\\work', pending: ['rel', 'x'] })
+    assert.throws(() => beginWalk('C:\\work', 'C:foo', path.win32), { code: 'EINVAL' })
+    // spliceSymlink: resolved-so-far is on D:, the session base was on C:
+    const pending = ['link', 'tail']
+    const start = spliceSymlink(pending, 1, 'D:\\x', '\\foo', path.win32)
+    assert.equal(start, 'D:\\')
+    assert.deepEqual(pending, ['link', 'foo', 'tail'])
+    assert.throws(() => spliceSymlink(['l'], 1, 'D:\\x', 'C:rel', path.win32), { code: 'EINVAL' })
+    // a relative link target continues from the link's parent
+    assert.equal(spliceSymlink(['l'], 1, 'D:\\x', 'sub\\y', path.win32), 'D:\\x')
+  })
+
+  it('walkStart on POSIX treats those spellings as ordinary names and roots', () => {
+    const w = (p, cur) => walkStart(p, cur, path.posix)
+    assert.deepEqual(w('/foo/bar', '/work'), { start: '/', below: ['foo', 'bar'] })
+    assert.deepEqual(w('C:foo', '/work'), { start: '', below: ['C:foo'] })
+    assert.deepEqual(w('\\foo', '/work'), { start: '', below: ['\\foo'] })
+  })
+
+  it('a missing component followed by `..` back to an existing directory resumes inspection (both agree)', {
+    skip: SKIP_NO_SYMLINK,
+  }, async () => {
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'other'))
+    symlinkSync(join(root, 'other'), join(root, 'src', 'jump'))
+    // `missing/..` returns to `src`, so `jump` is a real link and must be followed
+    await assertParity(root, 'src/missing/../jump/x', join(root, 'other/x'))
+    // two missing components, both popped
+    await assertParity(root, 'src/m1/m2/../../jump/x', join(root, 'other/x'))
+    // only one popped: still inside the to-be-created tail
+    await assertParity(root, 'src/m1/m2/../x', join(root, 'src/m1/x'))
+    // no link involved: unchanged
+    await assertParity(root, 'src/missing/../new.txt', join(root, 'src/new.txt'))
+  })
+
+  // The resolvers refuse a path whose root depends on the current drive or
+  // directory. The helper is tested with path.win32 above; these run the wiring
+  // (beginWalk and the link splice) and need a Windows host.
+  const WIN32_ONLY = process.platform === 'win32' ? false : 'needs Windows path rules'
+  it('on Windows, both resolvers place a root-relative target on the base drive and reject a drive-relative one', { skip: WIN32_ONLY }, async () => {
+    const driveRoot = path.parse(root).root
+    await assertParity(root, '\\foo', join(driveRoot, 'foo'))
+    await assertParity(root, '/foo/bar', join(driveRoot, 'foo', 'bar'))
+    await assertBothThrow(root, 'C:foo', 'EINVAL')
+  })
+
+  it('on Windows, a root-relative link target resolves on the current drive and a drive-relative one is refused', { skip: WIN32_ONLY || SKIP_NO_SYMLINK }, async () => {
+    const driveRoot = path.parse(root).root
+    symlinkSync('\\outside', join(root, 'rooted'))
+    await assertParity(root, 'rooted', join(driveRoot, 'outside'))
+    await assertParity(root, 'rooted/x', join(driveRoot, 'outside', 'x'))
+    symlinkSync('C:rel', join(root, 'driverel'))
+    await assertBothThrow(root, 'driverel', 'EINVAL')
   })
 })

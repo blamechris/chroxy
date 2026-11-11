@@ -654,6 +654,12 @@ an approve with edits can do, and it lives in `edited-input.js` and
   SDK/TUI/codex providers, so an atomic guard is not achievable at this layer. The
   floor is defence-in-depth and prompt-only. The #8741 worktree check (an `lstat`
   walk down from `.claude`) has the same limit.
+- **A path-scoped rule is a decision-time filter too.** A rule's `path` scope is checked
+  against the target's real location when the call is decided, with the same walk and
+  the same limit as the floor: it does not bind the filesystem objects the later open
+  uses. A scoped `deny` rule matches a call when any of its targets is inside the scope,
+  or when the targets cannot be determined. It does not match a Grep or Glob whose
+  search root lies above the scope.
 - **A floored target whose payload exceeds 64 KB is denied, not prompted.** The probe
   accepts up to 1 MiB, but `POST /permission` caps bodies at 64 KB (it *holds* the
   payload for five minutes and broadcasts it to clients), so a `Write` of a >64 KB

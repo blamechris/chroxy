@@ -1,6 +1,6 @@
 import { lstatSync, readlinkSync } from 'node:fs'
 import { lstat, readlink } from 'node:fs/promises'
-import { dirname, isAbsolute, join, parse, sep } from 'node:path'
+import path, { dirname, join } from 'node:path'
 
 /**
  * open(2)-faithful, component-by-component path resolver — the SINGLE SOURCE for
@@ -50,21 +50,62 @@ export const COMPONENTWISE_MAX_COMPONENTS = 1024
 export const COMPONENTWISE_MAX_PATH_LENGTH = 16384
 
 /**
- * #6928 — split a raw path into the components BELOW its parsed root, separating on
- * BOTH `/` and `\` regardless of platform. Node accepts forward slashes on Windows,
- * so a platform-`sep`-only split (`\` on Windows) would leave a forward-slash path
- * as ONE component — the walk would then break and fall back to a lexical `join()`,
- * reopening the exact `..`-after-symlink escape this resolver exists to close.
- * `root` (already parsed by the caller, which starts `resolved` there) is sliced off
- * first so a drive/UNC/`/` root is never walked as an ordinary component (a Windows
- * `C:\` would otherwise appear as a `C:` component and `join` straight back onto the
- * drive root).
+ * #6928 — split a raw path into the components BELOW its parsed root. The
+ * separators are the platform's own: `/` and `\` on Windows (Node accepts forward
+ * slashes there, so a `sep`-only split would leave a forward-slash path as ONE
+ * component and the walk would fall back to a lexical `join()`), but `/` ALONE on
+ * POSIX, where `\` is an ordinary filename character — splitting on it would walk
+ * a different pathname than the one a consumer opens. `root` (already parsed by the
+ * caller, which starts `resolved` there) is sliced off first so a drive/UNC/`/`
+ * root is never walked as an ordinary component (a Windows `C:\` would otherwise
+ * appear as a `C:` component and `join` straight back onto the drive root).
  * @param {string} p
  * @param {string} root  the already-`parse`d root of `p` (`''` for a relative path)
+ * @param {typeof import('node:path')} [pathImpl]  `path.win32` / `path.posix` to
+ *   drive the other platform's rules (tests); defaults to the host's `path`
  * @returns {string[]}
  */
-export function splitPathBelowRoot(p, root) {
-  return (root ? p.slice(root.length) : p).split(/[/\\]+/)
+export function splitPathBelowRoot(p, root, pathImpl = path) {
+  const separators = pathImpl.sep === '\\' ? /[/\\]+/ : /\/+/
+  return (root ? p.slice(root.length) : p).split(separators)
+}
+
+/**
+ * Where a walk over the raw path `p` starts, and the components below that start.
+ * `current` is the real path resolved so far (the session cwd for a target, the
+ * link's parent for a link target).
+ *   - a relative path starts where `current` is (`start` is `''`);
+ *   - an absolute path starts at its own parsed root;
+ *   - on Windows, a root-relative path (`\foo` or `/foo`, no drive) starts at the
+ *     root of `current`'s drive (or share), exactly as `path.win32.resolve(current, p)`
+ *     places it;
+ *   - on Windows, a drive-relative path (`C:foo`) depends on that drive's current
+ *     directory, which cannot be known here, so it throws EINVAL (callers fail
+ *     closed). So does a root-relative path when `current` has no drive.
+ * @param {string} p
+ * @param {string} current  the real path resolved so far
+ * @param {typeof import('node:path')} [pathImpl]  `path.win32` / `path.posix` to
+ *   drive the other platform's rules (tests); defaults to the host's `path`
+ * @returns {{ start: string, below: string[] }}
+ */
+export function walkStart(p, current, pathImpl = path) {
+  const { root } = pathImpl.parse(p)
+  if (pathImpl.sep === '\\') {
+    if (/^[A-Za-z]:$/.test(root)) {
+      throw Object.assign(new Error('componentwise resolver: a drive-relative path depends on the drive\'s current directory'), { code: 'EINVAL' })
+    }
+    if (root === '\\' || root === '/') {
+      const driveRoot = pathImpl.parse(current).root
+      // Only a real drive or a real share (server and share, the server neither `?` nor
+      // `.`): the `\\?\` and `\\.\` device namespaces have no drive to anchor to.
+      if (!/^[A-Za-z]:[\\/]$/.test(driveRoot) && !/^[\\/]{2}[^\\/?.][^\\/]*[\\/]+[^\\/]+[\\/]?$/.test(driveRoot)) {
+        throw Object.assign(new Error('componentwise resolver: a root-relative path has no drive to anchor to'), { code: 'EINVAL' })
+      }
+      return { start: driveRoot, below: splitPathBelowRoot(p, root, pathImpl) }
+    }
+  }
+  const start = pathImpl.isAbsolute(p) ? root : ''
+  return { start, below: splitPathBelowRoot(p, start, pathImpl) }
 }
 
 /**
@@ -77,9 +118,9 @@ export function splitPathBelowRoot(p, root) {
  * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path
  * @returns {{ resolved: string, pending: string[] }}
  */
-function beginWalk(realBase, target) {
-  const targetRoot = isAbsolute(target) ? parse(target).root : ''
-  return { resolved: targetRoot || realBase, pending: splitPathBelowRoot(target, targetRoot) }
+export function beginWalk(realBase, target, pathImpl = path) {
+  const { start, below } = walkStart(target, realBase, pathImpl)
+  return { resolved: start || realBase, pending: below }
 }
 
 /**
@@ -89,24 +130,28 @@ function beginWalk(realBase, target) {
  *   - `''` / `.`  → skip (resolved unchanged, no stat).
  *   - `..`        → pop to the PARENT of the resolved-so-far real path (`dirname`),
  *                   i.e. apply `..` AFTER following symlinks so far — NOT lexically
- *                   on the pre-resolution path. No stat.
- *   - tail-only   → once a component was ENOENT, everything after it is a
+ *                   on the pre-resolution path. No stat. When it pops a to-be-created
+ *                   component, the tail shrinks by one; once the tail is empty the
+ *                   resolved path is a directory that exists, and the driver goes
+ *                   back to inspecting each component.
+ *   - in a tail   → once a component was ENOENT, the components after it are a
  *                   to-be-created tail: append by `join` with no stat.
  *   - otherwise   → return the `candidate` to lstat; `resolved` is left UNCHANGED
  *                   (it is committed only after the driver confirms `candidate` is
  *                   not a symlink).
  * @param {string} resolved   resolved-so-far real path
  * @param {string} comp       the raw component
- * @param {boolean} tailOnly  true once a prior component was ENOENT
- * @returns {{ resolved: string, stat: string|null }}  `stat` is the path to lstat,
- *   or `null` when the component was fully consumed lexically (skip / `..` / tail).
+ * @param {number} tail       how many to-be-created components follow the last
+ *   existing directory (0 when every component so far was inspected)
+ * @returns {{ resolved: string, stat: string|null, tail: number }}  `stat` is the
+ *   path to lstat, or `null` when the component was fully consumed lexically.
  */
-function resolveComponentLexically(resolved, comp, tailOnly) {
-  if (comp === '' || comp === '.') return { resolved, stat: null }
-  if (comp === '..') return { resolved: dirname(resolved), stat: null }
+function resolveComponentLexically(resolved, comp, tail) {
+  if (comp === '' || comp === '.') return { resolved, stat: null, tail }
+  if (comp === '..') return { resolved: dirname(resolved), stat: null, tail: tail > 0 ? tail - 1 : 0 }
   const candidate = join(resolved, comp)
-  if (tailOnly) return { resolved: candidate, stat: null }
-  return { resolved, stat: candidate }
+  if (tail > 0) return { resolved: candidate, stat: null, tail: tail + 1 }
+  return { resolved, stat: candidate, tail }
 }
 
 /**
@@ -122,15 +167,15 @@ function resolveComponentLexically(resolved, comp, tailOnly) {
  * @param {string} link      the raw `readlink` target
  * @returns {string}
  */
-function spliceSymlink(pending, i, resolved, link) {
+export function spliceSymlink(pending, i, resolved, link, pathImpl = path) {
   // On POSIX `\` is a name character, which the split below would read as a
   // separator; a link whose target holds one is not walked (callers fail closed).
-  if (sep === '/' && link.includes('\\')) {
+  if (pathImpl.sep === '/' && link.includes('\\')) {
     throw Object.assign(new Error('componentwise resolver: link target holds a backslash'), { code: 'EINVAL' })
   }
-  const linkRoot = isAbsolute(link) ? parse(link).root : ''
-  pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
-  return linkRoot || resolved
+  const { start, below } = walkStart(link, resolved, pathImpl)
+  pending.splice(i, 0, ...below)
+  return start || resolved
 }
 
 /**
@@ -182,21 +227,22 @@ export function resolveTargetComponentwiseSync(realBase, target, budget) {
   const { resolved: base, pending } = beginWalk(realBase, target)
   let resolved = base
   let symlinks = 0
-  let tailOnly = false
+  let tail = 0
   let i = 0
   while (i < pending.length) {
     const comp = pending[i]
     i++
     checkWalkBounds(i, resolved, 'resolveTargetComponentwiseSync')
     spendWalkBudget(budget, 'resolveTargetComponentwiseSync')
-    const step = resolveComponentLexically(resolved, comp, tailOnly)
+    const step = resolveComponentLexically(resolved, comp, tail)
     resolved = step.resolved
+    tail = step.tail
     if (step.stat === null) continue
     let st
     try {
       st = lstatSync(step.stat)
     } catch (err) {
-      if (err.code === 'ENOENT') { tailOnly = true; resolved = step.stat; continue }
+      if (err.code === 'ENOENT') { tail = 1; resolved = step.stat; continue }
       throw err // EACCES etc. — fail closed via the caller's catch
     }
     if (st.isSymbolicLink()) {
@@ -225,21 +271,22 @@ export async function resolveTargetComponentwiseAsync(realBase, target, budget) 
   const { resolved: base, pending } = beginWalk(realBase, target)
   let resolved = base
   let symlinks = 0
-  let tailOnly = false
+  let tail = 0
   let i = 0
   while (i < pending.length) {
     const comp = pending[i]
     i++
     checkWalkBounds(i, resolved, 'resolveTargetComponentwiseAsync')
     spendWalkBudget(budget, 'resolveTargetComponentwiseAsync')
-    const step = resolveComponentLexically(resolved, comp, tailOnly)
+    const step = resolveComponentLexically(resolved, comp, tail)
     resolved = step.resolved
+    tail = step.tail
     if (step.stat === null) continue
     let st
     try {
       st = await lstat(step.stat)
     } catch (err) {
-      if (err.code === 'ENOENT') { tailOnly = true; resolved = step.stat; continue }
+      if (err.code === 'ENOENT') { tail = 1; resolved = step.stat; continue }
       throw err // EACCES etc. — fail closed via the caller
     }
     if (st.isSymbolicLink()) {

@@ -254,7 +254,12 @@ describe("FLOOR_ALLOWLISTED_TOOLS matches which tools isFlooredTarget can actual
  * `pattern` is uninspected, and a glob-less Grep reads a whole directory.
  */
 describe('Grep/Glob excluded from FLOOR_ALLOWLISTED_TOOLS: floored:false is not a complete safety signal for either (#7975-followup)', () => {
-  const cwd = '/tmp/agent-control-floor-fixture-glob-grep'
+  // A drive-qualified path on Windows: the shared resolver rejects a
+  // root-relative path there (its drive depends on the process), which would
+  // floor these benign rows for the wrong reason.
+  const cwd = process.platform === 'win32'
+    ? 'C:\\agent-control-floor-fixture-glob-grep'
+    : '/tmp/agent-control-floor-fixture-glob-grep'
 
   it('#7978: Grep({ path: <benign cwd>, glob: ".env" }) is now floored — the glob is inspected', () => {
     // This row used to pin the bug (floored:false). #7978 made the floor read

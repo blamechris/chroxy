@@ -1,7 +1,11 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { resolve, relative, sep, isAbsolute } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
+import { isPathWithin } from './utils/path-containment.js'
 import { createLogger } from './logger.js'
+import { globPatternEscapeReason } from './built-in-tools/tool-transforms.js'
 // #7004: the protected-path / secret-read FLOOR lives in permission-floor.js — a
 // leaf module — because BOTH permission pipelines must apply the identical floor:
 // this in-process path, and the HOOK-routed path (claude-tui/cli-session decide
@@ -14,6 +18,8 @@ import {
   isProtectedPathTarget,
   isSecretReadTarget,
   PROTECTED_PATH_INPUT_FIELDS,
+  collectChangeTargets,
+  effectiveSearchRoot,
 } from './permission-floor.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -312,26 +318,78 @@ export function buildDenyMessage(reason) {
 
 
 /**
- * #6803 — collect every concrete target path a tool input names: the flat
- * {@link PROTECTED_PATH_INPUT_FIELDS} plus `changes[]` member paths (codex
- * apply_patch). Used by the rule-scope test so a path-scoped rule can confirm
- * ALL of a tool call's targets fall inside its scope. Returns [] for a
- * command-shaped / path-less input.
- * @param {object} input
- * @returns {string[]}
+ * Tools whose single path-carrying input field a scoped rule reads. Glob and
+ * Grep are handled separately: they search from an effective root.
  */
-function collectTargetPaths(input) {
-  if (!input || typeof input !== 'object') return []
-  const out = []
-  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
-    if (typeof input[field] === 'string' && input[field].length > 0) out.push(input[field])
-  }
-  if (Array.isArray(input.changes)) {
-    for (const change of input.changes) {
-      if (change && typeof change.path === 'string' && change.path.length > 0) out.push(change.path)
+const SCOPED_RULE_PATH_FIELD = {
+  Read: 'file_path',
+  Write: 'file_path',
+  Edit: 'file_path',
+  MultiEdit: 'file_path',
+  NotebookEdit: 'notebook_path',
+}
+
+/** Does a Glob pattern select files outside its search root? */
+function _globPatternLeavesRoot(pattern) {
+  if (typeof pattern !== 'string') return false
+  // The whitespace rule only concerns how a container splits a pattern; a space
+  // does not make a pattern leave its root. An unquoted space starts a new word,
+  // so judge each word by turning whitespace into a comma: that is both a
+  // word-start anchor and a segment delimiter for the other rules.
+  const reason = globPatternEscapeReason(pattern.replace(/\s/g, ','))
+  return reason !== null || isAbsolute(pattern) || /^[/\\]/.test(pattern)
+}
+
+/** A path starting with `~` may be expanded to a home directory, so it names no fixed target. */
+function _startsWithHomeMarker(value) {
+  return /^~/.test(value)
+}
+
+/**
+ * #6803 — collect every concrete target path a tool call names, for the
+ * rule-scope test. Tool-aware: Read/Write/Edit use `file_path`, NotebookEdit uses
+ * `notebook_path`, Glob/Grep search from their effective root (`path`, else the
+ * session cwd; a Glob pattern that is absolute, climbs with `..` or expands
+ * through `~` or braces to such a path selects files outside it), and
+ * `apply_patch` uses every `changes` path and rename destination plus the
+ * approval's top-level `file_path` (the root the approval grants writes under),
+ * requiring a complete change list. Other fields are ignored.
+ *
+ * Returns null when the call names no usable target set: a command-shaped tool,
+ * a malformed or incomplete patch, a missing path, a `~`-prefixed path, or a
+ * Glob pattern that leaves its root. A rule that grants (allow) does not match
+ * such a call; a rule that refuses (deny) does.
+ * @param {string} toolName
+ * @param {object} input
+ * @returns {string[]|null}
+ */
+function collectTargetPaths(toolName, input) {
+  const targets = _collectTargets(toolName, input)
+  if (targets === null || targets.length === 0) return null
+  return targets.some(_startsWithHomeMarker) ? null : targets
+}
+
+function _collectTargets(toolName, input) {
+  if (!input || typeof input !== 'object') return null
+  if (toolName === 'apply_patch') {
+    const { complete, paths } = collectChangeTargets(input.changes)
+    if (!complete) return null
+    const root = input.file_path
+    if (root !== undefined && root !== null) {
+      if (typeof root !== 'string') return null
+      if (root.length > 0) paths.push(root)
     }
+    return paths
   }
-  return out
+  if (toolName === 'Glob' || toolName === 'Grep') {
+    if (toolName === 'Glob' && _globPatternLeavesRoot(input.pattern)) return null
+    const root = effectiveSearchRoot(input)
+    return root === null ? null : [root]
+  }
+  const field = SCOPED_RULE_PATH_FIELD[toolName]
+  if (field === undefined) return null
+  const value = input[field]
+  return typeof value === 'string' && value.length > 0 ? [value] : null
 }
 
 // #6803 — a scope string is a GLOB (vs a plain directory prefix) when it carries
@@ -385,6 +443,11 @@ function globToRegExp(glob) {
  * @returns {boolean}
  */
 function pathWithinScope(target, scope, base) {
+  return lexicallyWithinScope(target, scope, base) && realLocationWithinScope(target, scope, base)
+}
+
+/** The path-text half of {@link pathWithinScope}: resolve()/relative() only. */
+function lexicallyWithinScope(target, scope, base) {
   const resolvedTarget = resolve(base, target)
   if (_scopeHasGlobMagic(scope)) {
     // PR #6873 review — a glob scope must NEVER reach ABOVE the session cwd:
@@ -401,6 +464,40 @@ function pathWithinScope(target, scope, base) {
   const rel = relative(resolvedScope, resolvedTarget)
   // At the scope dir itself (rel === '') or under it (not `..`, not absolute).
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+}
+
+/**
+ * The filesystem half of {@link pathWithinScope}: a path-scoped rule matches
+ * only when the target's real location is inside the scope, as the permission
+ * floor already does. The base is resolved with realpath, the target and a
+ * plain scope are walked component by component (symlinks followed, a missing
+ * tail applied lexically), then compared. A glob scope also requires the real
+ * location to be under the real base and to satisfy the glob on its path
+ * relative to the real base. Any resolution error means no match.
+ */
+function realLocationWithinScope(target, scope, base, onError = false) {
+  try {
+    const realBase = realpathSync(base)
+    const realTarget = resolveTargetComponentwiseSync(realBase, target)
+    if (_scopeHasGlobMagic(scope)) {
+      if (!isPathWithin(realTarget, realBase)) return false
+      // The directory named before the first wildcard may itself be a link, so
+      // resolve it and match the glob against the target's path below it, as
+      // if the target were reached through the prefix's written spelling.
+      const head = scope.slice(0, scope.search(/[*?]/))
+      const prefix = head.slice(0, Math.max(head.lastIndexOf('/'), 0))
+      const written = relative(base, resolve(base, prefix)).split(sep).join('/')
+      const realPrefix = resolveTargetComponentwiseSync(realBase, prefix === '' ? '.' : prefix)
+      if (!isPathWithin(realTarget, realPrefix)) return false
+      const below = relative(realPrefix, realTarget).split(sep).join('/')
+      const through = written === '' ? below : below === '' ? written : `${written}/${below}`
+      return globToRegExp(scope).test(through)
+    }
+    const realScope = resolveTargetComponentwiseSync(realBase, scope)
+    return isPathWithin(realTarget, realScope)
+  } catch {
+    return onError
+  }
 }
 
 /**
@@ -608,21 +705,28 @@ export class PermissionManager extends EventEmitter {
 
   /**
    * #6803 — does this rule's optional `path` SCOPE admit `input`? An UNSCOPED
-   * rule (no `path`) matches every input, exactly as before. A SCOPED rule
-   * matches only when the input names at least one concrete target path AND
-   * EVERY target falls within the scope (resolved against the session cwd) — so
-   * a scoped `allow` never auto-approves an out-of-scope target, and an input
-   * with no path (a command-shaped tool, or a bare `Read` with no file) never
-   * matches a scoped rule and falls through to a prompt.
+   * rule (no `path`) matches every input, exactly as before. For a SCOPED rule:
+   * an allow rule matches only when the input names at least one target and
+   * EVERY target is within the scope (resolved against the session cwd); a deny
+   * rule matches when ANY target is within the scope, or when the targets cannot
+   * be determined. So a scoped `allow` never auto-approves an out-of-scope
+   * target, and an input with no path never matches a scoped allow and falls
+   * through to a prompt.
    * @param {{tool: string, decision: string, path?: string}} rule
    * @param {object} [input]
    * @returns {boolean}
    */
   _ruleScopeMatches(rule, input) {
     if (typeof rule.path !== 'string' || rule.path.length === 0) return true
-    const targets = collectTargetPaths(input)
-    if (targets.length === 0) return false
+    const targets = collectTargetPaths(rule.tool, input)
     const base = this._cwd || process.cwd()
+    if (rule.decision === 'deny') {
+      // A refusal matches when ANY target is inside the scope by its path text or
+      // by its real location, and when the targets cannot be determined.
+      if (targets === null) return true
+      return targets.some((t) => lexicallyWithinScope(t, rule.path, base) || realLocationWithinScope(t, rule.path, base, true))
+    }
+    if (targets === null) return false
     return targets.every((t) => pathWithinScope(t, rule.path, base))
   }
 

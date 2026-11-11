@@ -1,11 +1,11 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { join, parse, resolve, sep } from 'node:path'
 import { validateRawPathWithinCwd, resolveTargetComponentwiseAsync } from '../src/ws-file-ops/common.js'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
-import { SKIP_WIN32_LEXICAL_DOTDOT } from './helpers/symlink-support.js'
+import { SKIP_WIN32_LEXICAL_DOTDOT, SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * #6923 — async parity for the `..`-after-symlink evasion, on the BYOK file-ops
@@ -32,6 +32,8 @@ import { SKIP_WIN32_LEXICAL_DOTDOT } from './helpers/symlink-support.js'
  * raw path, so the two platforms' semantics cannot disagree about where a write
  * lands.
  */
+const WIN32_ONLY = process.platform === 'win32' ? false : 'a backslash is a filename character on POSIX'
+
 describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   let root
   const cwdRealCache = () => new Map()
@@ -250,7 +252,7 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   // mixed separators (which a POSIX `sep='/'` split would NOT break apart) and a
   // rooted target whose root must never be walked as a `..`-poppable component.
   // ==========================================================================
-  it('#6928: backslash and mixed separators resolve IDENTICALLY to the forward-slash form (and stay flagged)', async () => {
+  it('#6928: backslash and mixed separators resolve IDENTICALLY to the forward-slash form (and stay flagged)', { skip: WIN32_ONLY }, async () => {
     // The PoC 1 topology — session cwd IS the worktree; `work -> .claude/worktrees`
     // inside it, a trailing `..` climbs back into the parent .claude (above cwd).
     mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
@@ -270,7 +272,7 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
     }
   })
 
-  it('#6928: a plain relative BACKSLASH path is walked component-by-component, not treated as one blob', async () => {
+  it('#6928: a plain relative BACKSLASH path is walked component-by-component, not treated as one blob', { skip: WIN32_ONLY }, async () => {
     mkdirSync(join(root, 'real/deep'), { recursive: true })
     // With the platform `sep='/'` split, `real\deep\file.txt` would be ONE
     // component (a literal filename with backslashes); the fix splits it.
@@ -282,14 +284,54 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
     // A leading-root absolute target: the parsed root (`/`) must be stripped and
     // never treated as a `.`/`..`-poppable component. `..` at the root stays at
     // the root (kernel semantics), so `/../..` resolves to `/`, not underflow.
-    assert.equal(await resolveTargetComponentwiseAsync(root, '/../..'), '/')
+    assert.equal(await resolveTargetComponentwiseAsync(root, '/../..'), process.platform === 'win32' ? parse(root).root : '/')
 
-    // A Windows-style backslash path is likewise split component-wise (never one
-    // blob). On POSIX `parse` can't recognise the `C:` drive, so it walks as a
-    // relative path safely UNDER the base; on win32 `parse` strips the `C:\` root.
+    // A Windows-style backslash path is split component-wise on win32 only; on
+    // POSIX the backslashes are part of one filename.
     assert.equal(
       await resolveTargetComponentwiseAsync(root, 'Windows\\System32\\drivers'),
-      join(root, 'Windows/System32/drivers'),
+      process.platform === 'win32' ? join(root, 'Windows/System32/drivers') : join(root, 'Windows\\System32\\drivers'),
     )
+  })
+
+  it('POSIX: a link whose name holds a backslash is followed as one component and confined', {
+    skip: process.platform === 'win32' || SKIP_NO_SYMLINK,
+  }, async () => {
+    mkdirSync(join(root, 'cwd/src'), { recursive: true })
+    mkdirSync(join(root, 'outside'))
+    writeFileSync(join(root, 'outside/a.txt'), 'ORIGINAL')
+    symlinkSync(join(root, 'outside/a.txt'), join(root, 'cwd/src/x\\y'))
+    const cwd = join(root, 'cwd')
+    const { valid, realPath } = await validateRawPathWithinCwd('src/x\\y', cwd, cwdRealCache(), cwdCacheTtl)
+    assert.equal(realPath, join(root, 'outside/a.txt'))
+    assert.equal(valid, false)
+    const r = await executeBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'src/x\\y', content: 'CHANGED' },
+      cwd,
+      cwdRealCache: cwdRealCache(),
+      cwdCacheTtl,
+    })
+    assert.equal(r.isError, true)
+    assert.equal(readFileSync(join(root, 'outside/a.txt'), 'utf8'), 'ORIGINAL')
+  })
+
+  it('`src/missing/../jump/x` follows `jump` after the `..`, and is confined (resolver and Write executor)', { skip: SKIP_NO_SYMLINK }, async () => {
+    mkdirSync(join(root, 'cwd/src'), { recursive: true })
+    mkdirSync(join(root, 'outside'))
+    symlinkSync(join(root, 'outside'), join(root, 'cwd/src/jump'))
+    const cwd = join(root, 'cwd')
+    const { valid, realPath } = await validateRawPathWithinCwd('src/missing/../jump/x', cwd, cwdRealCache(), cwdCacheTtl)
+    assert.equal(realPath, join(root, 'outside/x'))
+    assert.equal(valid, false)
+    const r = await executeBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'src/missing/../jump/x', content: 'CHANGED' },
+      cwd,
+      cwdRealCache: cwdRealCache(),
+      cwdCacheTtl,
+    })
+    assert.equal(r.isError, true)
+    assert.equal(existsSync(join(root, 'outside/x')), false, 'nothing was written outside the workspace')
   })
 })
