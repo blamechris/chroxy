@@ -195,7 +195,7 @@ gh issue list --state open --json number,title,labels,assignees,createdAt --limi
 # (user may have labeled new issues while session was running)
 ```
 
-Add new unassigned issues only if they are prerequisites and decomposition sub-issues of picked items, or items the pool query returns, and are not already in `MASTER_LOG`. Discovery during a review does not itself make work a priority.
+Add new unassigned issues not already in `MASTER_LOG` only as follows. Under a PRIME charter: prerequisites and decomposition sub-issues of picked items, or items the pool query returns. In a normal or backlog-clear run: issues necessary for the delegated outcome or matching the explicitly selected backlog. Discovery during a review does not itself make work a priority.
 
 #### 2c. Check for User Merges
 
