@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { resolve, relative, sep, isAbsolute } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
+import { isPathWithin } from './utils/path-containment.js'
 import { createLogger } from './logger.js'
 // #7004: the protected-path / secret-read FLOOR lives in permission-floor.js — a
 // leaf module — because BOTH permission pipelines must apply the identical floor:
@@ -385,6 +388,11 @@ function globToRegExp(glob) {
  * @returns {boolean}
  */
 function pathWithinScope(target, scope, base) {
+  return lexicallyWithinScope(target, scope, base) && realLocationWithinScope(target, scope, base)
+}
+
+/** The path-text half of {@link pathWithinScope}: resolve()/relative() only. */
+function lexicallyWithinScope(target, scope, base) {
   const resolvedTarget = resolve(base, target)
   if (_scopeHasGlobMagic(scope)) {
     // PR #6873 review — a glob scope must NEVER reach ABOVE the session cwd:
@@ -401,6 +409,31 @@ function pathWithinScope(target, scope, base) {
   const rel = relative(resolvedScope, resolvedTarget)
   // At the scope dir itself (rel === '') or under it (not `..`, not absolute).
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+}
+
+/**
+ * The filesystem half of {@link pathWithinScope}: a path-scoped rule matches
+ * only when the target's real location is inside the scope, as the permission
+ * floor already does. The base is resolved with realpath, the target and a
+ * plain scope are walked component by component (symlinks followed, a missing
+ * tail applied lexically), then compared. A glob scope also requires the real
+ * location to be under the real base and to satisfy the glob on its path
+ * relative to the real base. Any resolution error means no match.
+ */
+function realLocationWithinScope(target, scope, base) {
+  try {
+    const realBase = realpathSync(base)
+    const realTarget = resolveTargetComponentwiseSync(realBase, target)
+    if (_scopeHasGlobMagic(scope)) {
+      if (!isPathWithin(realTarget, realBase)) return false
+      const rel = relative(realBase, realTarget)
+      return globToRegExp(scope).test(rel.split(sep).join('/'))
+    }
+    const realScope = resolveTargetComponentwiseSync(realBase, scope)
+    return isPathWithin(realTarget, realScope)
+  } catch {
+    return false
+  }
 }
 
 /**

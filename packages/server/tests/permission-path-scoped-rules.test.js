@@ -1,10 +1,11 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { PermissionManager } from '../src/permission-manager.js'
 import { PermissionRuleStore } from '../src/permission-rule-store.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * #6803 — path-scoped permission rules.
@@ -21,7 +22,11 @@ import { PermissionRuleStore } from '../src/permission-rule-store.js'
  */
 
 const silentLog = { info() {}, warn() {}, error() {} }
-const CWD = '/work/project'
+// A scoped rule is checked against the target's real location, so the session
+// cwd must exist on disk. The directory is created once and removed at exit.
+const CWD_ROOT = mkdtempSync(join(tmpdir(), 'chroxy-scoped-rules-cwd-'))
+const CWD = realpathSync(CWD_ROOT)
+after(() => { rmSync(CWD_ROOT, { recursive: true, force: true }) })
 
 function createManager(opts = {}) {
   return new PermissionManager({ log: silentLog, cwd: CWD, ...opts })
@@ -282,5 +287,71 @@ describe('#6803 path-scoped rules persist + round-trip through the store', () =>
       const outScope = await run(pm, 'Write', { file_path: 'lib/a.js' })
       assert.equal(outScope.floored, true)
     } finally { pm.destroy() }
+  })
+})
+
+describe('path-scoped rules match on the target real location', () => {
+  let root
+  let pm
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-scoped-rules-')))
+    mkdirSync(join(root, 'src', 'sub'), { recursive: true })
+    mkdirSync(join(root, 'other'))
+    writeFileSync(join(root, 'src', 'a.txt'), 'a')
+    writeFileSync(join(root, 'src', 'sub', 'b.txt'), 'b')
+    writeFileSync(join(root, 'other', 'outside.txt'), 'x')
+    pm = new PermissionManager({ log: silentLog, cwd: root })
+  })
+  afterEach(() => {
+    pm.destroy()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const match = (scope, file) => {
+    pm.setRules([{ tool: 'Write', decision: 'allow', path: scope }])
+    return pm._matchesRule('Write', { file_path: file })
+  }
+
+  it('matches a plain existing file inside the scope', () => {
+    assert.equal(match('src', 'src/a.txt'), 'allow')
+    assert.equal(match('src/**', 'src/a.txt'), 'allow')
+  })
+
+  it('matches a file that does not exist yet inside the scope', () => {
+    assert.equal(match('src', 'src/new.txt'), 'allow')
+    assert.equal(match('src', 'src/missing-dir/new.txt'), 'allow')
+    assert.equal(match('src/**', 'src/new.txt'), 'allow')
+  })
+
+  it('does not match a link inside the scope that points to a file outside it', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(join(root, 'other', 'outside.txt'), join(root, 'src', 'link'))
+    assert.equal(match('src', 'src/link'), null)
+    assert.equal(match('src/**', 'src/link'), null)
+  })
+
+  it('still matches a link inside the scope that points to another file inside it', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(join(root, 'src', 'a.txt'), join(root, 'src', 'inner'))
+    assert.equal(match('src', 'src/inner'), 'allow')
+    assert.equal(match('src/**', 'src/inner'), 'allow')
+  })
+
+  it('does not match a path that climbs out of the scope through a link', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(root, join(root, 'src', 'up'))
+    assert.equal(match('src', 'src/up/other/outside.txt'), null)
+    assert.equal(match('src', 'src/up/other/file'), null)
+  })
+
+  it('does not match when the target cannot be resolved (link loop)', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(join(root, 'src', 'loop-b'), join(root, 'src', 'loop-a'))
+    symlinkSync(join(root, 'src', 'loop-a'), join(root, 'src', 'loop-b'))
+    assert.equal(match('src', 'src/loop-a'), null)
+    assert.equal(match('src/**', 'src/loop-a'), null)
+  })
+
+  it('does not match when the session cwd does not exist', () => {
+    const missing = new PermissionManager({ log: silentLog, cwd: join(root, 'no-such-dir') })
+    missing.setRules([{ tool: 'Write', decision: 'allow', path: 'src' }])
+    assert.equal(missing._matchesRule('Write', { file_path: 'src/a.txt' }), null)
+    missing.destroy()
   })
 })
