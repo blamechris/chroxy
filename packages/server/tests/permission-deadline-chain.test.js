@@ -474,6 +474,13 @@ describe('Claude Code hook registrations: both sites write the host timeout (#85
     assert.equal(tuiHooks[0].timeout, HOST_TIMEOUT_S)
   })
 
+  it('the per-session registration blocks the tool call when the hook itself fails or is cancelled', async () => {
+    const { tuiHooks } = await readRegisteredHostTimeouts()
+    assert.equal(tuiHooks.length, 1)
+    assert.equal(tuiHooks[0].onFailure, 'block')
+    assert.equal(tuiHooks[0].type, 'command')
+  })
+
   it('the two sites agree', async () => {
     const { userHooks, tuiHooks } = await readRegisteredHostTimeouts()
     assert.equal(userHooks[0].timeout, tuiHooks[0].timeout)
@@ -488,6 +495,9 @@ describe('Claude Code hook registrations: both sites write the host timeout (#85
     ].filter((h) => !/permission-hook\.sh/.test(h.command))
     assert.ok(others.length >= 3)
     for (const h of others) assert.equal('timeout' in h, false, h.command)
+    // Nor do they block on failure: they only record events, and a capture
+    // hook that cannot write must not stop the tool call.
+    for (const h of others) assert.equal('onFailure' in h, false, h.command)
   })
 })
 

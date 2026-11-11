@@ -352,6 +352,11 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
       // Same number as the user-level registration (permission-hook.js): longer
       // than the script's budgeted envelope. See permission-deadlines.js.
       timeout: HOOK_HOST_TIMEOUT_S,
+      // A hook that Claude Code cancels at that timeout, or cannot run at all,
+      // has given no decision. With this, that outcome blocks the tool call
+      // rather than being skipped. Claude Code builds that predate the option
+      // ignore the key.
+      onFailure: 'block',
     })
   }
   const settings = {
