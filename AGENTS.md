@@ -71,7 +71,7 @@ npx chroxy tunnel setup
 <!-- chroxy-required-rule:start prime-compatibility-and-authority -->
 ## PRIME Compatibility and Authority
 
-The current user's scope, merge holds and host restrictions survive every skill invocation and resume. A skill cannot widen a review-only/draft-only task. Chroxy's explicitly selected PRIME backlog mission, gated synchronous squash merge, old-debt quota, build invariants and paused cost breaker remain in `.claude/commands/prime-directive.md` and `.claude/skill-profile.md`.
+The current user's scope, merge holds and host restrictions survive every skill invocation and resume. A skill cannot widen a review-only/draft-only task. PRIME runs from the owner's per-run charter (outcome, pool, done, check-in; no standing backlog mission), and Chroxy's gated synchronous squash merge, old-debt quota, build invariants and paused cost breaker remain in `.claude/commands/prime-directive.md` and `.claude/skill-profile.md`.
 
 Claude loads the compiled `.claude/skills/prime-directive/SKILL.md` through native `/prime-directive`. Other hosts must verify their own discovery; if unavailable, read that exact local artifact and disclose the manual fallback. Do not infer that this project contract loads machine-global Claude rules or registers slash skills. Preserve the run's owned branch, acceptance, holds, attempts and consumed limits; restored context is not new authority or a fresh budget. PRIME checkpoints continue within scope; NORMAL ends its selected package. Never refresh another active session's instructions as part of a repair.
 
