@@ -40,7 +40,8 @@ const GRAMMAR = [
     'AWS_SECRET_ACCESS_KEY="', 'AWS_SECRET_ACCESS_KEY="' + 'x'.repeat(1100),
     'AWS_SECRET_ACCESS_KEY=\\"', 'AWS_SECRET_ACCESS_KEY=\\"' + 'z'.repeat(1030),
     "AWS_SECRET_ACCESS_KEY='" + 'y'.repeat(1030), 'AWS_SECRET_ACCESS_KEY=abcdefg ',
-    'AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY=', 'FAKE_AWS_SECRET_ACCESS_KEY=abcdefg ',
+    "AWS_SECRET_ACCESS_KEY=$'", "AWS_SECRET_ACCESS_KEY=$'" + 'x'.repeat(1100), "AWS_SECRET_ACCESS_KEY=$'a\\'",
+    "AWS_SECRET_ACCESS_KEY=$$$'", 'AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY=', 'FAKE_AWS_SECRET_ACCESS_KEY=abcdefg ',
   ]],
   [API_KEY_PATTERNS[0], ['sk-ant-' + 'a'.repeat(39) + ' ', 'sk-ant-api03-' + 'a'.repeat(39) + ' ', 'sk-ant-', ' sk-ant-' + 'a-'.repeat(19)]],
   [API_KEY_PATTERNS[1], ['sk-proj-' + 'a'.repeat(39) + ' ', 'sk-proj-', ' sk-proj-' + 'a-'.repeat(19)]],
@@ -521,7 +522,7 @@ describe('a fragment at a cut is never shown', () => {
     assert.ok(!describeByNamedField({ command: glued(8192) }).includes('sk-ant'))
   })
 
-  it('a glued key that is not cut is left as it was (the boundary rule is the pattern\'s, not the cut\'s)', () => {
-    assert.equal(redactValue(`yyyy${ANT_KEY} z`), `yyyy${ANT_KEY} z`)
+  it('a glued key that is not cut is masked too (no leading boundary on a recognised credential prefix, #8416)', () => {
+    assert.equal(redactValue(`yyyy${ANT_KEY} z`), 'yyyy[REDACTED] z')
   })
 })

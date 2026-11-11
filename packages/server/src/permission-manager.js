@@ -24,7 +24,7 @@ import {
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
-import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
+import { sanitizeToolInput, redactBounded, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
 import { DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY, EditedInputRefusedError, isHunkReviewedTool, narrowByDroppedHunks, assertClientTextAllowed } from './edited-input.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
@@ -313,7 +313,9 @@ export function buildDenyMessage(reason) {
   if (typeof reason !== 'string') return 'User denied'
   const trimmed = reason.trim()
   if (trimmed.length === 0) return 'User denied'
-  return redactValue(trimmed.slice(0, MAX_DENY_REASON_LEN))
+  // Redact the whole reason, then cut it: clipping first leaves a short fragment of a
+  // credential straddling the cap (#8416).
+  return redactBounded(trimmed, MAX_DENY_REASON_LEN)
 }
 
 

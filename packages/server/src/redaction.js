@@ -27,7 +27,7 @@ const SENSITIVE_PATTERNS = [
   // quoted value is redacted up to its closing quote, whatever it holds; it is bounded
   // (1024 characters, no line break) so the scan stays linear in the input. A value with
   // no closing quote falls through to the unquoted form, which needs 8 token characters.
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key|\baws_secret_access_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
+  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key|\baws_secret_access_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|\$'(?:[^'\\\r\n]|\\.){1,1024}'|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
 ]
 
 // JWT shape: `eyJ` + base64url, a dot, base64url, a dot, base64url, each segment at
@@ -125,16 +125,18 @@ const JWT_PATTERN = {
 const API_KEY_PATTERNS = [
   // Anthropic: sk-ant-api03-... (checked before generic sk- so the longer
   // prefix wins). Real keys are well over 40 trailing chars.
-  /\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}/g,
+  /sk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}/g,
   // OpenAI project-scoped keys: sk-proj-... (typically 40+ chars after prefix)
-  /\bsk-proj-[A-Za-z0-9_-]{40,}/g,
+  /sk-proj-[A-Za-z0-9_-]{40,}/g,
   // OpenAI legacy secret keys: sk- followed by 40+ chars. Must not match
   // sk-ant- / sk-proj- (already handled above) — negative lookahead keeps
   // them from being partially redacted.
-  /\bsk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
+  /sk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
+  // Recognised credential prefixes carry no leading \b (#8416): a token right after a
+  // word character or a literal `\n` is still a credential; the length floors keep words readable.
   // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
   // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
-  /\bAIza[A-Za-z0-9_-]{35}\b/g,
+  /AIza[A-Za-z0-9_-]{35}\b/g,
   // #5358: JWTs (incl. claude/OAuth bearer JWTs printed without a "Bearer"/key
   // marker). header.payload.signature, each base64url; the header always starts
   // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
@@ -148,10 +150,11 @@ const API_KEY_PATTERNS = [
   // intact. Real webhook tokens are 60+ chars; the 20 floor keeps doc
   // placeholders like .../webhooks/123/abc readable while catching any
   // plausible real token.
-  /\bhttps:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
+  /https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
   // #8416: classic GitHub personal access tokens: ghp_ + 36 alphanumeric
-  // characters. Both word boundaries reject placeholders and longer identifiers.
-  /\bghp_[A-Za-z0-9]{36}\b/g,
+  // characters. The trailing boundary rejects longer identifiers; there is no leading one, so a
+  // token after a word character or a literal backslash-n is still masked.
+  /ghp_[A-Za-z0-9]{36}\b/g,
 ]
 
 /**
@@ -162,7 +165,7 @@ const API_KEY_PATTERNS = [
 const SENSITIVE_KEY_NAMES = new Set([
   'token', 'password', 'apikey', 'secret', 'authorization',
   'credential', 'private_key', 'api_key',
-  'anthropic_api_key', 'aws_secret_access_key',
+  'anthropic_api_key', 'aws_secret_access_key', 'access_token', 'x-api-key',
 ])
 
 /**
@@ -295,6 +298,9 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
   if (serialized.length > maxChars) {
+    // `result` is already redacted value by value, before serialization, so the clip cannot
+    // expose a credential. The serialization is deliberately NOT re-scanned as text: a key like
+    // `not_a_token` would then lose a value the broadcast kept (permission-outcome-history P3).
     return markSanitized({ _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' })
   }
   return markSanitized(result)

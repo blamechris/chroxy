@@ -73,7 +73,7 @@ describe('additive secret grammar', () => {
   for (const nearMiss of [
     'ghp_placeholder', 'ghp_' + 'a'.repeat(35), 'ghp_' + 'a'.repeat(37),
     'ghp_' + 'a'.repeat(35) + '_', 'ghp_' + 'a'.repeat(36) + '_suffix',
-    'x' + github, 'GHP_' + 'a'.repeat(36), 'ghp_' + 'a'.repeat(18) + '-' + 'b'.repeat(17),
+    'GHP_' + 'a'.repeat(36), 'ghp_' + 'a'.repeat(18) + '-' + 'b'.repeat(17),
   ]) {
     it(`keeps a non-token classic placeholder readable (${nearMiss.slice(0, 20)})`, () => {
       assert.deepEqual(sanitizeToolInput({ command: nearMiss }), { command: nearMiss })
