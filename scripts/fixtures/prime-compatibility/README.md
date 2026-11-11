@@ -143,7 +143,7 @@ fresh-session host discovery remains separate evidence.
   candidate head are clear. Recheck active ownership and any newer registry or
   project changes before selecting a release.
 - [ ] Review source and compiled pairs together; run the compiler and AGENTS
-  checks below. Preserve the explicit backlog mission, gated merge authority,
+  checks below. Preserve the per-run charter rule (no standing mission), gated merge authority,
   old-debt quota, project invariants and paused track-only budget.
 - [ ] At an owner-approved session boundary, use a **new** checkout/session to
   verify the exact compiled skill path and effective project/global rules.
