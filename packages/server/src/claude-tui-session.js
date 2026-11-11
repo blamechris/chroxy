@@ -6155,12 +6155,47 @@ export class ClaudeTuiSession extends BaseSession {
    * `_handleHardTimeout` keeps its existing pending-answer cleanup). Idempotent.
    */
   _suspendBackstopsForPendingQuestion() {
-    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
-    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    this._suspendSilenceBackstops()
     // Disarms + latches the per-turn first-output watchdog. By the time a
     // question is pending the first output (the tool_use) has already arrived,
     // so the watchdog is moot for the rest of this turn anyway.
     this._clearFirstOutputWatchdog()
+  }
+
+  /** Clear the two silence timers (soft inactivity, stream stall). Idempotent. */
+  _suspendSilenceBackstops() {
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+  }
+
+  /**
+   * #8529: a hook-routed permission prompt for this session is waiting on a
+   * human (ws-permissions parked the hook's POST /permission). That wait is not
+   * silence from claude, so the silence backstops are suspended for as long as
+   * one is pending, exactly as they are for a pending AskUserQuestion (#5318)
+   * and as CliSession and SdkSession already do (#2831).
+   *
+   * Without this the stream-stall watchdog (default 300 s, armed when the
+   * PreToolUse event drained) and the daemon's decision window (300 s, armed
+   * when the hook's request arrived) ran side by side on the same prompt, and
+   * whichever clock started first tore the turn down or denied it.
+   *
+   * The HARD cap stays armed, as it does for a pending question. The request
+   * itself proves a hook ran this turn, so the first-output watchdog is
+   * disarmed too.
+   *
+   * The handlers themselves are NOT taught to ignore a pending prompt. With the
+   * timers cleared here and kept clear by `_armResultTimeout`, they cannot fire
+   * under one; and if one ever did, ending the turn through `_teardownTurn`
+   * (which expires the prompt, #7382) is the safe outcome, not a silent return.
+   */
+  _onFirstPermissionPending() {
+    this._suspendBackstopsForPendingQuestion()
+  }
+
+  /** The last pending prompt was answered or timed out by the daemon: the turn goes on. */
+  _onLastPermissionResolved() {
+    if (this._isBusy) this._armResultTimeout()
   }
 
   _armResultTimeout() {
@@ -6184,6 +6219,15 @@ export class ClaudeTuiSession extends BaseSession {
     // pending entry, and the next drain-loop _armResultTimeout() falls through.
     if (this._pendingUserAnswers.size > 0) {
       this._suspendBackstopsForPendingQuestion()
+      return
+    }
+    // #8529: the same while a hook-routed permission prompt is pending, so a
+    // hook-drain re-arm cannot resurrect the silence timers under it. The
+    // first-output watchdog is left to its own latch here: a pending id that
+    // outlived its turn must not switch that watchdog off for the next one.
+    if (this._pendingPermissionIds.size > 0) {
+      this._suspendSilenceBackstops()
+      this._armFirstOutputWatchdog()
       return
     }
     this._resultTimeout = setTimeout(() => {

@@ -504,7 +504,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // user deny, and permission-hook.sh told the model "Denied by user" about
         // a prompt nobody answered. `decision` stays 'deny' (fail closed), so a
         // hook that predates the field reads this exactly as it always did. Only
-        // this timer sets it: a human's deny goes out through `resolve` below.
+        // this timer sets it. Every other deny goes out through `resolve` below
+        // with no reason: a human's, and also the daemon's own releases (an
+        // abandoned turn, a destroyed session, shutdown), which the hook
+        // therefore still words as a user deny.
         sendJson(res, 200, { decision: 'deny', reason: 'timeout' })
       }, PERMISSION_TTL_MS)
 

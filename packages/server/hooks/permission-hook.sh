@@ -333,9 +333,10 @@ route_to_phone() {
 
   if [ $EXIT_CODE -ne 0 ]; then
     # #8529: curl's exit 28 is its own deadline. What it had seen by then decides
-    # the wording, and every branch here DENIES. Both facts are read only from a
-    # well-formed trailer ("<3 digits> <digits>"); anything else is not proof of
-    # either and falls through to the unreachable handling below, as before.
+    # the wording, and both outcomes selected here DENY. Both facts are read only
+    # from a well-formed trailer ("<3 digits> <digits>"); anything else (and a
+    # 200 with no byte uploaded) is not proof of either and falls through to the
+    # unreachable handling below, unchanged, opt-out included.
     #   - A final non-200 status had already arrived (the daemon sent 401/429/5xx
     #     headers and then stalled): that is the daemon's rejection, so keep the
     #     status visible, exactly as a completed non-200 reads (#7044).

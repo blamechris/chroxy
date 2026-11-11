@@ -2509,8 +2509,9 @@ export class BaseSession extends EventEmitter {
    * Timer hooks for the pending-permission lifecycle. No-ops by default: the
    * bookkeeping above is provider-agnostic, but "don't time out while the user
    * is being asked" is not — CliSession pauses its inactivity trio, while
-   * ClaudeTuiSession's hard cap deliberately stays armed and its silence
-   * backstops are suspended by a separate AskUserQuestion mechanism.
+   * ClaudeTuiSession suspends only its silence backstops (for these prompts
+   * and, through its own mechanism, for a pending AskUserQuestion) and
+   * deliberately keeps its hard cap armed.
    *
    * Kept as THREE hooks rather than one because the abandon path must NOT
    * re-arm: the turn it belonged to is over. Collapsing them re-creates the

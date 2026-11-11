@@ -12,7 +12,8 @@ import { createPermissionHandler } from '../src/ws-permissions.js'
 import { createPermissionHookManager } from '../src/permission-hook.js'
 // Through claude-tui-session.js, as every other test does: pty-driver.js and the
 // session module import each other, and the driver cannot be the entry point.
-import { writeHookSettings } from '../src/claude-tui-session.js'
+import { ClaudeTuiSession, writeHookSettings } from '../src/claude-tui-session.js'
+import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import * as deadlines from '../src/permission-deadlines.js'
 
 /**
@@ -22,7 +23,8 @@ import * as deadlines from '../src/permission-deadlines.js'
  * `curl --max-time`, and the `timeout` Claude Code is given for the hook. They
  * were all 300 s, and the one that starts FIRST expired first, so the daemon's
  * "nobody answered" reply was written just after curl had stopped listening
- * and the hook reported an unreachable daemon instead.
+ * and the hook reported an unreachable daemon instead. On claude-tui a fourth
+ * ran beside them: the session's own stream-stall watchdog, also 300 s.
  *
  * What this file holds in place:
  *
@@ -30,7 +32,9 @@ import * as deadlines from '../src/permission-deadlines.js'
  *      numbers each layer ACTUALLY uses, observed from outside it: the daemon's
  *      timer under a mocked clock, the argv the real hook hands to curl, and the
  *      settings both registration sites write;
- *   2. what the hook says when curl itself times out after it began uploading: a
+ *   2. that a claude-tui session suspends its silence watchdogs for as long as
+ *      a hook-routed prompt is pending, and resumes them when it resolves;
+ *   3. what the hook says when curl itself times out after it began uploading: a
  *      deny that claims neither that the request never reached the phone nor
  *      that it did (a byte count shows only that the upload began), that keeps a
  *      rejection status that had already arrived, and that the `=ask` opt-out
@@ -43,7 +47,7 @@ import * as deadlines from '../src/permission-deadlines.js'
  *     #8529 evidence, not in CI.
  *   - Claude Code is never run. "The host cancels the hook" is SIMULATED below
  *     by killing the hook's process group; what a real host then does with a
- *     hook that returned nothing is not tested here. (Section 8's process-group
+ *     hook that returned nothing is not tested here. (Section 9's process-group
  *     kill is this file's own watchdog for its own child processes. It is test
  *     plumbing and says nothing about how production cancels a hook.)
  *   - A curl timeout BEFORE anything was sent is exercised only through a stub
@@ -68,6 +72,9 @@ const MIN_LOCAL_WORK_BUDGET_S = 10
 // Big enough that a loopback peer which never reads cannot absorb it into its
 // socket buffers, so curl's upload is still incomplete when its deadline hits.
 const PARTIAL_UPLOAD_BODY_BYTES = 32 * 1024 * 1024
+// The real curl's deadline in the scaled tests, in seconds. Long enough that a
+// slow runner still connects and uploads before it; nothing asserts on it.
+const SCALED_CURL_DEADLINE_S = '2'
 
 const USER_DENY = 'Denied by user via Chroxy mobile app'
 const NO_ANSWER_DENY = 'No one answered the Chroxy permission request before it timed out. Failing closed (denied).'
@@ -208,6 +215,8 @@ function killHookGroup(child) {
 function spawnHook({ port = 1, request = BASH_REQUEST, env = {}, mode = 'approve', binDir, timeout = DEFAULT_HOOK_WATCHDOG_MS }) {
   let exited = false
   let child
+  let rearm = () => {}
+  let watchdogAfterMs = timeout
   const done = new Promise((resolve, reject) => {
     child = spawn('/bin/bash', [hookPath], {
       detached: true,
@@ -228,9 +237,9 @@ function spawnHook({ port = 1, request = BASH_REQUEST, env = {}, mode = 'approve
       exited = true
       realClearTimeout(timer)
       if (graceTimer) realClearTimeout(graceTimer)
-      resolve({ stdout, stderr, watchdog, watchdogAfterMs: timeout, ...result })
+      resolve({ stdout, stderr, watchdog, watchdogAfterMs, ...result })
     }
-    const timer = realSetTimeout(() => {
+    const onWatchdog = () => {
       if (exited) return
       watchdog = true
       killHookGroup(child)
@@ -239,7 +248,17 @@ function spawnHook({ port = 1, request = BASH_REQUEST, env = {}, mode = 'approve
         child.stderr.destroy()
         settle({ status: null, signal: 'SIGKILL', stdioNeverClosed: true })
       }, WATCHDOG_GRACE_MS)
-    }, timeout)
+    }
+    let timer = realSetTimeout(onWatchdog, timeout)
+    // Replace the watchdog with a shorter one, counted from NOW. Lets a test
+    // wait for the hook to be demonstrably mid-request first, so the short
+    // deadline never races process start-up on a slow runner.
+    rearm = (ms) => {
+      if (exited) return
+      realClearTimeout(timer)
+      watchdogAfterMs = ms
+      timer = realSetTimeout(onWatchdog, ms)
+    }
     child.stdout.on('data', (c) => { stdout += c.toString() })
     child.stderr.on('data', (c) => { stderr += c.toString() })
     child.stdin.on('error', () => { /* the hook went away before reading its input */ })
@@ -254,7 +273,7 @@ function spawnHook({ port = 1, request = BASH_REQUEST, env = {}, mode = 'approve
     child.stdin.end()
   })
   done.catch(() => {})
-  return { done, hasExited: () => exited, killGroup: () => killHookGroup(child) }
+  return { done, hasExited: () => exited, killGroup: () => killHookGroup(child), armWatchdog: (ms) => rearm(ms) }
 }
 
 /** The decision of a hook that ran to a clean exit, or a failure that says why not. */
@@ -284,7 +303,7 @@ function stubEnv({ stdout = '', exit = 0, floorStdout = '', floorExit = 0, log }
 let logCounter = 0
 const newLog = () => join(scratch, `curl-${++logCounter}.log`)
 
-function makeHandler({ pending = new Map(), prompts = [] } = {}) {
+function makeHandler({ pending = new Map(), prompts = [], ownerSession = { cwd: '/work/project' } } = {}) {
   return createPermissionHandler({
     sendFn: () => {},
     broadcastFn: (msg) => { if (msg?.type === 'permission_request') prompts.push(msg) },
@@ -296,7 +315,7 @@ function makeHandler({ pending = new Map(), prompts = [] } = {}) {
     getSessionManager: () => null,
     pairingManager: null,
     findSessionByHookSecret: (secret) => (
-      secret === HOOK_SECRET ? { session: { cwd: '/work/project' }, sessionId: 'sess-1' } : null
+      secret === HOOK_SECRET ? { session: ownerSession, sessionId: 'sess-1' } : null
     ),
   })
 }
@@ -729,8 +748,17 @@ async function getClosedPort() {
 }
 
 /** The PRODUCTION handler behind a real http server, counting what it writes. */
+/** A Map that also remembers every value ever set, in order. */
+class RecordingMap extends Map {
+  held = []
+  set(key, value) {
+    this.held.push(value)
+    return super.set(key, value)
+  }
+}
+
 async function startRealDaemon() {
-  const pending = new Map()
+  const pending = new RecordingMap()
   const prompts = []
   const handler = makeHandler({ pending, prompts })
   const writes = { end: 0 }
@@ -749,6 +777,7 @@ async function startRealDaemon() {
     port: server.address().port,
     handler,
     pending,
+    held: pending.held,
     prompts,
     writes,
     async waitForPending() {
@@ -833,16 +862,19 @@ describe('daemon and hook, real sockets: timeouts, cancellation and what is left
   })
 
   // SCALED: the wrapper replaces only the number after --max-time, so the real
-  // curl reaches its own deadline in one second. The daemon's timer is frozen
+  // curl reaches its own deadline in a couple of seconds. The daemon's timer is frozen
   // by the mocked clock, standing in for a daemon whose reply never comes.
   async function scaledTransportTimeout(extraEnv = {}) {
     mock.timers.enable({ apis: ['setTimeout'] })
     daemon = await startRealDaemon()
     const binDir = makeBinDir(SCALED_CURL)
-    const hook = spawnHook({ port: daemon.port, binDir, env: { REAL_CURL: findRealCurl(), SCALED_MAX_TIME: '1', ...extraEnv } })
-    const requestId = await daemon.waitForPending()
-    const lateAnswer = daemon.pending.get(requestId).resolve
-    return { out: decisionFrom(await hook.done), lateAnswer }
+    const hook = spawnHook({ port: daemon.port, binDir, env: { REAL_CURL: findRealCurl(), SCALED_MAX_TIME: SCALED_CURL_DEADLINE_S, ...extraEnv } })
+    // The resolver is taken from the record of every request the daemon ever
+    // held, after the hook has finished. Nothing here has to observe the
+    // request inside curl's short window.
+    const out = decisionFrom(await hook.done)
+    assert.equal(daemon.held.length, 1, 'the hook request reached the daemon and was held')
+    return { out, lateAnswer: daemon.held[0].resolve }
   }
 
   it('real curl times out on a request the daemon is holding: transport-timeout deny, not "unreachable"', async () => {
@@ -876,7 +908,7 @@ describe('daemon and hook, real sockets: timeouts, cancellation and what is left
     await new Promise((r) => server.listen(0, '127.0.0.1', r))
     try {
       const binDir = makeBinDir(SCALED_CURL)
-      return await hookDecision({ port: server.address().port, binDir, env: { REAL_CURL: findRealCurl(), SCALED_MAX_TIME: '1', ...extraEnv } })
+      return await hookDecision({ port: server.address().port, binDir, env: { REAL_CURL: findRealCurl(), SCALED_MAX_TIME: SCALED_CURL_DEADLINE_S, ...extraEnv } })
     } finally {
       for (const s of sockets) s.destroy()
       await new Promise((r) => server.close(r))
@@ -911,7 +943,7 @@ describe('daemon and hook, real sockets: timeouts, cancellation and what is left
   // writes into the socket, so its uploaded-byte count is positive, while the
   // application on the other end has received nothing at all. This is the case
   // the wording must survive: "began sending" is true, "the daemon got it" is not.
-  async function neverReadingListener(request, extraEnv = {}, scaledMaxTime = '1') {
+  async function neverReadingListener(request, extraEnv = {}, scaledMaxTime = SCALED_CURL_DEADLINE_S) {
     const sockets = new Set()
     let appBytesRead = 0
     const server = createNetServer({ pauseOnConnect: true }, (s) => {
@@ -951,10 +983,10 @@ describe('daemon and hook, real sockets: timeouts, cancellation and what is left
 
   it('real curl: a PARTIAL upload (fewer bytes than the request) that times out is the same deny', async () => {
     // Larger than the loopback socket buffers can absorb with nobody reading.
-    // Three seconds, not one: for a body this size curl first waits a second for
-    // a "100 Continue" that never comes, and only then starts the upload.
+    // Longer than the other scaled cases: for a body this size curl first waits a
+    // second for a "100 Continue" that never comes, and only then starts the upload.
     const big = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '/work/project/big.txt', content: 'x'.repeat(PARTIAL_UPLOAD_BODY_BYTES) } })
-    const { out, trailer, uploaded, appBytesRead } = await neverReadingListener(big, {}, '3')
+    const { out, trailer, uploaded, appBytesRead } = await neverReadingListener(big, {}, '4')
     assert.ok(/^000 \d+$/.test(trailer), `curl's trailer: ${JSON.stringify(trailer)}`)
     assert.ok(uploaded > 0, 'the upload began')
     assert.ok(uploaded < Buffer.byteLength(big), `the upload did not finish (${uploaded} of ${Buffer.byteLength(big)} bytes)`)
@@ -1027,7 +1059,193 @@ describe('daemon and hook, real sockets: timeouts, cancellation and what is left
 })
 
 // ---------------------------------------------------------------------------
-// 8. The fixture itself: a hook that never finishes must FAIL, not hang
+// 8. claude-tui: the session's own silence watchdogs stand down for the prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * A fourth clock used to run on the same prompt. ClaudeTuiSession arms a
+ * stream-stall watchdog (default 300 s) every time a hook event drains, and
+ * did not stand it down while an ordinary hook-routed permission was pending.
+ * It started when the PreToolUse event drained; the daemon's decision window
+ * started when the hook's request arrived. Whichever started first won: either
+ * the daemon's deny, or a stream-stall teardown that Ctrl-C'd the turn about a
+ * prompt that was simply waiting for a person. CliSession and SdkSession
+ * already pause for a pending prompt; this holds claude-tui to the same.
+ */
+describe('claude-tui: silence watchdogs are suspended while a hook permission is pending (#8529)', () => {
+  const STALL_MS = 300_000
+  let skillsDir
+  let unpin
+  let session
+  let handler
+
+  before(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-deadline-chain-skills-')) })
+  after(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+  afterEach(async () => {
+    mock.timers.reset()
+    handler?.destroy()
+    handler = null
+    if (session) { try { await session.destroy() } catch { /* already gone */ } }
+    session = null
+    if (unpin) unpin()
+    unpin = null
+  })
+
+  function makeBusySession() {
+    unpin = pinTmpDaemonBase(ClaudeTuiSession, 'SINK_BASE')
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      resultTimeoutMs: 1_800_000, hardTimeoutMs: 7_200_000,
+      streamStallTimeoutMs: STALL_MS, firstOutputTimeoutMs: 90_000,
+    })
+    session._isBusy = true
+    session._currentMessageId = 'msg-1'
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    return { s: session, errors }
+  }
+
+  it('the first pending prompt suspends the soft and stall timers; the hard cap stays armed', () => {
+    const { s } = makeBusySession()
+    s._armResultTimeout()
+    assert.ok(s._streamStallTimeout, 'armed before the prompt')
+    assert.ok(s._resultTimeout)
+
+    s.notifyPermissionPending('perm-1')
+    assert.equal(s._streamStallTimeout, null, 'stream-stall suspended')
+    assert.equal(s._resultTimeout, null, 'soft inactivity suspended')
+    assert.equal(s._firstOutputTimeout, null, 'a prompt is itself first output')
+    assert.ok(s._hardTimeout, 'hard cap stays armed (last-resort backstop)')
+  })
+
+  it('a hook-drain re-arm while the prompt is pending does not resurrect them', () => {
+    const { s } = makeBusySession()
+    s.notifyPermissionPending('perm-1')
+    s._armResultTimeout() // what the drain loop does after every consumed hook file
+    assert.equal(s._streamStallTimeout, null)
+    assert.equal(s._resultTimeout, null)
+    assert.ok(s._hardTimeout)
+  })
+
+  it('the prompt arriving BEFORE the drain re-arm is covered too', () => {
+    const { s } = makeBusySession()
+    s.notifyPermissionPending('perm-1') // the hook's request beat the poller
+    s._armResultTimeout() // then the PreToolUse file drains
+    assert.equal(s._streamStallTimeout, null)
+  })
+
+  it('they resume when the LAST pending prompt resolves, not before', () => {
+    const { s } = makeBusySession()
+    s._armResultTimeout()
+    s.notifyPermissionPending('perm-1')
+    s.notifyPermissionPending('perm-2')
+    s.notifyPermissionResolved('perm-1')
+    assert.equal(s._streamStallTimeout, null, 'one prompt is still pending')
+    s.notifyPermissionResolved('perm-2')
+    assert.ok(s._streamStallTimeout, 'stream-stall re-armed')
+    assert.ok(s._resultTimeout, 'soft re-armed')
+    assert.ok(s._hardTimeout)
+  })
+
+  it('a prompt resolving after the turn ended does not arm timers on an idle session', () => {
+    const { s } = makeBusySession()
+    s.notifyPermissionPending('perm-1')
+    s._isBusy = false
+    s._currentMessageId = null
+    s.notifyPermissionResolved('perm-1')
+    assert.equal(s._streamStallTimeout, null)
+    assert.equal(s._resultTimeout, null)
+  })
+
+  // Deliberately NOT asserted: that the stall handler returns early under a
+  // pending prompt. It cannot fire under one (the tests above), and if it ever
+  // did it must still end the turn and expire the prompt — which
+  // hook-routed-permission-bookkeeping.test.js (#7382) holds it to.
+  it('if the stall handler ever did fire under a pending prompt, the turn ends and the prompt is expired, not left live', () => {
+    const { s } = makeBusySession()
+    s._activeTurn = { messageId: 'msg-1', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+    const expired = []
+    s.on('permission_expired', (e) => expired.push(e))
+    s.notifyPermissionPending('perm-1')
+    s._handleStreamStall()
+    assert.equal(s._isBusy, false)
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-1'])
+  })
+
+  it('with no prompt pending the stall watchdog still tears a silent turn down', () => {
+    mock.timers.enable({ apis: ['setTimeout'] })
+    const { s, errors } = makeBusySession()
+    s._armResultTimeout()
+    mock.timers.tick(STALL_MS)
+    assert.equal(s._isBusy, false, 'a genuinely silent turn is still recovered')
+    assert.equal(errors.filter((e) => e.code === 'stream_stall').length, 1)
+  })
+
+  it('the hard cap still force-clears across a pending prompt, and the prompt is expired', () => {
+    const { s, errors } = makeBusySession()
+    const expired = []
+    s.on('permission_expired', (e) => expired.push(e))
+    s.notifyPermissionPending('perm-1')
+    s._handleHardTimeout()
+    assert.equal(s._isBusy, false)
+    assert.equal(errors.length, 1)
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-1'])
+    assert.equal(s.getPendingPermissionCount(), 0)
+  })
+
+  it('a pending id left over at the start of a turn does not switch the first-output watchdog off', () => {
+    const { s } = makeBusySession()
+    s._pendingPermissionIds.add('perm-stale') // not via notify: its turn is long gone
+    s._firstOutputDisarmed = false
+    s._armResultTimeout()
+    assert.equal(s._streamStallTimeout, null, 'silence timers wait for the daemon to release the stale prompt')
+    assert.ok(s._firstOutputTimeout, 'the new turn keeps its first-output watchdog')
+  })
+
+  // The whole chain, under one mocked clock: the REAL session timers and the
+  // PRODUCTION permission handler, wired exactly as ws-permissions wires them
+  // (it calls notifyPermissionPending / notifyPermissionResolved on the session
+  // that owns the hook secret). The hook's request arrives 10 s after the
+  // PreToolUse event drained, which is the floor probe taking its full budget:
+  // the session's stall deadline (t = 300 s) then falls BEFORE the daemon's
+  // decision deadline (t = 310 s).
+  it('the stall deadline that falls inside the decision window does not fire; the daemon timer ends the wait and the watchdog resumes', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] })
+    const { s, errors } = makeBusySession()
+    const pending = new Map()
+    handler = makeHandler({ pending, ownerSession: s })
+
+    s._armResultTimeout() // t = 0: the PreToolUse event drained
+    mock.timers.tick(10_000) // t = 10 s: the floor probe used its whole budget
+
+    const res = makeRes()
+    handler.handlePermissionRequest(makeReq(BASH_REQUEST), res)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(pending.size, 1, 'the request is held')
+    assert.equal(s.getPendingPermissionCount(), 1, 'and the session was told')
+
+    mock.timers.tick(STALL_MS - 10_000) // t = 300 s: the session's old stall deadline
+    assert.equal(s._isBusy, true, 'the turn was not torn down under a pending prompt')
+    assert.equal(errors.length, 0, 'no stream_stall error')
+    assert.equal(res.endCalls, 0, 'and the daemon has not answered yet: the user still has 10 s')
+
+    mock.timers.tick(DECISION_WINDOW_MS - (STALL_MS - 10_000)) // t = 310 s: the decision window closes
+    assert.equal(res.endCalls, 1)
+    assert.deepEqual(JSON.parse(res.body), { decision: 'deny', reason: 'timeout' })
+    assert.equal(s.getPendingPermissionCount(), 0)
+    assert.equal(s._isBusy, true, 'the turn goes on: the model is told nobody answered')
+    assert.ok(s._streamStallTimeout, 'and silence is watched again from here')
+
+    mock.timers.tick(STALL_MS - 1)
+    assert.equal(s._isBusy, true)
+    mock.timers.tick(1) // 300 s of real silence after the deny
+    assert.equal(s._isBusy, false, 'a turn that then stays silent is recovered as before')
+    assert.equal(errors.filter((e) => e.code === 'stream_stall').length, 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9. The fixture itself: a hook that never finishes must FAIL, not hang
 // ---------------------------------------------------------------------------
 
 describe('test fixture: a hook left waiting is a quick, named failure, not a hang (#8529)', POSIX_ONLY, () => {
@@ -1035,8 +1253,11 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
   async function startHoldingServer() {
     const sockets = new Set()
     const state = { requests: 0, connectionsClosed: 0 }
+    let seen
+    const requestSeen = new Promise((r) => { seen = r })
     const server = createServer((req, res) => {
       state.requests++
+      seen()
       req.on('data', () => {})
       res.on('close', () => { state.connectionsClosed++ })
     })
@@ -1045,6 +1266,7 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
     return {
       port: server.address().port,
       state,
+      requestSeen,
       close: async () => {
         for (const s of sockets) s.destroy()
         await new Promise((r) => server.close(r))
@@ -1055,17 +1277,23 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
   it('the watchdog takes down the whole hook process group, bash AND curl, and says so', async () => {
     const holding = await startHoldingServer()
     try {
-      const started = Date.now()
-      const r = await spawnHook({ port: holding.port, timeout: 1000 }).done
-      const elapsedMs = Date.now() - started
+      // Start-up is not what is being timed: wait until curl is demonstrably
+      // mid-request under the default (long) watchdog, and only then arm the
+      // short one. What proves the group kill is that the pipes closed by
+      // themselves (no stdioNeverClosed) and that the server saw the socket
+      // drop, not how many milliseconds it took.
+      const hook = spawnHook({ port: holding.port })
+      await holding.requestSeen
+      hook.armWatchdog(300)
+      const r = await hook.done
 
       assert.equal(holding.state.requests, 1, 'the hook had reached the server and was being held')
       assert.equal(r.watchdog, true)
+      assert.equal(r.watchdogAfterMs, 300)
       assert.equal(r.stdout, '', 'a hook cut off mid-wait has decided nothing')
       assert.equal(r.stdioNeverClosed, undefined,
         'the pipes closed on their own once the group was killed, so nothing in it (curl) outlived bash')
       assert.equal(r.signal, 'SIGKILL')
-      assert.ok(elapsedMs < 1000 + WATCHDOG_GRACE_MS, `settled in ${elapsedMs} ms, inside the watchdog plus its grace period`)
 
       // curl is gone too: the server saw its connection drop.
       for (let i = 0; i < 80 && holding.state.connectionsClosed === 0; i++) await realSleep(25)
@@ -1078,12 +1306,10 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
   it('a test that expected a decision gets a failure naming the watchdog, not a JSON parse error', async () => {
     const holding = await startHoldingServer()
     try {
-      const started = Date.now()
       await assert.rejects(
         hookDecision({ port: holding.port, timeout: 1000 }),
         (err) => /WATCHDOG: the hook had not finished after 1000 ms/.test(err.message),
       )
-      assert.ok(Date.now() - started < 1000 + WATCHDOG_GRACE_MS + 1000, 'and it arrives quickly')
     } finally {
       await holding.close()
     }

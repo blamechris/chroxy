@@ -58,11 +58,26 @@ const POSIX_ONLY = { skip: process.platform === 'win32' ? 'spawns hooks/permissi
 const HOOK_SECRET = 'test-hook-secret'
 const REQUEST = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
 
-/** Spawn the REAL hook script. Rejects unless it exits 0 on its own. */
+// After the watchdog kills the hook's process group, how long to wait for the
+// child's stdio to close before rejecting anyway.
+const WATCHDOG_GRACE_MS = 2000
+
+/**
+ * Spawn the REAL hook script, in a process group of its own. Rejects unless it
+ * exits 0 on its own.
+ *
+ * A hook still running after `timeout` ms is a test failure and has to arrive
+ * as one. Killing only bash leaves its curl child holding the stdout/stderr
+ * pipes, so 'close' would not fire until curl's own five-minute deadline and
+ * the test would hang. The watchdog therefore kills the whole group (bash is
+ * its leader; nothing else is in it), tolerates a group that is already gone,
+ * and rejects after a grace period even if the pipes never close.
+ */
 function runHook({ port, extraEnv = {}, timeout = 15000 }) {
   let exited = false
   const done = new Promise((resolve, reject) => {
     const child = spawn('/bin/bash', [hookPath], {
+      detached: true,
       env: {
         PATH: process.env.PATH,
         CHROXY_PORT: String(port),
@@ -73,13 +88,43 @@ function runHook({ port, extraEnv = {}, timeout = 15000 }) {
     })
     let stdout = ''
     let stderr = ''
-    const timer = realSetTimeout(() => child.kill('SIGKILL'), timeout)
+    let watchdogFired = false
+    let graceTimer = null
+    const watchdogError = () => new Error(`WATCHDOG: the hook had not finished after ${timeout} ms, so its process group was killed\nstdout so far: ${JSON.stringify(stdout)}\nstderr: ${stderr}`)
+    const timer = realSetTimeout(() => {
+      if (exited) return
+      watchdogFired = true
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch (err) {
+        if (err.code !== 'ESRCH') throw err
+      }
+      graceTimer = realSetTimeout(() => {
+        if (exited) return
+        exited = true
+        child.stdout.destroy()
+        child.stderr.destroy()
+        reject(watchdogError())
+      }, WATCHDOG_GRACE_MS)
+    }, timeout)
     child.stdout.on('data', (c) => { stdout += c.toString() })
     child.stderr.on('data', (c) => { stderr += c.toString() })
-    child.on('error', (err) => { realClearTimeout(timer); exited = true; reject(err) })
-    child.on('close', (status, signal) => {
+    child.stdin.on('error', () => { /* the hook went away before reading its input */ })
+    child.on('error', (err) => {
+      if (exited) return
       realClearTimeout(timer)
       exited = true
+      reject(err)
+    })
+    child.on('close', (status, signal) => {
+      if (exited) return
+      realClearTimeout(timer)
+      if (graceTimer) realClearTimeout(graceTimer)
+      exited = true
+      if (watchdogFired) {
+        reject(watchdogError())
+        return
+      }
       if (signal || status !== 0) {
         reject(new Error(`hook exited uncleanly (status=${status}, signal=${signal})\nstderr: ${stderr}`))
         return
