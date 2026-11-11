@@ -534,6 +534,8 @@ export class ClaudeTuiSession extends BaseSession {
     // skipPermissions disables the whole permission system; permissionMode
     // selects between approve/auto/acceptEdits/plan WITHIN it.
     this.skipPermissions = !!skipPermissions
+    // #8529: true only while _expirePendingPermissions is running. See there.
+    this._abandoningPermissions = false
     // Per-session hook secret — picked up by WsServer's session_created handler
     // (ws-server.js:_registerSessionHookSecretIfMissing reads
     // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
@@ -6195,7 +6197,30 @@ export class ClaudeTuiSession extends BaseSession {
 
   /** The last pending prompt was answered or timed out by the daemon: the turn goes on. */
   _onLastPermissionResolved() {
+    // Not when the prompts are being abandoned with their turn (below).
+    if (this._abandoningPermissions) return
     if (this._isBusy) this._armResultTimeout()
+  }
+
+  /**
+   * #8529: expiring is ABANDONING, not resolving, and must never re-arm.
+   *
+   * The base emits `permission_expired` for each id BEFORE it drops them. In a
+   * running daemon that event releases the daemon's entry, and the release
+   * comes straight back, synchronously, through `notifyPermissionResolved`
+   * (event-normalizer's `release_permission` after-effect, then
+   * ws-permissions' cleanup). Every caller of this method is tearing a turn
+   * down and has not yet cleared `_isBusy`, so without this latch the last
+   * release would look like "answered, turn goes on" and re-arm the timers of
+   * a turn that is ending.
+   */
+  _expirePendingPermissions(message) {
+    this._abandoningPermissions = true
+    try {
+      super._expirePendingPermissions(message)
+    } finally {
+      this._abandoningPermissions = false
+    }
   }
 
   _armResultTimeout() {
@@ -7029,6 +7054,11 @@ export class ClaudeTuiSession extends BaseSession {
     // runs BEFORE _activeTurn is nulled so the helper still has access
     // to attachmentsDir; no-op when the turn had no attachments.
     this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
+    // The turn is over, so no turn timer may outlive it. _clearTurnEndState and
+    // destroy() clear all three; this path cleared none, which left the others
+    // armed on an idle session after any one of them fired.
+    this._suspendSilenceBackstops()
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     this._cleanupTurnAttachments(this._activeTurn)
     this._endThinkingForTurn() // #7393
     this._activeTurn = null

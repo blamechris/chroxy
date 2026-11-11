@@ -328,6 +328,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // JSON.parse is already guarded; this wraps the WHOLE body (res.writeHead
       // on a torn-down socket, downstream session/broadcast calls) so any other
       // throw is contained and returns a 500 to the client when possible.
+      // #8529: set once the owning session has been told a prompt is pending,
+      // cleared once cleanup() owns telling it the prompt ended. If anything in
+      // between throws, the catch below uses it, so the session is not left
+      // believing a prompt is outstanding (which pauses its inactivity timers)
+      // for a request that was answered 500 and never held.
+      let releaseOwnerPause = null
       try {
       // #5433: the 413 deny was already sent from the 'data' handler.
       // #7020: ditto the 400 deny from the 'error' handler.
@@ -381,6 +387,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const ownerSessionId = ownerLookup?.sessionId ?? null
       if (ownerSession && typeof ownerSession.notifyPermissionPending === 'function') {
         ownerSession.notifyPermissionPending(requestId)
+        if (typeof ownerSession.notifyPermissionResolved === 'function') {
+          releaseOwnerPause = () => ownerSession.notifyPermissionResolved(requestId)
+        }
       }
       if (ownerSessionId) {
         // #4798: prefer the WsServer-provided helper so dispatch also auto-
@@ -525,7 +534,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // rather than re-deriving (or silently dropping) it.
         data: { requestId, tool, description, input: sanitizedInput, remainingMs: PERMISSION_TTL_MS, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool), ...(toolUseId ? { toolUseId } : {}) },
       })
+      // Held: from here cleanup() releases the session's pause on every path.
+      releaseOwnerPause = null
       } catch (err) {
+        if (releaseOwnerPause) {
+          try { releaseOwnerPause() } catch { /* the session is already gone */ }
+        }
         // #5313 (WP-1.3): see the try at the top of this end callback.
         const message = err?.message || String(err)
         log.error(`POST /permission end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)

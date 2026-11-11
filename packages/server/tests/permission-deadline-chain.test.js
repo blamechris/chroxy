@@ -1118,6 +1118,10 @@ describe('claude-tui: silence watchdogs are suspended while a hook permission is
     assert.ok(s._hardTimeout, 'hard cap stays armed (last-resort backstop)')
   })
 
+  // Covers both orders the two can arrive in: the test above is "drained, then
+  // the prompt"; this is "the prompt, then a drain" — whether that drain is the
+  // prompt's own PreToolUse file (the hook's request beat the poller) or a
+  // later hook event while the prompt is still up.
   it('a hook-drain re-arm while the prompt is pending does not resurrect them', () => {
     const { s } = makeBusySession()
     s.notifyPermissionPending('perm-1')
@@ -1125,13 +1129,36 @@ describe('claude-tui: silence watchdogs are suspended while a hook permission is
     assert.equal(s._streamStallTimeout, null)
     assert.equal(s._resultTimeout, null)
     assert.ok(s._hardTimeout)
+    s._armResultTimeout() // and again, for a second event under the same prompt
+    assert.equal(s._streamStallTimeout, null)
+    assert.equal(s._resultTimeout, null)
   })
 
-  it('the prompt arriving BEFORE the drain re-arm is covered too', () => {
+  it('a request the daemon fails to hold (it answers 500) does not leave the session thinking a prompt is pending', async () => {
     const { s } = makeBusySession()
-    s.notifyPermissionPending('perm-1') // the hook's request beat the poller
-    s._armResultTimeout() // then the PreToolUse file drains
-    assert.equal(s._streamStallTimeout, null)
+    s._armResultTimeout()
+    const pending = new Map()
+    handler = createPermissionHandler({
+      sendFn: () => {},
+      broadcastFn: () => { throw new Error('broadcast failed') },
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions: pending,
+      permissionSessionMap: new Map(),
+      getSessionManager: () => null,
+      pairingManager: null,
+      findSessionByHookSecret: () => ({ session: s, sessionId: 'sess-1' }),
+    })
+    const res = makeRes()
+    handler.handlePermissionRequest(makeReq(BASH_REQUEST), res)
+    await new Promise((r) => setImmediate(r))
+
+    assert.equal(res.statusCode, 500)
+    assert.equal(pending.size, 0, 'nothing is held')
+    assert.equal(s.getPendingPermissionCount(), 0, 'and the session was told so')
+    assert.ok(s._streamStallTimeout, 'so its stall watchdog is running again')
+    assert.ok(s._resultTimeout)
   })
 
   it('they resume when the LAST pending prompt resolves, not before', () => {
@@ -1175,10 +1202,98 @@ describe('claude-tui: silence watchdogs are suspended while a hook permission is
   it('with no prompt pending the stall watchdog still tears a silent turn down', () => {
     mock.timers.enable({ apis: ['setTimeout'] })
     const { s, errors } = makeBusySession()
+    // As after a consumed hook event: the 90 s first-output watchdog shares the
+    // stream_stall error code, so it has to be out of the way or it would be
+    // what ends the turn here and the stall timer would never be exercised.
+    s._clearFirstOutputWatchdog()
     s._armResultTimeout()
-    mock.timers.tick(STALL_MS)
+    assert.equal(s._firstOutputTimeout, null)
+    mock.timers.tick(STALL_MS - 1)
+    assert.equal(s._isBusy, true, 'not before the stall deadline')
+    mock.timers.tick(1)
     assert.equal(s._isBusy, false, 'a genuinely silent turn is still recovered')
-    assert.equal(errors.filter((e) => e.code === 'stream_stall').length, 1)
+    const stalls = errors.filter((e) => e.code === 'stream_stall')
+    assert.equal(stalls.length, 1)
+    assert.equal(stalls[0].timeoutMs, STALL_MS, 'by the stall watchdog, not the first-output one')
+  })
+
+  // The daemon releases an expired prompt synchronously, and that release comes
+  // back through notifyPermissionResolved while the session is still marked
+  // busy. Wired here as production wires it: permission_expired -> the real
+  // handler's releaseAbandonedPermission -> cleanup -> the session.
+  function wireProductionRelease(s) {
+    const pending = new Map()
+    handler = makeHandler({ pending, ownerSession: s })
+    s.on('permission_expired', (e) => handler.releaseAbandonedPermission(e.requestId))
+    return pending
+  }
+  async function holdOneRequest(s, pending) {
+    const res = makeRes()
+    handler.handlePermissionRequest(makeReq(BASH_REQUEST), res)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(pending.size, 1)
+    assert.equal(s.getPendingPermissionCount(), 1)
+    return res
+  }
+  const TEARDOWNS = [
+    ['the hard cap', (s) => s._handleHardTimeout()],
+    ['a stream-stall teardown', (s) => s._handleStreamStall()],
+    ['a first-output teardown', (s) => s._handleFirstOutputTimeout()],
+    ['the PTY going away', (s) => s._onPtyGone({ exitCode: 1 }, 'exit')],
+    ['a turn ending normally', (s) => s._clearTurnEndState()],
+  ]
+  for (const [name, drive] of TEARDOWNS) {
+    it(`${name} with a prompt pending abandons it: the daemon's release does not re-arm any timer`, async () => {
+      const { s } = makeBusySession()
+      s._activeTurn = { messageId: 'msg-1', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const pending = wireProductionRelease(s)
+      const res = await holdOneRequest(s, pending)
+
+      drive(s)
+
+      assert.equal(s._isBusy, false, 'the turn ended')
+      assert.equal(pending.size, 0, 'the daemon released its entry')
+      assert.equal(res.endCalls, 1, 'and answered the hook')
+      assert.deepEqual(JSON.parse(res.body), { decision: 'deny' })
+      assert.equal(s.getPendingPermissionCount(), 0)
+      assert.equal(s._streamStallTimeout, null, 'no stall timer on an idle session')
+      assert.equal(s._resultTimeout, null, 'no soft timer on an idle session')
+      assert.equal(s._hardTimeout, null, 'no hard cap on an idle session')
+      assert.equal(s._abandoningPermissions, false, 'the latch is released')
+    })
+  }
+
+  it('a stall or first-output teardown leaves none of the three turn timers armed, prompt or no prompt', () => {
+    for (const drive of [(s) => s._handleStreamStall(), (s) => s._handleFirstOutputTimeout(), (s) => s._handleHardTimeout()]) {
+      const { s } = makeBusySession()
+      s._activeTurn = { messageId: 'msg-1', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      s._armResultTimeout()
+      assert.ok(s._hardTimeout && s._resultTimeout && s._streamStallTimeout, 'all three armed')
+      drive(s)
+      assert.equal(s._isBusy, false)
+      assert.equal(s._hardTimeout, null)
+      assert.equal(s._resultTimeout, null)
+      assert.equal(s._streamStallTimeout, null)
+    }
+  })
+
+  it('the abandon latch is released even when a permission_expired listener throws', () => {
+    const { s } = makeBusySession()
+    s.notifyPermissionPending('perm-1')
+    s.on('permission_expired', () => { throw new Error('listener failed') })
+    assert.throws(() => s._expirePendingPermissions('x'), /listener failed/)
+    assert.equal(s._abandoningPermissions, false)
+  })
+
+  it('a prompt answered in the ordinary way after an earlier abandonment still resumes the watchdogs', () => {
+    const { s } = makeBusySession()
+    s.notifyPermissionPending('perm-old')
+    s._expirePendingPermissions('the earlier turn ended')
+    s._armResultTimeout()
+    s.notifyPermissionPending('perm-new')
+    assert.equal(s._streamStallTimeout, null)
+    s.notifyPermissionResolved('perm-new')
+    assert.ok(s._streamStallTimeout, 'the latch did not stick')
   })
 
   it('the hard cap still force-clears across a pending prompt, and the prompt is expired', () => {
@@ -1240,7 +1355,9 @@ describe('claude-tui: silence watchdogs are suspended while a hook permission is
     assert.equal(s._isBusy, true)
     mock.timers.tick(1) // 300 s of real silence after the deny
     assert.equal(s._isBusy, false, 'a turn that then stays silent is recovered as before')
-    assert.equal(errors.filter((e) => e.code === 'stream_stall').length, 1)
+    const stalls = errors.filter((e) => e.code === 'stream_stall')
+    assert.equal(stalls.length, 1)
+    assert.equal(stalls[0].timeoutMs, STALL_MS, 'by the stall watchdog')
   })
 })
 
@@ -1276,14 +1393,22 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
 
   it('the watchdog takes down the whole hook process group, bash AND curl, and says so', async () => {
     const holding = await startHoldingServer()
+    let hook
     try {
       // Start-up is not what is being timed: wait until curl is demonstrably
       // mid-request under the default (long) watchdog, and only then arm the
       // short one. What proves the group kill is that the pipes closed by
       // themselves (no stdioNeverClosed) and that the server saw the socket
       // drop, not how many milliseconds it took.
-      const hook = spawnHook({ port: holding.port })
-      await holding.requestSeen
+      hook = spawnHook({ port: holding.port })
+      // Raced against the hook itself: if it exits (or its own long watchdog
+      // fires) before any request arrives, that is a fixture failure to report,
+      // not something to wait on forever.
+      const first = await Promise.race([
+        holding.requestSeen.then(() => 'request'),
+        hook.done.then(() => 'hook-ended'),
+      ])
+      assert.equal(first, 'request', 'the hook ended before its request reached the server')
       hook.armWatchdog(300)
       const r = await hook.done
 
@@ -1299,6 +1424,11 @@ describe('test fixture: a hook left waiting is a quick, named failure, not a han
       for (let i = 0; i < 80 && holding.state.connectionsClosed === 0; i++) await realSleep(25)
       assert.equal(holding.state.connectionsClosed, 1, "the server saw the hook's connection close")
     } finally {
+      // Whatever failed above, do not leave a hook behind holding the server open.
+      if (hook && !hook.hasExited()) {
+        hook.killGroup()
+        await hook.done
+      }
       await holding.close()
     }
   })
