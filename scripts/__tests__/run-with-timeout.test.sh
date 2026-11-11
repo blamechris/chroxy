@@ -65,8 +65,39 @@ echo "run-with-timeout.sh (#8145)"
 # like /usr/bin: on ubuntu-24.04 /usr/bin carries GNU `timeout`, so a PATH of
 # system dirs silently ran cases 5-7 through GNU timeout instead of perl on
 # the one platform CI uses (#8145 CI).
-NO_TIMEOUT_DIR="$(mktemp -d)"
-trap 'rm -rf "$NO_TIMEOUT_DIR"' EXIT
+#
+# Everything this run creates lives under ONE directory it made for itself,
+# and the EXIT trap removes exactly that directory: nothing shared with another
+# run, nothing matched by a pattern (#8579).
+#
+# The TERM-ignoring fixtures further down used to be allocated with
+# `mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh`. BSD mktemp (stock macOS)
+# substitutes only TRAILING X's, so with the `.sh` suffix it created the
+# template's literal name. Every run on the machine then shared one path: a run
+# cut off before its `rm -f` broke each later one ("mktemp: ... File exists"),
+# and two concurrent runs could remove each other's fixture. A template that ENDS in
+# X's is randomized by BSD and GNU mktemp alike, and a name inside a directory
+# only this run has cannot collide with anything.
+#
+# The template is spelled out, rather than left to a bare `mktemp -d`, so the
+# location follows TMPDIR on both platforms: stock macOS `mktemp -d` ignores it.
+#
+# A failed allocation stops HERE, before any case. An empty RUN_DIR would turn
+# the paths below into `/no-timeout-bin` and `/fixtures`, and the cases would
+# then report on a setup that never existed.
+TMP_ROOT="${TMPDIR:-/tmp}"
+RUN_DIR="$(mktemp -d "${TMP_ROOT%/}/chroxy-rwt.XXXXXX")" || RUN_DIR=""
+if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then
+  echo "run-with-timeout.test.sh: could not allocate a run-owned temp dir under '$TMP_ROOT' — no case was run" >&2
+  exit 1
+fi
+trap 'rm -rf "$RUN_DIR"' EXIT
+NO_TIMEOUT_DIR="$RUN_DIR/no-timeout-bin"
+FIXTURE_DIR="$RUN_DIR/fixtures"
+if ! mkdir "$NO_TIMEOUT_DIR" "$FIXTURE_DIR"; then
+  echo "run-with-timeout.test.sh: could not create the run's directories under '$RUN_DIR' — no case was run" >&2
+  exit 1
+fi
 for tool in bash sh perl true false sleep env; do
   # `type -P`, not `command -v`: `true`/`false` are shell builtins, and
   # `command -v true` prints the bare name, which would make a dangling link.
@@ -170,32 +201,251 @@ fi
 # <this script>` exits 137). run_with_timeout now normalizes 137 -> 124 in
 # the one place both GNU backends return through, so every caller's
 # existing `-eq 124` check keeps meaning "timed out" regardless of whether
-# escalation fired. Each case also confirms the actual process is gone
-# afterward (via `pgrep -f` on a per-run UNIQUE script name) — "the call
-# returned in time" alone would still pass if escalation silently failed to
-# reap anything and the TERM-ignoring process just kept running in the
-# background.
+# escalation fired. Each case also confirms the actual process is no longer
+# alive afterward — "the call returned in time" alone would still pass if
+# escalation silently failed to end anything and the TERM-ignoring process
+# just kept running in the background.
+#
+# HOW "NO LONGER ALIVE" IS ESTABLISHED. These two assertions used to ask
+# `pgrep -f` for the fixture's path. The fixture did `exec sleep 40`, so the
+# process it became had `sleep 40` for an argv and the path matched nothing.
+# Measured with a stand-in wrapper that kills nothing: both assertions reported
+# `ok` while both fixtures were alive (#8579 validation). "No such process" and
+# "a process this search cannot see" were the same answer.
+#
+# Now the fixture says which process it is, and the harness looks at exactly
+# that process:
+#
+#   identity   The fixture writes its own pid to `<fixture>.pid`, AFTER it has
+#              started ignoring TERM. A record that is absent, unreadable, not
+#              exactly one newline-terminated line, or not a plain pid FAILS:
+#              with nothing naming the process there is nothing to observe, and
+#              that is not evidence it ended. The record lives in this run's
+#              own FIXTURE_DIR, and the fixture is refused if one is already
+#              there, so it cannot be another process's.
+#   observers  `ps` is asked about that pid AND this harness's own pid in one
+#              call. Nothing it says counts — not an absent row, not a `Z` —
+#              unless it exited 0, every line it printed is one well-formed
+#              row for one of those two pids, and the harness's own row is
+#              among them. The harness is in the query, so a ps able to look
+#              exits 0 even when the fixture is gone (measured, macOS ps); one
+#              that is missing, denied, half-working or silent is "unknown"
+#              whatever else it printed. Then kill(pid, 0) — which delivers no
+#              signal — is asked about the same pid, and has to agree:
+#                gone     no row for the pid, and kill fails with ESRCH
+#                zombie   a row in state Z, and kill succeeds
+#                present  a row in any other state: running, sleeping, stopped
+#                unknown  anything else, the two disagreeing included
+#              gone and zombie pass. present and unknown fail.
+#   zombie     ps reports `Z` for a process that has terminated and is waiting
+#              for its parent to collect it. It cannot run again, and once the
+#              bounded call has returned, its parent is whatever adopted it —
+#              so one that lingers describes the host's init, not the wrapper.
+#              It passes, after the full wait for it to go, with a note. That
+#              is why these two cases claim "no LIVE process": not "no process
+#              table entry", and not "collected". The `Z` itself is ps's word
+#              alone; kill(pid, 0) cannot tell a zombie from a running process,
+#              it only confirms the pid still exists.
+#   bound      The exit is asynchronous. Measured on macOS, /usr/bin/timeout
+#              and GNU timeout 9.12 both end THEMSELVES with the KILL they
+#              escalate to (wait status: signal 9), so neither waits for the
+#              command, and the call can return before the kernel has
+#              finished with it. The look is repeated for a few seconds and
+#              stops at the first "gone". The fixture's own lifetime (40s) is
+#              far longer than that window, so waiting cannot turn a survivor
+#              into a pass.
+#   not a kill A pid that ended is not proof the WRAPPER ended it. The fixture
+#              writes `<fixture>.ended` when it leaves on its own, which a
+#              KILL never lets it do; gone or zombie with that marker fails.
+#
+# Nothing here sends a signal. A fixture that survives is released by removing
+# its own file, which its loop polls: the `rm -f` after each case, and the EXIT
+# trap's removal of RUN_DIR on every other way out. So there is no pid to kill
+# and no pattern to match, and pid reuse can only turn a pass into a failure,
+# never the reverse: a process that is alive, or dead and not yet collected,
+# keeps its pid.
+#
+# What this does NOT see: anything the fixture itself started (its `sleep 1`
+# ticks). Only the one process that recorded its pid is observed.
+#
+# The fixture's path is a fixed name inside this run's own FIXTURE_DIR, so it
+# is unique per run through its directory (#8579). A fixture that could not be
+# written stops the run: carrying on would report the missing file as a wrong
+# exit code from the wrapper.
 make_term_ignoring_script() {
   local path="$1"
-  cat > "$path" <<'EOF'
+  if [ -e "$path" ] || [ -e "$path.pid" ] || [ -e "$path.ended" ]; then
+    return 1
+  fi
+  cat > "$path" <<'EOF' || return 1
 #!/usr/bin/env bash
 trap '' TERM
-exec sleep 40
+printf '%s\n' "$$" > "$0.pid" || exit 97
+while [ "$SECONDS" -lt 40 ] && [ -e "$0" ]; do sleep 1; done
+{ : > "$0.ended"; } 2>/dev/null
 EOF
   chmod +x "$path"
 }
 
+# How many looks, 0.2s apart, each wait below is allowed: 5s to find a usable
+# identity record, 5s for the identified process to be gone.
+IDENTITY_TRIES=25
+LIVENESS_TRIES=25
+
+# Reads a fixture's identity record into FIXTURE_PID. Returns non-zero, with
+# the reason in FIXTURE_PID_DETAIL, for anything but one newline-terminated
+# line holding a plain pid. `read` fails on a line with no trailing newline,
+# which is what makes a half-written record unusable instead of a shorter pid.
+read_fixture_pid() {
+  local file="$1" first="" extra=""
+  FIXTURE_PID=""
+  FIXTURE_PID_DETAIL=""
+  if [ ! -f "$file" ]; then
+    FIXTURE_PID_DETAIL="no record at $file"
+    return 1
+  fi
+  if ! { IFS= read -r first && ! IFS= read -r extra && [ -z "$extra" ]; } 2>/dev/null < "$file"; then
+    FIXTURE_PID_DETAIL="the record at $file is unreadable or is not exactly one complete line"
+    return 1
+  fi
+  case "$first" in
+    ''|0*|*[!0-9]*)
+      FIXTURE_PID_DETAIL="the record at $file does not hold a pid: '$first'"
+      return 1
+      ;;
+  esac
+  if [ "${#first}" -gt 10 ]; then
+    FIXTURE_PID_DETAIL="the record at $file does not hold a pid: '$first'"
+    return 1
+  fi
+  FIXTURE_PID="$first"
+}
+
+# One look at one pid. Sets PROBE_STATE to gone, zombie, present or unknown
+# (the table above) and PROBE_DETAIL to what was seen. It starts at unknown and
+# every early return leaves it there: only the last few lines can set a state
+# that passes, and they are reached only after ps has exited 0, printed nothing
+# but well-formed rows for the two pids asked about, and listed this harness.
+probe_pid() {
+  local pid="$1" listing ps_rc p st rest saw_self=0 saw_pid=0 pid_state="" krc
+  PROBE_STATE=unknown
+  PROBE_DETAIL=""
+  if [ "$pid" = "$$" ]; then
+    PROBE_STATE=present
+    PROBE_DETAIL="the record names this harness's own pid"
+    return
+  fi
+  listing="$(ps -o pid= -o stat= -p "$$,$pid" 2>/dev/null)"
+  ps_rc=$?
+  if [ "$ps_rc" -ne 0 ]; then
+    PROBE_DETAIL="ps exited $ps_rc with this harness's own pid ($$) in the query — it could not look, so nothing it printed about pid $pid counts"
+    return
+  fi
+  while read -r p st rest; do
+    [ -n "$p" ] || continue
+    if [ -z "$st" ] || [ -n "$rest" ]; then
+      PROBE_DETAIL="ps printed a line that is not one 'pid state' row: '$p $st $rest'"
+      return
+    fi
+    if [ "$p" = "$$" ] && [ "$saw_self" -eq 0 ]; then
+      saw_self=1
+    elif [ "$p" = "$pid" ] && [ "$saw_pid" -eq 0 ]; then
+      saw_pid=1
+      pid_state="$st"
+    else
+      PROBE_DETAIL="ps printed a row that is not the one row for either pid asked about: '$p $st'"
+      return
+    fi
+  done <<< "$listing"
+  if [ "$saw_self" -ne 1 ]; then
+    PROBE_DETAIL="ps did not list this harness's own pid ($$), so nothing it printed about pid $pid counts"
+    return
+  fi
+  perl -e 'exit(kill(0, $ARGV[0]) ? 0 : ($!{ESRCH} ? 3 : 4))' "$pid" 2>/dev/null
+  krc=$?
+  if [ "$saw_pid" -eq 1 ]; then
+    case "$pid_state" in
+      Z*)
+        if [ "$krc" -eq 0 ]; then
+          PROBE_STATE=zombie
+          PROBE_DETAIL="ps state '$pid_state'"
+        else
+          PROBE_DETAIL="ps reports pid $pid as a zombie (state '$pid_state'), but the signal-0 check did not agree that the pid exists (perl exit $krc, expected 0)"
+        fi
+        ;;
+      *)
+        PROBE_STATE=present
+        PROBE_DETAIL="ps state '$pid_state'"
+        ;;
+    esac
+    return
+  fi
+  case "$krc" in
+    3) PROBE_STATE=gone ;;
+    0) PROBE_DETAIL="ps does not list pid $pid, but the pid still accepts signal 0" ;;
+    *) PROBE_DETAIL="ps does not list pid $pid, and the signal-0 check did not confirm it (perl exit $krc, expected 3 for ESRCH)" ;;
+  esac
+}
+
+# assert_fixture_not_alive LABEL FIXTURE — exactly one pass or fail.
+assert_fixture_not_alive() {
+  local label="$1" fixture="$2" tries=0
+  while ! read_fixture_pid "$fixture.pid"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt "$IDENTITY_TRIES" ] || break
+    sleep 0.2
+  done
+  if [ -z "$FIXTURE_PID" ]; then
+    fail "$label" "the fixture's process cannot be identified ($FIXTURE_PID_DETAIL) — that is not evidence it ended"
+    return
+  fi
+  tries=0
+  while :; do
+    probe_pid "$FIXTURE_PID"
+    [ "$PROBE_STATE" = gone ] && break
+    tries=$((tries + 1))
+    [ "$tries" -lt "$LIVENESS_TRIES" ] || break
+    sleep 0.2
+  done
+  case "$PROBE_STATE" in
+    gone|zombie)
+      if [ -e "$fixture.ended" ]; then
+        fail "$label" "fixture pid $FIXTURE_PID has ended, but it left on its own ($fixture.ended exists) — the wrapper did not end it"
+      else
+        pass "$label"
+        if [ "$PROBE_STATE" = zombie ]; then
+          echo "         note: fixture pid $FIXTURE_PID has terminated but has NOT been collected — it is still in the process table as a zombie ($PROBE_DETAIL)"
+        fi
+      fi
+      ;;
+    present)
+      fail "$label" "fixture pid $FIXTURE_PID is still in the process table ($PROBE_DETAIL) after $LIVENESS_TRIES looks"
+      ;;
+    *)
+      fail "$label" "could not establish whether fixture pid $FIXTURE_PID is still alive: $PROBE_DETAIL"
+      ;;
+  esac
+}
+
 # 9. Real backend (whatever the unmodified PATH provides — timeout, gtimeout,
 # or perl, same as case 3).
-term_script="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
-make_term_ignoring_script "$term_script"
+term_script="$FIXTURE_DIR/term-ignore-real-backend.sh"
+if ! make_term_ignoring_script "$term_script"; then
+  echo "run-with-timeout.test.sh: could not write the fixture '$term_script' — stopping before its cases" >&2
+  exit 1
+fi
 start=$(date +%s)
-env -i PATH="$PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script'"
+# The lib and the fixture are passed as ARGUMENTS, not spliced into the `-c`
+# source: the fixture path follows TMPDIR, and a TMPDIR containing an
+# apostrophe would otherwise end the quoted string early and make bash exit 2
+# on a syntax error before the wrapper ran (#8579 review).
+# shellcheck disable=SC2016 # `$1`/`$2` belong to the inner bash, not to this shell
+env -i PATH="$PATH" HOME="$HOME" bash -c 'source "$1"; run_with_timeout 1 "$2"' rwt-case "$LIB" "$term_script"
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 # The grace window (perl: hardcoded 10s; GNU timeout: `-k 10`) means this
 # returns at ~11s, not ~1s — bounded well under the TERM-ignoring script's
-# own 40s `sleep`, which is the actual property under test (it did NOT run
+# own 40s lifetime, which is the actual property under test (it did NOT run
 # to completion).
 if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 40 ]; then
   pass "a TERM-ignoring command is still reaped and reports the agreed timeout code (124), not 137"
@@ -203,22 +453,21 @@ else
   fail "a TERM-ignoring command is still reaped and reports the agreed timeout code (124), not 137" \
        "rc=$rc elapsed=${elapsed}s"
 fi
-sleep 1 # let process-table bookkeeping settle before checking
-if pgrep -f "$term_script" >/dev/null 2>&1; then
-  fail "no leftover process after a TERM-ignoring command's bound expires" \
-       "pgrep still finds a process for $term_script"
-else
-  pass "no leftover process after a TERM-ignoring command's bound expires"
-fi
+assert_fixture_not_alive "no live process is left after a TERM-ignoring command's bound expires" "$term_script"
+# Removing the fixture is also what releases one that survived (see above).
 rm -f "$term_script"
 
 # 10. Forced perl fallback — the SAME property, under the backend that has
 # its own, independently-written grace-then-KILL loop (not GNU coreutils'
 # `-k`), so a fix that only patched the GNU path would leave this half red.
-term_script2="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
-make_term_ignoring_script "$term_script2"
+term_script2="$FIXTURE_DIR/term-ignore-perl-fallback.sh"
+if ! make_term_ignoring_script "$term_script2"; then
+  echo "run-with-timeout.test.sh: could not write the fixture '$term_script2' — stopping before its cases" >&2
+  exit 1
+fi
 start=$(date +%s)
-env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script2'"
+# shellcheck disable=SC2016 # `$1`/`$2` belong to the inner bash, not to this shell
+env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c 'source "$1"; run_with_timeout 1 "$2"' rwt-case "$LIB" "$term_script2"
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 40 ]; then
@@ -227,13 +476,7 @@ else
   fail "perl fallback: a TERM-ignoring command is still reaped and reports 124" \
        "rc=$rc elapsed=${elapsed}s"
 fi
-sleep 1
-if pgrep -f "$term_script2" >/dev/null 2>&1; then
-  fail "perl fallback: no leftover process after a TERM-ignoring command's bound expires" \
-       "pgrep still finds a process for $term_script2"
-else
-  pass "perl fallback: no leftover process after a TERM-ignoring command's bound expires"
-fi
+assert_fixture_not_alive "perl fallback: no live process is left after a TERM-ignoring command's bound expires" "$term_script2"
 rm -f "$term_script2"
 
 echo ""
