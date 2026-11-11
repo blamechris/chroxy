@@ -1260,7 +1260,7 @@ export class SdkSession extends BaseSession {
     } else {
       options.hooks = {
         PreToolUse: [{
-          hooks: [(input, toolUseId, { signal }) => this._handleAutoPreToolUse(input, signal, toolUseId)],
+          hooks: [(input, toolUseId, hookOptions) => this._handleAutoPreToolUse(input, hookOptions?.signal, toolUseId)],
           // PermissionManager's default human-decision timeout is 300s. Give
           // its hook callback a small completion margin so the manager owns the
           // timeout result instead of the SDK aborting it first.
@@ -3115,10 +3115,27 @@ export class SdkSession extends BaseSession {
     const toolUseId = typeof hookToolUseId === 'string' && hookToolUseId.length > 0
       ? hookToolUseId
       : hookInput?.tool_use_id
-    const result = await this._trackPermissionDecision(
-      toolUseId,
-      this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId),
-    )
+    // This callback is the only gate on an Auto turn (the SDK itself runs in
+    // bypassPermissions), and a callback that rejects gives the SDK no decision.
+    // So a permission check that throws, or whose promise rejects, is answered
+    // here as a deny.
+    let result
+    try {
+      result = await this._trackPermissionDecision(
+        toolUseId,
+        this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId),
+      )
+    } catch (err) {
+      ;(this._log || log).warn(`Auto-mode permission check failed for ${toolName}; denying: ${err?.message || err}`)
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'Chroxy could not complete the permission check for this tool call. Failing closed (denied).',
+        },
+      }
+    }
     const allow = result?.behavior === 'allow'
     return {
       continue: true,

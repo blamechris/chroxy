@@ -38,6 +38,8 @@ const hookPath = join(__dirname, '../hooks/permission-hook.sh')
 
 const CWD = '/work/project'
 const HOOK_SECRET = 'test-hook-secret'
+// The guard the user-level registration puts in front of the script path.
+const USER_LEVEL_GUARD = '[ -n "$CHROXY_PORT" ] && [ "$CHROXY_TUI_CHILD" != 1 ] || exit 0; exec '
 
 function runCommand({ file, args, shellCommand, env, payload, timeout = 15000 }) {
   return new Promise((resolve, reject) => {
@@ -170,7 +172,9 @@ describe('claude-tui env + settings carry the #8263 flag and marker', () => {
     // The registration quotes the script path only when it needs it, so compare
     // against the expected form for THIS checkout rather than a fixed suffix (a
     // checkout path with a space would otherwise fail on the closing quote).
-    assert.equal(entry.hooks[0].command, shellQuotePath(resolve(hookPath)))
+    // The path follows the guard that keeps the entry inert outside a
+    // claude-cli session (written out here, not taken from the source).
+    assert.equal(entry.hooks[0].command, `${USER_LEVEL_GUARD}${shellQuotePath(resolve(hookPath))}`)
     await mgr.destroy()
   })
 })
@@ -400,8 +404,8 @@ describe('the claude-cli (user-level) registration shell-quotes the script path 
   it('writes the quoted form, and the entry is still recognised as ours without its flag', async () => {
     const { settingsPath, settings } = await registerAndRead()
     const entry = settings.hooks.PreToolUse[0]
-    assert.equal(entry.hooks[0].command, shellQuotePath(quotedScript))
-    assert.ok(entry.hooks[0].command.startsWith("'") && entry.hooks[0].command.endsWith("'"), entry.hooks[0].command)
+    assert.equal(entry.hooks[0].command, `${USER_LEVEL_GUARD}${shellQuotePath(quotedScript)}`)
+    assert.ok(entry.hooks[0].command.includes(" exec '") && entry.hooks[0].command.endsWith("'"), entry.hooks[0].command)
     // Drop the canonical flag so only the path-match arm can recognise it.
     delete entry._chroxy
     writeFileSync(settingsPath, JSON.stringify(settings))

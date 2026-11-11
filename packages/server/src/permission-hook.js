@@ -114,6 +114,34 @@ function _isChroxyHookEntry(entry) {
 }
 
 /**
+ * The command string of the user-level registration.
+ *
+ * The entry lives in the user's own Claude settings, so every Claude Code
+ * session on the machine loads it, and an entry can outlive the session that
+ * wrote it (#3714). It also sets `onFailure: 'block'`. So the command decides
+ * FIRST, without touching the script, whether this session is one it gates:
+ *
+ *   - no CHROXY_PORT: not a Chroxy session. Exit 0 with no output, which Claude
+ *     Code reads as "no decision". A leftover entry whose script has since
+ *     moved or been removed therefore does nothing, instead of failing and
+ *     blocking every tool call in an ordinary Claude Code session.
+ *   - CHROXY_TUI_CHILD=1: a claude-tui child, where only the session's own
+ *     `--settings` copy may decide (#8263). Same: exit 0, nothing.
+ *   - otherwise: a claude-cli session. `exec` the script. If that cannot run,
+ *     the hook has failed, and the failure blocks the tool call.
+ *
+ * permission-hook.sh makes the same two checks itself; they are repeated here
+ * because here they have to hold when the script cannot be run at all.
+ *
+ * @param {string} hookScript
+ * @returns {string}
+ */
+export function userLevelHookCommand(hookScript) {
+  const script = shellQuotePath(hookScript)
+  return `[ -n "$CHROXY_PORT" ] && [ "$CHROXY_TUI_CHILD" != 1 ] || exit 0; exec ${script}`
+}
+
+/**
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
  * @param {string} [settingsPath] - Path to settings.json (defaults to <claude config dir>/settings.json)
@@ -149,16 +177,19 @@ function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRI
       hooks: [
         {
           type: 'command',
-          // Claude runs this string through a shell: an install path with a space
-          // would split into words and exit 127, which Claude treats as a
-          // non-blocking error (the permission check silently skipped). Quoted only
-          // when it needs it, so a plain path is byte-for-byte what it always was.
-          command: shellQuotePath(hookScript),
+          // Claude runs this string through a shell, so the script path is
+          // shell-quoted when it needs it (an install path with a space would
+          // otherwise split into words). See userLevelHookCommand for the rest.
+          command: userLevelHookCommand(hookScript),
           // Longer than the script's budgeted envelope, so that within it the
           // daemon's answer (a decision, or its no-answer deny) is what ends the
           // wait and not the host cancelling the hook. A budget, not a
           // guarantee: see permission-deadlines.js.
           timeout: HOOK_HOST_TIMEOUT_S,
+          // A hook that Claude Code cancels at that timeout, or that cannot run
+          // in a claude-cli session, blocks the tool call rather than being
+          // skipped. Claude Code builds that predate the option ignore the key.
+          onFailure: 'block',
         },
       ],
     })
