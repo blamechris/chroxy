@@ -349,6 +349,27 @@ describe('path-scoped rules match on the target real location', () => {
     assert.equal(match('src/**', 'src/loop-a'), null)
   })
 
+  it('on POSIX a link whose name holds a backslash is followed as one component', {
+    skip: process.platform === 'win32' || SKIP_NO_SYMLINK,
+  }, () => {
+    symlinkSync(join(root, 'other', 'outside.txt'), join(root, 'src', 'x\\y'))
+    assert.equal(match('src', 'src/x\\y'), null)
+    assert.equal(match('src', join(root, 'src', 'x\\y')), null)
+    assert.equal(match('src/**', 'src/x\\y'), null)
+    // the same text with no such link is one new filename inside the scope
+    assert.equal(match('src', 'src/p\\q'), 'allow')
+  })
+
+  it('a `..` after a missing component resumes inspection, so a link reached afterwards is followed', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(join(root, 'other'), join(root, 'src', 'jump'))
+    assert.equal(match('src', 'src/missing/../jump/outside.txt'), null)
+    assert.equal(match('src', 'src/m1/m2/../../jump/outside.txt'), null)
+    assert.equal(match('src/**', 'src/missing/../jump/outside.txt'), null)
+    // a `..` that stays inside the scope still matches
+    assert.equal(match('src', 'src/missing/../new.txt'), 'allow')
+    assert.equal(match('src', 'src/missing/../sub/b.txt'), 'allow')
+  })
+
   it('does not match when the session cwd does not exist', () => {
     const missing = new PermissionManager({ log: silentLog, cwd: join(root, 'no-such-dir') })
     missing.setRules([{ tool: 'Write', decision: 'allow', path: 'src' }])

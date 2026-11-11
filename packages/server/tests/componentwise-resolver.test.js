@@ -2,11 +2,12 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import path, { join, sep } from 'node:path'
 import {
   resolveTargetComponentwiseSync,
   resolveTargetComponentwiseAsync,
   splitPathBelowRoot,
+  assertUnambiguousRoot,
   COMPONENTWISE_MAX_SYMLINKS,
   COMPONENTWISE_MAX_COMPONENTS,
   COMPONENTWISE_MAX_PATH_LENGTH,
@@ -91,20 +92,35 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     await assertParity(root, 'link/nonexistent/../file', join(root, 'real/file'))
   })
 
-  // #6928 — separator-agnostic split: `\` and mixed separators must resolve exactly
-  // like the forward-slash form (a POSIX `sep='/'` split would treat these as one
-  // blob and fall back to a lexical join, reopening the `..`-after-symlink escape).
-  it('#6928: backslash and mixed separators resolve identically to `/` (both agree)', async () => {
+  // #6928 — on Windows `\` and mixed separators must resolve exactly like the
+  // forward-slash form (a `/`-only split would treat them as one blob and fall back
+  // to a lexical join, reopening the `..`-after-symlink escape). On POSIX `\` is an
+  // ordinary filename character, covered by the next test.
+  it('#6928: on Windows, backslash and mixed separators resolve identically to `/` (both agree)', {
+    skip: process.platform === 'win32' ? false : 'a backslash is a filename character on POSIX',
+  }, async () => {
     mkdirSync(join(root, 'real/deep'), { recursive: true })
     symlinkSync(join(root, 'real/deep'), join(root, 'link'))
     const forms = [
-      'link/../sibling',       // POSIX
-      'link\\..\\sibling',     // all backslash
-      'link/..\\sibling',      // mixed
+      'link/../sibling',
+      'link\\..\\sibling',
+      'link/..\\sibling',
     ]
     for (const f of forms) {
       await assertParity(root, f, join(root, 'real/sibling'))
     }
+  })
+
+  it('on POSIX, a backslash is part of a filename: a link named `x\\y` is followed as one component', {
+    skip: process.platform === 'win32' || SKIP_NO_SYMLINK,
+  }, async () => {
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'other'))
+    symlinkSync(join(root, 'other'), join(root, 'src', 'x\\y'))
+    await assertParity(root, 'src/x\\y/a.txt', join(root, 'other/a.txt'))
+    await assertParity(root, join(root, 'src/x\\y/a.txt'), join(root, 'other/a.txt'))
+    // with no such link the same text is one missing name, not two components
+    await assertParity(root, 'src/p\\q', join(root, 'src/p\\q'))
   })
 
   it('#6928: a rooted target strips its root; `..` at the fs root is a no-op', async () => {
@@ -225,10 +241,39 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
   // ==========================================================================
   // splitPathBelowRoot — the #6928 footgun in isolation.
   // ==========================================================================
-  it('splitPathBelowRoot splits on BOTH separators and strips the root', () => {
-    assert.deepEqual(splitPathBelowRoot('a/b\\c', ''), ['a', 'b', 'c'])
-    assert.deepEqual(splitPathBelowRoot('/a/b', '/'), ['a', 'b'])
-    // collapses runs of mixed separators
-    assert.deepEqual(splitPathBelowRoot('a//b\\\\c', ''), ['a', 'b', 'c'])
+  it('splitPathBelowRoot splits on both separators on Windows and on `/` alone on POSIX', () => {
+    assert.deepEqual(splitPathBelowRoot('a/b\\c', '', path.win32), ['a', 'b', 'c'])
+    assert.deepEqual(splitPathBelowRoot('C:\\a/b', 'C:\\', path.win32), ['a', 'b'])
+    assert.deepEqual(splitPathBelowRoot('a//b\\\\c', '', path.win32), ['a', 'b', 'c'])
+    assert.deepEqual(splitPathBelowRoot('a/b\\c', '', path.posix), ['a', 'b\\c'])
+    assert.deepEqual(splitPathBelowRoot('/a/b', '/', path.posix), ['a', 'b'])
+    assert.deepEqual(splitPathBelowRoot('a//b', '', path.posix), ['a', 'b'])
+  })
+
+  it('assertUnambiguousRoot rejects drive-relative and root-relative Windows paths only', () => {
+    for (const bad of ['C:foo', 'c:', '\\foo', '/foo', '\\']) {
+      assert.throws(() => assertUnambiguousRoot(bad, path.win32), { code: 'EINVAL' }, bad)
+    }
+    for (const ok of ['C:\\foo', 'C:/foo', 'foo\\bar', '..\\x', '\\\\server\\share\\x']) {
+      assert.doesNotThrow(() => assertUnambiguousRoot(ok, path.win32), ok)
+    }
+    // POSIX: none of those spellings has a special root
+    for (const f of ['C:foo', '\\foo']) assert.doesNotThrow(() => assertUnambiguousRoot(f, path.posix), f)
+  })
+
+  it('a missing component followed by `..` back to an existing directory resumes inspection (both agree)', {
+    skip: SKIP_NO_SYMLINK,
+  }, async () => {
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'other'))
+    symlinkSync(join(root, 'other'), join(root, 'src', 'jump'))
+    // `missing/..` returns to `src`, so `jump` is a real link and must be followed
+    await assertParity(root, 'src/missing/../jump/x', join(root, 'other/x'))
+    // two missing components, both popped
+    await assertParity(root, 'src/m1/m2/../../jump/x', join(root, 'other/x'))
+    // only one popped: still inside the to-be-created tail
+    await assertParity(root, 'src/m1/m2/../x', join(root, 'src/m1/x'))
+    // no link involved: unchanged
+    await assertParity(root, 'src/missing/../new.txt', join(root, 'src/new.txt'))
   })
 })
