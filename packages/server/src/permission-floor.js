@@ -80,6 +80,37 @@ const ENV_FILE_PREFIX = '.env.'
 // path field (a path-redirect would let an edit slip past the protected floor).
 export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
 
+/**
+ * The paths a patch-shaped `changes` array names: each member's `path`, and the
+ * destination of a rename (`kind.move_path`, the app-server `PatchChangeKind`
+ * shape). One extraction, used by the protected-path floor and by path-scoped
+ * rules, so both look at the same set of paths.
+ *
+ * `complete` is false when `changes` is not an array, or any member is not an
+ * object with a non-empty string `path`, or carries a `move_path` that is
+ * neither absent/null nor a non-empty string. A caller that must see every path
+ * (a scoped rule) treats an incomplete list as no match; the floor uses the
+ * paths that are present.
+ * @param {*} changes
+ * @returns {{ complete: boolean, paths: string[] }}
+ */
+export function collectChangeTargets(changes) {
+  const paths = []
+  if (!Array.isArray(changes)) return { complete: false, paths }
+  let complete = true
+  for (const change of changes) {
+    if (!change || typeof change !== 'object') { complete = false; continue }
+    if (typeof change.path === 'string' && change.path.length > 0) paths.push(change.path)
+    else complete = false
+    const kind = change.kind
+    if (kind && typeof kind === 'object' && kind.move_path != null) {
+      if (typeof kind.move_path === 'string' && kind.move_path.length > 0) paths.push(kind.move_path)
+      else complete = false
+    }
+  }
+  return { complete, paths }
+}
+
 // #6803 — tools whose floor is SECRETS-ONLY (non-mutating reads). handlePermission
 // routes these through isSecretReadTarget (env files + key material) instead of
 // the full config-dir floor. EVERY OTHER path-carrying tool — the mutating ones
@@ -1065,10 +1096,8 @@ function _matchesFloor(input, cwd, secretsOnly) {
   // array is never enumerated past the budget.
   if (Array.isArray(input.changes)) {
     if (targets.length + input.changes.length > FLOOR_MAX_CALL_TARGETS) return true
-    for (const change of input.changes) {
-      if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      targets.push(change.path)
-    }
+    for (const changePath of collectChangeTargets(input.changes).paths) targets.push(changePath)
+    if (targets.length > FLOOR_MAX_CALL_TARGETS) return true
   }
   // The call's component and byte budgets, checked before any target is resolved.
   let components = 0

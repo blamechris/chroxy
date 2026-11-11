@@ -17,6 +17,7 @@ import {
   isProtectedPathTarget,
   isSecretReadTarget,
   PROTECTED_PATH_INPUT_FIELDS,
+  collectChangeTargets,
 } from './permission-floor.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -315,26 +316,45 @@ export function buildDenyMessage(reason) {
 
 
 /**
- * #6803 — collect every concrete target path a tool input names: the flat
- * {@link PROTECTED_PATH_INPUT_FIELDS} plus `changes[]` member paths (codex
- * apply_patch). Used by the rule-scope test so a path-scoped rule can confirm
- * ALL of a tool call's targets fall inside its scope. Returns [] for a
- * command-shaped / path-less input.
+ * Tools whose single path-carrying input field a scoped rule reads. A field a
+ * tool does not use never counts as one of its targets.
+ */
+const SCOPED_RULE_PATH_FIELD = {
+  Read: 'file_path',
+  Write: 'file_path',
+  Edit: 'file_path',
+  MultiEdit: 'file_path',
+  NotebookEdit: 'notebook_path',
+  Glob: 'path',
+  Grep: 'path',
+}
+
+/**
+ * #6803 — collect every concrete target path a tool call names, for the
+ * rule-scope test, so a path-scoped rule can confirm ALL of the call's targets
+ * fall inside its scope. Tool-aware: Read/Write/Edit use `file_path`,
+ * NotebookEdit uses `notebook_path`, Glob/Grep use `path` and search the session
+ * cwd when it is absent, and `apply_patch` uses its complete `changes` list
+ * (every `path` and rename destination). Fields a tool does not use are
+ * ignored. Returns [] when the call names no usable target (a command-shaped
+ * tool, a tool this does not know, a malformed or incomplete patch), so a
+ * scoped rule does not match it.
+ * @param {string} toolName
  * @param {object} input
  * @returns {string[]}
  */
-function collectTargetPaths(input) {
+function collectTargetPaths(toolName, input) {
   if (!input || typeof input !== 'object') return []
-  const out = []
-  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
-    if (typeof input[field] === 'string' && input[field].length > 0) out.push(input[field])
+  if (toolName === 'apply_patch') {
+    const { complete, paths } = collectChangeTargets(input.changes)
+    return complete ? paths : []
   }
-  if (Array.isArray(input.changes)) {
-    for (const change of input.changes) {
-      if (change && typeof change.path === 'string' && change.path.length > 0) out.push(change.path)
-    }
-  }
-  return out
+  const field = SCOPED_RULE_PATH_FIELD[toolName]
+  if (field === undefined) return []
+  const value = input[field]
+  if (typeof value === 'string' && value.length > 0) return [value]
+  if ((toolName === 'Glob' || toolName === 'Grep') && value == null) return ['.']
+  return []
 }
 
 // #6803 — a scope string is a GLOB (vs a plain directory prefix) when it carries
@@ -653,7 +673,7 @@ export class PermissionManager extends EventEmitter {
    */
   _ruleScopeMatches(rule, input) {
     if (typeof rule.path !== 'string' || rule.path.length === 0) return true
-    const targets = collectTargetPaths(input)
+    const targets = collectTargetPaths(rule.tool, input)
     if (targets.length === 0) return false
     const base = this._cwd || process.cwd()
     return targets.every((t) => pathWithinScope(t, rule.path, base))

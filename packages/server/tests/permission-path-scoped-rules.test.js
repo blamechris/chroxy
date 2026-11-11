@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSyn
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { PermissionManager } from '../src/permission-manager.js'
+import { isProtectedPathTarget, collectChangeTargets } from '../src/permission-floor.js'
 import { PermissionRuleStore } from '../src/permission-rule-store.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
@@ -353,5 +354,93 @@ describe('path-scoped rules match on the target real location', () => {
     missing.setRules([{ tool: 'Write', decision: 'allow', path: 'src' }])
     assert.equal(missing._matchesRule('Write', { file_path: 'src/a.txt' }), null)
     missing.destroy()
+  })
+})
+
+describe('path-scoped rules collect the targets the tool really uses', () => {
+  let root
+  let pm
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-scoped-targets-')))
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'docs'))
+    pm = new PermissionManager({ log: silentLog, cwd: root })
+  })
+  afterEach(() => {
+    pm.destroy()
+    rmSync(root, { recursive: true, force: true })
+  })
+  const rule = (tool, scope) => pm.setRules([{ tool, decision: 'allow', path: scope }])
+
+  it('Glob and Grep use `path`, and ignore a decoy `file_path`', () => {
+    for (const tool of ['Glob', 'Grep']) {
+      rule(tool, 'src')
+      assert.equal(pm._matchesRule(tool, { path: 'src', pattern: 'x' }), 'allow')
+      assert.equal(pm._matchesRule(tool, { file_path: 'src', pattern: 'x' }), null, `${tool}: decoy file_path with no path searches the cwd`)
+      assert.equal(pm._matchesRule(tool, { file_path: 'src', path: 'docs', pattern: 'x' }), null)
+      assert.equal(pm._matchesRule(tool, { file_path: 'docs', path: 'src', pattern: 'x' }), 'allow')
+    }
+  })
+
+  it('Glob and Grep with no `path` search the session cwd', () => {
+    rule('Glob', 'src')
+    assert.equal(pm._matchesRule('Glob', { pattern: '*' }), null)
+    rule('Glob', '**')
+    assert.equal(pm._matchesRule('Glob', { pattern: '*' }), 'allow')
+    pm.setRules([{ tool: 'Grep', decision: 'allow', path: '.' }])
+    assert.equal(pm._matchesRule('Grep', { pattern: 'x' }), 'allow')
+  })
+
+  it('Read/Write/Edit use `file_path` and ignore `path`', () => {
+    for (const tool of ['Read', 'Write', 'Edit']) {
+      rule(tool, 'src')
+      assert.equal(pm._matchesRule(tool, { file_path: 'src/a.txt' }), 'allow')
+      assert.equal(pm._matchesRule(tool, { file_path: 'docs/a.txt', path: 'src' }), null)
+      assert.equal(pm._matchesRule(tool, { path: 'src/a.txt' }), null)
+    }
+  })
+
+  it('NotebookEdit uses `notebook_path`', () => {
+    rule('NotebookEdit', 'src')
+    assert.equal(pm._matchesRule('NotebookEdit', { notebook_path: 'src/n.ipynb' }), 'allow')
+    assert.equal(pm._matchesRule('NotebookEdit', { notebook_path: 'docs/n.ipynb', file_path: 'src/n.ipynb' }), null)
+  })
+
+  it('apply_patch checks every path and every rename destination', () => {
+    rule('apply_patch', 'src')
+    const change = (path, move_path) => ({ path, kind: { type: 'update', move_path: move_path ?? null }, diff: '' })
+    assert.equal(pm._matchesRule('apply_patch', { changes: [change('src/a.txt')] }), 'allow')
+    assert.equal(pm._matchesRule('apply_patch', { changes: [change('src/a.txt', 'src/b.txt')] }), 'allow')
+    assert.equal(pm._matchesRule('apply_patch', { changes: [change('src/a.txt', 'docs/b.txt')] }), null)
+    assert.equal(pm._matchesRule('apply_patch', { changes: [change('src/a.txt'), change('docs/b.txt')] }), null)
+  })
+
+  it('apply_patch with an incomplete change list does not match', () => {
+    rule('apply_patch', 'src')
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'src', changes: 'diff --git a b' }), null)
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'src' }), null)
+    assert.equal(pm._matchesRule('apply_patch', { file_path: 'src', changes: [{ path: 'src/a.txt' }, {}] }), null)
+    assert.equal(pm._matchesRule('apply_patch', { changes: [{ path: 'src/a.txt', kind: { type: 'update', move_path: 5 } }] }), null)
+    assert.equal(pm._matchesRule('apply_patch', { changes: [] }), null)
+  })
+})
+
+describe('the protected-path floor reads rename destinations', () => {
+  let root
+  beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-floor-move-'))) })
+  afterEach(() => { rmSync(root, { recursive: true, force: true }) })
+
+  it('floors a patch whose rename destination is a protected path', () => {
+    const patch = (move_path) => ({ changes: [{ path: 'src/a.txt', kind: { type: 'update', move_path }, diff: '' }] })
+    assert.equal(isProtectedPathTarget(patch(null), root), false)
+    assert.equal(isProtectedPathTarget(patch('src/b.txt'), root), false)
+    assert.equal(isProtectedPathTarget(patch('.git/hooks/pre-commit'), root), true)
+  })
+
+  it('collectChangeTargets lists sources and destinations, and flags a malformed list', () => {
+    const ok = collectChangeTargets([{ path: 'a', kind: { type: 'update', move_path: 'b' } }, { path: 'c', kind: 'add' }])
+    assert.deepEqual(ok, { complete: true, paths: ['a', 'b', 'c'] })
+    assert.equal(collectChangeTargets([{ path: 'a' }, null]).complete, false)
+    assert.equal(collectChangeTargets('x').complete, false)
   })
 })
