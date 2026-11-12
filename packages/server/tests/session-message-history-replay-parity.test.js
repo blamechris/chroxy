@@ -644,14 +644,15 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
 
   it('a message past the budget is cut at whitespace-free text too, and a key crossing THAT is gone (delimiter-free, glued to the text before it)', () => {
     const filler = 'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)
-    const wire = buildErrorWire({ message: `${filler}${ANT_KEY}${'z'.repeat(100)}` })
+    // the glued key is masked now (#8416), so a long tail keeps the text over the budget and the cut still happens
+    const wire = buildErrorWire({ message: `${filler}${ANT_KEY} ${'z'.repeat(ERROR_TEXT_MAX + 100)}` })
     assert.ok(!wire.content.includes('sk-ant'), 'no fragment of the key survives')
     assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     assert.ok(wire.content.endsWith('[truncated]'))
   })
 
   it('the same glued key through redactAndClip with a budget it crosses: no fragment survives', () => {
-    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)}${ANT_KEY}${'z'.repeat(100)}`
+    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)}${ANT_KEY} ${'z'.repeat(ERROR_REDACT_SCAN_MAX + 100)}`
     const out = redactAndClip(text, ERROR_REDACT_SCAN_MAX, '[cut]')
     assert.ok(!out.includes('sk-ant'), 'no fragment of the key survives')
     assert.ok(out.endsWith('[cut]'))

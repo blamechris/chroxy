@@ -36,6 +36,14 @@ const GRAMMAR = [
     'token="', "token='", 'token=\\"', 'token="' + 'x'.repeat(1100), "password='" + 'y'.repeat(1030),
     'token=\\"' + 'z'.repeat(1030), 'api_key": "a\\"', 'token=abcdefg', 'token=' + 'a'.repeat(7) + ' ',
     'token=token=token=', 'token\\"token\\"token\\"', "token'='", 'authorization=a.b.c-',
+    'AWS_SECRET_ACCESS_KEY' + ' '.repeat(64), 'AWS_SECRET_ACCESS_KEY= ',
+    'AWS_SECRET_ACCESS_KEY="', 'AWS_SECRET_ACCESS_KEY="' + 'x'.repeat(1100),
+    'AWS_SECRET_ACCESS_KEY=\\"', 'AWS_SECRET_ACCESS_KEY=\\"' + 'z'.repeat(1030),
+    "AWS_SECRET_ACCESS_KEY='" + 'y'.repeat(1030), 'AWS_SECRET_ACCESS_KEY=abcdefg ',
+    "AWS_SECRET_ACCESS_KEY=$'", "AWS_SECRET_ACCESS_KEY=$'" + 'x'.repeat(1100), "AWS_SECRET_ACCESS_KEY=$'a\\'",
+    "AWS_SECRET_ACCESS_KEY=$$$'", 'AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY=', 'FAKE_AWS_SECRET_ACCESS_KEY=abcdefg ',
+    'x-api-key' + ' '.repeat(64), 'x-api-key: ', 'x-api-key="' + 'x'.repeat(1100), "x-api-key='" + 'y'.repeat(1030),
+    'x-api-key=\\"' + 'z'.repeat(1030), 'x-api-key=abcdefg ', 'x-api-key-x-api-key-',
   ]],
   [API_KEY_PATTERNS[0], ['sk-ant-' + 'a'.repeat(39) + ' ', 'sk-ant-api03-' + 'a'.repeat(39) + ' ', 'sk-ant-', ' sk-ant-' + 'a-'.repeat(19)]],
   [API_KEY_PATTERNS[1], ['sk-proj-' + 'a'.repeat(39) + ' ', 'sk-proj-', ' sk-proj-' + 'a-'.repeat(19)]],
@@ -49,6 +57,11 @@ const GRAMMAR = [
     'https://discord.com/api/webhooks/' + '1'.repeat(30), 'https://discord.com/api/webhooks/1/' + 'a'.repeat(19) + ' ',
     'https://discord.com/api/', 'https://discord.com/api/v1/', 'https://discord.com/api/webhooks/',
     'https://discordapp.com/api/v1/webhooks/12/abc ', 'https://ptb.discord.com/api/webhooks/', 'https://',
+  ]],
+  [API_KEY_PATTERNS[6], [
+    'ghp_', 'ghp_' + 'a'.repeat(35) + ' ', 'ghp_' + 'a'.repeat(37),
+    'ghp_' + 'a'.repeat(36) + '_', 'xghp_' + 'a'.repeat(36),
+    'ghp_' + 'a'.repeat(35) + '-', 'ghp_' + 'a'.repeat(36) + ' ',
   ]],
 ]
 
@@ -511,7 +524,7 @@ describe('a fragment at a cut is never shown', () => {
     assert.ok(!describeByNamedField({ command: glued(8192) }).includes('sk-ant'))
   })
 
-  it('a glued key that is not cut is left as it was (the boundary rule is the pattern\'s, not the cut\'s)', () => {
-    assert.equal(redactValue(`yyyy${ANT_KEY} z`), `yyyy${ANT_KEY} z`)
+  it('a glued key that is not cut is masked too (no leading boundary on a recognised credential prefix, #8416)', () => {
+    assert.equal(redactValue(`yyyy${ANT_KEY} z`), 'yyyy[REDACTED] z')
   })
 })
