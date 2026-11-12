@@ -21,6 +21,69 @@ describe('model presentation (#8260)', () => {
     expect(modelChoices([...models, duplicate])).toHaveLength(3)
     expect(findModelEntry([...models, duplicate], 'second-alias')).toBe(duplicate)
   })
+  it.each(['1-0', '1-0-20251001', '1-0[1m]'])('uses only the full target for cross-family descriptor collisions: %s (#8595)', suffix => {
+    const alpha = Object.freeze({ id: 'alpha', fullId: `claude-alpha-${suffix}`, label: 'Custom' })
+    const duplicate = Object.freeze({ ...alpha, id: 'second-alpha', label: 'Alias label' })
+    const beta = Object.freeze({ id: 'beta', fullId: `claude-beta-${suffix}`, label: 'Custom' })
+    const roster = Object.freeze([alpha, duplicate, beta])
+    const choices = modelChoices(roster)
+
+    expect(choices.map(m => m.label)).toEqual([
+      `Custom (claude-alpha-${suffix})`,
+      `Custom (claude-beta-${suffix})`,
+    ])
+    expect(choices.map(m => m.id)).toEqual(['alpha', 'beta'])
+    expect(choices.map(m => m.fullId)).toEqual([alpha.fullId, beta.fullId])
+    expect(roster.map(m => m.label)).toEqual(['Custom', 'Alias label', 'Custom'])
+    expect(findModelEntry(roster, 'second-alpha')).toBe(duplicate)
+    expect(findModelEntry(roster, alpha.fullId)).toBe(alpha)
+    expect(formatActiveModelLabel(roster, 'second-alpha')).toBe(`Custom (claude-alpha-${suffix})`)
+  })
+  it('retains authored parenthesized text when replacing a colliding descriptor (#8595)', () => {
+    const roster = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom (special)' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom (special)' },
+    ]
+    expect(modelChoices(roster).map(m => m.label)).toEqual([
+      'Custom (special) (claude-alpha-1-0)',
+      'Custom (special) (claude-beta-1-0)',
+    ])
+  })
+  it('disambiguates authored labels that match a simplified full-target label (#8595)', () => {
+    const roster = Object.freeze([
+      Object.freeze({ id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' }),
+      Object.freeze({ id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' }),
+      Object.freeze({ id: 'gamma', fullId: 'claude-gamma-2-0', label: 'Custom (claude-alpha-1-0)' }),
+    ])
+    const choices = modelChoices(roster)
+    expect(new Set(choices.map(m => m.label)).size).toBe(choices.length)
+    expect(choices.map(m => m.label)).toEqual([
+      'Custom (claude-alpha-1-0)',
+      'Custom (claude-beta-1-0)',
+      'Custom (claude-alpha-1-0) (claude-gamma-2-0)',
+    ])
+    expect(choices.map(m => m.id)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(choices.map(m => m.fullId)).toEqual(roster.map(m => m.fullId))
+    expect(roster[2]!.label).toBe('Custom (claude-alpha-1-0)')
+  })
+  it('keeps resulting labels unique even when authored labels reserve later fallbacks (#8595)', () => {
+    const roster = [
+      { id: 'gamma', fullId: 'claude-gamma-2-0', label: 'Custom (claude-alpha-1-0)' },
+      { id: 'delta', fullId: 'claude-delta-3-0', label: 'Custom (claude-alpha-1-0) (2)' },
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ]
+    const choices = modelChoices(roster)
+    expect(new Set(choices.map(m => m.label)).size).toBe(choices.length)
+    expect(choices.map(m => m.label)).toEqual([
+      'Custom (claude-alpha-1-0)',
+      'Custom (claude-alpha-1-0) (2)',
+      'Custom (claude-alpha-1-0) (3)',
+      'Custom (claude-beta-1-0)',
+    ])
+    expect(choices.map(m => m.id)).toEqual(roster.map(m => m.id))
+    expect(choices.map(m => m.fullId)).toEqual(roster.map(m => m.fullId))
+  })
   it('resolves exact id before an earlier full-ID alias', () => {
     const collision = [{ id: 'other', fullId: 'haiku-4-5', label: 'Other' }, ...models]
     expect(findModelEntry(collision, 'haiku-4-5')).toBe(models[1])
