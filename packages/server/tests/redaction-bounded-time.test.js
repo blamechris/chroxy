@@ -42,6 +42,8 @@ const GRAMMAR = [
     "AWS_SECRET_ACCESS_KEY='" + 'y'.repeat(1030), 'AWS_SECRET_ACCESS_KEY=abcdefg ',
     "AWS_SECRET_ACCESS_KEY=$'", "AWS_SECRET_ACCESS_KEY=$'" + 'x'.repeat(1100), "AWS_SECRET_ACCESS_KEY=$'a\\'",
     "AWS_SECRET_ACCESS_KEY=$$$'", 'AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY=', 'FAKE_AWS_SECRET_ACCESS_KEY=abcdefg ',
+    'x-api-key' + ' '.repeat(64), 'x-api-key: ', 'x-api-key="' + 'x'.repeat(1100), "x-api-key='" + 'y'.repeat(1030),
+    'x-api-key=\\"' + 'z'.repeat(1030), 'x-api-key=abcdefg ', 'x-api-key-x-api-key-',
   ]],
   [API_KEY_PATTERNS[0], ['sk-ant-' + 'a'.repeat(39) + ' ', 'sk-ant-api03-' + 'a'.repeat(39) + ' ', 'sk-ant-', ' sk-ant-' + 'a-'.repeat(19)]],
   [API_KEY_PATTERNS[1], ['sk-proj-' + 'a'.repeat(39) + ' ', 'sk-proj-', ' sk-proj-' + 'a-'.repeat(19)]],

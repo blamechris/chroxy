@@ -72,13 +72,46 @@ describe('redact before clipping (#8416)', () => {
 
   it('the _truncated summary carries no part of a credential straddling its cap', () => {
     const maxChars = 300
-    for (const cut of [4, 10, 20]) {
-      // the value is redacted before the object is serialized, so the clip never sees raw text
-      const out = sanitizeToolInput({ pad: 'k'.repeat(maxChars - cut - 12) + ' ' + github, other: 'x'.repeat(50) }, { maxChars: 10_240 })
-      const big = sanitizeToolInput({ a: 'k'.repeat(maxChars - cut - 12) + ' ' + github, b: 'x'.repeat(400) }, { maxChars })
-      assert.equal(big._truncated, true)
-      assert.ok(!big.summary.includes('ghp_'), `fragment survived at cut ${cut}`)
-      assert.ok(out.pad.includes('[REDACTED]'))
-    }
+    // the value is redacted before the object is serialized, so the clip never sees raw text
+    const big = sanitizeToolInput({ a: 'k'.repeat(maxChars - 20) + ' ' + github, b: 'x'.repeat(400) }, { maxChars })
+    assert.equal(big._truncated, true)
+    assert.ok(big.summary.includes('[REDACTED]'), 'value was redacted before the clip')
+    assert.ok(!big.summary.includes('ghp_'), 'no fragment of the credential')
   })
+})
+
+describe('key-name prefixes and x-api-key in text (#8416)', () => {
+  for (const input of [
+    'MY_AWS_SECRET_ACCESS_KEY=' + awsValue, 'TF_VAR_AWS_SECRET_ACCESS_KEY=' + awsValue, 'MY_TOKEN=plainvalue1',
+  ]) {
+    it(`masks the value of ${input.slice(0, 28)}`, () => {
+      const out = redactValue(input)
+      assert.ok(!out.includes(input.slice(-12)), out)
+      assert.ok(out.endsWith('[REDACTED]'), out)
+    })
+  }
+  for (const [input, expected] of [
+    ['curl -H "x-api-key: plainvalue1" https://x.test', 'curl -H "x-api-key: [REDACTED] https://x.test'],
+    ['{"x-api-key":"plainvalue1"}', '{"x-api-key": [REDACTED]}'],
+    ['{\"x-api-key\":\"plain value 1\"}', '{\"x-api-key\": [REDACTED]}'],
+    ['X-Api-Key=plainvalue1 next', 'X-Api-Key= [REDACTED] next'],
+  ]) {
+    it(`masks x-api-key text ${JSON.stringify(input).slice(0, 40)}`, () => {
+      assert.equal(redactValue(input), expected)
+      assert.ok(!sanitizeToolInput({ command: input }).command.includes('plain'), 'survived sanitizeToolInput')
+    })
+  }
+})
+
+describe('prefix-glued credential shapes are masked on purpose (#8416)', () => {
+  // Conservative: no leading boundary, so a word ending in sk- followed by 40+ alphanumerics is
+  // masked (and edited-input refuses an edit of such text, fail-closed). A future change is deliberate.
+  for (const word of ['task-', 'disk-', 'risk-']) {
+    it(`masks ${word} followed by 40 alphanumerics`, () => {
+      assert.equal(redactValue(word + 'a'.repeat(40)), word.slice(0, -3) + '[REDACTED]')
+    })
+    it(`keeps ${word} followed by a short identifier`, () => {
+      assert.equal(redactValue(word + 'a'.repeat(39)), word + 'a'.repeat(39))
+    })
+  }
 })

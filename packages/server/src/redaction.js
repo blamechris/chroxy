@@ -27,7 +27,7 @@ const SENSITIVE_PATTERNS = [
   // quoted value is redacted up to its closing quote, whatever it holds; it is bounded
   // (1024 characters, no line break) so the scan stays linear in the input. A value with
   // no closing quote falls through to the unquoted form, which needs 8 token characters.
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key|\baws_secret_access_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|\$'(?:[^'\\\r\n]|\\.){1,1024}'|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
+  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key|aws_secret_access_key|x-api-key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|\$'(?:[^'\\\r\n]|\\.){1,1024}'|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
 ]
 
 // JWT shape: `eyJ` + base64url, a dot, base64url, a dot, base64url, each segment at
@@ -133,7 +133,9 @@ const API_KEY_PATTERNS = [
   // them from being partially redacted.
   /sk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
   // Recognised credential prefixes carry no leading \b (#8416): a token right after a
-  // word character or a literal `\n` is still a credential; the length floors keep words readable.
+  // word character or a literal `\n` is still a credential; the length floors keep short identifiers
+  // readable. A word ending in `sk-` (`task-`, `disk-`, `risk-`) followed by 40+ alphanumerics IS masked,
+  // on purpose: conservative, and edited-input refuses an edit of such text (fail-closed).
   // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
   // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
   /AIza[A-Za-z0-9_-]{35}\b/g,
@@ -298,8 +300,8 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
   if (serialized.length > maxChars) {
-    // `result` is already redacted value by value, before serialization, so the clip cannot
-    // expose a credential. The serialization is deliberately NOT re-scanned as text: a key like
+    // The string VALUES in `result` are already redacted, before serialization, so the clip cannot
+    // expose a credential held in a value. Property NAMES are not value-scanned (pre-existing). The serialization is deliberately NOT re-scanned as text: a key like
     // `not_a_token` would then lose a value the broadcast kept (permission-outcome-history P3).
     return markSanitized({ _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' })
   }

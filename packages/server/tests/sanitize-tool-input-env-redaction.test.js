@@ -80,12 +80,13 @@ describe('additive secret grammar', () => {
     })
   }
 
-  it('does not infer aliases from benign key substrings or an AWS-name suffix', () => {
+  it('does not infer aliases from benign key substrings (a prefixed AWS name is masked, #8416)', () => {
     const input = {
       tokenizer: plainValue, secretary: plainValue, anthropic_api_key_hint: plainValue,
-      aws_secret_access_key_note: plainValue, command: `FAKE_AWS_SECRET_ACCESS_KEY=${awsValue}`,
+      aws_secret_access_key_note: plainValue, command: 'FAKE_AWS_SECRET_ACCESS_KEY_NOTE is documented',
     }
     assert.deepEqual(sanitizeToolInput(input), input)
+    assert.equal(sanitizeToolInput({ command: `FAKE_AWS_SECRET_ACCESS_KEY=${awsValue}` }).command, 'FAKE_AWS_SECRET_ACCESS_KEY= [REDACTED]')
   })
 })
 
