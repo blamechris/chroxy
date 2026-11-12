@@ -188,8 +188,8 @@ export function classifyUsageLimit(text, { structured = false } = {}) {
       kind: 'credits',
       code: USAGE_LIMIT_CODE,
       resetsAt: null,
-      message: 'Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.',
-      repeatMessage: 'Still no usage credits for this model \u2014 switch to another model or add usage credits.',
+      message: 'Usage limit: Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.',
+      repeatMessage: 'Usage limit: Still no usage credits for this model \u2014 switch to another model or add usage credits.',
       episodeKey: 'credits|',
     }
   }
