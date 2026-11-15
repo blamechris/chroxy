@@ -1025,6 +1025,24 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: No private local paths added by this PR
+        # Pull requests only: scans the lines the PR ADDS for the owner's home
+        # path, the private notes vault path and tailnet MagicDNS hosts. History
+        # and deleted lines are not scanned; .claude/, .codex/ and .gemini/ are
+        # exempt, and a line can opt out with the marker the failure message
+        # prints. The checkout is a depth-1 PR merge commit whose first parent
+        # is the base the PR merges into (read from the raw commit object,
+        # since shallow grafts hide it from rev-parse), so fetch just that
+        # commit and diff it directly (a full-history fetch would not fit this
+        # job's timeout). A missing base exits 2 and fails the job: the guard
+        # never passes by not running.
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE_SHA="$(git cat-file -p HEAD | awk '/^parent /{print $2; exit}')"
+          test -n "$BASE_SHA"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          bash scripts/lint-no-private-paths.sh --direct "$BASE_SHA"
+
       - name: No raw color literals in new styling files
         run: bash scripts/lint-no-raw-color-literals.sh
 
@@ -1933,6 +1951,12 @@ jobs:
 
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
+
+      - name: Run lint-no-private-paths golden test
+        # Red/green controls for the private-path guard in Style Lint: each
+        # rule fails, each exemption passes, a deleted line passes, and a
+        # missing base exits 2.
+        run: bash scripts/__tests__/lint-no-private-paths.test.sh
 
       - name: Run lint-no-pipe-into-grep-q golden test
         # #7907 — positive/negative controls for the guard above: every flag
