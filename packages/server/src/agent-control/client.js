@@ -272,6 +272,8 @@ export class AgentControlClient extends EventEmitter {
     // subscribe_sessions) at a time on this connection — see SERIAL_REPLY_TYPES.
     this._serialQueue = Promise.resolve()
     this._pendingSerialOp = null // { kind, resolve, reject, timer }
+    // management requests in flight (`request()`): each entry settles one with an error
+    this._pendingRequests = new Set()
 
     // sessionId -> { requestedModel: string|null, lastKnownStatus }. Accepts
     // an INJECTED Map so a caller managing reconnects across multiple
@@ -523,6 +525,32 @@ export class AgentControlClient extends EventEmitter {
   // ---------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------
+
+  /**
+   * Send one correlated management request and resolve with the first `replyType`
+   * frame that echoes its `requestId` (#9116: `chroxy agent ...` asks the daemon, which
+   * is the only writer of the principal store). Bounded by the request timeout; never
+   * retried, so an uncertain outcome is reported as uncertain.
+   * @param {string} type
+   * @param {object} fields
+   * @param {{ replyType: string, timeoutMs?: number }} opts
+   * @returns {Promise<object>}
+   */
+  async request(type, fields, { replyType, timeoutMs = this._requestTimeoutMs }) {
+    this._assertReady()
+    const requestId = randomUUID()
+    return new Promise((resolve, reject) => {
+      // Registered with the common pending-operation cleanup (`_rejectAllPending`), so
+      // close(), a socket close and a connection failure all settle it with that error.
+      const abort = (err) => done(reject, err)
+      const done = (fn, v) => { clearTimeout(timer); this.removeListener('message', onMsg); this._pendingRequests.delete(abort); fn(v) }
+      const timer = setTimeout(() => done(reject, new TimeoutError(type, timeoutMs)), timeoutMs)
+      this._pendingRequests.add(abort)
+      const onMsg = (msg) => { if (msg?.type === replyType && msg.requestId === requestId) done(resolve, msg) }
+      this.on('message', onMsg)
+      try { this._send({ type, requestId, ...fields }) } catch (err) { done(reject, err) }
+    })
+  }
 
   async listSessions() {
     this._assertReady()
@@ -1607,6 +1635,7 @@ export class AgentControlClient extends EventEmitter {
       pending.resolve({ status: 'uncertain', requestId, sessionId: pending.sessionId, disconnected: true, message: err.message })
     }
     this._pendingPermissionResponses.clear()
+    for (const abort of [...this._pendingRequests]) abort(err)
     if (this._pendingSerialOp) {
       clearTimeout(this._pendingSerialOp.timer)
       this._pendingSerialOp.reject(err)

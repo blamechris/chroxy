@@ -129,8 +129,13 @@ describe('principal inbound roster', () => {
     assert.equal(allowed.length, Object.keys(EXPECTED_ALLOWED_TIERS).length)
   })
 
-  it('no v1 entry invents a principal_ name before its handler exists', () => {
-    assert.deepEqual([...allowed, ...denied].filter((t) => t.startsWith('principal_')), [])
+  it('no v1 entry invents a principal_ name before its handler exists (only the S1 management surface, all denied)', () => {
+    // principal_admin_* is the strict-primary management surface (S1): denied to a
+    // principal and to a bound client, never allowed. Any other principal_ name needs its
+    // handler first.
+    const MANAGEMENT = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
+    assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')), [])
+    assert.deepEqual(denied.filter((t) => t.startsWith('principal_')).sort(), MANAGEMENT)
     assert.deepEqual(Object.keys(PRINCIPAL_OUTGOING_ALLOWED).filter((t) => t.startsWith('principal_')), [])
   })
 
@@ -779,7 +784,7 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
   // built elsewhere, a serialized payload). Each file lists how many it has and why that is
   // acceptable; a NEW unresolved send, or one that disappears, fails here so it is decided.
   const UNRESOLVED_ALLOWANCES = {
-    'agent-control/client.js': [3, 'client-to-server messages of the agent-control MCP client, not frames to a client'],
+    'agent-control/client.js': [4, 'client-to-server messages of the agent-control MCP client (including the CLI admin request()), not frames to a client'],
     'test-client.js': [2, 'client-to-server messages of the test client'],
     'control-room/handler-factory.js': [6, 'control-room replies built by the action factories; every type is a schema-backed, denied frame'],
     'dev-preview.js': [1, 'permission_request built by buildPermissionRequestMessage (denied)'],

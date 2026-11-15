@@ -71,6 +71,7 @@ import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
+import { createPrincipalStore } from './principal-store.js'
 import { StatusLineManager } from './statusline.js'
 import { warnIfClaudeConfigDirUnusable } from './utils/claude-config-dir.js'
 
@@ -1586,6 +1587,11 @@ export async function startCliServer(config) {
     localhostBypass: !config.encryptLocalhost,
     tokenManager,
     pairingManager,
+    // #9116: the agent-principal store. Hash-only, 0600, read through the trusted-file
+    // read; an absent store is empty and an untrusted one invalidates every principal.
+    // Nothing can mint a token yet (landing order: S11 first), so on a real install this
+    // is empty.
+    principalStore: createPrincipalStore(),
     // #5536 — the identity keypair the WsServer uses to sign each connection's
     // ephemeral exchange public key (both eager and discrete paths). Null when
     // pinning is unavailable (no-auth / no-encrypt / keychain failure).

@@ -151,6 +151,9 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
   session_preset_revoke: 'host-wide presets',
   daemon_update_action: 'host lifecycle',
   revoke_token: 'credential management',
+  principal_admin_grant: 'credential management',
+  principal_admin_list: 'credential management',
+  principal_admin_revoke: 'credential management',
   pair_approve: 'credential management',
   pair_deny: 'credential management',
 

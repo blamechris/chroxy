@@ -1401,6 +1401,33 @@ export const RevokeTokenSchema = z.object({
     type: z.literal('revoke_token'),
     requestId: z.string().max(128).optional(),
 });
+// -- Agent principal management (#9116, S1 of #9112) --
+// Strict-primary, loopback-only management of agent principals
+// (docs/security/agent-principals.md section 3.1). All three are refused for a
+// session-bound client and for a principal at dispatch, and each handler gates again
+// on `isPrimaryToken === true`, no binding, no principal stamp and a loopback upgrade.
+// `grant` refuses ("agent principals not yet enabled") until the audit writer and kill
+// switch land (S11); the fields below are the shape a later grant will use. Replies are
+// `principal_admin_result` frames (schemas/server/principal-admin.ts).
+export const PrincipalAdminGrantSchema = z.object({
+    type: z.literal('principal_admin_grant'),
+    requestId: z.string().max(128).optional(),
+    label: z.string().max(64),
+    scope: z.string().max(32),
+    sessionIds: z.array(z.string().max(128)).max(64).optional(),
+    cwdRoots: z.array(z.string().max(1024)).max(64).optional(),
+    ttlMs: z.number().int().positive().optional(),
+});
+export const PrincipalAdminListSchema = z.object({
+    type: z.literal('principal_admin_list'),
+    requestId: z.string().max(128).optional(),
+});
+export const PrincipalAdminRevokeSchema = z.object({
+    type: z.literal('principal_admin_revoke'),
+    requestId: z.string().max(128).optional(),
+    principalId: z.string().max(64).optional(),
+    label: z.string().max(64).optional(),
+});
 // -- Daemon update banner (#8331) --
 // Restart-now / postpone for the update the deploy script has queued for the
 // daily daemon. Gated server-side on a STRICT PRIMARY, UNBOUND client
@@ -2089,6 +2116,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SessionPresetApproveSchema,
     SessionPresetRevokeSchema,
     RevokeTokenSchema,
+    PrincipalAdminGrantSchema,
+    PrincipalAdminListSchema,
+    PrincipalAdminRevokeSchema,
     DaemonUpdateActionSchema,
     QueryPermissionAuditSchema,
     ExtensionMessageSchema,

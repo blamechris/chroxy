@@ -16,6 +16,7 @@ import { resolveClaudeConfigDirOverride } from './utils/claude-config-dir.js'
 import { canonicalName, segmentName } from './permission-floor.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { isBoundClient, isBoundToOtherSession } from './environments/authority.js'
+import { publicBoundSessionId } from './principal-binding.js'
 
 const log = createLogger('handler-utils')
 
@@ -1151,7 +1152,8 @@ export function buildSessionTokenMismatchPayload({
   boundSessionId = null,
   message = SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
 } = {}) {
-  const normalisedBoundId = typeof boundSessionId === 'string' && boundSessionId ? boundSessionId : null
+  // #9116: a principal's sentinel binding is never serialized: it reads as no binding.
+  const normalisedBoundId = publicBoundSessionId(boundSessionId)
   let boundSessionName = null
   if (normalisedBoundId && sessionManager && typeof sessionManager.getSession === 'function') {
     const entry = sessionManager.getSession(normalisedBoundId)

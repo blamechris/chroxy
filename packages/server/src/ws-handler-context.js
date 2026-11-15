@@ -89,6 +89,8 @@
  * @property {object|null} schedulerEngine - #6871 scheduled-task engine; null when scheduling is off.
  * @property {object|null} sessionCiWatcher - #7427 SessionCiWatcher, so an on-demand PR survey can arm the watch; null when `sessionCi.watch` is off.
  * @property {object|null} daemonUpdate - #8331 DaemonUpdateStatus (pending-update banner + restart-now / postpone request files); null when not wired.
+ * @property {object|null} principalStore - #9116: the agent-principal store (principal-store.js) behind the strict-primary `principal_admin_*` handlers. Null where none was built.
+ * @property {(principalId: string, reason?: string) => void} endPrincipalConnections - #9116: end every connection of one principal (credential_invalidated + close 4401); called after a revoke is acknowledged.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
@@ -211,6 +213,11 @@ export const CTX_NAMESPACES = {
     // not build one; the `daemon_update_action` handler reports that as
     // UNAVAILABLE rather than pretending an update can be applied.
     'daemonUpdate',
+    // #9116: the agent-principal store (principal-store.js) behind the strict-primary
+    // `principal_admin_*` handlers, and the call that ends a revoked principal's
+    // connections (4401). Null / absent where server-cli built no store.
+    'principalStore',
+    'endPrincipalConnections',
   ],
   runtime: [
     'draining',

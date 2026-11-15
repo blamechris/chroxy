@@ -34,7 +34,10 @@
  * so `''` and any real id are bound; a nullish client is bound too.
  */
 export function isBoundClient(client) {
-  return !client || client.boundSessionId != null
+  // #9116: an agent principal is never a host client. It also carries a sentinel
+  // `boundSessionId`, but this clause does not depend on that binding: a principal is
+  // bound whatever its binding field says (fail-safe, the same shape as `== null`).
+  return !client || client.boundSessionId != null || client.principal != null
 }
 
 /**
@@ -57,6 +60,9 @@ export function isBoundToOtherSession(client, sessionId) {
  * binding on the recipient is a binding, and matches no unscoped peer.
  */
 export function canSeePeer(recipient, peer) {
+  // #9116: a principal is told of no peer at all (not even another principal that shares
+  // its sentinel binding).
+  if (recipient?.principal != null) return false
   if (!isBoundClient(recipient)) return true
   const own = recipient?.boundSessionId
   return typeof own === 'string' && own.length > 0 && peer?.boundSessionId === own

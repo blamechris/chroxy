@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { parse } from 'acorn'
 import { PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES } from '../src/principal-policy.js'
 import { principalClient } from './principal-test-helpers.js'
+import { tempPrincipalDir, testPrincipalStore, insertPrincipal } from './helpers/principal-store-fixture.js'
 
 // The two fixed server_error texts are read out of the real sink sources (string literals in
 // ws-auth.js and ws-history.js), not copied, so a text change in either sink is a test failure
@@ -58,11 +59,20 @@ describe('the fixed server_error texts come from the real sinks', () => {
 
 describe('principal encrypted handshake and raw transport frames', () => {
   let server
-  afterEach(() => { if (server) { server.close(); server = null } })
+  const cleanups = []
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    while (cleanups.length) cleanups.pop()()
+  })
 
   async function boot({ stamp, keyExchangeTimeoutMs = 60_000 }) {
     const { manager } = createMockSessionManager([{ id: 'session-1', name: 'One', cwd: '/tmp/project-1' }])
-    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true, localhostBypass: false, keyExchangeTimeoutMs })
+    // The stamped principal ('pr-1') must be live in the store (the per-frame re-check, S1).
+    const fixture = tempPrincipalDir()
+    cleanups.push(fixture.cleanup)
+    const principalStore = testPrincipalStore(fixture.path)
+    insertPrincipal(principalStore, { principalId: 'pr-1' })
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true, localhostBypass: false, keyExchangeTimeoutMs, principalStore })
     const original = server._sendPostAuthInfo.bind(server)
     server._sendPostAuthInfo = (ws, extra) => {
       if (stamp) {

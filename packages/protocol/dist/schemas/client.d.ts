@@ -1150,6 +1150,25 @@ export declare const RevokeTokenSchema: z.ZodObject<{
     type: z.ZodLiteral<"revoke_token">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const PrincipalAdminGrantSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_grant">;
+    requestId: z.ZodOptional<z.ZodString>;
+    label: z.ZodString;
+    scope: z.ZodString;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    cwdRoots: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    ttlMs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const PrincipalAdminListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_list">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const PrincipalAdminRevokeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_revoke">;
+    requestId: z.ZodOptional<z.ZodString>;
+    principalId: z.ZodOptional<z.ZodString>;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const DaemonUpdateActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_action">;
     action: z.ZodEnum<{
@@ -2061,6 +2080,22 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"revoke_token">;
     requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_grant">;
+    requestId: z.ZodOptional<z.ZodString>;
+    label: z.ZodString;
+    scope: z.ZodString;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    cwdRoots: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    ttlMs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_list">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_revoke">;
+    requestId: z.ZodOptional<z.ZodString>;
+    principalId: z.ZodOptional<z.ZodString>;
+    label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_action">;
     action: z.ZodEnum<{

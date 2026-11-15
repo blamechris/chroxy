@@ -24,6 +24,7 @@ let plainCtx
 let WsServerBase
 let handleSessionMessage
 let WsBroadcaster
+let tempPrincipalDir, testPrincipalStore, insertPrincipal
 
 before(async () => {
   const real = await import('../src/bound-client-policy.js')
@@ -37,6 +38,8 @@ before(async () => {
   ;({ handleSessionMessage } = await import('../src/ws-message-handlers.js'))
   ;({ WsServer: WsServerBase } = await import('../src/ws-server.js'))
   ;({ WsBroadcaster } = await import('../src/ws-broadcaster.js'))
+  // After the mock: the fixture imports principal-store, which reaches bound-client-policy.
+  ;({ tempPrincipalDir, testPrincipalStore, insertPrincipal } = await import('./helpers/principal-store-fixture.js'))
 })
 
 after(() => { mock.reset() })
@@ -103,12 +106,22 @@ async function connect(port) {
 
 describe('principal over a real socket (server-side record stamped directly)', () => {
   let server
+  const cleanups = []
 
-  afterEach(() => { if (server) { server.close(); server = null } })
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    while (cleanups.length) cleanups.pop()()
+  })
 
   async function boot() {
     const { manager } = createMockSessionManager(SESSIONS)
-    server = newServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true })
+    // The stamped principal ('pr-1') must be live in the store, or the per-frame
+    // credential re-check (S1) would end the connection.
+    const fixture = tempPrincipalDir()
+    cleanups.push(fixture.cleanup)
+    const principalStore = testPrincipalStore(fixture.path)
+    insertPrincipal(principalStore, { principalId: 'pr-1', constraints: { sessionIds: ['sess-1', 'session-1', 'session-2'] } })
+    server = newServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true, principalStore })
     server.start('127.0.0.1')
     await new Promise((resolve) => server.httpServer.once('listening', resolve))
     return server.httpServer.address().port
