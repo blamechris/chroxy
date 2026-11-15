@@ -17,6 +17,12 @@ import {
   PRINCIPAL_DENIED_MESSAGE_TYPES,
   PRINCIPAL_ENVELOPES,
   PRINCIPAL_OUTGOING_ALLOWED,
+  PRINCIPAL_OUTGOING_DENIED,
+  PRINCIPAL_TRANSPORT_FRAMES,
+  PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES,
+  PRINCIPAL_BROADCAST_ALLOWED,
+  principalTransportFrame,
+  frameForPrincipalBroadcast,
   PRINCIPAL_TIER_ORDER,
   isPrincipalClient,
   dispatchPolicyFor,
@@ -25,6 +31,7 @@ import {
   frameForPrincipal,
 } from '../src/principal-policy.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { emittedFrameTypes, perClientLoopFrames } from './helpers/emitted-frame-types.js'
 import { REAL_HANDLERS, SENTINEL, principalClient, plainCtx } from './principal-test-helpers.js'
 
 const allowed = Object.keys(PRINCIPAL_ALLOWED_MESSAGE_TYPES)
@@ -700,6 +707,151 @@ describe('frameForPrincipal and the outgoing roster', () => {
     }
     // And the refusal path itself never produced the sentinel in the first place.
     assert.equal(raw.some((f) => JSON.stringify(f).includes(SENTINEL)), false)
+  })
+})
+
+// Names the source passes to a send-like call that are NOT frames to a client: client-to-server
+// messages the agent-control and supervisor code sends, and provider plumbing. Listed here by
+// hand, independently of outgoing-policy.js, and checked against the emitted set both ways.
+const NOT_CLIENT_FRAMES_LOCAL = [
+  'auth', 'drain', 'drain_complete', 'input', 'interrupt', 'key_exchange', 'list_sessions',
+  'permission_response', 'ping', 'ready', 'shutdown', 'stdin', 'stdin_end', 'subscribe_sessions',
+]
+
+describe('outgoing roster is exhaustive: every real server frame is classified exactly once', () => {
+  const emitted = emittedFrameTypes()
+  const schemaTypes = new Set(SCHEMA_BACKED_OUTBOUND_TYPES)
+  const real = new Set([...schemaTypes, ...[...emitted].filter((t) => !NOT_CLIENT_FRAMES_LOCAL.includes(t))])
+  const allowedOut = Object.keys(PRINCIPAL_OUTGOING_ALLOWED)
+  const deniedOut = [...PRINCIPAL_OUTGOING_DENIED]
+  const transportOut = Object.keys(PRINCIPAL_TRANSPORT_FRAMES)
+
+  it('enumerates a non-empty schema roster and a non-empty set of emitted frames (acorn)', () => {
+    assert.ok(schemaTypes.size > 100)
+    assert.ok(emitted.size > 100)
+    assert.ok(real.size > 0)
+  })
+
+  it('the independent not-a-frame list is real: each name is emitted and none is a schema frame', () => {
+    for (const t of NOT_CLIENT_FRAMES_LOCAL) {
+      assert.ok(emitted.has(t), `${t} is no longer emitted: drop it from the list`)
+      assert.equal(schemaTypes.has(t), false, `${t} is a schema-backed frame`)
+    }
+  })
+
+  it('every real frame (schema-backed and schema-less) is in exactly one of allowed, denied, transport', () => {
+    const where = (t) => [
+      allowedOut.includes(t) && 'allowed', deniedOut.includes(t) && 'denied', transportOut.includes(t) && 'transport',
+    ].filter(Boolean)
+    const unclassified = [...real].filter((t) => where(t).length === 0).sort()
+    const multiple = [...real].filter((t) => where(t).length > 1).sort()
+    assert.deepEqual(unclassified, [], 'classify each new server frame in src/principal-policy.js')
+    assert.deepEqual(multiple, [])
+  })
+
+  it('every classified name is a real frame (no stale entries)', () => {
+    assert.deepEqual([...allowedOut, ...deniedOut, ...transportOut].filter((t) => !real.has(t)), [])
+  })
+
+  it('the three lists are pairwise disjoint and the denied list has no duplicates', () => {
+    const all = [...allowedOut, ...deniedOut, ...transportOut]
+    assert.equal(new Set(all).size, all.length)
+    assert.equal(all.length, real.size, 'allowed + denied + transport must equal the real roster')
+  })
+
+  it('a denied frame is never delivered on the direct-reply path', () => {
+    const client = principalClient({ principal: { constraints: { sessionIds: ['sess-1'] } } })
+    for (const t of [...deniedOut, ...transportOut]) {
+      assert.equal(frameForPrincipal(client, { type: t }, {}), null, t)
+      assert.equal(frameForPrincipal(client, { type: t, sessionId: 'sess-1' }, {}), null, t)
+    }
+  })
+
+  it('no loop over the connected clients fans out a direct-reply type (a principal would receive it)', () => {
+    const sends = perClientLoopFrames()
+    assert.ok(sends.length > 0, 'the scan found no per-client loop sends: the scanner is broken')
+    const bad = sends.filter((x) => !x.single && Object.hasOwn(PRINCIPAL_OUTGOING_ALLOWED, x.type))
+    assert.deepEqual(bad.map((x) => `${x.file}:${x.line} ${x.type}`), [])
+  })
+})
+
+describe('principal transport frames (raw sinks)', () => {
+  const principal = principalClient()
+  it('a client that is not a principal gets the frame back untouched (same object)', () => {
+    for (const client of [{ id: 'u' }, { id: 'b', boundSessionId: 'sess-1' }, null]) {
+      const frame = { type: 'error', code: 'INVALID_MESSAGE', message: 'm', details: 'd' }
+      assert.equal(principalTransportFrame(client, frame), frame)
+    }
+  })
+
+  it('key_exchange_ok is reduced to the public handshake fields', () => {
+    const out = principalTransportFrame(principal, { type: 'key_exchange_ok', publicKey: 'pk', serverKeySig: 's', newIdentityKey: 'n', rotationCert: 'r', extra: 1, boundSessionId: SENTINEL })
+    assert.deepEqual(out, { type: 'key_exchange_ok', publicKey: 'pk', serverKeySig: 's', newIdentityKey: 'n', rotationCert: 'r' })
+  })
+
+  it('an error is sent only for the key-exchange codes and without its details', () => {
+    for (const code of PRINCIPAL_TRANSPORT_FRAMES.error.codes) {
+      assert.deepEqual(principalTransportFrame(principal, { type: 'error', code, message: 'm', details: 'secret zod text' }), { type: 'error', code, message: 'm' })
+    }
+    assert.equal(principalTransportFrame(principal, { type: 'error', code: 'SOMETHING_ELSE', message: 'm' }), null)
+  })
+
+  it('a server_error is sent only with one of the two fixed encryption messages', () => {
+    for (const message of PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES) {
+      assert.deepEqual(principalTransportFrame(principal, { type: 'server_error', message, recoverable: false, category: 'x' }), { type: 'server_error', message, recoverable: false })
+    }
+    assert.equal(principalTransportFrame(principal, { type: 'server_error', message: 'cloudflared at /Users/x died', recoverable: true }), null)
+  })
+
+  it('any other frame type is not sent raw to a principal', () => {
+    for (const type of ['auth_ok', 'session_list', 'token_rotated', 'message', undefined]) {
+      assert.equal(principalTransportFrame(principal, { type }), null)
+    }
+  })
+
+  it('auth_ok keeps the public key-exchange material and still drops the host fields', () => {
+    const f = frameForPrincipal(principal, {
+      type: 'auth_ok', clientId: 'c', encryption: 'required', protocolVersion: 3, minProtocolVersion: 1, maxProtocolVersion: 3,
+      serverPublicKey: 'spk', serverKeySig: 'sig', newIdentityKey: 'nik', rotationCert: 'rc', cwd: '/x', serverVersion: '1', capabilities: {},
+    }, {})
+    assert.deepEqual(f, {
+      type: 'auth_ok', clientId: 'c', encryption: 'required', protocolVersion: 3, minProtocolVersion: 1, maxProtocolVersion: 3,
+      serverPublicKey: 'spk', serverKeySig: 'sig', newIdentityKey: 'nik', rotationCert: 'rc',
+    })
+  })
+})
+
+describe('principal broadcast path is separate from direct replies', () => {
+  const client = principalClient({ principal: { constraints: { sessionIds: ['sess-1'] } } })
+  const probe = { probe_event: ['type', 'sessionId', 'n'] }
+
+  it('the broadcast allowlist is empty in S2, so no frame of any kind is delivered', () => {
+    assert.deepEqual(Object.keys(PRINCIPAL_BROADCAST_ALLOWED), [])
+    for (const type of [...Object.keys(PRINCIPAL_OUTGOING_ALLOWED), ...PRINCIPAL_OUTGOING_DENIED]) {
+      assert.equal(frameForPrincipalBroadcast(client, { type, sessionId: 'sess-1' }, {}), null, type)
+      assert.equal(frameForPrincipalBroadcast(client, { type }, {}), null, type)
+    }
+  })
+
+  it('a direct-reply type is not a broadcast type even when the extension point is filled', () => {
+    for (const type of Object.keys(PRINCIPAL_OUTGOING_ALLOWED)) {
+      assert.equal(frameForPrincipalBroadcast(client, { type, sessionId: 'sess-1' }, { broadcastAllowed: probe }), null, type)
+    }
+  })
+
+  it('with the extension point filled: granted session delivered and reduced, others and untagged frames not', () => {
+    const opts = { broadcastAllowed: probe, sessionExists: () => true }
+    assert.deepEqual(frameForPrincipalBroadcast(client, { type: 'probe_event', sessionId: 'sess-1', n: 1, secret: 'x' }, opts), { type: 'probe_event', sessionId: 'sess-1', n: 1 })
+    assert.equal(frameForPrincipalBroadcast(client, { type: 'probe_event', sessionId: 'sess-2', n: 1 }, opts), null)
+    assert.equal(frameForPrincipalBroadcast(client, { type: 'probe_event', n: 1 }, opts), null)
+    assert.equal(frameForPrincipalBroadcast({ id: 'u' }, { type: 'probe_event', sessionId: 'sess-1' }, opts), null)
+  })
+
+  it('only a frame the broadcast path vetted passes the direct path under an unlisted type', () => {
+    const opts = { broadcastAllowed: probe }
+    const vetted = frameForPrincipalBroadcast(client, { type: 'probe_event', sessionId: 'sess-1', n: 1 }, opts)
+    assert.equal(frameForPrincipal(client, vetted, opts), vetted)
+    assert.equal(frameForPrincipal(client, { ...vetted }, opts), null, 'a copy of the same shape is not vetted')
   })
 })
 

@@ -18,7 +18,7 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalPolicyOptsFromCtx } from './principal-policy.js'
+import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalPolicyOptsFromCtx, sendPrincipalRefusal, PRINCIPAL_ALLOWED_MESSAGE_TYPES } from './principal-policy.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
@@ -2797,6 +2797,14 @@ export class WsServer {
     // every other client by `refuseBoundMessage` as before.
     if ((isBoundClient(client) || isPrincipalClient(client)) &&
         dispatchPolicyFor(client)(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId))) {
+      return
+    }
+
+    // An agent principal is refused (not silently dropped) while the daemon drains: every
+    // allowed application operation, permission_response included (the drain exemption
+    // below is for human clients). Transport handling above is unchanged.
+    if (this._draining && isPrincipalClient(client) && Object.hasOwn(PRINCIPAL_ALLOWED_MESSAGE_TYPES, msg?.type)) {
+      sendPrincipalRefusal(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId), 'draining')
       return
     }
 

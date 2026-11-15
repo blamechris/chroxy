@@ -7,6 +7,7 @@
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger, loggableValue } from './logger.js'
+import { principalTransportFrame } from './principal-policy.js'
 import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
@@ -565,6 +566,17 @@ export function handlePairRequestMessage(ctx, ws, msg) {
 }
 
 /**
+ * Write a key-exchange frame straight to the socket, in plaintext and in order (the
+ * exchange cannot use the queued or encrypted sender). An agent principal is sent only
+ * the whitelisted reduction of the frame (principal-policy.js); every other client gets
+ * the frame unchanged.
+ */
+function sendRawTransport(ws, client, frame) {
+  const out = principalTransportFrame(client, frame)
+  if (out !== null) ws.send(JSON.stringify(out))
+}
+
+/**
  * Handle key exchange for E2E encryption.
  * Returns true if the message was consumed (caller should return).
  *
@@ -595,12 +607,12 @@ export function handleKeyExchange(ctx, ws, msg) {
     if (typeof msg.publicKey === 'string' && !msg.salt) {
       log.warn(`key_exchange from ${client.id} missing required 'salt' field; client likely predates 600612649 (chroxy >= v0.6.8). Rejecting to avoid nonce reuse on reconnect.`)
       try {
-        ws.send(JSON.stringify({
+        sendRawTransport(ws, client, {
           type: 'error',
           code: 'KEY_EXCHANGE_SALT_REQUIRED',
           message: 'key_exchange requires a client-supplied salt. Please upgrade your Chroxy client to v0.6.8 or later.',
           details: 'key_exchange requires a client-supplied salt for per-connection key derivation. Older clients that omit salt would fall back to the raw DH shared key with nonce=0 on reconnect, re-introducing a nonce-reuse vulnerability. Upgrade the client to a build that includes commit 600612649 (Chroxy v0.6.8 or later).',
-        }))
+        })
       } catch (err) {
         log.error(`Failed to send salt-required error: ${err.message}`)
       }
@@ -613,12 +625,12 @@ export function handleKeyExchange(ctx, ws, msg) {
       const details = keParsed.error.issues.map(i => i.message).join(', ')
       log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
       try {
-        ws.send(JSON.stringify({
+        sendRawTransport(ws, client, {
           type: 'error',
           code: 'INVALID_MESSAGE',
           message: 'Invalid key_exchange message.',
           details,
-        }))
+        })
       } catch (err) {
         log.error(`Failed to send key_exchange error: ${err.message}`)
       }
@@ -647,7 +659,7 @@ export function handleKeyExchange(ctx, ws, msg) {
       }
     }
     try {
-      ws.send(JSON.stringify({
+      sendRawTransport(ws, client, {
         type: 'key_exchange_ok',
         publicKey: serverKp.publicKey,
         ...(serverKeySig ? { serverKeySig } : {}),
@@ -658,7 +670,7 @@ export function handleKeyExchange(ctx, ws, msg) {
         ...(serverKeySig && serverIdentity?.rotationCert
           ? { newIdentityKey: serverIdentity.publicKey, rotationCert: serverIdentity.rotationCert }
           : {}),
-      }))
+      })
     } catch (err) {
       // #5702 (8b): the client never received the exchange key, so we must NOT
       // mark E2E established or flush the post-auth queue. `encryptionState` was
@@ -686,7 +698,7 @@ export function handleKeyExchange(ctx, ws, msg) {
   client.encryptionPending = false
   client.postAuthQueue = null
   try {
-    ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
+    sendRawTransport(ws, client, { type: 'server_error', message: 'Encryption required but client did not initiate key exchange.', recoverable: false })
   } catch (_) {}
   ws.close(1008, 'Key exchange required')
   return true

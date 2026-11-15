@@ -2,7 +2,7 @@ import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { isSessionViewer } from './handler-utils.js'
 import { isBoundToOtherSession, canSeePeer } from './environments/authority.js'
-import { isPrincipalClient, frameForPrincipal } from './principal-policy.js'
+import { isPrincipalClient, frameForPrincipalBroadcast } from './principal-policy.js'
 
 const log = createLogger('ws')
 
@@ -105,9 +105,11 @@ export class WsBroadcaster {
     // An agent principal is decided FIRST: it carries a sentinel binding, so the
     // drop below would discard every frame it may legitimately receive. It gets
     // `frameForPrincipal` (deny by default, session frames only inside the grant)
-    // and never reaches the bound drop.
+    // and never reaches the bound drop. This is the BROADCAST path: it applies
+    // `frameForPrincipalBroadcast` (empty in S2, so a principal receives no ordinary
+    // broadcast of any type), never the direct-reply allowlist of `_send`.
     if (isPrincipalClient(client)) {
-      const frame = frameForPrincipal(client, message, this._principalOpts())
+      const frame = frameForPrincipalBroadcast(client, message, this._principalOpts())
       if (frame === null) return false
       message = frame
     } else if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) {

@@ -167,6 +167,39 @@ describe('principal over a real socket (server-side record stamped directly)', (
     c.ws.close()
   })
 
+  it('draining: every allowed principal operation is refused scope_denied, not silently dropped', async () => {
+    const c = await principalConnection(await boot(), { constraints: { sessionIds: ['session-1'] } })
+    server.setDraining(true)
+    const ops = [
+      { type: 'input', sessionId: 'session-1', clientMessageId: 'm1', data: 'hi' },
+      { type: 'create_session', requestId: 'dr-create', cwd: '/tmp/project-1' },
+      { type: 'interrupt', sessionId: 'session-1', requestId: 'dr-int' },
+      { type: 'destroy_session', sessionId: 'session-1', requestId: 'dr-destroy' },
+      { type: 'permission_response', sessionId: 'session-1', requestId: 'dr-perm', decision: 'deny' },
+    ]
+    for (const op of ops) c.ws.send(JSON.stringify(op))
+    await waitFor(() => c.messages.filter((m) => m.type === 'session_error').length >= ops.length, { label: 'a refusal per operation' })
+    const refused = c.messages.filter((m) => m.type === 'session_error')
+    assert.equal(refused.length, ops.length)
+    assert.deepEqual(refused.map((m) => m.requestType).sort(), ops.map((o) => o.type).sort())
+    for (const r of refused) assert.equal(r.code, 'scope_denied')
+    assert.equal(c.messages.some((m) => m.type === 'server_status'), false, 'the human drain notice is not sent to a principal')
+    c.ws.close()
+  })
+
+  it('draining: a non-principal client keeps the existing drain behaviour (its input is answered with the restart notice)', async () => {
+    const c = await principalConnection(await boot())
+    c.record.principal = undefined
+    c.record.boundSessionId = null
+    c.record.isPrimaryToken = true
+    server.setDraining(true)
+    c.ws.send(JSON.stringify({ type: 'input', sessionId: 'session-1', data: 'hi' }))
+    const status = await waitFor(() => c.messages.find((m) => m.type === 'server_status'), { label: 'restart notice' })
+    assert.ok(status.message.includes('restarting'))
+    assert.equal(c.messages.some((m) => m.code === 'scope_denied'), false)
+    c.ws.close()
+  })
+
   it('end-to-end positive controls: an allowed create and an allowed input each reach their handlers', async () => {
     const c = await principalConnection(await boot(), { constraints: { sessionIds: ['session-1'] } })
     const lines = []
@@ -237,18 +270,44 @@ describe('principal over a real socket (server-side record stamped directly)', (
       c.ws.close()
     })
 
-    it('delivery point: _broadcast reaches a granted principal only for a granted session', async () => {
+    // The broadcast allowlist is EMPTY in S2 (a principal receives no ordinary broadcast of
+    // any type). The extension point S3 fills is exercised with a probe type injected through
+    // the policy opts, which is what proves the principal branch runs BEFORE the bound drop
+    // at each site (the sentinel binding would otherwise discard the frame).
+    const PROBE = { probe_event: ['type', 'sessionId', 'n'] }
+    const withProbe = () => {
+      const orig = server._principalPolicyOpts.bind(server)
+      server._principalPolicyOpts = () => ({ ...orig(), broadcastAllowed: PROBE })
+    }
+    const probes = (c) => c.messages.filter((m) => m.type === 'probe_event').map((m) => m.sessionId)
+    const probe = (sessionId, extra = {}) => ({ type: 'probe_event', sessionId, n: 1, secret: 'x', ...extra })
+
+    it('delivery point: _broadcast delivers nothing to a principal today (empty broadcast allowlist), even for a granted session', async () => {
       const c = await principalConnection(await boot(), { constraints: { sessionIds: ['session-1'] } })
       server._broadcast(ack('session-1'))
-      server._broadcast(ack('session-2'))
       server._broadcast({ type: 'message', sessionId: 'session-1', content: 'x' })
+      server._broadcast({ type: 'session_error', sessionId: 'session-1', message: 'raw provider text' })
+      server._broadcast({ type: 'session_error', message: 'untagged raw text' })
       await settle()
-      assert.deepEqual(acks(c), ['session-1'])
-      assert.equal(c.messages.some((m) => m.type === 'message'), false)
+      assert.deepEqual(c.messages, [])
       c.ws.close()
     })
 
-    it('index recipient site (_liveSessionMembers): a principal in the session index is delivered a granted frame only', async () => {
+    it('delivery point: with the extension point filled, _broadcast reaches a granted principal only for a granted session', async () => {
+      const c = await principalConnection(await boot(), { constraints: { sessionIds: ['session-1'] } })
+      withProbe()
+      server._broadcast(probe('session-1'))
+      server._broadcast(probe('session-2'))
+      server._broadcast(probe('no-such-session'))
+      server._broadcast(ack('session-1'))
+      await settle()
+      assert.deepEqual(probes(c), ['session-1'])
+      assert.equal(acks(c).length, 0, 'a direct-reply type is not a broadcast type')
+      assert.equal(c.messages.find((m) => m.type === 'probe_event').secret, undefined, 'reduced to the entry\'s field whitelist')
+      c.ws.close()
+    })
+
+    it('index recipient site (_liveSessionMembers): nothing today; with the extension point filled, granted sessions only', async () => {
       const c = await principalConnection(await boot(), { constraints: { sessionIds: ['session-1'] } })
       // S3 decides how a principal comes to be indexed; the sentinel binding makes the
       // ordinary subscribe path refuse it, so index it directly.
@@ -257,19 +316,80 @@ describe('principal over a real socket (server-side record stamped directly)', (
         server._clientManager._indexAdd(c.record, sid)
       }
       server._broadcastToSession('session-1', { type: 'input_ack', clientMessageId: 'm1', status: 'accepted', delivery: 'queued', retrySafe: true, dedupScope: 'process' })
-      server._broadcastToSession('session-2', { type: 'input_ack', clientMessageId: 'm2', status: 'accepted', delivery: 'queued', retrySafe: true, dedupScope: 'process' })
+      server._broadcastToSession('session-1', { type: 'session_error', message: 'raw provider text' })
       server._broadcastToSession('session-1', { type: 'message', content: 'ordinary' })
       await settle()
-      assert.deepEqual(acks(c), ['session-1'])
-      assert.equal(c.messages.some((m) => m.type === 'message'), false)
+      assert.deepEqual(c.messages, [])
+      withProbe()
+      server._broadcastToSession('session-1', { type: 'probe_event', n: 1 })
+      server._broadcastToSession('session-2', { type: 'probe_event', n: 2 })
+      await settle()
+      assert.deepEqual(probes(c), ['session-1'])
       assert.equal(server._broadcaster._countSessionSubscribers('session-1'), 1, 'the principal is a counted recipient: deliver and count agree')
+      c.ws.close()
+    })
+  })
+
+  describe('real broadcast producers never reach a granted, subscribed principal', () => {
+    const settle = () => new Promise((r) => setTimeout(r, 150))
+
+    async function subscribed(over) {
+      const port = await boot()
+      const c = await principalConnection(port, { constraints: { sessionIds: ['session-1'] } })
+      c.record.subscribedSessionIds.add('session-1')
+      server._clientManager._indexAdd(c.record, 'session-1')
+      return c
+    }
+
+    it('session_create_failed and dev_preview_stop_failed (tagged session_error broadcasts)', async () => {
+      const c = await subscribed()
+      const manager = server.sessionManager
+      manager.emit('session_create_failed', { sessionId: 'session-1', errorCode: 'SESSION_START_FAILED', errorMessage: 'raw provider text /Users/x/secret', provider: 'claude-sdk' })
+      server._devPreview.emit('dev_preview_stop_failed', { sessionId: 'session-1', port: 3000, error: 'cloudflared raw error' })
+      await settle()
+      assert.deepEqual(c.messages, [], 'no session_error broadcast may reach a principal')
+      c.ws.close()
+    })
+
+    it('positive control: a bound (non-principal) client still receives the same frames', async () => {
+      const c = await subscribed()
+      c.record.principal = undefined
+      c.record.boundSessionId = 'session-1'
+      server.sessionManager.emit('session_create_failed', { sessionId: 'session-1', errorCode: 'SESSION_START_FAILED', errorMessage: 'boom', provider: 'claude-sdk' })
+      server._devPreview.emit('dev_preview_stop_failed', { sessionId: 'session-1', port: 3000, error: 'e' })
+      const codes = await waitFor(() => {
+        const got = c.messages.filter((m) => m.type === 'session_error').map((m) => m.code)
+        return got.length >= 2 ? got : null
+      }, { label: 'bound client receives both session_error frames' })
+      assert.deepEqual(codes.sort(), ['DEV_PREVIEW_STOP_FAILED', 'SESSION_START_FAILED'])
+      c.ws.close()
+    })
+
+    it('the untagged legacy preview-failure session_error (CLI forwarding) is not delivered to a principal, and still reaches a bound client', async () => {
+      const { createMockSession } = await import('./test-helpers.js')
+      server = newServer({ port: 0, apiToken: 'primary-tok', cliSession: createMockSession(), authRequired: true })
+      server.start('127.0.0.1')
+      await new Promise((resolve) => server.httpServer.once('listening', resolve))
+      const port = server.httpServer.address().port
+      const c = await principalConnection(port, { constraints: { sessionIds: ['__legacy__'] } })
+      c.record.subscribedSessionIds.add('__legacy__')
+      server._devPreview.emit('dev_preview_stop_failed', { sessionId: '__legacy__', port: 3000, error: 'raw' })
+      await settle()
+      assert.deepEqual(c.messages, [])
+      c.record.principal = undefined
+      c.record.boundSessionId = '__legacy__'
+      server._devPreview.emit('dev_preview_stop_failed', { sessionId: '__legacy__', port: 3000, error: 'raw' })
+      const got = await waitFor(() => c.messages.find((m) => m.type === 'session_error'), { label: 'bound client gets the untagged frame' })
+      assert.equal(got.code, 'DEV_PREVIEW_STOP_FAILED')
+      assert.equal('sessionId' in got, false, 'the legacy frame is untagged')
       c.ws.close()
     })
   })
 })
 
 describe('broadcaster full-scan recipient site (_matchesSession), no client manager', () => {
-  function fixture() {
+  const PROBE = { probe_event: ['type', 'sessionId', 'n'] }
+  function fixture(extraOpts = {}) {
     const delivered = []
     const wsFor = (client) => ({ readyState: 1, bufferedAmount: 0, _client: client })
     const principal = principalClient({ subscribedSessionIds: new Set(['sess-1', 'sess-2']) })
@@ -278,27 +398,40 @@ describe('broadcaster full-scan recipient site (_matchesSession), no client mana
     const broadcaster = new WsBroadcaster({
       clients,
       sendFn: (ws, message) => delivered.push({ id: ws._client.id, message }),
-      principalOpts: () => ({ sessionExists: (id) => id === 'sess-1' || id === 'sess-2' }),
+      principalOpts: () => ({ sessionExists: (id) => id === 'sess-1' || id === 'sess-2', ...extraOpts }),
     })
     return { broadcaster, delivered }
   }
+  const forPrincipal = (delivered) => delivered.filter((d) => d.id === 'principal-client-1')
 
-  it('delivers a granted frame to the principal, not a non-granted one, and keeps the bound client as before', () => {
+  it('delivers nothing to the principal today, for any type, while the bound client is unchanged', () => {
     const { broadcaster, delivered } = fixture()
-    const frame = { type: 'input_ack', clientMessageId: 'm1', status: 'accepted', delivery: 'queued', retrySafe: true, dedupScope: 'process' }
-    broadcaster._broadcastToSession('sess-1', frame)
-    broadcaster._broadcastToSession('sess-2', frame)
-    const principalGot = delivered.filter((d) => d.id === 'principal-client-1').map((d) => d.message.sessionId)
-    assert.deepEqual(principalGot, ['sess-1'])
+    for (const frame of [
+      { type: 'input_ack', clientMessageId: 'm1', status: 'accepted', delivery: 'queued', retrySafe: true, dedupScope: 'process' },
+      { type: 'session_error', message: 'raw provider text' },
+      { type: 'stream_delta', delta: 'x' },
+    ]) {
+      broadcaster._broadcastToSession('sess-1', frame)
+      broadcaster._broadcastToSession('sess-2', frame)
+    }
+    assert.deepEqual(forPrincipal(delivered), [])
     // the bound client (bound to sess-1) is unchanged: it gets sess-1, never sess-2
-    assert.deepEqual(delivered.filter((d) => d.id === 'bound').map((d) => d.message.sessionId), ['sess-1'])
+    assert.deepEqual(delivered.filter((d) => d.id === 'bound').map((d) => d.message.sessionId), ['sess-1', 'sess-1', 'sess-1'])
   })
 
-  it('an ordinary broadcast never reaches the principal even for a granted session', () => {
+  it('an untagged broadcast is not delivered to the principal, and still reaches the bound client', () => {
     const { broadcaster, delivered } = fixture()
-    broadcaster._broadcastToSession('sess-1', { type: 'stream_delta', delta: 'x' })
-    assert.deepEqual(delivered.filter((d) => d.id === 'principal-client-1'), [])
+    broadcaster._broadcast({ type: 'session_error', message: 'untagged raw text' })
+    assert.deepEqual(forPrincipal(delivered), [])
     assert.equal(delivered.filter((d) => d.id === 'bound').length, 1)
+  })
+
+  it('with the extension point filled it delivers a granted frame to the principal, not a non-granted one', () => {
+    const { broadcaster, delivered } = fixture({ broadcastAllowed: PROBE })
+    broadcaster._broadcastToSession('sess-1', { type: 'probe_event', n: 1, secret: 'x' })
+    broadcaster._broadcastToSession('sess-2', { type: 'probe_event', n: 2 })
+    assert.deepEqual(forPrincipal(delivered).map((d) => d.message.sessionId), ['sess-1'])
+    assert.equal('secret' in forPrincipal(delivered)[0].message, false, 'reduced to the entry whitelist')
   })
 
   it('counts the principal as a viewer of its session, so deliver and count agree', () => {

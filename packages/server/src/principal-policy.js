@@ -549,7 +549,8 @@ export function refusePrincipalHandler(ws, client, msg, ctx, need) {
  * plausibly needs today:
  *
  *   - pong: the keepalive answer to its own `ping`.
- *   - auth_ok: the handshake answer. Reduced to the protocol negotiation: no
+ *   - auth_ok: the handshake answer. Reduced to the protocol negotiation and
+ *     the public key-exchange material (the client derives its key from it): no
  *     session list, no replay, no host fields (cwd, version, features, exposure,
  *     connected clients, billing).
  *   - session_error: the refusal reply (`scope_denied`) and any error about its
@@ -566,7 +567,13 @@ export function refusePrincipalHandler(ws, client, msg, ctx, need) {
  */
 export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
   pong: Object.freeze(['type', 'serverTs']),
-  auth_ok: Object.freeze(['type', 'clientId', 'encryption', 'protocolVersion', 'minProtocolVersion', 'maxProtocolVersion']),
+  // The public handshake material of the eager key exchange stays: the client derives
+  // the shared key FROM serverPublicKey, so stripping it leaves a principal that can
+  // never decrypt the encrypted burst that follows auth_ok.
+  auth_ok: Object.freeze([
+    'type', 'clientId', 'encryption', 'protocolVersion', 'minProtocolVersion', 'maxProtocolVersion',
+    'serverPublicKey', 'serverKeySig', 'newIdentityKey', 'rotationCert',
+  ]),
   session_error: Object.freeze(['type', 'message', 'code', 'recoverable', 'reason', 'requestId', 'requestType', 'sessionId']),
   server_error: Object.freeze(['type', 'category', 'recoverable', 'sessionId']),
   rate_limited: Object.freeze(['type', 'retryAfterMs', 'message']),
@@ -576,6 +583,153 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
   ]),
   credential_invalidated: Object.freeze(['type', 'reason']),
 })
+
+/**
+ * Every other real server frame: a principal is never sent one on the direct-reply
+ * path. Together with `PRINCIPAL_OUTGOING_ALLOWED` and `PRINCIPAL_TRANSPORT_FRAMES`
+ * this classifies EVERY frame the daemon can emit (schema-backed and schema-less), so a
+ * new frame cannot reach a principal without a decision. Delivery stays deny by default
+ * either way; this roster exists so tests/principal-policy.test.js can be red when a
+ * frame is added and nobody decided about it.
+ * @type {readonly string[]}
+ */
+export const PRINCIPAL_OUTGOING_DENIED = Object.freeze([
+  'activity_delta', 'activity_snapshot', 'agent_busy', 'agent_completed', 'agent_event', 'agent_idle',
+  'agent_list', 'agent_spawned', 'append_memory_result', 'archived_session_history',
+  'archived_sessions_list', 'auth_bootstrap', 'auth_fail', 'available_models',
+  'available_permission_modes', 'background_work_changed', 'billing_canary', 'budget_exceeded',
+  'budget_resume_ack', 'budget_resumed', 'budget_warning', 'byok_credentials_status',
+  'byok_pool_action_ack', 'byok_pool_status_snapshot', 'cancel_activity_ack', 'checkpoint_created',
+  'checkpoint_list', 'checkpoint_restored', 'chroxy_context_hint_changed', 'claude_ready',
+  'client_focus_changed', 'client_joined', 'client_left', 'code_search_results', 'confirm_permission_mode',
+  'containers_action_ack', 'containers_status_snapshot', 'conversation_id', 'conversations_list',
+  'cost_summary', 'cost_update', 'credential_test_result', 'credentials_status',
+  'daemon_update_action_result', 'daemon_update_confirm_required', 'daemon_update_status',
+  'delete_archived_session_result', 'dev_preview', 'dev_preview_status', 'dev_preview_stopped',
+  'diff_result', 'directory_listing', 'emulator_action_ack', 'emulator_status_snapshot',
+  'environment_created', 'environment_destroyed', 'environment_error', 'environment_info',
+  'environment_list', 'evaluate_draft_result', 'evaluator_clarify', 'evaluator_rewrite',
+  'extension_message', 'external_sessions_snapshot', 'failed_restore_history', 'failed_restores_list',
+  'file_content', 'file_listing', 'git_branches_result', 'git_commit_result', 'git_create_pr_result',
+  'git_repo_check_result', 'git_stage_result', 'git_status_result', 'git_unstage_result',
+  'github_webhook_config', 'history_replay_end', 'history_replay_start', 'host_prune_action_ack',
+  'host_prune_status_snapshot', 'host_status_snapshot', 'inactivity_warning', 'integration_action_ack',
+  'integration_status_snapshot', 'log_entry', 'mailbox_status_snapshot', 'mcp_servers',
+  'memory_stack_result', 'message', 'message_dequeued', 'message_queued', 'model_changed',
+  'monthly_budget', 'multi_question_intervention', 'notification_prefs', 'orchestration_action_ack',
+  'orchestration_run_delta', 'orchestration_run_snapshot', 'orchestration_runs_snapshot', 'pair_fail',
+  'pair_pending', 'pair_request_pending', 'pair_resolved', 'pair_result', 'pairing_refreshed',
+  'permission_audit_result', 'permission_expired', 'permission_input', 'permission_mode_changed',
+  'permission_outcome', 'permission_request', 'permission_resolved', 'permission_rules_updated',
+  'plan_ready', 'plan_started', 'primary_changed', 'prompt_evaluator_changed',
+  'prompt_evaluator_skip_pattern_changed', 'provider_list', 'provider_runtime_info', 'push_token_error',
+  'references_result', 'repo_events_delta', 'repo_events_snapshot', 'repo_list',
+  'repo_runtime_config_snapshot', 'restore_archived_session_result', 'result',
+  'retry_failed_restore_result', 'runner_status_snapshot', 'scheduled_tasks', 'search_results',
+  'server_mode', 'server_shutdown', 'server_status', 'session_activity', 'session_archive_policy_result',
+  'session_context', 'session_cost_threshold_crossed', 'session_destroyed', 'session_list',
+  'session_persist_failed', 'session_pr_status', 'session_pr_threads', 'session_preamble_changed',
+  'session_preset_snapshot', 'session_restore_failed', 'session_role', 'session_status', 'session_stopped',
+  'session_switched', 'session_timeout', 'session_updated', 'session_usage', 'session_warning',
+  'shell_pending_approval', 'simulator_action_ack', 'simulator_status_snapshot', 'skill_activated',
+  'skill_changed', 'skill_deactivated', 'skill_trust_accepted', 'skill_trust_grant_ok',
+  'skill_trust_granted', 'skill_trust_request', 'skills_inventory_snapshot', 'skills_list',
+  'slash_commands', 'status', 'statusline_output', 'stdin_dropped_totals', 'stream_delta', 'stream_end',
+  'stream_start', 'subscriptions_updated', 'summarize_session_result', 'symbol_location',
+  'symbols_snapshot', 'terminal_output', 'terminal_size', 'thinking_level_changed', 'token_rotated',
+  'tool_input_delta', 'tool_result', 'tool_start', 'tunnel_url_changed', 'user_input', 'user_question',
+  'web_feature_status', 'web_task_created', 'web_task_error', 'web_task_list', 'web_task_updated',
+  'write_file_result', 'wsl_action_ack', 'wsl_status_snapshot',
+])
+
+/**
+ * Frames sent to a principal by RAW socket writes that bypass `_send` on purpose (the
+ * key exchange is plaintext and must keep its ordering, so it cannot use the queued or
+ * encrypted sender). Each type lists the only fields it is sent with. `error` is limited
+ * to the key-exchange codes, and `server_error` (whose whitelist lives in
+ * `PRINCIPAL_OUTGOING_ALLOWED`) to the two fixed encryption messages.
+ * @type {Readonly<Record<string, { fields: readonly string[], codes?: readonly string[] }>>}
+ */
+export const PRINCIPAL_TRANSPORT_FRAMES = Object.freeze({
+  key_exchange_ok: Object.freeze({ fields: Object.freeze(['type', 'publicKey', 'serverKeySig', 'newIdentityKey', 'rotationCert']) }),
+  error: Object.freeze({
+    fields: Object.freeze(['type', 'code', 'message']),
+    codes: Object.freeze(['KEY_EXCHANGE_SALT_REQUIRED', 'INVALID_MESSAGE']),
+  }),
+})
+
+/** The fixed `server_error` texts the raw key-exchange sinks send. */
+export const PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES = Object.freeze([
+  'Encryption required but key exchange timed out. Please reconnect.',
+  'Encryption required but client did not initiate key exchange.',
+])
+
+/**
+ * The payload a RAW transport send should write for `client`: the frame unchanged for a
+ * client that is not a principal (byte-identical), the whitelisted reduction for a
+ * principal, and null when a principal may not be sent it (the caller writes nothing).
+ * @param {object} client
+ * @param {object} frame
+ * @returns {object|null}
+ */
+export function principalTransportFrame(client, frame) {
+  if (!isPrincipalClient(client)) return frame
+  const type = frame?.type
+  if (type === 'server_error') {
+    if (!PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES.includes(frame.message)) return null
+    return { type, message: frame.message, recoverable: frame.recoverable }
+  }
+  if (typeof type !== 'string' || !Object.hasOwn(PRINCIPAL_TRANSPORT_FRAMES, type)) return null
+  const spec = PRINCIPAL_TRANSPORT_FRAMES[type]
+  if (spec.codes && !spec.codes.includes(frame.code)) return null
+  const out = {}
+  for (const field of spec.fields) {
+    if (Object.hasOwn(frame, field)) out[field] = frame[field]
+  }
+  return out
+}
+
+/**
+ * Frames a principal may receive on the BROADCAST path (the broadcaster and the
+ * session-broadcast paths), with the fields each is delivered with. EMPTY in S2: a
+ * principal receives no ordinary session broadcast of any type (contract §3.1 item 7).
+ * This is the named extension point for the normalized `principal_event` path that S3
+ * adds; the grant check in `frameForPrincipalBroadcast` applies to every entry.
+ * @type {Readonly<Record<string, readonly string[]>>}
+ */
+export const PRINCIPAL_BROADCAST_ALLOWED = Object.freeze({})
+
+// Frames `frameForPrincipalBroadcast` already vetted. The broadcaster hands them to
+// `_send`, whose direct-reply allowlist would otherwise drop them.
+const VETTED_BROADCAST = new WeakSet()
+
+/**
+ * The frame a principal should receive from a BROADCAST, or null. Separate from
+ * `frameForPrincipal` (direct replies to the principal's own requests): the two
+ * allowlists are distinct, so a direct-reply type such as `session_error` reaches a
+ * principal only as a reply and never as a broadcast. A broadcast frame must be in
+ * `opts.broadcastAllowed` (default `PRINCIPAL_BROADCAST_ALLOWED`), carry a string
+ * `sessionId`, and pass `principalMaySee(..., 'observe')`.
+ * @param {object} client
+ * @param {object} message
+ * @param {PrincipalPolicyOpts & { broadcastAllowed?: Readonly<Record<string, readonly string[]>> }} [opts]
+ * @returns {object|null}
+ */
+export function frameForPrincipalBroadcast(client, message, opts = {}) {
+  if (!isPrincipalClient(client)) return null
+  const allowed = opts.broadcastAllowed ?? PRINCIPAL_BROADCAST_ALLOWED
+  const type = message?.type
+  if (typeof type !== 'string' || !Object.hasOwn(allowed, type)) return null
+  if (typeof message.sessionId !== 'string' || !principalMaySee(client, message.sessionId, 'observe', opts).ok) return null
+  const frame = {}
+  for (const field of allowed[type]) {
+    if (Object.hasOwn(message, field)) frame[field] = message[field]
+  }
+  const binding = client.boundSessionId
+  if (typeof binding === 'string' && binding.length > 0 && JSON.stringify(frame).includes(binding)) return null
+  VETTED_BROADCAST.add(frame)
+  return frame
+}
 
 /**
  * The frame a principal should receive for `message`, or null when it must
@@ -593,6 +747,7 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
  */
 export function frameForPrincipal(client, message, opts = {}) {
   if (!isPrincipalClient(client)) return null
+  if (message !== null && typeof message === 'object' && VETTED_BROADCAST.has(message)) return message
   const type = message?.type
   if (typeof type !== 'string' || !Object.hasOwn(PRINCIPAL_OUTGOING_ALLOWED, type)) return null
   if (typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {
