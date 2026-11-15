@@ -3417,7 +3417,7 @@ export class WsServer {
     client.isPrimaryToken = false
     client.pairingCredential = null
     client.authToken = undefined
-    client.postAuthQueue = null
+    if (client.principal != null) client.postAuthQueue = null
     this._clientManager.removeClient(ws)
     log.info(`Client ${client.id} ended: credential ${reason}`)
     try { ws.close(WS_CLOSE_CREDENTIAL_INVALID, `credential ${reason}`) } catch { /* already closing */ }

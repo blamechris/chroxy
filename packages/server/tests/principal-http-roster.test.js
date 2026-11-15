@@ -99,7 +99,8 @@ const NON_ROUTING_REQ_CALLS = ['sendOversizeResponse', 'dispatch']
  * read in the source tree. Pure over file paths so a mutated copy can be checked the same way.
  */
 function inventory(routesFile, srcRoot = SRC) {
-  const { routes, unplaced } = inventoryRoutes(routesFile, { nonRoutingReqCalls: NON_ROUTING_REQ_CALLS, strict: true })
+  const { routes, unplaced: routeUnplaced } = inventoryRoutes(routesFile, { nonRoutingReqCalls: NON_ROUTING_REQ_CALLS, strict: true })
+  const unplaced = [...routeUnplaced]
   const reads = {}
   const escapes = {}
   for (const f of srcFiles(srcRoot)) {
@@ -107,6 +108,7 @@ function inventory(routesFile, srcRoot = SRC) {
     const b = inventoryBearerReads(path)
     if (b.reads.length) reads[f.rel] = b.reads.length
     if (b.escapes.length) escapes[f.rel] = b.escapes.length
+    unplaced.push(...b.unplaced)
   }
   return { routes, unplaced, reads, escapes }
 }
@@ -284,8 +286,41 @@ describe('the HTTP route roster, checked in both directions against the source (
       assert.ok(cases === Object.keys(forms).length && cases > 0)
     })
 
+    it('(a) a request alias hides a route: reported as unplaced', () => {
+      const p = problemsFor(withExtra('alias-req', "    const r = req\n    if (r.method === 'GET' && r.url === '/unlisted') { res.end('x'); return }"))
+      assert.ok(p.some((x) => /^unplaced: .*request aliased or escaped/.test(x)), JSON.stringify(p))
+      const q = problemsFor(withExtra('destructure-req', "    const { method: m2, url: u2 } = req"))
+      assert.ok(q.some((x) => /request aliased or escaped/.test(x)), JSON.stringify(q))
+    })
+
+    it('(b) a switch on a URL-derived name is reported as unplaced', () => {
+      const p = problemsFor(withExtra('switch-url', "    switch (snapPath) { case '/unlisted': res.end('x'); return }"))
+      assert.ok(p.some((x) => /^unplaced: .*switch on the request/.test(x)), JSON.stringify(p))
+      const q = problemsFor(withExtra('switch-raw', "    switch (req.url) { case '/unlisted': res.end('x'); return }"))
+      assert.ok(q.some((x) => /switch on the request/.test(x)), JSON.stringify(q))
+    })
+
+    it('(c) a computed header key is unplaced, and a literal authorization key in any case is a bearer read', () => {
+      const p = problemsFor(withExtra('computed-key', "    const authKey = 'authorization'\n    const t8 = req.headers[authKey]?.slice(7)"))
+      assert.ok(p.some((x) => /^unplaced: .*computed header key/.test(x)), JSON.stringify(p))
+      const q = problemsFor(withExtra('literal-key-case', "    const t9 = req.headers['AUTHORIZATION']"))
+      assert.ok(q.some((x) => /authorization-header reads/.test(x)), JSON.stringify(q))
+    })
+
+    it('(d) compound and logical assignments to a header read count as reads', () => {
+      let cases = 0
+      for (const op of ['||=', '??=', '&&=', '+=']) {
+        const p = problemsFor(withExtra(`compound-${cases}`, `    const t10 = (req.headers.authorization ${op} '')?.slice(7)`))
+        cases++
+        assert.ok(p.some((x) => /authorization-header reads/.test(x)), `${op}: ${JSON.stringify(p)}`)
+      }
+      assert.ok(cases === 4)
+      // a plain write is not a read
+      assert.deepEqual(problemsFor(withExtra('plain-write', "    req.headers.authorization = 'x'")), [])
+    })
+
     it('every fixture above was written (the suite is not vacuous)', () => {
-      assert.ok(fixtures.length >= 8, `only ${fixtures.length} fixtures ran`)
+      assert.ok(fixtures.length >= 14, `only ${fixtures.length} fixtures ran`)
     })
   })
 })

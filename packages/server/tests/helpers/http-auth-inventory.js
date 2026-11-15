@@ -192,9 +192,11 @@ export function inventoryRoutes(path, { nonRoutingReqCalls = [], strict = false 
       const logging = fnCall && /^(log|console)\b/.test(text(fnCall.callee))
       if (!logging) unplaced.push(`${line(n)} req.method used outside a route test`)
     }
-    if (handler && n.type === 'SwitchStatement' && !inRoute(ancestors)) {
+    if (handler && n.type === 'SwitchStatement') {
       let usesReq = false
-      walk(n.discriminant, (m) => { if (isReqMember(m, 'method') || isReqMember(m, 'url')) usesReq = true })
+      walk(n.discriminant, (m) => {
+        if (isReqMember(m, 'method') || isReqMember(m, 'url') || (m.type === 'Identifier' && derived.has(m.name))) usesReq = true
+      })
       if (usesReq) unplaced.push(`${line(n)} switch on the request`)
     }
     if (n.type === 'CallExpression' && !inRoute(ancestors)) {
@@ -206,25 +208,41 @@ export function inventoryRoutes(path, { nonRoutingReqCalls = [], strict = false 
       }
     }
   })
+  // Pass 3: `req` itself must only ever be the base of a member access or an argument to a
+  // call. Any other use is an alias or an escape (`const r = req`, `{ method } = req`,
+  // `fns.push(req)`, a return, a ternary) and hides routing and header reads from this
+  // inventory, so it is UNPLACED rather than quietly ignored.
+  walk(ast, (n, parent, ancestors) => {
+    if (!inReqFn(ancestors) || !isReq(n) || !parent) return
+    if (/Function/.test(parent.type) && parent.params.includes(n)) return
+    if (parent.type === 'MemberExpression' && parent.object === n) return
+    if (parent.type === 'CallExpression' && parent.arguments.includes(n)) return
+    if (parent.type === 'Property' && parent.key === n && !parent.shorthand) return
+    unplaced.push(`${line(n)} request aliased or escaped (${parent.type})`)
+  })
   return { routes, unplaced }
 }
 
 /**
  * Every READ of the authorization header (or an escape of the whole header bag) in one file.
- * @returns {{ reads: string[], escapes: string[] }}
+ * @returns {{ reads: string[], escapes: string[], unplaced: string[] }}
  */
 export function inventoryBearerReads(path) {
   const { ast } = parseFile(path)
   const reads = []
   const escapes = []
+  const unplaced = []
   const at = (n) => `${path.split('/').pop()}:${n.loc.start.line}`
   const isAuthName = (s) => typeof s === 'string' && s.toLowerCase() === 'authorization'
   const isReqLike = (n) => n?.type === 'Identifier' && /^(req|request)$/.test(n.name)
   const HANDED_ON = new Set(['CallExpression', 'NewExpression', 'VariableDeclarator', 'SpreadElement', 'Property', 'ReturnStatement', 'AssignmentExpression', 'ArrayExpression'])
   walk(ast, (n, parent) => {
     if (n.type === 'MemberExpression') {
-      const assignedTo = parent?.type === 'AssignmentExpression' && parent.left === n
+      // `=` only writes; `||=`, `??=`, `&&=`, `+=` ... read the value first.
+      const assignedTo = parent?.type === 'AssignmentExpression' && parent.left === n && parent.operator === '='
       if (isAuthName(propName(n)) && !assignedTo) reads.push(`${at(n)} member`)
+      // A computed key on a request's header bag that is not a string literal can name any header.
+      if (n.computed && isReqMember(n.object, 'headers') && staticString(n.property) === null) unplaced.push(`${at(n)} computed header key`)
       if (propName(n) === 'rawHeaders' && isReqLike(n.object)) escapes.push(`${at(n)} rawHeaders`)
       // `req.headers` used as a value (not as the base of a further member, not a guard)
       if (propName(n) === 'headers' && isReqLike(n.object) && HANDED_ON.has(parent?.type) && !(parent.type === 'CallExpression' && parent.callee === n)) {
@@ -247,7 +265,7 @@ export function inventoryBearerReads(path) {
       }
     }
   })
-  return { reads, escapes }
+  return { reads, escapes, unplaced }
 }
 
 export function srcFiles(root, prefix = '') {

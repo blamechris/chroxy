@@ -198,6 +198,41 @@ describe('principal over a real socket', () => {
       assert.equal((await authFail(after)).reason, 'rate_limited')
     })
 
+    it('a principal success does not reset the shared backoff bucket; a primary success still does', async () => {
+      const { port, tokens } = await boot()
+      const c0 = await open(port, { token: tokens[0], auth: false })
+      const key = c0.record().rateLimitKey
+      const seed = () => server._authFailures.set(key, { count: 5, firstFailure: Date.now() - 1000, blockedUntil: Date.now() - 1 })
+      seed()
+      c0.sendAuth()
+      await authOk(c0)
+      assert.equal(server._authFailures.get(key)?.count, 5, 'principal auth left the failure count alone')
+      seed()
+      const p = await open(port, { token: PRIMARY })
+      await authOk(p)
+      assert.equal(server._authFailures.has(key), false, 'primary auth resets it, as before')
+    })
+
+    it('a remote peer never makes the daemon touch the store: no validate, no read, same opaque failure', async () => {
+      const { port, tokens, store } = await boot()
+      let validates = 0
+      let reads = 0
+      const origValidate = store.validate.bind(store)
+      store.validate = (...a) => { validates++; return origValidate(...a) }
+      store._readSecret = (...a) => { reads++; return readTrustedSecretFile(...a) }
+      const c = await open(port, { token: tokens[0], auth: false })
+      c.record().loopbackAtUpgrade = false
+      c.sendAuth()
+      assert.deepEqual(await authFail(c), { type: 'auth_fail', reason: 'invalid_token' })
+      assert.equal(validates, 0)
+      assert.equal(reads, 0)
+      // positive control: a loopback peer does reach the store
+      server._authFailures.clear()
+      const ok = await open(port, { token: tokens[0] })
+      await authOk(ok)
+      assert.ok(validates > 0 && reads > 0)
+    })
+
     it('positive control: the primary token still authenticates as primary and carries no principal', async () => {
       const { port } = await boot()
       const c = await open(port, { token: PRIMARY })
@@ -449,6 +484,17 @@ describe('principal over a real socket', () => {
       assert.doesNotThrow(() => server._keepaliveSweep())
       await b.waitClosed()
       assert.equal(b.closeCode, WS_CLOSE_CREDENTIAL_INVALID)
+    })
+
+    it('ending a NON-principal connection leaves its post-auth queue as it was (behaviour unchanged)', async () => {
+      const { port } = await boot()
+      const c = await open(port, { token: PRIMARY })
+      await authOk(c)
+      const rec = c.record()
+      rec.postAuthQueue = ['queued']
+      server._endCredentialConnection(rec._ws, rec, 'revoked')
+      assert.deepEqual(rec.postAuthQueue, ['queued'])
+      await c.waitClosed()
     })
 
     it('the timer is cleared when the connection simply closes', async () => {

@@ -19,6 +19,11 @@
  * it takes a hash, never a token. Tests insert entries through `_testOnlyInsertEntry`,
  * which exists only on a store constructed with `allowTestInsert: true`.
  *
+ * TRUST BOUNDARY. Anyone who can write files as the daemon's uid can hand-write a valid
+ * 0600 store and so create a principal. That is the same boundary as reading
+ * `connection.json` for the primary token (contract section 2, the same-user limit); it is
+ * not a mint path in this code, and nothing here defends against it.
+ *
  * REVOKE ORDER (§3, §10.2): flip in memory first (fail closed: the credential is dead
  * the instant the call starts), then persist with the durable write, then report. A
  * failed persist leaves memory revoked and reports `durable: false`; a refresh from disk
@@ -242,6 +247,18 @@ export class PrincipalStore {
     if (doc == null || typeof doc !== 'object' || Array.isArray(doc) || doc.version !== PRINCIPAL_STORE_VERSION ||
         !Array.isArray(doc.principals) || doc.principals.length > MAX_PRINCIPALS) {
       return this._setHealth({ ok: false, status: 'invalid', code: 'ECORRUPT', reason: 'the principal store has an unrecognised shape: restore it or delete it (deleting revokes every principal)' }, [], [])
+    }
+    // An identity named by two records is ambiguous, whatever else is wrong with either:
+    // a malformed copy (an unknown scope, say) may be the revoked one. Checked on the RAW
+    // records BEFORE any is discarded as malformed.
+    const seenIds = new Set()
+    for (const raw of doc.principals) {
+      const id = raw !== null && typeof raw === 'object' ? raw.principalId : undefined
+      if (typeof id !== 'string' || !PRINCIPAL_ID_PATTERN.test(id)) continue
+      if (seenIds.has(id)) {
+        return this._setHealth({ ok: false, status: 'invalid', code: 'ECORRUPT', reason: 'the principal store holds two records with one principalId: restore it or delete it (deleting revokes every principal)' }, [], [])
+      }
+      seenIds.add(id)
     }
     const entries = []
     const invalid = []

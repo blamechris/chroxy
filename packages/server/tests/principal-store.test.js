@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, chmodSync, symlinkSync, mkdirSync, statSyn
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+import { parse } from 'acorn'
 import {
   PrincipalStore, createPrincipalStore, buildPrincipalEntry, parsePrincipalEntry, hashPrincipalToken,
   PrincipalGrantsDisabledError, PRINCIPALS_NOT_ENABLED_MESSAGE, MAX_PRINCIPAL_TTL_MS, DEFAULT_PRINCIPAL_TTL_MS,
@@ -261,6 +262,41 @@ describe('duplicate principalIds fail the whole store closed, in either order', 
   }
 })
 
+describe('a malformed duplicate cannot hide a revocation', () => {
+  for (const [name, bad] of Object.entries({
+    'an unknown scope': (l) => ({ ...l, scope: 'root', tier: 'root', revokedAt: l.createdAt + 5 }),
+    'a bad label': (l) => ({ ...l, label: 'BAD LABEL', revokedAt: l.createdAt + 5 }),
+    'a bad hash': (l) => ({ ...l, tokenHash: 'zz', revokedAt: l.createdAt + 5 }),
+  })) {
+    for (const order of ['live-first', 'malformed-first']) {
+      it(`${name}, ${order}: the whole store is refused`, () => {
+        const d = fresh()
+        const store = testPrincipalStore(d.path)
+        const { token } = insertPrincipal(store, { principalId: 'dup', label: 'one' })
+        const live = JSON.parse(readFileSync(d.path, 'utf8')).principals[0]
+        const principals = order === 'live-first' ? [live, bad(live)] : [bad(live), live]
+        writeFileSync(d.path, JSON.stringify({ version: 1, principals }), { mode: 0o600 })
+        const s = createPrincipalStore({ path: d.path })
+        assert.equal(s.health().ok, false)
+        assert.equal(s.health().code, 'ECORRUPT')
+        assert.equal(s.state('dup'), 'invalid')
+        assert.equal(s.validate(token), null)
+      })
+    }
+  }
+
+  it('positive control: a malformed record with a DIFFERENT id is dropped alone', () => {
+    const d = fresh()
+    const store = testPrincipalStore(d.path)
+    const { token } = insertPrincipal(store, { principalId: 'ok', label: 'one' })
+    const live = JSON.parse(readFileSync(d.path, 'utf8')).principals[0]
+    writeFileSync(d.path, JSON.stringify({ version: 1, principals: [live, { ...live, principalId: 'other', scope: 'root' }] }), { mode: 0o600 })
+    const s = createPrincipalStore({ path: d.path })
+    assert.equal(s.health().ok, true)
+    assert.ok(s.validate(token))
+  })
+})
+
 describe('liveness: expiry and revocation', () => {
   it('a token is live until expiresAt (fake clock), then not', () => {
     const clock = fakeClock()
@@ -364,24 +400,51 @@ describe('grant refuses until the brakes land; nothing mints a token', () => {
     assert.throws(() => store._testOnlyInsertEntry(built.entry), /test-only/)
   })
 
-  it('no production source generates a principal token or reaches the test-only insert', () => {
+  it('no production source generates a principal token or reaches the test-only insert (AST)', () => {
     const files = []
-    const walk = (dir) => {
+    const collect = (dir) => {
       for (const name of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, name.name)
-        if (name.isDirectory()) walk(full)
+        if (name.isDirectory()) collect(full)
         else if (name.name.endsWith('.js')) files.push(full)
       }
     }
-    walk(SRC)
+    collect(SRC)
     assert.ok(files.length > 100)
-    const insertUsers = files.filter((f) => readFileSync(f, 'utf8').includes('_testOnlyInsertEntry')).map((f) => f.slice(SRC.length + 1))
-    assert.deepEqual(insertUsers, ['principal-store.js'])
-    // The principal modules contain no token generator.
+    const rel = (f) => f.slice(SRC.length + 1)
+    const seen = { allowTestInsert: new Set(), testInsert: new Set(), newStore: new Set(), createStore: new Set(), grantCalls: [], cryptoImports: {} }
+    const walk = (n, file) => {
+      if (!n || typeof n.type !== 'string') return
+      if (n.type === 'Identifier' && n.name === 'allowTestInsert') seen.allowTestInsert.add(rel(file))
+      if (n.type === 'Identifier' && n.name === '_testOnlyInsertEntry') seen.testInsert.add(rel(file))
+      if (n.type === 'Literal' && n.value === 'allowTestInsert') seen.allowTestInsert.add(rel(file))
+      if (n.type === 'NewExpression' && n.callee.type === 'Identifier' && n.callee.name === 'PrincipalStore') seen.newStore.add(rel(file))
+      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'createPrincipalStore') {
+        seen.createStore.add(rel(file))
+        // production construction passes no options at all (so no allowTestInsert)
+        assert.equal(n.arguments.length, 0, `${rel(file)} must call createPrincipalStore() with no options`)
+      }
+      if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === 'grant') seen.grantCalls.push(rel(file))
+      if (n.type === 'ImportDeclaration' && n.source.value === 'node:crypto') seen.cryptoImports[rel(file)] = n.specifiers.map((sp) => sp.imported?.name)
+      for (const key of Object.keys(n)) {
+        const v = n[key]
+        if (Array.isArray(v)) v.forEach((c) => walk(c, file))
+        else if (v && typeof v.type === 'string') walk(v, file)
+      }
+    }
+    for (const f of files) walk(parse(readFileSync(f, 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', allowAwaitOutsideFunction: true }), f)
+    assert.deepEqual([...seen.allowTestInsert].sort(), ['principal-store.js'])
+    assert.deepEqual([...seen.testInsert].sort(), ['principal-store.js'])
+    assert.deepEqual([...seen.newStore].sort(), ['principal-store.js'])
+    assert.deepEqual([...seen.createStore].sort(), ['server-cli.js'])
+    assert.deepEqual(seen.grantCalls, [], 'nothing in src calls .grant() on a principal store')
+    // The principal modules import no random-byte generator.
     for (const f of ['principal-store.js', 'principal-binding.js', 'principal-effect.js', 'durable-write.js', 'handlers/principal-admin-handlers.js', 'cli/agent-cmd.js']) {
-      const text = readFileSync(join(SRC, f), 'utf8')
-      assert.equal(/randomBytes\([^)]*\)\.toString\(\s*'base64url'/.test(text), false, `${f} generates a base64url token`)
-      assert.equal(/createPrincipalToken|mintPrincipal/.test(text), false, f)
+      const imported = seen.cryptoImports[f] ?? []
+      // durable-write.js draws random bytes for a TEMP FILE name, never a credential.
+      const allowed = f === 'durable-write.js' ? ['createHash', 'randomBytes'] : ['createHash']
+      assert.deepEqual(imported.filter((x) => !allowed.includes(x)), [], `${f} imports a generator from node:crypto`)
+      assert.equal(/createPrincipalToken|mintPrincipal/.test(readFileSync(join(SRC, f), 'utf8')), false, f)
     }
   })
 })

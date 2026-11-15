@@ -118,9 +118,11 @@ export function isLoopbackConnection(client) {
 function resolvePrincipalCredential(ctx, client, token) {
   const store = ctx.principalStore
   if (!store || typeof token !== 'string') return null
-  const principal = store.validate(token)
-  if (principal === null) return null
-  return isLoopbackConnection(client) ? principal : null
+  // Loopback FIRST: a remote peer never reaches the store, so it cannot make the daemon
+  // read it (a 256 KB file) or log an invalid store on every attempt. The reply is the
+  // same opaque failure either way.
+  if (!isLoopbackConnection(client)) return null
+  return store.validate(token)
 }
 
 /**
@@ -238,7 +240,9 @@ export function handleAuthMessage(ctx, ws, msg) {
     // shell gate's current-token check is skipped (no TokenManager).
     // A principal token is never retained on the connection record.
     client.authToken = principal === null ? msg.token : undefined
-    authFailures.delete(rateLimitKey)
+    // A principal's loopback key is the same bucket local primary-token guessers fail into:
+    // its success must not reset their backoff.
+    if (principal === null) authFailures.delete(rateLimitKey)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
