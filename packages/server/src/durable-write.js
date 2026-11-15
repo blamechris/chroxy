@@ -30,6 +30,6 @@ import { writeFileRestricted } from './platform.js'
  */
 export function writeDurableFile(filePath, data, seams = {}) {
   const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-  const { durabilityUnconfirmed } = writeFileRestricted(filePath, data, { ...seams, tmpSuffix, durable: true })
+  const { durabilityUnconfirmed } = writeFileRestricted(filePath, data, { ...seams, tmpSuffix, durable: true, strict: true })
   return { durable: durabilityUnconfirmed == null, unconfirmed: durabilityUnconfirmed ?? null }
 }

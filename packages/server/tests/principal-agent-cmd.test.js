@@ -59,6 +59,62 @@ describe('chroxy agent grant refuses', () => {
   })
 })
 
+describe('AgentControlClient.request settles with the common pending-operation cleanup', () => {
+  let server
+  const cleanups = []
+  afterEach(() => { if (server) { server.close(); server = null } while (cleanups.length) cleanups.pop()() })
+
+  async function connected() {
+    const fixture = tempPrincipalDir()
+    cleanups.push(fixture.cleanup)
+    const { manager } = createMockSessionManager([{ id: 'sess-1', name: 'One', cwd: '/tmp/p' }])
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true, principalStore: testPrincipalStore(fixture.path) })
+    server.start('127.0.0.1')
+    await new Promise((resolve) => server.httpServer.once('listening', resolve))
+    const { AgentControlClient } = await import('../src/agent-control/client.js')
+    const client = new AgentControlClient({ url: `ws://127.0.0.1:${server.httpServer.address().port}`, token: 'primary-tok', silent: true })
+    await client.connect()
+    return client
+  }
+
+  it('close() right after request() rejects it promptly and leaves no listener or pending entry', async () => {
+    const client = await connected()
+    const before = client.listenerCount('message')
+    const t0 = Date.now()
+    const pending = client.request('principal_admin_list', {}, { replyType: 'never_sent', timeoutMs: 30_000 })
+    assert.equal(client.listenerCount('message'), before + 1)
+    assert.equal(client._pendingRequests.size, 1)
+    await client.close()
+    await assert.rejects(pending, /client closed/)
+    assert.ok(Date.now() - t0 < 2000, 'settled promptly, not at the 30s timeout')
+    assert.equal(client.listenerCount('message'), before)
+    assert.equal(client._pendingRequests.size, 0)
+  })
+
+  it('the server closing the socket settles it too (socket close, connection failure)', async () => {
+    const client = await connected()
+    const before = client.listenerCount('message')
+    const pending = client.request('principal_admin_list', {}, { replyType: 'never_sent', timeoutMs: 30_000 })
+    for (const ws of server.wss.clients) ws.terminate()
+    await assert.rejects(pending)
+    assert.equal(client.listenerCount('message'), before)
+    assert.equal(client._pendingRequests.size, 0)
+    await client.close()
+  })
+
+  it('positive control and no retry: a normal reply resolves once, one frame is sent per request', async () => {
+    const client = await connected()
+    const sent = []
+    const orig = client._send.bind(client)
+    client._send = (p) => { sent.push(p.type); return orig(p) }
+    const r = await client.request('principal_admin_list', {}, { replyType: 'principal_admin_result' })
+    assert.equal(r.ok, true)
+    assert.deepEqual(sent, ['principal_admin_list'])
+    assert.equal(client._pendingRequests.size, 0)
+    await client.close()
+  })
+})
+
 describe('list and revoke against a real daemon', () => {
   let server
   const cleanups = []

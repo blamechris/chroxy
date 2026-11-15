@@ -190,12 +190,14 @@ export class PrincipalStore {
    * @param {boolean} [opts.allowTestInsert]  tests only; production never sets it
    * @param {(a: string, b: string) => boolean} [opts.compare]  the hash comparison; defaults to
    *   `safeTokenCompare`. Injectable only so a test can prove it runs once per stored entry.
+   * @param {Function} [opts.readSecret]  defaults to `readTrustedSecretFile`; injectable so a test can make the read throw
    */
-  constructor({ path, now = Date.now, writeDurable = writeDurableFile, allowTestInsert = false, compare = safeTokenCompare } = {}) {
+  constructor({ path, now = Date.now, writeDurable = writeDurableFile, allowTestInsert = false, compare = safeTokenCompare, readSecret = readTrustedSecretFile } = {}) {
     this._pathOpt = path ?? null
     this._now = now
     this._writeDurable = writeDurable
     this._compare = compare
+    this._readSecret = readSecret
     this._allowTestInsert = allowTestInsert === true
     /** @type {Map<string, object>} */
     this._entries = new Map()
@@ -218,7 +220,15 @@ export class PrincipalStore {
    * @returns {{ ok: boolean, status: string, code: string|null, reason: string|null }}
    */
   refresh() {
-    const read = readTrustedSecretFile(this.path, { mode: 0o600, checkOwner: true, maxSize: MAX_PRINCIPAL_STORE_BYTES })
+    let read
+    try {
+      read = this._readSecret(this.path, { mode: 0o600, checkOwner: true, maxSize: MAX_PRINCIPAL_STORE_BYTES })
+    } catch (err) {
+      // The read itself can throw after the checks passed (EIO from readFileSync(fd)). A
+      // store that cannot be read is not a store that is still trusted: nothing stays live.
+      // `_revokedInMemory` is untouched, so a revoke made in this process survives.
+      return this._setHealth({ ok: false, status: 'invalid', code: err?.code || 'EREAD', reason: `the principal store could not be read (${err?.code || 'error'}): every principal is refused until it can be` }, [], [])
+    }
     if (read.status === 'absent') return this._setHealth({ ok: true, status: 'absent', code: null, reason: null }, [], [])
     if (read.status === 'refused') {
       return this._setHealth({ ok: false, status: 'invalid', code: read.code, reason: describeRefusal(read.code, read.mode) }, [], [])
@@ -238,9 +248,15 @@ export class PrincipalStore {
     const ids = new Set()
     for (const raw of doc.principals) {
       const parsed = parsePrincipalEntry(raw)
-      if ('reason' in parsed || ids.has(parsed.entry.principalId)) {
+      if ('reason' in parsed) {
         invalid.push(raw)
         continue
+      }
+      // A principalId names exactly one grant. Two records with one id (a live one and a
+      // revoked copy, in either order) cannot be told apart safely: the whole store is
+      // corrupt and every principal is refused.
+      if (ids.has(parsed.entry.principalId)) {
+        return this._setHealth({ ok: false, status: 'invalid', code: 'ECORRUPT', reason: 'the principal store holds two records with one principalId: restore it or delete it (deleting revokes every principal)' }, [], [])
       }
       ids.add(parsed.entry.principalId)
       entries.push(parsed.entry)

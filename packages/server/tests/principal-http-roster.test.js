@@ -13,11 +13,12 @@
  */
 import { describe, it, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'acorn'
+import { inventoryRoutes, inventoryBearerReads, srcFiles } from './helpers/http-auth-inventory.js'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { PagesStore } from '../src/pages-store.js'
 import { createMockSessionManager } from './test-helpers.js'
@@ -78,19 +79,6 @@ const ROSTER = [
   { method: 'GET', match: '/^\\/dashboard', url: '/dashboard', guard: 'dashboard' },
 ]
 
-/** Calls that mark a guard family inside a route's consequent. Order matters: the first hit wins. */
-const FAMILY_MARKS = [
-  ['dashboard', /_authenticateDashboardRequest/],
-  ['primary', /_validatePrimaryBearerAuth/],
-  ['bearer-scoped', /_validateBearerAuth\(req, res, \{ allowScoped: true \}\)/],
-  ['bearer', /_validateBearerAuth\(req, res\)/],
-  ['ingest-secret', /handleEventIngest|handleMailbox/],
-  ['hmac', /handleGithubWebhook/],
-  ['hook-secret', /_permissions\.handle(PermissionRequest|PermissionFloorCheck)/],
-  // /permission-response checks a bearer through the shared validator, scoped tokens allowed
-  ['bearer-scoped', /_permissions\.handlePermissionResponseHttp/],
-]
-
 function walk(node, fn) {
   if (!node || typeof node.type !== 'string') return
   fn(node)
@@ -101,21 +89,60 @@ function walk(node, fn) {
   }
 }
 
-/** Every `if (req.method === ...)` route in http-routes.js, with the family its body uses. */
-function sourceRoutes() {
-  const src = read('http-routes.js')
-  const ast = parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowAwaitOutsideFunction: true })
-  const routes = []
-  walk(ast, (n) => {
-    if (n.type !== 'IfStatement') return
-    const test = src.slice(n.test.start, n.test.end).replace(/\s+/g, ' ')
-    const m = /req\.method === '([A-Z]+)'/.exec(test)
-    if (!m) return
-    const body = src.slice(n.consequent.start, n.consequent.end)
-    const mark = FAMILY_MARKS.find(([, re]) => re.test(body))
-    routes.push({ method: m[1], test, family: mark ? mark[0] : 'public' })
-  })
-  return routes
+// Callee names that may receive `req` outside a route without being a delegated route
+// (the wrapper around `dispatch`, and the oversize-body responder). Pinned.
+const NON_ROUTING_REQ_CALLS = ['sendOversizeResponse', 'dispatch']
+
+/**
+ * Everything the roster is checked against, from the AST: the routes of the request
+ * handler with their guard family, what could not be placed, and every authorization-header
+ * read in the source tree. Pure over file paths so a mutated copy can be checked the same way.
+ */
+function inventory(routesFile, srcRoot = SRC) {
+  const { routes, unplaced } = inventoryRoutes(routesFile, { nonRoutingReqCalls: NON_ROUTING_REQ_CALLS, strict: true })
+  const reads = {}
+  const escapes = {}
+  for (const f of srcFiles(srcRoot)) {
+    const path = f.rel === 'http-routes.js' ? routesFile : f.path
+    const b = inventoryBearerReads(path)
+    if (b.reads.length) reads[f.rel] = b.reads.length
+    if (b.escapes.length) escapes[f.rel] = b.escapes.length
+  }
+  return { routes, unplaced, reads, escapes }
+}
+
+// What the tree holds today, an independent oracle. Each bearer READ is a guard family
+// above, an HTTP-only credential (ingest secret, hook secret), the dashboard reader, or a
+// redaction or validation pattern (anthropic-compatible-config.js, redaction.js: a `Bearer` regex, not an inbound read); none reads the principal store (next test).
+const EXPECTED_READS = {
+  'anthropic-compatible-config.js': 1, 'bearer-recheck.js': 2, 'event-ingest.js': 2, 'http-routes.js': 1, 'mailbox-route.js': 2,
+  'redaction.js': 2, 'ws-permissions.js': 6, 'ws-server.js': 9,
+}
+// The request's header bag handed on whole: proxy-header classifiers and the preview proxy.
+const EXPECTED_ESCAPES = { 'connection-locality.js': 2, 'preview-target.js': 1 }
+
+/**
+ * The roster check as a function: every problem, as a string. The real test asserts
+ * the list is empty; the mutation fixtures assert it is not.
+ */
+function rosterProblems(inv) {
+  const problems = []
+  for (const u of inv.unplaced) problems.push(`unplaced: ${u}`)
+  const matches = (entry, route) => entry.method === route.method && route.test.includes(entry.match)
+  for (const route of inv.routes) {
+    const hits = ROSTER.filter((e) => matches(e, route))
+    if (hits.length !== 1) problems.push(`route not in the roster exactly once: ${route.method} ${route.test.slice(0, 80)}`)
+    else if (hits[0].guard !== route.family) problems.push(`guard family changed: ${hits[0].url} is ${route.family}, roster says ${hits[0].guard}`)
+  }
+  for (const e of ROSTER) if (!inv.routes.some((r) => matches(e, r))) problems.push(`roster entry is not a route: ${e.method} ${e.url}`)
+  const diff = (got, want, what) => {
+    for (const k of new Set([...Object.keys(got), ...Object.keys(want)])) {
+      if ((got[k] ?? 0) !== (want[k] ?? 0)) problems.push(`${what} in ${k}: found ${got[k] ?? 0}, expected ${want[k] ?? 0}`)
+    }
+  }
+  diff(inv.reads, EXPECTED_READS, 'authorization-header reads')
+  diff(inv.escapes, EXPECTED_ESCAPES, 'request headers handed on whole')
+  return problems
 }
 
 /** The text of a named method of the WsServer class. */
@@ -129,87 +156,137 @@ function methodSource(file, name) {
   return found
 }
 
-describe('the HTTP route roster, checked in both directions against the source', () => {
-  const routes = sourceRoutes()
-  const matchesRoute = (entry, route) => entry.method === route.method && route.test.includes(entry.match)
+describe('the HTTP route roster, checked in both directions against the source (AST, not spelling)', () => {
+  const real = inventory(join(SRC, 'http-routes.js'))
 
-  it('enumerates a non-empty route set from the source and a non-empty roster', () => {
-    assert.ok(routes.length >= 30, `the scan found only ${routes.length} routes`)
+  it('enumerates a non-empty route set and a non-empty roster', () => {
+    assert.ok(real.routes.length >= 30, `the scan found only ${real.routes.length} routes`)
     assert.ok(ROSTER.length > 0)
+    assert.ok(Object.keys(real.reads).length > 0)
   })
 
-  it('every route in http-routes.js is in the roster exactly once (a new route is red until classified)', () => {
-    const unlisted = routes.filter((r) => ROSTER.filter((e) => matchesRoute(e, r)).length !== 1).map((r) => `${r.method} ${r.test.slice(0, 90)}`)
-    assert.deepEqual(unlisted, [])
+  it('the source and the roster agree both ways: no unlisted route, no stale entry, no class change, no unplaced construct, no unaccounted bearer read', () => {
+    assert.deepEqual(rosterProblems(real), [])
   })
 
-  it('every roster entry is a real route (a listed route that does not exist is red)', () => {
-    const stale = ROSTER.filter((e) => !routes.some((r) => matchesRoute(e, r))).map((e) => `${e.method} ${e.url}`)
-    assert.deepEqual(stale, [])
-  })
-
-  it('the guard family the source uses for each route equals the roster guard (no route quietly changes class)', () => {
-    let cases = 0
-    for (const route of routes) {
-      const entry = ROSTER.find((e) => matchesRoute(e, route))
-      cases++
-      assert.equal(route.family, entry.guard, `${route.method} ${entry.url}: source uses ${route.family}, roster says ${entry.guard}`)
+  it('other servers that route on req.method are pinned (the shell-approval listener, the supervisor health probe, the channel server)', () => {
+    const found = {}
+    for (const f of srcFiles(SRC)) {
+      if (f.rel === 'http-routes.js') continue
+      const r = inventoryRoutes(f.path)
+      if (r.routes.length || r.unplaced.length) found[f.rel] = { routes: r.routes.length, unplaced: r.unplaced.length }
     }
-    assert.ok(cases > 0)
+    assert.deepEqual(found, {
+      'channels/chroxy-channel-server.js': { routes: 0, unplaced: 1 },
+      'supervisor.js': { routes: 1, unplaced: 0 },
+      'ws-server.js': { routes: 2, unplaced: 0 },
+    })
   })
 
   it('no route names a principal: http-routes.js does not mention one', () => {
     assert.equal(/principal/i.test(read('http-routes.js')), false)
   })
 
-  it('every place a bearer is parsed is accounted for (file -> count), so a new bearer sink is red', () => {
-    const counts = {}
-    const walkDir = (dir, prefix = '') => {
-      for (const d of readdirSync(dir, { withFileTypes: true })) {
-        if (d.isDirectory()) walkDir(join(dir, d.name), `${prefix}${d.name}/`)
-        else if (d.name.endsWith('.js')) {
-          const n = (readFileSync(join(dir, d.name), 'utf8').match(/startsWith\('Bearer '\)/g) || []).length
-          if (n > 0) counts[`${prefix}${d.name}`] = n
-        }
-      }
-    }
-    walkDir(SRC)
-    // The independent oracle. Each is a guard family above, an HTTP-only credential
-    // (ingest secret, hook secret) or the dashboard cookie/bearer reader; none reads the
-    // principal store, which the next test proves.
-    assert.deepEqual(counts, {
-      'bearer-recheck.js': 1,
-      'event-ingest.js': 1,
-      'mailbox-route.js': 1,
-      'ws-permissions.js': 3,
-      'ws-server.js': 4,
-    })
-  })
-
-  it('the principal store is referenced by no HTTP guard and by no module that parses a bearer', () => {
+  it('the principal store is referenced by no HTTP guard and by no module that reads a bearer', () => {
     const importers = []
-    const walkDir = (dir, prefix = '') => {
-      for (const d of readdirSync(dir, { withFileTypes: true })) {
-        if (d.isDirectory()) walkDir(join(dir, d.name), `${prefix}${d.name}/`)
-        else if (d.name.endsWith('.js') && /from '[^']*principal-store\.js'/.test(readFileSync(join(dir, d.name), 'utf8'))) importers.push(`${prefix}${d.name}`)
-      }
+    for (const f of srcFiles(SRC)) {
+      if (/from '[^']*principal-store\.js'/.test(readFileSync(f.path, 'utf8'))) importers.push(f.rel)
     }
-    walkDir(SRC)
     assert.deepEqual(importers.sort(), ['cli/agent-cmd.js', 'handlers/principal-admin-handlers.js', 'server-cli.js'])
     for (const name of ['_validateBearerAuth', '_validatePrimaryBearerAuth', '_authenticateDashboardRequest', '_validateHookAuth', '_isTokenValid', '_isSessionScopedToken']) {
       const text = methodSource('ws-server.js', name)
       assert.ok(typeof text === 'string' && text.length > 50, `${name} not found`)
       assert.equal(/principal/i.test(text), false, `${name} must not accept a principal`)
     }
-    for (const file of ['event-ingest.js', 'mailbox-route.js', 'ws-permissions.js', 'bearer-recheck.js', 'http-routes.js']) {
-      assert.equal(/principal/i.test(read(file)), false, file)
+    for (const rel of Object.keys(EXPECTED_READS).filter((r) => !['ws-server.js', 'redaction.js', 'anthropic-compatible-config.js'].includes(r))) {
+      assert.equal(/principal/i.test(read(rel)), false, rel)
     }
   })
 
   it('the shell-approval listener is primary-guarded and names no principal', () => {
-    const text = methodSource('ws-server.js', '_handleShellApprovalRequest') ?? read('ws-server.js').slice(read('ws-server.js').indexOf("path === '/api/shell/pending'") - 600, read('ws-server.js').indexOf("path === '/api/shell/pending'") + 400)
-    assert.ok(/_validatePrimaryBearerAuth/.test(text))
-    assert.equal(/principal/i.test(text), false)
+    const text = read('ws-server.js')
+    const at = text.indexOf("path === '/api/shell/pending'")
+    assert.ok(at > 0)
+    assert.ok(/_validatePrimaryBearerAuth/.test(text.slice(at - 600, at + 400)))
+    assert.equal(/principal/i.test(text.slice(at - 600, at + 400)), false)
+  })
+
+  describe('mutation fixtures: each construct the old regexes could not see makes the roster check fail on its own', () => {
+    const fixtures = []
+    const real_routes = read('http-routes.js')
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-roster-fixture-'))
+    after(() => rmSync(root, { recursive: true, force: true }))
+
+    /** A copy of http-routes.js with `extra` inserted before the dashboard route. */
+    function withExtra(name, extra) {
+      const marker = "    if (req.method === 'GET' && req.url?.startsWith('/assets/')) {"
+      assert.ok(real_routes.includes(marker), 'fixture anchor moved: update this test')
+      const path = join(root, `${name}.js`)
+      writeFileSync(path, real_routes.replace(marker, `${extra}\n${marker}`))
+      fixtures.push(name)
+      return path
+    }
+    const problemsFor = (path) => rosterProblems(inventory(path))
+
+    it('positive control: an untouched copy is clean', () => {
+      const path = join(root, 'clean.js')
+      writeFileSync(path, real_routes)
+      assert.deepEqual(problemsFor(path), [])
+    })
+
+    it('a reversed comparison is still a route, and an unlisted one is reported', () => {
+      const p = problemsFor(withExtra('reversed', "    if ('GET' === req.method && req.url === '/sneaky') { res.end('x'); return }"))
+      assert.ok(p.some((x) => /not in the roster exactly once/.test(x) && /sneaky/.test(x)), JSON.stringify(p))
+    })
+
+    it('alternative literal syntax (template literal, bracket access, loose equality) is still a route', () => {
+      const a = problemsFor(withExtra('tpl', "    if (req.method === `POST` && req.url === '/sneaky-tpl') { res.end('x'); return }"))
+      const b = problemsFor(withExtra('bracket', "    if (req['method'] == 'PUT' && req.url === '/sneaky-bracket') { res.end('x'); return }"))
+      const c = problemsFor(withExtra('includes', "    if (['PATCH', 'PUT'].includes(req.method) && req.url === '/sneaky-inc') { res.end('x'); return }"))
+      for (const p of [a, b, c]) assert.ok(p.some((x) => /not in the roster exactly once/.test(x)), JSON.stringify(p))
+    })
+
+    it('a method test that cannot be resolved to literals is reported as unplaced, not skipped', () => {
+      const p = problemsFor(withExtra('unresolved', "    if (req.method === someMethodVariable && req.url === '/sneaky-var') { res.end('x'); return }"))
+      assert.ok(p.some((x) => /^unplaced: .*not resolvable/.test(x)), JSON.stringify(p))
+      const q = problemsFor(withExtra('alias', "    const m = req.method\n    if (m === 'GET') { res.end('x'); return }"))
+      assert.ok(q.some((x) => /^unplaced: .*req\.method used outside a route test/.test(x)), JSON.stringify(q))
+    })
+
+    it('a delegated route handler is reported as unplaced', () => {
+      const p = problemsFor(withExtra('delegated', "    if (await extraRoutes(server, req, res)) return"))
+      assert.ok(p.some((x) => /^unplaced: .*request handed to extraRoutes/.test(x)), JSON.stringify(p))
+      const q = problemsFor(withExtra('table', "    const routeFn = TABLE[req.url]\n    if (routeFn) return routeFn(req, res)"))
+      assert.ok(q.some((x) => /^unplaced:/.test(x)), JSON.stringify(q))
+    })
+
+    it('a path test with no method comparison is reported as unplaced', () => {
+      const p = problemsFor(withExtra('nomethod', "    if (req.url === '/any-method') { res.end('x'); return }"))
+      assert.ok(p.some((x) => /^unplaced: .*path test with no method/.test(x)), JSON.stringify(p))
+    })
+
+    it('an alternative bearer parser is an unaccounted authorization-header read', () => {
+      const forms = {
+        optional: "    const t1 = req.headers['authorization']?.slice(7)",
+        upper: "    const t2 = req.headers['Authorization']",
+        template: "    const t3 = req.headers[`authorization`]",
+        getter: "    const t4 = req.headers.get('authorization')",
+        destructure: "    const { authorization: t5 } = req.headers",
+        regex: "    const t6 = /^Bearer (.+)$/.exec(String(1))",
+        escape: "    const t7 = extractAuth(req.headers)",
+      }
+      let cases = 0
+      for (const [name, code] of Object.entries(forms)) {
+        const p = problemsFor(withExtra(`bearer-${name}`, code))
+        cases++
+        assert.ok(p.some((x) => /authorization-header reads|handed on whole/.test(x)), `${name}: ${JSON.stringify(p)}`)
+      }
+      assert.ok(cases === Object.keys(forms).length && cases > 0)
+    })
+
+    it('every fixture above was written (the suite is not vacuous)', () => {
+      assert.ok(fixtures.length >= 8, `only ${fixtures.length} fixtures ran`)
+    })
   })
 })
 

@@ -3346,6 +3346,8 @@ export class WsServer {
       client._principalExpiryTimer = null
       const state = this._principalState(client)
       if (state !== 'live') this._endCredentialConnection(ws, client, state === 'revoked' ? 'revoked' : 'expired')
+      // Fired early (the credential is still live): keep watching for the remaining lifetime.
+      else if (client.authenticated) this._armPrincipalExpiry(ws, client)
     }, delay)
     timer?.unref?.()
     client._principalExpiryTimer = timer

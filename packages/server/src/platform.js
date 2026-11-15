@@ -169,7 +169,7 @@ export function defaultShell({ platform = process.platform, env = process.env } 
  * `_fsync` is a test seam (default `fsyncSync`) so the durable + benign-error
  * paths are exercisable without a real disk fault.
  */
-export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync } = {}) {
+export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync, strict = false } = {}) {
   let fd
   try {
     // Directories open read-only; regular files open `r+` so the handle is
@@ -179,7 +179,9 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
     fd = openSync(target, isDir ? 'r' : 'r+')
     _fsync(fd)
   } catch (err) {
-    if (err && BENIGN_FSYNC_CODES.has(err.code)) {
+    // `strict` (agent-principal store, #9116): a filesystem that cannot sync is NOT
+    // durable. Nothing is swallowed, so the caller reports it instead of claiming it.
+    if (!strict && err && BENIGN_FSYNC_CODES.has(err.code)) {
       log.warn(`durable-write: fsync of ${isDir ? 'directory' : 'file'} ${target} unsupported (${err.code}); continuing best-effort`)
       return
     }
@@ -358,6 +360,9 @@ export function writeFileRestricted(
     // Test seam (#6914): inject the fsync used by the `durable` path so the
     // durable + benign-fsync-error branches are exercisable without a disk fault.
     _fsync = fsyncSync,
+    // #9116: no benign-errno swallowing; a failed file sync prevents publication and a
+    // failed directory sync is reported as unconfirmed.
+    strict = false,
   } = {},
 ) {
   const onWindows = _isWindowsOverride ?? isWindows
@@ -407,7 +412,7 @@ export function writeFileRestricted(
   // has already swallowed the benign, filesystem-cannot-sync codes.)
   if (durable) {
     try {
-      fsyncForDurability(tmpPath, { _fsync })
+      fsyncForDurability(tmpPath, { _fsync, strict })
     } catch (err) {
       try {
         unlinkSync(tmpPath)
@@ -464,7 +469,7 @@ export function writeFileRestricted(
     durable,
     onWindows,
     // Bind this call's `_fsync` seam into the shared helper's higher-level one.
-    fsync: (target, opts) => fsyncForDurability(target, { ...opts, _fsync }),
+    fsync: (target, opts) => fsyncForDurability(target, { ...opts, _fsync, strict }),
   })
 }
 

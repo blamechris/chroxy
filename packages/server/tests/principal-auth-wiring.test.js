@@ -15,6 +15,7 @@ import WebSocket from 'ws'
 import { WsServer as _WsServer, WS_CLOSE_CREDENTIAL_INVALID } from '../src/ws-server.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { readTrustedSecretFile } from '../src/trusted-file-read.js'
 import { isBoundClient, canSeePeer } from '../src/environments/authority.js'
 import { PRINCIPAL_BINDING_SENTINEL, publicBoundSessionId } from '../src/principal-binding.js'
 import { buildSessionTokenMismatchPayload } from '../src/handler-utils.js'
@@ -409,6 +410,45 @@ describe('principal over a real socket', () => {
       assert.equal(c.closed, false)
       c.send({ type: 'ping' })
       await waitFor(() => c.messages.find((m) => m.type === 'pong'), { label: 'still serving' })
+    })
+
+    it('an early fire rearms for the remaining lifetime; the connection then closes 4401 at expiresAt', async () => {
+      const { port, tokens, clock, timers } = await boot({ ttlMs: 3_600_000 })
+      const c = await open(port, { token: tokens[0] })
+      await authOk(c)
+      const rec = c.record()
+      assert.equal(timers.armed.length, 1)
+      clock.advance(1_000)
+      timers.armed[0].fn() // early: still live
+      assert.equal(timers.armed.length, 2, 'rearmed')
+      assert.equal(timers.armed[1].ms, rec.principal.expiresAt - clock.now(), 'for the remaining lifetime')
+      assert.equal(c.closed, false)
+      clock.advance(3_600_000)
+      timers.armed[1].fn()
+      await c.waitClosed()
+      assert.equal(c.closeCode, WS_CLOSE_CREDENTIAL_INVALID)
+      assert.deepEqual(c.messages.filter((m) => m.type !== 'auth_ok'), [{ type: 'credential_invalidated', reason: 'expired' }])
+    })
+
+    it('a store whose read throws (EIO) cuts the connection from the sweep and _recheckPrincipals, without throwing', async () => {
+      const { port, tokens, store } = await boot()
+      const a = await open(port, { token: tokens[0] })
+      await authOk(a)
+      store._readSecret = () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) }
+      assert.doesNotThrow(() => server._recheckPrincipals())
+      await a.waitClosed()
+      assert.equal(a.closeCode, WS_CLOSE_CREDENTIAL_INVALID)
+      assert.deepEqual(a.messages.filter((m) => m.type !== 'auth_ok'), [{ type: 'credential_invalidated', reason: 'invalid' }])
+      // and through the keepalive sweep
+      store._readSecret = readTrustedSecretFile
+      store.refresh()
+      server._authFailures.clear()
+      const b = await open(port, { token: tokens[0] })
+      await authOk(b)
+      store._readSecret = () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) }
+      assert.doesNotThrow(() => server._keepaliveSweep())
+      await b.waitClosed()
+      assert.equal(b.closeCode, WS_CLOSE_CREDENTIAL_INVALID)
     })
 
     it('the timer is cleared when the connection simply closes', async () => {

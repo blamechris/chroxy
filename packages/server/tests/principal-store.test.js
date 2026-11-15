@@ -15,6 +15,7 @@ import {
   principalStorePath,
 } from '../src/principal-store.js'
 import { safeTokenCompare } from '../src/token-compare.js'
+import { readTrustedSecretFile } from '../src/trusted-file-read.js'
 import { writeDurableFile } from '../src/durable-write.js'
 import { tempPrincipalDir, testPrincipalStore, insertPrincipal, fakeClock } from './helpers/principal-store-fixture.js'
 
@@ -201,6 +202,63 @@ describe('the store fails closed', () => {
     writeFileSync(d.path, JSON.stringify(doc), { mode: 0o600 })
     assert.equal(createPrincipalStore({ path: d.path }).validate(token), null)
   })
+})
+
+describe('a read that throws after the checks passed fails closed (EIO)', () => {
+  it('the principal is no longer live, health reports invalid, and the revoke tombstone survives', () => {
+    const d = fresh()
+    const store = testPrincipalStore(d.path)
+    const { token } = insertPrincipal(store, { principalId: 'a', label: 'a' })
+    insertPrincipal(store, { principalId: 'b', label: 'b' })
+    assert.ok(store.validate(token))
+    store.revoke({ principalId: 'b' })
+    store._readSecret = () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) }
+    assert.doesNotThrow(() => store.refresh())
+    assert.equal(store.health().ok, false)
+    assert.equal(store.health().code, 'EIO')
+    assert.equal(store.isLive('a'), false)
+    assert.equal(store.validate(token), null)
+    assert.deepEqual(store.liveSummaries(), [])
+    // The read recovers: the tombstone for the in-process revoke is still applied.
+    store._readSecret = readTrustedSecretFile
+    store.refresh()
+    assert.equal(store.health().ok, true)
+    assert.equal(store.state('a'), 'live')
+    assert.equal(store.state('b'), 'revoked')
+  })
+})
+
+describe('duplicate principalIds fail the whole store closed, in either order', () => {
+  function seed(mutate) {
+    const d = fresh()
+    const store = testPrincipalStore(d.path)
+    const { token } = insertPrincipal(store, { principalId: 'dup', label: 'one' })
+    const doc = JSON.parse(readFileSync(d.path, 'utf8'))
+    const live = doc.principals[0]
+    const copy = mutate(live)
+    return { d, token, live, copy }
+  }
+  const variants = {
+    'a revoked copy of the same record': (l) => ({ ...l, revokedAt: l.createdAt + 5 }),
+    'a copy with a different hash': (l) => ({ ...l, tokenHash: hashPrincipalToken('other-token'), label: 'two' }),
+    'a copy with a different scope': (l) => ({ ...l, scope: 'observe', tier: 'observe', label: 'three' }),
+  }
+  for (const [name, mutate] of Object.entries(variants)) {
+    for (const order of ['live-first', 'copy-first']) {
+      it(`${name}, ${order}: no identity is usable`, () => {
+        const { d, token, live, copy } = seed(mutate)
+        const principals = order === 'live-first' ? [live, copy] : [copy, live]
+        writeFileSync(d.path, JSON.stringify({ version: 1, principals }), { mode: 0o600 })
+        const s = createPrincipalStore({ path: d.path })
+        assert.equal(s.health().ok, false)
+        assert.equal(s.health().code, 'ECORRUPT')
+        assert.equal(s.validate(token), null)
+        assert.equal(s.validate('other-token'), null)
+        assert.equal(s.isLive('dup'), false)
+        assert.deepEqual(s.liveSummaries(), [])
+      })
+    }
+  }
 })
 
 describe('liveness: expiry and revocation', () => {
@@ -450,6 +508,27 @@ describe('the one durable-write helper (write, fsync file, rename, fsync directo
     assert.throws(() => writeDurableFile(target, 'x', { _fsync: () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) } }), /EIO/)
     assert.deepEqual(readdirSync(d.dir), [])
   })
+
+  const SWALLOWED = ['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR', 'EBADF', 'ENOSYS']
+  for (const code of SWALLOWED) {
+    it(`${code} from the FILE fsync prevents publication (not swallowed as "benign")`, { skip: !posix }, () => {
+      const d = fresh()
+      const target = join(d.dir, 'out.json')
+      assert.throws(() => writeDurableFile(target, 'x', { _fsync: () => { throw Object.assign(new Error(code), { code }) } }), new RegExp(code))
+      assert.deepEqual(readdirSync(d.dir), [], 'no temp file and nothing published')
+    })
+
+    it(`${code} from the DIRECTORY fsync is reported as not durable, never as durable`, { skip: !posix }, () => {
+      const d = fresh()
+      const target = join(d.dir, 'out.json')
+      let n = 0
+      const r = writeDurableFile(target, 'x', { _fsync: () => { if (++n === 2) throw Object.assign(new Error(code), { code }) } })
+      assert.equal(n, 2)
+      assert.equal(r.durable, false)
+      assert.ok(new RegExp(code).test(r.unconfirmed))
+      assert.equal(readFileSync(target, 'utf8'), 'x')
+    })
+  }
 
   it('a failed rename throws and leaves no temp file', { skip: !posix }, () => {
     const d = fresh()
