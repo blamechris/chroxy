@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-no-private-paths.sh"
 
 # Asserted EQUAL so a case that stops executing is as loud as a failing one.
-EXPECTED_CASES=16
+EXPECTED_CASES=18
 
 PASS=0
 FAIL=0
@@ -125,6 +125,15 @@ check "not a git repo exits 2" 2 "$(run_lint "$TMP/plain" main)"
 # 15: --direct works in the same shape
 d="$(mkrepo direct)"; printf '%s\n' "$HOME_PATH" >"$d/a.md"; commit_all "$d"
 check "--direct flags the same change" 1 "$(run_lint "$d" --direct main)"
+
+# 16: an added line starting with "++ " must not be mistaken for a file header
+d="$(mkrepo plusplus)"; printf '++ %s\n' "$HOME_PATH" >"$d/a.md"; commit_all "$d"
+check "added line starting with '++ ' is scanned" 1 "$(run_lint "$d" main)"
+
+# 17: a leak after a "++ " line is still attributed to the right path
+d="$(mkrepo attrib)"; printf 'ok\n++ x\n%s\n' "$HOME_PATH" >"$d/b.md"; commit_all "$d"
+run_lint "$d" main >/dev/null
+check "leak after '++ ' line keeps its path:line" "b.md:3: [home-path]" "$(grep -o 'b.md:[0-9]*: \[[a-z-]*\]' "$OUT")"
 
 echo "----"
 BROKEN=0

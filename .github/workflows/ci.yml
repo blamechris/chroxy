@@ -1031,13 +1031,15 @@ jobs:
         # and deleted lines are not scanned; .claude/, .codex/ and .gemini/ are
         # exempt, and a line can opt out with the marker the failure message
         # prints. The checkout is a depth-1 PR merge commit whose first parent
-        # is the base tip, so fetch just that commit and diff it directly (a
-        # full-history fetch would not fit this job's timeout). A missing base
-        # exits 2 and fails the job: the guard never passes by not running.
+        # is the base the PR merges into (read from the raw commit object,
+        # since shallow grafts hide it from rev-parse), so fetch just that
+        # commit and diff it directly (a full-history fetch would not fit this
+        # job's timeout). A missing base exits 2 and fails the job: the guard
+        # never passes by not running.
         if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          BASE_SHA="$(git cat-file -p HEAD | awk '/^parent /{print $2; exit}')"
+          test -n "$BASE_SHA"
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           bash scripts/lint-no-private-paths.sh --direct "$BASE_SHA"
 

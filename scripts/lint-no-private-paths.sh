@@ -78,28 +78,46 @@ perl -e '
     [ "vault-path", $ENV{PRIVATE_PATH_VAULT} ],
   );
   my $tailnet = qr/[A-Za-z0-9-]+\.tail[0-9a-f]{6}\.ts\.net/;
-  my ($path, $skip, $line, $bad) = ("", 0, 0, 0);
+  my ($path, $skip, $line, $bad, $old, $new) = ("", 0, 0, 0, 0, 0);
+  # Hunk tracking: a file header (+++ / ---) is only valid OUTSIDE a hunk. An
+  # added line whose content starts with "++ " renders as "+++ ...", so inside
+  # a hunk every line is body, never a header. Binary files have no hunks and
+  # are therefore skipped.
   while (my $l = <STDIN>) {
     chomp $l;
+    if ($old > 0 || $new > 0) {
+      if ($l =~ /^\\/) { next }
+      if ($l =~ /^-/) { $old--; next }
+      if ($l =~ /^\+/) {
+        $new--;
+        my $cur = $line++;
+        next if $skip;
+        my $text = substr($l, 1);
+        next if index($text, $marker) >= 0;
+        for my $r (@literal) {
+          if (index($text, $r->[1]) >= 0) { print "$path:$cur: [$r->[0]]\n"; $bad++ }
+        }
+        if ($text =~ $tailnet) { print "$path:$cur: [tailnet]\n"; $bad++ }
+        next;
+      }
+      if ($l =~ /^ /) { $old--; $new--; $line++; next }
+      $old = 0; $new = 0;
+    }
     if ($l =~ /^\+\+\+ (.*)$/) {
       my $p = $1;
+      $p =~ s/\t.*$//;
       if ($p eq "/dev/null") { $path = ""; $skip = 1; next }
       $p =~ s{^b/}{};
       $path = $p;
       $skip = ($p =~ m{^\.(?:claude|codex|gemini)/}) ? 1 : 0;
       next;
     }
-    if ($l =~ /^@@ -\S+ \+(\d+)(?:,(\d+))? @@/) { $line = $1; next }
-    next if $l =~ /^(?:---|diff |index |new file|deleted file|similarity|rename |old mode|new mode|Binary )/;
-    next unless $l =~ /^\+/;
-    my $cur = $line++;
-    next if $skip;
-    my $text = substr($l, 1);
-    next if index($text, $marker) >= 0;
-    for my $r (@literal) {
-      if (index($text, $r->[1]) >= 0) { print "$path:$cur: [$r->[0]]\n"; $bad++ }
+    if ($l =~ /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/) {
+      $old = defined $1 ? $1 : 1;
+      $line = $2;
+      $new = defined $3 ? $3 : 1;
+      next;
     }
-    if ($text =~ $tailnet) { print "$path:$cur: [tailnet]\n"; $bad++ }
   }
   exit($bad ? 1 : 0);
 ' <"$DIFF_FILE" >"$DIFF_FILE.out" && rc=0 || rc=$?
