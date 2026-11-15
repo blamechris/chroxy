@@ -4,9 +4,11 @@ import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
+import { Writable, Readable } from 'node:stream'
 import { BaseSession, SOFT_HANDOFF_BLOCKER_CODES } from '../src/base-session.js'
 import { PermissionManager } from '../src/permission-manager.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { CliSession } from '../src/cli-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
@@ -129,6 +131,45 @@ describe('BaseSession.getHandoffBlockers (#8281)', () => {
     })
   })
 
+  it('pending_permission for a hook-routed approval registered the way ws-permissions does', () => {
+    withSession((s) => {
+      s.notifyPermissionPending('perm-hook-1')
+      assert.deepEqual(find(s, 'pending_permission'), { code: 'pending_permission', detail: { requestIds: ['perm-hook-1'] } })
+      s.notifyPermissionResolved('perm-hook-1')
+      assert.deepEqual(s.getHandoffBlockers(), [])
+    })
+  })
+
+  it('pending ids are the deduped union of every source, and match getPendingPermissionCount()', () => {
+    const fixtures = {
+      none: () => {},
+      hook: (s) => s.notifyPermissionPending('h1'),
+      manager: (s) => { s._permissions.handlePermission('Bash', { command: 'ls' }, undefined, 'approve') },
+      mapOnly: (s) => { s._pendingPermissions = new Map([['m1', {}], ['m2', {}]]) },
+      hookAndManager: (s) => {
+        s.notifyPermissionPending('h1')
+        s._permissions.handlePermission('Bash', { command: 'ls' }, undefined, 'approve')
+      },
+    }
+    for (const [name, setup] of Object.entries(fixtures)) {
+      withSession((s) => {
+        setup(s)
+        // The wiring providers do: the manager's own map IS `_pendingPermissions`.
+        if (name === 'manager' || name === 'hookAndManager') s._pendingPermissions = s._permissions._pendingPermissions
+        assert.equal(s.getPendingPermissionIds().length, s.getPendingPermissionCount(), name)
+        assert.equal(new Set(s.getPendingPermissionIds()).size, s.getPendingPermissionIds().length, `${name}: no duplicates`)
+      })
+    }
+  })
+
+  it('a prompt held by both the wired map and the manager is reported once', () => {
+    withSession((s) => {
+      s._permissions.handlePermission('Bash', { command: 'ls' }, undefined, 'approve')
+      s._pendingPermissions = s._permissions._pendingPermissions
+      assert.equal(s.getPendingPermissionIds().length, 1)
+    })
+  })
+
   it('a session with no permission manager reports no pending ids', () => {
     const s = new FakeSession()
     s._permissions = undefined
@@ -151,6 +192,24 @@ describe('BaseSession.getHandoffBlockers (#8281)', () => {
       // The send began: the in-flight marker is gone, the turn itself now blocks.
       assert.deepEqual(s.sent, ['first', 'second'])
       assert.deepEqual(codes(s), ['turn_active'])
+    })
+
+    it('counts two dequeues before one tick: 2, then 1 after the first tick, then 0', async () => {
+      const s = new FakeSession()
+      s.sendMessage('first')
+      s.sendMessage('a')
+      s.sendMessage('b')
+      s._isBusy = false
+      const seenAtFlush = []
+      // `message_dequeued(flush)` is emitted inside each tick, right after it released its count.
+      s.on('message_dequeued', (e) => { if (e.reason === 'flush') seenAtFlush.push(s._dequeuesInFlight) })
+      s.dequeueNextOutgoing()
+      s.dequeueNextOutgoing()
+      assert.equal(s._dequeuesInFlight, 2)
+      assert.deepEqual(find(s, 'queued_prompts'), { code: 'queued_prompts', detail: { count: 2 } })
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.deepEqual(seenAtFlush, [1, 0])
+      assert.equal(s.hasDequeueInFlight, false)
     })
 
     it('clears the marker when the flush-time admission is refused', async () => {
@@ -244,7 +303,7 @@ describe('SessionManager.getHandoffBlockers (#8281)', () => {
     try {
       const id = mgr.createSession({ cwd: '/tmp', provider: 'test-handoff-blockers' })
       assert.deepEqual(mgr.getHandoffBlockers(id), [])
-      assert.deepEqual(mgr.getHandoffBlockers(id, { evaluatorPending: false, hookPendingPermissionIds: [] }), [])
+      assert.deepEqual(mgr.getHandoffBlockers(id, { evaluatorPending: false }), [])
     } finally { cleanup(mgr) }
   })
 
@@ -288,24 +347,14 @@ describe('SessionManager.getHandoffBlockers (#8281)', () => {
     } finally { cleanup(mgr) }
   })
 
-  it('a hook-routed approval passed by the caller is reported, merged with the session\'s own', () => {
+  it('a hook-routed approval registered on the session is reported by the manager', () => {
     const mgr = makeMgr()
     try {
       const id = mgr.createSession({ cwd: '/tmp', provider: 'test-handoff-blockers' })
-      assert.deepEqual(mgr.getHandoffBlockers(id, { hookPendingPermissionIds: ['hook-1'] }), [
+      mgr.getSession(id).session.notifyPermissionPending('hook-1')
+      assert.deepEqual(mgr.getHandoffBlockers(id), [
         { code: 'pending_permission', detail: { requestIds: ['hook-1'] } },
       ])
-      // Control: without the option the session cannot see it, which is why the
-      // WS layer must pass it.
-      assert.deepEqual(mgr.getHandoffBlockers(id), [])
-      const session = mgr.getSession(id).session
-      session._permissions = new PermissionManager({ cwd: '/tmp' })
-      session._permissions.handlePermission('Bash', { command: 'ls' }, undefined, 'approve')
-      const own = session.getPendingPermissionIds()
-      const merged = mgr.getHandoffBlockers(id, { hookPendingPermissionIds: ['hook-1', own[0]] })
-      assert.equal(merged.filter((b) => b.code === 'pending_permission').length, 1, 'one entry, not two')
-      assert.deepEqual(merged[0].detail.requestIds.sort(), ['hook-1', own[0]].sort())
-      session._permissions.clearAll()
     } finally { cleanup(mgr) }
   })
 
@@ -324,5 +373,94 @@ describe('SessionManager.getHandoffBlockers (#8281)', () => {
       const id = mgr.createSession({ cwd: '/tmp', provider: 'test-handoff-bare' })
       assert.deepEqual(mgr.getHandoffBlockers(id), [])
     } finally { cleanup(mgr) }
+  })
+})
+
+describe('CliSession startup queue (#8281)', () => {
+  const created = []
+  function mkCli() {
+    const s = new CliSession({ cwd: '/tmp' })
+    created.push(s)
+    const child = new EventEmitter()
+    child.stdin = new Writable({ write(chunk, enc, cb) { cb() } })
+    child.stdout = new Readable({ read() {} })
+    child.stderr = new Readable({ read() {} })
+    child.pid = 12345
+    child.kill = () => true
+    child.killed = false
+    s._child = child
+    s._processReady = true
+    return s
+  }
+  function cleanupAll() {
+    for (const s of created.splice(0)) {
+      s._child = null
+      try { const r = s.destroy(); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch {}
+    }
+  }
+
+  it('an idle ready CliSession has no blockers', () => {
+    try { assert.deepEqual(mkCli().getHandoffBlockers(), []) } finally { cleanupAll() }
+  })
+
+  it('reports queued_prompts for a prompt parked while the child is not ready', async () => {
+    try {
+      const s = mkCli()
+      s._processReady = false
+      await s.sendMessage('parked')
+      assert.equal(s._pendingQueue.length, 1, 'precondition: it went to the startup queue')
+      assert.equal(s.outgoingQueueLength, 0, 'and not the outgoing queue')
+      assert.deepEqual(find(s, 'queued_prompts'), { code: 'queued_prompts', detail: { count: 1 } })
+    } finally { cleanupAll() }
+  })
+
+  it('still reports it on the tick a turn ends, before the deferred send starts', async () => {
+    try {
+      const s = mkCli()
+      s._pendingQueue.push({ prompt: 'next', attachments: undefined, options: {} })
+      s._drainNextPendingAfterResult()
+      assert.equal(s._isBusy, false)
+      assert.equal(s.isRunning, false, 'the gap `isRunning` cannot see')
+      assert.deepEqual(codes(s), ['queued_prompts'])
+      await tick()
+      assert.equal(s._pendingQueue.length, 0)
+      assert.equal(s._isBusy, true, 'the send began')
+      assert.deepEqual(codes(s), ['turn_active'])
+    } finally { cleanupAll() }
+  })
+})
+
+describe('restored sessions are not automation_owned (#8281)', () => {
+  it('metadata is not persisted, so a restored scheduled session loses automation_owned', async () => {
+    const { registerProvider } = await import('../src/providers.js')
+    class P extends BaseSession {
+      constructor(opts) { super({ cwd: opts.cwd }); this._processReady = true; this.resumeSessionId = null }
+      static get capabilities() { return {} }
+      start() {}
+      destroy() { this._destroying = true }
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    declareUnknownCustomization(P)
+    registerProvider('test-handoff-restore', P)
+    const dir = mkdtempSync(join(tmpdir(), 'sm-handoff-restore-'))
+    const stateFilePath = join(dir, 'state.json')
+    const mk = () => new SessionManager({ skipPreflight: true, maxSessions: 10, defaultCwd: '/tmp', stateFilePath })
+    const first = mk()
+    try {
+      const id = first.createSession({ name: 'S', cwd: '/tmp', provider: 'test-handoff-restore', metadata: { scheduledTaskId: 't1', orchestrationRunId: 'r1' } })
+      assert.deepEqual(first.getHandoffBlockers(id).map((b) => b.code), ['automation_owned'], 'control: owned before the restart')
+      first.serializeState()
+      first.destroyAll()
+      const second = mk()
+      try {
+        assert.ok(second.restoreState(), 'restored')
+        const [restored] = second.listSessions()
+        assert.ok(restored, 'a session came back')
+        assert.deepEqual(second.getHandoffBlockers(restored.sessionId), [], 'nothing re-stamps ownership on restore')
+      } finally { second.destroyAll() }
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })

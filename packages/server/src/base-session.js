@@ -1061,14 +1061,31 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #8281: ids of the permission prompts this session's own PermissionManager is
-   * still waiting on, so a caller need not read its private map. EMPTY for a
-   * provider without a manager. Hook-routed prompts (CLI / TUI) are held by the
-   * WS layer, not here: see `SessionManager.getHandoffBlockers`.
+   * #8281: ids of every permission prompt waiting on a human for this session,
+   * deduped across the same sources `getPendingPermissionCount()` counts:
+   * the hook-routed ids (`_pendingPermissionIds`, CLI / TUI, registered by
+   * ws-permissions through `notifyPermissionPending`), the in-process map
+   * installed as `_pendingPermissions` when it is a Map, and the
+   * PermissionManager's own ids. EMPTY when none of them holds anything.
    * @returns {string[]}
    */
   getPendingPermissionIds() {
-    return this._permissions?.getPendingPermissionIds?.() ?? []
+    const ids = new Set(this._pendingPermissionIds)
+    if (this._pendingPermissions instanceof Map) {
+      for (const id of this._pendingPermissions.keys()) ids.add(id)
+    }
+    for (const id of this._permissions?.getPendingPermissionIds?.() ?? []) ids.add(id)
+    return Array.from(ids)
+  }
+
+  /**
+   * #8281: prompts accepted by the provider that wait in a queue other than
+   * `_outgoingQueue` (or have left one with the send deferred). Default 0; a
+   * provider with a second queue overrides it. Counted as `queued_prompts`.
+   * @returns {number}
+   */
+  _extraQueuedPromptCount() {
+    return 0
   }
 
   /**
@@ -1089,8 +1106,8 @@ export class BaseSession extends EventEmitter {
    *                          `SOFT_HANDOFF_BLOCKER_CODES`). It is reported, and the
    *                          caller decides whether it blocks.
    *
-   * Does NOT see what lives outside the session: hook-routed permissions, the
-   * prompt evaluator, scheduler/orchestration ownership. `SessionManager.
+   * Does NOT see what lives outside the session: the prompt evaluator and
+   * scheduler/orchestration ownership. `SessionManager.
    * getHandoffBlockers` adds those. `isRunning` is unchanged and unrelated.
    *
    * @returns {{ code: string, detail?: object }[]}
@@ -1100,7 +1117,7 @@ export class BaseSession extends EventEmitter {
     if (this._destroying) blockers.push({ code: 'destroying' })
     if (!this._processReady) blockers.push({ code: 'not_ready' })
     if (this._hasTurnInFlight()) blockers.push({ code: 'turn_active' })
-    const queued = this._outgoingQueue.length + this._dequeuesInFlight
+    const queued = this._outgoingQueue.length + this._dequeuesInFlight + this._extraQueuedPromptCount()
     if (queued > 0) blockers.push({ code: 'queued_prompts', detail: { count: queued } })
     const permissionIds = this.getPendingPermissionIds()
     if (permissionIds.length > 0) {

@@ -5597,21 +5597,18 @@ export class SessionManager extends EventEmitter {
    *                          exactly as the engines' own session maps are.
    *   - `evaluator_pending`  the caller says the prompt evaluator holds a draft
    *
-   * Two inputs live outside the SessionManager and must be passed in by the
-   * caller, which today is the WS layer:
-   *   - `evaluatorPending`: the evaluator's draft state is on the WS handler
-   *     context, not on the session.
-   *   - `hookPendingPermissionIds`: permission prompts for a hook-routed session
-   *     (CLI / TUI) are held in `ws-server.js`'s own `_pendingPermissions` map,
-   *     not in a session's PermissionManager, so the session cannot see them.
-   *     Omitting it means they are NOT counted. They are merged into the
-   *     session's `pending_permission` entry.
+   * One input lives outside the SessionManager and must be passed in by the
+   * caller, which today is the WS layer: `evaluatorPending`, because the
+   * evaluator's draft state is on the WS handler context, not on the session.
+   * Hook-routed permission prompts need no input: ws-permissions registers each
+   * one on its owning session (`notifyPermissionPending`), and the session's
+   * `getPendingPermissionIds()` reports it.
    *
    * @param {string} sessionId
-   * @param {{ evaluatorPending?: boolean, hookPendingPermissionIds?: string[] }} [options]
+   * @param {{ evaluatorPending?: boolean }} [options]
    * @returns {{ code: string, detail?: object }[]}
    */
-  getHandoffBlockers(sessionId, { evaluatorPending = false, hookPendingPermissionIds = [] } = {}) {
+  getHandoffBlockers(sessionId, { evaluatorPending = false } = {}) {
     const entry = this._sessions.get(sessionId)
     if (!entry) return [{ code: 'not_found' }]
     const blockers = []
@@ -5621,13 +5618,6 @@ export class SessionManager extends EventEmitter {
     for (const blocker of sessionBlockers) blockers.push(blocker)
     if (entry._destroying && !blockers.some((b) => b.code === 'destroying')) {
       blockers.push({ code: 'destroying' })
-    }
-    if (Array.isArray(hookPendingPermissionIds) && hookPendingPermissionIds.length > 0) {
-      const existing = blockers.find((b) => b.code === 'pending_permission')
-      const own = existing?.detail?.requestIds ?? []
-      const requestIds = Array.from(new Set([...own, ...hookPendingPermissionIds]))
-      if (existing) existing.detail = { requestIds }
-      else blockers.push({ code: 'pending_permission', detail: { requestIds } })
     }
     const scheduledTaskId = entry.metadata?.scheduledTaskId
     const orchestrationRunId = entry.metadata?.orchestrationRunId
