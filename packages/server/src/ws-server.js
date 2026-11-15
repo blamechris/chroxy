@@ -18,7 +18,7 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { refuseBoundMessage } from './bound-client-policy.js'
+import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalPolicyOptsFromCtx, sendPrincipalRefusal, PRINCIPAL_ALLOWED_MESSAGE_TYPES } from './principal-policy.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
@@ -836,6 +836,9 @@ export class WsServer {
       // counts iterate the sessionId→clients index instead of scanning all clients.
       clientManager: this._clientManager,
       sendFn,
+      // A principal's frames are decided at the delivery point too (the
+      // broadcaster's bound-other-session drop would otherwise discard them).
+      principalOpts: () => self._principalPolicyOpts(),
       backpressureThreshold: this._backpressureThreshold,
       backpressureMaxDrops: this._backpressureMaxDrops,
     })
@@ -2788,8 +2791,20 @@ export class WsServer {
     // decision is not left to schema validation or to a handler. Applied before
     // both, so a malformed or unknown type is refused, not answered with a
     // schema error. (The dispatcher applies the same gate again.)
-    if (isBoundClient(client) &&
-        refuseBoundMessage(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId))) {
+    //
+    // The policy is chosen by ONE selector shared with handleSessionMessage: a
+    // principal is refused by the principal allowlist instead of the bound one,
+    // every other client by `refuseBoundMessage` as before.
+    if ((isBoundClient(client) || isPrincipalClient(client)) &&
+        dispatchPolicyFor(client)(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId))) {
+      return
+    }
+
+    // An agent principal is refused (not silently dropped) while the daemon drains: every
+    // allowed application operation, permission_response included (the drain exemption
+    // below is for human clients). Transport handling above is unchanged.
+    if (this._draining && isPrincipalClient(client) && Object.hasOwn(PRINCIPAL_ALLOWED_MESSAGE_TYPES, msg?.type)) {
+      sendPrincipalRefusal(ws, client, msg, buildMessageCtx(this._handlerCtx, correlationId), 'draining')
       return
     }
 
@@ -3526,9 +3541,29 @@ export class WsServer {
     return this._clientManager.hasActiveViewers(sessionId)
   }
 
+  /**
+   * The session lookups `frameForPrincipal` / `principalMaySee` need. The lease
+   * lookup is read from `this._principalLeases` once the lease store exists (S8).
+   */
+  _principalPolicyOpts() {
+    return principalPolicyOptsFromCtx({
+      sessions: { sessionManager: this.sessionManager },
+      services: { principalLeases: this._principalLeases },
+    })
+  }
+
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
+    // An agent principal is handled BEFORE the bound-other-session drop: it
+    // carries a sentinel binding, so that drop would discard every frame a
+    // principal may legitimately receive. Deny by default, session frames only
+    // when the grant covers the session (principal-policy.js).
+    if (client && isPrincipalClient(client)) {
+      const frame = frameForPrincipal(client, message, this._principalPolicyOpts())
+      if (frame === null) return true
+      return this._clientSend(ws, client, frame)
+    }
     // The one outgoing choke point: a session-scoped connection is sent no
     // host-wide frame and has host-wide fields removed from the rest.
     if (client && isBoundClient(client)) {

@@ -909,7 +909,9 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
   for (const [clientWs, c] of ctx.transport.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
-      // A client bound to another session is never subscribed to a new one.
+      // A client bound to another session is never subscribed to a new one. This also skips an
+      // agent principal (sentinel binding): deliberate and fail-closed in S2, pinned by
+      // tests/principal-dispatch-wiring.test.js; S3 changes it on purpose.
       if (isBoundToOtherSession(c, sessionId)) continue
       // #5563: route through the index-maintaining helper so the
       // sessionId→clients reverse index stays in sync. Falls back to a bare

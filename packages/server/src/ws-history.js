@@ -10,6 +10,7 @@ import { buildThinkingLevelChanged } from './thinking-level-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { isBoundClient } from './environments/authority.js'
+import { sendRawTransport } from './principal-policy.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
@@ -964,7 +965,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
         client.encryptionPending = false
         client.postAuthQueue = null
         try {
-          ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
+          sendRawTransport(ws, client, { type: 'server_error', message: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false })
         } catch (_) {}
         // Guard close() too: if the socket is already CLOSING/CLOSED when this
         // timer fires (a race with a concurrent client disconnect), a bare

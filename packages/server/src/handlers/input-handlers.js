@@ -12,6 +12,7 @@ import { validateAttachments, resolveFileRefAttachments, resolveSession, sendErr
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator, shouldSkipEvaluatorAsync } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { isBoundClient } from '../environments/authority.js'
+import { isPrincipalClient, refusePrincipalHandler, sendPrincipalRefusal } from '../principal-policy.js'
 import { createLogger, sessionLogger } from '../logger.js'
 import { answerDigest } from '../question-route-map.js'
 import { INPUT_CONTEXT_CAPABILITIES, InputContextError, prepareInputContext } from '../input-context.js'
@@ -319,6 +320,10 @@ function buildInputConflictError(sessionId, clientMessageId, message = INPUT_CON
 }
 
 async function handleInput(ws, client, msg, ctx) {
+  // An agent principal never falls into the host path below: its target is
+  // resolved from an EXPLICIT sessionId through principalMaySee (no activeSessionId
+  // fallback) and the branch always returns (contract §3.1 item 6).
+  if (isPrincipalClient(client)) return refusePrincipalHandler(ws, client, msg, ctx, 'steer')
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
   const targetSessionId = msg.sessionId || client.activeSessionId
@@ -1072,6 +1077,8 @@ async function handleInput(ws, client, msg, ctx) {
 }
 
 function handleInterrupt(ws, client, msg, ctx) {
+  // Principal branch: explicit sessionId through principalMaySee, never the host path.
+  if (isPrincipalClient(client)) return refusePrincipalHandler(ws, client, msg, ctx, 'drive')
   const interruptSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (entry) {
@@ -1363,6 +1370,12 @@ function handleNotificationPrefsGet(ws, client, msg, ctx) {
 }
 
 function handleNotificationPrefsSet(ws, client, msg, ctx) {
+  // Host-wide notification routing is never delegated to an agent principal. This
+  // handler carries no other client-authority check (S2 adds the principal one).
+  if (isPrincipalClient(client)) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'handler')
+    return
+  }
   if (!ctx.services.pushManager) {
     sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)', undefined, ctx)
     return
@@ -1616,6 +1629,14 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
 // Only claude-tui sessions expose writeTerminalInput; other providers have no PTY,
 // so the keystroke is silently dropped for them.
 function handleTerminalInput(ws, client, msg, ctx) {
+  // Raw keystrokes into a PTY are never delegated to an agent principal. The
+  // user-shell check below applies to user-shell sessions only, so this refusal is
+  // unconditional and first (a principal reaches a PTY only through the fenced
+  // sendMessage path of the input contract).
+  if (isPrincipalClient(client)) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'handler')
+    return
+  }
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (!entry) {

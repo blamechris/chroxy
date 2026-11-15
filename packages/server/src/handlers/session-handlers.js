@@ -7,6 +7,7 @@
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { authorizedFor } from '../connection-authority.js'
 import { isBoundClient } from '../environments/authority.js'
+import { isPrincipalClient, refusePrincipalHandler } from '../principal-policy.js'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { getRegistryForProvider, resolveRosterProvider } from '../models.js'
@@ -116,6 +117,10 @@ function handleCreateSession(ws, client, msg, ctx) {
   const requestId = (typeof msg.requestId === 'string' && msg.requestId) ? msg.requestId : undefined
   const rid = requestId !== undefined ? { requestId } : {}
   const sendError = (message) => ctx.transport.send(ws, { type: 'session_error', message, ...rid })
+  // Principal branch, BEFORE the bound refusal below (a principal carries a
+  // sentinel binding, so it would otherwise be refused as a bound client). It
+  // never falls into the host path and never touches the active session.
+  if (isPrincipalClient(client)) return refusePrincipalHandler(ws, client, msg, ctx, null)
   if (client.boundSessionId) {
     // Enrich the error with the bound session's name so the client can render
     // a remediation hint ("This device is paired to session X — disconnect to
@@ -380,6 +385,8 @@ export function finalizeShellCreate(ws, client, createOptions, ctx, audit) {
 }
 
 async function handleDestroySession(ws, client, msg, ctx) {
+  // Principal branch: the target resolves through principalMaySee, never the host path.
+  if (isPrincipalClient(client)) return refusePrincipalHandler(ws, client, msg, ctx, 'drive')
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
