@@ -2,7 +2,8 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { registeredMessageTypes, registerMessageHandler, handleSessionMessage } from '../src/ws-message-handlers.js'
 import { ClientMessageSchema } from '../src/ws-schemas.js'
 import { SCHEMA_BACKED_OUTBOUND_TYPES } from '../src/ws-outbound-schemas.js'
@@ -31,7 +32,7 @@ import {
   frameForPrincipal,
 } from '../src/principal-policy.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
-import { emittedFrameTypes, scanEmittedFrames, perClientLoopFrames } from './helpers/emitted-frame-types.js'
+import { emittedFrameTypes, scanEmittedFrames, perClientLoopFrames, relSrc } from './helpers/emitted-frame-types.js'
 import { REAL_HANDLERS, SENTINEL, principalClient, plainCtx } from './principal-test-helpers.js'
 
 const allowed = Object.keys(PRINCIPAL_ALLOWED_MESSAGE_TYPES)
@@ -811,6 +812,13 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
     'ws-permissions.js': [4, 'permission_request frames built by buildPermissionRequestMessage (denied)'],
     'ws-server.js': [16, 'relays of frames built by their producers, which are classified where they are built'],
   }
+
+  it('scanner file keys use forward slashes on every platform (Windows walks yield backslashes)', () => {
+    const src = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+    assert.equal(relSrc(src + '\\agent-control\\client.js'), 'agent-control/client.js')
+    assert.equal(relSrc(src + '/ws-file-ops/browser.js'), 'ws-file-ops/browser.js')
+    assert.equal(relSrc(src + '\\ws-file-ops/browser.js'), 'ws-file-ops/browser.js')
+  })
 
   it('every send argument the scanner cannot resolve is accounted for, in both directions', () => {
     const { unresolved } = scanEmittedFrames()

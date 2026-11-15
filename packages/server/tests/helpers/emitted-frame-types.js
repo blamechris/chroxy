@@ -106,6 +106,17 @@ function collectFromArg(node, out, scopes = [], unresolved = null, seen = new Se
   if (unresolved) unresolved.push({ line: node.loc?.start.line, kind: node.type === 'Identifier' ? `identifier ${node.name}` : node.type })
 }
 
+/**
+ * A source path relative to src/, always with forward slashes. The allowance
+ * table and the loop guard key on these strings, and on Windows the walk
+ * yields backslash paths, so split on BOTH separators rather than path.sep.
+ * @param {string} f
+ * @returns {string}
+ */
+export function relSrc(f) {
+  return f.slice(SRC.length + 1).split(/[\\/]+/).join('/')
+}
+
 function walk(node, visit) {
   if (!node || typeof node.type !== 'string') return
   visit(node)
@@ -160,7 +171,7 @@ export function scanEmittedFrames(dir = SRC) {
           if (a.type === 'Literal' || a.type === 'TemplateLiteral') continue
           const local = []
           collectFromArg(a, out, scopes, local)
-          for (const u of local) unresolved.push({ file: f.slice(SRC.length + 1), line: u.line ?? n.loc.start.line, callee, kind: u.kind, text: src.slice(a.start, a.end).replace(/\s+/g, ' ').slice(0, 80) })
+          for (const u of local) unresolved.push({ file: relSrc(f), line: u.line ?? n.loc.start.line, callee, kind: u.kind, text: src.slice(a.start, a.end).replace(/\s+/g, ' ').slice(0, 80) })
         }
       }
     })
@@ -212,7 +223,7 @@ export function perClientLoopFrames(dir = SRC) {
           for (const a of frameArgs(m, calleeName(m.callee))) collectFromArg(a, types, loopScopes)
         }
       })
-      for (const type of types) found.push({ file: f.slice(SRC.length + 1), line: n.loc.start.line, type, single })
+      for (const type of types) found.push({ file: relSrc(f), line: n.loc.start.line, type, single })
     })
   }
   return found
