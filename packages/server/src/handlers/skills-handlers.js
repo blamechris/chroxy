@@ -22,6 +22,7 @@ import {
 import { realpathSync, readdirSync, statSync } from 'fs'
 import { loggerForSession } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
+import { isPrincipalClient, sendPrincipalRefusal } from '../principal-policy.js'
 
 // #3250: strict ISO-8601 datetime gate matching the shape z.string().datetime()
 // accepts. Used by handleListSkills to drop malformed timestamps from a
@@ -49,6 +50,12 @@ function _isIsoDatetime(s) {
  * early-return); false to proceed. See docs/security/bearer-token-authority.md.
  */
 function rejectSkillTrustIfBound(ws, client, msg, ctx) {
+  // Independent principal gate: skill trust is host-executable code and never
+  // delegated to an agent principal, whatever its binding.
+  if (isPrincipalClient(client)) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'handler')
+    return true
+  }
   if (!client?.boundSessionId) return false
   loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to modify skill trust (${msg?.type}) — rejected`)
   sendError(ws, msg?.requestId, 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT',

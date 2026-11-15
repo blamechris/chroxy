@@ -2,6 +2,7 @@ import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { isSessionViewer } from './handler-utils.js'
 import { isBoundToOtherSession, canSeePeer } from './environments/authority.js'
+import { isPrincipalClient, frameForPrincipal } from './principal-policy.js'
 
 const log = createLogger('ws')
 
@@ -21,6 +22,8 @@ const log = createLogger('ws')
  * @param {object} opts
  * @param {Map} opts.clients             ws → client Map (shared reference with WsServer)
  * @param {function} opts.sendFn         (ws, message) => void — handles encryption, seq, etc.
+ * @param {function} [opts.principalOpts] () => PrincipalPolicyOpts — session lookups for an agent principal's
+ *                                        delivery decision (principal-policy.js); optional, defaults to no lookups
  * @param {object} [opts.clientManager]  WsClientManager owning the sessionId→clients reverse
  *                                        index (#5563). When present, session-scoped broadcasts
  *                                        and subscriber counts iterate the index Set instead of
@@ -31,8 +34,9 @@ const log = createLogger('ws')
  * @param {number} [opts.backpressureMaxDrops]   close connection after this many consecutive drops
  */
 export class WsBroadcaster {
-  constructor({ clients, clientManager, sendFn, backpressureThreshold, backpressureMaxDrops } = {}) {
+  constructor({ clients, clientManager, sendFn, principalOpts, backpressureThreshold, backpressureMaxDrops } = {}) {
     this._clients = clients
+    this._principalOpts = typeof principalOpts === 'function' ? principalOpts : () => ({})
     this._clientManager = clientManager ?? null
     this._sendFn = sendFn
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024
@@ -97,7 +101,16 @@ export class WsBroadcaster {
     // Checked here, the single delivery point every broadcast path ends in, so
     // an unfiltered `_broadcast` and both `_broadcastToSession` paths agree.
     // Frames without a string `sessionId` are not session-scoped and pass.
-    if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) {
+    //
+    // An agent principal is decided FIRST: it carries a sentinel binding, so the
+    // drop below would discard every frame it may legitimately receive. It gets
+    // `frameForPrincipal` (deny by default, session frames only inside the grant)
+    // and never reaches the bound drop.
+    if (isPrincipalClient(client)) {
+      const frame = frameForPrincipal(client, message, this._principalOpts())
+      if (frame === null) return false
+      message = frame
+    } else if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) {
       return false
     }
     if (ws.bufferedAmount > this._backpressureThreshold) {
@@ -161,8 +174,11 @@ export class WsBroadcaster {
    */
   _matchesSession(client, sessionId) {
     // A client bound to another session is never a recipient, whatever its
-    // active/subscribed sets say (same rule as the delivery point above).
-    if (isBoundToOtherSession(client, sessionId)) return false
+    // active/subscribed sets say (same rule as the delivery point above). An
+    // agent principal is the exception that is decided first: its sentinel binding
+    // must not exclude it here, and `frameForPrincipal` at the delivery point
+    // withholds every frame outside its grant.
+    if (!isPrincipalClient(client) && isBoundToOtherSession(client, sessionId)) return false
     return isSessionViewer(client, sessionId)
   }
 
@@ -178,7 +194,7 @@ export class WsBroadcaster {
     if (!this._clientManager) return
     for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
       if (!client.authenticated) continue
-      if (isBoundToOtherSession(client, sessionId)) continue
+      if (!isPrincipalClient(client) && isBoundToOtherSession(client, sessionId)) continue
       const sock = client._ws
       if (!sock || sock.readyState !== 1) continue
       yield { client, sock }

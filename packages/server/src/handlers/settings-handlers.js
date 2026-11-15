@@ -31,6 +31,7 @@ import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
+import { isPrincipalClient, refusePrincipalHandler, sendPrincipalRefusal } from '../principal-policy.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
 import { credentialHandlers } from './credential-handlers.js'
@@ -448,6 +449,9 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
 }
 
 function handlePermissionResponse(ws, client, msg, ctx) {
+  // Principal branch, FIRST: a principal may answer only through principalMaySee
+  // (deny only, S15) and never reaches the dev-preview consent check or the host path.
+  if (isPrincipalClient(client)) return refusePrincipalHandler(ws, client, msg, ctx, 'answer')
   const { requestId, decision } = msg
   if (!requestId || !decision) return
   if (ctx.services?.devPreview?.respondToConsent(client, msg)) return
@@ -999,6 +1003,12 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
 }
 
 function handleSetPermissionRules(ws, client, msg, ctx) {
+  // Independent principal gate: permission rules are never delegated to an
+  // agent principal, whatever its binding.
+  if (isPrincipalClient(client)) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'handler')
+    return
+  }
   // Bound (pairing-issued) session tokens are scoped to USE existing
   // permissions, never to escalate — the same principle that blocks them from
   // flipping to auto mode in handleSetPermissionMode. Permission rules can
