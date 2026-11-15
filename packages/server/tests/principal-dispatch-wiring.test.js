@@ -215,6 +215,9 @@ describe('principal over a real socket (server-side record stamped directly)', (
       assert.ok(reasons.some((l) => l.includes('create_session') && l.includes('(not_available)')), reasons.join('\n'))
       assert.ok(reasons.some((l) => l.includes('input') && l.includes('(lease_required)')), reasons.join('\n'))
       assert.equal(boundCalls, before, 'zero refuseBoundMessage calls across the whole dispatch')
+      // The refusal is logged before its frame reaches the client socket, so wait
+      // for the frames themselves (a slower runner delivers them after the log).
+      await waitFor(() => c.messages.filter((m) => m.type === 'session_error').length >= 2, { label: 'two refusal frames' })
       const replies = c.messages.filter((m) => m.type === 'session_error')
       assert.equal(replies.length, 2)
       for (const r of replies) assert.equal(r.code, 'scope_denied')
@@ -333,7 +336,7 @@ describe('principal over a real socket (server-side record stamped directly)', (
   describe('real broadcast producers never reach a granted, subscribed principal', () => {
     const settle = () => new Promise((r) => setTimeout(r, 150))
 
-    async function subscribed(over) {
+    async function subscribed() {
       const port = await boot()
       const c = await principalConnection(port, { constraints: { sessionIds: ['session-1'] } })
       c.record.subscribedSessionIds.add('session-1')
@@ -437,5 +440,64 @@ describe('broadcaster full-scan recipient site (_matchesSession), no client mana
   it('counts the principal as a viewer of its session, so deliver and count agree', () => {
     const { broadcaster } = fixture()
     assert.equal(broadcaster._countSessionSubscribers('sess-1'), 2)
+  })
+})
+
+describe('S2 pins: a principal is kept off the subscription index', () => {
+  it('ClientManager.subscribe and setActiveSession refuse a principal (S3 changes this on purpose)', async () => {
+    const { WsClientManager } = await import('../src/ws-client-manager.js')
+    const manager = new WsClientManager({})
+    const principal = principalClient({ subscribedSessionIds: new Set(), activeSessionId: null })
+    manager.subscribe(principal, 'sess-1')
+    manager.setActiveSession(principal, 'sess-1')
+    assert.equal(principal.subscribedSessionIds.has('sess-1'), false)
+    assert.equal(principal.activeSessionId, null)
+    assert.deepEqual([...manager.getSessionSubscribers('sess-1')], [])
+    // positive control: an unbound client is subscribed by the same calls
+    const host = { id: 'h', boundSessionId: null, subscribedSessionIds: new Set(), activeSessionId: null }
+    manager.subscribe(host, 'sess-1')
+    manager.setActiveSession(host, 'sess-1')
+    assert.equal(host.subscribedSessionIds.has('sess-1'), true)
+    assert.equal(host.activeSessionId, 'sess-1')
+    assert.deepEqual([...manager.getSessionSubscribers('sess-1')], [host])
+  })
+
+  it('autoSubscribeOtherClients skips a principal', async () => {
+    const { autoSubscribeOtherClients } = await import('../src/handler-utils.js')
+    const principal = principalClient()
+    const host = { id: 'h', authenticated: true, boundSessionId: null, subscribedSessionIds: new Set() }
+    const ctx = { transport: { clients: new Map([[{}, principal], [{}, host]]) } }
+    autoSubscribeOtherClients('sess-1', null, ctx)
+    assert.equal(principal.subscribedSessionIds.has('sess-1'), false)
+    assert.equal(host.subscribedSessionIds.has('sess-1'), true)
+  })
+})
+
+describe('production policy opts never carry the test-only broadcast allowlist', () => {
+  it('WsServer._principalPolicyOpts, principalPolicyOptsFromCtx and a default WsBroadcaster have no broadcastAllowed', async () => {
+    const { principalPolicyOptsFromCtx } = await import('../src/principal-policy.js')
+    const { manager } = createMockSessionManager(SESSIONS)
+    const server = newServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true })
+    try {
+      assert.equal(Object.hasOwn(server._principalPolicyOpts(), 'broadcastAllowed'), false)
+    } finally {
+      server.close()
+    }
+    assert.equal(Object.hasOwn(principalPolicyOptsFromCtx({ sessions: { sessionManager: manager }, services: {} }), 'broadcastAllowed'), false)
+    const delivered = []
+    const principal = principalClient({ subscribedSessionIds: new Set(['sess-1']) })
+    const ws = { readyState: 1, bufferedAmount: 0 }
+    const bare = new WsBroadcaster({ clients: new Map([[ws, principal]]), sendFn: (_ws, m) => delivered.push(m) })
+    assert.equal(Object.hasOwn(bare._principalOpts(), 'broadcastAllowed'), false)
+    bare._broadcastToSession('sess-1', { type: 'probe_event', n: 1 })
+    assert.deepEqual(delivered, [], 'nothing reaches a principal without an injected allowlist')
+    // positive control: the same broadcaster DOES deliver once the probe is injected
+    const probing = new WsBroadcaster({
+      clients: new Map([[ws, principal]]),
+      sendFn: (_ws, m) => delivered.push(m),
+      principalOpts: () => ({ sessionExists: () => true, broadcastAllowed: { probe_event: ['type', 'sessionId', 'n'] } }),
+    })
+    probing._broadcastToSession('sess-1', { type: 'probe_event', n: 1 })
+    assert.equal(delivered.length, 1)
   })
 })

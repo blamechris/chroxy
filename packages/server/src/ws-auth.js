@@ -7,7 +7,7 @@
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger, loggableValue } from './logger.js'
-import { principalTransportFrame } from './principal-policy.js'
+import { sendRawTransport } from './principal-policy.js'
 import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
@@ -563,17 +563,6 @@ export function handlePairRequestMessage(ctx, ws, msg) {
   // control chars); JSON.stringify keeps it a single well-formed log record.
   log.info(`pair_request queued from ${source} (requestId ${JSON.stringify(data.requestId)})`)
   return true
-}
-
-/**
- * Write a key-exchange frame straight to the socket, in plaintext and in order (the
- * exchange cannot use the queued or encrypted sender). An agent principal is sent only
- * the whitelisted reduction of the frame (principal-policy.js); every other client gets
- * the frame unchanged.
- */
-function sendRawTransport(ws, client, frame) {
-  const out = principalTransportFrame(client, frame)
-  if (out !== null) ws.send(JSON.stringify(out))
 }
 
 /**

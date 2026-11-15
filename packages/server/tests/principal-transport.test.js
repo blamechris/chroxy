@@ -13,7 +13,33 @@ import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnection
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parse } from 'acorn'
+import { PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES } from '../src/principal-policy.js'
 import { principalClient } from './principal-test-helpers.js'
+
+// The two fixed server_error texts are read out of the real sink sources (string literals in
+// ws-auth.js and ws-history.js), not copied, so a text change in either sink is a test failure
+// here instead of a principal frame that is silently dropped by the whitelist.
+const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+function encryptionMessages(file) {
+  const found = []
+  const visit = (n) => {
+    if (!n || typeof n.type !== 'string') return
+    if (n.type === 'Literal' && typeof n.value === 'string' && n.value.startsWith('Encryption required but')) found.push(n.value)
+    for (const k of Object.keys(n)) {
+      const v = n[k]
+      if (Array.isArray(v)) v.forEach(visit)
+      else if (v && typeof v.type === 'string') visit(v)
+    }
+  }
+  visit(parse(readFileSync(join(SRC, file), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true }))
+  return found
+}
+const [WRONG_MESSAGE] = encryptionMessages('ws-auth.js')
+const [TIMEOUT_MESSAGE] = encryptionMessages('ws-history.js')
 
 class WsServer extends _WsServer {
   constructor(opts = {}) { super(opts) }
@@ -21,6 +47,14 @@ class WsServer extends _WsServer {
 }
 
 const HOST_FIELDS = ['cwd', 'defaultCwd', 'serverVersion', 'latestVersion', 'serverCommit', 'connectedClients', 'capabilities', 'features', 'webFeatures', 'exposure', 'billingCanary', 'availablePermissionModes', 'resultTimeoutMs', 'hardTimeoutMs']
+
+describe('the fixed server_error texts come from the real sinks', () => {
+  it('each sink has exactly one text and together they are the policy\'s two fixed messages', () => {
+    assert.equal(encryptionMessages('ws-auth.js').length, 1)
+    assert.equal(encryptionMessages('ws-history.js').length, 1)
+    assert.deepEqual([WRONG_MESSAGE, TIMEOUT_MESSAGE].sort(), [...PRINCIPAL_TRANSPORT_SERVER_ERROR_MESSAGES].sort())
+  })
+})
 
 describe('principal encrypted handshake and raw transport frames', () => {
   let server
@@ -141,7 +175,7 @@ describe('principal encrypted handshake and raw transport frames', () => {
         const c = await discrete(stamp)
         c.ws.send(JSON.stringify({ type: 'ping' }))
         const err = await frameOf(c, 'server_error')
-        assert.equal(err.message, 'Encryption required but client did not initiate key exchange.')
+        assert.equal(err.message, WRONG_MESSAGE)
         assert.equal(err.recoverable, false)
         assert.deepEqual(Object.keys(err).sort(), ['message', 'recoverable', 'type'])
         await waitFor(() => c.closeCode() === 1008, { label: 'close 1008' })
@@ -150,7 +184,7 @@ describe('principal encrypted handshake and raw transport frames', () => {
       it(`${who}: a timeout gets the fixed server_error and a 1008 close`, async () => {
         const c = await discrete(stamp)
         const err = await waitFor(() => c.raw.find((m) => m.type === 'server_error'), { timeoutMs: 3000, label: 'timeout server_error' })
-        assert.equal(err.message, 'Encryption required but key exchange timed out. Please reconnect.')
+        assert.equal(err.message, TIMEOUT_MESSAGE)
         assert.deepEqual(Object.keys(err).sort(), ['message', 'recoverable', 'type'])
         await waitFor(() => c.closeCode() === 1008, { label: 'close 1008' })
       })

@@ -610,7 +610,7 @@ export const PRINCIPAL_OUTGOING_DENIED = Object.freeze([
   'environment_created', 'environment_destroyed', 'environment_error', 'environment_info',
   'environment_list', 'evaluate_draft_result', 'evaluator_clarify', 'evaluator_rewrite',
   'extension_message', 'external_sessions_snapshot', 'failed_restore_history', 'failed_restores_list',
-  'file_content', 'file_listing', 'git_branches_result', 'git_commit_result', 'git_create_pr_result',
+  'file_content', 'file_list', 'file_listing', 'git_branches_result', 'git_commit_result', 'git_create_pr_result',
   'git_repo_check_result', 'git_stage_result', 'git_status_result', 'git_unstage_result',
   'github_webhook_config', 'history_replay_end', 'history_replay_start', 'host_prune_action_ack',
   'host_prune_status_snapshot', 'host_status_snapshot', 'inactivity_warning', 'integration_action_ack',
@@ -690,6 +690,16 @@ export function principalTransportFrame(client, frame) {
 }
 
 /**
+ * Write a transport frame straight to a socket (plaintext, in order, no queue and no
+ * encryption: the key exchange needs exactly that) through `principalTransportFrame`.
+ * A client that is not a principal gets the frame unchanged. Throws what `ws.send` throws.
+ */
+export function sendRawTransport(ws, client, frame) {
+  const out = principalTransportFrame(client, frame)
+  if (out !== null) ws.send(JSON.stringify(out))
+}
+
+/**
  * Frames a principal may receive on the BROADCAST path (the broadcaster and the
  * session-broadcast paths), with the fields each is delivered with. EMPTY in S2: a
  * principal receives no ordinary session broadcast of any type (contract §3.1 item 7).
@@ -697,11 +707,14 @@ export function principalTransportFrame(client, frame) {
  * adds; the grant check in `frameForPrincipalBroadcast` applies to every entry.
  * @type {Readonly<Record<string, readonly string[]>>}
  */
+// S3 fills this with the normalized `principal_event` family; nothing else belongs here.
 export const PRINCIPAL_BROADCAST_ALLOWED = Object.freeze({})
 
-// Frames `frameForPrincipalBroadcast` already vetted. The broadcaster hands them to
-// `_send`, whose direct-reply allowlist would otherwise drop them.
-const VETTED_BROADCAST = new WeakSet()
+// Frames `frameForPrincipalBroadcast` already vetted, mapped to the ONE client each was vetted
+// for. The broadcaster hands them to `_send`, whose direct-reply allowlist would otherwise drop
+// them. A vetted frame is frozen, is honoured only for its own recipient, and has its session
+// re-checked against that recipient's grant at send time (a grant revoked in between wins).
+const VETTED_BROADCAST = new WeakMap()
 
 /**
  * The frame a principal should receive from a BROADCAST, or null. Separate from
@@ -727,8 +740,8 @@ export function frameForPrincipalBroadcast(client, message, opts = {}) {
   }
   const binding = client.boundSessionId
   if (typeof binding === 'string' && binding.length > 0 && JSON.stringify(frame).includes(binding)) return null
-  VETTED_BROADCAST.add(frame)
-  return frame
+  VETTED_BROADCAST.set(frame, client)
+  return Object.freeze(frame)
 }
 
 /**
@@ -747,7 +760,11 @@ export function frameForPrincipalBroadcast(client, message, opts = {}) {
  */
 export function frameForPrincipal(client, message, opts = {}) {
   if (!isPrincipalClient(client)) return null
-  if (message !== null && typeof message === 'object' && VETTED_BROADCAST.has(message)) return message
+  if (message !== null && typeof message === 'object' && VETTED_BROADCAST.has(message)) {
+    const ok = VETTED_BROADCAST.get(message) === client && Object.isFrozen(message) &&
+      typeof message.sessionId === 'string' && principalMaySee(client, message.sessionId, 'observe', opts).ok
+    return ok ? message : null
+  }
   const type = message?.type
   if (typeof type !== 'string' || !Object.hasOwn(PRINCIPAL_OUTGOING_ALLOWED, type)) return null
   if (typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {

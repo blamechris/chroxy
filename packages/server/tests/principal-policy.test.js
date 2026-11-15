@@ -31,7 +31,7 @@ import {
   frameForPrincipal,
 } from '../src/principal-policy.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
-import { emittedFrameTypes, perClientLoopFrames } from './helpers/emitted-frame-types.js'
+import { emittedFrameTypes, scanEmittedFrames, perClientLoopFrames } from './helpers/emitted-frame-types.js'
 import { REAL_HANDLERS, SENTINEL, principalClient, plainCtx } from './principal-test-helpers.js'
 
 const allowed = Object.keys(PRINCIPAL_ALLOWED_MESSAGE_TYPES)
@@ -716,6 +716,8 @@ describe('frameForPrincipal and the outgoing roster', () => {
 const NOT_CLIENT_FRAMES_LOCAL = [
   'auth', 'drain', 'drain_complete', 'input', 'interrupt', 'key_exchange', 'list_sessions',
   'permission_response', 'ping', 'ready', 'shutdown', 'stdin', 'stdin_end', 'subscribe_sessions',
+  // agent-control's client-to-server sessions and the provider-process plumbing:
+  'create_session', 'resume', 'spawn',
 ]
 
 describe('outgoing roster is exhaustive: every real server frame is classified exactly once', () => {
@@ -765,6 +767,60 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
       assert.equal(frameForPrincipal(client, { type: t }, {}), null, t)
       assert.equal(frameForPrincipal(client, { type: t, sessionId: 'sess-1' }, {}), null, t)
     }
+  })
+
+  it('regression: file_list, built in a local variable by ws-file-ops/browser.js and sent by identifier, is enumerated and classified', () => {
+    assert.ok(emitted.has('file_list'), 'the scanner must resolve `const response = { type: "file_list" }; sendFn(ws, response)`')
+    assert.ok(deniedOut.includes('file_list'))
+  })
+
+  // Send arguments the scanner cannot resolve to a frame type (a helper call, a relay of a frame
+  // built elsewhere, a serialized payload). Each file lists how many it has and why that is
+  // acceptable; a NEW unresolved send, or one that disappears, fails here so it is decided.
+  const UNRESOLVED_ALLOWANCES = {
+    'agent-control/client.js': [3, 'client-to-server messages of the agent-control MCP client, not frames to a client'],
+    'test-client.js': [2, 'client-to-server messages of the test client'],
+    'control-room/handler-factory.js': [6, 'control-room replies built by the action factories; every type is a schema-backed, denied frame'],
+    'dev-preview.js': [1, 'permission_request built by buildPermissionRequestMessage (denied)'],
+    'event-ingest.js': [3, 'notification titles and bodies handed to the sink, not client frames'],
+    'handlers/conversation-handlers.js': [2, 'conversation frames built by the handler (all denied; the CONVERSATION_FRAME marker is for bound clients)'],
+    'handlers/feature-handlers.js': [1, 'dev-preview status relayed from the manager (dev_preview_status, denied)'],
+    'handlers/github-webhook-handlers.js': [1, 'github_webhook_config built by buildWebhookConfig (denied)'],
+    'handlers/input-handlers.js': [4, 'session_error input_conflict built by buildInputConflictError (direct reply type, session tagged)'],
+    'handlers/scheduler-handlers.js': [1, 'scheduled_tasks snapshot built by buildSnapshot (denied)'],
+    'handlers/session-pr-status-handlers.js': [5, 'session_pr_status built by degraded() (denied)'],
+    'handlers/session-pr-threads-handlers.js': [5, 'session_pr_threads built by degraded() (denied)'],
+    'handlers/settings-handlers.js': [5, 'permission_input and thinking_level_changed relays (denied)'],
+    'notifications/sink-registry.js': [1, 'notification context handed to a sink, not a client frame'],
+    'per-session-settings.js': [1, 'per-setting broadcast whose type comes from the setting definition (denied settings frames)'],
+    'roster-broadcast.js': [3, 'relay of a roster frame built and classified by its producer (available_models, denied)'],
+    'server-cli/tunnel-lifecycle-handler.js': [3, 'server_status frames built by the tunnel lifecycle helpers (denied)'],
+    'server-cli.js': [3, 'relays of frames built at their producers, and notification titles'],
+    'session-ci-watcher.js': [1, 'notification title handed to the sink, not a client frame'],
+    'supervisor.js': [1, 'notification title handed to the sink, not a client frame'],
+    'principal-policy.js': [1, 'the raw transport sink, which writes only the output of principalTransportFrame'],
+    'ws-broadcaster.js': [3, 'the broadcaster relays frames its callers built'],
+    'ws-client-sender.js': [2, 'serialization of the frame being delivered, after the outgoing policy ran'],
+    'ws-file-ops/browser.js': [1, 'a frame built by its caller with an optional requestId merged in (file_content family, denied)'],
+    'ws-file-ops/git.js': [10, 'git_create_pr_result built by prResult() (denied)'],
+    'ws-file-ops/memory.js': [2, 'memory frames with an optional requestId merged in (denied)'],
+    'ws-file-ops/reader.js': [2, 'file frames with an optional requestId merged in (denied)'],
+    'ws-forwarding.js': [10, 'relays of provider events normalized elsewhere and tagged with a session (all denied session broadcasts)'],
+    'ws-history.js': [5, 'replayed history entries and snapshots (denied for a principal, which is sent no replay)'],
+    'ws-message-handlers.js': [1, 'the adapter relays a frame its handler built'],
+    'ws-permissions.js': [4, 'permission_request frames built by buildPermissionRequestMessage (denied)'],
+    'ws-server.js': [16, 'relays of frames built by their producers, which are classified where they are built'],
+  }
+
+  it('every send argument the scanner cannot resolve is accounted for, in both directions', () => {
+    const { unresolved } = scanEmittedFrames()
+    const counts = {}
+    for (const u of unresolved) counts[u.file] = (counts[u.file] ?? 0) + 1
+    for (const [file, [n, reason]] of Object.entries(UNRESOLVED_ALLOWANCES)) {
+      assert.ok(reason.length > 10, `${file} needs a reason`)
+      assert.equal(counts[file] ?? 0, n, `${file}: unresolved send count changed (decide the new send, then update the allowance)`)
+    }
+    assert.deepEqual(Object.keys(counts).filter((f) => !Object.hasOwn(UNRESOLVED_ALLOWANCES, f)).sort(), [], 'a file has an unresolved send with no allowance')
   })
 
   it('no loop over the connected clients fans out a direct-reply type (a principal would receive it)', () => {
@@ -847,11 +903,39 @@ describe('principal broadcast path is separate from direct replies', () => {
     assert.equal(frameForPrincipalBroadcast({ id: 'u' }, { type: 'probe_event', sessionId: 'sess-1' }, opts), null)
   })
 
-  it('only a frame the broadcast path vetted passes the direct path under an unlisted type', () => {
-    const opts = { broadcastAllowed: probe }
-    const vetted = frameForPrincipalBroadcast(client, { type: 'probe_event', sessionId: 'sess-1', n: 1 }, opts)
-    assert.equal(frameForPrincipal(client, vetted, opts), vetted)
-    assert.equal(frameForPrincipal(client, { ...vetted }, opts), null, 'a copy of the same shape is not vetted')
+  describe('a vetted frame is bound to its recipient and payload', () => {
+    const opts = { broadcastAllowed: probe, sessionExists: () => true }
+    const vet = (c) => frameForPrincipalBroadcast(c, { type: 'probe_event', sessionId: 'sess-1', n: 1 }, opts)
+
+    it('only a frame the broadcast path vetted passes the direct path under an unlisted type', () => {
+      const vetted = vet(client)
+      assert.equal(frameForPrincipal(client, vetted, opts), vetted)
+      assert.equal(frameForPrincipal(client, { ...vetted }, opts), null, 'a copy of the same shape is not vetted')
+    })
+
+    it('a frame vetted for principal A is refused for principal B, even with the same grant', () => {
+      const a = principalClient({ id: 'A', principal: { constraints: { sessionIds: ['sess-1'] } } })
+      const b = principalClient({ id: 'B', principal: { constraints: { sessionIds: ['sess-1'] } } })
+      const vetted = vet(a)
+      assert.equal(frameForPrincipal(a, vetted, opts), vetted)
+      assert.equal(frameForPrincipal(b, vetted, opts), null)
+    })
+
+    it('the approved frame is frozen, so it cannot be changed after vetting', () => {
+      const vetted = vet(client)
+      assert.ok(Object.isFrozen(vetted))
+      assert.throws(() => { vetted.sessionId = 'sess-2' }, TypeError)
+      assert.throws(() => { vetted.extra = 'x' }, TypeError)
+      assert.equal(vetted.sessionId, 'sess-1')
+    })
+
+    it('a grant revoked between vetting and sending is honoured', () => {
+      const c = principalClient({ principal: { constraints: { sessionIds: ['sess-1'] } } })
+      const vetted = vet(c)
+      assert.equal(frameForPrincipal(c, vetted, opts), vetted)
+      c.principal = { ...c.principal, constraints: { sessionIds: [] } }
+      assert.equal(frameForPrincipal(c, vetted, opts), null)
+    })
   })
 })
 
