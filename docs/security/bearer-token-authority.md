@@ -27,6 +27,16 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 > [`discord-return-path.md`](discord-return-path.md) §3; it becomes a row in this table
 > (and a §9 checklist entry) when #7168 lands the class in code.
 
+> **A sixth class is designed but not yet implemented:** the **agent principal**
+> (#9112 / #9113) — a scoped, labelled, revocable credential for a supervisor agent,
+> minted by `chroxy agent grant`, stored as a hash only in a 0600 store, accepted only at
+> WS `auth` from a loopback peer and refused on every HTTP route. It is never primary
+> and never reads as unbound host authority (`client.principal != null` is scoped), and
+> every message type is denied unless allowlisted per tier. It is not in code, so the
+> trust sentence in §1 does not list it. Its full specification lives in
+> [`agent-principals.md`](agent-principals.md); it becomes a row in this table when S1
+> of #9112 lands the class.
+
 > **On-disk paths in this document.** `~/.chroxy` is the **default** config/state
 > root, not a fixed one. `CHROXY_CONFIG_DIR` relocates **all** of it (#7052), so
 > every `~/.chroxy/…` path here — `config.json`, `session-tokens.json`,
@@ -344,6 +354,7 @@ Before merging any PR that adds a new HTTP route or WebSocket message handler th
 4. **If the operation can execute host code**, the unbound bar is NOT enough — gate on strict `client.isPrimaryToken === true` (see §4's primary-token table). Ask the concrete question: *can a caller choose a binary, argv, or environment this daemon will spawn?* If yes (a shell, a PTY write, a worker session, an MCP server entry, a scheduled task), an ordinary paired phone must not reach it. Reject before any validation, session resolve, file read, or payload logging, so the payload never touches disk on the rejected path. **This step ADDS to step 3, it does not replace it** — if the operation is also global, keep the bound-token rejection too (`client.isPrimaryToken === true && !client.boundSessionId`), or the mutation gate ends up weaker than the read gate guarding the same surface (#7025). **Same bar, both directions, for anything that restarts or stops the daemon itself or reports what is queued for it** (`daemon_update_action`, `daemon_update_status`, #8331): gate the handler, and filter every send path (the post-auth send *and* the change broadcast) with the same predicate. A broadcast filtered by `!client.boundSessionId` alone reaches paired phones.
 5. **Never log raw tokens.** `maskToken()` exists for a reason.
 6. **Use `safeTokenCompare()`** for any byte-equality check against a token.
+7. **If the caller may be an agent principal** (designed, not yet implemented — #9112 / #9113, [`agent-principals.md`](agent-principals.md)): add the type to the principal dispatch allowlist for the lowest tier that needs it, or to its denied list (a type in neither fails the roster guard), because the router refuses every unlisted type before any handler runs. Never let a principal read as host authority: `client.principal != null` is scoped exactly like a non-null `boundSessionId`, so do not gate on `boundSessionId == null` alone. Check scope and lease through the single principal helper **before** the session lookup, re-check the credential and lease after every `await`, and write the `[AUDIT]` attempt line **before** the effect (no line, no effect). Any new capability a principal could reach must also be refused by an existing bound or strict-primary gate, so no capability depends on one handler remembering to check.
 
 ## 10. LAN-Bind Unauthenticated Surface (#5356)
 

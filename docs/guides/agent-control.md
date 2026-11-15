@@ -75,7 +75,10 @@ merely by omission from `tools/list`.
 Full detail lives in [`docs/security/bearer-token-authority.md`](../security/bearer-token-authority.md)
 and [`docs/security/encryption-threat-model.md`](../security/encryption-threat-model.md) — this
 adapter does not introduce a new token class or widen what a token is allowed to do; the
-daemon's existing authority checks are the actual floor. Specific to `agent-control`:
+daemon's existing authority checks are the actual floor. A scoped, revocable agent-principal
+credential that moves these gates into the daemon is designed but not yet implemented
+([`docs/security/agent-principals.md`](../security/agent-principals.md), #9112). Specific to
+`agent-control`:
 
 - The bearer token is held **in memory only** for the life of the process — never in argv,
   never logged, and redacted (exact match, plus the shared value-shape patterns) out of
