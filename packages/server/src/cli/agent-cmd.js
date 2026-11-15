@@ -94,7 +94,7 @@ export async function runAgentList(options = {}, deps = {}) {
   return { ok: true, reply }
 }
 
-export async function runAgentRevoke(target, options = {}, deps = {}) {
+export async function runAgentRevoke(target, _options = {}, deps = {}) {
   const w = deps.out || out
   const e = deps.err || err
   if (typeof target !== 'string' || target.length === 0) {

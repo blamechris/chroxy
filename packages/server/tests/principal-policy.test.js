@@ -784,7 +784,7 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
   // built elsewhere, a serialized payload). Each file lists how many it has and why that is
   // acceptable; a NEW unresolved send, or one that disappears, fails here so it is decided.
   const UNRESOLVED_ALLOWANCES = {
-    'agent-control/client.js': [3, 'client-to-server messages of the agent-control MCP client, not frames to a client'],
+    'agent-control/client.js': [4, 'client-to-server messages of the agent-control MCP client (including the CLI admin request()), not frames to a client'],
     'test-client.js': [2, 'client-to-server messages of the test client'],
     'control-room/handler-factory.js': [6, 'control-room replies built by the action factories; every type is a schema-backed, denied frame'],
     'dev-preview.js': [1, 'permission_request built by buildPermissionRequestMessage (denied)'],

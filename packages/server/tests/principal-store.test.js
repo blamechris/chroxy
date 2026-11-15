@@ -425,7 +425,7 @@ describe('the one durable-write helper (write, fsync file, rename, fsync directo
     const events = []
     const target = join(d.dir, 'out.json')
     const r = writeDurableFile(target, '{"a":1}', {
-      _fsync: (fd) => { events.push(`fsync:${events.filter((e) => e.startsWith('fsync')).length === 0 ? 'file' : 'dir'}`) },
+      _fsync: (_fd) => { events.push(`fsync:${events.filter((e) => e.startsWith('fsync')).length === 0 ? 'file' : 'dir'}`) },
       _rename: (from, to) => { events.push('rename'); return renameReal(from, to) },
     })
     assert.deepEqual(events, ['fsync:file', 'rename', 'fsync:dir'])
