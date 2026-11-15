@@ -173,7 +173,11 @@ read as host everywhere. So, as contract:
 
 1. **Stamps.** A principal connection is stamped `client.principal = { principalId,
    label, tier, scope, constraints }` and `client.isPrimaryToken = false` (strict
-   `=== true` gates already read false). `isBoundClient` gains the clause
+   `=== true` gates already read false). **Stamp ordering:** `ws-auth.js` currently sets
+   `client.isPrimaryToken = !isPairingCredential`, which is **true** for a non-pairing
+   credential, so the principal branch sets `isPrimaryToken=false`, `principal` and the
+   sentinel **before any `await` or registration**; test: a client observed mid-auth is never
+   `isPrimaryToken === true`. `isBoundClient` gains the clause
    `|| client.principal != null` (S1 owns it; fail-safe, same shape as the `== null`
    rule).
 2. **Sentinel, as defence in depth.** `client.boundSessionId` is set to a **fixed,
@@ -184,22 +188,32 @@ read as host everywhere. So, as contract:
    `auth_ok`, and the bootstrap in `ws-history.js` omit or replace it for principals. A
    principal's `auth_ok` carries no session list beyond its grant and no replay. Test:
    scan every frame a principal receives across the §4.4 fixture for the sentinel string.
-3. **Inbound choke point.** `ws-server.js` calls `refuseBoundMessage(ws, client, msg, …)`
-   before schema validation for every `isBoundClient` client. For a principal the
-   contract is: run **`refusePrincipalMessage`** (the principal dispatch allowlist,
-   S2) **instead of** `refuseBoundMessage` at that point. The bound allowlist is **never
-   consulted** for principals and the bound policy is **not loosened**. Order: dispatch
-   allowlist → `principalMaySee` → handler. Test: a principal sending a type that is
-   bound-allowed but principal-denied (e.g. `terminal_input`) is refused `scope_denied`,
-   and a spy shows `refuseBoundMessage` was not called.
-4. **Outbound choke point.** `ws-server.js` `_send` drops a bound client's frame tagged
-   with another session and then applies `frameForBoundClient`
-   (`outgoing-policy.js`), which is deny-by-default on type. For a principal `_send`
-   applies a separate **`frameForPrincipal`**: a principal **outgoing allowlist**, deny by
-   default, whose scope check is "is this frame's session in the grant" — the sentinel
-   match is not used for delivery. A frame with no `sessionId` is delivered only if its
-   type is on the principal allowlist. S2 adds an **outgoing roster guard** in both
-   directions, modelled on `tests/outgoing-policy.test.js`.
+3. **Inbound choke points — both sites, one selector.** Bound clients are refused at
+   **two** places: `ws-server.js` before schema validation, and again in
+   `handleSessionMessage` (`ws-message-handlers.js`, which calls `refuseBoundMessage` as
+   the dispatch gate). Both sites call one shared selector, **`dispatchPolicyFor(client)`**
+   (S2): a principal gets **`refusePrincipalMessage`** (the principal allowlist),
+   a bound client gets `refuseBoundMessage`, **instead of**, never in addition to. The bound
+   allowlist is never consulted for a principal and the bound policy is **not loosened**.
+   Order: dispatch allowlist → `principalMaySee` → handler. Tests span the whole dispatch:
+   a spy shows **zero `refuseBoundMessage` calls** for a principal at either site; a
+   bound-allowed, principal-denied type (`terminal_input`) is refused `scope_denied`; and
+   **end-to-end positive controls** show a principal read (`principal_sessions_snapshot`)
+   and a principal create each reach their handlers (a selector that is wired at only one
+   site fails one of them). Mutation: revert one site to `refuseBoundMessage`.
+4. **Outbound choke points — principal branch first.** `ws-server.js` `_send` drops a
+   bound client's frame tagged with another session and then applies `frameForBoundClient`
+   (`outgoing-policy.js`, deny-by-default on type); `ws-broadcaster.js` repeats the
+   other-session drop at three `isBoundToOtherSession` sites (the delivery point in
+   `_sendOneWithBackpressure` and the two session-broadcast paths). With a sentinel
+   binding, **those drops would discard every principal frame**, so in `_send` **and** in
+   all three broadcaster sites the **principal branch runs before** the bound-other-session
+   drop. A principal gets **`frameForPrincipal`**: a principal **outgoing allowlist**, deny
+   by default, whose scope check is "is this frame's session in the grant"; a frame with no
+   `sessionId` is delivered only if its type is on the allowlist. S2 adds an **outgoing
+   roster guard** in both directions (model: `tests/outgoing-policy.test.js`). Test: a
+   `principal_event` for a granted `sessionId` is delivered and one for a non-granted
+   session is not, at every site; mutation: move the principal branch below the drop.
 5. **One access helper.** Per-session access goes through **`principalMaySee(client,
    sessionId, need)`** (S2): grant session/cwd constraint, tier and, for mutations,
    lease. No principal-aware handler does its own check.
@@ -260,14 +274,14 @@ while the daemon drains — is refused `scope_denied`. The refusal echoes
 the code.
 
 All **new** types carry a **`principal_` prefix**, because `agent_event` already exists
-(background-agent frames, `packages/protocol/src/schemas/server/activity.ts`, and
+(background-agent frames, `packages/protocol/src/schemas/server/stream.ts`, and
 `BOUND_OUTGOING_ALLOWED`). Proposed `PRINCIPAL_ALLOWED_MESSAGE_TYPES`:
 
 | Tier | Existing types reused | New types proposed |
 |---|---|---|
 | all | `auth`, `key_exchange`, `ping` (transport; asserted as the separate exempt set, §4.2) | `principal_subscribe`, `principal_unsubscribe`, `principal_events_read`, `principal_pending_permissions`, `principal_sessions_snapshot` |
 | steer | `input` (lease required; fenced and queued, §6) | `principal_lease_renew`, `principal_lease_release` |
-| drive | `interrupt` (requestId required, §7.4), `create_session` (closed allowlist, §4.1.1), `destroy_session` (**sessions it created only**) | — |
+| drive | `interrupt` (§4.1.3, §7.4), `create_session` (§4.1.2), `destroy_session` (**sessions it created only**) | — |
 | answer | `permission_response` (**`deny` only**, field-limited, §9) | — |
 
 Server frames, all new and all prefixed: `principal_subscribed`, `principal_event`,
@@ -278,41 +292,83 @@ History and roster reads go through the `principal_*` types, whose payloads are
 daemon-normalized and bounded, never through `request_full_history`, `list_sessions` or
 terminal types that expose raw output.
 
-#### 4.1.1 Create is a closed allowlist (S12)
+#### 4.1.1 Wire envelopes — one closed field set per operation
 
-Principal `create_session` accepts **only** `name`, `cwd`, `provider`, `model`,
-`permissionMode`, `worktree` and `requestId`. **Any other key is refused `scope_denied`**,
-including `.passthrough()` extras and the real fields `sandbox` (a passthrough
-`SandboxSchema` that can set `autoAllowBashIfSandboxed`, allowed commands and paths),
-`codexSandbox` (including `danger-full-access`), `connectionId`, `environmentId`,
-`isolation`, `agentCommId` and `skipPermissions`. User-shell is gated today by
-`provider === USER_SHELL_PROVIDER` plus strict primary (`handleCreateSession`); principal
-create refuses provider `user-shell` explicitly (there is no `userShell` field).
+Every principal operation has **exactly** the fields below; **any field outside the set is
+refused `scope_denied`** (including `.passthrough()` extras), at dispatch and at the handler.
+`leaseId` and `gen` are the lease the mutation is made under (§5.2).
+
+| Operation | Allowed fields |
+|---|---|
+| `input` | `type, sessionId, clientMessageId, data, leaseId, gen` |
+| `interrupt` | `type, sessionId, requestId, leaseId, gen` |
+| `permission_response` | `type, sessionId, requestId, decision: 'deny', leaseId, gen` |
+| `destroy_session` (own sessions only) | `type, sessionId, requestId, leaseId, gen` |
+| `principal_lease_renew` / `principal_lease_release` | `type, sessionId, leaseId, gen` |
+| `create_session` | `type, requestId, cwd, name?, provider?, model?, permissionMode?, worktree?` |
+
+`create_session` is **exempt from a session lease** (no session exists yet). It is
+authorized by a live credential, the grant's constraints, the kill switch and a
+**per-principal create rate limit**; its reply **issues the creator's drive lease**
+(`leaseId`, `gen`). Read operations (§7) carry `requestId` and the fields §7 names; they
+need no lease. §5.2 and §9 reference this table. Test per row: each extra field is refused
+and a positive control with exactly the allowed fields reaches the handler.
+
+#### 4.1.2 Create is a closed allowlist with a v1 ceiling (S12)
+
+The create envelope above is the allowlist. The real fields it excludes include `sandbox`
+(a passthrough `SandboxSchema` that can set `autoAllowBashIfSandboxed`, allowed commands
+and paths), `codexSandbox` (including `danger-full-access`), `connectionId`,
+`environmentId`, `isolation`, `agentCommId` and `skipPermissions`. User-shell is gated
+today by `provider === USER_SHELL_PROVIDER` plus strict primary (`handleCreateSession`);
+principal create refuses provider `user-shell` explicitly (there is no `userShell` field).
 
 The daemon writes **explicit** values — `skipPermissions: false`, an explicit
 `permissionMode` in {`approve`, `plan`}, no sandbox override, the provider's default
-connection — and, **immediately before creation**, validates the *fully resolved* plan:
-provider, model, mode, isolation, `realpath` of `cwd` under a granted root, and the
-effective sandbox. It **refuses** when a daemon default (`_defaultSkipPermissions`,
-`_defaultPermissionMode` in `session-manager.js`, a config sandbox) would make the
-effective configuration more permissive than the grant allows. `worktree: true` is allowed
-only under a granted root. The created session records `createdBy: principalId` (§5.4).
-Test: one case per refused key and per default that would widen, plus a positive-control
-create that succeeds.
+connection, `isolation` ∈ {`none`, `worktree`} — and, **immediately before creation**,
+validates the *fully resolved* plan: provider, model, mode, isolation, `realpath` of `cwd`
+under a granted root, the effective sandbox **and the effective rule set**. It refuses
+when:
 
-#### 4.1.2 Destroy and interrupt
+- the effective **daemon sandbox** carries any auto-allow (`autoAllowBashIfSandboxed`,
+  allowed commands);
+- the effective **Codex sandbox** is `danger-full-access`, whether from the daemon default
+  or from `CHROXY_CODEX_SANDBOX` (`resolveCodexSandbox`, `codex-session.js`);
+- a daemon default (`_defaultSkipPermissions`, `_defaultPermissionMode` in
+  `session-manager.js`) would make the configuration more permissive than the grant.
+
+**Standing allow rules are not inherited.** Chroxy permission rules, persisted
+`allowAlways` project rules and provider-level project-settings allows do **not** carry
+into a principal-created session unless the grant opts in (`chroxy agent grant
+--inherit-rules`). If the daemon cannot disable or detect provider-level allows for a
+provider, **principal create on that provider is refused**. `worktree: true` is allowed
+only under a granted root. The session records `createdBy: principalId` (§5.4). Test: one
+case per refused condition (sandbox auto-allow, `danger-full-access` via env and via
+default, widening default, inherited rule of each kind, undetectable provider) plus a
+positive-control create.
+
+#### 4.1.3 Destroy and interrupt
 
 `destroy_session` is refused for every session whose `createdBy` is not this principal —
 an owner-granted drive lease on a person's session **never** lets a principal close it.
-`interrupt` needs a drive lease, requires an explicit `sessionId` and `requestId`, and is
-refused `fenced_human_active` while the session's own (human) queue holds prompts: each
-provider's interrupt path clears that queue through `clearOutgoingQueue`
-(defined in `base-session.js`; called from the codex app-server and ACP sessions among
-others), so the refusal must be implemented **per provider**, not in the base class. A
-principal interrupt records `origin.kind = 'agent'` in the journal and audit; the human
-`recordUserInterrupt` attribution (`session-manager.js`) is **not** used. Interrupting
-while a permission or question is pending denies that prompt; this is permitted, because
-it is a deny.
+Test: a drive-leased human-started session refuses destroy; mutation: drop the
+`createdBy` check; positive control: an own session is destroyed.
+
+**Interrupt is a PTY write on claude-tui**: `interrupt()` (`claude-tui-session.js`) writes
+Ctrl-C (`\x03`) to the PTY, so it can land in a person's half-typed line, and each
+provider's interrupt path also clears the session's own queue through
+`clearOutgoingQueue` (`base-session.js`; called by the codex app-server and ACP sessions
+among others). A principal interrupt therefore:
+
+- is fenced by the **human predicates** of §6.4 (`ptyDirty`, dirty composer, human activity
+  within 60 s) and refused with `fenced_pty_dirty` / `fenced_human_active` **as refusals
+  here**, and with `human_queue_nonempty` while the session's human queue holds prompts;
+- **never calls `clearOutgoingQueue`** — implemented per provider, not in the base class.
+  Test: the human queue is intact after a refused interrupt; mutation: call the clear;
+- while a permission or question is pending, **requires answer scope** (the interrupt
+  denies that prompt) and is audited `denied_by_interrupt`;
+- records `origin.kind = 'agent'` in the journal and audit; the human
+  `recordUserInterrupt` attribution (`session-manager.js`) is not used.
 
 ### 4.2 Roster guard (S2)
 
@@ -338,38 +394,44 @@ source with the repo's parser, not a hand tokenizer.
 
 ### 4.3 Never — each capability mapped to two independent refusals
 
-No capability depends on one handler remembering to check. Column (a) is the dispatch
-allowlist (the type is absent). Column (b) is the **existing** gate that already refuses a
-bound or non-primary client and therefore refuses a principal through §3.1. **The table is
-a machine-read constant in code (S2, `PRINCIPAL_NEVER_CAPABILITIES`) and the guard reads
-that constant, not this prose.**
+Column (a) is the dispatch allowlist (the type is absent). Column (b) is a **handler-level
+predicate** that refuses a principal **on its own**. Because a principal runs
+`refusePrincipalMessage` and not `refuseBoundMessage` (§3.1), the bound allow/deny lists
+are **not** a second layer and are not counted as one. Column (b) names the actual predicate,
+and where none exists says **"S2 adds a handler refusal"** and S2 owns it. **The table is a
+machine-read constant in code (S2, `PRINCIPAL_NEVER_CAPABILITIES`) and the guard reads that
+constant, not this prose.**
 
-| Never | (a) dispatch | (b) existing gate that also refuses it |
+| Never | (a) dispatch | (b) handler predicate that refuses a principal |
 |---|---|---|
-| Auto / more-permissive mode, `acceptEdits`, `skipPermissions` | `set_permission_mode` absent; create is a closed allowlist (§4.1.1) | `set_permission_mode` is bound-guarded and resolves the bound session (the sentinel matches none); the unattended mode needs `allowAutoPermissionMode`; `skipPermissions:false` unchanged |
-| Permission rules, `allowAlways` | `set_permission_rules` absent; `allow*` refused (§9) | `set_permission_rules` in `BOUND_DENIED_MESSAGE_TYPES`; `permission_response` is bound-guarded and downgrades a standing allow |
-| Credentials, `revoke_token`, pairing (`pair_approve`, `pair_deny`), QR and `/connect` | absent | the WS types are in `BOUND_DENIED_MESSAGE_TYPES`; `revoke_token` is also strict `isPrimaryToken`; pairing HTTP routes refuse principals (§4.5) |
-| Identity rotation | no WS type exists (CLI only) | CLI needs local primary authority |
-| MCP config | `add_mcp_server` / `remove_mcp_server` absent | bound denied list; `rejectMcpConfigWriteUnlessPrimary` |
-| Skill trust | `skill_trust_accept` / `skill_trust_grant` absent | bound denied list |
-| File and git writes | `write_file`, `append_memory`, `git_stage`, `git_unstage`, `git_commit`, `git_create_pr` absent | bound denied list; `write_file` also hits the config-dir refusal in `ws-file-ops` |
-| Environments | `create_environment` / `destroy_environment` absent | bound denied list |
-| Config / settings | host-wide `set_*`, `notification_prefs_set`, `session_preset_set` absent | bound denied list |
-| User-shell, `terminal_input`, shell `terminal_subscribe` | absent | `terminal_input` is bound-allowed but session-local (the sentinel refuses); the user-shell gates are strict `isPrimaryToken` (`handleTerminalInput`, `handleCreateSession` `PRIMARY_TOKEN_REQUIRED`). A principal reaches a claude-tui PTY only through the daemon-composed `sendMessage()` of §6 |
-| Dev-preview publication | `open_dev_preview` absent | bound denied list; needs an authenticated primary-token WS client |
-| Archive purge / policy | `delete_archived_session`, `set_session_archive_policy` absent | bound denied list |
-| Daemon update / restart | `daemon_update_action` absent | bound denied list; `isPrimaryToken === true && !boundSessionId` first-statement gate |
-| Scheduled tasks | `scheduled_task_action`, `set_scheduler_enabled` absent | bound denied list; `rejectSchedulerWriteUnlessPrimary` |
-| Orchestration start | `orchestration_run_start` absent | bound denied list; `guardAction({ requirePrimary: true })` |
-| Checkpoint file restore | `restore_checkpoint` absent | bound denied list |
-| `set_model` (v1) | absent | bound-allowed but session-local (the sentinel refuses); a model-switch delta is required to add it |
+| Auto / more-permissive mode, `acceptEdits`, `skipPermissions` | `set_permission_mode` absent; create envelope (§4.1.1) | `handleSetPermissionMode` session resolution (S2 confirms it refuses the sentinel binding); the unattended mode needs `allowAutoPermissionMode` (`settings-handlers.js`); `skipPermissions:false` unchanged |
+| Permission rules, `allowAlways` | `set_permission_rules` absent; `allow*` refused (§9) | `handleSetPermissionRules` refuses `isBoundClient(client)` (and gains the principal clause) |
+| `revoke_token` | absent | `handleRevokeToken` refuses `client.isPrimaryToken !== true` |
+| Pairing (`pair_approve`, `pair_deny`), QR, `/connect` | absent | **S2 adds a handler refusal** for the WS pair types; the pairing HTTP routes refuse principals (§4.5) |
+| Identity rotation | no WS type (CLI only) | CLI needs local primary authority |
+| MCP config | `add_mcp_server` / `remove_mcp_server` absent | `rejectMcpConfigWriteUnlessPrimary` |
+| Skill trust | `skill_trust_accept` / `skill_trust_grant` absent | **S2 adds a handler refusal** |
+| File and git writes | `write_file`, `append_memory`, `git_stage`, `git_unstage`, `git_commit`, `git_create_pr` absent | `write_file` hits the config-dir refusal in `ws-file-ops` for that path only; **S2 adds a handler refusal** for the rest |
+| Environments | `create_environment` / `destroy_environment` absent | `handleCreateEnvironment` refuses `isPrimaryToken !== true`; `handleDestroyEnvironment` refuses `isBoundClient` |
+| Config / settings | host-wide `set_*`, `notification_prefs_set`, `session_preset_set` absent | **S2 adds a handler refusal**: `handleNotificationPrefsSet` has **no** client-authority check today, and `handleSessionPresetSet` shows none in its opening checks |
+| User-shell, `terminal_input`, shell `terminal_subscribe` | absent | `handleTerminalInput` returns silently when `isUserShellSession(entry) && client.isPrimaryToken !== true`, a check **conditional on a user-shell session**; for any other session `terminal_input` is bound-allowed and session-local, so **S2 adds an unconditional principal refusal** in `handleTerminalInput`. `handleCreateSession` `PRIMARY_TOKEN_REQUIRED` covers shell creation. A principal reaches a claude-tui PTY only through the `sendMessage()` of §6 |
+| Dev-preview publication | `open_dev_preview` absent | requires an authenticated primary-token WS client ([`bearer-token-authority.md` §3](bearer-token-authority.md)); **S2 confirms the handler predicate** |
+| Archive purge / policy | `delete_archived_session`, `set_session_archive_policy` absent | both handlers refuse `isBoundClient(client)` |
+| Daemon update / restart | `daemon_update_action` absent | `handleDaemonUpdateAction` first-statement `isPrimaryToken === true && !boundSessionId` |
+| Scheduled tasks | `scheduled_task_action`, `set_scheduler_enabled` absent | `rejectSchedulerWriteUnlessPrimary` |
+| Orchestration start | `orchestration_run_start` absent | `guardAction({ requirePrimary: true })` |
+| Checkpoint file restore | `restore_checkpoint` absent | `handleRestoreCheckpoint` refuses `isBoundClient(client)` |
+| `set_model` (v1) | absent | session-local resolution; **S2 confirms it refuses the sentinel**; a model-switch delta is required to add it |
 
-**Proving "two independent refusals".** For each row the test (1) calls the **real
-handler directly** with a principal-stamped client and the dispatch allowlist bypassed,
-and expects a refusal; (2) with the allowlist active, expects `scope_denied`. The
-mutation proof **deletes the column-(b) gate** and expects red, so the dispatch list alone
-is shown not to be carrying the row. A row whose column (b) later changes is a review
-trigger for this document.
+`isBoundClient` gains the `client.principal != null` clause (§3.1), so every row whose
+predicate is `isBoundClient` refuses a principal without being edited.
+
+**Proving "two independent refusals".** For each row the test (1) calls the **real handler
+directly** with a principal-stamped client and the dispatch allowlist bypassed, and expects
+a refusal; (2) with the allowlist active, expects `scope_denied`. The mutation proof
+**deletes the column-(b) predicate** and expects red, so the dispatch list alone is shown
+not to carry the row. A row marked "S2 adds a handler refusal" is **red until S2 adds it**.
+A row whose column (b) later changes is a review trigger for this document.
 
 ### 4.4 Common test rules (apply to every guard in this document)
 
@@ -420,7 +482,8 @@ Lease { leaseId, sessionId, principalId, tier: 'steer'|'drive', gen, grantedBy, 
 - **One holder per tier per session.** A second grant for a held tier is refused
   `lease_held`; the reply names the **holder's label only** — never `principalId`, token
   or generation.
-- Every principal mutation carries `leaseId` and `gen`. Any mismatch at the effect point →
+- Every principal mutation carries `leaseId` and `gen` as listed in the §4.1.1 table
+  (create is exempt and receives its lease in the reply). Any mismatch at the effect point →
   `lease_stale`. `gen` increments on every grant, renew-after-lapse, suspend and revoke,
   so a send queued before a pre-emption cannot land after it. The `gen` high-water mark is
   **persisted synchronously** (§5.4) and owned by S8.
@@ -437,6 +500,11 @@ Lease { leaseId, sessionId, principalId, tier: 'steer'|'drive', gen, grantedBy, 
   `lease_suspended` until the owner resumes it (`principal_admin_lease_resume`) or it
   expires. A principal cannot resume its own lease. A **steer lease coexists** with human
   use but its deliveries are fenced (§6.4).
+- **Owner-opt-in `autoResumeAfterIdleMinutes`** (per lease, default off, e.g. 5): after that
+  long with no human input or terminal activity, a suspended drive lease resumes, `gen`
+  bumps, and the resume is audited.
+- **If persisting a suspension fails** on the human-input path, **human input still
+  proceeds**: the lease is suspended in memory and the write is retried.
 - **Per-session "agents off"** (`principal_admin_session_off`): refuses every principal
   request on that session with `agents_off`, revokes its leases and drops its queue
   (audited). Only primary authority may clear it.
@@ -453,7 +521,8 @@ suspension > `createdBy` restoration.**
 the persistence, S12 consumes it). After a restart the creator, if its credential is valid
 and in scope, is re-granted a **drive lease** (new `leaseId`, `gen` continuing from the
 persisted high-water mark) **only if no suppression record exists for that
-(session, principal)**; `createdBy` alone never restores suppressed authority. A session
+(session, principal) and the session's persisted history holds no human-origin entry since
+creation**; `createdBy` alone never restores suppressed authority. A session
 whose creator was revoked or expired behaves as a human-started session. Sessions a
 person started never gain `createdBy`. Test: a restart after each owner action
 (agents-off, suspend, revoke) leaves the principal without a lease; mutation: ignore the
@@ -468,7 +537,7 @@ not take the explicit-claim path, and no evaluator outcome adopts primary for it
 A principal send that meets a busy session or an active human is **queued in the agent
 queue** (§6.5), never admitted through the primary path. Agents never write to the
 human's queue (`_outgoingQueue`, cap `OUTGOING_QUEUE_MAX` = 10 in `base-session.js`),
-composer or primary role, and never clear it (§4.1.2).
+composer or primary role, and never clear it (§4.1.3).
 
 ## 6. Input Contract
 
@@ -491,7 +560,10 @@ content, timestamp, messageId?, source?}` with no actor beyond `source: 'daemon'
 **Proposed (S7):** an `origin` field, persisted on the entry **and** on the live
 `user_input` broadcast: agent `origin: { kind: 'agent', principalId, label }`; human
 `origin: { kind: 'user', clientId, device }`. Dashboards and the app render an origin
-chip; an entry with no `origin` is a legacy human entry.
+chip; an entry with no `origin` is a legacy human entry. Test (S7): a principal input is
+persisted and replayed with `origin.kind === 'agent'` and its label, and renders an agent
+chip in the dashboard and app; a human input never carries `kind: 'agent'`. Mutation: drop
+`origin` from the persisted entry; positive control: a human entry renders as human.
 
 ### 6.3 Model-visible framing (D5)
 
@@ -524,7 +596,7 @@ stated reason (§6.7):
    hash → `payload_mismatch`. Dedup runs **before** the fence and enqueue, so a retry of a
    queued message can never queue it twice.
 9. **Audit attempt** (§10) via `auditOrRefuse()` — an unwritten line means **no effect**.
-10. **Fence → deliver or enqueue.** If the fence below is clear and the agent queue is
+10. **Admission fence → deliver or enqueue.** If the admission fence below is clear and the agent queue is
     empty, deliver through the provider write boundary (§6.9); otherwise enqueue (§6.5).
     The ack is `accepted` (`dispatch_started`), or `queued` carrying the fence cause as
     `reason` (`fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`,
@@ -536,59 +608,94 @@ before the attempt line so a replayed duplicate produces neither a second effect
 second attempt record. Test: assert this order with a recording harness, for each gate
 failing in turn (mutation: swap two gates).
 
-**The delivery fence** applies to **every** principal delivery at both tiers, and is
-re-evaluated by the drain. All of:
+**The delivery fence has two parts.** It applies to **every** principal delivery at both
+tiers.
+
+**Admission** (evaluated before dispatch, and by the drain). All of:
 
 - No #8281 handoff blockers: `turn_active` (`_isBusy`, **not** `isRunning`, so background
   shells never block), `queued_prompts` — **including a dequeued human prompt that has not
   started yet (the dequeue-in-flight flag)** — `pending_permission`, `pending_question`,
-  `evaluator_pending`. Where #8281 has not landed, S9 implements the same predicates and
-  the guard test names each. A pending permission or question fences **every** tier: input
+  `evaluator_pending`. Where #8281 has not landed, S9 implements the same predicates and the
+  guard test names each. A pending permission or question fences **every** tier: input
   landing in an approval picker is an approval by side effect (discord §4.1).
 - Session not paused by budget or quota.
-- **No human PTY activity (claude-tui):** a daemon-owned per-session **`ptyDirty`** flag
-  is set by any human `terminal_input` write (`handleTerminalInput` calls
-  `writeTerminalInput` directly and bypasses `handleInput`, so no input-path signal sees
-  it) and cleared **only** at an observed submit (Enter) or turn start. It **survives
-  client disconnect and has no time expiry**. While set → `fenced_pty_dirty`.
-- **No dirty human composer:** clients send a throttled `composer_state {sessionId,
-  dirty}` (S9). A dirty composer stays dirty for a **5 min grace** after its client
-  disconnects. **A primary client that never sent the signal counts as "human active"
-  for at most 10 min since its last human activity** (input, terminal input, claim);
-  after that the fence needs only `ptyDirty` clear and no recent human write, so a stale
-  primary cannot starve delivery.
+- **No human PTY draft (claude-tui):** the daemon-owned per-session **`ptyDirty`** flag is
+  clear (below).
+- **Composer state:** no dirty human composer, per the capability rule below.
 - **No human input or human `terminal_input` in the last N = 60 s** (`fenced_human_active`).
 
-Fence predicates are **per provider**: `ptyDirty` applies to claude-tui; SDK, CLI and
-Codex sessions have no shared PTY composer, so only the remaining predicates apply. On a
-session with no human client attached (typically one the principal created) the human
-predicates are clear by construction.
+**Continuation** (re-checked during the write, §6.9): credential, kill switch, "agents
+off", lease and `gen`, human activity, and **no new prompt**. Continuation carries an owned
+**`deliveryId`** and **tolerates that delivery's own `_isBusy` / `_activeTurn`**: claude-tui
+sets `_isBusy` before writing, so a continuation check that applied the admission
+predicates would abort every delivery. Test against the **real provider lifecycle** (fixture
+claude-tui and fixture SDK): a clean delivery completes; mutation: apply the admission
+`turn_active` predicate during continuation and watch every delivery abort.
+
+**`ptyDirty` (D2, R5).** `handleTerminalInput` calls `writeTerminalInput` directly and
+bypasses `handleInput`, so no input-path signal sees PTY typing; hence this flag.
+
+- Set only by **data-bearing** human keystrokes or paste. Terminal **reply sequences**
+  (cursor-position reports, device-attribute replies, focus in/out) and pure navigation
+  keys do **not** set it. Test: auto-replies alone never set it.
+- **Cleared only by a verified composer reset**: a turn start caused by that human input,
+  or a provider-adapter **prompt detector** reporting an empty composer line. **Enter/CR is
+  not proof**: in multi-line composition a bare CR is a newline, not a submit
+  (`_writePtyTextThrottled`, `claude-tui/pty-driver.js`). Ctrl-C / Ctrl-U / Esc are
+  *candidates* that still need the detector's confirmation. **No empty-composer detector
+  exists in claude-tui today** (the nearest signal is the PTY-quiet "composer ready" wait,
+  which says nothing about the line's content); S9 must add one, and until it does a
+  `ptyDirty` flag clears **only at a turn start caused by that human input** — it fails
+  closed.
+- It **survives the last client disconnecting and has no time expiry**.
+- **Backstop, no auto-clear:** the roster reports `blockedOn: human_draft`, and the owner
+  may clear it explicitly with the strict-primary `principal_admin_session_clear_draft`.
+- Human `terminal_input` counts as human activity for drive-lease pre-emption (§5.3) and
+  for the 60 s window.
+
+**Composer capability (R7).** Clients negotiate **`composer_state_v1`** at auth and send a
+throttled `composer_state {sessionId, dirty}`. A capable client must **affirmatively**
+report clean; a dirty composer stays dirty for a **5 min grace** after its client
+disconnects. While a **legacy** (non-capable) client is attached as primary the fence
+**holds with no time lapse**; the roster shows `blockedOn: legacy_client`, and the owner
+may set a per-session strict-primary override. Test: unsent typing in a legacy client past
+10 minutes still fences.
+
+Fence predicates are **per provider**: `ptyDirty` applies to claude-tui; SDK, CLI and Codex
+sessions have no shared PTY composer, so only the remaining predicates apply. A session
+with **no human client attached** has its *client-reported* predicates clear by
+construction, **but only if `ptyDirty` is clear**.
 
 ### 6.5 Agent delivery lock and queue (D6, D4)
 
 One **per-session agent delivery lock and one drain**, shared by **all principals and the
 Discord return path** (reusing its queue component, D2, with a distinct audit component).
 Entries are tagged by source (`principalId` or `discord`) and drained **FIFO across
-sources**; a revoke drops only that principal's entries; a steer holder and a drive holder
-of different principals can never write concurrently because the lock serializes them.
+sources**; a steer holder and a drive holder of different principals can never write
+concurrently because the lock serializes them.
 
-The queue is **separate from `_outgoingQueue`**, in-memory, **cap 3, reject-new**
-(`agent_queue_full`), **TTL 15 min**. The cap and TTL are chosen for **bounded staleness
-and bounded owner lockout**, not for any external token lifetime.
+The queue is **separate from `_outgoingQueue`**, in-memory, **cap 3 per source** plus a
+**per-session ceiling of 6**, **reject-new** (`agent_queue_full`), **TTL 15 min**, so one
+principal cannot starve Discord or another principal. The cap and TTL are chosen for
+**bounded staleness and bounded owner lockout**, not for any external token lifetime.
 
 - **The human queue drains first.** The agent drain runs only from the post-turn drain,
   **after** the human queue is empty and no dequeue is in flight.
 - An entry that **expires** emits an audit line and a `principal_event` of kind
   `input_expired`, visible to the principal. A missing `turn_ended` is bounded by the TTL.
-- Entries are dropped — one audit line each, and the dedup record updated to its terminal
-  outcome (§6.6) — on session end, daemon restart, kill, revocation, "agents off" and lease
-  release/suspension.
-- **Only `zero_effect` transient refusals re-enqueue** (TTL preserved, after a full gate
-  recheck, audited as a retry); `uncertain` is never retried (§6.9).
+- **Dropped** — one audit line each, dedup record updated (§6.6) — on session end, daemon
+  restart, **lease expiry, lease stale or suspension**, lease release, revocation, kill and
+  "agents off". Kill, revoke and "agents off" drop **principal-tagged entries only**; Discord
+  entries are governed by the Discord path's own controls (its kill switch,
+  [`discord-return-path.md` §9.2](discord-return-path.md)).
+- **Re-enqueue is allowed only** for a `zero_effect` outcome with a fence cause
+  (`fenced_*`, `fenced_busy`): TTL preserved, full gate recheck, audited as a retry. Every
+  other outcome drops; `uncertain` is never retried (§6.9).
 - The queue is non-durable: losing a parked message on restart is acceptable, executing a
   stale one is not.
 
-### 6.6 Durable dedup (E3)
+### 6.6 Durable dedup (E3, R10)
 
 Existing input dedup (`reserveInputRequest`; 10 min TTL, 60 min tombstone, cap 4096 per
 session, `INPUT_DEDUP_*` in `input-handlers.js`) is **process-local** — the ack carries
@@ -599,58 +706,83 @@ session, `INPUT_DEDUP_*` in `input-handlers.js`) is **process-local** — the ac
 through the debounced session-state write (which can trail by up to 2 s). An unwritable
 ledger means **no effect**.
 
-- Each record moves **`reserved` → `committed(<terminal or queued outcome>)`**; a later
-  queue drop **updates** the record to its terminal outcome.
-- A `reserved` record found after restart replays as `uncertain` and is **never
-  dispatched**.
+States and boot recovery:
+
+| State | Set when | After a restart |
+|---|---|---|
+| `reserved` | before the audit attempt | `uncertain` (never dispatched) |
+| `rejected:audit` | `auditOrRefuse` failed | terminal |
+| `committed(queued)` | entry enqueued | `dropped:restart` (the queue is not durable) |
+| `dispatching` | persisted **before draining** | `uncertain` |
+| `committed(<terminal>)` | a delivery or drop outcome | terminal |
+
 - **Retention is bound to the credential**: a record lives until its principal's
   `expiresAt` (≤ 7 d), so no id can be re-executed within a credential's lifetime.
-- At a **per-principal cap (10 000)** new input is refused `dedup_capacity`; nothing is
-  evicted.
+- Records are **compact hashes**; the cap is **100 000 per principal**. At the cap new input
+  is refused `dedup_capacity`; nothing is evicted; the roster surfaces "nearing cap".
 - Replayed acks carry `replayed: true`.
 
 Tests: a kill between the ledger write and the effect; a duplicate of a queued-then-dropped
-entry; restart with a `reserved` record. Mutation: evict at the cap instead of refusing.
+entry; one restart per row of the table. Mutation: evict at the cap instead of refusing.
 **Never auto-retry a principal mutation after an `uncertain` result** — in the daemon, in
 agent-control and in supervisor guidance.
 
-### 6.7 Ack reasons
+### 6.7 Ack reasons, by channel
 
-Consistent lower-snake case. Refusals: `scope_denied`, `lease_required`, `lease_stale`,
-`lease_suspended`, `lease_held`, `agents_off`, `agent_queue_full`, `dedup_capacity`,
-`payload_mismatch`, `invalid_input`. Reasons on a `queued` ack (not refusals):
-`fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`.
-Outcome (journal and audit, not an ack): `input_expired`. All are in addition to the
-existing input ack reasons. To an **unauthenticated or non-granted** caller they collapse
-to the connection-level refusal; specific reasons go only to an authenticated principal
-about its own request. Test: such a caller cannot distinguish any two reasons.
+Consistent lower-snake case; the channel is part of the contract.
 
-### 6.8 The evaluator (D1)
+| Channel | Reasons |
+|---|---|
+| Input ack, refusals | `scope_denied`, `lease_required`, `lease_stale`, `lease_suspended`, `agents_off`, `agent_queue_full`, `dedup_capacity`, `payload_mismatch`, `invalid_input` |
+| Input ack, `queued` reasons (not refusals) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy` |
+| Admin reply (`principal_admin_lease_grant`) | `lease_held` (names the holder label only) |
+| Interrupt ack | `scope_denied`, `lease_*`, `agents_off`, `fenced_pty_dirty` and `fenced_human_active` **as refusals**, `human_queue_nonempty` (§4.1.3) |
+| Journal / audit outcome | `input_expired`, `denied_by_interrupt`, `dropped:<reason>` |
+
+All are in addition to the existing input ack reasons. To an **unauthenticated or
+non-granted** caller they collapse to the connection-level refusal; specific reasons go only
+to an authenticated principal about its own request. Test: such a caller cannot distinguish
+any two reasons.
+
+### 6.8 The evaluator and the canonical payload
 
 Principal input **bypasses the prompt evaluator in v1**: no rewrite, no clarify. Today
-`handleInput` can assign `textToSend = result.rewritten` after framing; for a principal
-the delivered text is exactly the sanitized, framed text, the **audit hash and delivery
-record bind to those exact bytes**, and no evaluator outcome adopts primary.
+`handleInput` can assign `textToSend = result.rewritten` after framing; for a principal no
+evaluator outcome changes the text, and none adopts primary.
 
-### 6.9 The provider write boundary (D5)
+**Canonical payload (R15).** The delivered text is further normalized by the provider
+adapter — claude-tui's `_writePtyTextThrottled` normalizes `\r\n` to `\n`, strips embedded
+paste markers and **removes trailing newlines** on its multi-line (bracketed-paste) path
+before writing. The daemon therefore
+defines the **canonical model-visible payload as the text after all normalization**
+(framing, sanitize, and the adapter's own transforms): the **audit hash and the delivery
+record bind to those exact bytes**, and an adapter must preserve the canonical payload
+rather than transform it silently (a transform is applied *before* hashing, via a shared
+function). Test with a **trailing-newline positive control**: a body ending in LF hashes
+and delivers identically, and a mutation that hashes the pre-normalization text goes red.
 
-Principal input never goes through `_outgoingQueue` or any provider startup/draining
-queue (the SDK queues while `_drainingTurn` is set). A provider admission option
-(proposed `principalAdmission: true`) sends it straight to the agent delivery lock. The
-provider returns one explicit outcome: **`zero_effect`** (refused before any byte or
-effect), **`dispatched`**, or **`uncertain`** (a partial write, or a failure after
-writing).
+### 6.9 The provider write boundary and PTY arbitration (D5, R5)
 
-Credential, kill switch, "agents off", lease, `gen` and the fence are **re-validated at the
-write boundary**: before the first byte and, for claude-tui, **before each throttled chunk
-and before the final submit**. If readiness cannot be established the send fails closed
-with `zero_effect`; the TUI's "writing anyway" path is not taken for principals. If human
-`input` or `terminal_input` arrives during an agent PTY write, the agent write **aborts
-before submit**, clears its own partial line with the provider's line-clear sequence, and
-reports `uncertain`: the human wins. A kill, revoke or "agents off" during an in-flight
-drain aborts at the next boundary check, audited. Tests: a fault injected at each boundary
-check; mutation: skip the pre-submit re-check; positive control: an uninterrupted write
-dispatches.
+Principal input never goes through `_outgoingQueue` or any provider startup/draining queue
+(the SDK queues while `_drainingTurn` is set). A provider admission option (proposed
+`principalAdmission: true`) sends it straight to the agent delivery lock. The provider
+returns one explicit outcome: **`zero_effect`** (refused before any byte or effect),
+**`dispatched`**, or **`uncertain`** (a partial write, or a failure after writing).
+
+The **continuation** checks of §6.4 run **before the first byte and, for claude-tui, before
+each throttled chunk and before the final submit**; `ptyDirty` is **re-read at the final
+pre-submit check**. If readiness cannot be established the send fails closed with
+`zero_effect`; the TUI's "writing anyway" path is not taken for principals.
+
+**Arbitration.** Human `terminal_input` participates in the agent delivery lock: while an
+agent PTY write is in progress, **human bytes are held**, the agent writer **stops, clears
+its partial line and confirms the clear**, and only then are the held human bytes forwarded.
+Latency is bounded by one chunk and **no human keystroke is dropped**; the interrupted
+delivery reports `uncertain`. A kill, revoke or "agents off" during an in-flight drain
+aborts at the next boundary check, audited. Tests: a human keystroke at each chunk boundary
+loses nothing and is forwarded after the confirmed clear; a fault injected at each boundary
+check; mutation: forward human bytes before the clear is confirmed; positive control: an
+uninterrupted write dispatches.
 
 ## 7. Events
 
@@ -668,14 +800,20 @@ broadcast frames carry no per-session sequence; `request_full_history` has no
   the window start and is reported as a gap.
 - **Cursor** `{ sessionId, journalId, seq }`. Gap reasons: `evicted`, `journal_reset`,
   `restart_loss`, `unknown_cursor`.
-- **Seq survives a crash by reservation (E4).** The journal reuses the seq **reservation**
-  pattern of `session-message-history.js` (`_nextSeq` / `_seqReserved`, `SEQ_RESERVATION_STEP`,
-  #8259): no seq above the persisted reservation is ever issued, so within one `journalId`
-  seq stays monotonic across a crash and a crash costs only a gap flag for the unpersisted
-  tail, never a reused seq. A start that cannot prove the reservation mints a new
-  `journalId`, and an older cursor reports `restart_loss`. Tests use an **independent
-  oracle sequence** (not the journal's counters) and include an **unclean-restart** case;
-  the mutation reuses the old `journalId`/seq after a crash.
+- **Seq survives a crash by a *confirmed* reservation (E4, R14).** The journal reuses the
+  seq **reservation** idea of `session-message-history.js` (`_nextSeq` / `_seqReserved`,
+  `SEQ_RESERVATION_STEP`, #8259) but **not its failure handling**: `_nextSeq` advances
+  `_seqReserved` *before* persistence and only logs a failure of its reservation handler,
+  and the manager's callback ignores the result of `_flushPersistOrWarn`
+  (`session-manager.js`). The journal therefore requires a **confirmed durable**
+  reservation — the `_flushPersistConfirmedDurable` standard (file **and** directory fsync) —
+  **before it issues any seq beyond it**. If the confirmation fails the journal **emits no
+  event under that `journalId`** (the next successful start mints a new one) and an older
+  cursor reports `restart_loss`. Within one `journalId` seq stays monotonic across a crash
+  and a crash costs only a gap flag for the unpersisted tail, never a reused seq. Tests use
+  an **independent oracle sequence** (not the journal's counters), an **unclean-restart**
+  case, and a **persistence failure then crash** case; the mutation issues seqs past an
+  unconfirmed reservation.
 
 ### 7.2 Subscribe, replay, live fence
 
@@ -691,14 +829,17 @@ gap and **ends the subscription**; the client re-subscribes. Eviction between `h
 and the fence reports a gap. `principal_events_read { requestId, sessionId, cursor, limit
 }` is a paged pull (`principal_events_page`), **limit ≤ 200**. Both are limited to granted
 sessions; a non-granted id is refused `scope_denied`, indistinguishable from a nonexistent
-one.
+one, and a **multi-id `principal_subscribe` is all-or-nothing**: if any id is not granted the
+whole request is refused `scope_denied` and nothing is subscribed.
 
 ### 7.3 Pending permissions, roster, turn outcome
 
 - `principal_pending_permissions` returns a snapshot from the **canonical state of both
   permission pipelines** ([`permission-floor.md` §3](permission-floor.md#3-both-pipelines-one-implementation)),
   per request: the `floored` verdict, **`explicitConsent` and `nonDelegable`** (so a
-  future daemon-side answer policy has its inputs; #7860, S4).
+  future daemon-side answer policy has its inputs; #7860, S4). The tool **`input` is omitted
+  for floored requests**; otherwise a **bounded, redacted summary** is given (reusing the
+  existing sanitised permission description), never the raw input.
 - `principal_sessions_snapshot`: granted sessions with observed and declared status
   (#9026), handoff blockers, lease-holder **label**, model requested/observed (S5).
 - `turn_started { turnId, causedBy, origin }` and `turn_ended { turnId, outcome }` journal
@@ -707,14 +848,16 @@ one.
 ### 7.4 Interrupt
 
 `interrupt` gains a required `requestId` for principals; the daemon answers
-`principal_interrupt_ack { requestId, status: 'sent' | 'not_running' | 'rejected' }`
-(no `interrupt_ack` exists in the protocol today). The ack is **admission only** and is
+`principal_interrupt_ack { requestId, status: 'sent' | 'not_running' | 'rejected', reason? }`
+(no `interrupt_ack` exists in the protocol today; `reason` is one of §6.7's interrupt codes). The ack is **admission only** and is
 **not replayable** after a restart; whether the turn ended is `turn_ended` in the journal.
 
 ## 8. Redaction — what can and cannot be guaranteed (G1)
 
-Never in the journal, snapshots, acks or audit: principal tokens (the daemon never logs
-them and holds only hashes), raw PTY, the full text of a rejected body. Beyond that, be
+Never in the journal, snapshots, acks or audit: raw PTY and the full text of a rejected
+body. Principal tokens are never in **daemon-originated** fields (the daemon never logs
+them and holds only hashes); session text that happens to echo a token is caught only by
+the existing redaction patterns. Beyond that, be
 honest about what redaction can promise:
 
 - **Provenance-based suppression:** the result of a tool call whose permission request was
@@ -727,8 +870,8 @@ honest about what redaction can promise:
 
 ## 9. Permission Answers
 
-- **Deny only in v1 (D6).** A principal `permission_response` may carry **only** `type`,
-  `sessionId`, `requestId` and `decision: 'deny'`, for a pending request on a session it
+- **Deny only in v1 (D6).** A principal `permission_response` carries **only** the §4.1.1 fields
+  (`type`, `sessionId`, `requestId`, `decision: 'deny'`, `leaseId`, `gen`), for a pending request on a session it
   holds a drive lease on. `reason`, `editedInput`, `scope`, `allowAlways` and any other
   field are refused `scope_denied`, at dispatch **and** at the handler. The model-facing
   denial text is a **fixed daemon-authored string** naming the label (for example "Denied
@@ -781,22 +924,26 @@ Repeated identical rejections within a minute collapse into one counter line.
 
 - `chroxy agent disable --all | --label <label>` (`principal_admin_disable`), a dashboard
   button. **Inbound only:** outbound notification sinks are untouched.
-- **A durable barrier first.** The disabled flag is **written, fsynced and renamed
-  *before* the kill is acknowledged**; cleanup happens after. Order: persist barrier →
-  flip in memory (new frames refused `agents_off`) → close connections 4401 → **drain every
-  queue, one `dropped:killed` audit line per entry** → release leases.
+- **Revoke and kill share one order: memory first, then durability, then the ack.** Flip in
+  memory first (fail closed: new frames refused `agents_off`, principal auth refused) →
+  **persist** with the durable standard of `_flushPersistConfirmedDurable`
+  (`session-manager.js`): write, fsync the file, rename, **fsync the directory** → **ack**.
+  Then close connections 4401 → **drain every principal-tagged queue, one `dropped:killed`
+  audit line per entry** → release leases.
+- **If persistence fails**, memory **stays disabled**, principal auth stays refused, and the
+  ack says **"not durable"**. **Residual:** a restart before a successful persist can revive
+  the principals, so the owner should revoke or rotate again once the store is writable.
 - **Boot reads the flag fail-closed.** An **absent** flag means never killed; an
-  **unreadable or corrupt** flag means **disabled**.
-- If the barrier cannot be written, principals stay disabled **in memory**, principal auth
-  is refused, and the acknowledgement says the persist failed; the move-aside of the
-  principal store is a checked fallback, not an assumed one.
+  **unreadable or corrupt** flag means **disabled**. The move-aside of the principal store is
+  a checked fallback, not an assumed one.
 - Re-enable is an explicit operator action (`principal_admin_enable`), never automatic.
 - Deleting a principal's token file revokes nothing (the daemon stores only a hash), so
   **revoke or disable is the lever**; deleting the principal store invalidates every
   principal.
 
-Tests: fault-inject every transition; a real restart after a kill; an unreadable flag at
-boot. Mutation: acknowledge before the fsync; positive control: a healthy kill persists.
+Tests: fault-inject every transition including a failed directory fsync; a real restart
+after a kill and after a revoke; an unreadable flag at boot. Mutation: acknowledge before
+the fsync; positive control: a healthy kill persists.
 
 ## 11. Blast-Radius Ledger
 
@@ -805,7 +952,7 @@ boot. Mutation: acknowledge before the fsync; positive control: a healthy kill p
 | **Primary token** (reference) | Everything the owner can do through Chroxy ([`bearer-token-authority.md` §1](bearer-token-authority.md#1-trust-model-in-one-sentence)): all sessions, input, modes, config, shells | — |
 | Principal token, **observe** | Read journal, roster, pending permissions for granted sessions (session output; §8, §13) | Send anything, hold a lease, reach HTTP |
 | Principal token, **steer** | Observe + labelled, fenced, queued input into a leased session; cap 3 queued | Approve, interrupt, create, change any mode or config |
-| Principal token, **drive** | Input and interrupt on leased/own sessions; create within cwd/provider/model bounds in `approve`/`plan` mode with explicit values, no sandbox override, and a **resolved plan validated no more permissive than the grant** (§4.1.1) — i.e. an agent that can run *prompted* work the owner (or an automated rule) must still approve per tool | Raise a mode to auto/acceptEdits, set `skipPermissions`, override a sandbox, approve a prompt, rules, shells, close a session it did not create |
+| Principal token, **drive** | Input and interrupt on leased/own sessions; create within cwd/provider/model bounds in `approve`/`plan` mode with explicit values, no sandbox override, and a **resolved plan validated no more permissive than the grant** (§4.1.2) — i.e. an agent that can run *prompted* work the owner (or an automated rule) must still approve per tool | Raise a mode to auto/acceptEdits, set `skipPermissions`, override a sandbox, approve a prompt, rules, shells, close a session it did not create |
 | Principal token, **answer** | Drive + **deny** pending prompts (denial of progress) | `allow` anything; supply denial text |
 | Any principal token from a **non-loopback** peer | Nothing (refused) | — |
 | Daemon host | Everything (A4 of the Discord doc applies unchanged) | — |
@@ -821,22 +968,22 @@ local attacker.
 | Child | Owns | Contract lines it is reviewed against |
 |---|---|---|
 | S1 principal store, `grant\|list\|revoke`, stamps | the credential; `isBoundClient` clause; retained upgrade `req`; WS re-check wiring | §2 loopback, §3 table and discipline, §3.0 (`_isConnectionAuthorized`, `_mayDeliverTo`, `_endCredentialConnection`, expiry timer, `withPrincipalEffect`), §3.1 stamps and sentinel, §4.5 HTTP roster |
-| S2 dispatch + roster guards | `refusePrincipalMessage`, `frameForPrincipal`, `principalMaySee`, never-table constant | §3.1 items 3–5, §4.1, §4.2, §4.3, §4.4 |
-| S3 journal, subscribe, read | events | §7.1, §7.2, §8 |
+| S2 dispatch + roster guards | `dispatchPolicyFor` (both inbound sites), `refusePrincipalMessage`, `frameForPrincipal` (before the bound drops), `principalMaySee`, never-table constant, **the missing handler refusals** of §4.3 | §3.1 items 3–5, §4.1, §4.2, §4.3, §4.4 |
+| S3 journal, subscribe, read | events; **confirmed durable seq reservation** | §7.1, §7.2, §8 |
 | S4 pending snapshot, `resolvedBy` | permission visibility | §7.3, §9 |
 | S5 roster, blockers, declared status | observe snapshot | §7.3 |
 | S6 agent-control `--principal` read-only, `chroxy_wait_events` | MCP adapter, read side | §2 doctor warning, §4.1 |
 | S7 input `origin`, chips | provenance | §6.2 |
-| S8 leases, `createdBy` persistence, owner grant, "agents off" | lease model; gen high-water mark | §5 whole, `lease_held` |
-| S9 fence, `composer_state`, `ptyDirty`, queue, sanitizer agent profile and `[agent:` sigil | steer/drive delivery | §6.4, §6.5, §6.8, §6.9 |
-| S10 durable dedup | idempotency | §6.6 |
-| S11 audit writer + kill | the brakes | §10.1 (`auditOrRefuse`), §10.2 |
-| S12 constrained create | drive create | §4.1.1, §5.4 |
-| S13 drive interrupt, pre-emption | drive | §4.1.2, §5.3 |
+| S8 leases, `createdBy` persistence, owner grant, "agents off" | lease model; gen high-water mark; **auto-resume; the human-history check** | §5 whole, `lease_held` |
+| S9 fence, `composer_state_v1`, `ptyDirty` classification and prompt detector, PTY arbitration, queue, sanitizer agent profile and `[agent:` sigil | steer/drive delivery | §6.4, §6.5, §6.8, §6.9 |
+| S10 durable dedup | idempotency; the state table | §6.6 |
+| S11 audit writer, revoke/kill order, directory fsync | the brakes | §10.1 (`auditOrRefuse`), §10.2 |
+| S12 constrained create, create ceiling, rule non-inheritance | drive create | §4.1.1, §4.1.2, §5.4 |
+| S13 drive interrupt, pre-emption | drive | §4.1.3, §5.3 |
 | S14 `principal_interrupt_ack`, `turn_*` | outcomes | §7.3, §7.4 |
 | S15 answer policy, `decisionMatched`, delivery audit | deny-only answers | §9 |
 | S16 agent-control off the primary token | migration | §2; one release of a legacy flag |
-| S17 Agents tab, doctor row | operator surface | §2, §10.2, §3 store recovery |
+| S17 Agents tab, doctor row, `principal_admin_session_clear_draft` | operator surface | §2, §6.4, §10.2, §3 store recovery |
 | S18 owner-path smoke | acceptance | §1 asymmetries on an isolated daemon with a fixture planner |
 
 **Landing order (H1).** **S2** lands before any child that adds a principal message type.
@@ -862,6 +1009,8 @@ S9. S8 owns `createdBy` persistence and the gen high-water mark; S12 consumes th
   principal store holds label/scope/suppression metadata and the dedup ledger holds ids.
   All are 0600 under the config dir and carry the session history's sensitivity; the
   audit holds hashes only.
+- **Revoke or kill before a durable persist (§10.2)** can be undone by a restart; the ack
+  says so.
 - **One synchronous write between the last boundary check and the submit byte.** The
   provider write boundary (§6.9) re-validates before every chunk and before submit and
   aborts on human input; the residue is one synchronous write between the final check and
