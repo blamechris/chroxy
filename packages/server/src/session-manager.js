@@ -5580,6 +5580,61 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8281: why a handoff must not start from this session right now. The
+   * session's own blockers (`BaseSession.getHandoffBlockers`) plus the reasons
+   * only the manager can see. Not consumed anywhere yet; `isRunning`,
+   * `listSessions().isBusy` and the idle timeout are untouched.
+   *
+   * Manager-level codes:
+   *   - `not_found`          no such session (the only entry returned)
+   *   - `destroying`         the entry is being torn down
+   *   - `automation_owned`   the session is bound to a scheduled task or owned
+   *                          by an orchestration run, read from the in-memory
+   *                          `entry.metadata` those engines already stamp at
+   *                          createSession (`scheduledTaskId` /
+   *                          `orchestrationRunId`). Metadata is not persisted, so
+   *                          it is absent for a session restored after a restart,
+   *                          exactly as the engines' own session maps are.
+   *   - `evaluator_pending`  the caller says the prompt evaluator holds a draft
+   *
+   * One input lives outside the SessionManager and must be passed in by the
+   * caller, which today is the WS layer: `evaluatorPending`, because the
+   * evaluator's draft state is on the WS handler context, not on the session.
+   * Hook-routed permission prompts need no input: ws-permissions registers each
+   * one on its owning session (`notifyPermissionPending`), and the session's
+   * `getPendingPermissionIds()` reports it.
+   *
+   * @param {string} sessionId
+   * @param {{ evaluatorPending?: boolean }} [options]
+   * @returns {{ code: string, detail?: object }[]}
+   */
+  getHandoffBlockers(sessionId, { evaluatorPending = false } = {}) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return [{ code: 'not_found' }]
+    const blockers = []
+    const sessionBlockers = typeof entry.session?.getHandoffBlockers === 'function'
+      ? entry.session.getHandoffBlockers()
+      : []
+    for (const blocker of sessionBlockers) blockers.push(blocker)
+    if (entry._destroying && !blockers.some((b) => b.code === 'destroying')) {
+      blockers.push({ code: 'destroying' })
+    }
+    const scheduledTaskId = entry.metadata?.scheduledTaskId
+    const orchestrationRunId = entry.metadata?.orchestrationRunId
+    if (scheduledTaskId || orchestrationRunId) {
+      blockers.push({
+        code: 'automation_owned',
+        detail: {
+          ...(scheduledTaskId ? { scheduledTaskId } : {}),
+          ...(orchestrationRunId ? { orchestrationRunId } : {}),
+        },
+      })
+    }
+    if (evaluatorPending) blockers.push({ code: 'evaluator_pending' })
+    return blockers
+  }
+
+  /**
    * #8301: THE refusal seam for a daemon-authored turn — one answer, asked both
    * before dispatch and again when a queued wake is about to flush. Returns why
    * the session must not be handed one right now, or `null` when it may.

@@ -1056,6 +1056,15 @@ export class PermissionManager extends EventEmitter {
     return this._userStopInFlight
   }
 
+  /**
+   * #8281: request ids of the permission prompts waiting for a decision. A copy,
+   * so a caller cannot reach the private map through it.
+   * @returns {string[]}
+   */
+  getPendingPermissionIds() {
+    return Array.from(this._pendingPermissions.keys())
+  }
+
   /** #8430: is any permission prompt or question waiting for a decision right now? */
   hasPendingPrompt() {
     return this._pendingPermissions.size > 0 || this._pendingUserAnswer != null

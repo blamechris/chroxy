@@ -1141,6 +1141,16 @@ export class CodexAppServerSession extends BaseSession {
     return (!this._processReady || !this._client) ? 'not-started' : null
   }
 
+  /**
+   * #8281: `_activeTurn` is set when the turn is dispatched, before codex has
+   * answered with a turn id (`turnId` is null until `turn/start` returns). That
+   * window is still a turn in flight for a handoff.
+   * @returns {boolean}
+   */
+  _hasTurnInFlight() {
+    return !!this._activeTurn || super._hasTurnInFlight()
+  }
+
   async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
       const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })

@@ -805,6 +805,18 @@ export class CliSession extends BaseSession {
     return false
   }
 
+  /**
+   * #8281: the startup queue (`_pendingQueue`) counts as queued prompts. Both
+   * drains shift an item and call `sendMessage` (which sets busy) in the same
+   * synchronous step, so the item is in this queue until the instant the session
+   * is busy: the post-result drain's nextTick window and the respawn-to-ready
+   * window are both covered by the length alone, with no in-flight marker.
+   * @returns {number}
+   */
+  _extraQueuedPromptCount() {
+    return this._pendingQueue.length
+  }
+
   _drainPendingQueue() {
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
