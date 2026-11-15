@@ -524,6 +524,28 @@ export class AgentControlClient extends EventEmitter {
   // Public API
   // ---------------------------------------------------------------------
 
+  /**
+   * Send one correlated management request and resolve with the first `replyType`
+   * frame that echoes its `requestId` (#9116: `chroxy agent ...` asks the daemon, which
+   * is the only writer of the principal store). Bounded by the request timeout; never
+   * retried, so an uncertain outcome is reported as uncertain.
+   * @param {string} type
+   * @param {object} fields
+   * @param {{ replyType: string, timeoutMs?: number }} opts
+   * @returns {Promise<object>}
+   */
+  async request(type, fields, { replyType, timeoutMs = this._requestTimeoutMs }) {
+    this._assertReady()
+    const requestId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const done = (fn, v) => { clearTimeout(timer); this.removeListener('message', onMsg); fn(v) }
+      const timer = setTimeout(() => done(reject, new TimeoutError(type, timeoutMs)), timeoutMs)
+      const onMsg = (msg) => { if (msg?.type === replyType && msg.requestId === requestId) done(resolve, msg) }
+      this.on('message', onMsg)
+      try { this._send({ type, requestId, ...fields }) } catch (err) { done(reject, err) }
+    })
+  }
+
   async listSessions() {
     this._assertReady()
     const msg = await this._runSerial('list_sessions', this._requestTimeoutMs, () => {

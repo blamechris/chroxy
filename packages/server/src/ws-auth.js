@@ -8,6 +8,8 @@ import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } 
 import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger, loggableValue } from './logger.js'
 import { sendRawTransport } from './principal-policy.js'
+import { PRINCIPAL_BINDING_SENTINEL } from './principal-binding.js'
+import { isLoopbackPeer } from './connection-locality.js'
 import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
@@ -90,6 +92,62 @@ export function recordBenignPairAttempt(map, key, now) {
   return false
 }
 
+
+/**
+ * Is this connection's upgrade a loopback peer with no proxy hint, at upgrade time AND
+ * now? `client.loopbackAtUpgrade` is the verdict taken when the socket was upgraded;
+ * the retained upgrade request is classified again here, so a hint that appears on the
+ * retained request later still refuses. Fail closed: no retained request, no loopback.
+ * @param {object} client
+ * @returns {boolean}
+ */
+export function isLoopbackConnection(client) {
+  return client?.loopbackAtUpgrade === true && isLoopbackPeer(client._upgradeReq)
+}
+
+/**
+ * Resolve a presented token to a live agent principal, or null. The store compares the
+ * token's hash with every stored hash in constant time. A valid principal token
+ * presented from any peer that is not loopback is refused exactly like an invalid one:
+ * the caller cannot tell the cases apart. The token is never logged.
+ * @param {object} ctx
+ * @param {object} client
+ * @param {unknown} token
+ * @returns {object|null}
+ */
+function resolvePrincipalCredential(ctx, client, token) {
+  const store = ctx.principalStore
+  if (!store || typeof token !== 'string') return null
+  const principal = store.validate(token)
+  if (principal === null) return null
+  return isLoopbackConnection(client) ? principal : null
+}
+
+/**
+ * Stamp a principal connection (contract section 3.1 item 1-2) BEFORE it is marked
+ * authenticated or registered anywhere: `principal`, `isPrimaryToken = false` and the
+ * fixed binding sentinel, which every host gate that branches on `boundSessionId` then
+ * refuses. The sentinel is non-enumerable so a spread or a JSON dump of the record can
+ * never carry it onto the wire.
+ * @param {object} client
+ * @param {{ principalId: string, label: string, tier: string, scope: string, constraints: object, expiresAt: number }} principal
+ */
+export function stampPrincipal(client, principal) {
+  client.principal = {
+    principalId: principal.principalId,
+    label: principal.label,
+    tier: principal.tier,
+    scope: principal.scope,
+    constraints: principal.constraints,
+    expiresAt: principal.expiresAt,
+  }
+  client.isPrimaryToken = false
+  client.pairingCredential = null
+  Object.defineProperty(client, 'boundSessionId', {
+    value: PRINCIPAL_BINDING_SENTINEL, enumerable: false, writable: true, configurable: true,
+  })
+}
+
 /**
  * Handle an auth message from an unauthenticated client.
  * Returns true if the message was consumed (caller should return).
@@ -139,7 +197,17 @@ export function handleAuthMessage(ctx, ws, msg) {
     return true
   }
 
-  if (!authRequired || isTokenValid(msg.token)) {
+  // An agent principal is recognised ONLY here, ONLY when the token is not one of the
+  // existing classes, and ONLY from a loopback peer. Resolved before anything else so the
+  // success path stamps it before any state is touched.
+  const tokenIsKnown = !authRequired || isTokenValid(msg.token)
+  const principal = tokenIsKnown ? null : resolvePrincipalCredential(ctx, client, msg.token)
+
+  if (tokenIsKnown || principal !== null) {
+    // Stamp a principal before it is marked authenticated, before any registration and
+    // before any other assignment below can default it to a host-level connection.
+    if (principal !== null) stampPrincipal(client, principal)
+
     // Refuse an unsupported protocol version BEFORE the connection is marked
     // authenticated, so a connection that is being closed never carries an
     // authenticated-but-unscoped state.
@@ -152,8 +220,9 @@ export function handleAuthMessage(ctx, ws, msg) {
       return true
     }
 
-    // Scope and authenticate together (scope first), before anything else runs.
-    if (!applySessionScope(client, pairingManager, msg.token)) {
+    // Scope and authenticate together (scope first), before anything else runs. A
+    // principal's binding is the sentinel stamped above; no pairing scope applies.
+    if (principal === null && !applySessionScope(client, pairingManager, msg.token)) {
       log.warn(`Auth refused for ${rateLimitKey}: token's session binding cannot be applied`)
       send(ws, { type: 'auth_fail', reason: 'session_unavailable' })
       ws.close()
@@ -167,14 +236,19 @@ export function handleAuthMessage(ctx, ws, msg) {
     // connection lifetime — the client already holds the E2E shared key, so
     // this is comparable exposure. Undefined in --no-auth (no token), where the
     // shell gate's current-token check is skipped (no TokenManager).
-    client.authToken = msg.token
+    // A principal token is never retained on the connection record.
+    client.authToken = principal === null ? msg.token : undefined
     authFailures.delete(rateLimitKey)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
       : minProtocolVersion
 
-    if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
+    if (principal !== null) {
+      // The operator-authored label, never the connection's own claim: the principal's
+      // self-description is attacker-influenceable text that humans would read.
+      client.deviceInfo = { deviceId: null, deviceName: principal.label, deviceType: 'unknown', platform: 'agent' }
+    } else if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
       client.deviceInfo = {
         deviceId: typeof msg.deviceInfo.deviceId === 'string' ? msg.deviceInfo.deviceId : null,
         deviceName: typeof msg.deviceInfo.deviceName === 'string' ? msg.deviceInfo.deviceName : null,
@@ -198,12 +272,17 @@ export function handleAuthMessage(ctx, ws, msg) {
     // `!authRequired` short-circuit. The `pair`-message path never sets this, so
     // paired clients default to undefined (non-primary) — gates use strict
     // `=== true`. Consumed by the user-shell create + terminal_* gates.
-    const isPairingCredential = authRequired && !!pairingManager?.isSessionTokenValid(msg.token)
-    client.isPrimaryToken = !isPairingCredential
-    // Remember which stored credential this connection holds, so the connection
-    // ends when that credential is removed (revoked, expired, evicted). The
-    // primary token has its own lifecycle (rotation / revoke) and records none.
-    client.pairingCredential = isPairingCredential ? msg.token : null
+    //
+    // A principal is NEVER the primary class and holds no pairing credential: its stamps
+    // (above) are final, so neither line below may touch them.
+    if (principal === null) {
+      const isPairingCredential = authRequired && !!pairingManager?.isSessionTokenValid(msg.token)
+      client.isPrimaryToken = !isPairingCredential
+      // Remember which stored credential this connection holds, so the connection
+      // ends when that credential is removed (revoked, expired, evicted). The
+      // primary token has its own lifecycle (rotation / revoke) and records none.
+      client.pairingCredential = isPairingCredential ? msg.token : null
+    }
 
     client.clientCapabilities = new Set(authData.capabilities ?? [])
 

@@ -19,7 +19,7 @@ import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalPolicyOptsFromCtx, sendPrincipalRefusal, PRINCIPAL_ALLOWED_MESSAGE_TYPES } from './principal-policy.js'
-import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
+import { handleAuthMessage, isLoopbackConnection, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
@@ -46,7 +46,7 @@ import { assertCtxShape, buildMessageCtx } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
-import { isLocalOrLanPeer } from './connection-locality.js'
+import { isLocalOrLanPeer, isLoopbackPeer } from './connection-locality.js'
 import { configPath } from './config-dir.js'
 import { QuestionRouteMap } from './question-route-map.js'
 
@@ -357,6 +357,7 @@ function _isSecureRequest(req) {
  *   { type: 'scheduled_task_action', action, taskId?, handle?, task?, requestId? } — #6871 create/update/pause/resume/delete a scheduled task, or (#7079) `discard_unreadable` a load-refused stored entry by its opaque server-derived `handle` (UNBOUND-STRICT-PRIMARY gate — a scheduled task makes this machine run an agent session unattended; a pairing-BOUND client is rejected even if it is primary, #7025)
  *   { type: 'set_scheduler_enabled', enabled, requestId? } — #6871 flip the PERSISTED global scheduled-execution gate (features.scheduler); same unbound-strict-primary gate, and a daemon restart is required for it to take effect (reported as scheduler.restartRequired)
  *   { type: 'daemon_update_action', action: 'restart-now'|'postpone', target, confirmBusy?, requestId? } — #8331 apply or hold off the update the idle-only auto-deploy has queued for the daily daemon (STRICT-PRIMARY + UNBOUND gate — restarting kills every live session; a pairing or bound client gets daemon_update_action_result{code:NOT_AUTHORIZED} and nothing is written). restart-now with busy sessions and no confirmBusy replies daemon_update_confirm_required instead of writing
+ *   { type: 'principal_admin_grant', label, scope, sessionIds?, cwdRoots?, ttlMs?, requestId? } | { type: 'principal_admin_list', requestId? } | { type: 'principal_admin_revoke', principalId?, label?, requestId? } — #9116 agent-principal management (STRICT-PRIMARY + UNBOUND + loopback-only; refused to bound clients and principals at dispatch). grant refuses until S11; reply is principal_admin_result
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
  *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
@@ -593,6 +594,7 @@ function _isSecureRequest(req) {
  *   { type: 'daemon_update_status', running, pending, lastDeploy, postponedUntil, requestPending, applying } — #8331 the queued daily-daemon update + last deploy result; sent on auth and on change to STRICT-PRIMARY, UNBOUND clients ONLY
  *   { type: 'daemon_update_confirm_required', requestId, target, reasons[], sessions[] } — #8331 reply to restart-now while sessions are busy; nothing was written
  *   { type: 'daemon_update_action_result', requestId, action, ok, force?, postponedUntil?, code?, message? } — #8331 outcome of daemon_update_action (codes: NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE, UNSUPPORTED_ACTION)
+ *   { type: 'principal_admin_result', requestId, op: 'grant'|'list'|'revoke', ok, code?, message?, health?, principals?, principalId?, alreadyRevoked?, durable? } — #9116 reply to principal_admin_grant|list|revoke, sent ONLY to the strict-primary, loopback requester (codes: NOT_AUTHORIZED, PRINCIPALS_NOT_ENABLED, UNAVAILABLE, BAD_REQUEST, NOT_FOUND); `grant` always refuses until the audit writer and kill switch land; `revoke` is acknowledged only after the durable write (durable:false = revoked in memory, not confirmed on disk); carries no token and no hash
  *   { type: 'orchestration_action_ack', requestId?, action, runId, gateId? } — terminal success echo for a mutating orchestration action (#6691)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
@@ -635,11 +637,17 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, sessionCiWatcher = null, daemonUpdate = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, sessionCiWatcher = null, daemonUpdate = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter, principalStore = null, principalTimers = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
     this._pairingManager = pairingManager || null
+    // #9116: the agent-principal credential store (principal-store.js). Null where the
+    // caller built none: then no principal can authenticate and every principal
+    // connection (there can be none) is treated as invalid. Timers are injectable so a
+    // test can drive the per-connection expiry without waiting.
+    this._principalStore = principalStore || null
+    this._principalTimers = principalTimers || { setTimeout, clearTimeout }
     // #5536 — long-lived Ed25519 identity keypair. Its secret half signs each
     // connection's ephemeral exchange public key (eager + discrete paths) so a
     // pinned client can verify the exchange key came from this daemon. Null when
@@ -980,6 +988,10 @@ export class WsServer {
         // `revoke_token` handler can fire the operator panic button
         // (TokenManager.revoke()). Null when auth is disabled (--no-auth).
         get tokenManager() { return self._tokenManager },
+        // #9116: the agent-principal store and the call that ends one principal's
+        // connections (revoke): the strict-primary `principal_admin_*` handlers.
+        get principalStore() { return self._principalStore },
+        endPrincipalConnections: (principalId, reason) => self._endPrincipalConnections(principalId, reason),
         get devPreview() { return self._devPreview },
         get webTaskManager() { return self._webTaskManager },
         get environmentManager() { return self.environmentManager },
@@ -1197,6 +1209,7 @@ export class WsServer {
       get authFailures() { return self._authFailures },
       get benignPairAttempts() { return self._benignPairAttempts },
       get pairingManager() { return self._pairingManager },
+      get principalStore() { return self._principalStore },
       // #5536 — identity keypair for signing the discrete exchange public key.
       get serverIdentity() { return self._serverIdentity },
       get activeSessionId() {
@@ -1215,6 +1228,8 @@ export class WsServer {
       },
       send: sendFn,
       onAuthSuccess: (ws, client) => {
+        // #9116: a principal connection ends at its own expiry even if it never sends.
+        if (client.principal != null) self._armPrincipalExpiry(ws, client)
         // If paired, include sessionToken in auth_ok response
         if (client._sessionToken) {
           self._sendPostAuthInfo(ws, { sessionToken: client._sessionToken })
@@ -2310,6 +2325,10 @@ export class WsServer {
       // is safe: an attacker can't strip cloudflared's edge-stamped header to gain
       // the bypass.
       req._chroxyLocalPeer = localPeer
+      // #9116: the strict loopback verdict (socket peer AND no proxy-family hint) taken at
+      // the upgrade. A principal token is accepted only on such a connection; the retained
+      // request is classified again at `auth` (ws-auth.js `isLoopbackConnection`).
+      req._chroxyLoopbackPeer = isLoopbackPeer(req)
       if (localPeer) {
         delete req.headers['sec-websocket-extensions']
       }
@@ -2372,6 +2391,10 @@ export class WsServer {
         // encryption bypass so a tunneled (proxied) connection to socketIp
         // 127.0.0.1 is not treated as trusted-local and still requires E2E.
         localPeer: req._chroxyLocalPeer === true,
+        // #9116: the upgrade request, retained so loopback origin is decided again at
+        // `auth` and on every principal re-check, and the verdict taken at the upgrade.
+        _upgradeReq: req,
+        loopbackAtUpgrade: req._chroxyLoopbackPeer === true,
         // #3404: visible defaults to true; mobile flips to false on backgrounding
         // so completion push notifications fire instead of being suppressed by
         // a still-alive but invisible WS connection.
@@ -2740,6 +2763,17 @@ export class WsServer {
         !this._pairingManager?.isSessionTokenLive(client.pairingCredential)) {
       this._endCredentialConnection(ws, client, 'invalid')
       return
+    }
+
+    // #9116: an agent principal is re-checked on EVERY frame before dispatch (credential
+    // live, not expired, not revoked, store trusted, loopback origin retained). Fails
+    // closed: a principal with no store is not live.
+    if (client.principal != null) {
+      const state = this._principalState(client)
+      if (state !== 'live') {
+        this._endCredentialConnection(ws, client, state)
+        return
+      }
     }
 
     if (msg.type === 'auth') return
@@ -3227,6 +3261,7 @@ export class WsServer {
   _holdsPrimaryCredential(client) {
     if (client.boundSessionId != null) return false
     if (client.pairingCredential != null) return false
+    if (client.principal != null) return false
     return client.isPrimaryToken === true || !this.authRequired
   }
 
@@ -3248,6 +3283,10 @@ export class WsServer {
     if (client.pairingCredential != null) {
       return !!this._pairingManager?.isSessionTokenLive(client.pairingCredential)
     }
+    // #9116: a principal whose credential stopped being valid (revoked, expired, store
+    // untrusted, origin no longer loopback) receives nothing, even if it never sends a
+    // frame; the keepalive sweep and the expiry timer then end the connection.
+    if (client.principal != null) return this._principalState(client) === 'live'
     return true
   }
 
@@ -3267,7 +3306,78 @@ export class WsServer {
       }
       return false
     }
+    if (client.principal != null) {
+      const state = this._principalState(client)
+      if (state !== 'live') {
+        for (const [ws, c] of this.clients) {
+          if (c === client) { this._endCredentialConnection(ws, client, state); break }
+        }
+        return false
+      }
+    }
     return true
+  }
+
+  /**
+   * Why a principal connection may not continue: 'live' when it may, otherwise
+   * 'revoked', 'expired' or 'invalid' (no store, an untrusted store, an unknown grant, or
+   * an origin that is no longer loopback). Memory only: no disk read per frame.
+   * @param {object} client
+   * @returns {'live'|'revoked'|'expired'|'invalid'}
+   */
+  _principalState(client) {
+    const store = this._principalStore
+    if (!store || client.principal == null) return 'invalid'
+    if (!isLoopbackConnection(client)) return 'invalid'
+    return store.state(client.principal.principalId)
+  }
+
+  /**
+   * Arm the per-connection expiry timer: at the grant's `expiresAt` the connection ends
+   * with `credential_invalidated` and close code 4401, whether or not it sends anything.
+   * Cleared on departure and on end.
+   */
+  _armPrincipalExpiry(ws, client) {
+    this._clearPrincipalExpiry(client)
+    const store = this._principalStore
+    if (!store) return
+    const delay = Math.max(0, client.principal.expiresAt - store.now())
+    const timer = this._principalTimers.setTimeout(() => {
+      client._principalExpiryTimer = null
+      const state = this._principalState(client)
+      if (state !== 'live') this._endCredentialConnection(ws, client, state === 'revoked' ? 'revoked' : 'expired')
+    }, delay)
+    timer?.unref?.()
+    client._principalExpiryTimer = timer
+  }
+
+  _clearPrincipalExpiry(client) {
+    if (client._principalExpiryTimer != null) {
+      this._principalTimers.clearTimeout(client._principalExpiryTimer)
+      client._principalExpiryTimer = null
+    }
+  }
+
+  /** End every connection of one principal (revoke): each gets `credential_invalidated` and 4401. */
+  _endPrincipalConnections(principalId, reason = 'revoked') {
+    for (const [ws, client] of [...this.clients]) {
+      if (client.principal?.principalId === principalId) this._endCredentialConnection(ws, client, reason)
+    }
+  }
+
+  /**
+   * End every principal connection whose credential is no longer valid. Run by the
+   * keepalive sweep, so a store that became untrusted (deleted, re-moded) or a revoke
+   * made out of band cuts a connection that is sending nothing.
+   */
+  _recheckPrincipals() {
+    const store = this._principalStore
+    if (store) store.refresh()
+    for (const [ws, client] of [...this.clients]) {
+      if (client.principal == null || !client.authenticated) continue
+      const state = this._principalState(client)
+      if (state !== 'live') this._endCredentialConnection(ws, client, state)
+    }
   }
 
   /**
@@ -3299,11 +3409,13 @@ export class WsServer {
       this._send(ws, { type: 'credential_invalidated', reason: known ? reason : 'invalid' })
     }
     if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+    this._clearPrincipalExpiry(client)
     if (client.authenticated) this._handleClientDeparture(client)
     client.authenticated = false
     client.isPrimaryToken = false
     client.pairingCredential = null
     client.authToken = undefined
+    client.postAuthQueue = null
     this._clientManager.removeClient(ws)
     log.info(`Client ${client.id} ended: credential ${reason}`)
     try { ws.close(WS_CLOSE_CREDENTIAL_INVALID, `credential ${reason}`) } catch { /* already closing */ }
@@ -3328,6 +3440,9 @@ export class WsServer {
    * then `removeClient` updates the index, then we terminate the socket.
    */
   _keepaliveSweep() {
+    // #9116: cut any principal connection whose credential stopped being valid, however
+    // quiet it is (the outbound gate already withholds frames from it).
+    if (this._principalStore || [...this.clients.values()].some((c) => c.principal != null)) this._recheckPrincipals()
     for (const [ws, client] of this.clients) {
       if (!client.authenticated) continue
       if (ws.readyState !== 1) continue
@@ -3355,6 +3470,7 @@ export class WsServer {
 
   /** Handle cleanup when an authenticated client disconnects or is terminated */
   _handleClientDeparture(departingClient) {
+    this._clearPrincipalExpiry(departingClient)
     void this._devPreview.closeClient(departingClient.id)
     // #5563: vacate primary for every session this client owned. Promotion
     // policy is NOBODY-UNTIL-CLAIM — we clear the slot (broadcast null) rather

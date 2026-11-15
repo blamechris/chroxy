@@ -10,7 +10,7 @@ import { buildThinkingLevelChanged } from './thinking-level-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { isBoundClient } from './environments/authority.js'
-import { sendRawTransport } from './principal-policy.js'
+import { sendRawTransport, isPrincipalClient } from './principal-policy.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
@@ -873,11 +873,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // different one is stale. Omitted (not null) when no dist is built.
     ...(dashboardBuildId ? { dashboardBuildId } : {}),
     serverCommit: gitInfo.commit,
-    cwd: sessionInfo.cwd,
+    // A principal is told nothing about any session or peer at the source (#9116).
+    cwd: isPrincipalClient(client) ? null : sessionInfo.cwd,
     // A session-scoped connection is told about its own session only: not the
     // host's default working directory, and only the peers sharing its session.
     defaultCwd: isBoundClient(client) ? null : (sessionManager?.defaultCwd || null),
-    connectedClients: getConnectedClientList(client),
+    connectedClients: isPrincipalClient(client) ? [] : getConnectedClientList(client),
     encryption: requireEncryption ? 'required' : 'disabled',
     protocolVersion,
     minProtocolVersion,
@@ -977,6 +978,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       }
     }, keyExchangeTimeoutMs)
   }
+
+  // #9116: an agent principal's bootstrap ENDS at auth_ok (plus the key exchange it
+  // gates). It is sent no session list, no replay and none of the host-wide burst below:
+  // its reads are the `principal_*` family, and what it may see is decided per frame at
+  // the outgoing choke point. Stopping here also keeps the sentinel binding out of every
+  // bound-session lookup that follows.
+  if (isPrincipalClient(client)) return
 
   // Confirm the credential through the completed transport independently of catalogs.
   if (extra.sessionToken && client.clientCapabilities?.has('paired_credential_confirmation_v1')) {

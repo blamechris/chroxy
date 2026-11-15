@@ -223,6 +223,9 @@ export const PRINCIPAL_DENIED_MESSAGE_TYPES = Object.freeze({
   session_preset_revoke: 'host-wide presets are never delegated',
   daemon_update_action: 'daemon update and restart are never delegated',
   revoke_token: CREDENTIAL,
+  principal_admin_grant: CREDENTIAL,
+  principal_admin_list: CREDENTIAL,
+  principal_admin_revoke: CREDENTIAL,
   pair_approve: 'pairing is never delegated',
   pair_deny: 'pairing is never delegated',
 
@@ -621,7 +624,7 @@ export const PRINCIPAL_OUTGOING_DENIED = Object.freeze([
   'pair_pending', 'pair_request_pending', 'pair_resolved', 'pair_result', 'pairing_refreshed',
   'permission_audit_result', 'permission_expired', 'permission_input', 'permission_mode_changed',
   'permission_outcome', 'permission_request', 'permission_resolved', 'permission_rules_updated',
-  'plan_ready', 'plan_started', 'primary_changed', 'prompt_evaluator_changed',
+  'plan_ready', 'plan_started', 'primary_changed', 'principal_admin_result', 'prompt_evaluator_changed',
   'prompt_evaluator_skip_pattern_changed', 'provider_list', 'provider_runtime_info', 'push_token_error',
   'references_result', 'repo_events_delta', 'repo_events_snapshot', 'repo_list',
   'repo_runtime_config_snapshot', 'restore_archived_session_result', 'result',
@@ -790,17 +793,17 @@ export function frameForPrincipal(client, message, opts = {}) {
  *
  *   - `types`: the client message types the row covers (empty when no WebSocket
  *     type exists).
- *   - `sentinelDependent`: the predicate tests a truthy `boundSessionId` (or
- *     `isBoundClient`, which today reaches a principal only through the sentinel
- *     until the `principal != null` clause of S1 lands), so it refuses a principal
- *     ONLY because the sentinel is set. Removing the sentinel must turn it red.
+ *   - `sentinelDependent`: the predicate tests a truthy `boundSessionId` (not
+ *     `isBoundClient`, which has refused a principal through its own `principal != null`
+ *     clause since S1), so it refuses a principal ONLY because the sentinel is set.
+ *     Removing the sentinel must turn it red.
  *   - `s2AddsRefusal`: the handler had no principal-relevant check; S2 adds an
  *     explicit `isPrincipalClient` refusal.
  *
  * @type {readonly Readonly<{ id: string, capability: string, types: readonly string[], handlerPredicate: string, sentinelDependent: boolean, s2AddsRefusal: boolean }>[]}
  */
 export const PRINCIPAL_NEVER_CAPABILITIES = Object.freeze([
-  { id: 'permission-mode', capability: 'auto / more-permissive mode, acceptEdits, skipPermissions', types: ['set_permission_mode'], handlerPredicate: 'handleSetPermissionMode resolves the session through resolveSession, which refuses a client bound to another id (the sentinel)', sentinelDependent: true, s2AddsRefusal: false },
+  { id: 'permission-mode', capability: 'auto / more-permissive mode, acceptEdits, skipPermissions', types: ['set_permission_mode'], handlerPredicate: 'handleSetPermissionMode resolves the session through resolveSession, which refuses isBoundClient(client) bound to another id; isBoundClient is true for a principal through the principal clause (S1), with or without the sentinel', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'permission-rules', capability: 'permission rules and allowAlways', types: ['set_permission_rules'], handlerPredicate: 'handleSetPermissionRules refuses isPrincipalClient(client) first (independent gate); isBoundClient(client) follows', sentinelDependent: false, s2AddsRefusal: true },
   { id: 'revoke-token', capability: 'revoke_token', types: ['revoke_token'], handlerPredicate: 'handleRevokeToken refuses client.isPrimaryToken !== true', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'pairing', capability: 'pairing (pair_approve, pair_deny), QR, /connect', types: ['pair_approve', 'pair_deny'], handlerPredicate: 'rejectIfBound refuses a truthy boundSessionId', sentinelDependent: true, s2AddsRefusal: false },
@@ -809,16 +812,16 @@ export const PRINCIPAL_NEVER_CAPABILITIES = Object.freeze([
   { id: 'skill-trust', capability: 'skill trust', types: ['skill_trust_accept', 'skill_trust_grant'], handlerPredicate: 'rejectSkillTrustIfBound refuses isPrincipalClient(client) first (independent gate); a truthy boundSessionId follows', sentinelDependent: false, s2AddsRefusal: true },
   { id: 'file-git-writes', capability: 'file and git writes', types: ['write_file', 'append_memory', 'git_stage', 'git_unstage', 'git_commit', 'git_create_pr'], handlerPredicate: 'rejectMutationIfBound refuses a truthy boundSessionId', sentinelDependent: true, s2AddsRefusal: false },
   { id: 'environment-create', capability: 'environments (create)', types: ['create_environment'], handlerPredicate: 'handleCreateEnvironment refuses client.isPrimaryToken !== true', sentinelDependent: false, s2AddsRefusal: false },
-  { id: 'environment-destroy', capability: 'environments (destroy)', types: ['destroy_environment'], handlerPredicate: 'handleDestroyEnvironment refuses isBoundClient(client)', sentinelDependent: true, s2AddsRefusal: false },
+  { id: 'environment-destroy', capability: 'environments (destroy)', types: ['destroy_environment'], handlerPredicate: 'handleDestroyEnvironment refuses isBoundClient(client), true for a principal through the principal clause (S1), with or without the sentinel', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'config-settings', capability: 'host-wide config and settings', types: ['session_preset_set'], handlerPredicate: 'handleSessionPresetSet opens with rejectIfNotHost, which refuses a truthy boundSessionId', sentinelDependent: true, s2AddsRefusal: false },
   { id: 'notification-prefs', capability: 'notification preferences', types: ['notification_prefs_set'], handlerPredicate: 'handleNotificationPrefsSet refuses isPrincipalClient(client) (it had no authority check)', sentinelDependent: false, s2AddsRefusal: true },
   { id: 'terminal-input', capability: 'user-shell, terminal_input, shell terminal_subscribe', types: ['terminal_input'], handlerPredicate: 'handleTerminalInput refuses isPrincipalClient(client) unconditionally (the user-shell check applies to user-shell sessions only)', sentinelDependent: false, s2AddsRefusal: true },
   { id: 'terminal-subscribe', capability: 'shell terminal_subscribe (and raw terminal output)', types: ['terminal_subscribe'], handlerPredicate: 'handleTerminalSubscribe returns when a bound client names another session (the sentinel); a user-shell session additionally needs client.isPrimaryToken === true', sentinelDependent: true, s2AddsRefusal: false },
   { id: 'dev-preview', capability: 'dev-preview publication', types: ['open_dev_preview'], handlerPredicate: 'DevPreviewManager._assertAuthority requires the primary-token client with no boundSessionId', sentinelDependent: false, s2AddsRefusal: false },
-  { id: 'archive', capability: 'archive purge and policy', types: ['delete_archived_session', 'set_session_archive_policy'], handlerPredicate: 'both handlers refuse isBoundClient(client)', sentinelDependent: true, s2AddsRefusal: false },
+  { id: 'archive', capability: 'archive purge and policy', types: ['delete_archived_session', 'set_session_archive_policy'], handlerPredicate: 'both handlers refuse isBoundClient(client), true for a principal through the principal clause (S1), with or without the sentinel', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'daemon-update', capability: 'daemon update and restart', types: ['daemon_update_action'], handlerPredicate: 'handleDaemonUpdateAction refuses isPrimaryToken !== true or a truthy boundSessionId', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'scheduled-tasks', capability: 'scheduled tasks', types: ['scheduled_task_action', 'set_scheduler_enabled'], handlerPredicate: 'rejectSchedulerWriteUnlessPrimary refuses a non-primary client or a truthy boundSessionId', sentinelDependent: false, s2AddsRefusal: false },
   { id: 'orchestration-start', capability: 'orchestration start', types: ['orchestration_run_start'], handlerPredicate: 'guardAction refuses a truthy boundSessionId and, with requirePrimary, a non-primary client', sentinelDependent: false, s2AddsRefusal: false },
-  { id: 'checkpoint-restore', capability: 'checkpoint file restore', types: ['restore_checkpoint'], handlerPredicate: 'handleRestoreCheckpoint refuses isBoundClient(client)', sentinelDependent: true, s2AddsRefusal: false },
-  { id: 'set-model', capability: 'set_model (v1)', types: ['set_model'], handlerPredicate: 'handleSetModel resolves the session through resolveSession, which refuses a client bound to another id (the sentinel)', sentinelDependent: true, s2AddsRefusal: false },
+  { id: 'checkpoint-restore', capability: 'checkpoint file restore', types: ['restore_checkpoint'], handlerPredicate: 'handleRestoreCheckpoint refuses isBoundClient(client), true for a principal through the principal clause (S1), with or without the sentinel', sentinelDependent: false, s2AddsRefusal: false },
+  { id: 'set-model', capability: 'set_model (v1)', types: ['set_model'], handlerPredicate: 'handleSetModel resolves the session through resolveSession, which refuses isBoundClient(client) bound to another id; isBoundClient is true for a principal through the principal clause (S1), with or without the sentinel', sentinelDependent: false, s2AddsRefusal: false },
 ].map((row) => Object.freeze({ ...row, types: Object.freeze([...row.types]) })))

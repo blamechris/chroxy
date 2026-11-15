@@ -29,6 +29,7 @@ import { schedulerHandlers } from './handlers/scheduler-handlers.js'
 import { sessionPrStatusHandlers } from './handlers/session-pr-status-handlers.js'
 import { sessionPrThreadsHandlers } from './handlers/session-pr-threads-handlers.js'
 import { daemonUpdateHandlers } from './handlers/daemon-update-handlers.js'
+import { principalAdminHandlers } from './handlers/principal-admin-handlers.js'
 
 const log = createLogger('ws')
 
@@ -54,6 +55,7 @@ const handlerRegistry = new Map([
   ...Object.entries(sessionPrStatusHandlers),
   ...Object.entries(sessionPrThreadsHandlers),
   ...Object.entries(daemonUpdateHandlers),
+  ...Object.entries(principalAdminHandlers),
 ])
 
 /**

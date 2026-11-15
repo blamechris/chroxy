@@ -73,6 +73,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
   'pair_request_pending', // #5510 pairing-approval primitive — consumed by the dedicated requester panel (dashboard utils/request-pairing.ts, its own short-lived WS onmessage), NOT the main message-handler dispatch the extractor scans. Mobile requester side is an explicit out-of-scope fast-follow per epic #5509.
+  'principal_admin_result', // #9116 reply to the agent-principal management types; its only consumer is `chroxy agent` (cli/agent-cmd.js, through the agent-control client), not an app or dashboard handler. The dashboard Agents tab that would handle it is S17 of #9112; move this to PLATFORM_SPECIFIC when it lands.
   'pair_result',          // #5510 pairing-approval primitive — same as pair_request_pending: terminal result for the requester, handled by utils/request-pairing.ts, not the main dispatch. Mobile requester side deferred per epic #5509.
   // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
   // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as

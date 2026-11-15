@@ -129,8 +129,13 @@ describe('principal inbound roster', () => {
     assert.equal(allowed.length, Object.keys(EXPECTED_ALLOWED_TIERS).length)
   })
 
-  it('no v1 entry invents a principal_ name before its handler exists', () => {
-    assert.deepEqual([...allowed, ...denied].filter((t) => t.startsWith('principal_')), [])
+  it('no v1 entry invents a principal_ name before its handler exists (only the S1 management surface, all denied)', () => {
+    // principal_admin_* is the strict-primary management surface (S1): denied to a
+    // principal and to a bound client, never allowed. Any other principal_ name needs its
+    // handler first.
+    const MANAGEMENT = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
+    assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')), [])
+    assert.deepEqual(denied.filter((t) => t.startsWith('principal_')).sort(), MANAGEMENT)
     assert.deepEqual(Object.keys(PRINCIPAL_OUTGOING_ALLOWED).filter((t) => t.startsWith('principal_')), [])
   })
 

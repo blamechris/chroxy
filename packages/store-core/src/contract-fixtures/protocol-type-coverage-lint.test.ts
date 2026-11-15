@@ -279,6 +279,10 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'principal_admin_result',               // #9116 reply to the strict-primary agent-principal management types;
+                                          //   its only consumer is `chroxy agent` (cli/agent-cmd.js, via the
+                                          //   agent-control client). The dashboard Agents tab (S17 of #9112)
+                                          //   moves it to DASHBOARD_ONLY when it lands
   // 'memory_stack_result' removed — the dashboard now handles it (#6867); it
   // moved to DASHBOARD_ONLY below. Mobile parity is the sibling slice #6870.
 ])
