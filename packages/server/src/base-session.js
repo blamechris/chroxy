@@ -105,6 +105,12 @@ export const NOT_PROVIDER_ACTIVITY_EVENTS = Object.freeze([
 export const OUTGOING_QUEUE_MAX = 10
 
 /**
+ * #8281: handoff-blocker codes that are reported but advisory. A caller decides
+ * whether they block; every other code is hard.
+ */
+export const SOFT_HANDOFF_BLOCKER_CODES = Object.freeze(new Set(['background_shells']))
+
+/**
  * Report the provider's input-admission boundary without waiting for the turn.
  * Async sendMessage implementations call this before their first await when
  * possible, or later when an async transport handshake proves admission.
@@ -700,6 +706,10 @@ export class BaseSession extends EventEmitter {
     // input_conflict gate) — by the time a send reaches the queue it is the
     // owner's own follow-up, never a way around primary-client arbitration.
     this._outgoingQueue = []
+    // #8281: prompts `dequeueNextOutgoing()` has shifted off the queue whose
+    // deferred send (process.nextTick) has not begun yet. A counter, not a
+    // boolean, so two shifts landing before the tick cannot clear each other.
+    this._dequeuesInFlight = 0
     this._activeAgents = new Map()
     this._resultTimeout = null
     // #3899: parallel hard-cap setTimeout handle. Armed alongside
@@ -1030,6 +1040,84 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #8281: a prompt has left `_outgoingQueue` (see `dequeueNextOutgoing`) but its
+   * deferred send has not begun. For that one tick the session is not busy AND
+   * the queue is empty, yet a turn is about to start.
+   * @returns {boolean}
+   */
+  get hasDequeueInFlight() {
+    return this._dequeuesInFlight > 0
+  }
+
+  /**
+   * #8281: is a turn in flight from the point of view of a handoff? Defaults to
+   * `turnActive`. A provider whose turn exists before `_isBusy` is set (or
+   * before its backend id is known) overrides this rather than the base class
+   * learning provider internals.
+   * @returns {boolean}
+   */
+  _hasTurnInFlight() {
+    return this.turnActive
+  }
+
+  /**
+   * #8281: ids of the permission prompts this session's own PermissionManager is
+   * still waiting on, so a caller need not read its private map. EMPTY for a
+   * provider without a manager. Hook-routed prompts (CLI / TUI) are held by the
+   * WS layer, not here: see `SessionManager.getHandoffBlockers`.
+   * @returns {string[]}
+   */
+  getPendingPermissionIds() {
+    return this._permissions?.getPendingPermissionIds?.() ?? []
+  }
+
+  /**
+   * #8281: why a handoff must not start from this session right now. An empty
+   * array means nothing in THIS session can still act. Each entry is
+   * `{ code, detail? }`; codes:
+   *
+   *   - `turn_active`        a turn is in flight (`_hasTurnInFlight`)
+   *   - `queued_prompts`     prompts wait in the outgoing queue, or one has left
+   *                          it and its send has not begun (`hasDequeueInFlight`)
+   *   - `pending_permission` an approval is waiting (`getPendingPermissionIds`)
+   *   - `pending_question`   an AskUserQuestion is waiting (`getPendingQuestions`)
+   *   - `active_agents`      subagents are running (`getActiveAgents`)
+   *   - `not_ready`          the provider process is not ready
+   *   - `destroying`         the session is being torn down
+   *   - `background_shells`  SOFT: tracked background shells exist; the entry's
+   *                          detail carries `soft: true` (see
+   *                          `SOFT_HANDOFF_BLOCKER_CODES`). It is reported, and the
+   *                          caller decides whether it blocks.
+   *
+   * Does NOT see what lives outside the session: hook-routed permissions, the
+   * prompt evaluator, scheduler/orchestration ownership. `SessionManager.
+   * getHandoffBlockers` adds those. `isRunning` is unchanged and unrelated.
+   *
+   * @returns {{ code: string, detail?: object }[]}
+   */
+  getHandoffBlockers() {
+    const blockers = []
+    if (this._destroying) blockers.push({ code: 'destroying' })
+    if (!this._processReady) blockers.push({ code: 'not_ready' })
+    if (this._hasTurnInFlight()) blockers.push({ code: 'turn_active' })
+    const queued = this._outgoingQueue.length + this._dequeuesInFlight
+    if (queued > 0) blockers.push({ code: 'queued_prompts', detail: { count: queued } })
+    const permissionIds = this.getPendingPermissionIds()
+    if (permissionIds.length > 0) {
+      blockers.push({ code: 'pending_permission', detail: { requestIds: permissionIds } })
+    }
+    const questions = this.getPendingQuestions()
+    if (questions.length > 0) {
+      blockers.push({ code: 'pending_question', detail: { count: questions.length } })
+    }
+    const agents = this._activeAgents.size
+    if (agents > 0) blockers.push({ code: 'active_agents', detail: { count: agents } })
+    const shells = this.backgroundShellCount
+    if (shells > 0) blockers.push({ code: 'background_shells', detail: { count: shells, soft: true } })
+    return blockers
+  }
+
+  /**
    * #8302: why `isRunning` is true — `'turn'`, `'background-shells'` (idle model,
    * tracked shells only), or `null` when the session is not busy. Derived from
    * `isRunning` itself so a subclass that overrides it (the user shell's PTY
@@ -1135,6 +1223,8 @@ export class BaseSession extends EventEmitter {
   dequeueNextOutgoing() {
     if (this._destroying || this._outgoingQueue.length === 0) return null
     const item = this._outgoingQueue.shift()
+    // #8281: the item is off the queue but not yet sent; see `hasDequeueInFlight`.
+    this._dequeuesInFlight++
     const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
       ? item.sendOptions.clientMessageId
       : undefined
@@ -1149,6 +1239,9 @@ export class BaseSession extends EventEmitter {
     // dequeue ahead of the result that triggered it.
     const remaining = this._outgoingQueue.length
     process.nextTick(() => {
+      // #8281: the deferred send begins here. Cleared FIRST so every exit below
+      // (destroyed, admission refused, sent) leaves the counter balanced.
+      this._dequeuesInFlight = Math.max(0, this._dequeuesInFlight - 1)
       if (this._destroying) return
       // #8301: an item that carries `sendOptions.admitAtFlush` is re-checked HERE,
       // at the moment it would be dispatched — after the preceding turn's
