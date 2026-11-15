@@ -239,7 +239,9 @@ grants, revocation, leases, "agents off" and the kill switch through new
 **strict-primary, loopback-only** WS types: `principal_admin_grant`,
 `principal_admin_list`, `principal_admin_revoke`, `principal_admin_disable`,
 `principal_admin_enable`, `principal_admin_lease_grant`, `principal_admin_lease_revoke`,
-`principal_admin_lease_resume`, `principal_admin_session_off`. Each gates on
+`principal_admin_lease_resume`, `principal_admin_session_off`,
+`principal_admin_session_clear_draft` (§6.4) and `principal_admin_session_legacy_override`
+(§6.4). This list is the roster S2's guard reads for the management surface. Each gates on
 `client.isPrimaryToken === true && !client.boundSessionId && !client.principal` as its
 **first statement**, sits in `BOUND_DENIED_MESSAGE_TYPES` **and**
 `PRINCIPAL_DENIED_MESSAGE_TYPES`, and writes the store from the daemon process only — the
@@ -407,13 +409,13 @@ constant, not this prose.**
 | Auto / more-permissive mode, `acceptEdits`, `skipPermissions` | `set_permission_mode` absent; create envelope (§4.1.1) | `handleSetPermissionMode` session resolution (S2 confirms it refuses the sentinel binding); the unattended mode needs `allowAutoPermissionMode` (`settings-handlers.js`); `skipPermissions:false` unchanged |
 | Permission rules, `allowAlways` | `set_permission_rules` absent; `allow*` refused (§9) | `handleSetPermissionRules` refuses `isBoundClient(client)` (and gains the principal clause) |
 | `revoke_token` | absent | `handleRevokeToken` refuses `client.isPrimaryToken !== true` |
-| Pairing (`pair_approve`, `pair_deny`), QR, `/connect` | absent | **S2 adds a handler refusal** for the WS pair types; the pairing HTTP routes refuse principals (§4.5) |
+| Pairing (`pair_approve`, `pair_deny`), QR, `/connect` | absent | `rejectIfBound` (`handlers/pairing-handlers.js`, truthy `boundSessionId`) — refuses a principal **only through the sentinel**; the pairing HTTP routes refuse principals (§4.5) |
 | Identity rotation | no WS type (CLI only) | CLI needs local primary authority |
 | MCP config | `add_mcp_server` / `remove_mcp_server` absent | `rejectMcpConfigWriteUnlessPrimary` |
-| Skill trust | `skill_trust_accept` / `skill_trust_grant` absent | **S2 adds a handler refusal** |
-| File and git writes | `write_file`, `append_memory`, `git_stage`, `git_unstage`, `git_commit`, `git_create_pr` absent | `write_file` hits the config-dir refusal in `ws-file-ops` for that path only; **S2 adds a handler refusal** for the rest |
+| Skill trust | `skill_trust_accept` / `skill_trust_grant` absent | `rejectSkillTrustIfBound` (`handlers/skills-handlers.js`, truthy `boundSessionId`) — sentinel-dependent |
+| File and git writes | `write_file`, `append_memory`, `git_stage`, `git_unstage`, `git_commit`, `git_create_pr` absent | `rejectMutationIfBound` on all six (`handlers/file-handlers.js`, truthy `boundSessionId`) — sentinel-dependent; `write_file` also hits the config-dir refusal in `ws-file-ops` |
 | Environments | `create_environment` / `destroy_environment` absent | `handleCreateEnvironment` refuses `isPrimaryToken !== true`; `handleDestroyEnvironment` refuses `isBoundClient` |
-| Config / settings | host-wide `set_*`, `notification_prefs_set`, `session_preset_set` absent | **S2 adds a handler refusal**: `handleNotificationPrefsSet` has **no** client-authority check today, and `handleSessionPresetSet` shows none in its opening checks |
+| Config / settings | host-wide `set_*`, `notification_prefs_set`, `session_preset_set` absent | `handleSessionPresetSet` opens with `rejectIfNotHost` (`handlers/repo-handlers.js`, truthy `boundSessionId`) — sentinel-dependent; **S2 adds a handler refusal** to `handleNotificationPrefsSet`, which has **no** client-authority check today |
 | User-shell, `terminal_input`, shell `terminal_subscribe` | absent | `handleTerminalInput` returns silently when `isUserShellSession(entry) && client.isPrimaryToken !== true`, a check **conditional on a user-shell session**; for any other session `terminal_input` is bound-allowed and session-local, so **S2 adds an unconditional principal refusal** in `handleTerminalInput`. `handleCreateSession` `PRIMARY_TOKEN_REQUIRED` covers shell creation. A principal reaches a claude-tui PTY only through the `sendMessage()` of §6 |
 | Dev-preview publication | `open_dev_preview` absent | requires an authenticated primary-token WS client ([`bearer-token-authority.md` §3](bearer-token-authority.md)); **S2 confirms the handler predicate** |
 | Archive purge / policy | `delete_archived_session`, `set_session_archive_policy` absent | both handlers refuse `isBoundClient(client)` |
@@ -431,6 +433,11 @@ directly** with a principal-stamped client and the dispatch allowlist bypassed, 
 a refusal; (2) with the allowlist active, expects `scope_denied`. The mutation proof
 **deletes the column-(b) predicate** and expects red, so the dispatch list alone is shown
 not to carry the row. A row marked "S2 adds a handler refusal" is **red until S2 adds it**.
+**Sentinel-dependent rows** (gates that test a truthy `boundSessionId`, not
+`isBoundClient`, so the §3.1 `isBoundClient` clause does not reach them) refuse a principal
+only because the sentinel is non-empty. S2 either adds an explicit `client.principal` clause
+to each or keeps the dependency with a mutation test that **removes the sentinel** and
+watches every such row go red.
 A row whose column (b) later changes is a review trigger for this document.
 
 ### 4.4 Common test rules (apply to every guard in this document)
@@ -494,8 +501,10 @@ Lease { leaseId, sessionId, principalId, tier: 'steer'|'drive', gen, grantedBy, 
 
 ### 5.3 Human pre-emption and "agents off" (D4)
 
-- **Human activity suspends a drive lease.** Accepted human `input` **or human
-  `terminal_input`** on the session sets the drive lease `suspended`, bumps `gen` and
+- **Human activity suspends a drive lease.** Accepted human `input` **or data-bearing human
+  `terminal_input`** (the §6.4 classification: terminal reply sequences such as
+  cursor-position reports, device-attribute replies and focus in/out are **not** human
+  activity) on the session sets the drive lease `suspended`, bumps `gen` and
   drops the principal's queued entries (audited); principal mutations then answer
   `lease_suspended` until the owner resumes it (`principal_admin_lease_resume`) or it
   expires. A principal cannot resume its own lease. A **steer lease coexists** with human
@@ -504,7 +513,11 @@ Lease { leaseId, sessionId, principalId, tier: 'steer'|'drive', gen, grantedBy, 
   long with no human input or terminal activity, a suspended drive lease resumes, `gen`
   bumps, and the resume is audited.
 - **If persisting a suspension fails** on the human-input path, **human input still
-  proceeds**: the lease is suspended in memory and the write is retried.
+  proceeds**: the lease is suspended in memory and the write is retried. Residual: if the
+  daemon then crashes before either the retry or the debounced history write (≤ 2 s)
+  lands, §5.4's human-origin check cannot see that input and the creator's lease can be
+  restored. Accepted for v1 and listed in §13; the owner sees the restored lease in the
+  roster and can suspend it again.
 - **Per-session "agents off"** (`principal_admin_session_off`): refuses every principal
   request on that session with `agents_off`, revokes its leases and drops its queue
   (audited). Only primary authority may clear it.
@@ -512,9 +525,11 @@ Lease { leaseId, sessionId, principalId, tier: 'steer'|'drive', gen, grantedBy, 
 ### 5.4 Durable owner state, suppression and `createdBy` (E1)
 
 Owner actions must survive a crash, so **"agents off", lease suspension, lease revocation
-and the `gen` high-water mark are written synchronously (write, fsync, rename) to the
-principal store — never through the debounced session-state write — before the action is
-acknowledged.** Precedence, highest first: **kill > agents-off > lease revocation or
+and the `gen` high-water mark are written with the one durable-write standard used
+throughout this document — write, fsync the file, rename, fsync the directory, as
+`_flushPersistConfirmedDurable` does (`session-manager.js`) — to the principal store, never
+through the debounced session-state write, before the action is acknowledged.** §6.6
+and §10.2 use the same standard; S1 provides one helper for all three. Precedence, highest first: **kill > agents-off > lease revocation or
 suspension > `createdBy` restoration.**
 
 `createdBy: principalId` is written at create and persisted with session state (S8 owns
@@ -623,10 +638,12 @@ tiers.
 - **No human PTY draft (claude-tui):** the daemon-owned per-session **`ptyDirty`** flag is
   clear (below).
 - **Composer state:** no dirty human composer, per the capability rule below.
-- **No human input or human `terminal_input` in the last N = 60 s** (`fenced_human_active`).
+- **No human input or data-bearing human `terminal_input` in the last N = 60 s**
+  (`fenced_human_active`; reply sequences do not count). Test: an attached terminal view
+  that only auto-replies neither fences nor suspends a lease.
 
 **Continuation** (re-checked during the write, §6.9): credential, kill switch, "agents
-off", lease and `gen`, human activity, and **no new prompt**. Continuation carries an owned
+off", lease and `gen`, **new** human activity since admission, and **no new prompt**. Continuation carries an owned
 **`deliveryId`** and **tolerates that delivery's own `_isBusy` / `_activeTurn`**: claude-tui
 sets `_isBusy` before writing, so a continuation check that applied the admission
 predicates would abort every delivery. Test against the **real provider lifecycle** (fixture
@@ -649,23 +666,30 @@ bypasses `handleInput`, so no input-path signal sees PTY typing; hence this flag
   `ptyDirty` flag clears **only at a turn start caused by that human input** — it fails
   closed.
 - It **survives the last client disconnecting and has no time expiry**.
-- **Backstop, no auto-clear:** the roster reports `blockedOn: human_draft`, and the owner
-  may clear it explicitly with the strict-primary `principal_admin_session_clear_draft`.
-- Human `terminal_input` counts as human activity for drive-lease pre-emption (§5.3) and
-  for the 60 s window.
+- **Backstop, no auto-clear:** the roster reports `blockedOn: human_draft` with the remedy
+  ("clear the draft or run clear_draft"), and the owner may clear it explicitly with the
+  strict-primary `principal_admin_session_clear_draft`. **Usability cost, stated plainly:**
+  until S9's detector lands, ordinary owner actions that start no turn — a slash command,
+  Esc or Ctrl-U after typing — leave the flag set, so delivery into that claude-tui session
+  waits for the owner's explicit clear. That is the fail-closed choice, and S9's detector
+  is what removes it.
+- Data-bearing human `terminal_input` counts as human activity for drive-lease
+  pre-emption (§5.3) and for the 60 s window; reply sequences do not.
 
 **Composer capability (R7).** Clients negotiate **`composer_state_v1`** at auth and send a
 throttled `composer_state {sessionId, dirty}`. A capable client must **affirmatively**
 report clean; a dirty composer stays dirty for a **5 min grace** after its client
 disconnects. While a **legacy** (non-capable) client is attached as primary the fence
 **holds with no time lapse**; the roster shows `blockedOn: legacy_client`, and the owner
-may set a per-session strict-primary override. Test: unsent typing in a legacy client past
+may set a per-session strict-primary override (`principal_admin_session_legacy_override`).
+Test: unsent typing in a legacy client past
 10 minutes still fences.
 
 Fence predicates are **per provider**: `ptyDirty` applies to claude-tui; SDK, CLI and Codex
 sessions have no shared PTY composer, so only the remaining predicates apply. A session
 with **no human client attached** has its *client-reported* predicates clear by
-construction, **but only if `ptyDirty` is clear**.
+construction, **but only if `ptyDirty` is clear and no disconnected client's composer is
+still inside its 5 min dirty grace**.
 
 ### 6.5 Agent delivery lock and queue (D6, D4)
 
@@ -702,7 +726,8 @@ session, `INPUT_DEDUP_*` in `input-handlers.js`) is **process-local** — the ac
 `dedupScope: 'process'` (`ServerInputAckSchema`,
 `packages/protocol/src/schemas/server/session.ts`). Principals get a durable ledger keyed
 **`(principalId, sessionId, clientMessageId)`** (S10; the ack reports `dedupScope:
-'durable'`), in its **own 0600 store, written synchronously before the effect** — not
+'durable'`), in its **own 0600 store, written before the effect with the §5.4 durable-write
+standard** (file and directory fsync) — not
 through the debounced session-state write (which can trail by up to 2 s). An unwritable
 ledger means **no effect**.
 
@@ -777,8 +802,13 @@ pre-submit check**. If readiness cannot be established the send fails closed wit
 **Arbitration.** Human `terminal_input` participates in the agent delivery lock: while an
 agent PTY write is in progress, **human bytes are held**, the agent writer **stops, clears
 its partial line and confirms the clear**, and only then are the held human bytes forwarded.
-Latency is bounded by one chunk and **no human keystroke is dropped**; the interrupted
-delivery reports `uncertain`. A kill, revoke or "agents off" during an in-flight drain
+**No human keystroke is dropped**; the interrupted delivery reports `uncertain`.
+Confirming the clear needs the same empty-composer detector §6.4 requires of S9, so
+**claude-tui principal delivery is gated on that detector**: until it lands, S9 refuses
+principal input to claude-tui sessions with `zero_effect` (`fenced_pty_dirty`) rather than
+ship an arbitration step it cannot confirm. Once it lands, held human bytes wait at most a
+bounded timeout (S9 sets it, ≤ 2 s); on timeout they are forwarded and the delivery
+reports `uncertain`. A kill, revoke or "agents off" during an in-flight drain
 aborts at the next boundary check, audited. Tests: a human keystroke at each chunk boundary
 loses nothing and is forwarded after the confirmed clear; a fault injected at each boundary
 check; mutation: forward human bytes before the clear is confirmed; positive control: an
@@ -1002,6 +1032,12 @@ S9. S8 owns `createdBy` persistence and the gen high-water mark; S12 consumes th
   pattern matching (§8) and cannot catch arbitrary secrets or derived assistant text.
   Grant observe as you would grant read access to the transcript.
 - **Same-user containment (§2).** No sandbox against a hostile local process.
+- **A suspension lost to a crash.** If the suspension write fails and the daemon crashes
+  within the history debounce, `createdBy` can restore a lease the owner's input should
+  have suspended (§5.3). Visible in the roster; the owner suspends it again.
+- **claude-tui delivery waits for S9's composer detector.** Until it lands, principal input
+  to claude-tui sessions is refused, and a `ptyDirty` flag needs the owner's explicit clear
+  (§6.4, §6.9). SDK, CLI and Codex sessions are unaffected.
 - **Owner lockout bounded by pre-emption, TTL and kill.** A principal can hold a lease and
   fill the cap-3 queue; the owner can always type (human wins), revoke or kill, and
   leases and queue entries expire (2 h, 15 min).
