@@ -427,6 +427,7 @@ function MissionControlTab({ onSwitchSession }: { onSwitchSession?: (sessionId: 
   const metas = sessions.map((s) => ({
     sessionId: s.sessionId,
     cwd: s.cwd,
+    repoCwd: s.repoCwd,
     name: s.name,
     worktree: s.worktree,
   }))

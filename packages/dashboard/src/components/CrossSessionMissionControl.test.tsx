@@ -46,7 +46,7 @@ describe('CrossSessionMissionControl', () => {
     expect(screen.queryByTestId('mission-control-group')).toBeNull()
   })
 
-  it('groups sessions by repo+worktree with labels and the overall total', () => {
+  it('groups legacy sessions by cwd with labels and the overall total', () => {
     const state = stateOf({
       s1: [entry({ id: 'e1', status: 'running' })],
       s2: [entry({ id: 'e2', status: 'blocked' })],

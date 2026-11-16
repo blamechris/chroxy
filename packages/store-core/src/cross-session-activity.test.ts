@@ -91,9 +91,8 @@ describe('selectCrossSessionActivity', () => {
     expect(b.rollup).toEqual({ running: 0, blocked: 0, failed: 1, idle: 0 })
   })
 
-  it('flags a group as worktree from a realistically distinct-cwd worktree session', () => {
-    // A worktree session has its OWN cwd (never the origin checkout's), so it
-    // forms its own group; that group is flagged worktree.
+  it('keeps a legacy worktree in its own cwd group when repoCwd is absent', () => {
+    // An old server omits repoCwd, so this worktree keeps its own cwd group.
     const agg = selectCrossSessionActivity(createEmptyActivityState(), [
       { sessionId: 'main', cwd: '/home/u/repo-a', name: 'main' },
       { sessionId: 'wt', cwd: '/home/u/.chroxy/worktrees/repo-a-feat', name: 'feat', worktree: true },
@@ -180,5 +179,104 @@ describe('selectCrossSessionActivity', () => {
     const agg = selectCrossSessionActivity(createEmptyActivityState(), [{ sessionId: 's', cwd: '/', name: 'root' }])
     expect(agg.groups[0]!.key).toBe('/')
     expect(agg.groups[0]!.label).toBe('/')
+  })
+})
+
+
+describe('repository-aware mission-control grouping (#8199)', () => {
+  const repo = '/srv/projects/chroxy'
+  const wtA = '/home/u/.chroxy/worktrees/11111111111111111111111111111111'
+  const wtB = '/home/u/.chroxy/worktrees/22222222222222222222222222222222'
+
+  it('merges main and two hex worktrees, preserving member identities/order and attention totals', () => {
+    const metas: CrossSessionMeta[] = [
+      { sessionId: 'wt-b', cwd: wtB, repoCwd: repo, name: 'second worktree', worktree: true },
+      { sessionId: 'other', cwd: '/elsewhere/chroxy', name: 'different repository' },
+      { sessionId: 'main', cwd: repo, repoCwd: null, name: 'main' },
+      { sessionId: 'wt-a', cwd: wtA, repoCwd: repo, name: 'first worktree', worktree: true },
+      { sessionId: 'idle', cwd: repo },
+      // Duplicate must not move the first row, rename it, or count it again.
+      { sessionId: 'wt-b', cwd: '/wrong', repoCwd: '/wrong', name: 'duplicate' },
+    ]
+    const activity = stateOf({
+      'wt-b': [entry({ id: 'b', status: 'blocked' }), entry({ id: 'r', status: 'running' })],
+      main: [entry({ id: 'r', status: 'running' }), entry({ id: 'f', status: 'failed' })],
+      'wt-a': [entry({ id: 'f', status: 'failed' })],
+      orphan: [entry({ id: 'orphan', status: 'blocked' })],
+    })
+    const before = JSON.stringify({ metas, activity })
+    const agg = selectCrossSessionActivity(activity, metas)
+    expect(agg.groups.map((g) => g.key)).toEqual(['/elsewhere/chroxy', repo])
+    const group = agg.groups[1]!
+    expect(group.label).toBe('chroxy')
+    expect(group.worktree).toBe(true) // means contains at least one worktree
+    expect(group.sessions).toEqual([
+      { sessionId: 'wt-b', name: 'second worktree', status: 'blocked' },
+      { sessionId: 'main', name: 'main', status: 'running' },
+      { sessionId: 'wt-a', name: 'first worktree', status: 'failed' },
+      { sessionId: 'idle', name: 'idle', status: 'idle' },
+    ])
+    expect(group.rollup).toEqual({ running: 1, blocked: 1, failed: 1, idle: 1 })
+    expect(agg.total).toEqual({ running: 1, blocked: 1, failed: 1, idle: 2 })
+    const legacy = metas.map(({ repoCwd: _repoCwd, ...meta }) => meta)
+    expect(selectCrossSessionActivity(activity, legacy).total).toEqual(agg.total)
+    expect(JSON.stringify({ metas, activity })).toBe(before)
+  })
+
+  it('keeps old-server worktrees separate without repoCwd, including empty/null roots', () => {
+    const metas: CrossSessionMeta[] = [
+      { sessionId: 'main', cwd: repo },
+      { sessionId: 'legacy', cwd: wtA, worktree: true },
+      { sessionId: 'empty', cwd: wtB, repoCwd: '', worktree: true },
+      { sessionId: 'null', cwd: repo, repoCwd: null },
+      { sessionId: 'blank', cwd: repo, repoCwd: ' \t ' },
+    ]
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), metas)
+    expect(agg.groups.map((g) => g.key)).toEqual([wtA, wtB, repo])
+    expect(agg.groups.map((g) => g.label)).toEqual(['11111111111111111111111111111111', '22222222222222222222222222222222', 'chroxy'])
+    expect(agg.total.idle).toBe(5)
+  })
+
+  it('groups Windows worktrees by their original repository without changing raw keys', () => {
+    const root = 'C:\\Users\\u\\repo-win'
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), [
+      { sessionId: 'wt', cwd: 'C:\\Users\\u\\.chroxy\\worktrees\\abcdef', repoCwd: root, worktree: true },
+      { sessionId: 'main', cwd: root },
+    ])
+    expect(agg.groups).toHaveLength(1)
+    expect(agg.groups[0]!.key).toBe(root)
+    expect(agg.groups[0]!.label).toBe('repo-win')
+    expect(agg.groups[0]!.sessions.map((s) => s.sessionId)).toEqual(['wt', 'main'])
+  })
+
+  it('uses a valid repository even without cwd, otherwise keeps blank cwd Ungrouped and last', () => {
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), [
+      { sessionId: 'null-rooted', cwd: null, repoCwd: repo },
+      { sessionId: 'blank-rooted', cwd: ' \t ', repoCwd: repo },
+      { sessionId: 'missing-rooted', repoCwd: repo },
+      { sessionId: 'null', cwd: null },
+      { sessionId: 'blank', cwd: ' \t ', repoCwd: ' ' },
+      { sessionId: 'missing' },
+    ])
+    expect(agg.groups.map((g) => g.key)).toEqual([repo, ''])
+    expect(agg.groups.map((g) => g.label)).toEqual(['chroxy', 'Ungrouped'])
+    expect(agg.groups[0]!.sessions.map((s) => s.sessionId)).toEqual(['null-rooted', 'blank-rooted', 'missing-rooted'])
+    expect(agg.groups[1]!.sessions.map((s) => s.sessionId)).toEqual(['null', 'blank', 'missing'])
+    expect(agg.total).toEqual({ running: 0, blocked: 0, failed: 0, idle: 6 })
+  })
+})
+
+
+describe('worktree-only repository groups (#8199)', () => {
+  it('labels and separates repository roots even when no main checkout session is present', () => {
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), [
+      { sessionId: 'b', cwd: '/worktrees/22222222222222222222222222222222', repoCwd: '/srv/beta', worktree: true },
+      { sessionId: 'a', cwd: '/worktrees/11111111111111111111111111111111', repoCwd: '/srv/alpha', worktree: true },
+    ])
+    expect(agg.groups.map((g) => [g.key, g.label, g.worktree])).toEqual([
+      ['/srv/alpha', 'alpha', true], ['/srv/beta', 'beta', true],
+    ])
+    expect(agg.groups.map((g) => g.sessions[0]!.sessionId)).toEqual(['a', 'b'])
+    expect(agg.total).toEqual({ running: 0, blocked: 0, failed: 0, idle: 2 })
   })
 })

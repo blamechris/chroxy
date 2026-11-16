@@ -4,7 +4,7 @@
  * Parity port of the dashboard `CrossSessionMissionControl` (#6183): it reuses
  * store-core's `selectCrossSessionActivity` (#6182) so the mobile aggregate can
  * never drift from the dashboard / tray badge. Sessions are grouped by
- * repo+worktree (cwd); the overall set and each group carry
+ * repository (repoCwd, falling back to cwd); the overall set and each group carry
  * running/blocked/failed/idle SESSION counts. Each session renders as a row with
  * a derived-status badge.
  *
@@ -15,7 +15,8 @@
  *
  * Testability: the screen is a thin store-reader that delegates rendering to the
  * exported pure {@link MissionControlBody}. The render test drives the Body
- * directly with seeded fixtures (no store / navigation context needed).
+ * directly with seeded fixtures, and also covers the Screen's metadata adapter
+ * with a mocked store (no native connection / navigation context needed).
  */
 import React from 'react';
 import { View, Text, ScrollView, StyleSheet } from 'react-native';
@@ -139,13 +140,13 @@ export function MissionControlBody({ activity, sessions }: MissionControlBodyPro
 }
 
 /** Maps a SessionInfo (store shape) to the selector's minimal CrossSessionMeta. */
-function toMeta(s: { sessionId: string; cwd?: string | null; name?: string; worktree?: boolean }): CrossSessionMeta {
-  return { sessionId: s.sessionId, cwd: s.cwd, name: s.name, worktree: s.worktree };
+function toMeta(s: { sessionId: string; cwd?: string | null; repoCwd?: string | null; name?: string; worktree?: boolean }): CrossSessionMeta {
+  return { sessionId: s.sessionId, cwd: s.cwd, repoCwd: s.repoCwd, name: s.name, worktree: s.worktree };
 }
 
 /**
  * Stable testID fragment for a group (#6245 review): the selector keys groups by
- * raw cwd, which is '' for the Ungrouped bucket and can carry path separators /
+ * repository path (or legacy cwd), which is '' for the Ungrouped bucket and can carry path separators /
  * colons (Windows paths) — both make E2E selectors brittle. Map empty → 'ungrouped'
  * and collapse any non-alphanumeric run to a single '-'.
  */
