@@ -203,7 +203,10 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
 
   const handleCreate = () => {
     if (selectedConnectionUnavailable) return;
-    const sessionName = name.trim() || `Session ${sessions.length + 1}`;
+    // Nothing typed: send NO name and let the daemon name the session ("<project> <n>", or
+    // "Session <n>" on a daemon that predates project naming). Inventing "Session N" here would
+    // be an explicit name that always wins over the daemon's.
+    const sessionName = name.trim() || undefined;
     const sessionCwd = cwd.trim() || undefined;
     createSession({
       name: sessionName,
@@ -274,7 +277,8 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             <Text style={styles.label}>Session Name</Text>
             <TextInput
               style={styles.input}
-              placeholder={`Session ${sessions.length + 1}`}
+              testID="session-name-input"
+              placeholder="Optional"
               placeholderTextColor="#555"
               value={name}
               onChangeText={setName}

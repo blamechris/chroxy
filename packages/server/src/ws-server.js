@@ -1177,6 +1177,9 @@ export class WsServer {
       // mode pickers and say WHY. Late-bound getter so a test mutating
       // self.config is seen.
       get autoPermissionModeAllowed() { return self.config?.allowAutoPermissionMode === true },
+      // Truthful by construction: read off the manager that will actually name the session,
+      // not off the config that was meant to configure it. Late-bound like its neighbours.
+      get projectSessionNames() { return self.sessionManager?.sessionNaming === 'project' },
       // #6691: whether the orchestration harness is enabled on THIS server,
       // surfaced as the `orchestration` capability so the dashboard reveals the
       // Runs surface. Server-wide gate, not token-scoped; fail-closed.

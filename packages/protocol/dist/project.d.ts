@@ -85,4 +85,44 @@ export declare function deriveProject(cwd: string, env?: ProjectEnv): string | n
  * recover the parent repo from that file, or return null rather than mint the id.
  */
 export declare function deriveProjectFromCwd(cwd: string, env?: ProjectEnv): string | null;
+/** A project's canonical identity: a display label and the root it is rooted at. */
+export interface CanonicalProject {
+    label: string;
+    root: string;
+}
+type CoreConfig = {
+    bare: boolean;
+    worktree: string | null;
+};
+/** Called when a git config was REFUSED (project falls back to legacy naming). Never carries file contents. */
+export type RefuseHook = (info: {
+    reason: string;
+    dir: string;
+}) => void;
+/**
+ * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
+ * `core.worktree` exactly as git does. Anything outside it returns null so the
+ * caller REFUSES (legacy name) instead of guessing:
+ *  - only `[core]` counts (section names and keys are case-insensitive; `[core "x"]`
+ *    and `[core.x]` are other sections); `[include]`/`[includeIf ...]` are refused;
+ *  - `[section] key = value` on one line, `"` quoting, `\" \\ \n \t \b`, inline
+ *    `#`/`;` comments outside quotes, trailing-backslash continuation;
+ *  - booleans: true/yes/on/non-zero decimal and a bare key are true,
+ *    false/no/off/0/empty are false, anything else refuses.
+ * Exported (underscore) so tests can compare it with `git config` itself.
+ */
+export declare function _parseCoreConfig(text: string): CoreConfig | null;
+/**
+ * Canonical project identity for a working directory — the one answer a
+ * linked worktree, an agent checkout and the main repo all agree on.
+ *
+ *  1. chroxy session worktree → its parent repo.
+ *  2. nearest `.git` going up: a directory is the root; a FILE is resolved via
+ *     `commondir` to the MAIN repo (never the linked folder's own name).
+ *  3. no git root: tmp (incl. the realpath of os.tmpdir()) / home → null; anything else → the directory itself.
+ *
+ * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
+ * (notifications, ingest) must not change. `root` is a realpath, best effort.
+ */
+export declare function canonicalProjectForCwd(cwd: string, env?: ProjectEnv, onRefuse?: RefuseHook): CanonicalProject | null;
 export {};

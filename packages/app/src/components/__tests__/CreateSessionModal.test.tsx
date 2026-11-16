@@ -301,6 +301,42 @@ describe('CreateSessionModal agent connections', () => {
     { name: 'codex', auth: { ready: true } },
   ];
 
+  it('sends NO name when the user typed none, so the daemon names the session', () => {
+    setupStore(providers);
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockCreateSession.mock.calls[0][0].name).toBeUndefined();
+  });
+
+  it('whitespace-only is the same as nothing typed; a typed name is sent trimmed', () => {
+    setupStore(providers);
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+    act(() => {
+      component!.root.findByProps({ testID: 'session-name-input' }).props.onChangeText('   ');
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+    expect(mockCreateSession.mock.calls[0][0].name).toBeUndefined();
+    mockCreateSession.mockClear();
+    act(() => {
+      component!.root.findByProps({ testID: 'session-name-input' }).props.onChangeText('  My notes ');
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+    expect(mockCreateSession.mock.calls[0][0].name).toBe('My notes');
+  });
+
   it('Default submits neither provider nor connection when the daemon default is unknown', () => {
     setupStore(providers);
     let component: renderer.ReactTestRenderer;

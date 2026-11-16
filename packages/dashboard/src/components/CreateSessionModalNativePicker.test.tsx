@@ -40,6 +40,6 @@ describe('Native folder picker integration (#1473)', () => {
   it('updates CWD and name when folder is selected', () => {
     // After native selection, should set cwd and generate name
     expect(modalSource).toMatch(/setCwd\(selected\)/)
-    expect(modalSource).toMatch(/generateDefaultName\(selected/)
+    expect(modalSource).toMatch(/suggestName\(selected/)
   })
 })

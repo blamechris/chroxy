@@ -236,6 +236,12 @@ const CONFIG_SCHEMA = {
   // config file on the dev machine (physical-access proxy for real
   // user confirmation). Added in the 2026-04-11 audit Adversary A5 fix.
   allowAutoPermissionMode: 'boolean',
+  // How a session created WITHOUT a name is named: 'project' (default) gives
+  // "<project> <n>" ("chroxy 7", numbers kept per project in a durable store next
+  // to session-state.json), 'legacy' keeps "Session <n>". An explicit name always
+  // wins; a project that cannot be determined, or a store that cannot be trusted,
+  // falls back to the legacy name. See resolveSessionNaming().
+  sessionNaming: 'string',
   // #5985 (epic #5982): gate for the embedded user-shell terminal — a
   // `user-shell` session spawns the operator's `$SHELL` (arbitrary code
   // execution on the dev machine, reachable through the tunnel). Nested object
@@ -921,6 +927,12 @@ export function isSchedulerEnabled(config) {
   return config?.features?.scheduler === true
 }
 
+// Session naming mode. Anything but an explicit 'legacy' is 'project' (the default);
+// validateConfig warns about an unrecognised value.
+export function resolveSessionNaming(config) {
+  return config?.sessionNaming === 'legacy' ? 'legacy' : 'project'
+}
+
 // #6858 — resolve the opt-in provider-binary provenance PIN-LEDGER mode. One of
 // 'off' | 'warn' | 'block'. Fail-closed to 'off' (behaviour identical to the
 // pre-#6858 spawn path) for anything but an explicit 'warn' / 'block'. Precedence:
@@ -1292,6 +1304,10 @@ export function validateConfig(config, verbose = false) {
         warnings.push(`Invalid type for '${key}': expected ${expectedTypes.join(' or ')}, got ${actualType}`)
       }
     }
+  }
+
+  if (typeof config.sessionNaming === 'string' && config.sessionNaming !== 'project' && config.sessionNaming !== 'legacy') {
+    warnings.push(`Invalid value for 'sessionNaming': '${config.sessionNaming}' (expected 'project' or 'legacy'); using 'project'`)
   }
 
   // Range validation for the simple numeric fields (audit P2-6) — declarative

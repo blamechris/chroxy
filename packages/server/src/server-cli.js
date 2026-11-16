@@ -65,7 +65,7 @@ import { clientActiveProvider, overlayBroadcastReachesProvider, broadcastRosterP
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled, applyCodexBinaryConfig } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled, applyCodexBinaryConfig, resolveSessionNaming } from './config.js'
 import { sweepStaleProviderDirs } from './sweep-stale-provider-dirs.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { buildSchedulerEngine } from './scheduler.js'
@@ -1188,6 +1188,8 @@ export async function startCliServer(config) {
     // operator set userShell.enabled:true in the config file. Enforced in
     // SessionManager.createSession so it covers every spawn path.
     userShellEnabled: isUserShellEnabled(config),
+    // Unnamed sessions are named "<project> <n>" unless the operator sets sessionNaming: 'legacy'.
+    sessionNaming: resolveSessionNaming(config),
     // #6378: providers opted into unrestricted model validation (serve any
     // API-valid model id without a release). Empty Set unless the operator set
     // config.providers.allowAnyModel.

@@ -546,7 +546,8 @@ export interface ConnectionActions {
  * across platforms — adding a new field is a single-place change. (#3611)
  */
 export interface CreateSessionOptions {
-  name: string;
+  /** Omit to let the daemon name the session. */
+  name?: string;
   cwd?: string;
   provider?: string;
   connectionId?: string;

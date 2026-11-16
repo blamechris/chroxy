@@ -258,7 +258,9 @@ function handleCreateSession(ws, client, msg, ctx) {
 
   // #6277 — build the create options + audit identity ONCE; both the synchronous
   // path and the host-approval deferred path replay the identical create.
-  const createOptions = { name, cwd, provider, connectionId, model, permissionMode, worktree, sandbox, codexSandbox, skipPermissions, agentCommId, ...envOpts }
+  // `requestId` doubles as the naming idempotency key: a retried create (same id) is answered
+  // with the same reserved project number instead of burning another one.
+  const createOptions = { name, cwd, provider, connectionId, model, permissionMode, worktree, sandbox, codexSandbox, skipPermissions, agentCommId, ...(requestId !== undefined ? { nameIdempotencyKey: requestId } : {}), ...envOpts }
   const isUserShell = provider === USER_SHELL_PROVIDER
   // Capture the audit identity at REQUEST time: the deferred (approved) path may
   // run after the requesting socket is gone, so it can't read a live `client`.
