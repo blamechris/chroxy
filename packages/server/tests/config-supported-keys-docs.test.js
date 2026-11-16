@@ -5,6 +5,8 @@ import * as configModule from '../src/config.js'
 import * as providersModule from '../src/anthropic-compatible-config.js'
 import * as acpModule from '../src/acp-config.js'
 import {
+  checkMarkdownIntegrity,
+  checkSchemaRows,
   extractEntryShapes,
   extractTypeShapes,
   findConfigTableRow,
@@ -12,6 +14,7 @@ import {
   GENERIC_BACKTICK_LITERALS,
   findSchemaComment,
   findSection,
+  parseConfigSchema,
   parseFeaturesInventories,
   parseKeySets,
   parseRecognisedSubKeys,
@@ -892,6 +895,58 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
       assert.ok(ofKind(r, 'env').length >= 2, 'a swap must fail per flag even though the env SET is unchanged')
     })
 
+    // ---- #8564: a computed key must be reported, not invisible ----
+
+    for (const [name, body] of [
+      ['c[`features`].ide === true (template literal key)', 'return c[`features`].ide === true'],
+      ['c?.[`features`]?.ide === true', 'return c?.[`features`]?.ide === true'],
+      ['c[key].ide === true (variable key)', "const key = 'features'\n  return c[key].ide === true"],
+      ['c[`${k}`].ide === true (template with a substitution)', "const k = 'features'\n  return c[`${k}`].ide === true"],
+      ['true === c[key].ide', "const key = 'features'\n  return true === c[key].ide"],
+      ['c[key].ide = true (enabling write)', "const key = 'features'\n  c[key].ide = true"],
+      ['c[`features`].ide = true', 'c[`features`].ide = true'],
+    ]) {
+      it(`computed key fails closed: \`${name}\``, () => {
+        const r = checkFeatures(fixtureGate(`export const g = c => {\n  ${body}\n}\n`), md)
+        assert.ok(ofKind(r, 'shape').some(m => m.includes('_fixture.js') && m.includes('computed-key:')), ofKind(r, 'shape').join(' | '))
+      })
+    }
+
+    it('computed key: ordinary computed access is not reported (no noise)', () => {
+      const r = checkFeatures(fixtureGate("export const g = (seen, k, arr, i) => {\n  seen[k] = true\n  if (seen[k] === true) return arr[i].name\n  return arr[i]\n}\n"), md)
+      assert.deepEqual(ofKind(r, 'shape'), [])
+    })
+
+    it("computed key: a string-literal key is still a recognised gate (c['features'].ide === true)", () => {
+      const r = scanFeatureReads("export const g = c => c['features'].ide === true\n", '_fixture.js')
+      assert.deepEqual(r.gates.map(g => g.flag), ['ide'])
+      assert.deepEqual(r.unrecognised, [])
+    })
+
+    // ---- #8564: the env read must be in the gate's OWN scope ----
+
+    it('env scope: a read inside a nested closure of the gating function does not count', () => {
+      const r = checkFeatures(fixtureGate("export function g(c) {\n  const later = () => process.env.CHROXY_ENABLE_IDE === '1'\n  return c?.features?.ide === true\n}\n"), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('_fixture.js') && m.includes('reads env []')), ofKind(r, 'env').join(' | '))
+    })
+
+    it('env scope: a gate in a class field initializer is scoped to the field, not the whole class', () => {
+      const r = checkFeatures(fixtureGate("export class K {\n  on = cfg.features.ide === true\n  envOn() { return process.env.CHROXY_ENABLE_IDE === '1' }\n}\n"), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('_fixture.js') && m.includes('reads env []')), ofKind(r, 'env').join(' | '))
+    })
+
+    it('env scope: a gate in a static block is scoped to the block, not the whole class', () => {
+      const r = checkFeatures(fixtureGate("export class K {\n  static { K.on = cfg.features.ide === true }\n  static envOn() { return process.env.CHROXY_ENABLE_IDE === '1' }\n}\n"), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('_fixture.js') && m.includes('reads env []')), ofKind(r, 'env').join(' | '))
+    })
+
+    it('env scope: a read in the SAME field initializer or static block still counts (no false red)', () => {
+      const field = checkFeatures(fixtureGate("export class K {\n  on = process.env.CHROXY_ENABLE_IDE === '1' || cfg.features.ide === true\n}\n"), md)
+      assert.deepEqual(field.problems.map(p => p.message), [])
+      const block = checkFeatures(fixtureGate("export class K {\n  static { K.on = process.env.CHROXY_ENABLE_IDE === '1' || cfg.features.ide === true }\n}\n"), md)
+      assert.deepEqual(block.problems.map(p => p.message), [])
+    })
+
     it('stale exemption: a listed use that no longer exists', () => {
       const r = checkFeatures(withSources({ 'ws-history.js': t => mutate(t, '    features,\n', '') }), md)
       assert.ok(ofKind(r, 'stale-exemption').some(m => m.includes('ws-history.js')))
@@ -903,6 +958,168 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
       assert.ok(ofKind(checkFeatures(sources, mutate(md, '`CHROXY_ENABLE_IDE` / ', '')), 'env-sets').length > 0)
       assert.ok(ofKind(checkFeatures(sources, mutate(md, 'All four are', 'All five are')), 'numeral').length > 0)
       assert.ok(ofKind(checkFeatures(sources, mutate(md, '(the four [', '(the five [')), 'numeral').length > 0)
+    })
+  })
+})
+
+/**
+ * #8564 — the rest of #7032's list: the per-key schema rows and types, and the
+ * document's own structure (table column counts, anchor links). The env-override
+ * check lives in the features describe above (`env` problems: every function that
+ * gates a flag must read exactly the env CONFIG.md documents for it, not merely
+ * some read somewhere in src/), and the computed-key / env-scope rules are
+ * exercised there too.
+ *
+ * Producer = CONFIG_SCHEMA, parsed from config.js with acorn (it is not
+ * exported). Consumer = the `| Key | Type | CLI Flag | ... |` tables under
+ * "## Configuration Keys". Both directions are checked: a schema key with no row
+ * is an undocumented option, a row with no schema key is a phantom.
+ */
+describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#8564)', () => {
+  let md
+  let configSrc
+  let schema
+  let real
+
+  before(async () => {
+    md = (await readFile(new URL('../CONFIG.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+    configSrc = (await readFile(new URL('../src/config.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+    schema = parseConfigSchema(configSrc, 'src/config.js')
+    real = checkSchemaRows(schema, md)
+  })
+
+  // A value of each schema type, so the runtime cross-check below draws no type warnings.
+  const SAMPLE_BY_TYPE = { string: 'x', number: 1, boolean: true, array: [], object: {} }
+  const messages = (result, kind) => result.problems.filter(p => p.kind === kind).map(p => p.message)
+  const mutate = (text, from, to) => {
+    assert.equal(text.split(from).length - 1, 1, `mutation anchor ${JSON.stringify(from)} must occur exactly once`)
+    return text.replace(from, () => to)
+  }
+
+  it('positive control: the schema parse reads the real CONFIG_SCHEMA', () => {
+    assert.ok(schema.size >= 60, `only ${schema.size} CONFIG_SCHEMA keys parsed`)
+    for (const [key, type] of [['port', 'number'], ['providers', 'array|object'], ['features', 'object'], ['codexBinary', 'string']]) {
+      assert.equal(schema.get(key), type, `CONFIG_SCHEMA.${key}`)
+    }
+    assert.ok(real.rows.size >= 60, `only ${real.rows.size} per-key rows parsed`)
+    // The parse must agree with the runtime: validateConfig rejects exactly the keys
+    // outside the real CONFIG_SCHEMA, so every parsed key must be accepted and a
+    // made-up one must not be (a parse reading a different object fails one side).
+    const unknownWarnings = config => {
+      const out = configModule.validateConfig(config)
+      return (Array.isArray(out) ? out : out.warnings ?? []).filter(w => String(w).startsWith('Unknown config key'))
+    }
+    assert.deepEqual(unknownWarnings(Object.fromEntries([...schema].map(([k, type]) => [k, SAMPLE_BY_TYPE[type.split('|')[0]]]))), [], 'validateConfig rejects a key the source parse found')
+    assert.equal(unknownWarnings({ definitelyNotAKey: 1 }).length, 1, 'validateConfig no longer reports unknown keys')
+  })
+
+  it('every CONFIG_SCHEMA key has a CONFIG.md row, and no row is a phantom', () => {
+    assert.deepEqual(messages(real, 'missing-row'), [])
+    assert.deepEqual(messages(real, 'phantom-row'), [])
+  })
+
+  it("every row's documented type matches the schema's type", () => {
+    assert.deepEqual(messages(real, 'type'), [])
+  })
+
+  it('there is exactly one row per schema key', () => {
+    // checkSchemaRows REFUSES on a duplicate row; asserting the count equals the
+    // schema size makes "one row each" an explicit property rather than a side effect.
+    assert.equal(real.rows.size, schema.size)
+  })
+
+  it("CONFIG.md's tables have the same column count in every row, and every anchor link resolves", () => {
+    const r = checkMarkdownIntegrity(md)
+    assert.ok(r.tables >= 15 && r.links >= 30 && r.headings >= 40, `integrity parse looks empty: ${r.tables} tables, ${r.links} links, ${r.headings} headings`)
+    assert.deepEqual(r.problems.map(p => p.message), [])
+  })
+
+  // ---- each check goes red against its own mutant (in-memory) ----
+
+  describe('regression: each mutant goes red against the real check', () => {
+    it('a schema key with no row (the codexBinary / sessionNaming defect)', () => {
+      const r = checkSchemaRows(schema, md.replace(/^\| `port` \|.*\n/m, ''))
+      assert.ok(messages(r, 'missing-row').some(m => m.includes('`port`')), r.problems.map(p => p.message).join(' | '))
+    })
+
+    it('a row whose type disagrees with the schema', () => {
+      const r = checkSchemaRows(schema, mutate(md, '| `port` | number |', '| `port` | string |'))
+      assert.ok(messages(r, 'type').some(m => m.includes('`port`') && m.includes('`string`') && m.includes('`number`')))
+    })
+
+    it('an escaped-pipe union type is compared as written (`array \\| object` vs array|object)', () => {
+      const r = checkSchemaRows(schema, mutate(md, '| `providers` | array \\| object |', '| `providers` | array |'))
+      assert.ok(messages(r, 'type').some(m => m.includes('`providers`')))
+    })
+
+    it('a row for a key the schema does not have', () => {
+      const r = checkSchemaRows(schema, mutate(md, '| `port` | number |', '| `portt` | number |'))
+      assert.ok(messages(r, 'phantom-row').some(m => m.includes('`portt`')))
+      assert.ok(messages(r, 'missing-row').some(m => m.includes('`port`')))
+    })
+
+    it('a schema key added in source with no doc row', () => {
+      const r = checkSchemaRows(parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  port: 'number',\n  brandNewKey: 'boolean',\n"), 'src/config.js'), md)
+      assert.ok(messages(r, 'missing-row').some(m => m.includes('`brandNewKey`')))
+    })
+
+    it('a schema type changed in source', () => {
+      const r = checkSchemaRows(parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  port: 'string',\n"), 'src/config.js'), md)
+      assert.ok(messages(r, 'type').some(m => m.includes('`port`')))
+    })
+
+    it('a duplicate row REFUSES', () => {
+      const row = md.match(/^\| `port` \|.*$/m)[0]
+      assert.throws(() => checkSchemaRows(schema, md.replace(row, row + '\n' + row)), /REFUSE: .*`port` has two per-key table rows/)
+    })
+
+    it('a schema that cannot be read REFUSES instead of shrinking', () => {
+      assert.throws(() => parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  ...EXTRA,\n  port: 'number',\n"), 'src/config.js'), /REFUSE: .*not a plain/)
+      assert.throws(() => parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  [portKey]: 'number',\n"), 'src/config.js'), /REFUSE: .*not a plain/)
+      assert.throws(() => parseConfigSchema('export const x = 1\n', 'x.js'), /REFUSE: x\.js: no `const CONFIG_SCHEMA/)
+    })
+
+    it('a renamed per-key table header REFUSES instead of parsing zero rows', () => {
+      assert.throws(() => checkSchemaRows(schema, md.replaceAll('| Key | Type | CLI Flag |', '| Name | Type | CLI Flag |')), /REFUSE: .*0 per-key tables/)
+    })
+
+    it('a table row with one cell too many (an unescaped pipe inside a cell)', () => {
+      const r = checkMarkdownIntegrity(mutate(md, '| `port` | number | - | `PORT` | Local WebSocket port', '| `port` | number | - | `PORT` | a | b | Local WebSocket port'))
+      assert.ok(r.problems.some(p => p.kind === 'table' && p.message.includes('7 cells') && p.message.includes('has 5')), r.problems.map(p => p.message).join(' | '))
+    })
+
+    it('a table row with a cell too few', () => {
+      const r = checkMarkdownIntegrity(mutate(md, '| `port` | number | - | `PORT` | Local', '| `port` | number | `PORT` | Local'))
+      assert.ok(r.problems.some(p => p.kind === 'table' && p.message.includes('4 cells')))
+    })
+
+    it('a table that lost its separator row', () => {
+      const r = checkMarkdownIntegrity(md.replace(/^\|-----\|------\|----------\|---------------------\|-------------\|\n/m, ''))
+      assert.ok(r.problems.some(p => p.kind === 'table' && p.message.includes('no `|---|` separator')))
+    })
+
+    it('an anchor whose heading was renamed', () => {
+      const r = checkMarkdownIntegrity(mutate(md, '### Environment variable names', '### Environment variable naming'))
+      assert.ok(r.problems.some(p => p.kind === 'anchor' && p.message.includes('(#environment-variable-names)')), r.problems.map(p => p.message).join(' | '))
+    })
+
+    it('an anchor typo', () => {
+      const r = checkMarkdownIntegrity(md.replaceAll('(#opt-in-features-features)', '(#opt-in-feature-features)'))
+      assert.ok(r.problems.some(p => p.kind === 'anchor' && p.message.includes('opt-in-feature-features')))
+    })
+
+    it('a heading and a table inside a fenced code block are not read as structure', () => {
+      const fenced = md + '\n```\n## Fake heading\n| a | b |\n|---|---|\n| only-one |\n```\n[x](#fake-heading)\n'
+      const r = checkMarkdownIntegrity(fenced)
+      assert.deepEqual(r.problems.map(p => p.kind), ['anchor'], 'the fenced heading must not make #fake-heading resolve, and the fenced table must not be checked')
+    })
+
+    it('an unclosed fence REFUSES (everything after it would be skipped)', () => {
+      assert.throws(() => checkMarkdownIntegrity(md + '\n```\nnever closed\n'), /REFUSE: .*never closed/)
+    })
+
+    it('a document with no tables or links REFUSES', () => {
+      assert.throws(() => checkMarkdownIntegrity('# Title\n\nprose\n'), /REFUSE: .*0 tables/)
     })
   })
 })

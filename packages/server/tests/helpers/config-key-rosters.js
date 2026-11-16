@@ -411,25 +411,57 @@ function walkAst(node, ancestors, visit) {
   ancestors.pop()
 }
 
-/** A member's property name when it is spelled `.name` or `['name']`, else null. */
+/**
+ * Returned by `memberName` for a computed access whose key is not a plain
+ * string literal (a variable, a template literal, a call, a number). It equals
+ * no property name, so a name comparison against it is false — which is exactly
+ * how such an access used to vanish. Callers that must fail closed test for it
+ * explicitly (#8564).
+ */
+const COMPUTED_KEY = Symbol('computed-key')
+
+/** A member's property name when it is spelled `.name` or `['name']`, COMPUTED_KEY for any other computed key, else null. */
 function memberName(m) {
   if (!m.computed && m.property.type === 'Identifier') return m.property.name
   if (m.computed && m.property.type === 'Literal' && typeof m.property.value === 'string') return m.property.value
+  if (m.computed) return COMPUTED_KEY
   return null
 }
 
 const isLiteralTrue = n => n.type === 'Literal' && n.value === true
 
-/** Every `process.env.CHROXY_*` read anywhere inside `root`. */
+// A node that opens its own scope for the purpose of "what does this gate read":
+// a function, a class field initializer, or a static block.
+const SCOPE_TYPES = new Set([...FUNCTION_TYPES, 'PropertyDefinition', 'StaticBlock'])
+
+/**
+ * Every `process.env.CHROXY_*` read inside `root`'s OWN scope. A nested
+ * function, class field initializer or static block is a different scope: a
+ * closure may never run, so an env read inside one does not prove the gate
+ * reads it (#8564 — descending into them erred toward green). `root` itself is
+ * always walked, whatever its type.
+ */
 function collectChroxyEnvReads(root) {
   const envs = new Set()
-  walkAst(root, [], node => {
-    if (node.type !== 'MemberExpression') return
-    const name = memberName(node)
-    const o = node.object
-    if (name && name.startsWith('CHROXY_') && o.type === 'MemberExpression' && memberName(o) === 'env' &&
-        o.object.type === 'Identifier' && o.object.name === 'process') envs.add(name)
-  })
+  const visit = (node, top) => {
+    if (!top && SCOPE_TYPES.has(node.type)) return
+    if (node.type === 'MemberExpression') {
+      const name = memberName(node)
+      const o = node.object
+      if (typeof name === 'string' && name.startsWith('CHROXY_') && o.type === 'MemberExpression' && memberName(o) === 'env' &&
+          o.object.type === 'Identifier' && o.object.name === 'process') envs.add(name)
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc') continue
+      const v = node[key]
+      if (Array.isArray(v)) {
+        for (const c of v) if (c && typeof c.type === 'string') visit(c, false)
+      } else if (v && typeof v.type === 'string') {
+        visit(v, false)
+      }
+    }
+  }
+  visit(root, true)
   return [...envs].sort()
 }
 
@@ -469,9 +501,11 @@ function parseSource(src, label) {
  *
  *  - `gates`: a BinaryExpression `<x>.features.<flag> === true` (optional
  *    chaining accepted, `.flag` spelled non-computed, `true` on the right), with
- *    `envs` = every `process.env.CHROXY_*` read in the INNERMOST enclosing
- *    function (the enclosing top-level statement if there is none). Comments are
- *    not in the AST, so a commented-out read cannot count.
+ *    `envs` = every `process.env.CHROXY_*` read in the INNERMOST enclosing scope
+ *    (function, class field initializer or static block; the enclosing top-level
+ *    statement if there is none), NOT descending into nested functions, field
+ *    initializers or static blocks of that scope (#8564: a closure may never
+ *    run). Comments are not in the AST, so a commented-out read cannot count.
  *  - `unrecognised`: every OTHER use — a read in any other spelling (`!!`,
  *    `Boolean()`, destructure, alias, bracket, `true ===`, `!== false`, a bare
  *    `features` identifier), and a WRITE that could enable a flag:
@@ -479,7 +513,9 @@ function parseSource(src, label) {
  *    assignment. Writes of any other right-hand side (`= enabled`,
  *    `= enabled === true`) are not gates and are not reported. Each entry has a
  *    structural `descriptor` and the enclosing function name as `context`, which
- *    is what exemptions key on.
+ *    is what exemptions key on. A computed access with a non-literal key
+ *    (`c[`features`].u`, `c[k].u === true`, `c[k].u = true`) is reported as
+ *    `computed-key:*` rather than ignored (#8564); ordinary `map[k]` access is not.
  *
  * @param {string} src
  * @param {string} label
@@ -504,7 +540,53 @@ export function scanFeatureReads(src, label) {
     return { top, parent: ancestors[i], index: i }
   }
 
+  // #8564: a computed access with a non-literal key is neither a gate nor
+  // reported by the branches below (memberName used to answer null for it), so
+  // `c[`features`].u === true` was invisible rather than fail-closed. Two shapes
+  // are reported, both descriptors prefixed `computed-key:`:
+  //  - a template literal with no substitutions, which is a string literal in
+  //    all but spelling and is therefore spelled out as `c[`features`]`;
+  //  - a computed link (variable, call, ...) anywhere in a member chain that is
+  //    used as a gate or an enable (`=== true`, `= true`). Computed access in any
+  //    OTHER position (`arr[i].name`) is ordinary code and is not reported.
+  const isStaticTemplate = m => m.computed && m.property.type === 'TemplateLiteral' && m.property.expressions.length === 0
+  const reportComputedKey = (node, ancestors) => {
+    if (isStaticTemplate(node)) {
+      report(node, ancestors, `computed-key:template-literal(${node.property.quasis[0].value.cooked})`)
+      return
+    }
+    // Only the OUTERMOST member of a chain decides the position.
+    const { top, parent } = outward(node, ancestors)
+    if (parent?.type === 'MemberExpression' && parent.object === top) return
+    // A computed link must have a further member AFTER it (`c[k].flag`): a flag is
+    // a property of an object, so the last link of a chain is never the flag's
+    // parent. `seen[k] === true` / `seen[k] = true` is a set-membership idiom (8
+    // sites in src/ at the time of writing) and `features[k]` is already reported
+    // through the bare `features` identifier.
+    let chain = node.object
+    let hasComputedLink = false
+    for (;;) {
+      if (chain.type === 'ChainExpression') { chain = chain.expression; continue }
+      if (chain.type !== 'MemberExpression') break
+      if (memberName(chain) === COMPUTED_KEY && !isStaticTemplate(chain)) hasComputedLink = true
+      chain = chain.object
+    }
+    if (!hasComputedLink) return
+    // The two positions that ARE a gate or an enable: `<chain> === true` (either
+    // side) and `<chain> = true`. The weaker read spellings (`!x`, `!== false`,
+    // `Boolean(x)`) are deliberately not matched: with an unresolvable key they
+    // fire on ~20 ordinary `map[id]`-style reads in src/, and a gate that noisy is
+    // exempted wholesale and then guards nothing. Those spellings are already
+    // reported when the chain spells `.features` literally.
+    const inPosition =
+      (parent?.type === 'BinaryExpression' && (parent.operator === '===' || parent.operator === '==') && (isLiteralTrue(parent.left) || isLiteralTrue(parent.right))) ||
+      (parent?.type === 'AssignmentExpression' && parent.left === top && isLiteralTrue(parent.right))
+    if (inPosition) report(node, ancestors, `computed-key:chain-in-${describeNode(parent)}`)
+  }
+
   walkAst(ast, [], (node, ancestors) => {
+    // Every member is offered; the chain check inside only fires on the OUTERMOST one.
+    if (node.type === 'MemberExpression') reportComputedKey(node, ancestors)
     if (node.type === 'MemberExpression' && memberName(node) === 'features') {
       const { top, parent, index } = outward(node, ancestors)
       if (parent?.type === 'MemberExpression' && parent.object === top) {
@@ -513,7 +595,7 @@ export function scanFeatureReads(src, label) {
         const up = outward(parent, ancestors.slice(0, index))
         const p = up.parent
         if (flag && p?.type === 'BinaryExpression' && p.operator === '===' && p.left === up.top && isLiteralTrue(p.right)) {
-          const fn = [...ancestors].reverse().find(a => FUNCTION_TYPES.has(a.type)) ?? ancestors[1]
+          const fn = [...ancestors].reverse().find(a => SCOPE_TYPES.has(a.type)) ?? ancestors[1]
           gates.push({ flag, line: node.loc.start.line, envs: collectChroxyEnvReads(fn) })
         } else if (p?.type === 'AssignmentExpression' && p.left === up.top) {
           if (p.operator !== '=' || isLiteralTrue(p.right)) report(node, ancestors, `write:features.${flag ?? '<computed>'} ${p.operator} ${p.operator === '=' ? 'true' : '...'}`)
@@ -617,4 +699,174 @@ export function parseFeaturesInventories(md) {
   }
   if (directReads.envs.size === 0) throw new Error('REFUSE: CONFIG.md: the "Direct reads" features list parsed to zero env vars')
   return { keyRow, optIn, directReads }
+}
+
+// ---- #8564: schema rows + types, table and anchor integrity ----------------
+
+/**
+ * `CONFIG_SCHEMA` from config.js source, as key -> type string. Parsed from the
+ * AST (the object is not exported, and the runtime check must not depend on
+ * exporting it). REFUSES on anything it cannot read as `name: 'literal'`: a
+ * spread, a computed key or a non-string value would make the key set
+ * incomplete, and a schema check over a partial schema passes vacuously.
+ *
+ * @param {string} src
+ * @param {string} label
+ * @returns {Map<string, string>}
+ */
+export function parseConfigSchema(src, label) {
+  const ast = parseSource(src, label)
+  let obj = null
+  walkAst(ast, [], node => {
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.id.name === 'CONFIG_SCHEMA') {
+      if (obj) throw new Error(`REFUSE: ${label}: CONFIG_SCHEMA is declared twice`)
+      if (node.init?.type !== 'ObjectExpression') throw new Error(`REFUSE: ${label}: CONFIG_SCHEMA is not an object literal`)
+      obj = node.init
+    }
+  })
+  if (!obj) throw new Error(`REFUSE: ${label}: no \`const CONFIG_SCHEMA = { ... }\` declaration`)
+  const schema = new Map()
+  for (const p of obj.properties) {
+    const key = p.type === 'Property' && !p.computed
+      ? (p.key.type === 'Identifier' ? p.key.name : p.key.type === 'Literal' && typeof p.key.value === 'string' ? p.key.value : null)
+      : null
+    if (key === null || p.value.type !== 'Literal' || typeof p.value.value !== 'string') {
+      throw new Error(`REFUSE: ${label}:${p.loc.start.line}: CONFIG_SCHEMA entry is not a plain \`name: 'type'\` pair (${p.type}) — the schema is not fully readable`)
+    }
+    if (schema.has(key)) throw new Error(`REFUSE: ${label}: CONFIG_SCHEMA key ${key} appears twice`)
+    schema.set(key, p.value.value)
+  }
+  if (schema.size === 0) throw new Error(`REFUSE: ${label}: CONFIG_SCHEMA parsed to zero keys`)
+  return schema
+}
+
+/** Cells of one table line, split on UNESCAPED pipes (GFM: a pipe inside a code span still splits). */
+function tableCells(line) {
+  const t = line.trim()
+  const inner = t.slice(t.startsWith('|') ? 1 : 0, t.endsWith('|') && !t.endsWith('\\|') ? -1 : undefined)
+  return inner.split(/(?<!\\)\|/)
+}
+
+/** The lines of `md` outside fenced code blocks, with their 1-based line numbers. REFUSES on an unclosed fence. */
+function proseLines(md) {
+  const out = []
+  let fence = null
+  md.split('\n').forEach((line, i) => {
+    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    if (m) {
+      if (fence === null) fence = m[1][0]
+      else if (m[1][0] === fence) fence = null
+      return
+    }
+    if (fence === null) out.push({ n: i + 1, text: line })
+  })
+  if (fence !== null) throw new Error('REFUSE: CONFIG.md: a fenced code block is never closed — everything after it would be skipped')
+  return out
+}
+
+/** GitHub's heading slug: lowercase, drop punctuation except `-` and `_`, spaces to `-`. */
+function githubSlug(heading) {
+  return heading.toLowerCase().replace(/[^\p{L}\p{N}\p{M} _-]/gu, '').replace(/ /g, '-')
+}
+
+/**
+ * Structural integrity of CONFIG.md: every table has the same number of cells in
+ * every row as its header and separator, and every `](#fragment)` link resolves
+ * to a heading. Returns problems (never throws on a defect); REFUSES only when
+ * it cannot read the document at all (no tables, no headings, no links, or an
+ * unclosed fence), because a count over zero tables or links is the vacuous pass.
+ *
+ * @param {string} md
+ * @returns {{ problems: {kind: string, message: string}[], tables: number, links: number, headings: number }}
+ */
+export function checkMarkdownIntegrity(md) {
+  const lines = proseLines(md)
+  const problems = []
+  const add = (kind, message) => problems.push({ kind, message })
+
+  // Tables: maximal runs of consecutive prose lines that start with `|`.
+  let tables = 0
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].text.startsWith('|')) continue
+    const run = [lines[i]]
+    while (i + 1 < lines.length && lines[i + 1].n === run[run.length - 1].n + 1 && lines[i + 1].text.startsWith('|')) run.push(lines[++i])
+    tables++
+    const width = tableCells(run[0].text).length
+    if (run.length < 2 || !tableCells(run[1].text).every(c => /^\s*:?-{3,}:?\s*$/.test(c))) {
+      add('table', `CONFIG.md:${run[0].n}: the table has no \`|---|\` separator row under its header`)
+      continue
+    }
+    for (const row of run) {
+      const got = tableCells(row.text).length
+      if (got !== width) add('table', `CONFIG.md:${row.n}: table row has ${got} cells but its header (line ${run[0].n}) has ${width} — an unescaped \`|\` inside a cell splits it`)
+    }
+  }
+
+  // Anchors: heading slugs (with GitHub's -1, -2 suffix for repeats) vs `](#x)`.
+  const slugs = new Set()
+  const seen = new Map()
+  let headings = 0
+  for (const { text } of lines) {
+    const h = /^#{1,6}\s+(.*?)\s*#*\s*$/.exec(text)
+    if (!h) continue
+    headings++
+    const base = githubSlug(h[1])
+    const n = seen.get(base) ?? 0
+    seen.set(base, n + 1)
+    slugs.add(n === 0 ? base : `${base}-${n}`)
+  }
+  let links = 0
+  for (const { n, text } of lines) {
+    for (const m of text.matchAll(/\]\(#([^)\s]*)\)/g)) {
+      links++
+      if (!slugs.has(m[1])) add('anchor', `CONFIG.md:${n}: link \`(#${m[1]})\` matches no heading anchor`)
+    }
+  }
+  if (tables === 0 || headings === 0 || links === 0) {
+    throw new Error(`REFUSE: CONFIG.md: integrity parse found ${tables} tables, ${headings} headings, ${links} anchor links — it is not reading the document`)
+  }
+  return { problems, tables, links, headings }
+}
+
+/**
+ * Compare CONFIG.md's per-key tables (everything under "## Configuration Keys")
+ * with the CONFIG_SCHEMA key -> type map, both ways.
+ *
+ * @param {Map<string, string>} schema
+ * @param {string} md
+ * @returns {{ problems: {kind: string, message: string}[], rows: Map<string, string> }}
+ */
+export function checkSchemaRows(schema, md) {
+  const lines = proseLines(md)
+  const start = lines.findIndex(l => l.text === '## Configuration Keys')
+  if (start === -1) throw new Error('REFUSE: CONFIG.md: no "## Configuration Keys" heading')
+  let end = lines.findIndex((l, i) => i > start && /^## /.test(l.text))
+  if (end === -1) end = lines.length
+  const rows = new Map() // key -> documented type, normalised
+  const problems = []
+  const add = (kind, message) => problems.push({ kind, message })
+  // Only tables headed `| Key | Type | CLI Flag | Environment Variable | Description |`
+  // are per-key tables; the PVC / quota / ConfigMap tables below carry other rows.
+  const isKeyHeader = cells => cells.length === 5 && cells.map(c => c.trim()).join('|') === 'Key|Type|CLI Flag|Environment Variable|Description'
+  let inKeyTable = false
+  let keyTables = 0
+  for (const { n, text } of lines.slice(start, end)) {
+    if (!text.startsWith('|')) { inKeyTable = false; continue }
+    const cells = tableCells(text)
+    if (isKeyHeader(cells)) { inKeyTable = true; keyTables++; continue }
+    if (!inKeyTable || cells.length < 5) continue
+    const m = /^\s*`([A-Za-z_$][\w$]*)`\s*$/.exec(cells[0])
+    if (!m) continue // header, separator, `_(env-only)_` rows
+    if (rows.has(m[1])) throw new Error(`REFUSE: CONFIG.md:${n}: \`${m[1]}\` has two per-key table rows`)
+    rows.set(m[1], cells[1].replace(/\\\|/g, '|').replace(/\s+/g, ''))
+  }
+  if (keyTables === 0 || rows.size === 0) throw new Error(`REFUSE: CONFIG.md: found ${keyTables} per-key tables and ${rows.size} rows under "## Configuration Keys" — the header row may have changed`)
+  for (const [key, type] of schema) {
+    if (!rows.has(key)) add('missing-row', `CONFIG_SCHEMA key \`${key}\` has no row in CONFIG.md's per-key tables`)
+    else if (rows.get(key) !== type) add('type', `CONFIG.md documents \`${key}\` as \`${rows.get(key)}\` but CONFIG_SCHEMA says \`${type}\``)
+  }
+  for (const key of rows.keys()) {
+    if (!schema.has(key)) add('phantom-row', `CONFIG.md has a per-key row for \`${key}\`, which is not a CONFIG_SCHEMA key`)
+  }
+  return { problems, rows }
 }
