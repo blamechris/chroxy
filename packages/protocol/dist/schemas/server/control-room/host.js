@@ -167,6 +167,9 @@ export const HostStatusSummarySchema = z.object({
  */
 export const ServerHostStatusSnapshotSchema = z.object({
     type: z.literal('host_status_snapshot'),
+    // Echo of the request's `requestId` (null when the request carried none), as the
+    // sibling Control Room snapshots declare it.
+    requestId: z.string().nullable().optional(),
     generatedAt: z.string().datetime(),
     root: z.string(),
     summary: HostStatusSummarySchema,

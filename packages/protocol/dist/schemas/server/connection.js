@@ -68,11 +68,29 @@ export const ServerAuthOkSchema = z.object({
     dashboardBuildId: z.string().optional(),
     serverCommit: z.string(),
     cwd: z.string().nullable(),
+    // The host's default working directory (SessionManager.defaultCwd), which the New
+    // Session dialog seeds from. `null` for a session-bound (pairing) client, which is
+    // told about its own session only. Optional: older servers omit it, and clients
+    // treat absence as "unknown".
+    defaultCwd: z.string().nullable().optional(),
     connectedClients: z.array(ClientInfoSchema),
     encryption: z.enum(['required', 'disabled']),
     protocolVersion: z.number().int().min(1),
     minProtocolVersion: z.number().int().min(1),
     maxProtocolVersion: z.number().int().min(1),
+    // Cloud-task (`claude --remote` / teleport) availability on THIS host, from
+    // WebTaskManager.getFeatureStatus(). The producer always sends all three booleans;
+    // clients coerce each flag and fall back to all-false when the map is absent (older
+    // servers), so the field is optional here.
+    webFeatures: z.object({
+        available: z.boolean(),
+        remote: z.boolean(),
+        teleport: z.boolean(),
+    }).optional(),
+    // Server feature flags that gate provider-backed UI (`environments`: some registered
+    // provider is containerised). Distinct from `capabilities`, which advertises WS
+    // message support. Optional; unknown keys pass so a flag a newer server adds survives.
+    features: z.object({ environments: z.boolean().optional() }).passthrough().optional(),
     // #3272: server-advertised capability map. Keyed by feature name,
     // value=boolean. Lets the dashboard gate UI affordances on the
     // server actually supporting the matching WS message — e.g.

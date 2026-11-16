@@ -359,25 +359,12 @@ describe('#7085 outbound schema coverage', () => {
     // session-scoped frame downstream of the producer, so most schemas rightly omit it
     // (#7108 decided it is a transport tag, not a producer field). `type` is the key.
 
-    /** Fields a producer sends and the roster names, that the schema does not declare yet. */
-    const ROSTER_FIELDS_SCHEMA_LACKS = new Map([
-      ['auth_ok', {
-        fields: ['defaultCwd', 'webFeatures', 'features'],
-        why: 'ws-history.js sends all three in auth_ok; ServerAuthOkSchema declares none, so a parse strips them',
-      }],
-      ['tool_result', {
-        fields: ['images'],
-        why: 'event-normalizer.js attaches `images` when the tool returned any; ServerToolResultSchema lacks it',
-      }],
-      ['server_error', {
-        fields: ['correlationId'],
-        why: 'ws-server.js _handleMessage\'s catch path sends it; ServerErrorSchema lacks it',
-      }],
-      ['host_status_snapshot', {
-        fields: ['requestId'],
-        why: 'control-room-handlers.js echoes the request id; ServerHostStatusSnapshotSchema lacks it (the sibling snapshots declare it)',
-      }],
-    ])
+    /**
+     * Fields a producer sends and the roster names, that the schema does not declare yet. Empty:
+     * #8551 declared every one that was confirmed. An entry is stale-checked below, so one added
+     * here must be real (roster names it, schema still lacks it).
+     */
+    const ROSTER_FIELDS_SCHEMA_LACKS = new Map()
 
     /** Everything up to the Encrypted-envelope marker: the Server -> Client section proper. */
     function rosterSectionText() {

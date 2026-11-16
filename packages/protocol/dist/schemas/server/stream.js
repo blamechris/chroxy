@@ -156,6 +156,9 @@ export const ServerMessageSchema = z.object({
     tool: z.string().nullable().optional(),
     options: z.any().optional(),
     timestamp: z.number(),
+    // The server-assigned id of the stream a REPLAYED response was recorded from
+    // (history `message` entries carry it; live `message` frames do not).
+    messageId: z.string().optional(),
     code: z.string().max(64).optional(),
     // #6768: by producer convention (NOT enforced by this schema — like the
     // `code`/`attemptedResumeId` pairing below, `subtype` and
@@ -270,6 +273,9 @@ export const ServerToolStartSchema = z.object({
     tool: z.string(),
     input: z.any(),
     serverName: z.string().optional(),
+    // When the server recorded the entry. REPLAYED frames only (the history entry's
+    // stamp); a live broadcast omits it and the client uses its own clock.
+    timestamp: z.number().optional(),
     // #7454/#7458: present on REPLAYED frames only (both replay paths map the
     // server-internal `_seq` onto the wire; absent on live broadcasts). The
     // #5555.3 delta-replay cursor — and for user_question the #7420
@@ -296,6 +302,10 @@ export const ServerToolResultSchema = z.object({
     // Optional and additive -- older servers never send it, older clients strip it
     // and fall back to the `isError` styling they already have.
     terminatedReason: z.string().optional(),
+    // Base64 images the tool returned (computer-use screenshots), attached by the event
+    // normalizer only when there is at least one; allow-listed media types, each capped
+    // server-side. Absent otherwise, and on a replayed entry (history keeps no images).
+    images: z.array(z.object({ mediaType: z.string(), data: z.string() })).optional(),
     // #7346: the finalized tool input, backfilled by CliSession (parsed from
     // the buffered `content_block_stop` input_json_delta chunks) / SdkSession
     // (the full assistant-message `block.input`, already parsed) — see
@@ -310,6 +320,8 @@ export const ServerToolResultSchema = z.object({
     // server-internal `_seq` onto the wire; absent on live broadcasts). The
     // #5555.3 delta-replay cursor — and for user_question the #7420
     // live-vs-replayed guard — key on this field's presence.
+    // When the server recorded the entry. REPLAYED frames only; live omits it.
+    timestamp: z.number().optional(),
     historySeq: z.number().optional(),
 });
 // #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
@@ -1048,6 +1060,8 @@ export const ServerUserQuestionSchema = z.object({
     type: z.literal('user_question'),
     toolUseId: z.string(),
     questions: z.array(z.any()),
+    // When the server recorded the question. REPLAYED frames only; live omits it.
+    timestamp: z.number().optional(),
     // #7454: present on REPLAYED frames only (both replay paths map the server's
     // internal `_seq` onto the wire); absent on every live broadcast. The #7420
     // live-vs-replayed discriminator keys on this field's PRESENCE — a

@@ -151,6 +151,7 @@ export declare const HostStatusSummarySchema: z.ZodObject<{
  */
 export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
     type: z.ZodLiteral<"host_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     generatedAt: z.ZodString;
     root: z.ZodString;
     summary: z.ZodObject<{

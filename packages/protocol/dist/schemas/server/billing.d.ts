@@ -79,6 +79,7 @@ export declare const ServerErrorSchema: z.ZodObject<{
     category: z.ZodOptional<z.ZodString>;
     message: z.ZodString;
     recoverable: z.ZodBoolean;
+    correlationId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerPushTokenErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"push_token_error">;
