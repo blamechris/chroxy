@@ -761,20 +761,25 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // `keyCode === 229` is the Safari fallback for browsers that don't set
     // `isComposing` reliably.
     if (isImeComposing(e)) return
-    // Tab completion — only when dropdown is visible to avoid trapping keyboard
-    // focus. #8084: Shift+Tab is excluded so it keeps moving focus backward
-    // (never completes) — mirrors InputBar.tsx's slash-command/file pickers,
-    // which apply the identical `!e.shiftKey` guard to their own Tab-complete
-    // branches (#7370).
-    if (e.key === 'Tab' && !e.shiftKey && showSuggestions && suggestions.length > 0) {
+    const listOpen = showSuggestions && suggestions.length > 0
+    // The highlight index is not clamped when the list changes without typing
+    // (async autocomplete / knownCwds), so it can point past the end: treat
+    // that as "nothing highlighted" rather than reading `undefined`.
+    const highlighted = selectedSuggestion >= 0 ? suggestions[selectedSuggestion] : undefined
+    // Tab completion — only when the dropdown is visible AND the user has
+    // explicitly highlighted a still-valid suggestion (ArrowDown/ArrowUp).
+    // #8227: an unhighlighted (or stale-highlight) Tab is navigation, not
+    // completion — it used to take the first suggestion, so tabbing past this
+    // optional field set a cwd unintentionally. Tab is then left alone and
+    // focus moves normally. #8084: Shift+Tab is excluded so it keeps moving
+    // focus backward (never completes) — mirrors InputBar.tsx's pickers (#7370).
+    if (e.key === 'Tab' && !e.shiftKey && listOpen && highlighted !== undefined) {
       e.preventDefault()
-      const idx = selectedSuggestion >= 0 ? selectedSuggestion : 0
-      const suggestion = suggestions[idx]!
-      const completed = suggestion.endsWith('/') ? suggestion : suggestion + '/'
+      const completed = highlighted.endsWith('/') ? highlighted : highlighted + '/'
       selectSuggestion(completed)
       return
     }
-    if (showSuggestions && suggestions.length > 0) {
+    if (listOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         setSelectedSuggestion(i => Math.min(i + 1, suggestions.length - 1))
@@ -787,7 +792,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       }
       if (e.key === 'Enter' && selectedSuggestion >= 0) {
         e.preventDefault()
-        selectSuggestion(suggestions[selectedSuggestion]!)
+        // Stale highlight (list shrank): nothing valid was picked, so neither
+        // submit nor change the cwd — just drop the highlight.
+        if (highlighted === undefined) setSelectedSuggestion(-1)
+        else selectSuggestion(highlighted)
         return
       }
       if (e.key === 'Escape') {

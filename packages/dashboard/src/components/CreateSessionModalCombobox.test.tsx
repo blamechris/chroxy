@@ -152,6 +152,38 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     expect(cwdInput.value).toBe('/home/user/projects/api/')
   })
 
+  // #8227 — Tab with the dropdown open but NOTHING highlighted used to accept
+  // the first suggestion, so tabbing past the optional field set a cwd
+  // unintentionally. An unhighlighted Tab is navigation, not completion.
+  it('Tab with no highlighted suggestion leaves the cwd unchanged and does not complete (#8227)', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+    // Modal's own focus trap may also preventDefault here (activeElement is
+    // not really the input under fireEvent.focus), so the unconfounded
+    // signals are the value and the nameless-suggestion side effects.
+    fireEvent.keyDown(cwdInput, { key: 'Tab' })
+    expect(cwdInput.value, 'unhighlighted Tab must not take a suggestion').toBe('')
+    const nameInput = screen.getByLabelText('Session name') as HTMLInputElement
+    expect(nameInput.value, 'no suggestion applied, so no auto-name').toBe('')
+  })
+
+  it('Tab after ArrowDown highlights then completes with a trailing slash and prevents default (#8227)', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    // fireEvent returns false when preventDefault was called.
+    const notPrevented = fireEvent.keyDown(cwdInput, { key: 'Tab' })
+    expect(notPrevented).toBe(false)
+    expect(cwdInput.value).toBe('/home/user/projects/api/')
+  })
+
   // #8084 — `handleCwdKeyDown`'s Tab-completion branch did not exclude
   // Shift+Tab, so reverse-tabbing OUT of the cwd field while the suggestions
   // dropdown was open completed the highlighted suggestion instead of moving
@@ -177,6 +209,43 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
     fireEvent.keyDown(cwdInput, { key: 'Tab', shiftKey: true })
     expect(cwdInput.value, 'Shift+Tab must not complete the suggestion into the cwd field').toBe('')
+  })
+
+  // #8227 follow-up — the suggestion list can shrink WITHOUT typing (async
+  // autocomplete results / knownCwds change), leaving the highlight index past
+  // the end. Tab/Enter must treat that as "nothing highlighted", not throw.
+  function renderWithShrinkingList() {
+    const onCreate = vi.fn()
+    const base: CreateSessionModalProps = {
+      open: true, onClose: vi.fn(), onCreate, initialCwd: '', existingNames: [],
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    }
+    const { rerender } = render(<CreateSessionModal {...base} />)
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
+    rerender(<CreateSessionModal {...base} knownCwds={['/home/user/projects/api']} />)
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(1)
+    return { cwdInput, onCreate }
+  }
+
+  it('Tab with a stale highlight past the end of a shrunk list does not throw or complete (#8227)', () => {
+    const { cwdInput } = renderWithShrinkingList()
+    // React reports a throwing handler asynchronously, so also pin that the
+    // handler did not reach its preventDefault (focus must be free to move).
+    let notPrevented = false
+    expect(() => { notPrevented = fireEvent.keyDown(cwdInput, { key: 'Tab' }) }).not.toThrow()
+    expect(notPrevented, 'stale-highlight Tab must not be prevented').toBe(true)
+    expect(cwdInput.value).toBe('')
+  })
+
+  it('Enter with a stale highlight past the end of a shrunk list does not throw, change cwd or submit (#8227)', () => {
+    const { cwdInput, onCreate } = renderWithShrinkingList()
+    expect(() => fireEvent.keyDown(cwdInput, { key: 'Enter' })).not.toThrow()
+    expect(cwdInput.value).toBe('')
+    expect(onCreate).not.toHaveBeenCalled()
   })
 
   it('Escape closes suggestion list', () => {
