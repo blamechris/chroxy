@@ -127,7 +127,10 @@ describe('canonicalProjectForCwd', () => {
     const bare = join(b, 'holder', '.git')
     mkdirSync(join(b, 'holder'))
     git(b, 'init', '-q', '--bare', '-b', 'main', bare)
-    git(bare, 'worktree', 'add', '-q', '--orphan', '-b', 'o', join(b, 'wt')) // git >= 2.42
+    // Plumbing commit on the empty tree: `worktree add --orphan` needs git >= 2.42 and
+    // self-hosted Linux runners have 2.39.
+    const commit = git(bare, 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'init').toString().trim()
+    git(bare, 'worktree', 'add', '-q', '-b', 'o', join(b, 'wt'), commit)
     assert.equal(canonicalProjectForCwd(join(b, 'wt'), NO_TMP), null)
   })
 

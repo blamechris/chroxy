@@ -318,12 +318,30 @@ describe('buildSidebarContextMenuItems', () => {
       const items = buildSidebarContextMenuItems(
         makeArgs({
           target: { type: 'session', sessionId: 's42' },
-          sessions: [session],
+          sessions: [session, makeSession({ sessionId: 's43' })],
           confirmCloseSession,
         }),
       )
-      items.find(i => i.id === 'close')?.onClick?.()
+      const close = items.find(i => i.id === 'close')
+      expect(typeof close?.onClick).toBe('function')
+      close?.onClick?.()
       expect(confirmCloseSession).toHaveBeenCalledWith('s42')
+    })
+
+    it('#8226 — Close is not actionable when the target is the only live session', () => {
+      // The server rejects destroying the last session, so the menu must not
+      // offer it (SessionContextMenu drops items whose onClick is not a function).
+      const confirmCloseSession = vi.fn()
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'session', sessionId: 's42' },
+          sessions: [makeSession({ sessionId: 's42' })],
+          confirmCloseSession,
+        }),
+      )
+      const close = items.find(i => i.id === 'close')
+      expect(typeof close?.onClick).not.toBe('function')
+      expect(confirmCloseSession).not.toHaveBeenCalled()
     })
 
     it('Close item is flagged destructive with a separator above', () => {
@@ -331,7 +349,7 @@ describe('buildSidebarContextMenuItems', () => {
       const items = buildSidebarContextMenuItems(
         makeArgs({
           target: { type: 'session', sessionId: 's42' },
-          sessions: [session],
+          sessions: [session, makeSession({ sessionId: 's43' })],
         }),
       )
       const close = items.find(i => i.id === 'close')

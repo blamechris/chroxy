@@ -182,7 +182,11 @@ export function buildSidebarContextMenuItems(
         label: 'Close Session',
         destructive: true,
         separatorAbove: true,
-        onClick: () => confirmCloseSession(session.sessionId),
+        // #8226: the server refuses to destroy the last session ("Cannot
+        // destroy the last session"), so only offer Close while another live
+        // session exists. Mirrors SessionBar (`showClose = sessions.length > 1`)
+        // and Cmd+W; a falsy onClick makes SessionContextMenu drop the item.
+        onClick: sessions.length > 1 ? () => confirmCloseSession(session.sessionId) : undefined,
       },
     ]
   }
