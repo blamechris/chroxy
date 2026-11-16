@@ -211,6 +211,43 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     expect(cwdInput.value, 'Shift+Tab must not complete the suggestion into the cwd field').toBe('')
   })
 
+  // #8227 follow-up — the suggestion list can shrink WITHOUT typing (async
+  // autocomplete results / knownCwds change), leaving the highlight index past
+  // the end. Tab/Enter must treat that as "nothing highlighted", not throw.
+  function renderWithShrinkingList() {
+    const onCreate = vi.fn()
+    const base: CreateSessionModalProps = {
+      open: true, onClose: vi.fn(), onCreate, initialCwd: '', existingNames: [],
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    }
+    const { rerender } = render(<CreateSessionModal {...base} />)
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
+    rerender(<CreateSessionModal {...base} knownCwds={['/home/user/projects/api']} />)
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(1)
+    return { cwdInput, onCreate }
+  }
+
+  it('Tab with a stale highlight past the end of a shrunk list does not throw or complete (#8227)', () => {
+    const { cwdInput } = renderWithShrinkingList()
+    // React reports a throwing handler asynchronously, so also pin that the
+    // handler did not reach its preventDefault (focus must be free to move).
+    let notPrevented = false
+    expect(() => { notPrevented = fireEvent.keyDown(cwdInput, { key: 'Tab' }) }).not.toThrow()
+    expect(notPrevented, 'stale-highlight Tab must not be prevented').toBe(true)
+    expect(cwdInput.value).toBe('')
+  })
+
+  it('Enter with a stale highlight past the end of a shrunk list does not throw, change cwd or submit (#8227)', () => {
+    const { cwdInput, onCreate } = renderWithShrinkingList()
+    expect(() => fireEvent.keyDown(cwdInput, { key: 'Enter' })).not.toThrow()
+    expect(cwdInput.value).toBe('')
+    expect(onCreate).not.toHaveBeenCalled()
+  })
+
   it('Escape closes suggestion list', () => {
     renderModal({
       knownCwds: ['/home/user/projects/api'],
