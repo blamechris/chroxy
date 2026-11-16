@@ -152,6 +152,38 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     expect(cwdInput.value).toBe('/home/user/projects/api/')
   })
 
+  // #8227 — Tab with the dropdown open but NOTHING highlighted used to accept
+  // the first suggestion, so tabbing past the optional field set a cwd
+  // unintentionally. An unhighlighted Tab is navigation, not completion.
+  it('Tab with no highlighted suggestion leaves the cwd unchanged and does not complete (#8227)', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+    // Modal's own focus trap may also preventDefault here (activeElement is
+    // not really the input under fireEvent.focus), so the unconfounded
+    // signals are the value and the nameless-suggestion side effects.
+    fireEvent.keyDown(cwdInput, { key: 'Tab' })
+    expect(cwdInput.value, 'unhighlighted Tab must not take a suggestion').toBe('')
+    const nameInput = screen.getByLabelText('Session name') as HTMLInputElement
+    expect(nameInput.value, 'no suggestion applied, so no auto-name').toBe('')
+  })
+
+  it('Tab after ArrowDown highlights then completes with a trailing slash and prevents default (#8227)', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    // fireEvent returns false when preventDefault was called.
+    const notPrevented = fireEvent.keyDown(cwdInput, { key: 'Tab' })
+    expect(notPrevented).toBe(false)
+    expect(cwdInput.value).toBe('/home/user/projects/api/')
+  })
+
   // #8084 — `handleCwdKeyDown`'s Tab-completion branch did not exclude
   // Shift+Tab, so reverse-tabbing OUT of the cwd field while the suggestions
   // dropdown was open completed the highlighted suggestion instead of moving
