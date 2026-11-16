@@ -49,6 +49,23 @@
 export const SMOKE_MIN_CASES = 18
 const SMOKE_MIN_CASES_WITHOUT_IDE = 16
 
+/**
+ * The ONE decision for whether the IDE surface is required (#8435).
+ * SMOKE_REQUIRE_IDE '1' -> strict; '0' -> lenient (explicit opt-out); anything
+ * else (unset, '', 'true', a typo) is treated as unset, so a mistyped flag can
+ * never loosen CI: unset is strict when CI is truthy (GitHub Actions always
+ * sets CI=true) and lenient otherwise. Deleting the flag from the workflow
+ * therefore cannot silently lower the floor.
+ * @param {Record<string, string | undefined>} env
+ */
+export function requireIdeFrom(env) {
+  const flag = env.SMOKE_REQUIRE_IDE
+  if (flag === '1') return true
+  if (flag === '0') return false
+  const ci = env.CI
+  return Boolean(ci) && ci !== '0' && ci.toLowerCase() !== 'false'
+}
+
 /** @param {boolean} [requireIde=false] The same mode used for IDE preconditions. */
 export function smokeMinCases(requireIde = false) {
   return requireIde ? SMOKE_MIN_CASES : SMOKE_MIN_CASES_WITHOUT_IDE

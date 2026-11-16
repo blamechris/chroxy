@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { harnessVerdict, SMOKE_MIN_CASES, smokeMinCases } from './helpers/harness-floor.mjs'
+import { harnessVerdict, SMOKE_MIN_CASES, smokeMinCases, requireIdeFrom } from './helpers/harness-floor.mjs'
 
 // Pure verdict fixtures only: this file never imports or runs the browser harness.
 const pass = n => Array.from({ length: n }, () => ({ status: 'PASS' }))
@@ -17,11 +17,25 @@ describe('smoke-test mode-aware verdict (#7657, #8435)', () => {
     assert.equal(smokeMinCases(), 16)
   })
 
-  it('only the exact environment value 1 selects the required floor', () => {
-    for (const flag of [undefined, '', '0', 'false', 'true', 'yes', '01', ' 1', '1 ']) {
-      assert.equal(smokeMinCases(flag === '1'), 16, `non-required flag: ${String(flag)}`)
+  it('requireIdeFrom decides strictness from the flag and CI', () => {
+    const table = [
+      [{ CI: 'true' }, true, 'CI, flag unset -> strict'],
+      [{}, false, 'no CI, flag unset -> lenient'],
+      [{ CI: 'true', SMOKE_REQUIRE_IDE: '0' }, false, "flag '0' opts out under CI"],
+      [{ SMOKE_REQUIRE_IDE: '1' }, true, "flag '1' without CI -> strict"],
+      [{ CI: 'true', SMOKE_REQUIRE_IDE: '1' }, true, "flag '1' under CI -> strict"],
+      [{ CI: 'true', SMOKE_REQUIRE_IDE: '' }, true, 'empty flag = unset, under CI'],
+      [{ CI: 'true', SMOKE_REQUIRE_IDE: 'false' }, true, 'other flag value = unset, under CI'],
+      [{ CI: 'true', SMOKE_REQUIRE_IDE: 'yes' }, true, 'typo cannot loosen CI'],
+      [{ SMOKE_REQUIRE_IDE: 'true' }, false, 'other flag value = unset, no CI'],
+      [{ CI: '' }, false, 'empty CI is not CI'],
+      [{ CI: '0' }, false, "CI '0' is not CI"],
+      [{ CI: 'false' }, false, "CI 'false' is not CI"],
+    ]
+    for (const [env, strict, why] of table) {
+      assert.equal(requireIdeFrom(env), strict, why)
+      assert.equal(smokeMinCases(requireIdeFrom(env)), strict ? 18 : 16, `floor: ${why}`)
     }
-    assert.equal(smokeMinCases('1' === '1'), 18)
   })
 
   for (const { mode, requireIde, floor } of [
@@ -106,8 +120,8 @@ describe('smoke-test source wiring (#7657, #8435)', () => {
   })
 
   it('the strict mode flag is derived once and keeps both required-IDE failures', () => {
-    assert.equal((src.match(/const requireIde = process\.env\.SMOKE_REQUIRE_IDE === '1'/g) || []).length, 1)
-    assert.equal((src.match(/process\.env\.SMOKE_REQUIRE_IDE/g) || []).length, 1)
+    assert.equal((src.match(/const requireIde = requireIdeFrom\(process\.env\)/g) || []).length, 1)
+    assert.ok(!/SMOKE_REQUIRE_IDE\s*===/.test(src), 'no inline flag parse beside the shared helper')
     assert.equal((src.match(/\brequireIde\s*=/g) || []).length, 1, 'mode is never reassigned')
     assert.ok(src.indexOf('const requireIde =') < src.indexOf('async function run()'), 'same mode reaches probes and summary')
     assert.ok(src.includes("if (requireIde) fail('IDE quick-open palette',"), 'missing required palette must still fail')

@@ -22,7 +22,7 @@ import { mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
-import { harnessVerdict, smokeMinCases } from './helpers/harness-floor.mjs'
+import { harnessVerdict, smokeMinCases, requireIdeFrom } from './helpers/harness-floor.mjs'
 import { parseSmokeArgs, resolveSmokeTarget, USAGE } from './helpers/smoke-target.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
@@ -49,7 +49,7 @@ if (parsed.args.dryRun) {
 }
 const headed = parsed.args.headed
 const apiToken = target.token
-const requireIde = process.env.SMOKE_REQUIRE_IDE === '1'
+const requireIde = requireIdeFrom(process.env)
 
 // Playwright is imported only once the target is known, so a refusal never needs a browser.
 const { chromium } = await import('playwright')
