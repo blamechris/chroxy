@@ -285,10 +285,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // Pull the full tool input once per eligible, unanswered prompt (idempotent —
   // gated on `pulledInput === undefined` so a re-render doesn't re-request).
   useEffect(() => {
-    if (reviewEligible && message.requestId && message.answered == null && pulledInput === undefined) {
+    if (reviewEligible && !message.permissionOutcome && message.requestId && message.answered == null && pulledInput === undefined) {
       requestPermissionInput(message.requestId);
     }
-  }, [reviewEligible, message.requestId, message.answered, pulledInput, requestPermissionInput]);
+  }, [reviewEligible, message.permissionOutcome, message.requestId, message.answered, pulledInput, requestPermissionInput]);
 
   // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
   // Without this, otherActive would stay true after an answer arrives from
@@ -527,9 +527,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
 
   // #8348: a permission prompt that has ENDED, rebuilt from the server's durable
   // `permission_outcome` history entry (a session switch or a reload — the live
-  // card is not replayed). A compact, non-interactive record. Ahead of the pill so
-  // an allowed/denied record (which also carries `answered`) does not offer an
-  // "expand" there is nothing behind.
+  // card is not replayed). Keep its terminal status while permitting read-only
+  // detail inspection when input exists. Ahead of the pill so no terminal record
+  // returns decision controls, including one that also carries `answered`.
   if (isPrompt && message.requestId && message.permissionOutcome) {
     return <PermissionOutcomeRecord message={message} />;
   }
