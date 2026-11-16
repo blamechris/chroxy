@@ -37,11 +37,22 @@ describe('toast container placement (#8596)', () => {
     expect(blocks.length).toBe(2)
   })
 
-  it('base rule is fixed and bottom-anchored above the composer-published offset', () => {
+  it('lift and fallback arithmetic: fallback leaves the original 20px, lift clears the scroll-to-bottom FAB', () => {
+    const m = /var\(--toast-bottom-offset,\s*(-?\d+)px\)\s*\+\s*(\d+)px/.exec(decl(blocks[0] ?? '', 'bottom') ?? '')
+    expect(m !== null).toBe(true)
+    const [fallback, lift] = [Number(m![1]), Number(m![2])]
+    expect(fallback + lift).toBe(20)
+    const fab = /\.scroll-to-bottom\s*\{([^}]*)\}/.exec(css)![1]!
+    const fabTop = Number(/bottom:\s*(\d+)px/.exec(fab)![1]) + Number(/height:\s*(\d+)px/.exec(fab)![1])
+    expect(lift >= fabTop).toBe(true)
+  })
+
+  it('base rule is fixed and bottom-anchored on the transcript-published offset', () => {
     const base = blocks[0] ?? ''
     expect(decl(base, 'position')).toBe('fixed')
     const bottom = decl(base, 'bottom') ?? ''
-    expect(/^calc\(\s*var\(--toast-bottom-offset\s*,\s*-?\d+px\s*\)\s*\+\s*\d+px\s*\)$/.test(bottom), bottom).toBe(true)
+    // Exact: lift 56 = FAB (12 + 36) + 8 gap; fallback -36 => 20px with no transcript.
+    expect(bottom).toBe('calc(var(--toast-bottom-offset, -36px) + 56px)')
   })
 
   it('no placement rule re-anchors the stack elsewhere or overrides the offset', () => {
@@ -55,5 +66,15 @@ describe('toast container placement (#8596)', () => {
     expect(narrow === '').toBe(false)
     const nb = decl(narrow, 'bottom')
     expect(nb === undefined || /--toast-bottom-offset/.test(nb)).toBe(true)
+  })
+})
+
+describe('toast close button hit area (#8596)', () => {
+  const rule = /(^|\})\s*\.toast-close\s*\{([^{}]*)\}/m.exec(css)?.[2] ?? ''
+
+  it('is at least 44x44 so dismissal stays reachable', () => {
+    expect(rule === '').toBe(false)
+    expect(Number(decl(rule, 'min-width')?.replace('px', ''))).toBeGreaterThanOrEqual(44)
+    expect(Number(decl(rule, 'min-height')?.replace('px', ''))).toBeGreaterThanOrEqual(44)
   })
 })

@@ -1,38 +1,49 @@
 import { useLayoutEffect, type RefObject } from 'react'
 
-/** CSS custom property: the composer's top edge as a distance from the viewport bottom, px (#8596). */
+/** CSS custom property: the transcript's bottom edge as a distance from the viewport bottom, px (#8596). */
 export const TOAST_BOTTOM_OFFSET_VAR = '--toast-bottom-offset'
 
 /**
- * #8596 — publish how far the composer's top edge sits above the viewport
- * bottom, so the fixed toast stack can rest directly above it (covering only
- * transcript, never the composer / Send). The offset includes everything laid
- * out BELOW the composer (the footer bar), so those are observed too: the
- * composer itself, and every later sibling of it and of its ancestors up to
- * <body>. Window resize re-measures as well. With no composer mounted the
- * variable is absent and the stylesheet's fallback keeps the original
- * bottom-right spot. Without ResizeObserver nothing is published.
+ * Live publishers (split mode mounts two transcripts). The variable is only
+ * removed when the LAST one unmounts; otherwise a survivor republishes, so one
+ * instance's cleanup never clobbers another's value.
+ */
+const publishers = new Map<symbol, () => void>()
+
+/**
+ * #8596 — publish how far the TRANSCRIPT's bottom edge sits above the viewport
+ * bottom, so the fixed toast stack rests on it. Everything laid out between the
+ * transcript and the viewport bottom (plan-approval / recovery / activity
+ * panels, the composer, the footer) is then below the stack, so the stack
+ * covers transcript content only. The app is a 100vh flex column: anything that
+ * appears or disappears below the transcript resizes it, so observing the
+ * transcript element alone (plus window / visualViewport resize) is enough.
+ * No transcript mounted -> variable absent -> the stylesheet fallback applies.
  */
 export function useToastBottomOffset(ref: RefObject<HTMLElement | null>) {
   useLayoutEffect(() => {
     const el = ref.current
     if (!el || typeof ResizeObserver === 'undefined') return
     const root = document.documentElement
+    const token = Symbol('toast-offset')
     const publish = () => {
-      const offset = Math.max(0, Math.round(window.innerHeight - el.getBoundingClientRect().top))
+      const offset = Math.max(0, Math.round(root.clientHeight - el.getBoundingClientRect().bottom))
       root.style.setProperty(TOAST_BOTTOM_OFFSET_VAR, `${offset}px`)
     }
+    publishers.set(token, publish)
     publish()
     const ro = new ResizeObserver(publish)
     ro.observe(el)
-    for (let node: HTMLElement | null = el; node && node !== document.body; node = node.parentElement) {
-      for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) ro.observe(sib)
-    }
     window.addEventListener('resize', publish)
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', publish)
     return () => {
+      vv?.removeEventListener('resize', publish)
       window.removeEventListener('resize', publish)
       ro.disconnect()
-      root.style.removeProperty(TOAST_BOTTOM_OFFSET_VAR)
+      publishers.delete(token)
+      if (publishers.size === 0) root.style.removeProperty(TOAST_BOTTOM_OFFSET_VAR)
+      else [...publishers.values()].pop()!()
     }
   }, [ref])
 }
