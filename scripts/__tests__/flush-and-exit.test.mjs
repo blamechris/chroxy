@@ -30,7 +30,7 @@ const { flushAndExit } = await import(helperPath)
 // literally, so the exact count is knowable here in a way it is not for a
 // runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
 // bound for exactly that reason).
-const EXPECTED_CASES = 7
+const EXPECTED_CASES = 9
 
 let pass = 0
 let fail = 0
@@ -223,18 +223,18 @@ await test('fallback timer is unref-ed', async () => {
 // `process.exit` that tail is dropped (the CONTROL, which proves the case can
 // fail); with drainStdioAndExit it is delivered.
 const SENTINEL = 'SENTINEL-FINAL-LINE'
-const runSlowReader = async (exitStatement) => {
+const runSlowReader = async (exitStatement, which = 'stdout') => {
   const { spawn } = await import('node:child_process')
   const script = `
     import { drainStdioAndExit } from '${helperPath}'
     const line = 'x'.repeat(99) + '\\n'
-    for (let i = 0; i < 13000; i++) process.stdout.write(line)
-    process.stdout.write('${SENTINEL}\\n')
+    for (let i = 0; i < 13000; i++) process.${which}.write(line)
+    process.${which}.write('${SENTINEL}\\n')
     ${exitStatement}
   `
   return await new Promise((resolveP, rejectP) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
     const chunks = []
     const killer = setTimeout(() => {
@@ -243,8 +243,10 @@ const runSlowReader = async (exitStatement) => {
     }, 15000)
     // Lag the reader: nothing is consumed until the child has had time to
     // fill the pipe and exit (or block on it).
+    if (which !== 'stdout') child.stdout.resume()
+    if (which !== 'stderr') child.stderr.resume()
     const startReading = setTimeout(() => {
-      child.stdout.on('data', (c) => chunks.push(c))
+      child[which].on('data', (c) => chunks.push(c))
     }, 700)
     child.on('close', (code) => {
       clearTimeout(killer)
@@ -267,6 +269,40 @@ await test('CONTROL: a bare process.exit under the same slow reader loses the fi
   assert(r.code === 3, `exit code should be 3, got ${r.code}`)
   assert(!r.out.includes(SENTINEL),
     'the sentinel survived a bare process.exit — the slow-pipe condition did not reproduce, so case 6 proves nothing')
+})
+
+await test('drainStdioAndExit delivers the final STDERR line through a slow-read pipe and keeps the exit code', async () => {
+  const r = await runSlowReader('await drainStdioAndExit(4)', 'stderr')
+  assert(r.code === 4, `exit code should be 4, got ${r.code}`)
+  assert(r.lines.length === 13001, `expected 13001 stderr lines, got ${r.lines.length}`)
+  assert(r.lines[r.lines.length - 1] === SENTINEL, `last stderr line should be the sentinel, got ${JSON.stringify(r.lines[r.lines.length - 1])}`)
+})
+
+await test('drainStdioAndExit sets process.exitCode before waiting, so a stubbed exitFn cannot turn a failure into 0', async () => {
+  const { spawn } = await import('node:child_process')
+  const script = `
+    import { drainStdioAndExit } from '${helperPath}'
+    drainStdioAndExit(7, { exitFn: () => {}, fallbackMs: 50 })
+    const t = setInterval(() => {}, 20)
+    setTimeout(() => {
+      process.stdout.write('exitCode=' + process.exitCode + '\\n')
+      clearInterval(t)
+    }, 300)
+  `
+  const r = await new Promise((resolveP, rejectP) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    let out = ''
+    child.stdout.on('data', (c) => { out += c })
+    const killer = setTimeout(() => {
+      child.kill('SIGKILL')
+      rejectP(new Error('child did not finish within 10s'))
+    }, 10000)
+    child.on('close', (code) => { clearTimeout(killer); resolveP({ code, out }) })
+  })
+  assert(r.out.trim() === 'exitCode=7', `process.exitCode should be 7 inside the child, got ${JSON.stringify(r.out)}`)
+  assert(r.code === 7, `child should end with 7 when the loop empties, got ${r.code}`)
 })
 
 // --- summary --------------------------------------------------------------

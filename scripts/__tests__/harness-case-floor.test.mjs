@@ -750,7 +750,7 @@ for (const [mode, spec] of Object.entries(CONTROL_MODES)) {
         assert(r.ms >= r.budgetMs + REPORT_GRACE_MS - 200 && r.ms < r.budgetMs + REPORT_GRACE_MS + 1_500,
           `reported after ${r.ms}ms against a ${r.budgetMs}ms budget + ${REPORT_GRACE_MS}ms grace — the ` +
           'straggler holds the pipes, so only the grace timer can end the wait, and it must do so on time.')
-        // Not observable from the outside: this file ends in process.exit(), so a
+        // Not observable from the outside: this file ends in drainStdioAndExit(), which exits, so a
         // straggler holding an open pipe cannot keep THIS process alive. It matters
         // to anything that reuses run() without that, and costs one property read.
         assert(r.pipesReleased,
