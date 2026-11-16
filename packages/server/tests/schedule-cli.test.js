@@ -811,6 +811,14 @@ describe('buildDeps defaultProviderName resolution honours CLI > ENV > file > de
     }, { provider: 'claude-tui' })
   })
 
+  it('(c2) the CLI passes the resolved default to the refusal, so the DEFAULT clause is printed (#8279)', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, async () => {
+      const { output } = resolvedProviderFromCreate()
+      assert.match(output, /provider 'claude-tui' will be REFUSED/)
+      assert.match(output, /daemon DEFAULT/)
+    }, { provider: 'claude-tui' })
+  })
+
   it('(d) CHROXY_PROVIDER beats a config-file provider (ENV > file precedence)', async () => {
     await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, async () => {
       const { output } = resolvedProviderFromCreate()

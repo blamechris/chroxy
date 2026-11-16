@@ -249,7 +249,7 @@ function projectLastRun(lastRun) {
  * registry, and the panel now surfaces that as a readable snapshot error rather
  * than hanging.
  */
-function projectTask(task, ctx, quarantinedIds) {
+function projectTask(task, ctx, quarantinedIds, daemonDefault) {
   const provider = effectiveProvider(task, ctx)
   const requestedMode = task?.target?.permissionMode
   const effectiveMode = resolveScheduledPermissionMode(requestedMode)
@@ -264,7 +264,7 @@ function projectTask(task, ctx, quarantinedIds) {
     lastRun: projectLastRun(task.lastRun),
     createdAt: Number.isFinite(task.createdAt) ? task.createdAt : 0,
     updatedAt: Number.isFinite(task.updatedAt) ? task.updatedAt : 0,
-    providerRefusal: clampWire(scheduledProviderRefusalReason(provider), 2048),
+    providerRefusal: clampWire(scheduledProviderRefusalReason(provider, undefined, daemonDefault), 2048),
     effectiveProvider: clampWire(provider, 128),
     effectivePermissionMode: clampWire(effectiveMode, 64),
     // True only when the task ASKED for something and got clamped — an absent
@@ -303,7 +303,7 @@ function buildSnapshot(ctx, requestId, { error = null } = {}) {
   let tasks = []
   if (store && !error) {
     try {
-      tasks = store.list().map((t) => projectTask(t, ctx, quarantinedIds))
+      tasks = store.list().map((t) => projectTask(t, ctx, quarantinedIds, effectiveProvider(null, ctx)))
     } catch (err) {
       // Degrade to a structurally valid empty snapshot + error, the same posture
       // the Control Room surveys use — never a dead/unparseable reply.
@@ -342,7 +342,7 @@ function buildSnapshot(ctx, requestId, { error = null } = {}) {
     },
     schedulableProviders: listSchedulableProviders().slice(0, SCHEDULABLE_PROVIDERS_MAX),
     defaultProvider,
-    defaultProviderRefusal: scheduledProviderRefusalReason(defaultProvider),
+    defaultProviderRefusal: scheduledProviderRefusalReason(defaultProvider, undefined, defaultProvider),
     tasks,
     unreadableCount,
     unreadable,
