@@ -37,6 +37,7 @@ import {
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
 import { TurnError } from './turn-driver.js'
+import { normalizeUsage } from './run-record.js'
 import { recordToRunSummary, recordToRunDetail, gateToWire } from './to-wire.js'
 import { buildRunReport, renderReportMarkdown } from './run-report.js'
 
@@ -812,16 +813,33 @@ export class OrchestrationManager extends EventEmitter {
     let attempt = 0
     let currentPrompt = prompt
     let lastError = null
-    while (attempt <= this._cfg.maxParseRetries) {
-      const { text, result } = await this._driver.driveTurn(sessionId, currentPrompt, { label: turnLabel, timeoutMs: this._cfg.turnTimeoutMs })
+    const recordUsage = (result, terminalEvent = 'result') => {
       const roleClass = run.ownedSessions.get(sessionId)?.role ?? null
       // dotted ledger role: architect plan/synthesis vs architect.review, worker.audit
       const ledgerRole = roleClass === 'architect'
         ? (turnLabel === 'poa_review' || turnLabel === 'result_review' ? 'architect.review' : 'architect')
         : `worker.${roleClass}`
       this._ledger.recordTurnUsage(run.runId, {
-        subtaskId, sessionId, role: ledgerRole, turnLabel, terminalEvent: 'result', data: result,
+        subtaskId, sessionId, role: ledgerRole, turnLabel, terminalEvent, data: result,
       })
+    }
+    while (attempt <= this._cfg.maxParseRetries) {
+      let turn
+      try {
+        turn = await this._driver.driveTurn(sessionId, currentPrompt, { label: turnLabel, timeoutMs: this._cfg.turnTimeoutMs })
+      } catch (err) {
+        // A rejected terminal result OR error can still have spent money/tokens
+        // (#8554). Require TurnDriver's explicit event provenance; thrown send
+        // failures are not accounting evidence. Skip null/empty synthetic stalls
+        // using the same token normalization as the ledger reducer.
+        const result = err instanceof TurnError && (err.terminalEvent === 'result' || err.terminalEvent === 'error') ? err.result : null
+        if (result && (Number.isFinite(result.cost) || Object.values(normalizeUsage(result.usage)).some((n) => n > 0))) {
+          recordUsage(result, err.terminalEvent)
+        }
+        throw err // an interrupted decision must never enter the parse/repair path
+      }
+      const { text, result } = turn
+      recordUsage(result)
       try {
         return { decision: extractDecision(text, kind).decision }
       } catch (err) {

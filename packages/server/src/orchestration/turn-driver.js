@@ -86,12 +86,29 @@ export const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000
 export const DEFAULT_DRAIN_TIMEOUT_MS = 10 * 1000
 const TRUNCATION_MARKER = '\n…[chroxy-orch: output truncated at 2MB]…\n'
 
+// Both result and error events can carry a turn's sole accounting payload.
+// Preserve the same projection for either terminal event; never copy nested
+// exception properties, error codes or unrelated provider metadata.
+function projectTerminalUsage(data) {
+  return {
+    cost: data?.cost ?? null,
+    duration: data?.duration ?? null,
+    usage: data?.usage ?? null,
+    modelUsage: data?.modelUsage ?? null,
+    model: data?.model ?? null,
+    numTurns: Number.isFinite(data?.numTurns) ? data.numTurns : null,
+    apiDurationMs: Number.isFinite(data?.apiDurationMs) ? data.apiDurationMs : null,
+  }
+}
+
 export class TurnError extends Error {
-  constructor(code, message, { partialText = '' } = {}) {
+  constructor(code, message, { partialText = '', result = null, terminalEvent = null } = {}) {
     super(message || code)
     this.name = 'TurnError'
     this.code = code // TURN_ERROR | TURN_TIMEOUT | TURN_STOPPED | SESSION_GONE | SEND_FAILED
     this.partialText = partialText
+    this.result = result // projected terminal accounting, never thrown error metadata
+    this.terminalEvent = terminalEvent // result | error; null without a terminal payload
   }
 }
 
@@ -286,6 +303,7 @@ export class TurnDriver {
         break
       }
       case 'result': {
+        const result = projectTerminalUsage(data)
         // #7072 — a terminal-looking `result` the provider marked `interrupted:
         // true` is terminal but NOT a success: the turn was cut short (a Stop that
         // the provider answered with a normal result, a BYOK interrupt in the tool
@@ -300,29 +318,21 @@ export class TurnDriver {
           const partialText = this._assembleText(ctx)
           const failure = typeof data.failureMessage === 'string' && data.failureMessage ? data.failureMessage : null
           this._finishTurn(ctx, () => ctx.reject(failure
-            ? new TurnError('TURN_ERROR', failure, { partialText })
-            : new TurnError('TURN_STOPPED', 'turn interrupted before completing', { partialText })))
+            ? new TurnError('TURN_ERROR', failure, { partialText, result, terminalEvent: 'result' })
+            : new TurnError('TURN_STOPPED', 'turn interrupted before completing', { partialText, result, terminalEvent: 'result' })))
           break
-        }
-        // Forward the FULL terminal usage payload, not just cost/duration/usage:
-        // the ledger's recordTurnUsage keys off modelUsage/model/numTurns/
-        // apiDurationMs for per-model attribution (#6692). Dropping them here
-        // would silently collapse every metered run to a single unknown model.
-        const result = {
-          cost: data?.cost ?? null,
-          duration: data?.duration ?? null,
-          usage: data?.usage ?? null,
-          modelUsage: data?.modelUsage ?? null,
-          model: data?.model ?? null,
-          numTurns: Number.isFinite(data?.numTurns) ? data.numTurns : null,
-          apiDurationMs: Number.isFinite(data?.apiDurationMs) ? data.apiDurationMs : null,
         }
         const text = this._assembleText(ctx)
         this._finishTurn(ctx, () => ctx.resolve({ text, result }))
         break
       }
       case 'error': {
-        this._finishTurn(ctx, () => ctx.reject(new TurnError('TURN_ERROR', (data && data.message) || 'session error', { partialText: this._assembleText(ctx) })))
+        // BYOK can emit error instead of result after completed rounds. Its
+        // top-level partial spend is genuine terminal accounting (#8554), unlike
+        // arbitrary properties on a thrown/rejected sendMessage exception.
+        this._finishTurn(ctx, () => ctx.reject(new TurnError('TURN_ERROR', (data && data.message) || 'session error', {
+          partialText: this._assembleText(ctx), result: projectTerminalUsage(data), terminalEvent: 'error',
+        })))
         break
       }
       case 'stopped': {
