@@ -24,6 +24,7 @@ import {
   billingClassForProvider,
   billingDetailForClass,
   isProgrammaticCreditEra,
+  programmaticCreditEraEnabled,
   PROGRAMMATIC_CREDIT_ERA_START,
 } from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
@@ -955,14 +956,24 @@ export async function runDoctorChecks({
         status: 'pass',
         message: `Default provider '${effectiveDefault}' — ${detail}`,
       })
-    } else {
-      // Pre-cutover: nothing meters yet, but surface the upcoming boundary and
-      // what the default will bill once it lands.
+    } else if (programmaticCreditEraEnabled()) {
+      // Operator declared the era but the announced instant is still ahead:
+      // surface the upcoming boundary and what the default will bill once it
+      // lands.
       const cutover = new Date(PROGRAMMATIC_CREDIT_ERA_START).toISOString().slice(0, 10)
       checks.push({
         name: 'Billing',
         status: 'pass',
         message: `Default provider '${effectiveDefault}' — ${detail}. Programmatic-credit cutover: ${cutover}.`,
+      })
+    } else {
+      // Era flag off (the default): the announced 2026-06-15 cutover was paused
+      // and never took effect (#7333), so naming that date would announce a
+      // change that is not scheduled. Say nothing about it (#8278).
+      checks.push({
+        name: 'Billing',
+        status: 'pass',
+        message: `Default provider '${effectiveDefault}' — ${detail}`,
       })
     }
   }
