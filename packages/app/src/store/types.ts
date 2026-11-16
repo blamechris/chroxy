@@ -392,6 +392,9 @@ export interface ModelsAndPermissionsData {
   permissionModesByProvider: Record<string, PermissionMode[]>;
   // Available providers from server (for session creation UI)
   availableProviders: ProviderInfo[];
+  // Connection-scoped default for capability notes only. null means the daemon
+  // has not advertised one (older daemons use the protocol DEFAULT_PROVIDER).
+  serverDefaultProvider: string | null;
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: PendingPermissionConfirm | null;
   // #6543 (feature B): pulled full (secret-redacted) tool inputs for pre-write

@@ -1523,6 +1523,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // before the flat-state write (drops nameless/non-object entries). The
   // dashboard omits this hook and writes the server payload verbatim.
   mapProviderList: (providers) => mapProviderList(providers),
+  // #8188: display metadata, never a persisted selection or creation override.
+  // Shared dispatch calls this only for a validated nonblank advertisement;
+  // absent fields keep the current connection's value until transport reset.
+  applyServerDefaultProvider: (name) => getStore().setState({ serverDefaultProvider: name }),
   // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
   // The app builds a structured ServerError, ring-caps the flat `serverErrors`
   // list, and mirrors into the mobile notification store. (The id prefix is now a

@@ -67,6 +67,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
   const availableProviders = useConnectionStore((s) => s.availableProviders);
+  const serverDefaultProvider = useConnectionStore((s) => s.serverDefaultProvider);
   const fetchProviders = useConnectionStore((s) => s.fetchProviders);
   const [showBrowser, setShowBrowser] = useState(false);
   const [providersLoading, setProvidersLoading] = useState(false);
@@ -168,10 +169,10 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   // note. When the selected provider reports a capability as `false` (notably
   // claude-tui: no plan mode / streaming / model switch), surface a concise
   // non-blocking note rather than leaving the user to infer the gap from an absent
-  // control. The empty `provider` chip means "server default", so resolve it to
-  // DEFAULT_PROVIDER for the capability lookup.
+  // control. Default uses the daemon's advertised provider for notes only;
+  // older daemons fall back to DEFAULT_PROVIDER. Creation still omits provider.
   const selectedProviderCaps = availableProviders.find(
-    (p) => p.name === (provider || DEFAULT_PROVIDER),
+    (p) => p.name === (provider || serverDefaultProvider || DEFAULT_PROVIDER),
   )?.capabilities;
   const providerLimitationNote = buildProviderLimitationNote(selectedProviderCaps);
 
