@@ -18,12 +18,14 @@ export interface ModalProps {
    * silently discard typed/selected values.
    */
   closeOnBackdrop?: boolean
+  /** Extra class on the dialog box, for a modal that needs its own sizing (#8611). */
+  contentClassName?: string
 }
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
-export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdrop = true }: ModalProps) {
+export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdrop = true, contentClassName }: ModalProps) {
   const titleId = useId()
   const overlayRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -112,7 +114,7 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
     >
       <div
         ref={contentRef}
-        className="modal-content"
+        className={contentClassName ? `modal-content ${contentClassName}` : 'modal-content'}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

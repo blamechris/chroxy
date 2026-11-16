@@ -265,6 +265,21 @@ export function sessionDefaultsNoticeText(notice: SessionDefaultsNotice): string
   return `A saved default from an older version was cleared (${parts.join(', ')}). New sessions now use ${follows.join(' and ')}. To keep the old choice, pick it again in Settings → Session Defaults.`
 }
 
+/**
+ * #8611: the migration notice describes a cleared Claude-family default (the
+ * legacy providers it clears are claude-cli/claude-tui and the model pins are
+ * Claude ids), so it only means something while the picker is on a
+ * Claude-family provider. docker-* providers run the same Claude clients.
+ */
+export function sessionDefaultsNoticeApplies(notice: SessionDefaultsNotice | null, provider: string): boolean {
+  if (!notice) return false
+  return /^(claude|docker)(-|$)/.test(provider)
+}
+
+function connectionOptionLabel(connection: { label: string; authentication: { requested: string }; entitlement: { route: string } }): string {
+  return `${connection.label} · ${connection.authentication.requested} · ${connection.entitlement.route}`
+}
+
 export function resolveCreateSessionModel(
   provider: string,
   defaultModel: string | null | undefined,
@@ -822,7 +837,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [submit])
 
   return (
-    <Modal open={open} onClose={onClose} title="New Session" closeOnBackdrop={false}>
+    <Modal open={open} onClose={onClose} title="New Session" closeOnBackdrop={false} contentClassName="modal-content--session-form">
       <input
         type="text"
         placeholder={projectNaming ? 'Leave blank to name it after the project (e.g. chroxy 7)' : 'Session name'}
@@ -1042,7 +1057,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               </span>
             </span>
           ) : null}
-          {sessionDefaultsNotice ? (
+          {sessionDefaultsNotice && sessionDefaultsNoticeApplies(sessionDefaultsNotice, provider) ? (
             <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
               <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(sessionDefaultsNotice)}</span>
               <button
@@ -1061,6 +1076,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <label htmlFor="connection-select">Connection</label>
               <select
                 id="connection-select"
+                title={selectedConnection ? connectionOptionLabel(selectedConnection) : undefined}
                 value={connectionId}
                 onChange={e => setConnectionId(e.target.value)}
               >
@@ -1068,9 +1084,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   <option
                     key={connection.id}
                     value={connection.id}
+                    title={connectionOptionLabel(connection)}
                     disabled={connection.readiness.state === 'blocked' || connection.readiness.state === 'unsupported'}
                   >
-                    {connection.label} · {connection.authentication.requested} · {connection.entitlement.route}
+                    {connectionOptionLabel(connection)}
                   </option>
                 ))}
               </select>
