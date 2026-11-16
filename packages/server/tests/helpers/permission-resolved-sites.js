@@ -25,10 +25,13 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { parse } from 'acorn'
+import { RESOLVED_BY } from '../../src/permission-resolved-by.js'
 
 const TARGET = 'permission_resolved'
 const LISTENER_REGISTRATION = new Set(['on', 'once', 'off', 'addListener', 'removeListener', 'prependListener', 'prependOnceListener'])
 const VETTED_CALLS = new Set(['resolvedByForReason', 'normalizeResolvedBy'])
+// Spread helpers known to add nothing under the `resolvedBy` key (permission-manager.js).
+const NEUTRAL_SPREAD_CALLS = new Set(['stoppedToolUseField'])
 
 function walk(node, visit, parent = null) {
   if (!node || typeof node.type !== 'string') return
@@ -88,18 +91,52 @@ function keyOf(p, consts) {
 
 function validResolvedByValue(v) {
   if (!v) return false
-  if (v.type === 'MemberExpression') return v.object.type === 'Identifier' && v.object.name === 'RESOLVED_BY' && !v.computed
+  // a REAL member of RESOLVED_BY: a typo or an invented kind is not vetted
+  if (v.type === 'MemberExpression') return v.object.type === 'Identifier' && v.object.name === 'RESOLVED_BY' && !v.computed && v.property.type === 'Identifier' && Object.hasOwn(RESOLVED_BY, v.property.name)
   if (v.type === 'CallExpression') return v.callee.type === 'Identifier' && VETTED_CALLS.has(v.callee.name)
   if (v.type === 'LogicalExpression') return validResolvedByValue(v.left) && validResolvedByValue(v.right)
   if (v.type === 'ConditionalExpression') return validResolvedByValue(v.consequent) && validResolvedByValue(v.alternate)
   return false
 }
 
+/**
+ * The effect of a list of properties on `resolvedBy`, folded in source order because the LAST
+ * writer wins: 'vetted' (it ends as a vetted value), 'bad' (it ends unvetted, overridden or
+ * unknown) or 'neutral' (it never touches the key).
+ */
+function foldProperties(properties, consts) {
+  let state = 'neutral'
+  for (const p of properties) {
+    if (p.type === 'Property') {
+      if (keyOf(p, consts) === 'resolvedBy') state = validResolvedByValue(p.value) ? 'vetted' : 'bad'
+      continue
+    }
+    if (p.type !== 'SpreadElement') continue
+    const effect = spreadEffect(p.argument, consts)
+    if (effect !== 'neutral') state = effect
+  }
+  return state
+}
+
+function spreadEffect(arg, consts) {
+  switch (arg.type) {
+    case 'CallExpression': {
+      const name = arg.callee.type === 'Identifier' ? arg.callee.name : null
+      if (name === 'resolvedByField') return 'vetted'
+      return NEUTRAL_SPREAD_CALLS.has(name) ? 'neutral' : 'bad'
+    }
+    case 'ObjectExpression': return foldProperties(arg.properties, consts)
+    case 'ConditionalExpression': {
+      const [x, y] = [spreadEffect(arg.consequent, consts), spreadEffect(arg.alternate, consts)]
+      return x === y ? x : 'bad'
+    }
+    case 'LogicalExpression': return arg.operator === '&&' ? spreadEffect(arg.right, consts) : 'bad'
+    default: return 'bad'
+  }
+}
+
 function namesResolvedBy(obj, consts) {
-  return obj.properties.some((p) => {
-    if (keyOf(p, consts) === 'resolvedBy') return validResolvedByValue(p.value)
-    return p.type === 'SpreadElement' && p.argument.type === 'CallExpression' && calleeName(p.argument.callee) === 'resolvedByField'
-  })
+  return foldProperties(obj.properties, consts) === 'vetted'
 }
 
 function listSourceFiles(dir) {
@@ -119,8 +156,6 @@ function listSourceFiles(dir) {
 function scanFiles(srcDir, fn) {
   for (const path of listSourceFiles(srcDir)) {
     const text = readFileSync(path, 'utf8')
-    // A cheap pre-filter that cannot hide a split spelling: any file that mentions either half.
-    if (!text.includes('permission_') && !text.includes('resolved')) continue
     const ast = parse(text, { ecmaVersion: 'latest', sourceType: 'module', locations: true })
     fn(ast, relative(srcDir, path).split('\\').join('/'))
   }

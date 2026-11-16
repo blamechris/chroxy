@@ -612,6 +612,27 @@ describe('collectPendingPermissions (unit, over the real stores)', () => {
     assert.equal(collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: exact }) }).truncated, false)
   })
 
+  it('a holder with 100,000 distinct children is cut at the ceiling in bounded time, and reported incomplete', () => {
+    const root = new EventEmitter()
+    const children = new Map()
+    for (let i = 0; i < 100_000; i++) children.set(`c${i}`, { _pendingPermissions: new Map() })
+    root._subagentPermissionRouting = children
+    const started = Date.now()
+    const got = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: root }) })
+    const elapsed = Date.now() - started
+    assert.equal(got.truncated, true)
+    assert.ok(elapsed < 500, `the walk must not scale with the number of children (took ${elapsed} ms)`)
+  })
+
+  it('a tool name the redactor reduces to nothing reads as unknown, never as an empty string', () => {
+    const pm = mgr()
+    pm.handlePermission('Bash', { command: 'a' }, null, 'approve')
+    const [id] = pm._pendingPermissions.keys()
+    pm._lastPermissionData.get(id).tool = 'a'.repeat(5 * 1024 * 1024) // past the redaction admission ceiling: nothing safe to keep
+    const [p] = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: holder(pm) }) }).permissions
+    assert.equal(p.tool, 'unknown')
+  })
+
   it('an empty authorized set returns an empty snapshot without reading the hook store', () => {
     const trap = new Map([['h', {}]])
     const owners = new Map([['h', 's9']])

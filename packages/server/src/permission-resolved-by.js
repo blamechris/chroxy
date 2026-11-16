@@ -6,9 +6,9 @@
 //   user       a person answered (any client: the dashboard, the app, the HTTP fallback)
 //   agent      an agent principal answered; `label` is the operator-authored principal
 //              label. RESERVED: principals cannot answer until S15, so nothing produces it
-//   rule       a permission rule decided it. Rules resolve before a prompt exists and
-//              emit no `permission_resolved` (see PermissionManager._auditPersistedRule
-//              AutoApprove), so nothing produces it today either
+//   rule       the daemon's own POLICY decided it: the orchestration allowlist's allow and
+//              deny, and the deny after a refused edit. (A session rule decides before a
+//              prompt exists and emits no `permission_resolved`, #6842, so it never shows here.)
 //   timeout    nobody answered in time
 //   auto_mode  the session's auto mode resolved a pending prompt
 //   abort      the turn was stopped or aborted, or the request was cancelled

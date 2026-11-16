@@ -151,6 +151,32 @@ describe('permission_resolved emit sites (#9119)', () => {
       }
     })
 
+    it('judges the EFFECTIVE resolvedBy: a member that does not exist, or a later override, is not vetted', () => {
+      const emit = (body) => `export const f = (m) => m.emit('permission_resolved', { requestId: 'r', ${body} })\n`
+      const bad = [
+        'resolvedBy: RESOLVED_BY.noSuchKind',
+        'resolvedBy: RESOLVED_BY.timeout, resolvedBy: undefined',
+        "resolvedBy: RESOLVED_BY.timeout, ...{ resolvedBy: { kind: 'user', clientId: 'x' } }",
+        'resolvedBy: RESOLVED_BY.timeout, ...x',
+        'resolvedBy: RESOLVED_BY.timeout, ...makeExtras()',
+        "resolvedBy: RESOLVED_BY.timeout, ...(c ? { resolvedBy: undefined } : {})",
+      ]
+      for (const body of bad) assert.equal(scanSource(emit(body))[0].hasResolvedBy, false, body)
+      const good = [
+        'resolvedBy: RESOLVED_BY.timeout',
+        'resolvedBy: RESOLVED_BY.cleared, ...(c ? { scope: 1 } : {}), ...stoppedToolUseField(a, b)',
+        '...x, resolvedBy: RESOLVED_BY.user',
+        '...x, ...resolvedByField(y)',
+        "resolvedBy: undefined, ...{ resolvedBy: RESOLVED_BY.abort }",
+      ]
+      for (const body of good) assert.equal(scanSource(emit(body))[0].hasResolvedBy, true, body)
+    })
+
+    it('finds a name assembled from fragments in a file that never contains the whole word', () => {
+      const found = scanSource("export const f = (m) => m.emit('permis' + 'sion_' + 'reso' + 'lved', {})\n")
+      assert.deepEqual(found.map((x) => [x.shape, x.hasResolvedBy]), [['emit-literal', false]])
+    })
+
     it('the cross-check reports a mention the scanner does not classify', () => {
       const mentions = (text) => {
         const dir = mkdtempSync(join(tmpdir(), 'chroxy-mentions-'))

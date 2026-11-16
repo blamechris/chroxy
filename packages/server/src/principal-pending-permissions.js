@@ -65,7 +65,8 @@ function describeRequest({ requestId, sessionId, origin, pending, data }) {
     sessionId,
     // A tool name comes from a provider or a hook payload (an MCP name, say), so it is redacted
     // WHOLE before it is bounded: a cut first could leave a prefix no pattern recognises.
-    tool: typeof data?.tool === 'string' && data.tool.length > 0 ? redactBounded(data.tool, TOOL_NAME_MAX) : 'unknown',
+    // A name the redactor reduces to nothing is no name: it reads as unknown.
+    tool: (typeof data?.tool === 'string' && redactBounded(data.tool, TOOL_NAME_MAX)) || 'unknown',
     floored,
     explicitConsent: pending?.explicitConsent === true || data == null || data.explicitConsent !== false,
     nonDelegable: data == null || data.nonDelegable !== false,
@@ -85,14 +86,14 @@ function describeRequest({ requestId, sessionId, origin, pending, data }) {
  * `MAX_HOLDERS_PER_SESSION` with holders still unvisited: the read is then incomplete.
  */
 function readInProcess(root, sessionId, add) {
-  const seen = new Set()
+  if (root == null || typeof root !== 'object') return false
+  // Holders are admitted (deduped and counted) when they are ENQUEUED, so the frontier never
+  // holds more than the ceiling and the first holder past it ends the walk: the work is bounded
+  // by the ceiling, not by how many children a holder routes to.
+  const seen = new Set([root])
   const queue = [root]
-  let incomplete = false
-  while (queue.length > 0) {
-    const holder = queue.shift()
-    if (holder == null || typeof holder !== 'object' || seen.has(holder)) continue
-    if (seen.size >= MAX_HOLDERS_PER_SESSION) { incomplete = true; continue }
-    seen.add(holder)
+  for (let head = 0; head < queue.length; head++) {
+    const holder = queue[head]
     const pendingMap = holder._pendingPermissions
     if (pendingMap instanceof Map) {
       const dataMap = holder._lastPermissionData instanceof Map ? holder._lastPermissionData : null
@@ -102,9 +103,15 @@ function readInProcess(root, sessionId, add) {
       }
     }
     const routing = holder._subagentPermissionRouting
-    if (routing instanceof Map) for (const child of new Set(routing.values())) queue.push(child)
+    if (!(routing instanceof Map)) continue
+    for (const child of routing.values()) {
+      if (child == null || typeof child !== 'object' || seen.has(child)) continue
+      if (seen.size >= MAX_HOLDERS_PER_SESSION) return true // a holder we will not read: incomplete
+      seen.add(child)
+      queue.push(child)
+    }
   }
-  return incomplete
+  return false
 }
 
 /**
