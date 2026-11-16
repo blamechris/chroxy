@@ -6,7 +6,7 @@
  * Pure + prop-driven (same shape as ActivityTree): the parent passes the whole
  * `activity` reducer state + the session list; this component derives the
  * cross-session rollup via store-core's `selectCrossSessionActivity` (#6182) —
- * sessions grouped by repo+worktree (cwd), each group + the overall set carrying
+ * sessions grouped by repository (repoCwd, falling back to cwd), each group + the overall set carrying
  * running/blocked/failed/idle SESSION counts. Each session row drills down into
  * its v1 `ActivityTree`, so the per-session tree stays the single source of
  * truth (no regression) and this view is purely the aggregation layer on top.

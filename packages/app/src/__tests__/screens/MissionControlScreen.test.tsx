@@ -5,14 +5,20 @@
  * store-core's `selectCrossSessionActivity` over SEEDED `ActivityState` (built
  * with `createEmptyActivityState` + `applyActivitySnapshot`, mirroring the
  * dashboard's CrossSessionMissionControl.test.tsx fixtures). No device, no live
- * feeder, no store/navigator: the test drives the pure `MissionControlBody`
- * directly with fixtures — same render-test harness as ObserverBanner.test.tsx.
+ * feeder or navigator: tests drive the pure `MissionControlBody` directly and
+ * the actual `MissionControlScreen` metadata adapter with a mocked store.
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
 import type { ActivityEntry, ActivityState, CrossSessionMeta } from '@chroxy/store-core';
 import { createEmptyActivityState, applyActivitySnapshot } from '@chroxy/store-core';
-import { MissionControlBody } from '../../screens/MissionControlScreen';
+import { MissionControlBody, MissionControlScreen } from '../../screens/MissionControlScreen';
+
+// Exercise the real Screen adapter without loading connection/native side effects.
+let mockStoreState: Record<string, unknown> = {};
+jest.mock('../../store/connection', () => ({
+  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockStoreState),
+}));
 
 const T0 = 1_800_000_000_000;
 
@@ -103,7 +109,7 @@ describe('MissionControlScreen (#5968 PR1)', () => {
     expect(findByTestId(t.root, 'mission-control-group-label')).toBeNull();
   });
 
-  it('groups sessions by repo+worktree with labels and the overall total', () => {
+  it('groups legacy sessions by cwd with labels and the overall total', () => {
     const activity = stateOf({
       s1: [entry({ id: 'e1', status: 'running' })],
       s2: [entry({ id: 'e2', status: 'blocked' })],
@@ -144,5 +150,38 @@ describe('MissionControlScreen (#5968 PR1)', () => {
     });
     // Exactly one group carries the worktree badge.
     expect(findAllByTestId(t.root, 'mission-control-group-worktree').length).toBe(1);
+  });
+
+  it('passes store repoCwd through the actual Screen adapter and preserves member order, statuses, and totals (#8199)', () => {
+    const repo = '/srv/projects/chroxy';
+    const sessions = [
+      { sessionId: 'wt-b', cwd: '/worktrees/22222222222222222222222222222222', repoCwd: repo, name: 'Worktree B', worktree: true },
+      { sessionId: 'main', cwd: repo, name: 'Main' },
+      { sessionId: 'wt-a', cwd: '/worktrees/11111111111111111111111111111111', repoCwd: repo, name: 'Worktree A', worktree: true },
+    ];
+    mockStoreState = { sessions, activity: stateOf({
+      'wt-b': [entry({ id: 'b', status: 'blocked' })],
+      main: [entry({ id: 'r', status: 'running' })],
+      'wt-a': [entry({ id: 'f', status: 'failed' })],
+    }) };
+    act(() => { tree = renderer.create(<MissionControlScreen />); });
+    const root = tree!.root;
+    expect(findAllByTestId(root, 'mission-control-group-label').map(textOf)).toEqual(['chroxy']);
+    expect(findAllByTestId(root, 'mission-control-group-worktree')).toHaveLength(1);
+    const group = findByTestId(root, 'mc-group-srv-projects-chroxy')!;
+    expect(group).not.toBeNull();
+    expect(group.findAll((n) => typeof n.type === 'string' && /^mc-session-/.test(n.props.testID ?? '')).map((n) => n.props.testID))
+      .toEqual(['mc-session-wt-b', 'mc-session-main', 'mc-session-wt-a']);
+    for (const [id, status] of [['wt-b', 'Blocked'], ['main', 'Running'], ['wt-a', 'Failed']]) {
+      expect(textOf(findByTestId(root, `mission-control-session-status-${id}`))).toBe(status);
+    }
+    for (const status of ['running', 'blocked', 'failed']) {
+      expect(textOf(findByTestId(root, `mission-control-total-${status}`))).toBe(`1 ${status}`);
+      expect(textOf(findByTestId(group, `mission-control-group-rollup-${status}`))).toBe(`1 ${status}`);
+    }
+    // Same IDs + new worktree paths keep the recognizable repository group.
+    mockStoreState = { ...mockStoreState, sessions: sessions.map((s) => s.repoCwd ? { ...s, cwd: '/moved/' + s.sessionId } : s) };
+    act(() => { tree!.update(<MissionControlScreen />); });
+    expect(findAllByTestId(tree!.root, 'mission-control-group-label').map(textOf)).toEqual(['chroxy']);
   });
 });

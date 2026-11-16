@@ -31,7 +31,7 @@ export function useTrayBadgeSync(blocked: number): void {
     (s) =>
       selectCrossSessionActivity(
         s.activity ?? { bySession: {} },
-        (s.sessions ?? []).map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, name: x.name, worktree: x.worktree })),
+        (s.sessions ?? []).map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, repoCwd: x.repoCwd, name: x.name, worktree: x.worktree })),
       ).total.failed,
   )
   // Last count pushed to the bridge ("blocked:failed"), so we only invoke on a

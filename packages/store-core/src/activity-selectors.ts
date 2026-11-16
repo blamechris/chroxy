@@ -10,6 +10,7 @@
 import type { ActivityEntry } from '@chroxy/protocol'
 import type { ActivityState } from './activity-state'
 import { hasKey } from './activity-internal'
+import { repoDisplayName, sessionGroupKey } from './repo-label'
 
 /** A node in the rendered activity tree: an entry plus its ordered children. */
 export interface ActivityTreeNode {
@@ -115,15 +116,17 @@ export function selectActivityTree(state: ActivityState, sessionId: string): rea
 //
 // A selector layer ON TOP of the per-session reducer above: it turns the
 // all-sessions activity map into a mission-control rollup — sessions grouped by
-// repo+worktree, each group + the whole set carrying running/blocked/failed/idle
+// repository, each group + the whole set carrying running/blocked/failed/idle
 // counts. The dashboard aggregate view (#6183) and the Tauri tray badge (#6184)
 // both consume THIS one selector so the surfaces can't drift.
 //
 // Design decisions (documented so consumers don't have to reverse-engineer):
-//   - GROUP KEY is the session's `cwd`. Chroxy has no separate repo-root field on
-//     SessionInfo, but a worktree always has a distinct cwd from its main
-//     checkout, so grouping by cwd is grouping by repo+worktree. A session with
-//     no cwd lands in the "" (Ungrouped) bucket, which sorts last.
+//   - GROUP KEY prefers `repoCwd`, falling back to `cwd` (#8199). Main checkout
+//     and worktree sessions merge under their original repository, matching the
+//     sidebar's sessionGroupKey precedent. Without repoCwd (including old
+//     servers), distinct cwds still form separate groups. Blank/missing paths
+//     land in the "" (Ungrouped) bucket, which sorts last. Keys are not otherwise
+//     normalized, so genuinely distinct repository paths remain distinct.
 //   - PER-SESSION STATUS is derived from the session's activity entries with the
 //     priority blocked > running > failed > idle: "blocked-on-input" is the
 //     highest-attention signal (something needs you NOW), then actively running,
@@ -149,8 +152,10 @@ export interface CrossSessionRollup {
 /** Minimal per-session metadata the selector needs (a SessionInfo subset). */
 export interface CrossSessionMeta {
   readonly sessionId: string
-  /** Working directory — the repo+worktree group key. Null/empty → Ungrouped. */
+  /** Working directory — the group key when no usable repoCwd is present. */
   readonly cwd?: string | null
+  /** Original repository directory for a worktree; merges it with the main checkout. */
+  readonly repoCwd?: string | null
   /** Display name; falls back to the sessionId. */
   readonly name?: string
   /** Whether this session runs in a git worktree (annotates the group). */
@@ -164,9 +169,9 @@ export interface CrossSessionGroupSession {
   readonly status: SessionDerivedStatus
 }
 
-/** Sessions sharing a repo+worktree (cwd), with their rollup. */
+/** Sessions sharing a repository (repoCwd, falling back to cwd), with their rollup. */
 export interface CrossSessionGroup {
-  /** The cwd, or '' for the Ungrouped bucket. */
+  /** The repository directory (or legacy cwd), or '' for the Ungrouped bucket. */
   readonly key: string
   /** Human label: the last path segment of `key`, or 'Ungrouped'. */
   readonly label: string
@@ -201,12 +206,6 @@ export function deriveSessionStatus(entries: readonly ActivityEntry[]): SessionD
   return 'idle'
 }
 
-/** Last path segment of a cwd (handles POSIX and Windows separators). */
-function labelFromCwd(cwd: string): string {
-  const parts = cwd.split(/[/\\]/).filter(Boolean)
-  return parts.length > 0 ? parts[parts.length - 1]! : cwd
-}
-
 type MutableRollup = { running: number; blocked: number; failed: number; idle: number }
 const emptyRollup = (): MutableRollup => ({ running: 0, blocked: 0, failed: 0, idle: 0 })
 
@@ -231,7 +230,11 @@ export function selectCrossSessionActivity(
     if (seen.has(meta.sessionId)) continue // dedupe — first occurrence wins
     seen.add(meta.sessionId)
     const status = deriveSessionStatus(selectSessionEntries(state, meta.sessionId))
-    const key = typeof meta.cwd === 'string' && meta.cwd.trim() !== '' ? meta.cwd : ''
+    // Preserve the old blank-cwd handling, and apply it to optional repo roots
+    // before using the shared sidebar rule. Keep usable paths byte-for-byte.
+    const cwd = typeof meta.cwd === 'string' && meta.cwd.trim() !== '' ? meta.cwd : undefined
+    const repoCwd = typeof meta.repoCwd === 'string' && meta.repoCwd.trim() !== '' ? meta.repoCwd : undefined
+    const key = sessionGroupKey({ cwd, repoCwd })
     let group = byKey.get(key)
     if (group === undefined) {
       group = { worktree: false, sessions: [], rollup: emptyRollup() }
@@ -255,7 +258,7 @@ export function selectCrossSessionActivity(
     const g = byKey.get(key)!
     return {
       key,
-      label: key === '' ? 'Ungrouped' : labelFromCwd(key),
+      label: key === '' ? 'Ungrouped' : repoDisplayName(key, undefined),
       worktree: g.worktree,
       sessions: g.sessions,
       rollup: g.rollup,

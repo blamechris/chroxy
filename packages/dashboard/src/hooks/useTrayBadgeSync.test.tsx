@@ -13,6 +13,13 @@ vi.mock('../utils/tauri-bridge', () => ({
   getTauriInvoke: () => invokeImpl,
 }))
 
+// Run the real selector but record its result: totals alone cannot expose a
+// dropped repoCwd because regrouping deliberately leaves totals unchanged.
+vi.mock('@chroxy/store-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@chroxy/store-core')>()
+  return { ...actual, selectCrossSessionActivity: vi.fn(actual.selectCrossSessionActivity) }
+})
+import { selectCrossSessionActivity } from '@chroxy/store-core'
 import { useTrayBadgeSync } from './useTrayBadgeSync'
 
 // BLOCKED is passed in by the caller (#6225 — App reuses its header pending
@@ -39,7 +46,7 @@ function activityOf(map: Record<string, 'running' | 'blocked' | 'failed'>) {
 
 function setStore(opts: {
   activity?: ReturnType<typeof activityOf>
-  sessions?: Array<{ sessionId: string; cwd?: string | null; name?: string }>
+  sessions?: Array<{ sessionId: string; cwd?: string | null; name?: string; repoCwd?: string | null; worktree?: boolean }>
 }) {
   storeState = {
     activity: opts.activity ?? { bySession: {} },
@@ -49,6 +56,7 @@ function setStore(opts: {
 
 describe('useTrayBadgeSync (#6184)', () => {
   beforeEach(() => {
+    vi.mocked(selectCrossSessionActivity).mockClear()
     invokeSpy.mockClear()
     invokeImpl = invokeSpy
   })
@@ -117,5 +125,32 @@ describe('useTrayBadgeSync (#6184)', () => {
     rerender(<Harness blocked={1} />)
     expect(invokeSpy).toHaveBeenCalledTimes(2)
     expect(invokeSpy).toHaveBeenLastCalledWith('update_tray_badge', { blocked: 1, failed: 1 })
+  })
+})
+
+describe('repository metadata through the tray adapter (#8199)', () => {
+  afterEach(cleanup)
+  it('retains repoCwd for the shared selector while keeping bridge totals and deduplication unchanged', () => {
+    invokeSpy.mockClear()
+    invokeImpl = invokeSpy
+    vi.mocked(selectCrossSessionActivity).mockClear()
+    const repo = '/srv/projects/chroxy'
+    setStore({
+      sessions: [
+        { sessionId: 'wt-b', cwd: '/worktrees/22222222222222222222222222222222', repoCwd: repo, worktree: true },
+        { sessionId: 'main', cwd: repo },
+        { sessionId: 'wt-a', cwd: '/worktrees/11111111111111111111111111111111', repoCwd: repo, worktree: true },
+      ],
+      activity: activityOf({ 'wt-b': 'failed', main: 'running', 'wt-a': 'failed' }),
+    })
+    const { rerender } = render(<Harness blocked={3} />)
+    const result = vi.mocked(selectCrossSessionActivity).mock.results[0]!.value as ReturnType<typeof selectCrossSessionActivity>
+    expect(result.groups.map((g) => [g.key, g.label])).toEqual([[repo, 'chroxy']])
+    expect(result.groups[0]!.sessions.map((s) => s.sessionId)).toEqual(['wt-b', 'main', 'wt-a'])
+    expect(result.total).toEqual({ running: 1, blocked: 0, failed: 2, idle: 0 })
+    expect(invokeSpy).toHaveBeenCalledWith('update_tray_badge', { blocked: 3, failed: 2 })
+    storeState = { ...storeState, sessions: (storeState.sessions as Array<{ sessionId: string }>).map((s) => ({ ...s, cwd: '/moved/' + s.sessionId })) }
+    rerender(<Harness blocked={3} />)
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
   })
 })
