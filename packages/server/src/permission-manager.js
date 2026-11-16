@@ -36,7 +36,7 @@ import { DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY, EditedInputRefusedError, isHunkRevie
 // normalizeProjectKey is a hoisted function declaration.
 import { normalizeProjectKey } from './permission-rule-store.js'
 import { permissionScope } from './permission-scope.js'
-import { RESOLVED_BY, resolvedByForReason } from './permission-resolved-by.js'
+import { RESOLVED_BY, resolvedByForReason, normalizeResolvedBy } from './permission-resolved-by.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -1204,10 +1204,14 @@ export class PermissionManager extends EventEmitter {
    *   Session" (the decision is then `allow`). A LABEL for the permission_resolved
    *   event and the journal: it changes nothing about how the request is resolved,
    *   and is dropped unless it rides beside `allow` (permission-scope.js).
+   * @param {{ kind: string }} [resolvedBy] #9119 WHO resolved it (`RESOLVED_BY.*`). Absent means
+   *   `cleared`: an unattributed caller must never read as a person, so a client's answer
+   *   passes `RESOLVED_BY.user` explicitly (permission-resolver.js) and a daemon-made one passes
+   *   `rule` (policy) or `cleared` (nobody to ask).
    * @returns {boolean} true if a pending permission was found and resolved,
    *   false if the requestId was unknown (already resolved or expired).
    */
-  respondToPermission(requestId, decision, editedInput, reason, scope) {
+  respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
       this._logWarn(`No pending permission for ${requestId}`)
@@ -1234,7 +1238,7 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners see the pending-count drop
     // before any follow-on work runs synchronously.
     const resolvedScope = permissionScope(decision, scope)
-    this.emit('permission_resolved', { requestId, decision, reason: 'user', resolvedBy: RESOLVED_BY.user, ...(resolvedScope ? { scope: resolvedScope } : {}) })
+    this.emit('permission_resolved', { requestId, decision, reason: 'user', resolvedBy: normalizeResolvedBy(resolvedBy) ?? RESOLVED_BY.cleared, ...(resolvedScope ? { scope: resolvedScope } : {}) })
 
     // #6543 (feature B): on an approve, an operator who reviewed the proposed
     // Write/Edit per-hunk may narrow the CONTENT (never the path — see

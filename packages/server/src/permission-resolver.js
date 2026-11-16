@@ -171,7 +171,6 @@ export function createPermissionResolver({
     // scope label above, which was already dropped beside `allowAlways`.)
     if (callerIsScoped && decision === 'allowAlways') decision = 'allow'
     const scopeResult = scope ? { scope } : {}
-    const scopeArg = scope ? [scope] : []
 
     // Invariant B (#2806 residual): the binding check reads the RAW map entry —
     // never an activeSessionId fallback. For a bound caller the request MUST be
@@ -226,7 +225,8 @@ export function createPermissionResolver({
         // agent-facing denial message (permission-manager.js buildDenyMessage).
         let resolved
         try {
-          resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason, ...scopeArg)
+          // #9119: this path is a client's answer, the one place that is a person.
+          resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason, scope, RESOLVED_BY.user)
         } catch (err) {
           if (!(err instanceof EditedInputRefusedError)) throw err
           // #8446 — the operator's edit cannot be applied without writing a
@@ -240,7 +240,7 @@ export function createPermissionResolver({
           // subagent's prompt lives in its child's manager; the parent routes to it)
           // and its return value says whether it did: a deny that found nothing to
           // resolve is not audited as one.
-          const denied = entry.session.respondToPermission(requestId, 'deny', undefined, err.message)
+          const denied = entry.session.respondToPermission(requestId, 'deny', undefined, err.message, undefined, RESOLVED_BY.rule)
           consumeRoute(requestId)
           if (!denied) return { kind: 'expired', sessionId: originSessionId }
           audit(clientId, originSessionId, requestId, 'deny', { ...(toolName ? { tool: toolName } : {}), reason: 'edit_refused' })

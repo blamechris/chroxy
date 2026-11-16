@@ -656,6 +656,40 @@ describe('collectPendingPermissions (unit, over the real stores)', () => {
     })
   })
 
+  it('the description is redacted in the snapshot itself: a credential straddling the 200-character cut leaves no prefix', () => {
+    const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop'
+    const data = (id, description) => ({ requestId: id, tool: 'Bash', description, input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false, explicitConsent: false, nonDelegable: false })
+    const raw = `${'x'.repeat(170)}-${JWT}-tail` // the JWT starts inside the first 200 characters and ends past them
+    const pm = mgr()
+    pm.handlePermission('Bash', { command: 'a' }, null, 'approve')
+    const [id] = pm._pendingPermissions.keys()
+    pm._lastPermissionData.get(id).description = raw
+    const snap = collectPendingPermissions({
+      sessionIds: ['s1'], sessionManager: manager({ s1: holder(pm) }),
+      pendingPermissions: new Map([['h-1', { data: data('h-1', raw) }]]), permissionSessionMap: new Map([['h-1', 's1']]),
+    })
+    assert.equal(snap.permissions.length, 2)
+    const client = { id: 'p', boundSessionId: 'sentinel', principal: { tier: 'observe', constraints: { sessionIds: ['s1'] } } }
+    const frame = frameForPrincipal(client, { type: 'principal_pending_permissions_result', requestId: 'q', ...snap }, { sessionExists: () => true })
+    for (const p of frame.permissions) {
+      assert.ok(p.description.length <= PENDING_DESCRIPTION_MAX)
+      assert.equal(p.description.includes('eyJhbGci'), false, `no prefix of the credential: ${p.description.slice(150)}`)
+    }
+  })
+
+  it('a hook-routed AskUserQuestion is not a permission request and is not listed (the in-process pipeline does not list questions either)', () => {
+    const entry = (id, tool) => [id, { data: { requestId: id, tool, description: tool === 'AskUserQuestion' ? 'Which database should we use?' : 'ls', remainingMs: 300_000, createdAt: Date.now(), floored: false, explicitConsent: false, nonDelegable: false } }]
+    const pending = new Map([entry('q-1', 'AskUserQuestion'), entry('p-1', 'Bash')])
+    const owners = new Map([['q-1', 's1'], ['p-1', 's1']])
+    const got = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({}), pendingPermissions: pending, permissionSessionMap: owners })
+    assert.deepEqual(got.permissions.map((p) => p.requestId), ['p-1'])
+    assert.equal(JSON.stringify(got).includes('Which database'), false)
+    // the in-process pipeline: a pending question is not in `_pendingPermissions`
+    const pm = mgr()
+    pm._handleAskUserQuestion({ questions: [{ question: 'Which?' }] }, null)
+    assert.deepEqual(collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: holder(pm) }) }).permissions, [])
+  })
+
   it('a hook-routed entry is listed only under its owner, and an ownerless one under nobody', () => {
     const data = (id) => ({ requestId: id, tool: 'Bash', description: 'ls', input: { command: 'ls' }, remainingMs: 300_000, createdAt: 1000, floored: false, explicitConsent: false, nonDelegable: false })
     const pending = new Map([['h-1', { data: data('h-1') }], ['h-2', { data: data('h-2') }], ['h-3', { data: data('h-3') }]])

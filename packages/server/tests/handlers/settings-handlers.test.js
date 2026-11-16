@@ -745,7 +745,7 @@ describe('settings-handlers', () => {
       settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-1', decision: 'allow' }, ctx)
 
       assert.equal(session.respondToPermission.callCount, 1)
-      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (both absent here)
+      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (both absent here)
     })
 
     it('#6590 legacy-unmapped resolve broadcasts permission_resolved to ALL clients incl. the resolver', () => {
@@ -806,7 +806,7 @@ describe('settings-handlers', () => {
         const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp' }]]))
         ctx.permissions.permissionSessionMap.set('req-1', 's1')
         settingsHandlers.permission_response(makeWs(), makeClient({ activeSessionId: 's1' }), { requestId: 'req-1', decision: 'allow', scope: 'session' }, ctx)
-        assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, 'session'])
+        assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, 'session', { kind: 'user' }])
       })
 
       it('a hook-routed session allow broadcasts permission_resolved with decision allow and the scope', () => {
@@ -1214,7 +1214,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'unbound client with matching activeSessionId must route normally')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-ok-active'), false,
           'mapping must be consumed when the decision is routed')
       })
@@ -1244,7 +1244,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'subscribed unbound client must route normally — matches _broadcastToSession filter')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
       })
 
       it('leaves the bound-client guard unchanged (different code path)', () => {
@@ -1310,7 +1310,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'after-switch decision must route to the originating session A')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
         assert.equal(sessionB.respondToPermission.callCount, 0,
           'must not bleed onto the now-active session B')
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-after-switch'), false,

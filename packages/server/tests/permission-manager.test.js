@@ -140,7 +140,7 @@ describe('PermissionManager', () => {
         pm.on('permission_request', (d) => requested.push(d))
         pm.on('permission_resolved', (d) => resolved.push(d))
         const promise = pm.handlePermission(tool, input, null, 'approve')
-        const ok = pm.respondToPermission(requested[0].requestId, decision, undefined, undefined, scope)
+        const ok = pm.respondToPermission(requested[0].requestId, decision, undefined, undefined, scope, { kind: 'user' })
         return { ok, result: await promise, resolved, pm }
       }
 
@@ -285,7 +285,7 @@ describe('PermissionManager', () => {
 
       const promise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
       const requestId = Array.from(pm._pendingPermissions.keys())[0]
-      pm.respondToPermission(requestId, 'allow')
+      pm.respondToPermission(requestId, 'allow', undefined, undefined, undefined, { kind: 'user' })
       await promise
 
       assert.equal(events.length, 1)

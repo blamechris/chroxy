@@ -144,6 +144,10 @@ export function collectPendingPermissions({
     for (const [requestId, pending] of pendingPermissions) {
       const owner = permissionSessionMap.get(requestId)
       if (typeof owner !== 'string' || !wanted.has(owner)) continue
+      // A hook-routed AskUserQuestion is held here too, but it is a question with the user's
+      // wording in it, not a permission request; the in-process pipeline keeps questions out
+      // of this map as well, so the two pipelines agree (contract 7.3).
+      if (pending?.data?.tool === 'AskUserQuestion') continue
       add(describeRequest({ requestId, sessionId: owner, origin: 'hook', pending, data: pending?.data }))
     }
   }

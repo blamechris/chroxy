@@ -589,6 +589,8 @@ describe('#6865 SchedulerEngine', () => {
 
       // Answered through the same door a human clicks — and answered DENY.
       assert.deepEqual(sm.responded, [['req-1', 'deny']])
+      // #9119: the daemon denied it with nobody to ask. It is never reported as a person's answer.
+      assert.deepEqual(sm.respondedBy, [{ kind: 'cleared' }])
       // The turn is aborted rather than left to burn the 5-minute timeout.
       assert.equal(sm.interrupted.length, 1)
       // ...and the run is a VISIBLE failure, not a silent success.
@@ -1654,6 +1656,7 @@ class FakeSessionManager extends EventEmitter {
     this.destroyed = []
     this.sends = []
     this.responded = []
+    this.respondedBy = [] // #9119: who each answer claims to come from
     this.interrupted = []
     this.modeSets = []
     this.scheduledTaskStore = null
@@ -1682,7 +1685,7 @@ class FakeSessionManager extends EventEmitter {
         session.permissionMode = mode
         return true
       },
-      respondToPermission: (requestId, decision) => { this.responded.push([requestId, decision]) },
+      respondToPermission: (requestId, decision, _edited, _reason, _scope, resolvedBy) => { this.responded.push([requestId, decision]); this.respondedBy.push(resolvedBy) },
       interrupt: async () => {
         this.interrupted.push(id)
         // The real SDK abort surface: `stopped`, with no result and no error.

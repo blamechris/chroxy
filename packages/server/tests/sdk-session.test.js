@@ -286,7 +286,7 @@ describe('SdkSession', () => {
 
       const promise = session._handlePermission('Bash', { command: 'ls' }, null)
       const requestId = Array.from(session._pendingPermissions.keys())[0]
-      session.respondToPermission(requestId, 'allow')
+      session.respondToPermission(requestId, 'allow', undefined, undefined, undefined, { kind: 'user' })
       await promise
 
       assert.equal(upstream.length, 1)

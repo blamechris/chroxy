@@ -2439,8 +2439,8 @@ export class CodexAppServerSession extends BaseSession {
 
   // In-process permission responses (capabilities.inProcessPermissions) — thin
   // delegators to the PermissionManager, mirroring SdkSession.
-  respondToPermission(requestId, decision, editedInput, reason, scope) {
-    return this._permissions.respondToPermission(requestId, decision, editedInput, reason, scope)
+  respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy) {
+    return this._permissions.respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy)
   }
 
   respondToQuestion(text, answers, toolUseId) {

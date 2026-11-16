@@ -900,8 +900,10 @@ whole request is refused `scope_denied` and nothing is subscribed.
   id must pass `principalMaySee(..., 'observe')` or the whole request is refused `scope_denied`,
   like a nonexistent session; without it, the reply covers the granted sessions. At most 100
   requests, oldest first, `truncated` when more were pending. It grants **no decision
-  authority**: nothing in it can answer, extend or reroute a request. A pending
-  `AskUserQuestion` is not a permission request and is not listed.
+  authority**: nothing in it can answer, extend or reroute a request. Outside the snapshot: a
+  pending `AskUserQuestion` (in-process it is not in `_pendingPermissions`; a hook-routed one is
+  held in the hook store and is skipped by tool name) and the dev-preview consent prompts, which
+  live in a PermissionManager of their own that is not attached to any session.
 - `principal_sessions_snapshot`: granted sessions with observed and declared status
   (#9026), handoff blockers, lease-holder **label**, model requested/observed (S5).
 - `turn_started { turnId, causedBy, origin }` and `turn_ended { turnId, outcome }` journal
@@ -971,13 +973,17 @@ honest about what redaction can promise:
   the wire. Every announcement sets it (`tests/permission-resolved-by-roster.test.js` enumerates
   the sites from the syntax tree and fails on one without it) and the event normalizer rebuilds
   the wire value through `normalizeResolvedBy`, so a producer cannot put another field on it.
-  Mapping: an answer is `user` (a client's answer on either pipeline, including the HTTP
-  fallback); a timer is `timeout`; an aborted turn, a user Stop and a cancelled consent request
+  Mapping: an answer is `user` only when a client made it (the resolver's `permission_response`
+  path on either pipeline, including the HTTP fallback); `respondToPermission` takes the source
+  as its last argument and an absent one reads `cleared`, so no unattributed caller claims a
+  person. The daemon's own answers are `rule` when it is policy (the orchestration allowlist's
+  allow and deny, and the deny that follows a refused edit) and `cleared` when nobody was there
+  to ask (the scheduler's auto-deny); a timer is `timeout`; an aborted turn, a user Stop and a cancelled consent request
   are `abort` (`reason` still says `stopped` or `aborted`); a mode switch that resolves or
   denies a pending prompt is `auto_mode`; a drain at message completion or teardown, and a
   question a newer one replaced, are `cleared`. **Reserved, produced by nothing yet:** `agent`
-  (principals cannot answer before S15) and `rule` (a rule decides before a prompt exists and
-  emits no `permission_resolved`, #6842). A hook-routed prompt that times out or whose hook goes
+  (principals cannot answer before S15). A session rule decides before a prompt exists and emits
+  no `permission_resolved` (#6842), so `rule` appears only on the daemon-policy answers above. A hook-routed prompt that times out or whose hook goes
   away emits no `permission_resolved` at all today, so it has no `resolvedBy`. A principal does
   not receive `permission_resolved` directly (it is in `PRINCIPAL_OUTGOING_DENIED`); it reads it
   through the S3 journal, whose event data carries `resolvedBy` unchanged.

@@ -865,7 +865,7 @@ describe('createPermissionHandler', () => {
       handlePermissionResponseHttp(makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allow', scope: 'session' })), res)
       await new Promise(r => setImmediate(r))
       assert.equal(res.statusCode, 200)
-      assert.deepEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined, undefined, 'session'])
+      assert.deepEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined, undefined, 'session', { kind: 'user' }])
     })
 
     it('#8517: a legacy allow with scope session broadcasts permission_resolved carrying it; a deny does not', async () => {
@@ -1154,7 +1154,7 @@ describe('createPermissionHandler', () => {
       assert.equal(res.statusCode, 200)
       assert.equal(respondToPermission.mock.calls.length, 1,
         'SDK session.respondToPermission must be invoked')
-      assert.deepStrictEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined, undefined]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (HTTP path passes reason=parsed.reason, undefined here)
+      assert.deepStrictEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (HTTP path passes reason=parsed.reason, undefined here)
       assert.equal(opts.broadcastFn.mock.calls.length, 0,
         'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
     })

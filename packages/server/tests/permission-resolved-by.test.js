@@ -13,7 +13,8 @@ import assert from 'node:assert/strict'
 import WebSocket from 'ws'
 import { PermissionManager } from '../src/permission-manager.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { buildLegacyResolvedBroadcast } from '../src/permission-resolver.js'
+import { buildLegacyResolvedBroadcast, createPermissionResolver } from '../src/permission-resolver.js'
+import { EditedInputRefusedError } from '../src/edited-input.js'
 import {
   RESOLVED_BY_KINDS, RESOLVED_BY_LABEL_MAX, RESOLVED_BY, normalizeResolvedBy, resolvedByForReason,
 } from '../src/permission-resolved-by.js'
@@ -98,7 +99,7 @@ describe('every resolution path says who resolved it (real manager, real normali
       const pm = mk()
       const events = collect(pm)
       const p = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
-      pm.respondToPermission([...pm._pendingPermissions.keys()][0], decision, undefined, undefined, scope)
+      pm.respondToPermission([...pm._pendingPermissions.keys()][0], decision, undefined, undefined, scope, RESOLVED_BY.user)
       await p
       assert.deepEqual(events.map((e) => e.resolvedBy), [{ kind: 'user' }], `${decision}/${scope}`)
       const [frame] = wire(events[0])
@@ -247,6 +248,57 @@ describe('every resolution path says who resolved it (real manager, real normali
     const [frame] = wire({ requestId: 'r', decision: 'allow', reason: 'rule', resolvedBy: { kind: 'rule' } })
     assert.deepEqual(frame.resolvedBy, { kind: 'rule' })
     pm.destroy()
+  })
+})
+
+describe('who answered: only a client is a person (#9119 review)', () => {
+  it('an answer with no stated source is never a person: it reads as cleared', async () => {
+    const pm = mk()
+    const events = collect(pm)
+    const p = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+    pm.respondToPermission([...pm._pendingPermissions.keys()][0], 'allow')
+    await p
+    assert.deepEqual(events.map((e) => [e.reason, e.resolvedBy]), [['user', { kind: 'cleared' }]], 'reason is unchanged; the class is not a claim about a person')
+    pm.destroy()
+  })
+
+  it('the stated source is honoured, and is rebuilt (nothing but the class survives)', async () => {
+    for (const [given, want] of [[{ kind: 'rule' }, 'rule'], [{ kind: 'user', clientId: 'client-1' }, 'user'], [{ kind: 'root' }, 'cleared']]) {
+      const pm = mk()
+      const events = collect(pm)
+      const p = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      pm.respondToPermission([...pm._pendingPermissions.keys()][0], 'deny', undefined, undefined, undefined, given)
+      await p
+      assert.deepEqual(events[0].resolvedBy, { kind: want })
+      pm.destroy()
+    }
+  })
+
+  function resolverFor(session) {
+    return createPermissionResolver({
+      permissionSessionMap: new Map([['r1', 's1']]), pendingPermissions: new Map(),
+      getSessionManager: () => ({ getSession: () => ({ session }) }), resolveLegacyPermission() {}, getPermissionAudit: () => null,
+    })
+  }
+
+  it("the resolver's client answer is a user; the deny after a refused edit is the daemon's (rule)", () => {
+    const calls = []
+    const session = { respondToPermission: (...a) => { calls.push(a); return true } }
+    resolverFor(session).resolve('r1', 'allow', null, { clientId: 'c1' })
+    assert.deepEqual(calls[0][5], { kind: 'user' })
+
+    const refusing = []
+    const edited = {
+      respondToPermission: (...a) => {
+        refusing.push(a)
+        if (refusing.length === 1) throw new EditedInputRefusedError('no placeholder writes')
+        return true
+      },
+    }
+    const out = resolverFor(edited).resolve('r1', 'allow', null, { clientId: 'c1', editedInput: { x: 1 } })
+    assert.equal(out.kind, 'edit_refused')
+    assert.deepEqual(refusing[1][5], { kind: 'rule' }, 'the follow-up deny is not the person who edited')
+    assert.equal(refusing[1][1], 'deny')
   })
 })
 

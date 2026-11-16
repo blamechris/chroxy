@@ -2787,7 +2787,7 @@ export class ClaudeByokSession extends BaseSession {
    * PermissionManager which resolves the pending Promise in
    * handlePermission() above.
    */
-  respondToPermission(requestId, decision, editedInput, reason, scope) {
+  respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy) {
     // #5056: if this requestId belongs to a Task subagent (its pending
     // entry lives in the CHILD's PermissionManager, not ours), forward
     // the decision to that child. ws-permissions only ever calls the
@@ -2801,7 +2801,7 @@ export class ClaudeByokSession extends BaseSession {
       // #6543: forward the operator's per-hunk editedInput to the child too.
       // #6773: the deny `reason` forwards to the child as well.
       // #8517: so does the session-scope label.
-      const resolved = child.respondToPermission(requestId, decision, editedInput, reason, scope)
+      const resolved = child.respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy)
       // Drop the routing entry once the child has taken the response, so a
       // duplicate/late response can't re-resolve a stale id. The child also emits
       // permission_resolved which our relay listener uses to clear the same entry
@@ -2813,7 +2813,7 @@ export class ClaudeByokSession extends BaseSession {
       this._subagentPermissionRouting.delete(requestId)
       return resolved
     }
-    return this._permissions.respondToPermission(requestId, decision, editedInput, reason, scope)
+    return this._permissions.respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy)
   }
 
   /**

@@ -14,7 +14,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { scanPermissionResolvedSites } from './helpers/permission-resolved-sites.js'
+import { scanPermissionResolvedSites, scanUnclassifiedMentions } from './helpers/permission-resolved-sites.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
@@ -35,6 +35,21 @@ const EXPECTED = {
   'byok-session.js': { 'emit-relay': 1 },
 }
 
+// Every OTHER place the string appears, with why it is not an announcement. A mention outside
+// this list (a new comparison, list, key or constant) fails: it may be a shape the scanner does
+// not understand, so a person has to look and either add a reason here or make it a site.
+const ALLOWED_MENTIONS = {
+  'agent-control/client.js': { count: 4, reason: 'the MCP adapter READS the frame (a buffered-type set and comparisons)' },
+  'agent-control/events.js': { count: 1, reason: 'the event-log allowlist of forwarded broadcast types' },
+  'base-session.js': { count: 1, reason: 'the list of events a session forwards upward' },
+  'byok-session.js': { count: 1, reason: 'a comparison on a relayed child event type' },
+  'event-normalizer.js': { count: 3, reason: 'the nested-payload type test, the agent_event registration compare, and the EVENT_MAP key' },
+  'outgoing-policy.js': { count: 1, reason: 'the bound-client delivery roster' },
+  'principal-policy.js': { count: 1, reason: 'the principal delivery denylist' },
+  'session-manager.js': { count: 4, reason: 'the transient-event list and the permission-outcome history mapping, which read the event' },
+  'ws-server.js': { count: 1, reason: 'a filter comparing the event name' },
+}
+
 function tally(sites) {
   const out = {}
   for (const s of sites) {
@@ -50,6 +65,12 @@ describe('permission_resolved emit sites (#9119)', () => {
   it('finds sites at all, and exactly the rostered ones, in both directions', () => {
     assert.ok(sites.length > 0, 'the scan found nothing: the guard is not looking')
     assert.deepEqual(tally(sites), EXPECTED)
+  })
+
+  it('every other mention of the string is accounted for, in both directions', () => {
+    const found = {}
+    for (const m of scanUnclassifiedMentions(SRC)) found[m.file] = (found[m.file] ?? 0) + 1
+    assert.deepEqual(found, Object.fromEntries(Object.entries(ALLOWED_MENTIONS).map(([f, v]) => [f, v.count])))
   })
 
   it('every literal emit and every wire frame names resolvedBy', () => {
@@ -99,10 +120,51 @@ describe('permission_resolved emit sites (#9119)', () => {
       const bad = scanSource("export const f = (d) => ({ type: 'permission_resolved', requestId: 'r', ...d })\n")
       assert.equal(bad[0].shape, 'frame-literal')
       assert.equal(bad[0].hasResolvedBy, false, 'a bare spread of the event is not naming resolvedBy')
-      const direct = scanSource("export const f = () => ({ type: 'permission_resolved', resolvedBy: { kind: 'user' } })\n")
+      const direct = scanSource("export const f = () => ({ type: 'permission_resolved', resolvedBy: RESOLVED_BY.user })\n")
       assert.equal(direct[0].hasResolvedBy, true)
       const helper = scanSource("export const f = (d) => ({ type: 'permission_resolved', ...resolvedByField(d.resolvedBy) })\n")
       assert.equal(helper[0].hasResolvedBy, true)
+    })
+
+    it('sees through every spelling of the name (each was invisible to the first scanner)', () => {
+      const shapes = {
+        'a const identifier': "const T = 'permission_resolved'\nexport const f = (m) => m.emit(T, { requestId: 'r' })\n",
+        'a template literal': "export const f = (m) => m.emit(`permission_resolved`, { requestId: 'r' })\n",
+        'a concatenation': "export const f = () => ({ type: 'permission_' + 'resolved' })\n",
+        'a computed key': "export const f = () => ({ ['type']: 'permission_resolved' })\n",
+        'a const concatenation': "const A = 'permission_'\nconst T = A + 'resolved'\nexport const f = (m) => m.emit(T, { a: 1 })\n",
+      }
+      for (const [name, text] of Object.entries(shapes)) {
+        const found = scanSource(text)
+        assert.equal(found.length, 1, name)
+        assert.equal(found[0].hasResolvedBy, false, name)
+      }
+    })
+
+    it('does not accept a resolvedBy that is only present, or that is not a vetted producer', () => {
+      const frame = (value) => `export const f = (x) => ({ type: 'permission_resolved', resolvedBy: ${value} })\n`
+      for (const bad of ['undefined', "{ kind: 'user', clientId: x }", 'x', "{ kind: 'user' }", 'RESOLVED_BY[x]', 'someOther(x)']) {
+        assert.equal(scanSource(frame(bad))[0].hasResolvedBy, false, bad)
+      }
+      for (const good of ['RESOLVED_BY.user', 'resolvedByForReason(x)', 'normalizeResolvedBy(x)', 'normalizeResolvedBy(x) ?? RESOLVED_BY.cleared']) {
+        assert.equal(scanSource(frame(good))[0].hasResolvedBy, true, good)
+      }
+    })
+
+    it('the cross-check reports a mention the scanner does not classify', () => {
+      const mentions = (text) => {
+        const dir = mkdtempSync(join(tmpdir(), 'chroxy-mentions-'))
+        try {
+          writeFileSync(join(dir, 'x.js'), text)
+          return scanUnclassifiedMentions(dir)
+        } finally { rmSync(dir, { recursive: true, force: true }) }
+      }
+      assert.equal(mentions("export const is = (t) => t === 'permission_resolved'\n").length, 1)
+      assert.equal(mentions("export const L = ['permission_resolved']\n").length, 1)
+      assert.equal(mentions("export const h = { permission_resolved: () => {} }\n").length, 1)
+      assert.equal(mentions("export const T = 'permission_' + 'resolved'\n").length, 1)
+      assert.equal(mentions("export const h = (m) => m.on('permission_resolved', () => {})\n").length, 0, 'a listener registration is classified')
+      assert.equal(mentions("export const h = (m) => m.emit('permission_resolved', {})\n").length, 0, 'a site is classified (and checked elsewhere)')
     })
 
     it('does not count a listener registration, a comment or a string', () => {
