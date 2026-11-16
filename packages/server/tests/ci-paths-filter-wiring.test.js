@@ -86,8 +86,8 @@ import {
  * with js-yaml exactly as ci-docker-path-filter.test.js and
  * ci-publish-artifacts-path-filter.test.js do. The one reader written here,
  * `jobOutputs`, is a block-mapping walk, and a hand-rolled walk gets an ORACLE:
- * the CONTROL below compares it (and the consumer set, and each consumer's
- * `needs:`) against js-yaml over the real file, so the two cannot disagree
+ * the CONTROL below compares it (and the consumer set, and every job's
+ * `needs:` across the workflows) against js-yaml, so the two cannot disagree
  * silently.
  *
  * WHAT IS NOT CHECKED, stated so the next reader does not assume it is — and in
@@ -714,13 +714,16 @@ describe(`${WORKFLOW}: every path-filtered job is wired to a real '${PRODUCER_JO
       `the consumer set disagrees with js-yaml: ${report.consumers.map((c) => c.id).join(', ')} vs ${oracleConsumers.join(', ')}`
     )
 
-    for (const c of report.consumers) {
-      const job = ci.jobs.find((j) => j.id === c.id)
-      const oracleNeeds = [].concat(doc.jobs[c.id].needs ?? [])
-      assert.ok(
-        JSON.stringify(directNeeds(job)) === JSON.stringify(oracleNeeds),
-        `directNeeds disagrees with js-yaml for '${c.id}': ${JSON.stringify(directNeeds(job))} vs ${JSON.stringify(oracleNeeds)}`
-      )
+    for (const workflow of workflows) {
+      for (const [id, oracleJob] of Object.entries(yaml.load(workflow.text).jobs ?? {})) {
+        const job = workflow.jobs.find((j) => j.id === id)
+        assert.ok(job, `the line reader missed '${id}' in ${workflow.name}`)
+        const oracleNeeds = [].concat(oracleJob.needs ?? [])
+        assert.ok(
+          JSON.stringify(directNeeds(job)) === JSON.stringify(oracleNeeds),
+          `directNeeds disagrees with js-yaml for '${id}' in ${workflow.name}: ${JSON.stringify(directNeeds(job))} vs ${JSON.stringify(oracleNeeds)}`
+        )
+      }
     }
   })
 
@@ -1239,7 +1242,9 @@ describe('pathsFilterWiring reports each defect it exists to find, on a syntheti
  * three names written here — so a consumer added tomorrow is mutation-proven the
  * day it lands. The file on disk is never touched.
  *
- * Every edit asserts it changed something, and every suite starts from a CONTROL
+ * Every defect injection asserts it changed something; layout normalization may
+ * already be present. A fixed fixture proves each layout rewrites something,
+ * and every suite starts from a CONTROL
  * that the unmutated copy is clean, so a mutant that lands nowhere cannot read as
  * a pass. The suite runs once per LAYOUT: the same file rewritten in a spelling
  * GitHub treats identically (a `working-directory:` after the `run:`, quoted
@@ -1255,8 +1260,8 @@ const ANCHOR = 'mutation anchor assumption (not a guard defect)'
 const indentOf = (l) => /^( *)/.exec(l)[1].length
 const red = (mutant, kind, re, what) => assertReports(pathsFilterWiring(asWorkflow(mutant)), kind, re, what)
 
-/** Edit one job's block of `text` in place on its lines; asserts the edit changed something. */
-function editJob(text, id, fn) {
+/** Edit one job's block; only layout normalization may opt into a no-op. */
+function editJob(text, id, fn, { allowNoop = false } = {}) {
   const lines = text.split('\n')
   const job = parseJobs(text, WORKFLOW).find((j) => j.id === id)
   assert.ok(job, `${ANCHOR}: no job '${id}' in ${WORKFLOW}`)
@@ -1269,7 +1274,7 @@ function editJob(text, id, fn) {
   }
   fn({ lines, start, end, job, find })
   const out = lines.join('\n')
-  assert.ok(out !== text, `${ANCHOR}: the edit on '${id}' changed nothing`)
+  assert.ok(allowNoop || out !== text, `${ANCHOR}: the edit on '${id}' changed nothing`)
   return out
 }
 
@@ -1369,13 +1374,14 @@ const RUN_SPELLINGS = [
 function readNeeds(lines, start, end) {
   const i = lines.findIndex((l, n) => n >= start && n < end && /^ {4}needs:/.test(l))
   assert.ok(i !== -1, `${ANCHOR}: no needs: line`)
-  const raw = lines[i].replace(/^ {4}needs:\s*/, '').replace(/\s+#.*$/, '').trim()
+  const raw = lines[i].replace(/\s+#.*$/, '').replace(/^ {4}needs:\s*/, '').trim()
   if (raw !== '') {
     return { i, len: 1, items: raw.replace(/^\[|\]$/g, '').split(',').map((x) => unquote(x.trim())).filter(Boolean) }
   }
   const items = []
   let j = i + 1
   for (; j < end; j++) {
+    if (/^\s*(?:#.*)?$/.test(lines[j])) continue
     const m = /^ {6,}-\s*(\S+)/.exec(lines[j])
     if (!m) break
     items.push(unquote(m[1]))
@@ -1386,25 +1392,27 @@ function readNeeds(lines, start, end) {
 const mappingLine = (out) => new RegExp(`^ {6}${out}:\\s*['"]?\\$\\{\\{`)
 
 /** Apply `fn(lines, span)` to every run step of every consumer `base` discovered. */
-function onEveryConsumerRunStep(text, base, fn) {
+function onEveryConsumerRunStep(text, base, fn, options) {
   let out = text
   for (const c of base.consumers) {
     out = editJob(out, c.id, ({ lines, start, job }) => {
       for (const span of stepSpans(job, start).reverse()) if (stepRun(span.step) !== undefined) fn(lines, span)
-    })
+    }, options)
   }
   return out
 }
 
-const onEveryConsumer = (text, base, fn) =>
-  base.consumers.reduce((out, c) => editJob(out, c.id, (ctx) => fn(ctx, c)), text)
+const onEveryConsumer = (text, base, fn, options) =>
+  base.consumers.reduce((out, c) => editJob(out, c.id, (ctx) => fn(ctx, c), options), text)
 
 /** Valid rewrites of the real file: the rule must stay quiet on each, and every mutant must still land. */
 const LAYOUTS = [
   { name: 'as committed', xf: (t) => t },
   {
     name: 'run: followed by working-directory:',
-    xf: (t, base) => onEveryConsumerRunStep(t, base, (lines, span) => insertAfterRun(lines, span, 'working-directory: .')),
+    xf: (t, base) => onEveryConsumerRunStep(t, base, (lines, span) => {
+      if (stepInput(span.step, 'working-directory') === undefined) insertAfterRun(lines, span, 'working-directory: .')
+    }, { allowNoop: true }),
   },
   {
     name: 'quoted output mappings',
@@ -1412,9 +1420,9 @@ const LAYOUTS = [
       editJob(t, PRODUCER_JOB, ({ lines, find }) => {
         for (const o of base.outputs) {
           const i = find((l) => mappingLine(o.name).test(l), `the ${o.name} mapping`)
-          lines[i] = lines[i].replace(/^(\s*[\w-]+:\s*)(\S.*?)\s*$/, (_, a, b) => `${a}'${b}'`)
+          lines[i] = lines[i].replace(/^(\s*[\w-]+:\s*)(\$\{\{.*?\}\})(\s*(?:#.*)?)$/, (_, a, b, comment) => `${a}'${b}'${comment}`)
         }
-      }),
+      }, { allowNoop: true }),
   },
   {
     name: "no spaces around == 'true'",
@@ -1425,28 +1433,28 @@ const LAYOUTS = [
             lines[i] = lines[i].replace(/\s*==\s*'true'/, "=='true'")
           }
         }
-      }),
+      }, { allowNoop: true }),
   },
   {
     name: 'needs: with a trailing comment',
     xf: (t, base) => onEveryConsumer(t, base, ({ lines, start, end }) => {
       const n = readNeeds(lines, start, end)
-      lines[n.i] += '  # why'
-    }),
+      if (!/\s+#/.test(lines[n.i])) lines[n.i] += '  # why'
+    }, { allowNoop: true }),
   },
   {
     name: 'needs: entries quoted',
     xf: (t, base) => onEveryConsumer(t, base, ({ lines, start, end }) => {
       const n = readNeeds(lines, start, end)
       lines.splice(n.i, n.len, n.items.length === 1 ? `    needs: '${n.items[0]}'` : `    needs: [${n.items.map((x) => `'${x}'`).join(', ')}]`)
-    }),
+    }, { allowNoop: true }),
   },
   {
     name: 'needs: as a block list',
     xf: (t, base) => onEveryConsumer(t, base, ({ lines, start, end }) => {
       const n = readNeeds(lines, start, end)
       lines.splice(n.i, n.len, '    needs:', ...n.items.map((x) => `      - ${x}`))
-    }),
+    }, { allowNoop: true }),
   },
   {
     name: 'a second reader of every consumed output',
@@ -1459,6 +1467,40 @@ const LAYOUTS = [
   },
 ]
 
+// Independent of ci.yml's current formatting: a normalized real file may
+// legitimately make a layout a no-op, but a broken transform must still fail.
+describe('injection layouts rewrite a fixed fixture (#8211)', () => {
+  const fixture = `on:
+  pull_request:
+jobs:
+  changes:
+    outputs:
+      example: \${{ steps.filter.outputs.example }}
+    steps:
+      - id: filter
+        uses: dorny/paths-filter@fixture
+        with:
+          filters: |
+            example:
+              - '**'
+  consumer:
+    needs: changes
+    if: needs.changes.outputs.example == 'true'
+    steps:
+      - run: echo fixture
+`
+
+  for (const layout of LAYOUTS.filter((l) => l.name !== 'as committed')) {
+    it(layout.name, () => {
+      const base = pathsFilterWiring(asWorkflow(fixture))
+      assert.deepEqual(base.issues, [])
+      const rewritten = layout.xf(fixture, base)
+      assert.ok(rewritten !== fixture, `${ANCHOR}: layout '${layout.name}' changed nothing on the fixture`)
+      assert.deepEqual(pathsFilterWiring(asWorkflow(rewritten)).issues, [])
+    })
+  }
+})
+
 for (const layout of LAYOUTS) {
   describe(`the rule turns RED on each wiring mutant, for every job and output ci.yml has (#8193) [${layout.name}]`, () => {
     let text
@@ -1469,7 +1511,6 @@ for (const layout of LAYOUTS) {
       assert.ok(ci, `expected ${WORKFLOW} among the scanned workflows`)
       const base = pathsFilterWiring(ci)
       text = layout.xf(ci.text, base)
-      assert.ok(layout.name === 'as committed' || text !== ci.text, `${ANCHOR}: layout '${layout.name}' changed nothing`)
       report = pathsFilterWiring(asWorkflow(text))
     })
 
@@ -1645,9 +1686,13 @@ for (const layout of LAYOUTS) {
 
     it("S2: the changes job's own if: typo'd, or narrowed to an event that is not a pull_request", () => {
       const swapEvent = (to) =>
-        editJob(text, PRODUCER_JOB, ({ lines, find }) => {
-          const i = find((l) => /^ {4}if:/.test(l) && l.includes("'pull_request'"), "the producer's if: naming pull_request")
-          lines[i] = lines[i].replace("'pull_request'", `'${to}'`)
+        editJob(text, PRODUCER_JOB, ({ lines, start, end }) => {
+          const i = lines.findIndex((l, n) => n >= start && n < end && /^ {4}if:/.test(l))
+          if (i === -1) lines.splice(start + 1, 0, `    if: github.event_name == '${to}'`)
+          else {
+            assert.ok(lines[i].includes("'pull_request'"), `${ANCHOR}: the producer's if: does not name pull_request`)
+            lines[i] = lines[i].replace("'pull_request'", `'${to}'`)
+          }
         })
       red(swapEvent('pull_requests'), 'loud', /job 'changes': its if: compares github\.event_name to 'pull_requests', which this workflow never triggers on/, "typo'd event")
       red(swapEvent('push'), 'loud', /job 'changes': its if: never lets a pull_request through/, 'push only')
