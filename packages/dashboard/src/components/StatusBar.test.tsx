@@ -130,12 +130,13 @@ describe('StatusBar', () => {
     expect(screen.queryByTestId('agent-badge')).not.toBeInTheDocument()
   })
 
-  it('shows SDK provider badge with billing tooltip', () => {
+  it('shows SDK provider badge with a billing-neutral tooltip (#8228)', () => {
     render(<StatusBar provider="claude-sdk" />)
     const badge = screen.getByTestId('status-provider')
     expect(badge).toHaveTextContent('SDK')
     expect(badge.getAttribute('data-provider')).toBe('sdk')
-    expect(badge.getAttribute('title')).toContain('API')
+    expect(badge.getAttribute('title')).toContain('Claude Agent SDK, headless')
+    expect(badge.getAttribute('title')).not.toContain('ANTHROPIC_API_KEY')
   })
 
   it('shows version, unknowns, and instruction delivery details', () => {
