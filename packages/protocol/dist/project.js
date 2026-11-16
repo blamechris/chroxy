@@ -21,7 +21,7 @@
  * package's fixtures change (`CHROXY_WORKTREES_ROOT` /
  * `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT`, and `CHROXY_HOOKS_TMP_PREFIXES`).
  */
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 /** Default to process.env without depending on the `process` global type (tsconfig `types: []`). */
@@ -401,15 +401,19 @@ export function deriveProjectFromCwd(cwd, env = defaultEnv()) {
 }
 /** Pointer files (`.git`, `commondir`) are a line or two; anything bigger is hostile or corrupt. */
 const GIT_POINTER_MAX_BYTES = 4096;
+/** A repo `config` is bigger, but still bounded: past this we refuse to guess. */
+const GIT_CONFIG_MAX_BYTES = 64 * 1024;
 /**
- * Read a small text file. `{ absent: true }` when it does not exist; `null`
- * for anything else that is not a usable small file (unreadable, a directory,
- * oversized) so the caller can fail closed rather than guess.
+ * Read a small REGULAR file without ever blocking. Opened O_RDONLY|O_NONBLOCK
+ * (a FIFO then opens instantly instead of waiting for a writer) and fstat'd
+ * before a byte is read: anything that is not a regular file, or is over
+ * `maxBytes`, is refused. `{ absent: true }` when it does not exist; `null`
+ * for everything else that is not usable so the caller fails closed.
  */
-function readSmallFile(path) {
+function readSmallFile(path, maxBytes = GIT_POINTER_MAX_BYTES) {
     let fd;
     try {
-        fd = openSync(path, 'r');
+        fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
     }
     catch (err) {
         const code = err.code;
@@ -417,7 +421,7 @@ function readSmallFile(path) {
     }
     try {
         const st = fstatSync(fd);
-        if (!st.isFile() || st.size > GIT_POINTER_MAX_BYTES)
+        if (!st.isFile() || st.size > maxBytes)
             return null;
         const buf = Buffer.alloc(st.size);
         let off = 0;
@@ -441,13 +445,79 @@ function readSmallFile(path) {
         }
     }
 }
+/** A real git dir: a directory holding a regular HEAD file. */
+function isGitDirectory(dir) {
+    try {
+        if (!statSync(dir).isDirectory())
+            return false;
+        return statSync(join(dir, 'HEAD')).isFile();
+    }
+    catch {
+        return false;
+    }
+}
+function unquoteConfigValue(raw) {
+    const v = raw.trim();
+    if (v.startsWith('"')) {
+        let out = '';
+        for (let i = 1; i < v.length; i++) {
+            const c = v[i];
+            if (c === '\\' && i + 1 < v.length) {
+                out += v[++i];
+            }
+            else if (c === '"') {
+                break;
+            }
+            else {
+                out += c;
+            }
+        }
+        return out;
+    }
+    return v.replace(/\s*[#;].*$/, '').trim();
+}
+/** The two `[core]` keys that decide bare-vs-working-tree. Last assignment wins, like git. */
+function parseCoreConfig(text) {
+    let inCore = false;
+    let bare = false;
+    let worktree = null;
+    for (const line of text.split(/\r?\n/)) {
+        const section = /^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\]/.exec(line);
+        if (section) {
+            inCore = section[1].toLowerCase() === 'core';
+            continue;
+        }
+        if (!inCore)
+            continue;
+        const kv = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+        if (!kv)
+            continue;
+        const key = kv[1].toLowerCase();
+        if (key === 'bare') {
+            bare = kv[2] === undefined ? true : /^(true|yes|on|1)$/i.test(unquoteConfigValue(kv[2]));
+        }
+        else if (key === 'worktree' && kv[2] !== undefined) {
+            const v = unquoteConfigValue(kv[2]);
+            worktree = v.length > 0 ? v : null;
+        }
+    }
+    return { bare, worktree };
+}
 /**
- * Root of the repo a `.git` FILE (a linked worktree or a submodule) belongs to.
- * Linked worktree: `gitdir: <common>/worktrees/<id>` holds a `commondir` file
- * pointing back at the common git dir; its parent is the MAIN repo. A bare
- * common dir (basename not `.git`) has no working-tree root → null. No
- * `commondir` (submodule) → the directory holding the `.git` file. Null on any
- * malformed/oversized/unreadable input.
+ * Identity of the repo a `.git` FILE (linked worktree, submodule, separate git
+ * dir) belongs to, decided from git METADATA, never from directory names:
+ *
+ *  - the gitdir the file points at must be a real git dir (directory + regular HEAD);
+ *  - `commondir` (linked worktree) names the common git dir, validated the same way;
+ *  - the common dir's `config` `[core]` decides: `bare = true` -> null;
+ *    `worktree = <p>` -> that path (relative to the common dir);
+ *  - no `commondir`: the file's own directory is the working tree (submodule,
+ *    `--separate-git-dir` main);
+ *  - `commondir` named `.git` -> its parent;
+ *  - any other common dir (a separate git dir: git records the MAIN working
+ *    tree nowhere readable) -> the common dir itself, labelled with a trailing
+ *    `.git` stripped — the same answer `git worktree list` gives.
+ * Null on any malformed/oversized/unreadable/non-regular input.
  */
 function rootFromGitFile(holderDir) {
     const pointer = readSmallFile(join(holderDir, '.git'));
@@ -457,19 +527,36 @@ function rootFromGitFile(holderDir) {
     if (!match)
         return null;
     const gitDir = resolve(holderDir, match[1]);
+    if (!isGitDirectory(gitDir))
+        return null;
     const commondir = readSmallFile(join(gitDir, 'commondir'));
     if (commondir === null)
         return null;
-    if ('absent' in commondir)
-        return holderDir;
-    const rel = commondir.text.trim();
-    if (rel.length === 0)
+    let commonDir = gitDir;
+    let linked = false;
+    if (!('absent' in commondir)) {
+        const rel = commondir.text.trim();
+        if (rel.length === 0)
+            return null;
+        commonDir = resolve(gitDir, rel);
+        if (!isGitDirectory(commonDir))
+            return null;
+        linked = true;
+    }
+    const config = readSmallFile(join(commonDir, 'config'), GIT_CONFIG_MAX_BYTES);
+    if (config === null)
         return null;
-    const common = resolve(gitDir, rel);
-    if (basename(common) !== '.git')
+    const core = 'absent' in config ? { bare: false, worktree: null } : parseCoreConfig(config.text);
+    if (core.bare)
         return null;
-    const root = dirname(common);
-    return root.length > 0 && root !== common ? root : null;
+    if (core.worktree)
+        return { root: resolve(commonDir, core.worktree) };
+    if (!linked)
+        return { root: holderDir };
+    if (basename(commonDir) === '.git')
+        return { root: dirname(commonDir) };
+    const stripped = basename(commonDir).replace(/\.git$/i, '');
+    return { root: commonDir, label: stripped.length > 0 ? stripped : undefined };
 }
 /**
  * Canonical project identity for a working directory — the one answer a
@@ -478,7 +565,7 @@ function rootFromGitFile(holderDir) {
  *  1. chroxy session worktree → its parent repo.
  *  2. nearest `.git` going up: a directory is the root; a FILE is resolved via
  *     `commondir` to the MAIN repo (never the linked folder's own name).
- *  3. no git root: tmp / home → null; anything else → the directory itself.
+ *  3. no git root: tmp (incl. the realpath of os.tmpdir()) / home → null; anything else → the directory itself.
  *
  * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
  * (notifications, ingest) must not change. `root` is a realpath, best effort.
@@ -489,11 +576,11 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
     const dir = realResolve(cwd);
     if (!dir)
         return null;
-    const finish = (root) => {
+    const finish = (root, labelOverride) => {
         const real = realResolve(root);
         if (!real)
             return null;
-        const label = basename(real);
+        const label = labelOverride ?? basename(real);
         return label.length > 0 ? { label, root: real } : null;
     };
     const chroxyTop = chroxyWorktreeTopDir(dir, env);
@@ -504,8 +591,10 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
     let current = dir;
     for (let i = 0; i < 256; i++) {
         let kind = null;
+        let exists = false;
         try {
             const st = statSync(join(current, '.git'));
+            exists = true;
             kind = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : null;
         }
         catch (err) {
@@ -516,9 +605,11 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
         if (kind === 'dir')
             return finish(current);
         if (kind === 'file') {
-            const root = rootFromGitFile(current);
-            return root ? finish(root) : null;
+            const found = rootFromGitFile(current);
+            return found ? finish(found.root, found.label) : null;
         }
+        if (exists)
+            return null; // a .git that is neither a directory nor a regular file (FIFO, socket): refuse
         const parent = dirname(current);
         if (parent === current)
             break;
@@ -526,6 +617,10 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
     }
     const cls = classifyNonProjectCwd(dir, env);
     if (cls === 'tmp' || cls === 'home')
+        return null;
+    // The OS temp dir is scratch space wherever it lives (macOS /var/folders, a $TMPDIR override).
+    const osTmp = realResolve(tmpdir());
+    if (osTmp && _pathWithinPrefix(osTmp, dir))
         return null;
     return finish(dir);
 }

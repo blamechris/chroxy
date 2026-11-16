@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, chmodSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import {
@@ -11,6 +11,32 @@ import {
   classifyNonProjectCwd,
   worktreeParent,
 } from '../src/project.ts'
+
+const SRC_URL = new URL('../src/project.ts', import.meta.url).href
+
+/**
+ * canonicalProjectForCwd in a child with a hard timeout: a regression that blocks
+ * on a FIFO is a red assertion here, not a hung test runner.
+ */
+function inChild(cwd, env = NO_TMP, extraEnv = {}) {
+  const script = `import { canonicalProjectForCwd } from ${JSON.stringify(SRC_URL)}
+process.stdout.write(JSON.stringify(canonicalProjectForCwd(${JSON.stringify(cwd)}, ${JSON.stringify(env)})))`
+  const r = spawnSync(process.execPath, ['--import', 'tsx/esm', '--input-type=module', '-e', script], {
+    timeout: 8000, encoding: 'utf8', env: { ...process.env, ...extraEnv },
+  })
+  assert.equal(r.error?.code, undefined, 'child blocked or crashed: ' + (r.error?.message ?? r.stderr))
+  assert.equal(r.status, 0, r.stderr)
+  return JSON.parse(r.stdout)
+}
+function mkfifo(path) {
+  execFileSync('mkfifo', [path])
+}
+/** A minimal valid git dir (directory + regular HEAD) with the given config text. */
+function fakeGitDir(path, config) {
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'HEAD'), 'ref: refs/heads/main\n')
+  if (config !== undefined) writeFileSync(join(path, 'config'), config)
+}
 
 // Fixtures live under the OS temp dir; point the tmp classification at a path
 // that does not exist so they classify by the real rules (same trick as project.test.js).
@@ -76,31 +102,97 @@ describe('canonicalProjectForCwd', () => {
     const b = base()
     const sub = join(b, 'super', 'subproj')
     mkdirSync(sub, { recursive: true })
-    mkdirSync(join(b, 'super', '.git', 'modules', 'subproj'), { recursive: true })
+    fakeGitDir(join(b, 'super', '.git', 'modules', 'subproj'))
     writeFileSync(join(sub, '.git'), 'gitdir: ../.git/modules/subproj\n')
     assert.deepEqual(canonicalProjectForCwd(sub, NO_TMP), { label: 'subproj', root: sub })
   })
 
-  it('bare common dir (worktree of a bare repo) is null', () => {
+  it('bare repo: a linked worktree of a bare repo (any name) is null', () => {
     const b = base()
-    const bare = join(b, 'repo.git')
-    mkdirSync(join(bare, 'worktrees', 'w'), { recursive: true })
-    writeFileSync(join(bare, 'worktrees', 'w', 'commondir'), '../..\n')
-    const wt = join(b, 'wt')
-    mkdirSync(wt)
-    writeFileSync(join(wt, '.git'), `gitdir: ${join(bare, 'worktrees', 'w')}\n`)
-    assert.equal(canonicalProjectForCwd(wt, NO_TMP), null)
+    for (const name of ['repo.git', '.git']) {
+      const bare = join(b, name === '.git' ? 'dotgit' : name, name)
+      fakeGitDir(bare, '[core]\n\tbare = true\n')
+      fakeGitDir(join(bare, 'worktrees', 'w'))
+      writeFileSync(join(bare, 'worktrees', 'w', 'commondir'), '../..\n')
+      const wt = join(b, `wt-${name}`)
+      mkdirSync(wt)
+      writeFileSync(join(wt, '.git'), `gitdir: ${join(bare, 'worktrees', 'w')}\n`)
+      assert.equal(canonicalProjectForCwd(wt, NO_TMP), null, name)
+    }
+  })
+
+  it('real bare repo in a directory named .git, with a real linked worktree, is null', () => {
+    const b = base()
+    const bare = join(b, 'holder', '.git')
+    mkdirSync(join(b, 'holder'))
+    git(b, 'init', '-q', '--bare', '-b', 'main', bare)
+    git(bare, 'worktree', 'add', '-q', '--orphan', '-b', 'o', join(b, 'wt')) // git >= 2.42
+    assert.equal(canonicalProjectForCwd(join(b, 'wt'), NO_TMP), null)
   })
 
   it('relative gitdir + relative commondir resolve against the right bases', () => {
     const b = base()
     const main = join(b, 'relmain')
-    mkdirSync(join(main, '.git', 'worktrees', 'w'), { recursive: true })
+    fakeGitDir(join(main, '.git'))
+    fakeGitDir(join(main, '.git', 'worktrees', 'w'))
     writeFileSync(join(main, '.git', 'worktrees', 'w', 'commondir'), '../..\n')
     const wt = join(b, 'elsewhere')
     mkdirSync(wt)
     writeFileSync(join(wt, '.git'), 'gitdir: ../relmain/.git/worktrees/w\n')
     assert.deepEqual(canonicalProjectForCwd(wt, NO_TMP), { label: 'relmain', root: main })
+  })
+
+  it('core.worktree in the common dir config decides the root', () => {
+    const b = base()
+    const real = join(b, 'actual-tree')
+    mkdirSync(real)
+    const common = join(b, 'store.git')
+    fakeGitDir(common, '[core]\n\tbare = false\n\tworktree = ../actual-tree\n')
+    fakeGitDir(join(common, 'worktrees', 'w'))
+    writeFileSync(join(common, 'worktrees', 'w', 'commondir'), '../..\n')
+    const wt = join(b, 'lw')
+    mkdirSync(wt)
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(common, 'worktrees', 'w')}\n`)
+    assert.deepEqual(canonicalProjectForCwd(wt, NO_TMP), { label: 'actual-tree', root: real })
+  })
+
+  it('git init --separate-git-dir: the working tree and a linked worktree of it', () => {
+    const b = base()
+    const work = join(b, 'sepwork')
+    const sep = join(b, 'sepstore.git')
+    git(b, 'init', '-q', '-b', 'main', '--separate-git-dir', sep, work)
+    writeFileSync(join(work, 'f'), 'x')
+    git(work, 'add', 'f')
+    git(work, 'commit', '-q', '-m', 'i')
+    assert.deepEqual(canonicalProjectForCwd(work, NO_TMP), { label: 'sepwork', root: work })
+    const lw = join(b, 'sep-linked')
+    git(work, 'worktree', 'add', '-q', '--detach', lw)
+    // git records the main working tree nowhere readable: documented fallback is the common dir, `.git` stripped
+    assert.deepEqual(canonicalProjectForCwd(lw, NO_TMP), { label: 'sepstore', root: sep })
+  })
+
+  it('submodule and a linked worktree of the submodule resolve to the submodule', () => {
+    const { repo: sup } = realRepo('superproj')
+    const { repo: lib } = realRepo('libproj')
+    execFileSync('git', ['-c', 'protocol.file.allow=always', '-C', sup, 'submodule', 'add', '-q', lib, 'sub'], { stdio: 'pipe', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 'a@b.c', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 'a@b.c' } })
+    const sub = join(sup, 'sub')
+    assert.deepEqual(canonicalProjectForCwd(sub, NO_TMP), { label: 'sub', root: sub })
+    const lw = join(base(), 'sublinked')
+    git(sub, 'worktree', 'add', '-q', '--detach', lw)
+    assert.deepEqual(canonicalProjectForCwd(lw, NO_TMP), { label: 'sub', root: sub })
+  })
+
+  it('a broken gitdir pointer is null (never a "normal" layout)', () => {
+    const b = base()
+    const d = join(b, 'dangling')
+    mkdirSync(d)
+    writeFileSync(join(d, '.git'), 'gitdir: /nonexistent/place\n')
+    assert.equal(canonicalProjectForCwd(d, NO_TMP), null)
+    const noHead = join(b, 'nohead')
+    mkdirSync(join(b, 'gd'))
+    mkdirSync(noHead)
+    writeFileSync(join(noHead, '.git'), `gitdir: ${join(b, 'gd')}\n`)
+    assert.equal(canonicalProjectForCwd(noHead, NO_TMP), null)
   })
 
   it('malformed / oversized / unreadable .git file is null', () => {
@@ -113,21 +205,56 @@ describe('canonicalProjectForCwd', () => {
     }
     assert.equal(canonicalProjectForCwd(mk('junk', 'not a pointer\n'), NO_TMP), null)
     assert.equal(canonicalProjectForCwd(mk('big', 'gitdir: ' + 'a'.repeat(5000) + '\n'), NO_TMP), null)
-    // oversized commondir
     const main = join(b, 'bigmain')
-    mkdirSync(join(main, '.git', 'worktrees', 'w'), { recursive: true })
+    fakeGitDir(join(main, '.git'))
+    fakeGitDir(join(main, '.git', 'worktrees', 'w'))
     writeFileSync(join(main, '.git', 'worktrees', 'w', 'commondir'), '../..'.padEnd(5000, '/'))
     assert.equal(canonicalProjectForCwd(mk('bigcd', `gitdir: ${join(main, '.git', 'worktrees', 'w')}\n`), NO_TMP), null)
-    // empty commondir
     const m2 = join(b, 'm2')
-    mkdirSync(join(m2, '.git', 'worktrees', 'w'), { recursive: true })
+    fakeGitDir(join(m2, '.git'))
+    fakeGitDir(join(m2, '.git', 'worktrees', 'w'))
     writeFileSync(join(m2, '.git', 'worktrees', 'w', 'commondir'), '   \n')
     assert.equal(canonicalProjectForCwd(mk('emptycd', `gitdir: ${join(m2, '.git', 'worktrees', 'w')}\n`), NO_TMP), null)
+    // oversized config
+    const m3 = join(b, 'm3')
+    fakeGitDir(join(m3, '.git'), '#'.repeat(70 * 1024))
+    fakeGitDir(join(m3, '.git', 'worktrees', 'w'))
+    writeFileSync(join(m3, '.git', 'worktrees', 'w', 'commondir'), '../..\n')
+    assert.equal(canonicalProjectForCwd(mk('bigcfg', `gitdir: ${join(m3, '.git', 'worktrees', 'w')}\n`), NO_TMP), null)
     if (process.platform !== 'win32' && process.getuid?.() !== 0) {
       const d = mk('unread', 'gitdir: /x\n')
       chmodSync(join(d, '.git'), 0)
       assert.equal(canonicalProjectForCwd(d, NO_TMP), null)
     }
+  })
+
+  it('a FIFO at .git, commondir, HEAD or config never blocks and is null', { skip: process.platform === 'win32' }, () => {
+    const b = base()
+    const fifoGit = join(b, 'fifogit')
+    mkdirSync(fifoGit)
+    mkfifo(join(fifoGit, '.git'))
+    assert.equal(inChild(fifoGit), null)
+
+    const mkWorktree = (name, tweak) => {
+      const main = join(b, `${name}-main`)
+      fakeGitDir(join(main, '.git'), '[core]\n')
+      const gd = join(main, '.git', 'worktrees', 'w')
+      fakeGitDir(gd)
+      writeFileSync(join(gd, 'commondir'), '../..\n')
+      tweak(main, gd)
+      const wt = join(b, `${name}-wt`)
+      mkdirSync(wt)
+      writeFileSync(join(wt, '.git'), `gitdir: ${gd}\n`)
+      return wt
+    }
+    assert.equal(inChild(mkWorktree('fcd', (m, gd) => { rmSync(join(gd, 'commondir')); mkfifo(join(gd, 'commondir')) })), null)
+    assert.equal(inChild(mkWorktree('fcfg', (m) => { rmSync(join(m, '.git', 'config')); mkfifo(join(m, '.git', 'config')) })), null)
+    assert.equal(inChild(mkWorktree('fhead', (m, gd) => { rmSync(join(gd, 'HEAD')); mkfifo(join(gd, 'HEAD')) })), null)
+    const fifoPointer = join(b, 'fifoptr')
+    mkdirSync(fifoPointer)
+    mkfifo(join(b, 'fifoptr-target'))
+    writeFileSync(join(fifoPointer, '.git'), `gitdir: ${join(b, 'fifoptr-target')}\n`)
+    assert.equal(inChild(fifoPointer), null)
   })
 
   it('git repo under a tmp prefix is still a project (git check comes first)', () => {
@@ -137,6 +264,7 @@ describe('canonicalProjectForCwd', () => {
     const env = { CHROXY_HOOKS_TMP_PREFIXES: b }
     assert.equal(classifyNonProjectCwd(repo, env), 'tmp')
     assert.deepEqual(canonicalProjectForCwd(repo, env), { label: 'tmprepo', root: repo })
+    assert.deepEqual(canonicalProjectForCwd(repo, NO_TMP), { label: 'tmprepo', root: repo }, 'also under os.tmpdir()')
   })
 
   it('non-git tmp dir is null; non-git normal dir is its basename', () => {
@@ -144,7 +272,17 @@ describe('canonicalProjectForCwd', () => {
     const plain = join(b, 'plain-dir')
     mkdirSync(plain)
     assert.equal(canonicalProjectForCwd(plain, { CHROXY_HOOKS_TMP_PREFIXES: b }), null)
-    assert.deepEqual(canonicalProjectForCwd(plain, NO_TMP), { label: 'plain-dir', root: plain })
+    // not under the (overridden) OS temp dir: a normal directory, named by basename
+    const saved = process.env.TMPDIR
+    process.env.TMPDIR = '/nonexistent-os-tmpdir'
+    try {
+      assert.deepEqual(canonicalProjectForCwd(plain, NO_TMP), { label: 'plain-dir', root: plain })
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = saved
+    }
+    // ...and under the real realpath(os.tmpdir()) a non-git dir is scratch space
+    assert.equal(canonicalProjectForCwd(plain, NO_TMP), null)
   })
 
   it('home root itself is null', () => {

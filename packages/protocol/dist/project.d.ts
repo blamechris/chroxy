@@ -97,7 +97,7 @@ export interface CanonicalProject {
  *  1. chroxy session worktree → its parent repo.
  *  2. nearest `.git` going up: a directory is the root; a FILE is resolved via
  *     `commondir` to the MAIN repo (never the linked folder's own name).
- *  3. no git root: tmp / home → null; anything else → the directory itself.
+ *  3. no git root: tmp (incl. the realpath of os.tmpdir()) / home → null; anything else → the directory itself.
  *
  * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
  * (notifications, ingest) must not change. `root` is a realpath, best effort.
