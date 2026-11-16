@@ -29,8 +29,9 @@ import {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
+  DEFAULT_BYPASS_CATEGORIES as CLIENT_DEFAULT_BYPASS_CATEGORIES,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,17 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+})
+
+describe('default notification bypass: server <-> clients (#8567)', () => {
+  it('every server default bypass is checked by both clients', () => {
+    const missing = DEFAULT_BYPASS_CATEGORIES.filter((key) => !CLIENT_DEFAULT_BYPASS_CATEGORIES.includes(key))
+    assert.deepEqual(missing, [], `server default bypass missing from ${PROTOCOL_FILE}: ${missing.join(', ')}`)
+  })
+
+  it('every client default bypass is enabled by the server', () => {
+    const extra = CLIENT_DEFAULT_BYPASS_CATEGORIES.filter((key) => !DEFAULT_BYPASS_CATEGORIES.includes(key))
+    assert.deepEqual(extra, [], `client default bypass missing from ${SERVER_FILE}: ${extra.join(', ')}`)
   })
 })

@@ -34,7 +34,7 @@ import {
 export function QuietHoursEditor(props: {
   window: { start: string; end: string; timezone: string } | null;
   categories: Record<string, boolean>;
-  bypassCategories: string[];
+  bypassCategories: readonly string[];
   onWindowChange: (w: { start: string; end: string; timezone: string } | null) => void;
   onBypassChange: (categories: string[]) => void;
 }) {

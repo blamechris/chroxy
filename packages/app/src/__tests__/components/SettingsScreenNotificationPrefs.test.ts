@@ -11,10 +11,12 @@ import {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS as PROTOCOL_LABELS,
   NOTIFICATION_CATEGORY_ORDER as PROTOCOL_ORDER,
+  DEFAULT_BYPASS_CATEGORIES as PROTOCOL_DEFAULT_BYPASS_CATEGORIES,
 } from '@chroxy/protocol';
 import {
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
+  DEFAULT_BYPASS_CATEGORIES,
 } from '../../components/settings/constants';
 
 // #5655: the notification-prefs / quiet-hours / per-device UI was extracted
@@ -265,6 +267,10 @@ describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
 
   it('falls back to DEFAULT_BYPASS_CATEGORIES when the snapshot omits the list', () => {
     expect(settingsSource).toMatch(/bypassCategories=\{notificationPrefs\.bypassCategories\s*\?\?\s*DEFAULT_BYPASS_CATEGORIES\}/);
+  });
+
+  it('uses the shared protocol default-bypass list without a local copy (#8567)', () => {
+    expect(DEFAULT_BYPASS_CATEGORIES).toBe(PROTOCOL_DEFAULT_BYPASS_CATEGORIES);
   });
 });
 

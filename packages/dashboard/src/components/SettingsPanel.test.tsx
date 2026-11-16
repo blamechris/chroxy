@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
-import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
+import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
@@ -2098,20 +2098,36 @@ describe('SettingsPanel', () => {
       expect(called.sort()).toEqual(['permission'])
     })
 
-    it('falls back to documented bypass defaults when the snapshot omits bypassCategories', () => {
+    it('falls back to the exact shared bypass set when the snapshot omits bypassCategories (#8567)', () => {
       // Older server omits the field. The UI must still show permission +
       // activity_error checked so the user sees the active gate state.
       setMockState({
         notificationPrefs: {
           ...baseSnapshot,
+          categories: Object.fromEntries(NOTIFICATION_CATEGORY_ORDER.map((key) => [key, true])),
           quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
         },
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
-      const permCheck = screen.getByTestId('quiet-hours-bypass-toggle-permission') as HTMLInputElement
-      const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
-      expect(permCheck.checked).toBe(true)
-      expect(errCheck.checked).toBe(true)
+      const checked = NOTIFICATION_CATEGORY_ORDER.filter((key) =>
+        (screen.getByTestId(`quiet-hours-bypass-toggle-${key}`) as HTMLInputElement).checked,
+      )
+      expect(checked.sort()).toEqual([...DEFAULT_BYPASS_CATEGORIES].sort())
+    })
+
+    it('preserves an explicit empty bypass override instead of applying defaults (#8567)', () => {
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          categories: Object.fromEntries(NOTIFICATION_CATEGORY_ORDER.map((key) => [key, true])),
+          quietHours: { start: '22:00', end: '07:00', timezone: 'UTC' },
+          bypassCategories: [],
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      for (const key of NOTIFICATION_CATEGORY_ORDER) {
+        expect(screen.getByTestId(`quiet-hours-bypass-toggle-${key}`)).not.toBeChecked()
+      }
     })
 
     // #4570: snapshot broadcasts must not clobber unsaved edits.

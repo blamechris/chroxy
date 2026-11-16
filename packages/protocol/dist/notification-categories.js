@@ -112,6 +112,14 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
 /** Render order for the known categories (derived — never a second list). */
 export const NOTIFICATION_CATEGORY_ORDER = Object.freeze(NOTIFICATION_CATEGORIES.map((c) => c.key));
 /**
+ * Quiet-hours bypass defaults (#4544 / #8567), also used when an older server
+ * snapshot omits the field. Permission prompts block the operator's agent;
+ * fatal session errors need attention too. Other categories stay muted.
+ * The server's copy is pinned to this set in both directions by
+ * `packages/server/tests/notification-category-roster.test.js`.
+ */
+export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error']);
+/**
  * Label + hint by key (derived — never a second list). Typed as a plain
  * string-keyed record because snapshots carry keys this build has never heard
  * of; lookups must be treated as possibly `undefined` and fall back to the raw
