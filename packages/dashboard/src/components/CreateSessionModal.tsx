@@ -276,6 +276,30 @@ export function sessionDefaultsNoticeApplies(notice: SessionDefaultsNotice | nul
   return /^(claude|docker)(-|$)/.test(provider)
 }
 
+/**
+ * The migration notice, shared by New Session and Settings (#8277). Both read
+ * the same store notice and the same dismissal (store + localStorage), so
+ * dismissing in either surface dismisses both.
+ */
+export function SessionDefaultsNoticeBanner({ provider }: { provider: string }) {
+  const notice = useConnectionStore(s => s.sessionDefaultsNotice)
+  const dismiss = useConnectionStore(s => s.dismissSessionDefaultsNotice)
+  if (!notice || !sessionDefaultsNoticeApplies(notice, provider)) return null
+  return (
+    <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
+      <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(notice)}</span>
+      <button
+        type="button"
+        className="session-defaults-notice-dismiss"
+        onClick={dismiss}
+        data-testid="session-defaults-notice-dismiss"
+      >
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
 function connectionOptionLabel(connection: { label: string; authentication: { requested: string }; entitlement: { route: string } }): string {
   return `${connection.label} · ${connection.authentication.requested} · ${connection.entitlement.route}`
 }
@@ -325,8 +349,6 @@ function nextGitCheckRequestId(): string {
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
-  const sessionDefaultsNotice = useConnectionStore(s => s.sessionDefaultsNotice)
-  const dismissSessionDefaultsNotice = useConnectionStore(s => s.dismissSessionDefaultsNotice)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const modelsByProvider = useConnectionStore(s => s.modelsByProvider) || EMPTY_MODELS_BY_PROVIDER
   const availableProviders = useConnectionStore(s => s.availableProviders)
@@ -1057,19 +1079,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               </span>
             </span>
           ) : null}
-          {sessionDefaultsNotice && sessionDefaultsNoticeApplies(sessionDefaultsNotice, provider) ? (
-            <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
-              <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(sessionDefaultsNotice)}</span>
-              <button
-                type="button"
-                className="session-defaults-notice-dismiss"
-                onClick={dismissSessionDefaultsNotice}
-                data-testid="session-defaults-notice-dismiss"
-              >
-                Dismiss
-              </button>
-            </div>
-          ) : null}
+          <SessionDefaultsNoticeBanner provider={provider} />
 
           {selectedProviderInfo?.connections?.length ? (
             <div className="form-group" data-testid="agent-connection-field">
