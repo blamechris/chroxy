@@ -661,8 +661,8 @@ export function PermissionPill({
 /**
  * #8348 — the compact record of a permission prompt rebuilt from the server's
  * durable `permission_outcome` history entry (a session switch or a reload: the
- * live card is not replayed). Non-interactive: there is nothing to expand (the
- * entry keeps no tool input) and nothing to answer.
+ * live card is not replayed). There is nothing to answer. Retained or journaled
+ * tool input can still be inspected (#8392); older inputless records stay inert.
  *
  * `allowed` / `denied` read like the pill a live answered card collapses to;
  * `expired` (no decision) reads like the dashboard's dismissed-expired record, so
@@ -671,49 +671,59 @@ export function PermissionPill({
  * way: "Permission stopped — Bash: ls — not run".
  */
 export function PermissionOutcomeRecord({ message }: { message: ChatMessage }) {
+  const [expanded, setExpanded] = useState(false);
   const outcome = message.permissionOutcome;
   const detail = message.content?.trim() || message.tool || 'Permission requested';
-  if (outcome === 'expired') {
-    const text = `Permission expired \u2014 ${detail} \u2014 dropped`;
-    return (
-      <View
-        style={[styles.permissionPill, styles.permissionPillExpired]}
-        accessibilityRole="text"
-        accessibilityLabel={text}
-        testID={`permission-outcome-${message.id}`}
-      >
-        <Text style={styles.permissionPillTextExpired} numberOfLines={3}>{text}</Text>
-      </View>
-    );
-  }
-  if (outcome === 'stopped') {
-    const text = `Permission stopped \u2014 ${detail} \u2014 not run`;
-    return (
-      <View
-        style={[styles.permissionPill, styles.permissionPillExpired]}
-        accessibilityRole="text"
-        accessibilityLabel={text}
-        testID={`permission-outcome-${message.id}`}
-      >
-        <Text style={styles.permissionPillTextExpired} numberOfLines={3}>{text}</Text>
-      </View>
-    );
-  }
   const isDenied = outcome === 'denied';
+  const noDecision = outcome === 'expired' || outcome === 'stopped';
   const statusLabel = isDenied ? 'Denied' : 'Allowed';
-  return (
-    <View
-      style={[styles.permissionPill, isDenied ? styles.permissionPillDenied : styles.permissionPillAllowed]}
-      accessibilityRole="text"
-      accessibilityLabel={`${statusLabel}: ${detail}`}
-      testID={`permission-outcome-${message.id}`}
-    >
-      <Text
-        style={isDenied ? styles.permissionPillTextDenied : styles.permissionPillTextAllowed}
-        numberOfLines={3}
+  const label = outcome === 'expired'
+    ? `Permission expired \u2014 ${detail} \u2014 dropped`
+    : outcome === 'stopped'
+      ? `Permission stopped \u2014 ${detail} \u2014 not run`
+      : `${statusLabel}: ${detail}`;
+  const pillStyle = noDecision ? styles.permissionPillExpired
+    : isDenied ? styles.permissionPillDenied : styles.permissionPillAllowed;
+  const textStyle = noDecision ? styles.permissionPillTextExpired
+    : isDenied ? styles.permissionPillTextDenied : styles.permissionPillTextAllowed;
+  const text = noDecision ? label : `${isDenied ? ICON_CLOSE : ICON_CHECK} ${label}`;
+  // Only the sanitized input already held by the message is rendered. This
+  // disclosure never mounts the live card, fetches input, or exposes decisions.
+  const inspection = message.toolInput ? renderPermissionDetail(message.tool, message.toolInput) : null;
+  if (!inspection) {
+    return (
+      <View
+        style={[styles.permissionPill, pillStyle]}
+        accessibilityRole="text"
+        accessibilityLabel={label}
+        testID={`permission-outcome-${message.id}`}
       >
-        {isDenied ? ICON_CLOSE : ICON_CHECK} {statusLabel}: {detail}
-      </Text>
+        <Text style={textStyle} numberOfLines={3}>{text}</Text>
+      </View>
+    );
+  }
+  return (
+    <View>
+      <TouchableOpacity
+        onPress={() => {
+          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          setExpanded((value) => !value);
+        }}
+        activeOpacity={0.7}
+        style={[styles.permissionPill, pillStyle]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityHint={expanded ? 'Hide permission details' : 'Show permission details'}
+        accessibilityState={{ expanded }}
+        testID={`permission-outcome-${message.id}`}
+      >
+        <Text style={textStyle} numberOfLines={3}>{text} {expanded ? '▾' : '▸'}</Text>
+      </TouchableOpacity>
+      {expanded && (
+        <View testID={`permission-outcome-details-${message.id}`}>
+          {inspection}
+        </View>
+      )}
     </View>
   );
 }
