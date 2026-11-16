@@ -1,7 +1,7 @@
 /**
  * Toast — notification stack with auto-dismiss (errors + info).
  *
- * Fixed top-right (never over the bottom composer, #8596), max visible controlled by parent, 5s auto-dismiss.
+ * Fixed bottom-right, resting above the composer (#8596), max visible controlled by parent, 5s auto-dismiss.
  *
  * #3587: optional `action` renders a one-click recovery button inside
  * the toast. The parent owns the callback; clicking the button invokes

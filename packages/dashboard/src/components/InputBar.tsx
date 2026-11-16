@@ -6,6 +6,7 @@
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
 import { useState, useEffect, useLayoutEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent, type SyntheticEvent } from 'react'
+import { useToastBottomOffset } from './useToastBottomOffset'
 import { FilePicker, FILE_PICKER_DISPLAY_CAP, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
@@ -250,6 +251,9 @@ function autoResizeComposer(el: HTMLTextAreaElement): void {
 }
 
 export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendStatus, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
+  // #8596 — lets the toast stack sit directly above the composer.
+  const composerRef = useRef<HTMLDivElement>(null)
+  useToastBottomOffset(composerRef)
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const writeValue = onValueChange || setInternalValue
@@ -1276,6 +1280,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
 
   return (
     <div
+      ref={composerRef}
       className={`input-bar${dragging ? ' dragging' : ''}${lozengeText ? ' input-bar--with-lozenge' : ''}`}
       data-testid="input-bar"
       data-activity-state={chatActivityState}

@@ -7782,15 +7782,16 @@ button.sidebar-token-view-session-row:hover {
 .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
 
 /* ---- Toast Notifications ---- */
-/* #8596: anchored just BELOW the header (top-right), never the bottom. The chat
-   composer (textarea + Send) is pinned to the bottom edge and its height varies
-   with the draft, so any bottom-anchored stack lands on Send for the toast's
-   lifetime (the quiet "Session stopped" toast swallowed an immediate Send
-   click). Keep the stack out of the composer's region at every viewport. */
+/* #8596: rests directly ABOVE the chat composer at bottom-right, so it covers
+   only transcript and never the composer / Send. The composer publishes its top
+   edge as `--toast-bottom-offset` (distance from the viewport bottom, footer
+   included; see useToastBottomOffset). With no composer mounted (Control Room,
+   settings, terminal-only) the variable is absent and the -36px fallback gives
+   the original 20px bottom-right spot. The +56px clears the transcript's
+   scroll-to-bottom FAB (12px + 36px + gap) which sits at the same corner. */
 .toast-container {
   position: fixed;
-  /* header bottom edge is published by AppHeader (#8596); fallback ~ one row */
-  top: calc(var(--app-header-height, 56px) + 10px);
+  bottom: calc(var(--toast-bottom-offset, -36px) + 56px);
   right: 20px;
   display: flex;
   flex-direction: column;
@@ -8616,7 +8617,7 @@ button.sidebar-token-view-session-row:hover {
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }
   .status-bar { gap: 8px; padding: 4px 10px; font-size: 11px; }
   .modal-content { min-width: 0; max-width: 90vw; margin: 0 16px; padding: 16px; }
-  .toast-container { top: calc(var(--app-header-height, 56px) + 10px); right: 10px; left: 10px; max-width: none; }
+  .toast-container { right: 10px; left: 10px; max-width: none; }
   .plan-approval { margin: 6px 10px; }
   .loading-container, .error-screen-container { padding: 1rem; }
   .loading-qr-container { width: 180px; height: 180px; }
