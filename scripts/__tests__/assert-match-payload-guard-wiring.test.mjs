@@ -47,6 +47,7 @@
  *   node scripts/__tests__/assert-match-payload-guard-wiring.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -186,13 +187,13 @@ if (ACCOUNTED < MIN_CASES) {
     `\nHARNESS BROKEN: ran ${ACCOUNTED} cases, expected at least ${MIN_CASES}. ` +
     'Cases went missing rather than failing.\n',
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) {
   for (const f of failures) {
     process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
   }
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
-process.exit(0)
+await drainStdioAndExit(0)

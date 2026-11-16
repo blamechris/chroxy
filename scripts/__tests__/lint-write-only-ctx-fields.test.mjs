@@ -27,6 +27,7 @@
  *   node scripts/__tests__/lint-write-only-ctx-fields.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -183,7 +184,7 @@ if (fail > 0) {
     '\nFAIL: the entry-point call site is broken. Stopping BEFORE importing the module, ' +
     'because a guard stuck TRUE would exit this process during that import.\n',
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 
 const {
@@ -2549,9 +2550,9 @@ if (total < MIN_CASES) {
     `HARNESS BROKEN: ran ${total} cases, expected at least ${MIN_CASES}. A case stopped being ` +
     'discovered — that is a shrinking suite, not a passing one.\n',
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 if (fail > 0) {
   for (const f of failures) process.stdout.write(`\n--- ${f.name}\n${f.err.stack}\n`)
-  process.exit(1)
+  await drainStdioAndExit(1)
 }

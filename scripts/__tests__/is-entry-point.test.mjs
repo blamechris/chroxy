@@ -23,6 +23,7 @@
  *   node scripts/__tests__/is-entry-point.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -395,13 +396,13 @@ if (EXPECTED < MIN_CASES) {
     `\nHARNESS BROKEN: ran ${EXPECTED} cases, expected at least ${MIN_CASES}. ` +
     'Cases went missing rather than failing — check the root/platform skips.\n',
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 process.stdout.write(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}\n`)
 if (fail > 0) {
   for (const f of failures) {
     process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
   }
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
-process.exit(0)
+await drainStdioAndExit(0)

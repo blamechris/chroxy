@@ -28,6 +28,7 @@
  * Exit status: 0 if every case passes, 1 otherwise.
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -319,7 +320,7 @@ if (process.argv[2] === '--fifo-child') {
   if (process.argv[4] === 'busy') env.daemon.idleFn = () => BUSY
   const r = await env.run()
   process.stdout.write(JSON.stringify({ outcome: r.outcome, exitCode: r.exitCode }))
-  process.exit(0)
+  await drainStdioAndExit(0)
 }
 
 await test('parseArgs: defaults and every flag', () => {
@@ -2217,11 +2218,11 @@ if (EXPECTED !== MIN_CASES) {
     `\nHARNESS BROKEN: ran ${EXPECTED} cases, expected at least ${MIN_CASES}. ` +
     `Cases went missing rather than failing, or were added without updating MIN_CASES (${MIN_CASES}).\n`,
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) {
   for (const f of failures) process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
-process.exit(0)
+await drainStdioAndExit(0)

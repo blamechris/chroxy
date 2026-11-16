@@ -9,6 +9,7 @@
 // The negative cases matter just as much: a guard that fires on ordinary PRs
 // gets disabled, and one that cannot fire on a release PR is decoration.
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -243,6 +244,6 @@ console.log(`\nResults: ${passed} passed, ${failed} failed\n`)
 const ran = passed + failed
 if (ran !== EXPECTED_CASES) {
   console.log(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
-process.exit(failed ? 1 : 0)
+await drainStdioAndExit(failed ? 1 : 0)

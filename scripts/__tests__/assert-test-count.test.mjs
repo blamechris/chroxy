@@ -14,6 +14,7 @@
  *   node scripts/__tests__/assert-test-count.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { execFile } from 'node:child_process'
 import { dirname, resolve, join } from 'node:path'
 import { writeFileSync, rmSync } from 'node:fs'
@@ -252,4 +253,4 @@ if (ran !== EXPECTED_CASES) {
   console.log(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
   broken = true
 }
-process.exit(broken ? 1 : 0)
+await drainStdioAndExit(broken ? 1 : 0)

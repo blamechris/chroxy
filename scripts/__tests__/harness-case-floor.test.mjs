@@ -72,6 +72,7 @@
  * Exit status: 0 if all cases pass, 1 otherwise.
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -498,7 +499,7 @@ if (selfMatches.length !== 1) {
   process.stdout.write('\nHARNESS REFUSED: self-identification failed — refusing to run the behavioural ' +
     'pass, which would recurse into this file.\n')
 
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +750,7 @@ for (const [mode, spec] of Object.entries(CONTROL_MODES)) {
         assert(r.ms >= r.budgetMs + REPORT_GRACE_MS - 200 && r.ms < r.budgetMs + REPORT_GRACE_MS + 1_500,
           `reported after ${r.ms}ms against a ${r.budgetMs}ms budget + ${REPORT_GRACE_MS}ms grace — the ` +
           'straggler holds the pipes, so only the grace timer can end the wait, and it must do so on time.')
-        // Not observable from the outside: this file ends in process.exit(), so a
+        // Not observable from the outside: this file ends in drainStdioAndExit(), which exits, so a
         // straggler holding an open pipe cannot keep THIS process alive. It matters
         // to anything that reuses run() without that, and costs one property read.
         assert(r.pipesReleased,
@@ -834,4 +835,4 @@ if (ran !== expected) {
   )
   broken = true
 }
-process.exit(broken ? 1 : 0)
+await drainStdioAndExit(broken ? 1 : 0)
