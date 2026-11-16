@@ -2,7 +2,8 @@
  * The agent principal's read path over WebSocket (docs/security/agent-principals.md
  * sections 7.1 and 7.2; #9118, S3 of #9112): `principal_subscribe`,
  * `principal_unsubscribe` and `principal_events_read`, and (#9119, S4) the pending-permission
- * snapshot `principal_pending_permissions` (section 7.3).
+ * snapshot `principal_pending_permissions` (section 7.3) and (#9120, S5) the session roster
+ * snapshot `principal_sessions_snapshot`.
  *
  * All three are OBSERVE tier. Dispatch has already checked the type, the tier and the
  * closed envelope (principal-policy.js); each handler then resolves EVERY session id
@@ -17,6 +18,7 @@
  */
 import { isPrincipalClient, principalMaySee, principalPolicyOptsFromCtx, sendPrincipalRefusal } from '../principal-policy.js'
 import { collectPendingPermissions } from '../principal-pending-permissions.js'
+import { collectSessionsSnapshot } from '../principal-sessions-snapshot.js'
 
 export const PRINCIPAL_READ_DEFAULT_LIMIT = 50
 export const PRINCIPAL_READ_MAX_LIMIT = 200
@@ -137,25 +139,8 @@ function handlePrincipalEventsRead(ws, client, msg, ctx) {
  */
 function handlePrincipalPendingPermissions(ws, client, msg, ctx) {
   if (!isPrincipalClient(client)) return refuseNonPrincipal(ws, msg, ctx)
-  if (typeof msg?.requestId !== 'string' || msg.requestId.length === 0) {
-    return sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
-  }
-  let ids
-  if (msg.sessionIds !== undefined) {
-    ids = sessionIdList(msg.sessionIds)
-    if (ids === null) return sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
-    // ALL-OR-NOTHING, evaluated for every id (no early exit that would time differently).
-    if (!allGranted(client, ids, ctx)) return sendPrincipalRefusal(ws, client, msg, ctx, 'scope')
-  } else {
-    const opts = principalPolicyOptsFromCtx(ctx)
-    // Ids only: the full listing runs provider getters for EVERY session, so one the principal
-    // is not granted could change this reply.
-    const listed = ctx.sessions?.sessionManager?.listSessionIds?.() ?? []
-    ids = []
-    for (const id of Array.isArray(listed) ? listed : []) {
-      if (typeof id === 'string' && !ids.includes(id) && principalMaySee(client, id, 'observe', opts).ok) ids.push(id)
-    }
-  }
+  const ids = resolveSnapshotSessionIds(ws, client, msg, ctx)
+  if (ids === null) return
   const snapshot = collectPendingPermissions({
     sessionIds: ids,
     sessionManager: ctx.sessions?.sessionManager ?? null,
@@ -171,8 +156,76 @@ function handlePrincipalPendingPermissions(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * The session ids a snapshot request covers, or null after the request was refused. With
+ * `sessionIds`, EVERY id goes through `principalMaySee(..., 'observe')` and one that is not
+ * granted (or not there) refuses the whole request `scope_denied`, replying exactly as for a
+ * session that does not exist. Without it, the ids are the sessions the principal may see,
+ * which is a filter, not a refusal: an empty grant gets an empty snapshot.
+ */
+function resolveSnapshotSessionIds(ws, client, msg, ctx) {
+  if (typeof msg?.requestId !== 'string' || msg.requestId.length === 0) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
+    return null
+  }
+  if (msg.sessionIds !== undefined) {
+    const ids = sessionIdList(msg.sessionIds)
+    if (ids === null) { sendPrincipalRefusal(ws, client, msg, ctx, 'envelope'); return null }
+    // ALL-OR-NOTHING, evaluated for every id (no early exit that would time differently).
+    if (!allGranted(client, ids, ctx)) { sendPrincipalRefusal(ws, client, msg, ctx, 'scope'); return null }
+    return ids
+  }
+  const opts = principalPolicyOptsFromCtx(ctx)
+  // Ids only: the full listing runs provider getters for EVERY session, so one the principal
+  // is not granted could change this reply.
+  const listed = ctx.sessions?.sessionManager?.listSessionIds?.() ?? []
+  const ids = []
+  for (const id of Array.isArray(listed) ? listed : []) {
+    if (typeof id === 'string' && !ids.includes(id) && principalMaySee(client, id, 'observe', opts).ok) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * Does the prompt evaluator hold a draft for this session? The WS layer's answer, which
+ * `SessionManager.getHandoffBlockers` cannot see and asks its caller for: input-handlers
+ * takes the per-session lock `runtime.pendingEvaluatorAwaits` before it awaits the skip
+ * decision and holds it until the evaluator settles (released in a `finally`). When the map
+ * is not there the answer is UNKNOWN, and unknown reads as pending: a blocker that is not
+ * real is safe, a missing one is not.
+ */
+function evaluatorPendingFor(ctx) {
+  const awaits = ctx.runtime?.pendingEvaluatorAwaits
+  return awaits instanceof Map ? (id) => awaits.has(id) : () => true
+}
+
+/**
+ * `principal_sessions_snapshot`: a roster of the principal's granted sessions with observed
+ * and declared status, handoff blockers and the model requested and observed
+ * (principal-sessions-snapshot.js; section 7.3). OBSERVE tier and READ ONLY. Same id rules as
+ * `principal_pending_permissions`.
+ */
+function handlePrincipalSessionsSnapshot(ws, client, msg, ctx) {
+  if (!isPrincipalClient(client)) return refuseNonPrincipal(ws, msg, ctx)
+  const ids = resolveSnapshotSessionIds(ws, client, msg, ctx)
+  if (ids === null) return
+  const snapshot = collectSessionsSnapshot({
+    sessionIds: ids,
+    sessionManager: ctx.sessions?.sessionManager ?? null,
+    evaluatorPending: evaluatorPendingFor(ctx),
+  })
+  ctx.transport.send(ws, {
+    type: 'principal_sessions_snapshot_result',
+    requestId: msg.requestId,
+    generatedAt: snapshot.generatedAt,
+    sessions: snapshot.sessions,
+    truncated: snapshot.truncated,
+  })
+}
+
 export const principalHandlers = {
   principal_pending_permissions: handlePrincipalPendingPermissions,
+  principal_sessions_snapshot: handlePrincipalSessionsSnapshot,
   principal_subscribe: handlePrincipalSubscribe,
   principal_unsubscribe: handlePrincipalUnsubscribe,
   principal_events_read: handlePrincipalEventsRead,

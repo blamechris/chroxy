@@ -906,6 +906,37 @@ whole request is refused `scope_denied` and nothing is subscribed.
   live in a PermissionManager of their own that is not attached to any session.
 - `principal_sessions_snapshot`: granted sessions with observed and declared status
   (#9026), handoff blockers, lease-holder **label**, model requested/observed (S5).
+  **(S5, #9120)** Request `principal_sessions_snapshot { requestId, sessionIds? }`, reply
+  `principal_sessions_snapshot_result { requestId, generatedAt, sessions[], truncated }` (observe
+  tier, a direct reply through `frameForPrincipal`; `PRINCIPAL_BROADCAST_ALLOWED` stays empty).
+  The id rules are those of `principal_pending_permissions`: with `sessionIds`, every id must
+  pass `principalMaySee(..., 'observe')` or the whole request is refused `scope_denied`, byte for
+  byte like a nonexistent session; without it, the reply covers the granted sessions. At most 100
+  rows, in request order (listing order when omitted), `truncated` when more existed. One row per
+  session, read from that session's own entry (`principal-sessions-snapshot.js`; never
+  `listSessions()`, whose provider getters run for every session): `sessionId`, `name`,
+  `provider`; `status` `{ isBusy, busyReason: 'turn' | 'background-shells' | null, starting }`
+  (observed); `declaredStatus` (what the agent said about itself, validated against
+  `DeclaredStatusSchema`, text redacted, `null` when absent: a claim, never merged with
+  `status`); `model` `{ requested, observed }` (`requested` is the explicit override, `null`
+  follows the daemon's default; `observed` is the model actually running, `null` when unknown);
+  `blockers`; `leaseHolder` (a label, always `null` until S8 fills it); `lastActivityAt`. No
+  cwd, history, cost, billing or capability field. `blockers` is
+  `SessionManager.getHandoffBlockers` (#8281) projected through a per-code detail whitelist:
+  `queued_prompts {count}`, `pending_permission {requestIds}`, `pending_question {count}`,
+  `active_agents {count}`, `background_shells {count, soft}`, `automation_owned
+  {scheduledTaskId?, orchestrationRunId?}`; `turn_active`, `not_ready`, `destroying` and
+  `evaluator_pending` carry no detail, and a code the daemon does not know is delivered as
+  `{ code }` alone (it is still a blocker). `evaluator_pending` is WS-layer state: the handler
+  passes whether `runtime.pendingEvaluatorAwaits` holds the session (the lock `input` takes while
+  the prompt evaluator holds a draft), and reads an absent map as pending. **An empty `blockers`
+  list means nothing can still act**, so it is never what a failure produces: a row whose read
+  throws still appears with its unreadable fields `null` and `blockers: [{ code: 'unavailable' }]`
+  (other rows unaffected), and `frameForPrincipal` delivers a `blockers` that is not a list the
+  same way. A session the accessor reports `not_found` is omitted. `frameForPrincipal` refuses the
+  whole frame unless every row's `sessionId` passes `principalMaySee`, and rebuilds each row, its
+  `status`, `model`, `declaredStatus` and each blocker's detail from field whitelists as a second
+  line. It grants **no authority**.
 - `turn_started { turnId, causedBy, origin }` and `turn_ended { turnId, outcome }` journal
   events give execution and outcome their own signals (S14).
 

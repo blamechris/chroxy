@@ -158,6 +158,7 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
   principal_unsubscribe: 'agent-principal journal read path, never a bound client\'s',
   principal_events_read: 'agent-principal journal read path, never a bound client\'s',
   principal_pending_permissions: 'agent-principal pending-permission snapshot, never a bound client\'s',
+  principal_sessions_snapshot: 'agent-principal session roster snapshot, never a bound client\'s',
   pair_approve: 'credential management',
   pair_deny: 'credential management',
 
