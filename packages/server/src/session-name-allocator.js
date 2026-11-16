@@ -104,6 +104,12 @@
  *   projects, new projects get `store_full` while existing ones keep allocating.
  * - A candidate name is checked against every live name; collisions are skipped
  *   (at most 64) and then fail with `live_collision` (non-closing).
+ * - Cost: every call is SYNCHRONOUS disk work on the caller's thread. Measured on a laptop:
+ *   about 15 ms per allocation against an empty store, about 28 ms near the size budget, and
+ *   27-57 ms for a create that carries an idempotency key, because the follow-up `bind` publishes
+ *   a second generation. A bind is not folded into the allocation's own publish on purpose: a
+ *   record must only become "bound" once the session really exists, or a retry of a create that
+ *   failed in between would burn a fresh number instead of reusing its reservation.
  * - Nothing here throws for I/O or corruption problems; those return
  *   `{ ok: false, reason }`. Only bad arguments throw (programming errors).
  */
@@ -607,11 +613,15 @@ export function createSessionNameAllocator({
         expire(body)
         const result = (n) => ({ ok: true, name: `${label} ${n}`, label, number: n, key })
         const entry = idempotencyKey !== undefined && own(body.keys, idempotencyKey) ? body.keys[idempotencyKey] : null
-        if (entry && (entry.key !== key || entry.rootId !== rootId)) {
+        // The same key for another project or root is a conflict only while the reservation is
+        // still open. A BOUND record is spent: the key is simply reused (agent-control retries
+        // across reconnects with one requestId), and the record is replaced like any other.
+        const differs = entry && (entry.key !== key || entry.rootId !== rootId)
+        if (differs && entry.sessionId === null) {
           return { done: { ok: false, reason: 'idempotency_key_conflict' } }
         }
 
-        if (entry) {
+        if (entry && !differs) {
           const held = liveSet.has(`${key} ${entry.n}`)
           if (entry.sessionId === null && !held) {
             // A retry of a create whose number was never bound: same number, but only after

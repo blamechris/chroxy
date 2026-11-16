@@ -493,6 +493,30 @@ describe('sendPostAuthInfo — autoPermissionMode capability (#8619)', () => {
   })
 })
 
+// The `projectSessionNames` capability: this daemon names an unnamed new session after its
+// project, so a client should stop prefilling/requiring a name. Fail-closed for old callers.
+describe('sendPostAuthInfo — projectSessionNames capability', () => {
+  it('advertises true only for an explicit true, for ANY client class', () => {
+    for (const primary of [true, false, undefined]) {
+      const ctx = makeCtx({ projectSessionNames: true })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, primary === undefined ? {} : { isPrimaryToken: primary })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.projectSessionNames, true)
+    }
+  })
+
+  it('advertises false when off, absent or not exactly true (fail-closed)', () => {
+    for (const v of [false, undefined, 'true', 1, 'project']) {
+      const ctx = makeCtx(v === undefined ? {} : { projectSessionNames: v })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, { isPrimaryToken: true })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.projectSessionNames, false)
+    }
+  })
+})
+
 // #6481 (epic #6469): the `ide` capability advertises that the opt-in IDE feature
 // surface is enabled on this server (config.features.ide / CHROXY_ENABLE_IDE).
 // Unlike userShell/tokenRevoke it is a server-WIDE gate, not token-scoped —

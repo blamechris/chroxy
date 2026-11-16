@@ -519,6 +519,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // disable Auto in their mode pickers and say why. Optional — absent →
     // false (fail-closed) for old callers / test harnesses.
     autoPermissionModeAllowed,
+    // Whether this daemon names an unnamed new session after its project ("chroxy 7"),
+    // i.e. SessionManager runs with sessionNaming 'project'. Surfaced as the
+    // `projectSessionNames` capability so a client can stop prefilling/requiring a name.
+    // Optional — absent → false (fail-closed): an older daemon keeps today's client behaviour.
+    projectSessionNames,
     // #6006: whether the server has a rotating TokenManager (i.e. auth is on),
     // so the operator panic button (`revoke_token`) can fire. Surfaced as the
     // `tokenRevoke` capability, gated to primary-token clients below. Optional —
@@ -774,6 +779,8 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // a client only whether the config gate would admit a switch, so it can
     // disable Auto with the real reason instead of a generic tooltip.
     autoPermissionMode: autoPermissionModeAllowed === true,
+    // Unnamed sessions are named after their project by this daemon (sessionNaming 'project').
+    projectSessionNames: projectSessionNames === true,
     // #6871 (epic #6784): this server has the scheduled-tasks WS surface
     // (scheduled_tasks_request / scheduled_task_action / set_scheduler_enabled +
     // the `scheduled_tasks` snapshot). CONSTANT true — deliberately NOT tied to

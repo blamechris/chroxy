@@ -11,6 +11,7 @@ import { createSessionNameAllocator } from '../src/session-name-allocator.js'
 import { registerProvider } from '../src/providers.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 import { resolveSessionNaming, validateConfig } from '../src/config.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * N2: project-scoped session names ("chroxy 7") wired into SessionManager.createSession.
@@ -435,5 +436,134 @@ describe('configuration', () => {
     const dir = tmp('pn-alloc-')
     const alloc = createSessionNameAllocator({ dir })
     assert.equal(alloc.allocate({ cwd: repo('naming-proj') }).number, 1)
+  })
+})
+
+
+describe('successor naming happens at the last plan step', () => {
+  async function archivedNamed(sm, cwd, name, provider = 'test-noop-project-naming') {
+    const id = sm.createSession({ cwd, provider, name })
+    sm._sessions.get(id).session.resumeSessionId = 'conv-1'
+    sm._history.setHistory(id, [{ type: 'message', messageType: 'user_input', content: 'hello' }, { type: 'message', messageType: 'response', content: 'hi' }])
+    sm.destroySession(id)
+    await sm.whenArchiveIdle()
+    return sm.listArchivedSessions().sessions.find((r) => r.sessionId === id)
+  }
+  const nextNumber = (sm, cwd) => nameOf(sm, create(sm, { cwd }))
+
+  it('a successor refused by the session limit spends no number', async () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'), { maxSessions: 2 })
+    const row = await archivedNamed(sm, cwd, 'naming-proj 4')
+    create(sm, { cwd, name: 'a' })
+    create(sm, { cwd, name: 'b' })
+    for (let i = 0; i < 5; i++) {
+      const r = await sm.restoreArchivedSession(row.archiveId, 'new_thread')
+      assert.equal(r.ok, false)
+    }
+    assert.equal(namingFiles(dirname(sm._stateFilePath)).length, 0, 'the store was never touched')
+    for (const id of sm.listSessionIds()) sm.destroySession(id)
+    assert.equal(nextNumber(sm, cwd), 'naming-proj 1')
+  })
+
+  it('a successor refused by the provider preflight spends no number', async () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    class NeedsBinary extends NoopProvider {
+      static get preflight() {
+        return { label: 'FakeMissingBin', binary: { name: '__chroxy_definitely_missing_binary_succ__', candidates: ['/var/empty/missing-a'], installHint: 'install it' } }
+      }
+    }
+    declareUnknownCustomization(NeedsBinary, NoopProvider)
+    registerProvider('test-needs-binary-successor', NeedsBinary)
+    const row = await archivedNamed(sm, cwd, 'naming-proj 4', 'test-needs-binary-successor')
+    sm._skipPreflight = false
+    for (let i = 0; i < 3; i++) assert.equal((await sm.restoreArchivedSession(row.archiveId, 'new_thread')).ok, false)
+    assert.equal(namingFiles(dirname(sm._stateFilePath)).length, 0)
+    assert.equal(nextNumber(sm, cwd), 'naming-proj 1')
+  })
+
+  it('a successor of an allocator-style name still takes a fresh number, and a hand-named one keeps (continued)', async () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    const a = await archivedNamed(sm, cwd, 'naming-proj 4')
+    const b = await archivedNamed(sm, cwd, 'My notes')
+    const ra = await sm.restoreArchivedSession(a.archiveId, 'new_thread')
+    assert.equal(nameOf(sm, ra.sessionId), 'naming-proj 1')
+    const rb = await sm.restoreArchivedSession(b.archiveId, 'new_thread')
+    assert.equal(nameOf(sm, rb.sessionId), 'My notes (continued)')
+    assert.equal(sm._sessionCounter, 0, 'no legacy number was spent either')
+  })
+})
+
+describe('review fixes', () => {
+  it('a direct create with a whitespace-only name is unnamed in project mode', () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    assert.equal(nameOf(sm, create(sm, { cwd, name: '   ' })), 'naming-proj 1')
+    const legacy = makeSm(tmp('pn-state-'), { sessionNaming: 'legacy' })
+    assert.equal(nameOf(legacy, create(legacy, { cwd, name: '   ' })), '   ', 'the legacy path is untouched')
+  })
+
+  it('a restore-shaped create never allocates, whatever else it says', () => {
+    const cwd = repo('naming-proj')
+    const state = tmp('pn-state-')
+    const sm = makeSm(state)
+    const a = create(sm, { cwd, preserveId: 'a'.repeat(32) })
+    assert.equal(nameOf(sm, a), 'Session 1')
+    const b = create(sm, { cwd, restoreWorktreePath: join(tmp('pn-rw-'), 'x') })
+    assert.equal(nameOf(sm, b), 'Session 2')
+    assert.equal(namingFiles(state).length, 0)
+  })
+
+  it('a live session renamed above the stored counter is skipped by the next creates', () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    const first = create(sm, { cwd })
+    assert.equal(nameOf(sm, first), 'naming-proj 1')
+    sm._sessions.get(first).name = 'naming-proj 6' // renamed by hand to a number the store has not reached
+    assert.equal(nameOf(sm, create(sm, { cwd })), 'naming-proj 7')
+    assert.equal(nameOf(sm, create(sm, { cwd })), 'naming-proj 8')
+  })
+
+  it('a closed store logs one warning, not one per create', () => {
+    const cwd = repo('naming-proj')
+    const state = tmp('pn-state-')
+    const sm = makeSm(state)
+    create(sm, { cwd })
+    for (const n of namingFiles(state)) writeFileSync(join(state, n), 'corrupt')
+    const lines = []
+    const listener = (e) => { if (e.level === 'warn' && /Project session naming unavailable/.test(e.message)) lines.push(e.message) }
+    addLogListener(listener)
+    try {
+      for (let i = 0; i < 6; i++) create(sm, { cwd })
+    } finally {
+      removeLogListener(listener)
+    }
+    assert.equal(lines.length, 1, lines.join('\n'))
+    assert.ok(/evidence_lost/.test(lines[0]))
+  })
+})
+
+describe('production wiring', () => {
+  it('server-cli hands the resolved sessionNaming to the SessionManager', () => {
+    const src = readFileSync(join(SRC, 'server-cli.js'), 'utf8')
+    assert.ok(/sessionNaming:\s*resolveSessionNaming\(config\)/.test(src), 'server-cli passes sessionNaming: resolveSessionNaming(config)')
+    assert.ok(/resolveSessionNaming[^\n]*from '\.\/config\.js'/.test(src), 'and imports it from config.js')
+  })
+
+  it("a manager built from the daemon's default config is in project mode; 'legacy' opts out", () => {
+    const state = tmp('pn-state-')
+    const daemonDefault = new SessionManager({ skipPreflight: true, defaultCwd: state, stateFilePath: join(state, 's.json'), sessionNaming: resolveSessionNaming({}) })
+    managers.push(daemonDefault)
+    assert.equal(daemonDefault.sessionNaming, 'project')
+    const optedOut = new SessionManager({ skipPreflight: true, defaultCwd: state, stateFilePath: join(state, 't.json'), sessionNaming: resolveSessionNaming({ sessionNaming: 'legacy' }) })
+    managers.push(optedOut)
+    assert.equal(optedOut.sessionNaming, 'legacy')
+  })
+
+  it('ws-server advertises projectSessionNames from the manager that will do the naming', () => {
+    const src = readFileSync(join(SRC, 'ws-server.js'), 'utf8')
+    assert.ok(/get projectSessionNames\(\)\s*\{\s*return self\.sessionManager\?\.sessionNaming === 'project'/.test(src))
   })
 })

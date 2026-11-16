@@ -931,6 +931,7 @@ export class SessionManager extends EventEmitter {
     // dirname rule as every sidecar below), so a test's temp stateFilePath keeps it out of
     // the real ~/.chroxy. Nothing touches the disk until the first allocation.
     this._sessionNaming = sessionNaming === 'project' ? 'project' : 'legacy'
+    this._namingWarnedAt = new Map()
     this._sessionNameAllocator = sessionNameAllocator || createSessionNameAllocator({
       dir: dirname(this._stateFilePath),
       liveNames: () => this._liveSessionNames(),
@@ -1593,7 +1594,7 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
-  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false, modelSource = 'explicit', nameIdempotencyKey } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false, modelSource = 'explicit', nameIdempotencyKey, successorOf } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1666,8 +1667,17 @@ export class SessionManager extends EventEmitter {
     // 'project' mode is named after its project, but only once everything that can still
     // refuse the create has run (see the end of this method); every other unnamed create
     // takes the legacy counter here, exactly as before.
-    const wantProjectName = !name && !isRestore && this._sessionNaming === 'project'
-    let sessionName = wantProjectName ? null : (name || `Session ${++this._sessionCounter}`)
+    // A name of only whitespace is no name for this purpose (project mode only; the legacy
+    // path keeps using whatever it was given). A restore-shaped call (isRestore, a preserved id,
+    // or a restored worktree) never allocates, whatever else it says.
+    const unnamed = !name || String(name).trim() === ''
+    const restoreShaped = isRestore || !!preserveId || !!restoreWorktreePath
+    const wantProjectName = unnamed && !successorOf && !restoreShaped && this._sessionNaming === 'project'
+    // A successor of an archived session ("continue as a new thread") is named at the same last
+    // step: a fresh number when its predecessor carried an allocator-style name, else
+    // "<name> (continued)". Neither consumes the legacy counter.
+    const wantSuccessorName = !name && !!successorOf && !isRestore
+    let sessionName = (wantProjectName || wantSuccessorName) ? null : (name || `Session ${++this._sessionCounter}`)
 
     // Pre-flight: verify the provider's binary exists and required credential
     // env vars are set BEFORE constructing/spawning. Without this, a missing
@@ -1904,7 +1914,15 @@ export class SessionManager extends EventEmitter {
     // all throw, and a create that never happens must not spend a number. (A failure after
     // this point, in provider construction, still leaves a gap: numbers are never reissued.)
     let nameAllocation = null
-    if (wantProjectName) {
+    if (wantSuccessorName) {
+      const base = typeof successorOf.name === 'string' && successorOf.name ? successorOf.name : 'Archived session'
+      if (this._sessionNaming === 'project' && isAllocatorNameForCwd(base, successorOf.cwd)) {
+        nameAllocation = this._allocateProjectName(resolvedCwd)
+      }
+      sessionName = nameAllocation ? nameAllocation.name : `${base} (continued)`
+    } else if (wantProjectName) {
+      // Synchronous disk work (about 15 ms; 27-57 ms with an idempotency key once the bind runs):
+      // see the cost note in session-name-allocator.js.
       nameAllocation = this._allocateProjectName(resolvedCwd, nameIdempotencyKey)
       sessionName = nameAllocation ? nameAllocation.name : `Session ${++this._sessionCounter}`
     }
@@ -2015,7 +2033,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false, modelSource, nameIdempotencyKey } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false, modelSource, nameIdempotencyKey, successorOf } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -2041,6 +2059,7 @@ export class SessionManager extends EventEmitter {
       isRestore,
       modelSource,
       nameIdempotencyKey,
+      successorOf,
     })
     const {
       sessionId,
@@ -4554,20 +4573,8 @@ export class SessionManager extends EventEmitter {
     return sessionId
   }
 
-  /**
-   * Name for a session continued as a NEW thread from an archived one. A predecessor that
-   * carried an allocator-style name for its project ("chroxy 4") gets a fresh number in the
-   * same project ("chroxy 9"), since "chroxy 4 (continued)" would read as a name the allocator
-   * never issued. Anything a person named keeps "<name> (continued)", as does every case where
-   * a number cannot be had.
-   * @private
-   */
-  _successorName(saved, baseName) {
-    const continued = `${baseName} (continued)`
-    if (this._sessionNaming !== 'project') return continued
-    if (!isAllocatorNameForCwd(baseName, saved.cwd)) return continued
-    return this._allocateProjectName(saved.cwd)?.name || continued
-  }
+  /** 'project' or 'legacy': how this manager names a session created without a name. */
+  get sessionNaming() { return this._sessionNaming }
 
   /** Names that currently occupy the namespace: live sessions plus parked failed restores. */
   _liveSessionNames() {
@@ -4588,7 +4595,7 @@ export class SessionManager extends EventEmitter {
       const key = typeof idempotencyKey === 'string' && idempotencyKey.length > 0 && idempotencyKey.length <= 256 ? idempotencyKey : undefined
       const res = this._sessionNameAllocator.allocate({ cwd, ...(key !== undefined ? { idempotencyKey: key } : {}) })
       if (!res?.ok) {
-        if (res?.reason && res.reason !== 'non_project') log.warn(`Project session naming unavailable (${res.reason}); using the legacy name`)
+        if (res?.reason && res.reason !== 'non_project') this._warnNamingUnavailable(res.reason)
         return null
       }
       return { name: res.name, key: res.key, number: res.number, idempotencyKey: key }
@@ -4596,6 +4603,21 @@ export class SessionManager extends EventEmitter {
       log.warn(`Project session naming failed (${err?.message || err}); using the legacy name`)
       return null
     }
+  }
+
+  /**
+   * One WARN per reason: a closed store would otherwise repeat the same line on every create.
+   * States that stay until an operator acts (evidence_lost, inconsistent, store_full,
+   * unsupported_fs) are logged once per manager; transient ones at most once a minute.
+   * @private
+   */
+  _warnNamingUnavailable(reason) {
+    const STICKY = new Set(['evidence_lost', 'inconsistent', 'store_full', 'unsupported_fs'])
+    const last = this._namingWarnedAt.get(reason)
+    const now = Date.now()
+    if (last !== undefined && (STICKY.has(reason) || now - last < 60_000)) return
+    this._namingWarnedAt.set(reason, now)
+    log.warn(`Project session naming unavailable (${reason}); using the legacy name`)
   }
 
   /** Best-effort bind of a reserved number to the session that took it. @private */
@@ -4992,7 +5014,8 @@ export class SessionManager extends EventEmitter {
         let newId
         try {
           newId = this.createSession({
-            name: this._successorName(saved, baseName),
+            // Named by the create plan, at its last step (a refused create spends no number).
+            successorOf: { name: baseName, cwd: saved.cwd },
             cwd: saved.cwd,
             model: saved.model || undefined,
             // #7855: a model read back from a saved record is a replay, not a request

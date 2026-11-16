@@ -879,6 +879,28 @@ describe('idempotency', () => {
     assert.equal(f.alloc.allocate({ cwd: b }).number, 2, 'both roots share the label counter')
   })
 
+  it('a BOUND record under the same key for another project or root is replaced, not a conflict (agent-control retries across reconnects)', () => {
+    const f = fresh()
+    const one = project('one')
+    const two = project('two')
+    assert.equal(f.alloc.allocate({ cwd: one, idempotencyKey: 'k' }).number, 1)
+    assert.deepEqual(f.alloc.bind('k', 'sess-1', { number: 1 }), { ok: true })
+    const other = f.alloc.allocate({ cwd: two, idempotencyKey: 'k' })
+    assert.equal(other.ok, true, JSON.stringify(other))
+    assert.equal(other.number, 1)
+    assert.equal(readDoc(f.top().A).body.keys.k.key, 'two', 'the record now belongs to the new project')
+    assert.equal(readDoc(f.top().A).body.keys.k.sessionId, null)
+    // the same label under another root
+    const a = project('same')
+    const b = project('same')
+    assert.equal(f.alloc.allocate({ cwd: a, idempotencyKey: 'k2' }).number, 1)
+    assert.deepEqual(f.alloc.bind('k2', 's2', { number: 1 }), { ok: true })
+    assert.equal(f.alloc.allocate({ cwd: b, idempotencyKey: 'k2' }).number, 2)
+    // while an UNBOUND reservation under the key still refuses another project
+    assert.equal(f.alloc.allocate({ cwd: one, idempotencyKey: 'k3' }).ok, true)
+    assert.equal(f.alloc.allocate({ cwd: two, idempotencyKey: 'k3' }).reason, 'idempotency_key_conflict')
+  })
+
   it('bind: unknown key writes nothing; already_bound to a different session; the same session is idempotent', () => {
     const f = fresh()
     f.alloc.allocate({ cwd: project('p'), idempotencyKey: 'k' })

@@ -24,7 +24,7 @@ import type { SessionDefaultsNotice } from '../store/session-defaults'
 import { isImeComposing } from '../utils/ime'
 
 export interface CreateSessionData {
-  name: string
+  name?: string
   cwd: string
   provider?: string
   connectionId?: string
@@ -379,6 +379,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // #9065: a daemon that echoes `requestId` lets the picker route replies by id
   // instead of comparing path text, which fails when the server resolves the
   // path (`a/..`). Without it the picker keeps the path-matching fallback.
+  // The daemon names an unnamed session after its project ("chroxy 7"). Only when it says so:
+  // no prefilled name, none required, and a blank field sends no name. An older or remote
+  // daemon that does not advertise it keeps the prefilled-and-required behaviour exactly.
+  const projectNaming = useConnectionStore(s => s.serverCapabilities?.projectSessionNames === true)
+  const suggestName = useCallback(
+    (path: string) => (projectNaming ? '' : generateDefaultName(path, existingNames)),
+    [projectNaming, existingNames],
+  )
   const listingRequestIdCapable = useConnectionStore(s => s.serverCapabilities?.directoryListingRequestIdV1 === true)
   const browseCancelRef = useRef<(() => void) | null>(null)
   const cancelBrowseRequest = useCallback(() => {
@@ -520,14 +528,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setDirectoryListingCallback(null)
     cancelBrowseRequest()
     if (cwdValue) {
-      const generated = generateDefaultName(cwdValue, existingNames)
+      const generated = suggestName(cwdValue)
       setName(generated)
       nameValRef.current = generated
     } else {
       setName('')
       nameValRef.current = ''
     }
-  }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
+  }, [open, initialCwd, existingNames, availableProviders, defaultProvider, projectNaming])
 
   // Keep provider in sync while modal is open: if availableProviders changes
   // and the current provider is no longer valid, fall back to first available.
@@ -600,7 +608,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
 
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
-    if (!trimmed) {
+    if (!trimmed && !projectNaming) {
       flushSync(() => setNameError('Session name is required'))
       return
     }
@@ -629,8 +637,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // instead of being silently overridden. Other providers never forward it.
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: effectiveWorktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoBlocked])
+    onCreate({ name: trimmed || undefined, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: effectiveWorktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
+  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoBlocked, projectNaming])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -638,11 +646,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     if (!nameManuallyEdited) {
-      const generated = generateDefaultName(path, existingNames)
+      const generated = suggestName(path)
       setName(generated)
       nameValRef.current = generated
     }
-  }, [nameManuallyEdited, existingNames])
+  }, [nameManuallyEdited, suggestName])
 
   const applyBrowseListing = useCallback((listing: DirectoryListing, requestedPath: string) => {
     const responsePath = listing.path || listing.parentPath || ''
@@ -712,7 +720,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           setCwd(selected)
           cwdValRef.current = selected
           if (!nameManuallyEdited) {
-            const generated = generateDefaultName(selected, existingNames)
+            const generated = suggestName(selected)
             setName(generated)
             nameValRef.current = generated
           }
@@ -726,7 +734,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const startPath = cwd || initialCwd || defaultCwd || '/'
     setBrowsing(true)
     handleBrowseNavigate(startPath)
-  }, [cwd, initialCwd, defaultCwd, handleBrowseNavigate, nameManuallyEdited, existingNames])
+  }, [cwd, initialCwd, defaultCwd, handleBrowseNavigate, nameManuallyEdited, suggestName])
 
   const handleBrowseSelect = useCallback((path: string) => {
     setCwd(path)
@@ -735,11 +743,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setDirectoryListingCallback(null)
     cancelBrowseRequest()
     if (!nameManuallyEdited) {
-      const generated = generateDefaultName(path, existingNames)
+      const generated = suggestName(path)
       setName(generated)
       nameValRef.current = generated
     }
-  }, [nameManuallyEdited, existingNames, setDirectoryListingCallback, cancelBrowseRequest])
+  }, [nameManuallyEdited, suggestName, setDirectoryListingCallback, cancelBrowseRequest])
 
   const handleBrowseCancel = useCallback(() => {
     setBrowsing(false)
@@ -809,7 +817,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     <Modal open={open} onClose={onClose} title="New Session" closeOnBackdrop={false}>
       <input
         type="text"
-        placeholder="Session name"
+        placeholder={projectNaming ? 'Leave blank to name it after the project (e.g. chroxy 7)' : 'Session name'}
         aria-label="Session name"
         value={name}
         onChange={e => {
