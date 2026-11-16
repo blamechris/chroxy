@@ -16,7 +16,7 @@ vi.mock('../store/connection', () => ({
     selector(mockStoreState),
 }))
 
-import { CreateSessionModal, sessionDefaultsNoticeText } from './CreateSessionModal'
+import { CreateSessionModal, sessionDefaultsNoticeText, sessionDefaultsNoticeApplies } from './CreateSessionModal'
 
 const READY = { ready: true, source: 'login', envVar: null, envVars: [], detail: '', hint: '' }
 const PROVIDERS = [
@@ -116,5 +116,51 @@ describe('CreateSessionModal migration notice (#8265)', () => {
       "A saved default from an older version was cleared (model opus-4-6). New sessions now use the provider's own default model. To keep the old choice, pick it again in Settings → Session Defaults.",
     )
     expect(sessionDefaultsNoticeText({ provider: 'claude-tui' })).toMatch(/\(provider .+\)\. New sessions now use the server's default provider\./)
+  })
+})
+
+describe('CreateSessionModal migration notice scoping (#8611)', () => {
+  const PROVIDERS_WITH_CODEX = [...PROVIDERS, { name: 'codex', capabilities: {}, auth: READY }]
+
+  it('shows for a Claude provider and hides after switching to Codex', () => {
+    mockStoreState.availableProviders = PROVIDERS_WITH_CODEX
+    mockStoreState.sessionDefaultsNotice = { model: 'opus-4-6' }
+    renderModal()
+    expect(screen.getByTestId('session-defaults-notice')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'codex' } })
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'claude-sdk' } })
+    expect(screen.getByTestId('session-defaults-notice')).toBeInTheDocument()
+  })
+
+  it('stays dismissed: a null store notice renders nothing on any provider', () => {
+    mockStoreState.availableProviders = PROVIDERS_WITH_CODEX
+    mockStoreState.sessionDefaultsNotice = null
+    renderModal()
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'codex' } })
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'claude-sdk' } })
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+  })
+
+  it('applies to Claude-family and docker providers only', () => {
+    const n = { model: 'opus-4-6' }
+    expect(sessionDefaultsNoticeApplies(n, 'claude-sdk')).toBe(true)
+    expect(sessionDefaultsNoticeApplies(n, 'docker-byok')).toBe(true)
+    expect(sessionDefaultsNoticeApplies(n, 'codex')).toBe(false)
+    expect(sessionDefaultsNoticeApplies(n, 'gemini')).toBe(false)
+    expect(sessionDefaultsNoticeApplies(null, 'claude-sdk')).toBe(false)
+  })
+})
+
+describe('CreateSessionModal select styling (#8611)', () => {
+  it('every select sits inside the session-form box that carries the dark control style', () => {
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: {}, auth: READY }]
+    mockStoreState.defaultProvider = 'codex'
+    renderModal()
+    fireEvent.click(screen.getByText(/Advanced/))
+    const selects = document.querySelectorAll('select')
+    expect(selects.length).toBeGreaterThanOrEqual(3)
+    selects.forEach(s => expect(s.closest('.modal-content--session-form')).not.toBeNull())
   })
 })
