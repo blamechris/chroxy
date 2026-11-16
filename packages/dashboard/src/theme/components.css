@@ -11024,6 +11024,12 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .git-file-row:hover { background: var(--bg-tertiary); }
+.git-file-row-outside { cursor: default; }
+/* Dim the row, but not the hint: --text-dim at 0.6 opacity falls well below AA. */
+.git-file-row-outside > :not(.git-file-outside-hint) { opacity: 0.6; }
+.git-file-outside-hint { color: var(--text-muted); }
+.git-file-row-outside:hover { background: transparent; }
+.git-file-row-outside .git-file-checkbox { cursor: default; }
 
 .git-file-checkbox {
   flex-shrink: 0;

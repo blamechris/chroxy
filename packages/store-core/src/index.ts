@@ -851,7 +851,10 @@ export {
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
-  // #7292 — expand a rename/copy entry's selected path to include its
+  isGitPathOutsideCwd,
+  GIT_OUTSIDE_CWD_HINT,
+  isGitFileOutsideCwd,
+  // #7292 — expand a rename entry's selected path to include its
   // oldPath before sending git_stage/git_unstage.
   expandRenamePathsForStaging,
   handleGitBranchesResult,

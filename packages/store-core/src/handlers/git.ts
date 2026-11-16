@@ -225,6 +225,27 @@ export function handleGitStatusResult(
   }
 }
 
+/** Hint shown on non-selectable outside-folder rows; one string for every client. */
+export const GIT_OUTSIDE_CWD_HINT = 'Outside this session’s folder'
+
+/**
+ * Classify canonical cwd-relative git status paths for client selection (#8187).
+ * Mirrors the server's `inside` filter in ws-file-ops/git.js: `..`, a `../`
+ * prefix, or an absolute path (POSIX `/…`, or a Windows drive such as `D:/x`
+ * or `D:\x`, which a different-drive repo yields) is outside. `..notes` and
+ * drive-relative `C:foo` are not. This is a UI hint, not path validation:
+ * server containment remains authoritative.
+ */
+export function isGitPathOutsideCwd(path: string): boolean {
+  return path === '..' || path.startsWith('../') || path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
+}
+
+/** A rename must stay selectable as a whole, never as just its inside half. */
+export function isGitFileOutsideCwd(entry: GitFileStatus): boolean {
+  return isGitPathOutsideCwd(entry.path)
+    || (entry.status === 'renamed' && entry.oldPath !== undefined && isGitPathOutsideCwd(entry.oldPath))
+}
+
 /**
  * #7292 — expand a set of selected `git_status_result` entry paths to also
  * include each RENAMED entry's `oldPath`, so staging/unstaging a rename moves
@@ -246,18 +267,24 @@ export function handleGitStatusResult(
  * 'copied' entry (see GitFileStatus), but this also checks `status ===
  * 'renamed'` directly as defense in depth — this helper must stay correct
  * even if that server invariant is ever violated.
+ *
+ * #8187 — omit outside-cwd selections and whole cross-boundary renames. Do
+ * not filter only the expanded source: that would silently split a rename.
  */
 export function expandRenamePathsForStaging(
   selectedPaths: readonly string[],
   entries: readonly GitFileStatus[],
 ): string[] {
   const oldPathByPath = new Map<string, string>()
+  const outsideEntries = new Set<string>()
   for (const entry of entries) {
+    if (isGitFileOutsideCwd(entry)) outsideEntries.add(entry.path)
     if (entry.status === 'renamed' && entry.oldPath) oldPathByPath.set(entry.path, entry.oldPath)
   }
   const seen = new Set<string>()
   const out: string[] = []
   for (const path of selectedPaths) {
+    if (isGitPathOutsideCwd(path) || outsideEntries.has(path)) continue
     const oldPath = oldPathByPath.get(path)
     if (oldPath !== undefined && !seen.has(oldPath)) {
       seen.add(oldPath)
