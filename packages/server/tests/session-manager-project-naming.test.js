@@ -13,6 +13,7 @@ import { declareUnknownCustomization } from './helpers/provider-customization.js
 import { resolveSessionNaming, validateConfig } from '../src/config.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { parse } from 'acorn'
+import { createDaemonSessionManager } from '../src/server-cli.js'
 
 const parseModule = (src) => parse(src, { ecmaVersion: 'latest', sourceType: 'module' })
 const propName = (p) => (p.key.type === 'Identifier' ? p.key.name : p.key.value)
@@ -569,13 +570,37 @@ describe('production wiring', () => {
     assert.deepEqual(calls[0].arguments[0].type === 'Identifier' && calls[0].arguments[0].name, 'config')
     const opts = calls[0].arguments[1]
     assert.equal(opts?.type, 'ObjectExpression')
-    const prop = opts.properties.find((p) => p.type === 'Property' && !p.computed && propName(p) === 'sessionNaming')
-    assert.ok(prop, 'the options object has a sessionNaming property')
+    const named = opts.properties.filter((p) => p.type === 'Property' && propName(p) === 'sessionNaming')
+    assert.equal(named.length, 1, 'exactly one sessionNaming key (a later duplicate would silently win)')
+    const prop = named[0]
+    assert.equal(prop.computed, false)
+    const at = opts.properties.indexOf(prop)
+    assert.equal(opts.properties.slice(at + 1).some((p) => p.type === 'SpreadElement'), false, 'no spread after it can override it')
     assert.equal(prop.value.type, 'CallExpression')
     assert.equal(prop.value.callee.type === 'Identifier' && prop.value.callee.name, 'resolveSessionNaming')
     assert.deepEqual(prop.value.arguments.map((a) => a.type === 'Identifier' && a.name), ['config'])
     const imports = findAll(ast, (n) => n.type === 'ImportDeclaration' && n.source.value === './config.js')
     assert.ok(imports.some((i) => i.specifiers.some((sp) => sp.imported?.name === 'resolveSessionNaming')), 'and imports it from config.js')
+  })
+
+  it('the real daemon factory builds a project-mode manager from an empty config, and honours legacy', () => {
+    // The options startCliServer passes carry `sessionNaming: resolveSessionNaming(config)` (AST-checked
+    // above); this drives the REAL factory with that value, so a factory that drops the option (a
+    // removed spread, a clobbering key) is caught by behaviour, not by spelling.
+    for (const [config, expected] of [[{}, 'project'], [{ sessionNaming: 'project' }, 'project'], [{ sessionNaming: 'legacy' }, 'legacy']]) {
+      const state = tmp('pn-state-')
+      const { sessionManager } = createDaemonSessionManager(config, {
+        maxSessions: 5,
+        defaultCwd: state,
+        providerType: 'test-noop-project-naming',
+        skipPreflight: true,
+        stateFilePath: join(state, 'state.json'),
+        persistDebounceMs: 0,
+        sessionNaming: resolveSessionNaming(config),
+      })
+      managers.push(sessionManager)
+      assert.equal(sessionManager.sessionNaming, expected, JSON.stringify(config))
+    }
   })
 
   it("a manager built from the daemon's default config is in project mode; 'legacy' opts out", () => {
