@@ -117,6 +117,8 @@ function getDefaultStore() {
  */
 function buildDeps(overrides = {}) {
   const config = readConfigSoft(configFile())
+  // NOTE: resolved from config/env tiers only (no CLI tier), so a daemon started
+  // with `--provider X` can differ from this value. Pre-existing; tracked separately.
   const defaultProviderName = overrides.defaultProviderName
     || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config }))
   return {

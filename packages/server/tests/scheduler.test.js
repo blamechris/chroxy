@@ -935,7 +935,7 @@ describe('#6865 SchedulerEngine', () => {
 
     it('the compiled-in default is schedulable; claude-tui (the default until #8266) is not', () => {
       assert.equal(DEFAULT_PROVIDER, 'claude-sdk')
-      assert.equal(scheduledProviderRefusalReason(DEFAULT_PROVIDER), null, 'the default provider must be schedulable')
+      assert.equal(scheduledProviderRefusalReason(DEFAULT_PROVIDER, undefined, null), null, 'the default provider must be schedulable')
       const schedulable = listSchedulableProviders()
       assert.ok(schedulable.includes(DEFAULT_PROVIDER))
       assert.ok(!schedulable.includes('claude-tui'), 'a hook-routed provider must stay refused')
@@ -1055,19 +1055,19 @@ describe('#6865 SchedulerEngine', () => {
     })
 
     it('scheduledProviderRefusalReason: supported providers pass, everything else is named', () => {
-      assert.equal(scheduledProviderRefusalReason('claude-sdk'), null)
-      assert.equal(scheduledProviderRefusalReason('claude-byok'), null)
+      assert.equal(scheduledProviderRefusalReason('claude-sdk', undefined, null), null)
+      assert.equal(scheduledProviderRefusalReason('claude-byok', undefined, null), null)
       for (const hookRouted of ['claude-tui', 'claude-cli', 'gemini']) {
-        const reason = scheduledProviderRefusalReason(hookRouted)
+        const reason = scheduledProviderRefusalReason(hookRouted, undefined, null)
         assert.ok(reason, `${hookRouted} must be refused`)
         assert.match(reason, new RegExp(hookRouted))
       }
-      assert.match(scheduledProviderRefusalReason(''), /no provider could be resolved/)
-      assert.match(scheduledProviderRefusalReason(null), /no provider could be resolved/)
-      assert.match(scheduledProviderRefusalReason(undefined), /no provider could be resolved/)
+      assert.match(scheduledProviderRefusalReason('', undefined, null), /no provider could be resolved/)
+      assert.match(scheduledProviderRefusalReason(null, undefined, null), /no provider could be resolved/)
+      assert.match(scheduledProviderRefusalReason(undefined, undefined, null), /no provider could be resolved/)
       // Reads the capability off the registry, not a hardcoded name list.
       const fake = () => ({ capabilities: { inProcessPermissions: true } })
-      assert.equal(scheduledProviderRefusalReason('anything', fake), null)
+      assert.equal(scheduledProviderRefusalReason('anything', fake, null), null)
     })
 
     it('scheduledProviderRefusalReason: the DEFAULT clause follows the passed daemon default, not the constant (#8279)', () => {
@@ -1076,12 +1076,15 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(scheduledProviderRefusalReason(DEFAULT_PROVIDER, undefined, DEFAULT_PROVIDER), null)
       // a refused provider that is not the daemon default
       assert.doesNotMatch(scheduledProviderRefusalReason('gemini', undefined, 'claude-tui'), /daemon DEFAULT/)
-      // no default supplied: never claimed
-      assert.doesNotMatch(scheduledProviderRefusalReason('claude-tui'), /daemon DEFAULT/)
+      // null = no resolved default known: never claimed
+      assert.doesNotMatch(scheduledProviderRefusalReason('claude-tui', undefined, null), /daemon DEFAULT/)
+      // omitting the argument is a loud error, not a silently missing clause
+      assert.throws(() => scheduledProviderRefusalReason('claude-tui'), TypeError)
+      assert.throws(() => scheduledProviderRefusalReason('claude-tui', undefined, undefined), /scheduledProviderRefusalReason/)
     })
 
     it('the refusal reason fits the 500-char record cap, pointer and all', () => {
-      const reason = scheduledProviderRefusalReason('claude-tui')
+      const reason = scheduledProviderRefusalReason('claude-tui', undefined, 'claude-tui')
       assert.ok(reason.length <= 500, `refusal reason is ${reason.length} chars — it would be truncated`)
     })
   })

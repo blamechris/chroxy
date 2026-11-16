@@ -266,14 +266,19 @@ export function listSchedulableProviders(list = listProviders) {
  *
  * @param {string} providerName - the provider the run would actually use
  * @param {(name: string) => Function} [getProviderClass=getProvider] - registry seam
- * @param {string} [daemonDefaultProvider] - the daemon's RESOLVED default provider
+ * @param {string|null} daemonDefaultProvider - the daemon's RESOLVED default provider
  *   (`resolveDaemonDefaultProvider(config)` / the manager's `providerType`), NOT the
  *   compiled-in DEFAULT_PROVIDER: a daemon configured `provider: claude-tui` refuses
- *   provider-less tasks, and only the resolved value can say so (#8279). Omitted
- *   means the clause is never appended.
+ *   provider-less tasks, and only the resolved value can say so (#8279). REQUIRED: `undefined`
+ *   throws; `null` means no resolved default is known (no clause).
  * @returns {string|null} refusal reason, or null when the provider is supported
  */
-export function scheduledProviderRefusalReason(providerName, getProviderClass = getProvider, daemonDefaultProvider = undefined) {
+export function scheduledProviderRefusalReason(providerName, getProviderClass = getProvider, daemonDefaultProvider) {
+  // REQUIRED (null = "no resolved default known", no clause): an optional
+  // argument lets a caller silently lose the clause (#8279).
+  if (daemonDefaultProvider === undefined) {
+    throw new TypeError('scheduledProviderRefusalReason: daemonDefaultProvider is required (pass null when no resolved default is known)')
+  }
   if (typeof providerName !== 'string' || providerName.length === 0) {
     return 'no provider could be resolved for this scheduled task — refusing to fire an unattended run at an unknown provider'
   }
