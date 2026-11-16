@@ -281,12 +281,44 @@ describe('runDoctorChecks', () => {
       assert.match(billing.message, /claude-tui/)
     })
 
-    it('passes before the cutover and surfaces the upcoming date', async () => {
-      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: BEFORE }))
+    // Env set/restored per case so neither flag state leaks (or depends on the
+    // ambient shell).
+    const withEra = async (value, fn) => {
+      const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+      if (value === null) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+      else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = value
+      try { return await fn() } finally {
+        if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+        else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+      }
+    }
+
+    it('era flag OFF: does not announce the paused 2026-06-15 cutover, before or after the date (#8278)', async () => {
+      for (const now of [BEFORE, AFTER]) {
+        const { checks } = await withEra(null, () => withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now })))
+        const billing = checks.find(c => c.name === 'Billing')
+        assert.ok(billing)
+        assert.equal(billing.status, 'pass')
+        assert.equal(/cutover|2026-06-15/i.test(billing.message), false, `announced cutover at ${now}: ${billing.message}`)
+        assert.match(billing.message, /^Default provider 'claude-sdk' — /)
+      }
+    })
+
+    it('era flag ON before the announced date: still surfaces the upcoming cutover date (#8278)', async () => {
+      const { checks } = await withEra('1', () => withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: BEFORE })))
       const billing = checks.find(c => c.name === 'Billing')
       assert.ok(billing)
       assert.equal(billing.status, 'pass')
       assert.match(billing.message, /cutover: 2026-06-15/)
+    })
+
+    it('era flag ON after the announced date: the era copy is unchanged (#8278)', async () => {
+      const { checks } = await withEra('1', () => withEnv(null, () => runDoctorChecks({ providers: ['claude-tui'], now: AFTER })))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /^Default provider 'claude-tui' — /)
+      assert.equal(/cutover/i.test(billing.message), false)
     })
   })
 
