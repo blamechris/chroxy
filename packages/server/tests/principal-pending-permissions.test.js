@@ -612,6 +612,37 @@ describe('collectPendingPermissions (unit, over the real stores)', () => {
     assert.equal(collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: exact }) }).truncated, false)
   })
 
+  it('past the ceiling the holders already admitted are still READ: only the ones beyond it are missing', () => {
+    const request = (pm) => { pm.handlePermission('Bash', { command: 'x' }, null, 'approve'); return [...pm._pendingPermissions.keys()].at(-1) }
+    const build = (n) => {
+      const rootPm = mgr()
+      const rootId = request(rootPm)
+      const root = holder(rootPm)
+      const ids = []
+      const routing = new Map()
+      for (let i = 0; i < n; i++) {
+        const pm = mgr()
+        ids.push(request(pm))
+        routing.set(`c${i}`, holder(pm))
+      }
+      root._subagentPermissionRouting = routing
+      return { rootId, ids, sm: manager({ s1: root }) }
+    }
+    const read = (sm) => collectPendingPermissions({ sessionIds: ['s1'], sessionManager: sm, max: 1000 })
+    // exactly at the ceiling: the root plus MAX-1 children, nothing missing
+    const exact = build(MAX_HOLDERS_PER_SESSION - 1)
+    const e = read(exact.sm)
+    assert.equal(e.truncated, false)
+    assert.deepEqual(e.permissions.map((p) => p.requestId).sort(), [exact.rootId, ...exact.ids].sort())
+    // one past it, and well past it: the first MAX-1 children and the root are all present
+    for (const n of [MAX_HOLDERS_PER_SESSION, 300]) {
+      const over = build(n)
+      const got = read(over.sm)
+      assert.equal(got.truncated, true, `n=${n}`)
+      assert.deepEqual(got.permissions.map((p) => p.requestId).sort(), [over.rootId, ...over.ids.slice(0, MAX_HOLDERS_PER_SESSION - 1)].sort(), `n=${n}`)
+    }
+  })
+
   it('a holder with 100,000 distinct children is cut at the ceiling in bounded time, and reported incomplete', () => {
     const root = new EventEmitter()
     const children = new Map()

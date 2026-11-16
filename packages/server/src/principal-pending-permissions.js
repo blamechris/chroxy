@@ -92,6 +92,7 @@ function readInProcess(root, sessionId, add) {
   // by the ceiling, not by how many children a holder routes to.
   const seen = new Set([root])
   const queue = [root]
+  let overflow = false
   for (let head = 0; head < queue.length; head++) {
     const holder = queue[head]
     const pendingMap = holder._pendingPermissions
@@ -103,15 +104,17 @@ function readInProcess(root, sessionId, add) {
       }
     }
     const routing = holder._subagentPermissionRouting
+    // Once the ceiling blocks an admission nothing more is admitted, and a later holder's scan
+    // ends at its first unseen child (at most MAX seen ones precede it), so the work stays bounded.
     if (!(routing instanceof Map)) continue
     for (const child of routing.values()) {
       if (child == null || typeof child !== 'object' || seen.has(child)) continue
-      if (seen.size >= MAX_HOLDERS_PER_SESSION) return true // a holder we will not read: incomplete
+      if (seen.size >= MAX_HOLDERS_PER_SESSION) { overflow = true; break } // a holder we will not read: incomplete
       seen.add(child)
       queue.push(child)
     }
   }
-  return false
+  return overflow
 }
 
 /**
