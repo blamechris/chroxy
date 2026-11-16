@@ -266,9 +266,14 @@ export function listSchedulableProviders(list = listProviders) {
  *
  * @param {string} providerName - the provider the run would actually use
  * @param {(name: string) => Function} [getProviderClass=getProvider] - registry seam
+ * @param {string} [daemonDefaultProvider] - the daemon's RESOLVED default provider
+ *   (`resolveDaemonDefaultProvider(config)` / the manager's `providerType`), NOT the
+ *   compiled-in DEFAULT_PROVIDER: a daemon configured `provider: claude-tui` refuses
+ *   provider-less tasks, and only the resolved value can say so (#8279). Omitted
+ *   means the clause is never appended.
  * @returns {string|null} refusal reason, or null when the provider is supported
  */
-export function scheduledProviderRefusalReason(providerName, getProviderClass = getProvider) {
+export function scheduledProviderRefusalReason(providerName, getProviderClass = getProvider, daemonDefaultProvider = undefined) {
   if (typeof providerName !== 'string' || providerName.length === 0) {
     return 'no provider could be resolved for this scheduled task — refusing to fire an unattended run at an unknown provider'
   }
@@ -282,7 +287,7 @@ export function scheduledProviderRefusalReason(providerName, getProviderClass = 
   // Kept under the 500-char cap _recordRefusal applies, so the #7003 pointer and
   // the supported-provider list survive into the registry rather than being cut.
   const supported = listSchedulableProviders()
-  const isDefault = providerName === DEFAULT_PROVIDER
+  const isDefault = typeof daemonDefaultProvider === 'string' && providerName === daemonDefaultProvider
   return `provider '${providerName}' routes permission prompts through the permission hook (POST /permission), which the scheduler cannot answer — an unattended run would stall on every gated tool call until the 300s auto-deny, then report a turn whose tool calls were all silently refused.${isDefault ? ` It is also the daemon DEFAULT, so a task with no target.provider lands here.` : ''} Set target.provider to one of: ${supported.length ? supported.join(', ') : '(none)'}. Hook-routed support: #7003.`
 }
 
@@ -704,7 +709,11 @@ export class SchedulerEngine extends EventEmitter {
    */
   _preflightRefusal(task) {
     // (a) Can we actually govern this provider's permission prompts? (#7003)
-    const providerRefusal = scheduledProviderRefusalReason(this._resolveProviderName(task), this._getProviderClass)
+    const providerRefusal = scheduledProviderRefusalReason(
+      this._resolveProviderName(task),
+      this._getProviderClass,
+      this._resolveProviderName({}),
+    )
     if (providerRefusal) return providerRefusal
 
     // (b) Is the cwd one a session may be created in at all? The registry is a

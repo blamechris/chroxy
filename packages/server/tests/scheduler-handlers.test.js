@@ -328,6 +328,17 @@ describe('scheduler handlers — engine verdicts are passed through, not re-deri
     assert.deepEqual(sent[0].schedulableProviders, listSchedulableProviders())
   })
 
+  it('names the DEFAULT clause only on refusals of the configured daemon default (#8279)', () => {
+    const { ctx, sent, store } = mkCtx({ providerType: 'claude-tui' })
+    store.add({ prompt: 'p', cadence: { kind: 'cron', expression: '* * * * *' } })
+    store.add({ prompt: 'q', cadence: { kind: 'cron', expression: '* * * * *' }, target: { provider: 'gemini' } })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.match(sent[0].defaultProviderRefusal, /daemon DEFAULT/)
+    const byProvider = Object.fromEntries(sent[0].tasks.map((t) => [t.effectiveProvider, t.providerRefusal]))
+    assert.match(byProvider['claude-tui'], /daemon DEFAULT/)
+    assert.doesNotMatch(byProvider.gemini, /daemon DEFAULT/)
+  })
+
   it('reports the CLAMPED permission mode and flags that it was clamped', () => {
     const { ctx, sent, store } = mkCtx()
     store.add({

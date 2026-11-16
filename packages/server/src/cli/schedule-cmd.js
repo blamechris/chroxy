@@ -117,6 +117,8 @@ function getDefaultStore() {
  */
 function buildDeps(overrides = {}) {
   const config = readConfigSoft(configFile())
+  const defaultProviderName = overrides.defaultProviderName
+    || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config }))
   return {
     store: overrides.store || getDefaultStore(),
     write: overrides.write || console.log,
@@ -135,9 +137,9 @@ function buildDeps(overrides = {}) {
     // here is fed in as the FILE tier only; there is no CLI tier for this
     // value (an explicit `overrides.defaultProviderName`, when present, wins
     // outright and never reaches mergeConfig at all).
-    defaultProviderName: overrides.defaultProviderName
-      || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config })),
-    checkProviderRefusal: overrides.checkProviderRefusal || ((name) => scheduledProviderRefusalReason(name)),
+    defaultProviderName,
+    checkProviderRefusal: overrides.checkProviderRefusal
+      || ((name) => scheduledProviderRefusalReason(name, undefined, defaultProviderName)),
     resolvePermissionMode: overrides.resolvePermissionMode || resolveScheduledPermissionMode,
     checkSchedulerEnabled: overrides.checkSchedulerEnabled || (() => isSchedulerEnabled(config)),
   }

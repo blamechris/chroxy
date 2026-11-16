@@ -264,7 +264,7 @@ function projectTask(task, ctx, quarantinedIds) {
     lastRun: projectLastRun(task.lastRun),
     createdAt: Number.isFinite(task.createdAt) ? task.createdAt : 0,
     updatedAt: Number.isFinite(task.updatedAt) ? task.updatedAt : 0,
-    providerRefusal: clampWire(scheduledProviderRefusalReason(provider), 2048),
+    providerRefusal: clampWire(scheduledProviderRefusalReason(provider, undefined, effectiveProvider(null, ctx)), 2048),
     effectiveProvider: clampWire(provider, 128),
     effectivePermissionMode: clampWire(effectiveMode, 64),
     // True only when the task ASKED for something and got clamped — an absent
@@ -342,7 +342,7 @@ function buildSnapshot(ctx, requestId, { error = null } = {}) {
     },
     schedulableProviders: listSchedulableProviders().slice(0, SCHEDULABLE_PROVIDERS_MAX),
     defaultProvider,
-    defaultProviderRefusal: scheduledProviderRefusalReason(defaultProvider),
+    defaultProviderRefusal: scheduledProviderRefusalReason(defaultProvider, undefined, defaultProvider),
     tasks,
     unreadableCount,
     unreadable,

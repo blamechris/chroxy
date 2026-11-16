@@ -988,6 +988,18 @@ describe('#6865 SchedulerEngine', () => {
       assert.match(record.lastRun.error, /claude-tui/)
     })
 
+    it('the refusal names the daemon DEFAULT clause when the resolved default is hook-routed (#8279)', async () => {
+      const { record } = await fireTask({}, { providerType: 'claude-tui' })
+      assert.match(record.lastRun.error, /daemon DEFAULT/)
+    })
+
+    it('an explicit refused provider that is NOT the daemon default gets no DEFAULT clause (#8279)', async () => {
+      const { record } = await fireTask({ target: { provider: 'gemini' } }, { providerType: 'claude-tui' })
+      assert.equal(record.lastRun.status, REFUSED_STATUS)
+      assert.match(record.lastRun.error, /gemini/)
+      assert.doesNotMatch(record.lastRun.error, /daemon DEFAULT/)
+    })
+
     it('refuses a task with no target at all when the daemon default is hook-routed', async () => {
       const { sm, record } = await fireTask({}, { providerType: 'claude-tui' })
       assert.equal(sm.created.length, 0)
@@ -1056,6 +1068,16 @@ describe('#6865 SchedulerEngine', () => {
       // Reads the capability off the registry, not a hardcoded name list.
       const fake = () => ({ capabilities: { inProcessPermissions: true } })
       assert.equal(scheduledProviderRefusalReason('anything', fake), null)
+    })
+
+    it('scheduledProviderRefusalReason: the DEFAULT clause follows the passed daemon default, not the constant (#8279)', () => {
+      assert.match(scheduledProviderRefusalReason('claude-tui', undefined, 'claude-tui'), /daemon DEFAULT/)
+      // the compiled default is schedulable: no refusal, so no clause, however it is passed
+      assert.equal(scheduledProviderRefusalReason(DEFAULT_PROVIDER, undefined, DEFAULT_PROVIDER), null)
+      // a refused provider that is not the daemon default
+      assert.doesNotMatch(scheduledProviderRefusalReason('gemini', undefined, 'claude-tui'), /daemon DEFAULT/)
+      // no default supplied: never claimed
+      assert.doesNotMatch(scheduledProviderRefusalReason('claude-tui'), /daemon DEFAULT/)
     })
 
     it('the refusal reason fits the 500-char record cap, pointer and all', () => {
