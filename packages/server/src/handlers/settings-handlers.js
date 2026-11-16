@@ -191,7 +191,26 @@ function handleSetModel(ws, client, msg, ctx) {
       return
     }
     if (providerAllowed) {
-      if (!providerAllowed.includes(msg.model)) {
+      // #9139: the picker offers a models.json overlay row under its short id
+      // (`id`) while the allowlist holds TARGETS (`fullId`). Resolve an
+      // off-list id through this provider's roster and accept it only when the
+      // row's target is on the list; everything downstream (setModel, the
+      // broadcast) then speaks the target, which is also what the endpoint
+      // must receive — it would 404 an alias.
+      let requested = msg.model
+      if (!providerAllowed.includes(requested)) {
+        let row = null
+        try {
+          row = getRosterModelRow(entry.provider, requested)
+        } catch {
+          // Roster unavailable: cannot resolve an alias, so refuse below.
+        }
+        // The re-check below is what refuses a target that is off the list.
+        if (row && typeof row.fullId === 'string') {
+          requested = row.fullId
+        }
+      }
+      if (!providerAllowed.includes(requested)) {
         // #4828: session-scoped — modelSessionId identifies the affected
         // session. Legacy single-session adapters may surface an empty
         // sessionId, so fall back to the module-level `log` rather than
@@ -209,18 +228,18 @@ function handleSetModel(ws, client, msg, ctx) {
         return
       }
       // #4828: session-scoped (single-session fallback as above).
-      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${requested}`)
       // #5696: only broadcast when setModel() reports the change landed.
-      if (!entry.session.setModel(msg.model)) {
-        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
-        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
+      if (!entry.session.setModel(requested)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${requested}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${requested}' was not applied (session busy or already on that model).`, undefined, ctx)
         return
       }
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
       // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
       // unchanged for non-Claude IDs, so applying it uniformly is safe.
-      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(requested) })
       return
     }
     // Fall through to the legacy global allowlist when the provider hasn't
