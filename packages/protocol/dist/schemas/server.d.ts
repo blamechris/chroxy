@@ -24,3 +24,4 @@ export * from './server/daemon-update.ts';
 export * from './server/principal-admin.ts';
 export * from './server/principal-journal.ts';
 export * from './server/principal-permissions.ts';
+export * from './server/principal-sessions.ts';
