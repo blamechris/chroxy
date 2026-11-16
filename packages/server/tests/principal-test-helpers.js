@@ -28,6 +28,7 @@ import { sessionPrStatusHandlers } from '../src/handlers/session-pr-status-handl
 import { sessionPrThreadsHandlers } from '../src/handlers/session-pr-threads-handlers.js'
 import { daemonUpdateHandlers } from '../src/handlers/daemon-update-handlers.js'
 import { principalAdminHandlers } from '../src/handlers/principal-admin-handlers.js'
+import { principalHandlers } from '../src/handlers/principal-handlers.js'
 
 /**
  * type -> real handler function, assembled from the same handler modules
@@ -40,7 +41,7 @@ export const REAL_HANDLERS = Object.freeze(Object.assign({},
   conversationHandlers, checkpointHandlers, repoHandlers, featureHandlers, evaluatorHandlers,
   controlRoomHandlers, githubWebhookHandlers, summarizeHandlers, pairingHandlers, tokenHandlers,
   orchestrationHandlers, schedulerHandlers, sessionPrStatusHandlers, sessionPrThreadsHandlers,
-  daemonUpdateHandlers, principalAdminHandlers))
+  daemonUpdateHandlers, principalAdminHandlers, principalHandlers))
 
 /** A stand-in for the S1 sentinel: fixed, non-empty, opaque, equal to no session id. */
 export const SENTINEL = 'principal-sentinel-7f3a9c'

@@ -456,8 +456,13 @@ describe('broadcaster full-scan recipient site (_matchesSession), no client mana
   })
 })
 
-describe('S2 pins: a principal is kept off the subscription index', () => {
-  it('ClientManager.subscribe and setActiveSession refuse a principal (S3 changes this on purpose)', async () => {
+describe('a principal is kept off the subscription index (S2 pin, deliberately KEPT by S3)', () => {
+  // S3 chose a dedicated per-subscription direct send for the journal (principal-subscriptions.js),
+  // so it needs NOTHING from the ClientManager index: a principal still receives no ordinary
+  // session broadcast (contract 3.1 item 7) and the index stays closed to it. The rule is
+  // therefore unchanged, and tests/principal-journal-wiring.test.js proves a subscribed principal
+  // gets the journal frames while this index stays empty.
+  it('ClientManager.subscribe and setActiveSession refuse a principal', async () => {
     const { WsClientManager } = await import('../src/ws-client-manager.js')
     const manager = new WsClientManager({})
     const principal = principalClient({ subscribedSessionIds: new Set(), activeSessionId: null })

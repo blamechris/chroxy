@@ -287,7 +287,10 @@ All **new** types carry a **`principal_` prefix**, because `agent_event` already
 | answer | `permission_response` (**`deny` only**, field-limited, §9) | — |
 
 Server frames, all new and all prefixed: `principal_subscribed`, `principal_event`,
-`principal_events_page`, `principal_live_fence`, `principal_interrupt_ack`. S2's guard
+`principal_events_page`, `principal_live_fence`, `principal_gap` (S3: a gap, or the end of a
+subscription), `principal_interrupt_ack`. On `principal_event` and `principal_live_fence` the
+journal position is **`journalSeq`**, not `seq`: the transport stamps its own per-connection
+`seq` on every frame (`ws-client-sender.js`) and would overwrite a field of that name. S2's guard
 asserts **no new name collides with an existing client or server schema type**.
 
 History and roster reads go through the `principal_*` types, whose payloads are
@@ -829,7 +832,15 @@ broadcast frames carry no per-session sequence; `request_full_history` has no
   truncated with `truncated: true`), persisted with session state. An eviction advances
   the window start and is reported as a gap.
 - **Cursor** `{ sessionId, journalId, seq }`. Gap reasons: `evicted`, `journal_reset`,
-  `restart_loss`, `unknown_cursor`.
+  `restart_loss`, `unknown_cursor`. (S3: a subscription the daemon ends carries the extra
+  reasons `held_overflow` and `backpressure` on `principal_gap { ended: true }`.)
+- **Persistence (S3): a 0600 sidecar, not the session state file** —
+  `<config dir>/principal-journal/<hash>.meta.json` (id, reservation, clean flag; written
+  synchronously with the strict durable write) and `<hash>.events.json` (the window,
+  debounced). One JSON state file rewritten wholesale by many writers, parsed by the restore
+  path and written by a lenient writer is the wrong place for up to 2000 x 4 KiB per session and
+  for a reservation that must be confirmed durable. The journal records only while the
+  principal store holds an entry, so a daemon with no principals writes none (§13).
 - **Seq survives a crash by a *confirmed* reservation (E4, R14).** The journal reuses the
   seq **reservation** idea of `session-message-history.js` (`_nextSeq` / `_seqReserved`,
   `SEQ_RESERVATION_STEP`, #8259) but **not its failure handling**: `_nextSeq` advances
@@ -852,7 +863,9 @@ broadcast frames carry no per-session sequence; `request_full_history` has no
 2. Replay `principal_event` frames (`replay: true`) from the cursor to `headSeq`.
 3. `principal_live_fence { requestId, sessionId, seq }` — everything after is live.
 4. Live `principal_event` frames. Live events during replay are **held and released in
-   `seq` order** after the fence.
+   `seq` order** after the fence. (Delivery, S3: a dedicated per-subscription direct send
+   through `frameForPrincipal`, not the broadcast path; `PRINCIPAL_BROADCAST_ALLOWED` stays
+   empty and a principal stays off the ClientManager session index.)
 
 The held-live buffer is **capped (500 events or 1 MiB)**. On overflow the daemon reports a
 gap and **ends the subscription**; the client re-subscribes. Eviction between `headSeq`
@@ -1041,6 +1054,13 @@ S9. S8 owns `createdBy` persistence and the gen high-water mark; S12 consumes th
 - **Owner lockout bounded by pre-emption, TTL and kill.** A principal can hold a lease and
   fill the cap-3 queue; the owner can always type (human wins), revoke or kill, and
   leases and queue entries expire (2 h, 15 min).
+- **A principal granted late sees the journal from the grant on.** The journal records only
+  while the principal store has an entry (data-at-rest minimisation, S3), so history from before
+  the first grant does not exist. Its cursors and gaps are otherwise unchanged.
+- **Floored-result suppression can over-suppress.** One pipeline names the tool call on its
+  `permission_request` (`toolUseId`), the other does not; without it the request is matched to
+  the open or next call of the same tool, so a second call of that tool can be withheld too.
+  It never under-suppresses (§8).
 - **New data at rest.** The journal persists up to 2000 normalized events per session, the
   principal store holds label/scope/suppression metadata and the dedup ledger holds ids.
   All are 0600 under the config dir and carry the session history's sensitivity; the

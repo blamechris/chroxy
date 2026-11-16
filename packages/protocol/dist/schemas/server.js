@@ -22,3 +22,4 @@ export * from "./server/orchestration.js";
 export * from "./server/scheduler.js";
 export * from "./server/daemon-update.js";
 export * from "./server/principal-admin.js";
+export * from "./server/principal-journal.js";

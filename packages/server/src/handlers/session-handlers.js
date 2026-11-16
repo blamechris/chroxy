@@ -473,6 +473,9 @@ async function handleDestroySession(ws, client, msg, ctx) {
   }
 
   ctx.transport.broadcast({ type: 'session_destroyed', sessionId: targetId })
+  // #9118: a destroyed session keeps no journal (and its subscriptions end with it). A
+  // daemon shutdown does not pass through here, so a restart keeps every journal.
+  try { ctx.services?.principalJournal?.removeSession(targetId) } catch { /* best effort */ }
   ctx.transport.broadcastSessionList()
 }
 

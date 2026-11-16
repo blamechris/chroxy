@@ -42,13 +42,19 @@ const denied = Object.keys(PRINCIPAL_DENIED_MESSAGE_TYPES)
 // so changing the v1 surface is a visible change to this file too.
 const EXPECTED_EXEMPT = ['auth', 'key_exchange', 'ping']
 const EXPECTED_ALLOWED_TIERS = {
+  principal_subscribe: 'observe',
+  principal_unsubscribe: 'observe',
+  principal_events_read: 'observe',
   input: 'steer',
   interrupt: 'drive',
   create_session: 'drive',
   destroy_session: 'drive',
   permission_response: 'answer',
 }
-const EXPECTED_OUTGOING = ['auth_ok', 'credential_invalidated', 'input_ack', 'pong', 'rate_limited', 'server_error', 'session_error']
+const EXPECTED_OUTGOING = [
+  'auth_ok', 'credential_invalidated', 'input_ack', 'pong', 'principal_event', 'principal_events_page', 'principal_gap',
+  'principal_live_fence', 'principal_subscribed', 'rate_limited', 'server_error', 'session_error',
+]
 
 const clientSchemaTypes = new Set(ClientMessageSchema.options.map((o) => o.shape.type.value))
 const registered = new Set(registeredMessageTypes)
@@ -118,7 +124,7 @@ describe('principal inbound roster', () => {
     }
   })
 
-  it('the v1 allowlist is exactly the five existing types at the contract tiers', () => {
+  it('the v1 allowlist is exactly the five existing types plus the three S3 journal types, at the contract tiers', () => {
     const actual = Object.fromEntries(Object.entries(PRINCIPAL_ALLOWED_MESSAGE_TYPES).map(([t, s]) => [t, s.tier]))
     assert.deepEqual(actual, EXPECTED_ALLOWED_TIERS)
     for (const tier of Object.values(actual)) assert.ok(PRINCIPAL_TIER_ORDER.includes(tier))
@@ -129,14 +135,18 @@ describe('principal inbound roster', () => {
     assert.equal(allowed.length, Object.keys(EXPECTED_ALLOWED_TIERS).length)
   })
 
-  it('no v1 entry invents a principal_ name before its handler exists (only the S1 management surface, all denied)', () => {
+  it('only the S1 management surface (denied) and the S3 journal read path (allowed) carry a principal_ name', () => {
     // principal_admin_* is the strict-primary management surface (S1): denied to a
-    // principal and to a bound client, never allowed. Any other principal_ name needs its
-    // handler first.
+    // principal and to a bound client, never allowed. The S3 read path is the only
+    // principal_ name that is allowed; any other needs its handler first.
     const MANAGEMENT = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
-    assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')), [])
+    const JOURNAL = ['principal_events_read', 'principal_subscribe', 'principal_unsubscribe']
+    assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')).sort(), JOURNAL)
     assert.deepEqual(denied.filter((t) => t.startsWith('principal_')).sort(), MANAGEMENT)
-    assert.deepEqual(Object.keys(PRINCIPAL_OUTGOING_ALLOWED).filter((t) => t.startsWith('principal_')), [])
+    assert.deepEqual(Object.keys(PRINCIPAL_OUTGOING_ALLOWED).filter((t) => t.startsWith('principal_')).sort(),
+      ['principal_event', 'principal_events_page', 'principal_gap', 'principal_live_fence', 'principal_subscribed'])
+    // none of them is registered as a broadcast type: the broadcast allowlist stays empty
+    assert.deepEqual(Object.keys(PRINCIPAL_BROADCAST_ALLOWED), [])
   })
 
   it('every allowed type has a closed envelope with its own type field', () => {
@@ -165,8 +175,10 @@ describe('principal behavioural check: no grant is refused at the handler, not m
     return { sent, calls, reasonLines: lines.filter((l) => l.includes('refused message type')) }
   }
 
-  it('has a fixture for every allowed type (so none can be skipped)', () => {
-    assert.deepEqual(Object.keys(FIXTURES).sort(), [...allowed].sort())
+  it('has a fixture for every allowed type (so none can be skipped); the observe journal types are covered below', () => {
+    const observeTypes = allowed.filter((t) => PRINCIPAL_ALLOWED_MESSAGE_TYPES[t].tier === 'observe')
+    assert.deepEqual(observeTypes.sort(), ['principal_events_read', 'principal_subscribe', 'principal_unsubscribe'])
+    assert.deepEqual(Object.keys(FIXTURES).sort(), allowed.filter((t) => !observeTypes.includes(t)).sort())
   })
 
   for (const type of Object.keys(FIXTURES)) {
@@ -238,6 +250,9 @@ describe('refusePrincipalMessage / dispatchPolicyFor', () => {
     permission_response: { type: 'permission_response', sessionId: 'sess-1', requestId: 'r1', decision: 'deny', leaseId: 'L1', gen: 1 },
     destroy_session: { type: 'destroy_session', sessionId: 'sess-1', requestId: 'r1', leaseId: 'L1', gen: 1 },
     create_session: { type: 'create_session', requestId: 'r1', cwd: '/tmp/a', name: 'n', provider: 'claude-sdk', model: 'm', permissionMode: 'approve', worktree: false },
+    principal_subscribe: { type: 'principal_subscribe', requestId: 'r1', sessionIds: ['sess-1'], cursors: [{ sessionId: 'sess-1', journalId: 'j', seq: 0 }] },
+    principal_unsubscribe: { type: 'principal_unsubscribe', requestId: 'r1', sessionIds: ['sess-1'] },
+    principal_events_read: { type: 'principal_events_read', requestId: 'r1', sessionId: 'sess-1', cursor: { sessionId: 'sess-1', journalId: 'j', seq: 0 }, limit: 10 },
   }
 
   it('the selector gives a principal the principal policy and everyone else the bound policy', () => {
@@ -281,7 +296,7 @@ describe('refusePrincipalMessage / dispatchPolicyFor', () => {
   })
 
   it('refuses an unlisted, malformed or prototype-named type', () => {
-    for (const msg of [{ type: 'zz_unknown' }, {}, { requestId: 'r' }, { type: 5 }, { type: null }, { type: { a: 1 } }, { type: '__proto__' }, { type: 'constructor' }, { type: 'toString' }, { type: 'principal_subscribe' }]) {
+    for (const msg of [{ type: 'zz_unknown' }, {}, { requestId: 'r' }, { type: 5 }, { type: null }, { type: { a: 1 } }, { type: '__proto__' }, { type: 'constructor' }, { type: 'toString' }, { type: 'principal_snapshot_not_a_type' }]) {
       const { refused, sent } = run(principalClient(), msg)
       assert.equal(refused, true, JSON.stringify(msg))
       assert.equal(sent[0].code, 'scope_denied')
@@ -349,11 +364,12 @@ describe('refusePrincipalMessage / dispatchPolicyFor', () => {
   })
 
   describe('tier', () => {
+    const JOURNAL_TYPES = ['principal_subscribe', 'principal_unsubscribe', 'principal_events_read']
     const TIER_CAN_SEND = {
-      observe: [],
-      steer: ['input'],
-      drive: ['input', 'interrupt', 'create_session', 'destroy_session'],
-      answer: ['input', 'interrupt', 'create_session', 'destroy_session', 'permission_response'],
+      observe: JOURNAL_TYPES,
+      steer: [...JOURNAL_TYPES, 'input'],
+      drive: [...JOURNAL_TYPES, 'input', 'interrupt', 'create_session', 'destroy_session'],
+      answer: [...JOURNAL_TYPES, 'input', 'interrupt', 'create_session', 'destroy_session', 'permission_response'],
     }
     for (const [tier, can] of Object.entries(TIER_CAN_SEND)) {
       for (const type of allowed) {
@@ -638,7 +654,7 @@ describe('frameForPrincipal and the outgoing roster', () => {
   })
 
   it('ordinary session broadcasts are never delivered, even inside the grant', () => {
-    for (const type of ['stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'permission_request', 'permission_resolved', 'user_input', 'session_status', 'result', 'terminal_output', 'history_replay_start', 'agent_event', 'session_list', 'client_joined', 'principal_event']) {
+    for (const type of ['stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'permission_request', 'permission_resolved', 'user_input', 'session_status', 'result', 'terminal_output', 'history_replay_start', 'agent_event', 'session_list', 'client_joined']) {
       assert.equal(frameForPrincipal(granted, { type, sessionId: 'sess-1' }, opts), null, type)
     }
   })
@@ -940,6 +956,35 @@ describe('principal broadcast path is separate from direct replies', () => {
       assert.throws(() => { vetted.sessionId = 'sess-2' }, TypeError)
       assert.throws(() => { vetted.extra = 'x' }, TypeError)
       assert.equal(vetted.sessionId, 'sess-1')
+    })
+
+    it('the vetted frame is DEEP-frozen and shares no nested value with its source (S2 review note)', () => {
+      const nested = { type: 'probe_nested', sessionId: 'sess-1', body: { list: [1, { deep: true }] } }
+      const o = { broadcastAllowed: { probe_nested: ['type', 'sessionId', 'body'] }, sessionExists: () => true }
+      const vetted = frameForPrincipalBroadcast(client, nested, o)
+      assert.ok(Object.isFrozen(vetted.body) && Object.isFrozen(vetted.body.list) && Object.isFrozen(vetted.body.list[1]))
+      assert.throws(() => { vetted.body.list.push(2) }, TypeError)
+      assert.throws(() => { vetted.body.list[1].deep = false }, TypeError)
+      assert.notEqual(vetted.body, nested.body)
+      nested.body.list.push('late') // the source can change; the vetted frame cannot follow it
+      assert.deepEqual(vetted.body.list, [1, { deep: true }])
+    })
+
+    it('a delivered direct-reply frame holds a COPY of any nested value', () => {
+      const data = { a: [1, 2] }
+      const f = frameForPrincipal(client, { type: 'principal_event', sessionId: 'sess-1', journalId: 'j', journalSeq: 1, ts: 1, eventType: 'm', data }, { sessionExists: () => true })
+      assert.notEqual(f.data, data)
+      assert.notEqual(f.data.a, data.a)
+      f.data.a.push(3)
+      assert.deepEqual(data.a, [1, 2])
+    })
+
+    it('principal_subscribed lists sessions: every listed session must be granted or the frame is withheld', () => {
+      const o = { sessionExists: () => true }
+      const sess = (ids) => ({ type: 'principal_subscribed', requestId: 'r', sessions: ids.map((sessionId) => ({ sessionId, journalId: 'j', headSeq: 0 })) })
+      assert.ok(frameForPrincipal(client, sess(['sess-1']), o))
+      assert.equal(frameForPrincipal(client, sess(['sess-1', 'sess-2']), o), null)
+      assert.equal(frameForPrincipal(client, { type: 'principal_subscribed', requestId: 'r', sessions: 'x' }, o), null)
     })
 
     it('a grant revoked between vetting and sending is honoured', () => {

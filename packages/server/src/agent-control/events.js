@@ -56,6 +56,10 @@ const FORWARDED_TYPES = new Set([
   'permission_mode_changed',
   'confirm_permission_mode',
   'model_changed',
+  // #9075: the requested (`level`) and effective (`effective`: a string, null for "not
+  // reported yet", absent for "this provider makes no such report") effort. Applied-setting
+  // metadata, never the thinking text, which stays excluded below.
+  'thinking_level_changed',
   'available_models',
   'agent_busy',
   'agent_idle',
@@ -130,7 +134,7 @@ function boundIdentityValue(value) {
  * `truncated: true` so a caller can tell the difference from a payload that
  * was always this shape.
  */
-function truncateEventData(data, type) {
+export function truncateEventData(data, type, maxBytes = MAX_EVENT_BYTES) {
   if (!data || typeof data !== 'object') {
     return { truncated: true, originalType: type }
   }
@@ -142,7 +146,7 @@ function truncateEventData(data, type) {
   // identity fields are each near the cap (9 fields * 512B can still exceed
   // a small MAX_EVENT_BYTES in a future retune) — check the real total
   // rather than assuming the per-field cap times the field count fits.
-  if (Buffer.byteLength(JSON.stringify(kept), 'utf8') > MAX_EVENT_BYTES) {
+  if (Buffer.byteLength(JSON.stringify(kept), 'utf8') > maxBytes) {
     return { truncated: true, originalType: type }
   }
   let textKey = null
@@ -154,7 +158,7 @@ function truncateEventData(data, type) {
   const full = Buffer.from(data[textKey], 'utf8')
   const fitsWithPrefixBytes = (n) => {
     const candidate = { ...kept, [textKey]: full.subarray(0, n).toString('utf8') }
-    return Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_EVENT_BYTES
+    return Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= maxBytes
   }
   if (!fitsWithPrefixBytes(0)) {
     // Even an empty text field doesn't fit (identity fields alone are too

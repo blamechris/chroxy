@@ -154,6 +154,9 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
   principal_admin_grant: 'credential management',
   principal_admin_list: 'credential management',
   principal_admin_revoke: 'credential management',
+  principal_subscribe: 'agent-principal journal read path, never a bound client\'s',
+  principal_unsubscribe: 'agent-principal journal read path, never a bound client\'s',
+  principal_events_read: 'agent-principal journal read path, never a bound client\'s',
   pair_approve: 'credential management',
   pair_deny: 'credential management',
 

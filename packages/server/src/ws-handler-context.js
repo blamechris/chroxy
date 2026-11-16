@@ -90,6 +90,8 @@
  * @property {object|null} sessionCiWatcher - #7427 SessionCiWatcher, so an on-demand PR survey can arm the watch; null when `sessionCi.watch` is off.
  * @property {object|null} daemonUpdate - #8331 DaemonUpdateStatus (pending-update banner + restart-now / postpone request files); null when not wired.
  * @property {object|null} principalStore - #9116: the agent-principal store (principal-store.js) behind the strict-primary `principal_admin_*` handlers. Null where none was built.
+ * @property {object|null} principalJournal - #9118: the daemon-side normalized event journal (principal-journal.js) behind `principal_events_read`. Null where none was built.
+ * @property {object|null} principalSubscriptions - #9118: the per-client journal subscriptions (principal-subscriptions.js) behind `principal_subscribe`. Null where none was built.
  * @property {(principalId: string, reason?: string) => void} endPrincipalConnections - #9116: end every connection of one principal (credential_invalidated + close 4401); called after a revoke is acknowledged.
  *
  * @typedef {Object} WsHandlerRuntime
@@ -218,6 +220,11 @@ export const CTX_NAMESPACES = {
     // connections (4401). Null / absent where server-cli built no store.
     'principalStore',
     'endPrincipalConnections',
+    // #9118: the agent principal's read path (S3): the event journal and the per-client
+    // subscriptions to it. Null where server-cli built none; the `principal_*` read
+    // handlers then refuse rather than pretend there is history.
+    'principalJournal',
+    'principalSubscriptions',
   ],
   runtime: [
     'draining',
