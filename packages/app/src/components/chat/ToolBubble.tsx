@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
+import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, describeTurnTermination, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -46,11 +46,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  /** The trailing `rawToolName` is the UNFORMATTED `message.tool` (#6982) —
+  /** `rawToolName` is the UNFORMATTED `message.tool` (#6982) —
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -99,10 +99,18 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
       ? partialPreview
       : (rawContent || partialPreview);
 
-  // Hide empty tool messages. For suppressed tools `content` is the tool-name
+  // #8364: termination is independent of the result body (which may be empty
+  // or absent). It takes precedence over the synthetic error flag and must not
+  // imply that an interrupted command had no effects.
+  const termination = message.toolResultTerminatedReason
+    ? describeTurnTermination(message.toolResultTerminatedReason)
+    : null;
+
+  // Hide empty tool messages unless a terminated state still needs surfacing.
+  // For suppressed tools `content` is the tool-name
   // placeholder (non-empty, since the tool was matched by name) so the bubble
   // still renders as a quiet placeholder with just the tool name + pulse marker.
-  if (!content) return null;
+  if (!content && !termination) return null;
 
   const displayTool = formatToolName(message.tool);
 
@@ -115,7 +123,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   // the same predicate used by the ActivityIndicator above.
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
-  const inFlight = !hasResult;
+  const inFlight = !hasResult && !termination;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +134,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -217,6 +225,12 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {termination && (
+          <>
+            <Icon name="stop" size={12} color={COLORS.accentOrange} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+            <Text style={styles.terminationLabel}>{termination.label}</Text>
+          </>
+        )}
         {inFlight && (
           <View
             style={styles.pulse}
@@ -238,7 +252,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
       </View>
       {expanded ? (
         <>
-          {todoParsed ? (
+          {termination ? (
+            <Text selectable style={styles.toolContentExpanded}>{termination.summary}</Text>
+          ) : todoParsed ? (
             <TodoList parsed={todoParsed} />
           ) : webParsed ? (
             <WebToolResultView parsed={webParsed} />
@@ -276,7 +292,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           testID="tool-collapsed-preview"
           style={styles.toolContentCollapsed}
           numberOfLines={1}
-        >{preview}</Text>
+        >{termination ? termination.summary : preview}</Text>
       )}
     </TouchableOpacity>
   );
@@ -309,6 +325,11 @@ const styles = StyleSheet.create({
   },
   senderLabelTool: {
     color: COLORS.accentPurple,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  terminationLabel: {
+    color: COLORS.accentOrange,
     fontSize: 11,
     fontWeight: '600',
   },
