@@ -1211,6 +1211,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           aria-expanded={showAdvanced}
         >
           {showAdvanced ? '\u25BC' : '\u25B6'} Advanced
+          {/* #8221: disclose the submitted choice even while its checkbox is hidden. */}
+          {!showAdvanced && effectiveWorktree && ' (worktree isolation selected)'}
         </button>
       </div>
       {showAdvanced && (
