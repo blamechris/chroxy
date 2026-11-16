@@ -912,6 +912,13 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
       })
     }
 
+    it('computed key BOUNDARY: truthiness, !, !== false, Boolean(), ternary, && and destructure of a computed chain are NOT reported', () => {
+      for (const body of ['if (c[k].ide) return 1', 'return !c[k].ide', 'return c[k].ide !== false', 'return Boolean(c[k].ide)', 'return c[k].ide ? 1 : 2', 'return c[k].ide && 1', 'const { ide } = c[k]']) {
+        const r = scanFeatureReads(`export const g = (c, k) => {\n  ${body}\n}\n`, '_fixture.js')
+        assert.deepEqual(r.unrecognised.filter(u => u.descriptor.startsWith('computed-key')), [], body)
+      }
+    })
+
     it('computed key: ordinary computed access is not reported (no noise)', () => {
       const r = checkFeatures(fixtureGate("export const g = (seen, k, arr, i) => {\n  seen[k] = true\n  if (seen[k] === true) return arr[i].name\n  return arr[i]\n}\n"), md)
       assert.deepEqual(ofKind(r, 'shape'), [])
@@ -996,12 +1003,21 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
     return text.replace(from, () => to)
   }
 
+  // Floors, not pins: the parse is reading a real document (tables 19, links 45, headings 51
+  // when written), but the counts are not the subject, so unrelated edits must not trip them.
+  // Each sits well below the current count and far above what a parse that stopped matching returns.
+  const MIN_TABLES = 15
+  const MIN_LINKS = 30
+  const MIN_HEADINGS = 40
+  // Likewise for the schema/rows parse (69 keys when written).
+  const MIN_SCHEMA_KEYS = 60
+
   it('positive control: the schema parse reads the real CONFIG_SCHEMA', () => {
-    assert.ok(schema.size >= 60, `only ${schema.size} CONFIG_SCHEMA keys parsed`)
+    assert.ok(schema.size >= MIN_SCHEMA_KEYS, `only ${schema.size} CONFIG_SCHEMA keys parsed`)
     for (const [key, type] of [['port', 'number'], ['providers', 'array|object'], ['features', 'object'], ['codexBinary', 'string']]) {
       assert.equal(schema.get(key), type, `CONFIG_SCHEMA.${key}`)
     }
-    assert.ok(real.rows.size >= 60, `only ${real.rows.size} per-key rows parsed`)
+    assert.ok(real.rows.size >= MIN_SCHEMA_KEYS, `only ${real.rows.size} per-key rows parsed`)
     // The parse must agree with the runtime: validateConfig rejects exactly the keys
     // outside the real CONFIG_SCHEMA, so every parsed key must be accepted and a
     // made-up one must not be (a parse reading a different object fails one side).
@@ -1018,6 +1034,10 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
     assert.deepEqual(messages(real, 'phantom-row'), [])
   })
 
+  it('every table in the per-key section carries the expected header', () => {
+    assert.deepEqual(messages(real, 'unrecognised-table'), [])
+  })
+
   it("every row's documented type matches the schema's type", () => {
     assert.deepEqual(messages(real, 'type'), [])
   })
@@ -1030,7 +1050,7 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
 
   it("CONFIG.md's tables have the same column count in every row, and every anchor link resolves", () => {
     const r = checkMarkdownIntegrity(md)
-    assert.ok(r.tables >= 15 && r.links >= 30 && r.headings >= 40, `integrity parse looks empty: ${r.tables} tables, ${r.links} links, ${r.headings} headings`)
+    assert.ok(r.tables >= MIN_TABLES && r.links >= MIN_LINKS && r.headings >= MIN_HEADINGS, `integrity parse looks empty: ${r.tables} tables, ${r.links} links, ${r.headings} headings`)
     assert.deepEqual(r.problems.map(p => p.message), [])
   })
 
@@ -1091,6 +1111,11 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
     it('a table row with a cell too few', () => {
       const r = checkMarkdownIntegrity(mutate(md, '| `port` | number | - | `PORT` | Local', '| `port` | number | `PORT` | Local'))
       assert.ok(r.problems.some(p => p.kind === 'table' && p.message.includes('4 cells')))
+    })
+
+    it('a per-key table whose header was renamed is reported, not skipped', () => {
+      const r = checkSchemaRows(schema, mutate(md, '| Key | Type | CLI Flag | Environment Variable | Description |\n|-----|------|----------|---------------------|-------------|\n| `apiToken`', '| Key | Kind | CLI Flag | Environment Variable | Description |\n|-----|------|----------|---------------------|-------------|\n| `apiToken`'))
+      assert.ok(messages(r, 'unrecognised-table').length === 1, r.problems.map(p => p.message).join(' | '))
     })
 
     it('a table that lost its separator row', () => {

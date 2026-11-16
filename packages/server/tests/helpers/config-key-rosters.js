@@ -516,6 +516,13 @@ function parseSource(src, label) {
  *    is what exemptions key on. A computed access with a non-literal key
  *    (`c[`features`].u`, `c[k].u === true`, `c[k].u = true`) is reported as
  *    `computed-key:*` rather than ignored (#8564); ordinary `map[k]` access is not.
+ *    BOUNDARY of that rule, stated so the comment claims no more than the code
+ *    checks: a computed link followed by a further member is reported ONLY as
+ *    `<chain> === true`, `== true`, `true === <chain>` (optional chaining
+ *    accepted) or `<chain> = true`. It is NOT reported in a truthiness test
+ *    (`if (c[k].ide)`), `!`, `!== false`, `Boolean()`, a ternary, `&&`, or a
+ *    destructure. A static template key (`c[`features`]`) IS reported in any
+ *    position. Pinned by a negative test; widening it is a deliberate change.
  *
  * @param {string} src
  * @param {string} label
@@ -770,7 +777,12 @@ function githubSlug(heading) {
 }
 
 /**
- * Structural integrity of CONFIG.md: every table has the same number of cells in
+ * Structural integrity of CONFIG.md. LINK SCOPE: only inline `](#fragment)` links
+ * are checked. Reference-style links (`[x][ref]`), `<a name>` / `id=` anchors and
+ * relative file links (`](../x.md)`) are NOT checked, and a heading's slug is
+ * computed the GitHub way without emoji or HTML-heading handling.
+ *
+ * What it checks: every table has the same number of cells in
  * every row as its header and separator, and every `](#fragment)` link resolves
  * to a heading. Returns problems (never throws on a defect); REFUSES only when
  * it cannot read the document at all (no tables, no headings, no links, or an
@@ -848,12 +860,25 @@ export function checkSchemaRows(schema, md) {
   // Only tables headed `| Key | Type | CLI Flag | Environment Variable | Description |`
   // are per-key tables; the PVC / quota / ConfigMap tables below carry other rows.
   const isKeyHeader = cells => cells.length === 5 && cells.map(c => c.trim()).join('|') === 'Key|Type|CLI Flag|Environment Variable|Description'
+  // The per-key region ends at "### Environment variable names"; every table before
+  // it must carry the key header. A table whose header was renamed or reshaped is
+  // REPORTED (not skipped): skipping it would hide a phantom or mistyped row in it.
+  const regionEnd = lines.findIndex((l, i) => i > start && l.text === '### Environment variable names')
+  if (regionEnd === -1 || regionEnd >= end) throw new Error('REFUSE: CONFIG.md: no "### Environment variable names" heading closing the per-key tables')
   let inKeyTable = false
   let keyTables = 0
-  for (const { n, text } of lines.slice(start, end)) {
-    if (!text.startsWith('|')) { inKeyTable = false; continue }
+  let prevPipe = false
+  for (const [idx, { n, text }] of lines.slice(start, end).entries()) {
+    const isPipe = text.startsWith('|')
+    const tableStart = isPipe && !prevPipe
+    prevPipe = isPipe
+    if (!isPipe) { inKeyTable = false; continue }
     const cells = tableCells(text)
     if (isKeyHeader(cells)) { inKeyTable = true; keyTables++; continue }
+    if (tableStart) {
+      if (start + idx < regionEnd) add('unrecognised-table', `CONFIG.md:${n}: a table in the per-key section has header \`${text.slice(0, 80)}\`, not the expected \`| Key | Type | CLI Flag | Environment Variable | Description |\` — its rows are not compared with CONFIG_SCHEMA`)
+      continue
+    }
     if (!inKeyTable || cells.length < 5) continue
     const m = /^\s*`([A-Za-z_$][\w$]*)`\s*$/.exec(cells[0])
     if (!m) continue // header, separator, `_(env-only)_` rows
