@@ -9,7 +9,7 @@
  * likewise clipping-immune.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { findModelEntry, modelDisplayTarget, formatActiveModelLabel } from '@chroxy/store-core'
+import { modelDisplayTarget, formatActiveModelLabel } from '@chroxy/store-core'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
 // #6901: single-source the sandbox label/description from protocol's
@@ -34,16 +34,17 @@ import { ModelPickerModal } from './ModelPickerModal'
  * imported because the helper module is not yet on `main` — once #3887
  * lands, this can be refactored to call the shared helper.
  *
- * Picks the model entry by `fullId` first, then `id`, so users see the
- * canonical "claude-opus-4-7"-style identifier when available rather than
- * the dropdown's short `id` form.
+ * Receives an already-resolved display target, not a selection ID. Match
+ * only the row's target: another row may use this target as its opaque ID
+ * (#8594), so resolving it as an ID again would show that other model.
+ * Within matching targets, retain exact-ID metadata precedence over aliases.
  */
 function buildActiveModelTooltip(
   availableModels: ModelInfo[],
-  activeModel: string | null,
+  display: string | null,
 ): string {
-  const info = findModelEntry(availableModels, activeModel)
-  const display = info?.fullId || info?.id || activeModel
+  const info = availableModels.find(m => m.id === display && (m.fullId || m.id) === display)
+    ?? availableModels.find(m => (m.fullId || m.id) === display)
   if (!display) {
     return 'Active model. Click the model picker in the header to switch.'
   }
@@ -61,6 +62,7 @@ export interface ChatSettingsDropdownProps {
   /** #8909 — model ids the backend refused for this session's client; shown disabled in the picker. */
   rejectedModelIds?: readonly string[]
   activeModel: string | null
+  /** Already-resolved display target from modelDisplayTarget; never a selection ID. */
   modelTooltipTarget?: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
