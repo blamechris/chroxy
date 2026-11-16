@@ -25,6 +25,7 @@ import { isRenderableImageUri } from '../utils/attachment-preview'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
 import { useWindowedRange } from './useWindowedRange'
+import { useToastBottomOffset } from './useToastBottomOffset'
 import { TranscriptSearchBar } from './TranscriptSearchBar'
 import { useTranscriptSearch } from '../hooks/useTranscriptSearch'
 import type { SearchableRow } from '../lib/transcriptSearch'
@@ -1351,8 +1352,12 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // and both spacers are 0, so short conversations render exactly as before.
   const visible = dedupedMessages.slice(range.startIndex, range.endIndex)
 
+  // #8596 — publish this transcript's bottom edge so the toast stack rests on it.
+  const chatViewRef = useRef<HTMLDivElement>(null)
+  useToastBottomOffset(chatViewRef)
+
   return (
-    <div className="chat-view" data-testid="chat-view">
+    <div ref={chatViewRef} className="chat-view" data-testid="chat-view">
       {/*
         Chat redesign #6392 (presence rail): ONE left-edge spine per pane,
         absolutely positioned against this non-scrolling .chat-view parent — NOT

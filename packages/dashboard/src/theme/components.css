@@ -7782,9 +7782,19 @@ button.sidebar-token-view-session-row:hover {
 .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
 
 /* ---- Toast Notifications ---- */
+/* #8596: rests on the bottom edge of the chat TRANSCRIPT (bottom-right), so it
+   covers transcript content only: the plan-approval / recovery / activity
+   panels, the composer and the footer all sit below the transcript, hence below
+   the stack. ChatView publishes `--toast-bottom-offset` = viewport clientHeight
+   minus the transcript's bottom edge (useToastBottomOffset).
+   Arithmetic: bottom = offset + 56px, where 56 = the `.scroll-to-bottom` FAB's
+   12px bottom inset + 36px height + 8px gap, so the stack clears that FAB (it
+   lives inside the transcript at the same corner).
+   No transcript mounted (Control Room, settings, terminal-only): the variable is
+   absent, the -36px fallback gives -36 + 56 = 20px, the original spot. */
 .toast-container {
   position: fixed;
-  bottom: 20px;
+  bottom: calc(var(--toast-bottom-offset, -36px) + 56px);
   right: 20px;
   display: flex;
   flex-direction: column;
@@ -7828,6 +7838,14 @@ button.sidebar-token-view-session-row:hover {
   line-height: 1;
   padding: 0;
   flex-shrink: 0;
+  /* #8596: 44x44 hit area (repo tap-target floor). Negative margins cancel the
+     extra size so the toast's visual layout does not grow. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -14px -8px -14px 0;
 }
 
 .toast-close:hover { color: #fff; }
