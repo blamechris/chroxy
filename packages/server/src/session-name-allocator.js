@@ -197,6 +197,25 @@ export function normalizeLabel(raw) {
   return s.trim().normalize('NFC')
 }
 
+/**
+ * Is `name` an allocator-style name ("<label> <n>") for the project that `cwd` belongs to?
+ * Used to tell a name this module handed out from one a person typed.
+ */
+export function isAllocatorNameForCwd(name, cwd) {
+  if (typeof name !== 'string' || typeof cwd !== 'string' || cwd.length === 0) return false
+  let project
+  try {
+    project = canonicalProjectForCwd(cwd)
+  } catch {
+    return false
+  }
+  if (!project) return false
+  const label = normalizeLabel(project.label)
+  if (!label) return false
+  const key = keyForLabel(label)
+  return new RegExp(`^${escapeRegExp(key)} \\d+$`).test(name.normalize('NFC').toLowerCase())
+}
+
 export function keyForLabel(label) {
   return label.normalize('NFC').toLowerCase()
 }
