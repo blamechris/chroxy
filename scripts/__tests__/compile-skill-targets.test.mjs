@@ -20,6 +20,7 @@
  * invocation behind an "invoked directly" check so it is safe to import here.
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -1154,4 +1155,4 @@ if (ran !== EXPECTED_CASES) {
   )
   broken = true
 }
-process.exit(broken ? 1 : 0)
+await drainStdioAndExit(broken ? 1 : 0)

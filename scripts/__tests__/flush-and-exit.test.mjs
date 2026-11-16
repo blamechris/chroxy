@@ -9,6 +9,7 @@
  *   node scripts/__tests__/flush-and-exit.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { createWriteStream, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -29,7 +30,7 @@ const { flushAndExit } = await import(helperPath)
 // literally, so the exact count is knowable here in a way it is not for a
 // runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
 // bound for exactly that reason).
-const EXPECTED_CASES = 5
+const EXPECTED_CASES = 7
 
 let pass = 0
 let fail = 0
@@ -215,6 +216,59 @@ await test('fallback timer is unref-ed', async () => {
   assert(elapsed < 3000, `should exit quickly, took ${elapsed}ms`)
 })
 
+// --- Tests 6 & 7: stdout drain through a slow-read pipe (#9164) -----------
+// A child prints well over a pipe buffer (~1.3 MB of lines) and a final
+// sentinel, then exits. The parent deliberately does not read for 700 ms, so
+// the tail is still queued inside the child when it exits. With a bare
+// `process.exit` that tail is dropped (the CONTROL, which proves the case can
+// fail); with drainStdioAndExit it is delivered.
+const SENTINEL = 'SENTINEL-FINAL-LINE'
+const runSlowReader = async (exitStatement) => {
+  const { spawn } = await import('node:child_process')
+  const script = `
+    import { drainStdioAndExit } from '${helperPath}'
+    const line = 'x'.repeat(99) + '\\n'
+    for (let i = 0; i < 13000; i++) process.stdout.write(line)
+    process.stdout.write('${SENTINEL}\\n')
+    ${exitStatement}
+  `
+  return await new Promise((resolveP, rejectP) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const chunks = []
+    const killer = setTimeout(() => {
+      child.kill('SIGKILL')
+      rejectP(new Error('child did not finish within 15s'))
+    }, 15000)
+    // Lag the reader: nothing is consumed until the child has had time to
+    // fill the pipe and exit (or block on it).
+    const startReading = setTimeout(() => {
+      child.stdout.on('data', (c) => chunks.push(c))
+    }, 700)
+    child.on('close', (code) => {
+      clearTimeout(killer)
+      clearTimeout(startReading)
+      const out = Buffer.concat(chunks).toString('utf8')
+      resolveP({ code, out, lines: out.split('\n').filter(Boolean) })
+    })
+  })
+}
+
+await test('drainStdioAndExit delivers the final line through a slow-read pipe and keeps the exit code', async () => {
+  const r = await runSlowReader('await drainStdioAndExit(3)')
+  assert(r.code === 3, `exit code should be 3, got ${r.code}`)
+  assert(r.lines.length === 13001, `expected 13001 lines, got ${r.lines.length}`)
+  assert(r.lines[r.lines.length - 1] === SENTINEL, `last line should be the sentinel, got ${JSON.stringify(r.lines[r.lines.length - 1])}`)
+})
+
+await test('CONTROL: a bare process.exit under the same slow reader loses the final line', async () => {
+  const r = await runSlowReader('process.exit(3)')
+  assert(r.code === 3, `exit code should be 3, got ${r.code}`)
+  assert(!r.out.includes(SENTINEL),
+    'the sentinel survived a bare process.exit — the slow-pipe condition did not reproduce, so case 6 proves nothing')
+})
+
 // --- summary --------------------------------------------------------------
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 let broken = false
@@ -231,4 +285,4 @@ if (ran !== EXPECTED_CASES) {
   )
   broken = true
 }
-process.exit(broken ? 1 : 0)
+await drainStdioAndExit(broken ? 1 : 0)

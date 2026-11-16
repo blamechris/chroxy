@@ -41,6 +41,7 @@
  *   node scripts/__tests__/lint-workflow-npm-env.test.mjs
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -166,7 +167,7 @@ if (fail > 0) {
   // too. Only reachable when section 0 fails, but that is precisely the run
   // nobody is going to tidy up after by hand.
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 
 const {
@@ -675,9 +676,9 @@ if (total < MIN_CASES) {
     `HARNESS BROKEN: ran ${total} cases, expected at least ${MIN_CASES}. A case stopped being ` +
     'discovered — that is a shrinking suite, not a passing one.\n',
   )
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 if (fail > 0) {
   for (const f of failures) process.stdout.write(`\n--- ${f.name}\n${f.err.stack}\n`)
-  process.exit(1)
+  await drainStdioAndExit(1)
 }

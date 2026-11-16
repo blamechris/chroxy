@@ -17,6 +17,7 @@
 // EXPECTED_CASES is asserted equal, not >=, the same guard
 // check-release-pr-subject.test.mjs uses.
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { classifyDoctorOutput, classifyDoctorSpawnResult } from '../lib/classify-doctor-output.mjs'
 
 const EXPECTED_CASES = 39
@@ -358,6 +359,6 @@ console.log(`\nResults: ${passed} passed, ${failed} failed\n`)
 const ran = passed + failed
 if (ran !== EXPECTED_CASES) {
   console.log(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
-process.exit(failed ? 1 : 0)
+await drainStdioAndExit(failed ? 1 : 0)

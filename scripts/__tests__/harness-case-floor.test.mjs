@@ -72,6 +72,7 @@
  * Exit status: 0 if all cases pass, 1 otherwise.
  */
 
+import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -498,7 +499,7 @@ if (selfMatches.length !== 1) {
   process.stdout.write('\nHARNESS REFUSED: self-identification failed — refusing to run the behavioural ' +
     'pass, which would recurse into this file.\n')
 
-  process.exit(1)
+  await drainStdioAndExit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -834,4 +835,4 @@ if (ran !== expected) {
   )
   broken = true
 }
-process.exit(broken ? 1 : 0)
+await drainStdioAndExit(broken ? 1 : 0)

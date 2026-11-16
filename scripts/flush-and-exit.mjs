@@ -48,3 +48,67 @@ export const flushAndExit = (stream, exitCode, options = {}) => {
   // Don't let the fallback timer alone keep the event loop alive.
   if (typeof timer.unref === 'function') timer.unref()
 }
+
+/**
+ * Wait for process.stdout AND process.stderr to drain, then exit (#9164).
+ *
+ * `process.exit()` drops whatever Node still has queued for a stream. When
+ * stdout is a pipe whose reader lags, anything beyond the pipe buffer is still
+ * queued inside Node, so a harness that prints its summary / floor line and
+ * then calls `process.exit(code)` can lose exactly those last lines.
+ *
+ * Mechanism: writes on a stream complete in order, so the callback of a
+ * zero-length write on each stream fires only after every earlier queued write
+ * on that stream has been handed to the OS. We wait for both callbacks, then
+ * exit. (Verified in scripts/__tests__/flush-and-exit.test.mjs: a bare
+ * `process.exit` loses the sentinel under a lagging reader, this does not.)
+ *
+ * Bounded wait: if a stream never calls back (reader gone, broken stream), we
+ * exit anyway after `fallbackMs` (default 10000 ms). The timer is unref'd, so
+ * it never keeps the process alive, and a stream that errors also counts as
+ * done. The bound means a reader that stalls for longer than `fallbackMs` can
+ * still lose output; this reduces the loss window, it does not eliminate it.
+ *
+ * Usage (ES modules): `await drainStdioAndExit(code)`. The returned promise
+ * never resolves, so nothing after the await runs.
+ *
+ * @param {number} code - process exit code
+ * @param {{ exitFn?: (code: number) => void, fallbackMs?: number }} [options]
+ *   - exitFn: override for process.exit (test seam)
+ *   - fallbackMs: max ms to wait before exiting regardless (default 10000)
+ * @returns {Promise<never>}
+ */
+export const drainStdioAndExit = (code, options = {}) => {
+  const exitFn = options.exitFn || ((c) => process.exit(c))
+  const fallbackMs = options.fallbackMs ?? 10000
+  return new Promise(() => {
+    let exited = false
+    const exitOnce = () => {
+      if (exited) return
+      exited = true
+      exitFn(code)
+    }
+    // If the loop ever empties before we exit (unref'd timer, no handles), node
+    // would end with this code instead of silently turning a failure into 0.
+    process.exitCode = code
+    let pending = 2
+    for (const stream of [process.stdout, process.stderr]) {
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        if (--pending === 0) exitOnce()
+      }
+      try {
+        stream.once('error', done)
+        stream.write('', done)
+      } catch {
+        done()
+      }
+    }
+    const timer = setTimeout(exitOnce, fallbackMs)
+    // Do not let the fallback alone keep node alive; the pending write
+    // callbacks / stream handles do that for as long as there is output.
+    if (typeof timer.unref === 'function') timer.unref()
+  })
+}
