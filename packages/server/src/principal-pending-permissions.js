@@ -42,8 +42,11 @@ export const PENDING_DESCRIPTION_MAX = 200
 /** The longest tool name echoed. */
 const TOOL_NAME_MAX = 200
 
-/** How many BYOK subagent levels are followed (a child of a child of a child). */
-const MAX_SUBAGENT_DEPTH = 4
+/**
+ * The most holders (a session plus its BYOK subagents, at any depth) one read will visit. A
+ * read that would exceed it is reported incomplete (`truncated`), never as a complete snapshot.
+ */
+export const MAX_HOLDERS_PER_SESSION = 256
 
 function finiteMs(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null
@@ -60,7 +63,9 @@ function describeRequest({ requestId, sessionId, origin, pending, data }) {
   const out = {
     requestId,
     sessionId,
-    tool: typeof data?.tool === 'string' && data.tool.length > 0 ? data.tool.slice(0, TOOL_NAME_MAX) : 'unknown',
+    // A tool name comes from a provider or a hook payload (an MCP name, say), so it is redacted
+    // WHOLE before it is bounded: a cut first could leave a prefix no pattern recognises.
+    tool: typeof data?.tool === 'string' && data.tool.length > 0 ? redactBounded(data.tool, TOOL_NAME_MAX) : 'unknown',
     floored,
     explicitConsent: pending?.explicitConsent === true || data == null || data.explicitConsent !== false,
     nonDelegable: data == null || data.nonDelegable !== false,
@@ -74,23 +79,32 @@ function describeRequest({ requestId, sessionId, origin, pending, data }) {
   return out
 }
 
-/** The pending requests of one in-process holder, and of the subagents it routes to. */
-function readInProcess(holder, sessionId, add, seenHolders, depth) {
-  if (holder == null || typeof holder !== 'object' || seenHolders.has(holder)) return
-  seenHolders.add(holder)
-  const pendingMap = holder._pendingPermissions
-  if (pendingMap instanceof Map) {
-    const dataMap = holder._lastPermissionData instanceof Map ? holder._lastPermissionData : null
-    for (const [requestId, pending] of pendingMap) {
-      if (typeof requestId !== 'string') continue
-      add(describeRequest({ requestId, sessionId, origin: 'in_process', pending, data: dataMap?.get(requestId) }))
+/**
+ * The pending requests of one session's in-process holder and of every BYOK subagent below it,
+ * at any depth (iterative, with a visited set so a cycle ends). Returns true when the walk hit
+ * `MAX_HOLDERS_PER_SESSION` with holders still unvisited: the read is then incomplete.
+ */
+function readInProcess(root, sessionId, add) {
+  const seen = new Set()
+  const queue = [root]
+  let incomplete = false
+  while (queue.length > 0) {
+    const holder = queue.shift()
+    if (holder == null || typeof holder !== 'object' || seen.has(holder)) continue
+    if (seen.size >= MAX_HOLDERS_PER_SESSION) { incomplete = true; continue }
+    seen.add(holder)
+    const pendingMap = holder._pendingPermissions
+    if (pendingMap instanceof Map) {
+      const dataMap = holder._lastPermissionData instanceof Map ? holder._lastPermissionData : null
+      for (const [requestId, pending] of pendingMap) {
+        if (typeof requestId !== 'string') continue
+        add(describeRequest({ requestId, sessionId, origin: 'in_process', pending, data: dataMap?.get(requestId) }))
+      }
     }
+    const routing = holder._subagentPermissionRouting
+    if (routing instanceof Map) for (const child of new Set(routing.values())) queue.push(child)
   }
-  if (depth >= MAX_SUBAGENT_DEPTH) return
-  const routing = holder._subagentPermissionRouting
-  if (routing instanceof Map) {
-    for (const child of new Set(routing.values())) readInProcess(child, sessionId, add, seenHolders, depth + 1)
-  }
+  return incomplete
 }
 
 /**
@@ -113,6 +127,7 @@ export function collectPendingPermissions({
 }) {
   const wanted = new Set(sessionIds)
   const byRequest = new Map()
+  let incomplete = false
   const add = (request) => {
     // One request id is one request: the in-process read goes first, so a hook entry that
     // somehow shares its id never replaces it.
@@ -121,10 +136,11 @@ export function collectPendingPermissions({
 
   for (const sessionId of wanted) {
     const entry = typeof sessionManager?.getSession === 'function' ? sessionManager.getSession(sessionId) : null
-    readInProcess(entry?.session, sessionId, add, new Set(), 0)
+    if (readInProcess(entry?.session, sessionId, add)) incomplete = true
   }
 
-  if (pendingPermissions instanceof Map && permissionSessionMap instanceof Map) {
+  // Still O(total hook entries): the store has no per-session index (not needed at this size).
+  if (wanted.size > 0 && pendingPermissions instanceof Map && permissionSessionMap instanceof Map) {
     for (const [requestId, pending] of pendingPermissions) {
       const owner = permissionSessionMap.get(requestId)
       if (typeof owner !== 'string' || !wanted.has(owner)) continue
@@ -141,5 +157,5 @@ export function collectPendingPermissions({
     const cb = b.createdAt ?? Number.MAX_SAFE_INTEGER
     return ca !== cb ? ca - cb : a.requestId < b.requestId ? -1 : a.requestId > b.requestId ? 1 : 0
   })
-  return { generatedAt: now, permissions: live.slice(0, max), truncated: live.length > max }
+  return { generatedAt: now, permissions: live.slice(0, max), truncated: incomplete || live.length > max }
 }

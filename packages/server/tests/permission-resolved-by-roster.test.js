@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scanPermissionResolvedSites } from './helpers/permission-resolved-sites.js'
+import { EventNormalizer } from '../src/event-normalizer.js'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
@@ -56,6 +57,25 @@ describe('permission_resolved emit sites (#9119)', () => {
       .filter((s) => s.shape !== 'emit-relay' && !s.hasResolvedBy)
       .map((s) => `${s.file}:${s.line} (${s.shape})`)
     assert.deepEqual(missing, [], 'these announce permission_resolved without resolvedBy')
+  })
+
+  it('the BYOK relay path (an emit-relay site) is normalized on its way to the wire', () => {
+    // A relayed child event reaches clients inside an `agent_event` payload. Whatever the child
+    // put on `resolvedBy` must be rebuilt there, because the relay site itself cannot be.
+    assert.ok(sites.some((s) => s.file === 'byok-session.js' && s.shape === 'emit-relay'), 'precondition: the relay exists')
+    const poisoned = { kind: 'user', clientId: 'client-1', deviceName: "Chris's iPhone", token: 'tok-secret' }
+    const payload = { requestId: 'r1', decision: 'allow', reason: 'user', resolvedBy: poisoned }
+    const normalizer = new EventNormalizer()
+    try {
+      const result = normalizer.normalize('agent_event', { parentToolUseId: 'toolu_1', type: 'permission_resolved', payload }, { sessionId: 's1', mode: 'multi', getSessionEntry: () => null })
+      const wire = result.messages[0].msg.payload
+      assert.deepEqual(wire.resolvedBy, { kind: 'user' })
+      assert.equal(JSON.stringify(result.messages).includes('client-1'), false)
+      assert.deepEqual(payload.resolvedBy, poisoned, "the producer's own object is not mutated")
+      // other relayed events stay verbatim
+      const other = normalizer.normalize('agent_event', { parentToolUseId: 'toolu_1', type: 'tool_start', payload: { toolUseId: 'x', extra: { a: 1 } } }, { sessionId: 's1', mode: 'multi', getSessionEntry: () => null })
+      assert.deepEqual(other.messages[0].msg.payload, { toolUseId: 'x', extra: { a: 1 } })
+    } finally { normalizer.destroy() }
   })
 
   describe('the scan can fail (positive control on a synthetic source tree)', () => {

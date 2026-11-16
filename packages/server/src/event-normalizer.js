@@ -87,6 +87,18 @@ function backgroundTaskFields(ctx) {
   }
 }
 
+/**
+ * The payload of a relayed subagent event. A nested `permission_resolved` has its `resolvedBy`
+ * rebuilt (#9119) on a copy, so nothing but the class (and an agent's label) can ride the
+ * relay; every other payload stays verbatim.
+ */
+function nestedPayload(data) {
+  const payload = data.payload ?? {}
+  if (data.type !== 'permission_resolved' || payload === null || typeof payload !== 'object' || !('resolvedBy' in payload)) return payload
+  const { resolvedBy, ...rest } = payload
+  return { ...rest, ...resolvedByField(resolvedBy) }
+}
+
 const EVENT_MAP = Object.create(null)
 Object.assign(EVENT_MAP, {
   ready: (data, ctx) => {
@@ -352,7 +364,7 @@ Object.assign(EVENT_MAP, {
           type: 'agent_event',
           parentToolUseId: data.parentToolUseId,
           eventType: data.type,
-          payload: data.payload ?? {},
+          payload: nestedPayload(data),
         },
       }],
     }

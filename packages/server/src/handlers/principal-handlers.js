@@ -148,10 +148,11 @@ function handlePrincipalPendingPermissions(ws, client, msg, ctx) {
     if (!allGranted(client, ids, ctx)) return sendPrincipalRefusal(ws, client, msg, ctx, 'scope')
   } else {
     const opts = principalPolicyOptsFromCtx(ctx)
-    const listed = ctx.sessions?.sessionManager?.listSessions?.() ?? []
+    // Ids only: the full listing runs provider getters for EVERY session, so one the principal
+    // is not granted could change this reply.
+    const listed = ctx.sessions?.sessionManager?.listSessionIds?.() ?? []
     ids = []
-    for (const info of Array.isArray(listed) ? listed : []) {
-      const id = info?.sessionId
+    for (const id of Array.isArray(listed) ? listed : []) {
       if (typeof id === 'string' && !ids.includes(id) && principalMaySee(client, id, 'observe', opts).ok) ids.push(id)
     }
   }

@@ -18,8 +18,9 @@ import WebSocket from 'ws'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { PrincipalJournal } from '../src/principal-journal.js'
-import { collectPendingPermissions, PRINCIPAL_PENDING_PERMISSIONS_MAX, PENDING_DESCRIPTION_MAX } from '../src/principal-pending-permissions.js'
+import { collectPendingPermissions, PRINCIPAL_PENDING_PERMISSIONS_MAX, PENDING_DESCRIPTION_MAX, MAX_HOLDERS_PER_SESSION } from '../src/principal-pending-permissions.js'
 import { frameForPrincipal, PRINCIPAL_OUTGOING_DENIED, PRINCIPAL_PENDING_PERMISSION_FIELDS } from '../src/principal-policy.js'
+import { SessionManager } from '../src/session-manager.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 import { tempPrincipalDir, testPrincipalStore, insertPrincipal } from './helpers/principal-store-fixture.js'
@@ -300,6 +301,18 @@ describe('principal_pending_permissions over a real server', () => {
       assert.equal(JSON.stringify(reply).includes('sess-3'), false)
     })
 
+    it('the no-ids reply does not depend on any session the principal is not granted (no provider getter runs)', async () => {
+      const { port, token, sessionsMap } = await boot()
+      const a = raiseInProcess(attach(sessionsMap, 'sess-1'), 'Bash', { command: 'ls' })
+      // the full listing would run provider getters for every session; sess-3 is not granted and its getter is broken
+      server.sessionManager.listSessions = () => { throw new Error('a getter of an ungranted session failed') }
+      Object.defineProperty(sessionsMap.get('sess-3'), 'session', { get() { throw new Error('read an ungranted session') } })
+      const c = await open(port, token)
+      const reply = await snapshot(c)
+      assert.equal(reply.type, 'principal_pending_permissions_result')
+      assert.deepEqual(idsOf(reply), [a])
+    })
+
     it('a cwd-root grant covers the sessions under it, and an empty grant gets an empty snapshot, not a refusal', async () => {
       const root = mkdtempSync(join(tmpdir(), 'chroxy-pending-root-'))
       cleanups.push(() => rmSync(root, { recursive: true, force: true }))
@@ -576,6 +589,71 @@ describe('collectPendingPermissions (unit, over the real stores)', () => {
     const got = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: parent }) }).permissions
     assert.equal(got.length, 3)
     assert.deepEqual([...new Set(got.map((p) => p.sessionId))], ['s1'], 'the subagents prompts belong to the parent session')
+  })
+
+  it('follows a chain deeper than the old four-level cutoff, and finds the request in the deepest holder', () => {
+    const pms = Array.from({ length: 6 }, () => mgr())
+    const holders = pms.map(holder)
+    pms.at(-1).handlePermission('Bash', { command: 'deep' }, null, 'approve')
+    const deepId = [...pms.at(-1)._pendingPermissions.keys()][0]
+    for (let i = 0; i < 5; i++) holders[i]._subagentPermissionRouting = new Map([[`c${i}`, holders[i + 1]]])
+    const got = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: holders[0] }) })
+    assert.deepEqual(got.permissions.map((p) => p.requestId), [deepId])
+    assert.equal(got.truncated, false)
+  })
+
+  it('a walk past the holder ceiling is reported incomplete, never as a complete snapshot', () => {
+    const root = new EventEmitter()
+    root._subagentPermissionRouting = new Map(Array.from({ length: MAX_HOLDERS_PER_SESSION + 5 }, (_, i) => [`c${i}`, { _pendingPermissions: new Map() }]))
+    const got = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: root }) })
+    assert.equal(got.truncated, true)
+    const exact = new EventEmitter()
+    exact._subagentPermissionRouting = new Map(Array.from({ length: MAX_HOLDERS_PER_SESSION - 1 }, (_, i) => [`c${i}`, { _pendingPermissions: new Map() }]))
+    assert.equal(collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: exact }) }).truncated, false)
+  })
+
+  it('an empty authorized set returns an empty snapshot without reading the hook store', () => {
+    const trap = new Map([['h', {}]])
+    const owners = new Map([['h', 's9']])
+    owners.get = () => { throw new Error('the hook store was scanned for an empty grant') }
+    const got = collectPendingPermissions({ sessionIds: [], sessionManager: manager({}), pendingPermissions: trap, permissionSessionMap: owners })
+    assert.deepEqual(got, { generatedAt: got.generatedAt, permissions: [], truncated: false })
+  })
+
+  it('SessionManager.listSessionIds returns the live ids and touches no provider state', () => {
+    const entries = new Map([
+      ['a', { get session() { throw new Error('getter ran') } }],
+      ['b', { _destroying: true, get session() { throw new Error('getter ran') } }],
+      ['c', {}],
+    ])
+    assert.deepEqual(SessionManager.prototype.listSessionIds.call({ _sessions: entries }), ['a', 'c'])
+  })
+
+  describe('a tool name is redacted whole, then bounded', () => {
+    const client = { id: 'p', boundSessionId: 'sentinel', principal: { tier: 'observe', constraints: { sessionIds: ['s1'] } } }
+    const KEY = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop' // a JWT: a shape the redactor knows
+    const delivered = (tool, floored) => {
+      const pm = mgr()
+      pm.handlePermission('Bash', { command: 'x' }, null, 'approve')
+      const [id] = pm._pendingPermissions.keys()
+      Object.assign(pm._lastPermissionData.get(id), { tool, floored })
+      const snap = collectPendingPermissions({ sessionIds: ['s1'], sessionManager: manager({ s1: holder(pm) }) })
+      const frame = frameForPrincipal(client, { type: 'principal_pending_permissions_result', requestId: 'q', ...snap }, { sessionExists: () => true })
+      return frame.permissions[0].tool
+    }
+    for (const floored of [true, false]) {
+      it(`a credential in the name never reaches the principal (floored=${floored})`, () => {
+        assert.equal(delivered(`deploy-${KEY}-run`, floored).includes('eyJzdWIi'), false)
+      })
+      it(`a credential that straddles the 200-character cut leaves no prefix (floored=${floored})`, () => {
+        const out = delivered(`${'t'.repeat(180)}-${KEY}`, floored)
+        assert.ok(out.length <= 200)
+        assert.equal(out.includes('eyJhbGci'), false, out)
+      })
+    }
+    it('ordinary tool names pass through unchanged', () => {
+      for (const name of ['Bash', 'mcp__server__tool', 'Write']) assert.equal(delivered(name, false), name)
+    })
   })
 
   it('a hook-routed entry is listed only under its owner, and an ownerless one under nobody', () => {
