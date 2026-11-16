@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import { DevPreviewRequest } from './DevPreviewRequest'
 import type { DevPreviewRequestState } from '@chroxy/store-core'
 import type { ComponentProps } from 'react'
@@ -147,9 +148,38 @@ export interface AppHeaderProps {
   onPrefillSessionPrStatus?: () => void
 }
 
+/** CSS custom property carrying the header's rendered bottom edge in px (#8596). */
+export const APP_HEADER_HEIGHT_VAR = '--app-header-height'
+
+/**
+ * #8596 — publish the header's measured bottom edge on :root so the fixed toast
+ * stack can sit just below it at every width (the header wraps to several rows
+ * on narrow viewports). Without ResizeObserver the variable is left unset and
+ * the stylesheet's fallback applies.
+ */
+function useHeaderHeightVar(ref: React.RefObject<HTMLElement | null>) {
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const root = document.documentElement
+    const publish = () => {
+      root.style.setProperty(APP_HEADER_HEIGHT_VAR, `${Math.ceil(el.getBoundingClientRect().bottom)}px`)
+    }
+    publish()
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      root.style.removeProperty(APP_HEADER_HEIGHT_VAR)
+    }
+  }, [ref])
+}
+
 export function AppHeader(props: AppHeaderProps) {
+  const headerRef = useRef<HTMLElement>(null)
+  useHeaderHeightVar(headerRef)
   return (
-    <header id="header">
+    <header id="header" ref={headerRef}>
       {/* #5200: two-row header — row 1 (.header-main) is the 3-column main
           bar (logo/status | model+permission selects | bell + ⋯); the
           cost/token cluster moved to row 2 (.header-meta) so the main bar

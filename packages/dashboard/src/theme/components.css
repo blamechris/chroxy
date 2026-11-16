@@ -7782,14 +7782,15 @@ button.sidebar-token-view-session-row:hover {
 .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
 
 /* ---- Toast Notifications ---- */
-/* #8596: anchored to the TOP of the viewport, never the bottom. The chat
+/* #8596: anchored just BELOW the header (top-right), never the bottom. The chat
    composer (textarea + Send) is pinned to the bottom edge and its height varies
    with the draft, so any bottom-anchored stack lands on Send for the toast's
    lifetime (the quiet "Session stopped" toast swallowed an immediate Send
    click). Keep the stack out of the composer's region at every viewport. */
 .toast-container {
   position: fixed;
-  top: 20px;
+  /* header bottom edge is published by AppHeader (#8596); fallback ~ one row */
+  top: calc(var(--app-header-height, 56px) + 10px);
   right: 20px;
   display: flex;
   flex-direction: column;
@@ -8615,7 +8616,7 @@ button.sidebar-token-view-session-row:hover {
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }
   .status-bar { gap: 8px; padding: 4px 10px; font-size: 11px; }
   .modal-content { min-width: 0; max-width: 90vw; margin: 0 16px; padding: 16px; }
-  .toast-container { top: 10px; right: 10px; left: 10px; max-width: none; }
+  .toast-container { top: calc(var(--app-header-height, 56px) + 10px); right: 10px; left: 10px; max-width: none; }
   .plan-approval { margin: 6px 10px; }
   .loading-container, .error-screen-container { padding: 1rem; }
   .loading-qr-container { width: 180px; height: 180px; }

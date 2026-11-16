@@ -27,10 +27,12 @@ describe('toast container placement (#8596)', () => {
     expect(blocks.length >= 2).toBe(true)
   })
 
-  it('base rule is fixed and anchored to the top', () => {
+  const HEADER_TOP = /(^|[\s;])top:\s*calc\(\s*var\(--app-header-height\s*,[^)]+\)\s*\+\s*\d+px\s*\)/
+
+  it('base rule is fixed and its top is derived from the header height', () => {
     const base = blocks[0] ?? ''
     expect(/position:\s*fixed/.test(base)).toBe(true)
-    expect(/(^|[\s;])top:\s*\d+px/.test(base)).toBe(true)
+    expect(HEADER_TOP.test(base)).toBe(true)
   })
 
   it('no placement rule offsets from the bottom (where the composer lives)', () => {
@@ -39,9 +41,9 @@ describe('toast container placement (#8596)', () => {
     }
   })
 
-  it('narrow-viewport override also keeps the stack at the top', () => {
+  it('narrow-viewport override also derives its top from the header height', () => {
     const narrow = blocks.find((b) => /left:\s*10px/.test(b))
     expect(narrow !== undefined).toBe(true)
-    expect(/(^|[\s;])top:\s*\d+px/.test(narrow as string)).toBe(true)
+    expect(HEADER_TOP.test(narrow as string)).toBe(true)
   })
 })
