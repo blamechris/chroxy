@@ -575,6 +575,30 @@ describe('GitPanel outside-session status rows (#8187)', () => {
     expect(mockRequestGitUnstage).not.toHaveBeenCalled()
   })
 
+  it('disables a section Stage all / Unstage all that has only outside rows', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [{ path: '../s', status: 'modified' }], unstaged: [{ path: '../u', status: 'modified' }], untracked: ['../n'] })
+    expect(screen.getByText('Unstage all')).toBeDisabled()
+    for (const button of screen.getAllByText('Stage all')) expect(button).toBeDisabled()
+  })
+
+  it('keeps bulk buttons enabled when any selectable row remains', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [{ path: 's', status: 'modified' }, { path: '../s', status: 'modified' }], unstaged: [{ path: '../u', status: 'modified' }], untracked: ['n'] })
+    expect(screen.getByText('Unstage all')).toBeEnabled()
+    for (const button of screen.getAllByText('Stage all')) expect(button).toBeEnabled()
+  })
+
+  it('describes an outside checkbox with the visible hint, uniquely per row', () => {
+    render(<GitPanel />)
+    showStatus({ unstaged: [{ path: '../a', status: 'modified' }, { path: '../b', status: 'modified' }, { path: 'in', status: 'modified' }] })
+    expect(checkbox('../a')).toHaveAccessibleDescription('Outside this session’s folder')
+    expect(checkbox('../b')).toHaveAccessibleDescription('Outside this session’s folder')
+    expect(checkbox('../a').getAttribute('aria-describedby')).not.toBe(checkbox('../b').getAttribute('aria-describedby'))
+    expect(checkbox('../a')).not.toHaveAttribute('aria-description')
+    expect(checkbox('in')).not.toHaveAttribute('aria-describedby')
+  })
+
   it.each(['staged', 'unstaged'] as const)('disables a cross-boundary %s rename with an inside destination', section => {
     render(<GitPanel />)
     showStatus({ [section]: [{ path: 'new', oldPath: '../old', status: 'renamed' }] })

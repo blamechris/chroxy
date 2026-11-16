@@ -5,10 +5,10 @@ import type { GitFileStatus } from '../types'
 // These classify canonical cwd-relative status paths for the clients. Server
 // containment remains authoritative; this is not a general path validator.
 describe('git status outside-session selection (#8187)', () => {
-  it.each(['../sibling.txt', '../../other/file', '..'])('classifies %s outside', path => {
+  it.each(['../sibling.txt', '../../other/file', '..', '/etc/passwd', '/', 'D:/x', 'c:/x/y', 'D:\\x\\y'])('classifies %s outside', path => {
     expect(git.isGitPathOutsideCwd(path)).toBe(true)
   })
-  it.each(['inside.txt', 'dir/file', '..notes', 'dir/../literal', ''])('does not reject in-folder status spelling %s', path => {
+  it.each(['inside.txt', 'dir/file', '..notes', 'dir/../literal', '', 'C:foo', 'a:b/c', 'dir/D:/x', 'sub/dir/file'])('does not reject in-folder status spelling %s', path => {
     expect(git.isGitPathOutsideCwd(path)).toBe(false)
   })
   it.each([
@@ -19,6 +19,13 @@ describe('git status outside-session selection (#8187)', () => {
   ])('marks the whole outside entry $path nonselectable', entry => {
     expect(git.isGitFileOutsideCwd(entry)).toBe(true)
     expect(git.expandRenamePathsForStaging([entry.path], [entry])).toEqual([])
+  })
+  it('treats an absolute-path rename half as outside the whole entry', () => {
+    expect(git.isGitFileOutsideCwd({ path: 'in', oldPath: 'D:/old', status: 'renamed' })).toBe(true)
+    expect(git.expandRenamePathsForStaging(['in', '/abs'], [{ path: 'in', oldPath: '/old', status: 'renamed' }])).toEqual([])
+  })
+  it('exports one hint string for every client', () => {
+    expect(git.GIT_OUTSIDE_CWD_HINT).toBe('Outside this session’s folder')
   })
   it('drops directly selected outside paths even without matching entries', () => {
     expect(git.expandRenamePathsForStaging(['../outside', 'inside', '../../outside'], [])).toEqual(['inside'])

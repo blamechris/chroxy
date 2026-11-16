@@ -225,12 +225,19 @@ export function handleGitStatusResult(
   }
 }
 
+/** Hint shown on non-selectable outside-folder rows; one string for every client. */
+export const GIT_OUTSIDE_CWD_HINT = 'Outside this session’s folder'
+
 /**
  * Classify canonical cwd-relative git status paths for client selection (#8187).
- * This is a UI hint, not path validation: server containment remains authoritative.
+ * Mirrors the server's `inside` filter in ws-file-ops/git.js: `..`, a `../`
+ * prefix, or an absolute path (POSIX `/…`, or a Windows drive such as `D:/x`
+ * or `D:\x`, which a different-drive repo yields) is outside. `..notes` and
+ * drive-relative `C:foo` are not. This is a UI hint, not path validation:
+ * server containment remains authoritative.
  */
 export function isGitPathOutsideCwd(path: string): boolean {
-  return path === '..' || path.startsWith('../')
+  return path === '..' || path.startsWith('../') || path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
 }
 
 /** A rename must stay selectable as a whole, never as just its inside half. */

@@ -110,6 +110,18 @@ describe('GitView session-folder boundary', () => {
     expect(mockStore.requestGitUnstage).not.toHaveBeenCalled();
   });
 
+  it.each(['staged', 'unstaged'] as const)('does not re-select a %s row that left and re-entered the folder', (section) => {
+    const label = `${section === 'staged' ? 'Staged' : 'Unstaged'} modified file back.ts`;
+    show({ [section]: [{ path: 'back.ts', status: 'modified' }] });
+    press(label);
+    expect(control(label).props.accessibilityState.checked).toBe(true);
+    updateStatus({ [section]: [{ path: '/abs/back.ts', status: 'modified' }, { path: 'back.ts', oldPath: '../x', status: 'renamed' }] });
+    updateStatus({ [section]: [{ path: 'back.ts', status: 'modified' }] });
+    expect(control(label).props.accessibilityState.checked).toBe(false);
+    expect(control('Stage selected files')).toBeUndefined();
+    expect(control('Unstage selected files')).toBeUndefined();
+  });
+
   it('keeps in-folder names that merely start with two dots selectable', () => {
     show({ unstaged: [{ path: '..notes', status: 'modified' }], untracked: ['..draft.md'] });
     press('Unstaged modified file ..notes');

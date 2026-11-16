@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 // Renames move both index halves together; copies only act on their destination.
-import { expandRenamePathsForStaging, isGitPathOutsideCwd, isGitFileOutsideCwd } from '@chroxy/store-core';
+import { expandRenamePathsForStaging, isGitPathOutsideCwd, isGitFileOutsideCwd, GIT_OUTSIDE_CWD_HINT } from '@chroxy/store-core';
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -30,7 +30,7 @@ interface GitViewProps {
 
 type TabId = 'changes' | 'branches';
 
-const OUTSIDE_CWD_HINT = 'Outside this session’s folder';
+const OUTSIDE_CWD_HINT = GIT_OUTSIDE_CWD_HINT;
 
 const STATUS_COLORS: Record<string, string> = {
   modified: COLORS.accentOrange,

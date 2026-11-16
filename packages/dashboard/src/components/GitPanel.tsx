@@ -19,14 +19,14 @@
  * git_create_pr_result. Branch SWITCHING (checkout) is still follow-up work (no
  * wire message exists for it, and the mobile app's Branches tab is read-only).
  */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useId } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { ConfirmDialog } from './ConfirmDialog'
 // #7292 — a staged/unstaged rename entry carries its pre-rename
 // `oldPath`; expandRenamePathsForStaging inserts it alongside the selected
 // `path` before a git_stage/git_unstage request so both index halves of the
 // rename move together (see @chroxy/store-core's handlers/git.ts).
-import { expandRenamePathsForStaging, isGitFileOutsideCwd, isGitPathOutsideCwd } from '@chroxy/store-core'
+import { expandRenamePathsForStaging, isGitFileOutsideCwd, isGitPathOutsideCwd, GIT_OUTSIDE_CWD_HINT } from '@chroxy/store-core'
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -72,6 +72,7 @@ function FileRow({
   const outside = status === 'untracked'
     ? isGitPathOutsideCwd(path)
     : isGitFileOutsideCwd({ path, oldPath, status })
+  const hintId = `git-outside-hint-${useId()}`
   const name = path.includes('/') ? path.split('/').pop()! : path
   const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''
   const cls = status === 'untracked' ? 'git-status-untracked' : statusClass(status)
@@ -85,7 +86,7 @@ function FileRow({
         disabled={outside}
         onChange={() => { if (!outside) onToggle() }}
         aria-label={`${!outside && selected ? 'Deselect' : 'Select'} ${path}`}
-        aria-description={outside ? "Outside this session's folder" : undefined}
+        aria-describedby={outside ? hintId : undefined}
       />
       <span className={`git-status-badge ${cls}`}>{label}</span>
       <span className="git-file-path" title={oldPath ? `${oldPath} → ${path}` : path}>
@@ -96,7 +97,7 @@ function FileRow({
         {!oldPath && dir && <span className="git-file-dir">{dir}</span>}
         <span className="git-file-name">{name}</span>
       </span>
-      {outside && <span className="git-file-dir">Outside this session's folder</span>}
+      {outside && <span id={hintId} className="git-file-outside-hint">{GIT_OUTSIDE_CWD_HINT}</span>}
     </label>
   )
 }
@@ -215,6 +216,10 @@ export function GitPanel() {
   const stagedPaths = useMemo(() => new Set(staged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path)), [staged])
   const unstagedPaths = useMemo(() => new Set(unstaged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path)), [unstaged])
   const untrackedSet = useMemo(() => new Set(untracked.filter(p => !isGitPathOutsideCwd(p))), [untracked])
+
+  // Section-header bulk buttons: nothing selectable means nothing to send.
+  const canStageAll = unstagedPaths.size > 0 || untrackedSet.size > 0
+  const canUnstageAll = stagedPaths.size > 0
 
   const hasUnstagedSelected = useMemo(
     () => Array.from(selectedPaths).some(p => unstagedPaths.has(p) || untrackedSet.has(p)),
@@ -537,7 +542,7 @@ export function GitPanel() {
             <div className="git-section" data-testid="git-staged-section">
               <div className="git-section-header">
                 <span className="git-section-title">Staged ({staged.length})</span>
-                <button type="button" className="git-section-action" onClick={handleUnstageAll} disabled={stagingInProgress}>
+                <button type="button" className="git-section-action" onClick={handleUnstageAll} disabled={stagingInProgress || !canUnstageAll}>
                   Unstage all
                 </button>
               </div>
@@ -558,7 +563,7 @@ export function GitPanel() {
             <div className="git-section" data-testid="git-unstaged-section">
               <div className="git-section-header">
                 <span className="git-section-title">Changes ({unstaged.length})</span>
-                <button type="button" className="git-section-action" onClick={handleStageAll} disabled={stagingInProgress}>
+                <button type="button" className="git-section-action" onClick={handleStageAll} disabled={stagingInProgress || !canStageAll}>
                   Stage all
                 </button>
               </div>
@@ -579,7 +584,7 @@ export function GitPanel() {
             <div className="git-section" data-testid="git-untracked-section">
               <div className="git-section-header">
                 <span className="git-section-title">Untracked ({untracked.length})</span>
-                <button type="button" className="git-section-action" onClick={handleStageAll} disabled={stagingInProgress}>
+                <button type="button" className="git-section-action" onClick={handleStageAll} disabled={stagingInProgress || !canStageAll}>
                   Stage all
                 </button>
               </div>
