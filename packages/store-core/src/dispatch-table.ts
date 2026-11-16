@@ -615,21 +615,12 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * OPTIONAL: when omitted, a client keeps using its own hardcoded
    * DEFAULT_PROVIDER fallback, exactly as before this field existed. The
    * dashboard implements it (a `chroxy_default_provider` localStorage key
-   * gates the apply — see message-handler.ts). The mobile app does NOT
-   * implement it (#8151 round-2 review S6) — not because it needs to: the
-   * app's "Default" chip already sends no explicit `provider` at session
-   * creation (CreateSessionModal), deferring entirely to the SERVER's own
-   * resolution, so the real functional behaviour this field exists to fix
-   * (a Docker image's CHROXY_PROVIDER picking the wrong provider) is
-   * already correct there by construction. What the app does NOT get from
-   * this field is cosmetic: its own capability lookups that fall back to
-   * the baked-in `DEFAULT_PROVIDER` constant (e.g. `provider ||
-   * DEFAULT_PROVIDER` in CreateSessionModal) can describe the wrong
-   * provider's capabilities for a "Default" selection on a server whose
-   * default differs from that constant, until a session actually exists and reports its own
-   * real provider. Wiring this hook into the app's own persisted-settings
-   * store would close that cosmetic gap; it is tracked as a follow-up
-   * rather than folded in here.
+   * gates the apply — see message-handler.ts). Mobile stores it as
+   * connection-scoped display metadata (#8188): its Default chip uses the
+   * advertisement for capability notes, with DEFAULT_PROVIDER as the
+   * older-daemon fallback. It is not a persisted preference and is cleared
+   * on connect/transport teardown. Mobile session creation still omits
+   * `provider`, leaving actual default resolution entirely to the server.
    */
   applyServerDefaultProvider?(name: string): void
 }

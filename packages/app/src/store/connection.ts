@@ -671,6 +671,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   modelsByProvider: {},
   permissionModesByProvider: {},
   availableProviders: [],
+  serverDefaultProvider: null,
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
@@ -1166,7 +1167,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       useConnectionLifecycleStore.getState().connectionPhase === 'connected';
     const phase =
       isReconnect || _retryCount > 0 || wasConnectedPhase ? 'reconnecting' : 'connecting';
-    set({ socket: null });
+    // Re-learn the default for every transport, including same-server redials:
+    // an older daemon must never inherit a previous connection's advertisement.
+    set({ socket: null, serverDefaultProvider: null });
     useConnectionLifecycleStore.getState().setConnectionPhase(phase);
     useConnectionLifecycleStore.getState().setConnectionError(
       // Only clear on fresh user-initiated connections (not retries/reconnects)
@@ -1577,7 +1580,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearHandshakeTimer();
 
       const wasConnected = !useConnectionLifecycleStore.getState().userDisconnected && (useConnectionLifecycleStore.getState().connectionPhase === 'connected' || socketCtx.authReceived === true);
-      set({ socket: null });
+      set({ socket: null, serverDefaultProvider: null });
 
       // #7456 — the replay window and its live-arrival ledger are
       // per-CONNECTION state, like the rebuild baseline: release them on the
@@ -1673,7 +1676,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // (this attempt errored; the reconnect ladder takes over).
       clearHandshakeTimer();
 
-      set({ socket: null });
+      set({ socket: null, serverDefaultProvider: null });
 
       // #7456 — the replay window and its live-arrival ledger are
       // per-CONNECTION state, like the rebuild baseline: release them on the
@@ -1780,6 +1783,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       modelsByProvider: {},
       permissionModesByProvider: {},
       availableProviders: [],
+      serverDefaultProvider: null,
       myClientId: null,
       connectedClients: [],
       primaryClientId: null,
