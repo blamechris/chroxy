@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, chmodSync, symlinkSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
@@ -432,6 +432,10 @@ describe('config parser agrees with git (oracle)', () => {
     '[core\n\tbare = true\n',
     '[ core]\n\tbare = true\n', // git: bad config line
     '[core ]\n\tbare = true\n', // git: bad config line
+    '[co\\\nre]\n\tbare = true\n', // continuation inside a header
+    '[core]\n\tbare\\\n= true\n', // continuation between key and `=`
+    '[core]\n\twork\\\ntree = ../w\n', // continuation inside a key name
+    '[core]\n\\\n\tbare = true\n', // a lone backslash line
     '[core]\n\tworktree =\n', // git yields "": not the same as unset, so refuse
     '[core]\n\tworktree = ""\n',
   ]
@@ -531,5 +535,24 @@ describe('large configs and stray .git directories', () => {
     const none = []
     assert.ok(canonicalProjectForCwd(ok, NO_TMP, (info) => none.push(info)))
     assert.deepEqual(none, [])
+  })
+})
+
+
+describe('symlinked HEAD', { skip: process.platform === 'win32' }, () => {
+  it('a symlink into refs/ (even dangling, as git still accepts) counts as a git dir; any other target does not', () => {
+    const b = base()
+    const mk = (name, target) => {
+      const d = join(b, name)
+      mkdirSync(join(d, '.git'), { recursive: true })
+      symlinkSync(target, join(d, '.git', 'HEAD'))
+      return d
+    }
+    const ok = mk('legacy', 'refs/heads/main') // dangling: the branch is unborn
+    assert.deepEqual(canonicalProjectForCwd(ok, NO_TMP), { label: 'legacy', root: ok })
+    const outside = mk('outside', '/etc/hosts')
+    mkdirSync(join(outside, 'sub'))
+    const got = canonicalProjectForCwd(join(outside, 'sub'), NO_TMP)
+    assert.notEqual(got?.label, 'outside', 'a HEAD pointing outside refs/ is not a git dir')
   })
 })

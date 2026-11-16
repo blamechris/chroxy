@@ -21,7 +21,7 @@
  * package's fixtures change (`CHROXY_WORKTREES_ROOT` /
  * `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT`, and `CHROXY_HOOKS_TMP_PREFIXES`).
  */
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 /** Default to process.env without depending on the `process` global type (tsconfig `types: []`). */
@@ -445,12 +445,20 @@ function readSmallFile(path, maxBytes = GIT_POINTER_MAX_BYTES) {
         }
     }
 }
-/** A real git dir: a directory holding a regular HEAD file. */
+/**
+ * A real git dir: a directory whose HEAD is a regular file, or (as git still accepts for
+ * legacy repos) a symlink into `refs/` — even a dangling one, which is how an unborn branch
+ * looks. A symlink to anywhere else is not a HEAD.
+ */
 function isGitDirectory(dir) {
     try {
         if (!statSync(dir).isDirectory())
             return false;
-        return statSync(join(dir, 'HEAD')).isFile();
+        const head = join(dir, 'HEAD');
+        const l = lstatSync(head);
+        if (l.isSymbolicLink())
+            return /^refs\//.test(readlinkSync(head));
+        return l.isFile();
     }
     catch {
         return false;
@@ -505,20 +513,28 @@ function parseConfigBool(value) {
     return null;
 }
 /**
- * Join `\<newline>` continuations the way git does: only inside values. A comment
- * ends at its newline whatever precedes it, and an escaped backslash (`\\`) followed
- * by a newline is a complete line, not a continuation.
+ * Join `\<newline>` continuations the way git does: only inside VALUES (after the
+ * `=` of a key line). A comment ends at its newline whatever precedes it, and an
+ * escaped backslash (`\\`) followed by a newline is a complete line. A `\<newline>`
+ * anywhere else (a header, a key name, a lone `\`) is something git rejects as a bad
+ * config line, so it is unsupported: returns null and the caller refuses.
  */
 function joinContinuations(text) {
     const src = text.replace(/\r\n/g, '\n');
     let out = '';
     let inQuote = false;
     let inComment = false;
+    let inValue = false;
+    let inHeader = false;
+    let lineBlank = true; // only whitespace so far on this line
     for (let i = 0; i < src.length; i++) {
         const c = src[i];
         if (c === '\n') {
             inQuote = false;
             inComment = false;
+            inValue = false;
+            inHeader = false;
+            lineBlank = true;
             out += c;
             continue;
         }
@@ -529,9 +545,12 @@ function joinContinuations(text) {
         if (c === '\\') {
             const n = src[i + 1];
             if (n === '\n') {
-                i++; // continuation
+                if (!inValue)
+                    return null;
+                i++; // continuation inside a value
                 continue;
             }
+            lineBlank = false;
             out += c;
             if (n !== undefined) {
                 out += n;
@@ -543,6 +562,14 @@ function joinContinuations(text) {
             inQuote = !inQuote;
         else if (!inQuote && (c === '#' || c === ';'))
             inComment = true;
+        else if (!inQuote && c === '[' && lineBlank)
+            inHeader = true;
+        else if (!inQuote && c === ']' && inHeader)
+            inHeader = false;
+        else if (!inQuote && c === '=' && !inHeader)
+            inValue = true;
+        if (c !== ' ' && c !== '\t')
+            lineBlank = false;
         out += c;
     }
     return out;
@@ -561,6 +588,8 @@ function joinContinuations(text) {
  */
 export function _parseCoreConfig(text) {
     const joined = joinContinuations(text);
+    if (joined === null)
+        return null;
     let inCore = false;
     let bare = false;
     let worktree = null;

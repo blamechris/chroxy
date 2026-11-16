@@ -643,18 +643,49 @@ describe('eviction cost near the cap', () => {
     const size = Buffer.byteLength(JSON.stringify(doc))
     assert.ok(size < 1024 * 1024)
     const budget = size - 60_000 // about 260 records must go
-    const alloc = createSessionNameAllocator({ dir, deps: { maxBytes: budget, syncDir: noSync } })
-    const t0 = performance.now()
+    let serializations = 0
+    const alloc = createSessionNameAllocator({ dir, deps: { maxBytes: budget, syncDir: noSync, onSerialize: () => { serializations += 1 } } })
     const r = alloc.allocate({ cwd: project('proj-0-fresh'), idempotencyKey: 'new-key' })
-    const ms = performance.now() - t0
     assert.equal(r.ok, true, JSON.stringify(r))
     const stored = readDoc(top(dir).A)
     assert.ok(statSync(top(dir).A).size <= budget)
     assert.ok(Object.keys(stored.body.keys).length < 300)
     assert.ok('new-key' in stored.body.keys, 'the current record is kept')
     assert.ok(!('k-0' in stored.body.keys) && 'k-511' in stored.body.keys, 'oldest by seq went first')
-    assert.ok(ms < 500, `eviction took ${ms.toFixed(0)}ms`)
-    console.log(`# eviction near cap: ${ms.toFixed(0)}ms for ${512 - Object.keys(stored.body.keys).length + 1} records`)
+    assert.ok(serializations <= 3, `the store was re-serialized ${serializations} times for one batch of evictions`)
+  })
+})
+
+describe('log dedupe is per allocator instance', () => {
+  it('two allocators on one closed store each log their own fail-closed error', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    writeFileSync(f.top().A, 'x')
+    writeFileSync(f.top().B, 'y')
+    const logsB = []
+    const other = createSessionNameAllocator({ dir: f.dir, log: { error: (m) => logsB.push(m) } })
+    for (let i = 0; i < 3; i++) {
+      f.alloc.allocate({ cwd })
+      other.allocate({ cwd })
+    }
+    assert.equal(f.logs.filter((l) => l.level === 'error').length, 1)
+    assert.equal(logsB.length, 1)
+  })
+
+  it('a write budget larger than the read cap is clamped to it (a store never outgrows what a load accepts)', () => {
+    const dir = tmp('names-clamp-')
+    const body = { projects: {}, keys: {}, seq: 0 }
+    for (let i = 0; i < 2600; i++) body.projects[`proj-${i}`] = { label: `proj-${i}`, root: 'x'.repeat(300), next: 5 }
+    const LIMIT = 1024 * 1024
+    const size = () => Buffer.byteLength(JSON.stringify(sign({ gen: 1, body })))
+    body.projects['proj-0'].root += 'x'.repeat(Math.max(0, LIMIT - 200 - size()))
+    assert.ok(size() < LIMIT && size() > LIMIT - 300)
+    putStore(dir, sign({ gen: 1, body }))
+    const alloc = createSessionNameAllocator({ dir, deps: { maxBytes: 50 * 1024 * 1024, syncDir: noSync } })
+    assert.deepEqual(alloc.allocate({ cwd: project('a-brand-new-project-with-a-long-enough-name-to-overflow') }), { ok: false, reason: 'store_full' })
+    assert.ok(statSync(top(dir).A).size <= LIMIT)
+    assert.equal(alloc.allocate({ cwd: project('proj-5') }).ok, true, 'an existing project still allocates')
   })
 })
 
@@ -665,7 +696,6 @@ describe('refused git config visibility', () => {
     writeFileSync(join(cwd, '.git', 'config'), '[include]\n\tpath = SECRET-MARKER-path\n')
     assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'non_project' })
     assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'non_project' })
-    assert.deepEqual(createSessionNameAllocator({ dir: f.dir, log: { warn: (m, x) => f.logs.push({ level: 'warn', m, x }) } }).allocate({ cwd }), { ok: false, reason: 'non_project' })
     const warns = f.logs.filter((l) => l.level === 'warn')
     assert.equal(warns.length, 1)
     assert.ok(/legacy naming/.test(warns[0].m) && /config_unsupported_syntax/.test(warns[0].m))

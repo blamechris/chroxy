@@ -138,9 +138,6 @@ const MAX_LIVE_SKIPS = 64
 const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0
 const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
 
-// Once per process per (dir, reason) — a closed allocator is polled on every create.
-const loggedFailClosed = new Set()
-const loggedRefusals = new Set()
 
 const genName = (gen, mirror) => `session-names.g${String(gen).padStart(12, '0')}${mirror ? '.mirror' : ''}.json`
 
@@ -262,7 +259,7 @@ const setOwn = (obj, k, v) => Object.defineProperty(obj, k, { value: v, enumerab
  * @param {() => number} [opts.now]        wall clock (idempotency TTL only)
  * @param {{warn?:Function,error?:Function,info?:Function}} [opts.log]
  * @param {number} [opts.maxAttempts]      bound on CAS retries
- * @param {object} [opts.deps]             test seams: readFile, readdir, linkSync, syncDir, writeSync,
+ * @param {object} [opts.deps]             test seams: readFile, readdir, linkSync, syncDir, writeSync, onSerialize,
  *                                         afterLoad, maxBytes
  */
 export function createSessionNameAllocator({
@@ -279,7 +276,8 @@ export function createSessionNameAllocator({
   const writeBytes = deps.writeSync ?? ((fd, buf, off, len) => writeSync(fd, buf, off, len))
   const listDir = deps.readdir ?? readdirSync
   const afterLoad = deps.afterLoad ?? null
-  const maxBytes = deps.maxBytes ?? MAX_STORE_BYTES
+  // The budget can be tightened for tests but never loosened past what a load will accept.
+  const maxBytes = Math.min(deps.maxBytes ?? MAX_STORE_BYTES, MAX_STORE_BYTES)
 
   // A refused git config makes the project fall back to legacy names: say so once per root.
   const onRefuse = ({ reason, dir: where }) => {
@@ -288,6 +286,10 @@ export function createSessionNameAllocator({
     loggedRefusals.add(k)
     emit('warn', `session names: ${where} fell back to legacy naming (${reason}); its git config is outside the supported subset`, { reason, dir: where })
   }
+
+  // Once per allocator per (dir, reason): a closed allocator is polled on every create.
+  const loggedFailClosed = new Set()
+  const loggedRefusals = new Set()
 
   const emit = (level, msg, fields) => {
     try {
@@ -343,7 +345,10 @@ export function createSessionNameAllocator({
     return { ok: false, reason }
   }
 
-  const serialize = (gen, body) => JSON.stringify({ version: VERSION, gen, body, sha256: digest(VERSION, gen, body) })
+  const serialize = (gen, body) => {
+    deps.onSerialize?.()
+    return JSON.stringify({ version: VERSION, gen, body, sha256: digest(VERSION, gen, body) })
+  }
 
   /**
    * Fit the serialized store into the budget by evicting idempotency records, oldest seq first,
