@@ -4,6 +4,15 @@ import { posix as path } from 'node:path'
 export const VERIFY_SCRIPT = 'scripts/verify-publish-artifacts.mjs'
 const REPO = '/__chroxy_repo__'
 
+// The only fs functions whose argument is followed as an input.
+const FS_READS = ['readFile', 'readFileSync', 'createReadStream']
+// The real verifier also creates/removes its temp dir, writes a generated
+// consumer package.json and checks for files it just produced. None of those
+// is a repo content input, so they are tolerated ONLY in the verifier and only
+// up to today's call counts: any additional call is refused, never ignored.
+// existsSync with a literal repo path is still discovered as an input.
+const VERIFIER_FS_CALLS = { mkdtempSync: 1, rmSync: 1, writeFileSync: 1, existsSync: 3 }
+
 function walk(node, visit, parent = null) {
   if (!node || typeof node.type !== 'string') return
   visit(node, parent)
@@ -235,6 +244,16 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
         if (!/\.(?:mjs|cjs|js)$/.test(target)) unsupported(file, node, 'local module imports must have a .js/.mjs/.cjs extension')
         visit(target)
       } else if (/^(?:[/.]|file:)/.test(value)) unsupported(file, node, 'absolute or file URL imports are not supported')
+      else if (/^(?:node:)?module$/.test(value)) unsupported(file, node, "'node:module' (createRequire) lets a CommonJS dependency escape discovery")
+    }
+    function fsFnName(node) {
+      if (node?.type === 'Identifier') {
+        const imp = imports.get(node.name)
+        if (['fs', 'fs/promises'].includes(imp?.source) && imp.name !== '*' && imp.name !== 'promises') return imp.name
+        return null
+      }
+      if (node?.type === 'MemberExpression' && fsNamespace(node.object) && !fsNamespace(node) && !['default', 'promises'].includes(property(node))) return property(node) ?? null
+      return null
     }
     function fsRead(callee) {
       const reads = ['readFile', 'readFileSync', 'createReadStream']
@@ -258,10 +277,33 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (base?.source === 'fs' && property(node) === 'promises') return { source: 'fs/promises', defaultExport: false }
       return null
     }
+    const fsCalls = new Map()
     walk(ast, (node, parent) => {
+      const importedBinding = ['ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier'].includes(parent?.type)
+      const memberProperty = parent?.type === 'MemberExpression' && parent.property === node && !parent.computed
+      const fsName = importedBinding || memberProperty ? null : fsFnName(node)
+      if (fsName !== null) {
+        const tolerated = file === VERIFY_SCRIPT && Object.hasOwn(VERIFIER_FS_CALLS, fsName)
+        if (!FS_READS.includes(fsName) && !tolerated) {
+          unsupported(file, node, `fs '${fsName}' is not understood by input discovery; only ${FS_READS.join('/')} are followed`)
+        }
+        if (tolerated) {
+          if (!(parent?.type === 'CallExpression' && parent.callee === node)) unsupported(file, node, `fs '${fsName}' must be called directly`)
+          const count = (fsCalls.get(fsName) || 0) + 1
+          fsCalls.set(fsName, count)
+          if (count > VERIFIER_FS_CALLS[fsName]) unsupported(file, node, `new fs '${fsName}' call: only ${VERIFIER_FS_CALLS[fsName]} are known and none reads a repo input`)
+          const literal = fsName === 'existsSync' ? staticPath(parent.arguments[0]) : null
+          if (literal !== null) {
+            const rel = literal.startsWith(`${REPO}/`) ? literal.slice(REPO.length + 1) : literal
+            if (text(parent.arguments[0])?.startsWith('/') || rel.startsWith('/')) unsupported(file, node, 'absolute filesystem paths are not supported')
+            inputs.add(localInput(rel, node, false))
+          }
+        }
+      }
+      if (['ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source && /^(?:node:)?fs(?:\/promises)?$/.test(text(node.source) ?? '')) {
+        unsupported(file, node, 'filesystem re-exports require explicit discovery support')
+      }
       if (fsRead(node) || fsNamespace(node)) {
-        const importedBinding = ['ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier'].includes(parent?.type)
-        const memberProperty = parent?.type === 'MemberExpression' && parent.property === node && !parent.computed
         const directUse = parent?.type === 'CallExpression' && parent.callee === node && fsRead(node)
         const memberUse = fsNamespace(node) && parent?.type === 'MemberExpression' && parent.object === node && property(parent) !== null &&
           (!['default', 'promises'].includes(property(parent)) || fsNamespace(parent))

@@ -457,6 +457,63 @@ describe('PACKAGES discovery has structural and independent roster controls (#81
   })
 })
 
+describe('fs and require forms discovery cannot follow are refused, not ignored (#8195)', () => {
+  const refused = /is not understood by input discovery/
+  for (const [label, source] of [
+    ['existsSync (named)', "import { existsSync } from 'node:fs'; existsSync('scripts/x.json')"],
+    ['readdirSync (named)', "import { readdirSync } from 'node:fs'; readdirSync('scripts')"],
+    ['openSync (named)', "import { openSync } from 'fs'; openSync('scripts/x.json')"],
+    ['cpSync (namespace)', "import * as fs from 'node:fs'; fs.cpSync('scripts', 'out')"],
+    ['statSync (default import)', "import fs from 'node:fs'; fs.statSync('scripts/x.json')"],
+    ['fs.promises read-adjacent call', "import fs from 'node:fs'; await fs.promises.readdir('scripts')"],
+    ['fs/promises access', "import { access } from 'node:fs/promises'; await access('scripts/x.json')"],
+    ['fs/promises namespace opendir', "import * as fs from 'node:fs/promises'; await fs.opendir('scripts')"],
+    ['aliased named import', "import { readdirSync as list } from 'node:fs'; list('scripts')"],
+  ]) {
+    it(`refuses ${label} in a followed module`, () => {
+      assert.throws(() => fixture("import './lib/helper.mjs'", { 'scripts/lib/helper.mjs': source }).discover(), refused)
+    })
+    if (!source.includes('existsSync')) {
+      it(`refuses ${label} in the verifier itself`, () => {
+        assert.throws(() => fixture(source).discover(), refused)
+      })
+    }
+  }
+
+  it('names the call and the file in the message', () => {
+    assert.throws(() => fixture("import { readdirSync } from 'node:fs'; readdirSync('scripts')").discover(), /verify-publish-artifacts\.mjs:\d+: .*'readdirSync'/)
+  })
+
+  it('refuses an fs re-export', () => {
+    assert.throws(() => fixture("export { readdirSync } from 'node:fs'").discover(), /filesystem re-exports/)
+  })
+
+  for (const [label, source] of [
+    ['createRequire', "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url)"],
+    ['bare module specifier', "import { createRequire } from 'module'"],
+    ['module namespace', "import * as m from 'node:module'"],
+    ['dynamic node:module', "await import('node:module')"],
+  ]) {
+    it(`refuses ${label}`, () => {
+      assert.throws(() => fixture(source).discover(), /node:module/)
+    })
+  }
+
+  it('refuses the verifier-only tolerated calls outside the verifier, and beyond their known count inside it', () => {
+    const outside = "import { existsSync } from 'node:fs'; existsSync(dynamicPath)"
+    assert.throws(() => fixture("import './lib/helper.mjs'", { 'scripts/lib/helper.mjs': outside }).discover(), refused)
+    const four = "import { existsSync } from 'node:fs'; existsSync(a); existsSync(b); existsSync(c); existsSync(d)"
+    assert.throws(() => fixture(four).discover(), /new fs 'existsSync' call/)
+    assert.throws(() => fixture("import { writeFileSync } from 'node:fs'; writeFileSync(a, b); writeFileSync(c, d)").discover(), /new fs 'writeFileSync' call/)
+    assert.throws(() => fixture("import { rmSync } from 'node:fs'; const r = rmSync").discover(), /must be called directly/)
+  })
+
+  it('still tolerates the verifier known calls, and follows a literal existsSync path as an input', () => {
+    const discovered = fixture("import { existsSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs'; existsSync(dynamic); existsSync('scripts/known.json'); rmSync(a); mkdtempSync(b); writeFileSync(c, d)").discover()
+    assert.deepEqual(discovered.inputs, ['scripts/known.json'])
+  })
+})
+
 describe('independent review regression controls (#8195)', () => {
   const target = 'scripts/zz-review-unfiltered.json'
   for (const [label, source] of [
