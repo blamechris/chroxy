@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
 import { PermissionManager } from './permission-manager.js'
+import { normalizeResolvedBy } from './permission-resolved-by.js'
 import { PreviewTunnelAdapter } from './tunnel/preview.js'
 import { assertPreviewPort, pinPreviewTarget, createPinnedPreviewProxy } from './preview-target.js'
 import { createLogger } from './logger.js'
@@ -60,7 +61,7 @@ export class DevPreviewManager extends EventEmitter {
       request.permissions = permissions
       permissions.on('permission_request', data => send(buildPermissionRequestMessage({ ...data, sessionId })))
       permissions.on('permission_resolved', data => {
-        send({ type: 'permission_resolved', sessionId, ...data })
+        send({ type: 'permission_resolved', sessionId, ...data, resolvedBy: normalizeResolvedBy(data.resolvedBy) })
         if (data.decision !== 'allow') this._status(request, data.reason === 'user' ? 'denied' : 'cancelled', data.reason === 'timeout' ? 'Consent expired; request a new preview' : data.reason === 'user' ? 'Preview consent denied' : request.endReason || 'Preview request cancelled')
       })
       request.pin = await this._pinTarget({ port, cwd: session.cwd, signal: request.controller.signal })

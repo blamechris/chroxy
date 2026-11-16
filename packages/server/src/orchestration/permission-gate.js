@@ -30,6 +30,8 @@
 // deleted with no observable change today. That makes the branch a guard
 // against a FUTURE allow path being added above it, and the invariant worth
 // testing is its POSITION, not its effect (see the test).
+import { RESOLVED_BY } from '../permission-resolved-by.js'
+
 export const ALWAYS_DENY = new Set(['Task', 'Agent', 'WebFetch', 'WebSearch'])
 
 export class OrchestrationPermissionGate {
@@ -113,7 +115,8 @@ export class OrchestrationPermissionGate {
       return
     }
     try {
-      session.respondToPermission(requestId, decision === 'allow' ? 'allow' : 'deny')
+      // #9119: a policy decision (the allowlist), never a person.
+      session.respondToPermission(requestId, decision === 'allow' ? 'allow' : 'deny', undefined, undefined, undefined, RESOLVED_BY.rule)
     } catch (err) {
       this._log?.warn?.(`permission-gate: respond failed for ${sessionId}: ${err?.message || err}`)
     }

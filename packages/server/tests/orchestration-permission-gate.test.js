@@ -12,7 +12,7 @@ function mkStub() {
   const sessions = new Map()
   sm.getSession = (id) => sessions.get(id) || null
   const add = (id) => {
-    const session = { responses: [], respondToPermission(requestId, decision) { this.responses.push({ requestId, decision }) } }
+    const session = { responses: [], resolvedBys: [], respondToPermission(requestId, decision, _e, _r, _s, resolvedBy) { this.responses.push({ requestId, decision }); this.resolvedBys.push(resolvedBy) } }
     sessions.set(id, { session })
     return session
   }
@@ -150,6 +150,9 @@ describe('OrchestrationPermissionGate', () => {
       { requestId: 'b', decision: 'allow' },
       { requestId: 'c', decision: 'deny' }, // escalate → deny-until-resolved
     ])
+    // #9119: an allowlist auto-allow (and the deny that follows an escalation) is the daemon's
+    // POLICY, never a person: every answer here is `rule`, and none claims `user`.
+    assert.deepEqual(s.resolvedBys, [{ kind: 'rule' }, { kind: 'rule' }, { kind: 'rule' }])
     assert.equal(escalations.length, 1)
     assert.equal(escalations[0].requestId, 'c')
   })

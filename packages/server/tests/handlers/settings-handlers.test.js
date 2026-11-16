@@ -745,7 +745,7 @@ describe('settings-handlers', () => {
       settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-1', decision: 'allow' }, ctx)
 
       assert.equal(session.respondToPermission.callCount, 1)
-      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (both absent here)
+      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (both absent here)
     })
 
     it('#6590 legacy-unmapped resolve broadcasts permission_resolved to ALL clients incl. the resolver', () => {
@@ -806,7 +806,7 @@ describe('settings-handlers', () => {
         const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp' }]]))
         ctx.permissions.permissionSessionMap.set('req-1', 's1')
         settingsHandlers.permission_response(makeWs(), makeClient({ activeSessionId: 's1' }), { requestId: 'req-1', decision: 'allow', scope: 'session' }, ctx)
-        assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, 'session'])
+        assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, 'session', { kind: 'user' }])
       })
 
       it('a hook-routed session allow broadcasts permission_resolved with decision allow and the scope', () => {
@@ -816,7 +816,7 @@ describe('settings-handlers', () => {
         assert.deepEqual(ctx.permissions.permissions.resolvePermission.lastCall, ['req-hook', 'allow'], 'the held hook request is released as a plain allow')
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1)
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', scope: 'session', sessionId: 's1' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, scope: 'session', sessionId: 's1' })
       })
 
       it('the unmapped legacy broadcast carries the scope too', () => {
@@ -870,7 +870,7 @@ describe('settings-handlers', () => {
         assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'dispatched through the legacy store')
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', sessionId: 's1' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, sessionId: 's1' })
         // No client filter: the resolver (#6590) and every other client that was
         // sent the request receive it. Session-bound clients are still scoped by
         // the broadcaster's delivery check on the frame's sessionId (#8342).
@@ -933,7 +933,7 @@ describe('settings-handlers', () => {
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
         // Not stamped with s9: the prompt never belonged to the answerer's session.
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-unmapped', decision: 'allow' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-unmapped', decision: 'allow', resolvedBy: { kind: 'user' } })
         // Unbound-only: a session-bound client has no session to match a tagless frame (#8342).
         const filter = frames[0][1]
         assert.equal(typeof filter, 'function')
@@ -961,7 +961,7 @@ describe('settings-handlers', () => {
         assert.equal(sdkSession.respondToPermission.callCount, 0)
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow', resolvedBy: { kind: 'user' } })
         assert.equal(frames[0][1]({ id: 'guest', boundSessionId: 's9' }), false)
         assert.equal(frames[0][1]({ id: 'other', boundSessionId: null }), true)
         assert.equal(ctx.transport.send.calls.filter((a) => a[1]?.type === 'permission_expired').length, 0)
@@ -1214,7 +1214,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'unbound client with matching activeSessionId must route normally')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-ok-active'), false,
           'mapping must be consumed when the decision is routed')
       })
@@ -1244,7 +1244,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'subscribed unbound client must route normally — matches _broadcastToSession filter')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
       })
 
       it('leaves the bound-client guard unchanged (different code path)', () => {
@@ -1310,7 +1310,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'after-switch decision must route to the originating session A')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow', undefined, undefined]) // #6773 reason 4th arg
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow', undefined, undefined, undefined, { kind: 'user' }]) // #6773 reason 4th arg
         assert.equal(sessionB.respondToPermission.callCount, 0,
           'must not bleed onto the now-active session B')
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-after-switch'), false,

@@ -883,6 +883,27 @@ whole request is refused `scope_denied` and nothing is subscribed.
   future daemon-side answer policy has its inputs; #7860, S4). The tool **`input` is omitted
   for floored requests**; otherwise a **bounded, redacted summary** is given (reusing the
   existing sanitised permission description), never the raw input.
+  **(S4, #9119)** Request `principal_pending_permissions { requestId, sessionIds? }`, reply
+  `principal_pending_permissions_result { requestId, generatedAt, permissions[], truncated }`
+  (observe tier, a direct reply through `frameForPrincipal`; `PRINCIPAL_BROADCAST_ALLOWED` stays
+  empty). Each request carries `requestId`, `sessionId`, `tool`, `floored`, `explicitConsent`,
+  `nonDelegable`, `origin` (`in_process` | `hook`), `createdAt` and `expiresAt` (epoch ms: the
+  request's own deadline, `null` when the daemon cannot say) and, only when `floored === false`,
+  the existing description clipped to 200 characters after redaction. Never the input, and
+  `frameForPrincipal` rebuilds every request from a field whitelist as a second line. Source:
+  `principal-pending-permissions.js` reads the in-process PermissionManager (the session's
+  `_pendingPermissions` and `_lastPermissionData`, and a BYOK session's subagents through
+  `_subagentPermissionRouting`) and the hook-routed store (the server's `pendingPermissions`,
+  owner from `permissionSessionMap`; a prompt with no owner is listed to nobody). Missing
+  metadata fails closed (floored, consent-gated, not delegable, no description). A request at or
+  past its own deadline is excluded even when its timer has not fired. With `sessionIds`, every
+  id must pass `principalMaySee(..., 'observe')` or the whole request is refused `scope_denied`,
+  like a nonexistent session; without it, the reply covers the granted sessions. At most 100
+  requests, oldest first, `truncated` when more were pending. It grants **no decision
+  authority**: nothing in it can answer, extend or reroute a request. Outside the snapshot: a
+  pending `AskUserQuestion` (in-process it is not in `_pendingPermissions`; a hook-routed one is
+  held in the hook store and is skipped by tool name) and the dev-preview consent prompts, which
+  live in a PermissionManager of their own that is not attached to any session.
 - `principal_sessions_snapshot`: granted sessions with observed and declared status
   (#9026), handoff blockers, lease-holder **label**, model requested/observed (S5).
 - `turn_started { turnId, causedBy, origin }` and `turn_ended { turnId, outcome }` journal
@@ -946,10 +967,26 @@ honest about what redaction can promise:
   `explicitConsent === false` and `nonDelegable === false`**
   (`agent-control/client.js` `respondPermission`) — **and** a HIGH-reviewed delta of this
   document. Neither the label nor an `[agent:` message ever substitutes.
-- **`resolvedBy` on `permission_resolved` (S4, proposed).** The event carries `requestId`,
-  `decision`, `reason`, `scope` and no resolver. Proposed: `resolvedBy { kind: 'user' |
-  'agent' | 'rule' | 'timeout' | 'auto_mode' | 'abort' | 'cleared', label? }` — a class
-  plus the operator label for agents, never a token or a raw client id.
+- **`resolvedBy` on `permission_resolved` (S4, #9119).** `resolvedBy { kind: 'user' | 'agent' |
+  'rule' | 'timeout' | 'auto_mode' | 'abort' | 'cleared', label? }` — a class plus the operator
+  label for agents, never a token, a raw client id or a device name. Additive and optional on
+  the wire. Every announcement sets it (`tests/permission-resolved-by-roster.test.js` enumerates
+  the sites from the syntax tree and fails on one without it) and the event normalizer rebuilds
+  the wire value through `normalizeResolvedBy`, so a producer cannot put another field on it.
+  Mapping: an answer is `user` only when a client made it (the resolver's `permission_response`
+  path on either pipeline, including the HTTP fallback); `respondToPermission` takes the source
+  as its last argument and an absent one reads `cleared`, so no unattributed caller claims a
+  person. The daemon's own answers are `rule` when it is policy (the orchestration allowlist's
+  allow and deny, and the deny that follows a refused edit) and `cleared` when nobody was there
+  to ask (the scheduler's auto-deny); a timer is `timeout`; an aborted turn, a user Stop and a cancelled consent request
+  are `abort` (`reason` still says `stopped` or `aborted`); a mode switch that resolves or
+  denies a pending prompt is `auto_mode`; a drain at message completion or teardown, and a
+  question a newer one replaced, are `cleared`. **Reserved, produced by nothing yet:** `agent`
+  (principals cannot answer before S15). A session rule decides before a prompt exists and emits
+  no `permission_resolved` (#6842), so `rule` appears only on the daemon-policy answers above. A hook-routed prompt that times out or whose hook goes
+  away emits no `permission_resolved` at all today, so it has no `resolvedBy`. A principal does
+  not receive `permission_resolved` directly (it is in `PRINCIPAL_OUTGOING_DENIED`); it reads it
+  through the S3 journal, whose event data carries `resolvedBy` unchanged.
 - **`decisionMatched` (proposed, S15; #8927)** is **not on main**: it would tell a
   responder whether its decision won over a competing one.
 - **Delivery audit (#7352, S15):** records whether a prompt reached at least one client.

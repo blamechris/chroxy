@@ -2914,6 +2914,17 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * The ids of the live sessions, and nothing else: no provider getter runs, so a session whose
+   * state is broken cannot affect a caller that only needs to know which ids exist (#9119).
+   * @returns {string[]}
+   */
+  listSessionIds() {
+    const ids = []
+    for (const [sessionId, entry] of this._sessions) if (!entry._destroying) ids.push(sessionId)
+    return ids
+  }
+
+  /**
    * List all sessions with summary info.
    * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */

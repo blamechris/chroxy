@@ -134,7 +134,7 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     assert.equal(owner.respondToPermission.mock.calls.length, 1)
     assert.deepStrictEqual(
       owner.respondToPermission.mock.calls[0].arguments,
-      ['perm-r', 'deny', { command: 'ls' }, 'read-only please'],
+      ['perm-r', 'deny', { command: 'ls' }, 'read-only please', undefined, { kind: 'user' }],
     )
   })
 
@@ -144,15 +144,15 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
       const { resolver } = build({ map: [['perm-s', OWNER]], ownerSession: owner })
       const r = resolver.resolve('perm-s', 'allow', OWNER, { clientId: 'c1', scope: 'session' })
       assert.equal(r.kind, 'resolved')
-      assert.deepStrictEqual(owner.respondToPermission.mock.calls[0].arguments, ['perm-s', 'allow', undefined, undefined, 'session'])
+      assert.deepStrictEqual(owner.respondToPermission.mock.calls[0].arguments, ['perm-s', 'allow', undefined, undefined, 'session', { kind: 'user' }])
       assert.equal(r.scope, 'session', 'the result names the scope, for a caller that broadcasts')
     })
 
-    it('adds no argument when there is no scope (the call shape every provider and mock already has)', () => {
+    it('passes no scope (undefined) when there is none, then the source of the answer (#9119)', () => {
       const owner = makeSdkSession({ pending: ['perm-n'] })
       const { resolver } = build({ map: [['perm-n', OWNER]], ownerSession: owner })
       const r = resolver.resolve('perm-n', 'allow', OWNER, { clientId: 'c1' })
-      assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 4)
+      assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 6)
       assert.equal('scope' in r, false)
     })
 
@@ -162,7 +162,7 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
         const { resolver } = build({ map: [['perm-d', OWNER]], ownerSession: owner })
         const r = resolver.resolve('perm-d', decision, OWNER, { clientId: 'c1', scope })
         assert.equal(r.kind, 'resolved')
-        assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 4, `${decision}+${scope}`)
+        assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 6, `${decision}+${scope}`)
         assert.equal('scope' in r, false, `${decision}+${scope}`)
       }
     })

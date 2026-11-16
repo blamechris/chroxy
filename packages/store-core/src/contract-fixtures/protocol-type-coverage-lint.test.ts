@@ -288,6 +288,9 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
   'principal_live_fence',                 //   neither the dashboard nor the mobile app ever is. Its consumer is the
   'principal_gap',                        //   agent-control adapter (S6 of #9112). The dashboard Agents tab (S17)
   'principal_events_page',                //   would be the only client to handle it.
+  'principal_pending_permissions_result', // #9119 (S4 of #9112) the principal's pending-permission snapshot: same
+                                          //   audience as the journal frames above (a scoped principal, never the
+                                          //   dashboard or app); consumer is the agent-control adapter (S6)
   // 'memory_stack_result' removed — the dashboard now handles it (#6867); it
   // moved to DASHBOARD_ONLY below. Mobile parity is the sibling slice #6870.
 ])

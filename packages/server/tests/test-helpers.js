@@ -401,6 +401,7 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
   }
 
   manager.getSession = (id) => sessionsMap.get(id)
+  manager.listSessionIds = () => [...sessionsMap.keys()]
   manager.listSessions = () => {
     const list = []
     for (const [sessionId, entry] of sessionsMap) {

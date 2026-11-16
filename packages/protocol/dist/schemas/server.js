@@ -23,3 +23,4 @@ export * from "./server/scheduler.js";
 export * from "./server/daemon-update.js";
 export * from "./server/principal-admin.js";
 export * from "./server/principal-journal.js";
+export * from "./server/principal-permissions.js";

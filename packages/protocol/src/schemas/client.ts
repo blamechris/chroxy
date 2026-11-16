@@ -1626,6 +1626,16 @@ export const PrincipalEventsReadSchema = z.object({
   limit: z.number().int().min(1).max(200).optional(),
 })
 
+// Pending-permission snapshot (#9119, S4 of #9112; docs/security/agent-principals.md 7.3).
+// Observe tier. `sessionIds` omitted = every session the principal is granted; when given,
+// EVERY id must be granted or the whole request is refused `scope_denied` (a refusal looks the
+// same as a session that does not exist). The reply grants no decision authority.
+export const PrincipalPendingPermissionsSchema = z.object({
+  type: z.literal('principal_pending_permissions'),
+  requestId: z.string().min(1).max(128),
+  sessionIds: z.array(z.string().min(1).max(128)).min(1).max(32).optional(),
+})
+
 // -- Daemon update banner (#8331) --
 
 // Restart-now / postpone for the update the deploy script has queued for the
@@ -2378,6 +2388,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   PrincipalSubscribeSchema,
   PrincipalUnsubscribeSchema,
   PrincipalEventsReadSchema,
+  PrincipalPendingPermissionsSchema,
   DaemonUpdateActionSchema,
   QueryPermissionAuditSchema,
   ExtensionMessageSchema,

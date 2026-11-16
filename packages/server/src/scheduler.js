@@ -102,6 +102,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { isSchedulerEnabled } from './config.js'
+import { RESOLVED_BY } from './permission-resolved-by.js'
 import { getProvider, listProviders, DEFAULT_PROVIDER } from './providers.js'
 import { validateCwdAllowed } from './handler-utils.js'
 import { TurnDriver, TurnError } from './orchestration/turn-driver.js'
@@ -1053,7 +1054,8 @@ export class SchedulerEngine extends EventEmitter {
     if (!session) return
     if (typeof session.respondToPermission === 'function') {
       try {
-        session.respondToPermission(requestId, 'deny')
+        // #9119: nobody was there to ask; the daemon cleared it. Never a person.
+        session.respondToPermission(requestId, 'deny', undefined, undefined, undefined, RESOLVED_BY.cleared)
       } catch (err) {
         this._log.warn(`Scheduler permission deny failed for ${sessionId}: ${err?.message || err}`)
       }

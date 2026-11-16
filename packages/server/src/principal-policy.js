@@ -84,6 +84,10 @@ export const PRINCIPAL_ALLOWED_MESSAGE_TYPES = Object.freeze({
     tier: 'observe',
     reason: 'observe: a paged read of the normalized event journal (limit 200); the handler resolves the explicit session id through principalMaySee',
   }),
+  principal_pending_permissions: Object.freeze({
+    tier: 'observe',
+    reason: 'observe: a read-only snapshot of the pending permission requests of the granted sessions (#9119); it grants no decision authority; the handler resolves EVERY explicit session id through principalMaySee and refuses the whole request scope_denied when any one is not granted',
+  }),
   input: Object.freeze({
     tier: 'steer',
     reason: 'steer: one fenced, provenance-labelled input into a leased session; the handler resolves an explicit sessionId through principalMaySee with no activeSessionId fallback',
@@ -308,6 +312,9 @@ export const PRINCIPAL_ENVELOPES = Object.freeze({
   }),
   principal_events_read: Object.freeze({
     fields: Object.freeze(['type', 'requestId', 'sessionId', 'cursor', 'limit']),
+  }),
+  principal_pending_permissions: Object.freeze({
+    fields: Object.freeze(['type', 'requestId', 'sessionIds']),
   }),
   input: Object.freeze({
     fields: Object.freeze(['type', 'sessionId', 'clientMessageId', 'data', 'leaseId', 'gen']),
@@ -618,7 +625,21 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
   principal_live_fence: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'journalSeq']),
   principal_gap: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'reason', 'fromSeq', 'toSeq', 'ended']),
   principal_events_page: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'events', 'headSeq', 'cursor', 'more', 'gap']),
+  // The pending-permission snapshot (S4). A direct reply to `principal_pending_permissions`;
+  // like `principal_subscribed` it has no top-level session: every request it lists is
+  // checked against the grant and rebuilt from `PRINCIPAL_PENDING_PERMISSION_FIELDS`.
+  principal_pending_permissions_result: Object.freeze(['type', 'requestId', 'generatedAt', 'permissions', 'truncated']),
 })
+
+/**
+ * The only fields of one request in a `principal_pending_permissions_result`. There is no
+ * `input` and no `toolInput`: a tool input never reaches a principal (contract sections 7.3
+ * and 8). `description` is further limited to requests that are not floored.
+ * @type {readonly string[]}
+ */
+export const PRINCIPAL_PENDING_PERMISSION_FIELDS = Object.freeze([
+  'requestId', 'sessionId', 'tool', 'floored', 'explicitConsent', 'nonDelegable', 'origin', 'createdAt', 'expiresAt', 'description',
+])
 
 /**
  * Every other real server frame: a principal is never sent one on the direct-reply
@@ -835,12 +856,41 @@ export function frameForPrincipal(client, message, opts = {}) {
       return null
     }
   }
+  // The snapshot lists requests instead of carrying one session: each must be granted, and
+  // each is rebuilt from its own whitelist (no input, a description only when not floored).
+  if (type === 'principal_pending_permissions_result') {
+    const requests = message.permissions
+    if (requests !== undefined && (!Array.isArray(requests) || !requests.every((r) => typeof r?.sessionId === 'string' && principalMaySee(client, r.sessionId, 'observe', opts).ok))) {
+      return null
+    }
+    const rebuilt = {}
+    for (const field of PRINCIPAL_OUTGOING_ALLOWED[type]) {
+      if (field === 'permissions') {
+        if (requests !== undefined) rebuilt.permissions = requests.map((r) => {
+          const entry = {}
+          for (const key of PRINCIPAL_PENDING_PERMISSION_FIELDS) {
+            if (key === 'description' && r.floored !== false) continue
+            if (Object.hasOwn(r, key)) entry[key] = cloneField(r[key])
+          }
+          return entry
+        })
+      } else if (Object.hasOwn(message, field)) {
+        rebuilt[field] = cloneField(message[field])
+      }
+    }
+    return withoutBindingValue(client, rebuilt)
+  }
   const frame = {}
   for (const field of PRINCIPAL_OUTGOING_ALLOWED[type]) {
     // A nested value is copied, never shared: the delivered frame holds nothing the
     // journal (or any other owner) can still change or that could be changed through it.
     if (Object.hasOwn(message, field)) frame[field] = cloneField(message[field])
   }
+  return withoutBindingValue(client, frame)
+}
+
+/** The frame, or null when it contains the client's own binding value (the sentinel must not reach the wire). */
+function withoutBindingValue(client, frame) {
   const binding = client.boundSessionId
   if (typeof binding === 'string' && binding.length > 0 && JSON.stringify(frame).includes(binding)) return null
   return frame
