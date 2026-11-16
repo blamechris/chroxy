@@ -814,6 +814,19 @@ export const ServerPermissionExpiredSchema = z.object({
 //     `'stopped'` marks the prompt Stopped rather than Denied, because Stop
 //     resolves the prompt as `decision: 'deny'` and nothing else tells the two
 //     apart.
+// #9119 (S4 of #9112): WHO or WHAT resolved the prompt, as a class. Never a token, a client id
+// or a device name. `label` is the operator-authored label of an agent principal and is present
+// only for `kind: 'agent'`, which no daemon produces yet (principals cannot answer before S15).
+// `rule` is part of the vocabulary but rules resolve before a prompt exists, so no frame carries
+// it today. `kind` is a PLAIN string (like `decision` and `reason`), not the closed enum, so a
+// kind a newer daemon adds cannot fail the whole frame; the values the daemon sends today are
+// PERMISSION_RESOLVED_BY_KIND_VALUES and a consumer treats any other as "unknown".
+export const PERMISSION_RESOLVED_BY_KIND_VALUES = ['user', 'agent', 'rule', 'timeout', 'auto_mode', 'abort', 'cleared'] as const
+export const PermissionResolvedBySchema = z.object({
+  kind: z.string().min(1).max(32),
+  label: z.string().max(64).optional(),
+})
+
 export const ServerPermissionResolvedSchema = z.object({
   type: z.literal('permission_resolved'),
   requestId: z.string().optional(),
@@ -824,6 +837,9 @@ export const ServerPermissionResolvedSchema = z.object({
   // `allow`). Absent otherwise, and from a daemon older than this field; a client
   // then reads the decision alone. A label: it changes nothing the server did.
   scope: PermissionScopeSchema.optional(),
+  // #9119: absent from a daemon older than this field, and from a producer that has not been
+  // taught to say; a client reads the decision and `reason` as before.
+  resolvedBy: PermissionResolvedBySchema.optional(),
   sessionId: z.string().optional(),
 }).superRefine((m, ctx) => {
   // Exactly one non-empty id: a permission prompt names a `requestId`, a

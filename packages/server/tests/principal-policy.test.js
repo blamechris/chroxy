@@ -45,6 +45,7 @@ const EXPECTED_ALLOWED_TIERS = {
   principal_subscribe: 'observe',
   principal_unsubscribe: 'observe',
   principal_events_read: 'observe',
+  principal_pending_permissions: 'observe',
   input: 'steer',
   interrupt: 'drive',
   create_session: 'drive',
@@ -53,7 +54,7 @@ const EXPECTED_ALLOWED_TIERS = {
 }
 const EXPECTED_OUTGOING = [
   'auth_ok', 'credential_invalidated', 'input_ack', 'pong', 'principal_event', 'principal_events_page', 'principal_gap',
-  'principal_live_fence', 'principal_subscribed', 'rate_limited', 'server_error', 'session_error',
+  'principal_live_fence', 'principal_pending_permissions_result', 'principal_subscribed', 'rate_limited', 'server_error', 'session_error',
 ]
 
 const clientSchemaTypes = new Set(ClientMessageSchema.options.map((o) => o.shape.type.value))
@@ -124,7 +125,7 @@ describe('principal inbound roster', () => {
     }
   })
 
-  it('the v1 allowlist is exactly the five existing types plus the three S3 journal types, at the contract tiers', () => {
+  it('the v1 allowlist is exactly the five existing types plus the three S3 journal types and the S4 pending-permission snapshot, at the contract tiers', () => {
     const actual = Object.fromEntries(Object.entries(PRINCIPAL_ALLOWED_MESSAGE_TYPES).map(([t, s]) => [t, s.tier]))
     assert.deepEqual(actual, EXPECTED_ALLOWED_TIERS)
     for (const tier of Object.values(actual)) assert.ok(PRINCIPAL_TIER_ORDER.includes(tier))
@@ -140,11 +141,11 @@ describe('principal inbound roster', () => {
     // principal and to a bound client, never allowed. The S3 read path is the only
     // principal_ name that is allowed; any other needs its handler first.
     const MANAGEMENT = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
-    const JOURNAL = ['principal_events_read', 'principal_subscribe', 'principal_unsubscribe']
+    const JOURNAL = ['principal_events_read', 'principal_pending_permissions', 'principal_subscribe', 'principal_unsubscribe']
     assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')).sort(), JOURNAL)
     assert.deepEqual(denied.filter((t) => t.startsWith('principal_')).sort(), MANAGEMENT)
     assert.deepEqual(Object.keys(PRINCIPAL_OUTGOING_ALLOWED).filter((t) => t.startsWith('principal_')).sort(),
-      ['principal_event', 'principal_events_page', 'principal_gap', 'principal_live_fence', 'principal_subscribed'])
+      ['principal_event', 'principal_events_page', 'principal_gap', 'principal_live_fence', 'principal_pending_permissions_result', 'principal_subscribed'])
     // none of them is registered as a broadcast type: the broadcast allowlist stays empty
     assert.deepEqual(Object.keys(PRINCIPAL_BROADCAST_ALLOWED), [])
   })
@@ -177,7 +178,7 @@ describe('principal behavioural check: no grant is refused at the handler, not m
 
   it('has a fixture for every allowed type (so none can be skipped); the observe journal types are covered below', () => {
     const observeTypes = allowed.filter((t) => PRINCIPAL_ALLOWED_MESSAGE_TYPES[t].tier === 'observe')
-    assert.deepEqual(observeTypes.sort(), ['principal_events_read', 'principal_subscribe', 'principal_unsubscribe'])
+    assert.deepEqual(observeTypes.sort(), ['principal_events_read', 'principal_pending_permissions', 'principal_subscribe', 'principal_unsubscribe'])
     assert.deepEqual(Object.keys(FIXTURES).sort(), allowed.filter((t) => !observeTypes.includes(t)).sort())
   })
 
@@ -253,6 +254,7 @@ describe('refusePrincipalMessage / dispatchPolicyFor', () => {
     principal_subscribe: { type: 'principal_subscribe', requestId: 'r1', sessionIds: ['sess-1'], cursors: [{ sessionId: 'sess-1', journalId: 'j', seq: 0 }] },
     principal_unsubscribe: { type: 'principal_unsubscribe', requestId: 'r1', sessionIds: ['sess-1'] },
     principal_events_read: { type: 'principal_events_read', requestId: 'r1', sessionId: 'sess-1', cursor: { sessionId: 'sess-1', journalId: 'j', seq: 0 }, limit: 10 },
+    principal_pending_permissions: { type: 'principal_pending_permissions', requestId: 'r1', sessionIds: ['sess-1'] },
   }
 
   it('the selector gives a principal the principal policy and everyone else the bound policy', () => {
@@ -364,7 +366,7 @@ describe('refusePrincipalMessage / dispatchPolicyFor', () => {
   })
 
   describe('tier', () => {
-    const JOURNAL_TYPES = ['principal_subscribe', 'principal_unsubscribe', 'principal_events_read']
+    const JOURNAL_TYPES = ['principal_subscribe', 'principal_unsubscribe', 'principal_events_read', 'principal_pending_permissions']
     const TIER_CAN_SEND = {
       observe: JOURNAL_TYPES,
       steer: [...JOURNAL_TYPES, 'input'],

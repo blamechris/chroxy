@@ -816,7 +816,7 @@ describe('settings-handlers', () => {
         assert.deepEqual(ctx.permissions.permissions.resolvePermission.lastCall, ['req-hook', 'allow'], 'the held hook request is released as a plain allow')
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1)
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', scope: 'session', sessionId: 's1' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, scope: 'session', sessionId: 's1' })
       })
 
       it('the unmapped legacy broadcast carries the scope too', () => {
@@ -870,7 +870,7 @@ describe('settings-handlers', () => {
         assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'dispatched through the legacy store')
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', sessionId: 's1' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, sessionId: 's1' })
         // No client filter: the resolver (#6590) and every other client that was
         // sent the request receive it. Session-bound clients are still scoped by
         // the broadcaster's delivery check on the frame's sessionId (#8342).
@@ -933,7 +933,7 @@ describe('settings-handlers', () => {
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
         // Not stamped with s9: the prompt never belonged to the answerer's session.
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-unmapped', decision: 'allow' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-unmapped', decision: 'allow', resolvedBy: { kind: 'user' } })
         // Unbound-only: a session-bound client has no session to match a tagless frame (#8342).
         const filter = frames[0][1]
         assert.equal(typeof filter, 'function')
@@ -961,7 +961,7 @@ describe('settings-handlers', () => {
         assert.equal(sdkSession.respondToPermission.callCount, 0)
         const frames = resolvedFrames(ctx)
         assert.equal(frames.length, 1, 'exactly one permission_resolved')
-        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow' })
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow', resolvedBy: { kind: 'user' } })
         assert.equal(frames[0][1]({ id: 'guest', boundSessionId: 's9' }), false)
         assert.equal(frames[0][1]({ id: 'other', boundSessionId: null }), true)
         assert.equal(ctx.transport.send.calls.filter((a) => a[1]?.type === 'permission_expired').length, 0)

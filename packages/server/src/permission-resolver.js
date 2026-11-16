@@ -38,6 +38,7 @@ import { normalizeProjectKey } from './permission-rule-store.js'
 import { EditedInputRefusedError } from './edited-input.js'
 import { permissionScope, permissionDecisionToken } from './permission-scope.js'
 import { isBoundClient } from './environments/authority.js'
+import { RESOLVED_BY } from './permission-resolved-by.js'
 
 const unboundOnly = (client) => !isBoundClient(client)
 
@@ -68,6 +69,9 @@ export function buildLegacyResolvedBroadcast(result, requestId, decision) {
       type: 'permission_resolved',
       requestId,
       decision,
+      // #9119: a legacy answer is always a client's: the WS and HTTP handlers resolve it only on a
+      // `permission_response`. A class, never the answering client's id or token.
+      resolvedBy: RESOLVED_BY.user,
       // #8517: the "Allow for Session" label, when the caller sent it beside an allow.
       ...(result.scope ? { scope: result.scope } : {}),
       ...(result.mapped ? { sessionId: result.sessionId } : {}),

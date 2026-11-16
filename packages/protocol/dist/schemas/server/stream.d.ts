@@ -407,6 +407,11 @@ export declare const ServerPermissionExpiredSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     message: z.ZodString;
 }, z.core.$strip>;
+export declare const PERMISSION_RESOLVED_BY_KIND_VALUES: readonly ["user", "agent", "rule", "timeout", "auto_mode", "abort", "cleared"];
+export declare const PermissionResolvedBySchema: z.ZodObject<{
+    kind: z.ZodString;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerPermissionResolvedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_resolved">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -416,6 +421,10 @@ export declare const ServerPermissionResolvedSchema: z.ZodObject<{
     scope: z.ZodOptional<z.ZodEnum<{
         session: "session";
     }>>;
+    resolvedBy: z.ZodOptional<z.ZodObject<{
+        kind: z.ZodString;
+        label: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**

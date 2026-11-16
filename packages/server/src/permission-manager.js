@@ -36,6 +36,7 @@ import { DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY, EditedInputRefusedError, isHunkRevie
 // normalizeProjectKey is a hoisted function declaration.
 import { normalizeProjectKey } from './permission-rule-store.js'
 import { permissionScope } from './permission-scope.js'
+import { RESOLVED_BY, resolvedByForReason } from './permission-resolved-by.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -1007,6 +1008,7 @@ export class PermissionManager extends EventEmitter {
               requestId,
               decision: 'deny',
               reason,
+              resolvedBy: RESOLVED_BY.abort,
               ...stoppedToolUseField(reason, pending.toolUseId),
             })
           }
@@ -1021,7 +1023,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingPermissions.delete(requestId)
           this._lastPermissionData.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
-          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout' })
+          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout', resolvedBy: RESOLVED_BY.timeout })
         }
       }, this._timeoutMs)
       this._permissionTimers.set(requestId, timer)
@@ -1152,7 +1154,7 @@ export class PermissionManager extends EventEmitter {
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
             resolve({ behavior: 'deny', message: 'Cancelled' })
-            this.emit('permission_resolved', { toolUseId, reason, ...stoppedToolUseField(reason, sourceToolUseId) })
+            this.emit('permission_resolved', { toolUseId, reason, resolvedBy: RESOLVED_BY.abort, ...stoppedToolUseField(reason, sourceToolUseId) })
           }
         }, { once: true })
       }
@@ -1165,7 +1167,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingUserAnswer = null
           this._waitingForAnswer = false
           resolve({ behavior: 'deny', message: 'Question timed out' })
-          this.emit('permission_resolved', { toolUseId, reason: 'timeout' })
+          this.emit('permission_resolved', { toolUseId, reason: 'timeout', resolvedBy: RESOLVED_BY.timeout })
         }
       }, this._timeoutMs)
     })
@@ -1186,7 +1188,7 @@ export class PermissionManager extends EventEmitter {
     this._waitingForAnswer = false
     this._logInfo(`Question ${superseded.toolUseId} superseded by a newer question`)
     superseded.resolve({ behavior: 'deny', message: 'Superseded by a newer question' })
-    this.emit('permission_resolved', { toolUseId: superseded.toolUseId, decision: 'deny', reason: 'superseded' })
+    this.emit('permission_resolved', { toolUseId: superseded.toolUseId, decision: 'deny', reason: 'superseded', resolvedBy: RESOLVED_BY.cleared })
   }
 
   /**
@@ -1232,7 +1234,7 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners see the pending-count drop
     // before any follow-on work runs synchronously.
     const resolvedScope = permissionScope(decision, scope)
-    this.emit('permission_resolved', { requestId, decision, reason: 'user', ...(resolvedScope ? { scope: resolvedScope } : {}) })
+    this.emit('permission_resolved', { requestId, decision, reason: 'user', resolvedBy: RESOLVED_BY.user, ...(resolvedScope ? { scope: resolvedScope } : {}) })
 
     // #6543 (feature B): on an approve, an operator who reviewed the proposed
     // Write/Edit per-hunk may narrow the CONTENT (never the path — see
@@ -1339,7 +1341,7 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners (e.g. the SdkSession
     // inactivity-timer resumer, #2831) see the state flip before any
     // downstream synchronous work runs.
-    this.emit('permission_resolved', { toolUseId: pendingToolUseId, reason: 'answered' })
+    this.emit('permission_resolved', { toolUseId: pendingToolUseId, reason: 'answered', resolvedBy: RESOLVED_BY.user })
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }.
     // Per @anthropic-ai/claude-agent-sdk sdk-tools.d.ts (AskUserQuestionOutput.answers,
@@ -1490,7 +1492,7 @@ export class PermissionManager extends EventEmitter {
           behavior: 'deny',
           message: 'MCP trust not persisted via auto-mode bypass; approve explicitly to trust this server',
         })
-        this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'auto_mode_mcp_trust_bypass' })
+        this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'auto_mode_mcp_trust_bypass', resolvedBy: RESOLVED_BY.auto_mode })
         deniedMcpTrust += 1
         continue
       }
@@ -1519,7 +1521,7 @@ export class PermissionManager extends EventEmitter {
       this._lastPermissionData.delete(requestId)
       this._clearPermissionTimer(requestId)
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
-      this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
+      this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode', resolvedBy: RESOLVED_BY.auto_mode })
       allowed += 1
     }
     if (deniedMcpTrust > 0 || preservedProtected > 0 || preservedNotDelegable > 0) {
@@ -1585,6 +1587,7 @@ export class PermissionManager extends EventEmitter {
         requestId,
         decision: 'deny',
         reason: requestReason,
+        resolvedBy: resolvedByForReason(requestReason),
         ...stoppedToolUseField(requestReason, pendingToolUseIds.get(requestId)),
       })
     }
@@ -1596,6 +1599,7 @@ export class PermissionManager extends EventEmitter {
       this.emit('permission_resolved', {
         toolUseId: clearedUserAnswer.toolUseId,
         reason: requestReason,
+        resolvedBy: resolvedByForReason(requestReason),
         ...stoppedToolUseField(requestReason, clearedUserAnswer.sourceToolUseId),
       })
     }
@@ -1612,7 +1616,7 @@ export class PermissionManager extends EventEmitter {
         this._lastPermissionData.delete(requestId)
         this._clearPermissionTimer(requestId)
         signal?.removeEventListener('abort', abort)
-        this.emit('permission_resolved', { requestId, decision: allowed ? 'allow' : 'deny', reason })
+        this.emit('permission_resolved', { requestId, decision: allowed ? 'allow' : 'deny', reason, resolvedBy: resolvedByForReason(reason) })
         resolve(allowed)
       }
       const abort = () => finish(false, 'cancelled')
@@ -1784,7 +1788,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingPermissions.delete(requestId)
           this._lastPermissionData.delete(requestId)
           resolve(false)
-          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout' })
+          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout', resolvedBy: RESOLVED_BY.timeout })
         }
       }, this._timeoutMs)
       this._permissionTimers.set(requestId, timer)

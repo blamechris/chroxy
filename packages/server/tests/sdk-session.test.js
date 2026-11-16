@@ -290,7 +290,7 @@ describe('SdkSession', () => {
       await promise
 
       assert.equal(upstream.length, 1)
-      assert.deepStrictEqual(upstream[0], { requestId, decision: 'allow', reason: 'user' })
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'allow', reason: 'user', resolvedBy: { kind: 'user' } })
     })
 
     it('re-emits permission_resolved on timeout (#3048)', async () => {
@@ -306,7 +306,7 @@ describe('SdkSession', () => {
 
       assert.equal(result.behavior, 'deny')
       assert.equal(upstream.length, 1)
-      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'timeout' })
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'timeout', resolvedBy: { kind: 'timeout' } })
       fastSession.destroy()
     })
 
@@ -322,7 +322,7 @@ describe('SdkSession', () => {
 
       assert.equal(result.behavior, 'deny')
       assert.equal(upstream.length, 1)
-      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'aborted' })
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'aborted', resolvedBy: { kind: 'abort' } })
     })
 
     it('re-emits AskUserQuestion permission_resolved WITH toolUseId so questionSessionMap can prune via the unified pipeline (#3048, #3975, #3988)', async () => {

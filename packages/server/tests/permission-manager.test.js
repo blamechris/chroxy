@@ -158,7 +158,7 @@ describe('PermissionManager', () => {
 
       it('labels the permission_resolved event with the scope, beside a plain allow decision', async () => {
         const { resolved } = await answer('Bash', { command: 'ls' }, 'allow', 'session')
-        assert.deepEqual(resolved, [{ requestId: resolved[0].requestId, decision: 'allow', reason: 'user', scope: 'session' }])
+        assert.deepEqual(resolved, [{ requestId: resolved[0].requestId, decision: 'allow', reason: 'user', resolvedBy: { kind: 'user' }, scope: 'session' }])
       })
 
       it('adds no scope key when none is sent', async () => {
@@ -289,7 +289,7 @@ describe('PermissionManager', () => {
       await promise
 
       assert.equal(events.length, 1)
-      assert.deepStrictEqual(events[0], { requestId, decision: 'allow', reason: 'user' })
+      assert.deepStrictEqual(events[0], { requestId, decision: 'allow', reason: 'user', resolvedBy: { kind: 'user' } })
     })
 
     it('emits unified permission_resolved payload on timeout (#3048)', async () => {
@@ -303,7 +303,7 @@ describe('PermissionManager', () => {
 
       assert.equal(result.behavior, 'deny')
       assert.equal(events.length, 1)
-      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'timeout' })
+      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'timeout', resolvedBy: { kind: 'timeout' } })
       fastPm.destroy()
     })
 
@@ -318,7 +318,7 @@ describe('PermissionManager', () => {
       const promise = fastPm.requestMcpTrust({ name: 'slowmcp', command: '/usr/bin/true', args: [], envKeys: [] })
       const requestId = Array.from(fastPm._pendingPermissions.keys())[0]
       assert.equal(await promise, false)
-      assert.deepStrictEqual(events, [{ requestId, decision: 'deny', reason: 'timeout' }])
+      assert.deepStrictEqual(events, [{ requestId, decision: 'deny', reason: 'timeout', resolvedBy: { kind: 'timeout' } }])
       fastPm.destroy()
     })
 
@@ -334,7 +334,7 @@ describe('PermissionManager', () => {
 
       assert.equal(result.behavior, 'deny')
       assert.equal(events.length, 1)
-      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'aborted' })
+      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'aborted', resolvedBy: { kind: 'abort' } })
     })
 
     it('auto-denies on abort signal', async () => {

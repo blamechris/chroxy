@@ -2745,6 +2745,36 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #9119 (S4 of #9112): `permission_resolved` gained an optional `resolvedBy` ({ kind, label? }:
+    // WHAT resolved the prompt, as a class). Neither client reads it yet; this pins that a frame
+    // carrying it (including a kind a newer daemon adds) still flips the prompt exactly as one
+    // without it does, so the additive field cannot break either client.
+    name: 'permission_resolved carrying resolvedBy flips the prompt in place, as without it (#9119)',
+    type: 'permission_resolved',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-2',
+              type: 'prompt',
+              content: 'Bash: ls',
+              tool: 'Bash',
+              requestId: 'req-2',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: { type: 'permission_resolved', requestId: 'req-2', decision: 'deny', reason: 'timeout', resolvedBy: { kind: 'timeout' } },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'prompt-req-2', type: 'prompt', content: 'Bash: ls', tool: 'Bash' }] },
+      },
+    },
+  },
+  {
     // error is a GLOBAL surface (app → native Alert, dashboard → toast) — neither
     // client routes it into a session transcript. Seed a response bubble on the
     // active session and assert the error leaves the transcript completely

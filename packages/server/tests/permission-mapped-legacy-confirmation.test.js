@@ -84,7 +84,7 @@ describe('#7858 mapped hook-routed WS decision is confirmed', () => {
     assert.deepEqual(h.hookResolve.mock.calls.map((c) => c.arguments[0]), ['allow'], 'the parked hook got the decision exactly once')
     const frames = resolvedFrames(h.broadcasts)
     assert.equal(frames.length, 1)
-    assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', sessionId: 's1' })
+    assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, sessionId: 's1' })
     assert.equal(frames[0][1], undefined, 'no recipient filter: the resolver and every viewer get it')
   })
 
@@ -117,7 +117,7 @@ describe('#7858 mapped hook-routed WS decision is confirmed', () => {
     settingsHandlers.permission_response(makeWs(), viewer(), { requestId: 'req-hook', decision: 'allow', scope: 'session' }, h.ctx)
     const frames = resolvedFrames(h.broadcasts)
     assert.equal(frames.length, 1)
-    assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', scope: 'session', sessionId: 's1' })
+    assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', resolvedBy: { kind: 'user' }, scope: 'session', sessionId: 's1' })
   })
 })
 

@@ -1,0 +1,98 @@
+/**
+ * Guard: every place the daemon announces `permission_resolved` says WHO or WHAT resolved it
+ * (docs/security/agent-principals.md section 9; #9119, S4 of #9112).
+ *
+ * The sites are enumerated from the syntax tree (tests/helpers/permission-resolved-sites.js),
+ * so a new emit site written without `resolvedBy` goes red here instead of shipping a frame
+ * a consumer cannot attribute. The roster below is checked in BOTH directions: a site that is
+ * not listed fails, and a listed site that no longer exists fails (a roster that silently
+ * shrinks is a guard that checks nothing).
+ */
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { scanPermissionResolvedSites } from './helpers/permission-resolved-sites.js'
+
+const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+
+// The oracle, spelled out: where `permission_resolved` is announced today.
+const EXPECTED = {
+  // 13 manager resolutions: abort, timeout, question abort, question timeout, superseded, user,
+  // question answered, MCP-trust auto-mode deny, auto-mode allow, clearAll (request + question),
+  // explicit-consent finish, MCP-trust timeout
+  'permission-manager.js': { 'emit-literal': 13, 'emit-relay': 1 },
+  // the legacy (hook-routed) answer, announced for both the WS and the HTTP transport
+  'permission-resolver.js': { 'frame-literal': 1 },
+  // the unified pipeline's two wire frames: the prompt variant and the superseded question
+  'event-normalizer.js': { 'frame-literal': 2 },
+  // the dev-preview consent prompt's own manager, sent straight to its requester
+  'dev-preview.js': { 'frame-literal': 1 },
+  // a BYOK subagent's event, relayed to the parent's agent_event channel unchanged
+  'byok-session.js': { 'emit-relay': 1 },
+}
+
+function tally(sites) {
+  const out = {}
+  for (const s of sites) {
+    out[s.file] ??= {}
+    out[s.file][s.shape] = (out[s.file][s.shape] ?? 0) + 1
+  }
+  return out
+}
+
+describe('permission_resolved emit sites (#9119)', () => {
+  const sites = scanPermissionResolvedSites(SRC)
+
+  it('finds sites at all, and exactly the rostered ones, in both directions', () => {
+    assert.ok(sites.length > 0, 'the scan found nothing: the guard is not looking')
+    assert.deepEqual(tally(sites), EXPECTED)
+  })
+
+  it('every literal emit and every wire frame names resolvedBy', () => {
+    const missing = sites
+      .filter((s) => s.shape !== 'emit-relay' && !s.hasResolvedBy)
+      .map((s) => `${s.file}:${s.line} (${s.shape})`)
+    assert.deepEqual(missing, [], 'these announce permission_resolved without resolvedBy')
+  })
+
+  describe('the scan can fail (positive control on a synthetic source tree)', () => {
+    function scanSource(text) {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-sites-'))
+      try {
+        mkdirSync(join(dir, 'nested'))
+        writeFileSync(join(dir, 'nested', 'x.js'), text)
+        return scanPermissionResolvedSites(dir)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+
+    it('reports a literal emit with no resolvedBy', () => {
+      const found = scanSource("export const f = (m) => m.emit('permission_resolved', { requestId: 'r', decision: 'deny' })\n")
+      assert.deepEqual(found.map((s) => [s.file, s.shape, s.hasResolvedBy]), [['nested/x.js', 'emit-literal', false]])
+    })
+
+    it('reports a wire frame with no resolvedBy, and accepts both spellings that name it', () => {
+      const bad = scanSource("export const f = (d) => ({ type: 'permission_resolved', requestId: 'r', ...d })\n")
+      assert.equal(bad[0].shape, 'frame-literal')
+      assert.equal(bad[0].hasResolvedBy, false, 'a bare spread of the event is not naming resolvedBy')
+      const direct = scanSource("export const f = () => ({ type: 'permission_resolved', resolvedBy: { kind: 'user' } })\n")
+      assert.equal(direct[0].hasResolvedBy, true)
+      const helper = scanSource("export const f = (d) => ({ type: 'permission_resolved', ...resolvedByField(d.resolvedBy) })\n")
+      assert.equal(helper[0].hasResolvedBy, true)
+    })
+
+    it('does not count a listener registration, a comment or a string', () => {
+      const found = scanSource("// m.emit('permission_resolved', {})\nconst s = \"permission_resolved\"\nm.on('permission_resolved', () => {})\n")
+      assert.deepEqual(found, [])
+    })
+
+    it('reports a relay as a relay (so a new one has to be rostered)', () => {
+      const found = scanSource("export const f = (m, d) => m.emit('permission_resolved', d)\n")
+      assert.deepEqual(found.map((s) => s.shape), ['emit-relay'])
+    })
+  })
+})

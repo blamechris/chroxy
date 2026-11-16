@@ -49,7 +49,7 @@ const spySubs = () => {
 
 describe('the observe types are covered by this file', () => {
   it('every observe-tier allowed type is exercised below (so none can be skipped)', () => {
-    assert.deepEqual([...OBSERVE].sort(), ['principal_events_read', 'principal_subscribe', 'principal_unsubscribe'])
+    assert.deepEqual([...OBSERVE].sort(), ['principal_events_read', 'principal_pending_permissions', 'principal_subscribe', 'principal_unsubscribe'])
     for (const t of OBSERVE) assert.equal(typeof REAL_HANDLERS[t], 'function', t)
   })
 })
