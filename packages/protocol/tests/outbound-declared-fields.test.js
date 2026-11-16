@@ -32,6 +32,10 @@ describe('auth_ok handshake fields', () => {
     assert.equal(ok(ServerAuthOkSchema, { ...AUTH_OK, defaultCwd: null }), true)
     assert.equal(ServerAuthOkSchema.parse({ ...AUTH_OK, features: { environments: true, later: true } }).features.later, true)
   })
+  it('parses a frame WITHOUT defaultCwd and one with defaultCwd: null, keeping the null', () => {
+    assert.equal(ServerAuthOkSchema.parse(AUTH_OK).defaultCwd, undefined)
+    assert.equal(ServerAuthOkSchema.parse({ ...AUTH_OK, defaultCwd: null }).defaultCwd, null)
+  })
   it('rejects wrong types', () => {
     assert.equal(ok(ServerAuthOkSchema, { ...AUTH_OK, defaultCwd: 5 }), false)
     assert.equal(ok(ServerAuthOkSchema, { ...AUTH_OK, webFeatures: { available: 'yes', remote: true, teleport: false } }), false)
@@ -45,6 +49,10 @@ describe('tool_result images', () => {
     assert.equal(ok(ServerToolResultSchema, base), true)
     const images = [{ mediaType: 'image/png', data: 'AAAA' }]
     assert.deepEqual(ServerToolResultSchema.parse({ ...base, images }).images, images)
+  })
+  it('strips unknown keys on an image entry (non-strict object: the wire may grow a field without rejecting the whole result)', () => {
+    const parsed = ServerToolResultSchema.parse({ ...base, images: [{ mediaType: 'image/png', data: 'AAAA', extra: 1 }] })
+    assert.deepEqual(parsed.images, [{ mediaType: 'image/png', data: 'AAAA' }])
   })
   it('rejects a non-array or a malformed image', () => {
     assert.equal(ok(ServerToolResultSchema, { ...base, images: 'x' }), false)

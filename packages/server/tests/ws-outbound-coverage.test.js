@@ -556,17 +556,32 @@ describe('#7085 outbound schema coverage', () => {
       assert.deepEqual(unpinned, [...UNSCHEMAD].sort(), 'the lines the pin cannot see must be the UNSCHEMAD allowlist, no more and no fewer')
     })
 
-    it('a schema-gap exemption is only valid while the roster names the field and the schema still lacks it', () => {
-      for (const [type, { fields, why }] of ROSTER_FIELDS_SCHEMA_LACKS) {
-        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+    /** Why each exemption is stale (empty = all genuine). Pure so a CONTROL can feed it a bad one. */
+    function staleExemptionProblems(lacksMap) {
+      const problems = []
+      for (const [type, { fields, why }] of lacksMap) {
+        if (!(why.length > 20)) problems.push(`'${type}' needs a stated reason`)
         const entry = ENTRIES.find((e) => e.type === type)
         const schemaFields = schemaFieldsFor(type)
-        assert.ok(entry && schemaFields, `'${type}' is exempted but is not a schema-backed roster line (stale)`)
+        if (!(entry && schemaFields)) { problems.push(`'${type}' is exempted but is not a schema-backed roster line (stale)`); continue }
         for (const f of fields) {
-          assert.ok(entry.fields.some((x) => x.name === f), `'${type}.${f}' is exempted but the roster no longer names it (stale)`)
-          assert.equal(schemaFields.has(f), false, `'${type}.${f}' now HAS a schema field — drop its exemption`)
+          if (!entry.fields.some((x) => x.name === f)) problems.push(`'${type}.${f}' is exempted but the roster no longer names it (stale)`)
+          if (schemaFields.has(f)) problems.push(`'${type}.${f}' now HAS a schema field — drop its exemption`)
         }
       }
+      return problems
+    }
+
+    it('a schema-gap exemption is only valid while the roster names the field and the schema still lacks it', () => {
+      assert.deepEqual(staleExemptionProblems(ROSTER_FIELDS_SCHEMA_LACKS), [])
+    })
+
+    it('CONTROL: the stale check reports an exemption for a field the schema already declares', () => {
+      const bad = new Map([['server_error', { fields: ['correlationId'], why: 'synthetic exemption for a declared field' }]])
+      const problems = staleExemptionProblems(bad)
+      assert.equal(problems.length, 1)
+      assert.ok(problems[0].includes('now HAS a schema field'), problems[0])
+      assert.ok(staleExemptionProblems(new Map([['server_error', { fields: ['ghost'], why: 'synthetic exemption for a ghost field' }]])).length > 0)
     })
 
     it('CONTROL: a roster line that omits a schema field is reported', () => {
