@@ -36,7 +36,7 @@ export const BOUND_OUTGOING_DENIED = Object.freeze([
   'integration_action_ack', 'integration_status_snapshot', 'mailbox_status_snapshot',
   'monthly_budget', 'notification_prefs', 'orchestration_action_ack', 'orchestration_run_delta',
   'orchestration_run_snapshot', 'orchestration_runs_snapshot', 'pair_pending',
-  'pair_request_pending', 'pair_resolved', 'principal_admin_result', 'repo_events_delta', 'repo_events_snapshot',
+  'pair_request_pending', 'pair_resolved', 'principal_admin_result', 'principal_event', 'principal_events_page', 'principal_gap', 'principal_live_fence', 'principal_subscribed', 'repo_events_delta', 'repo_events_snapshot',
   'repo_runtime_config_snapshot', 'restore_archived_session_result', 'retry_failed_restore_result',
   'runner_status_snapshot', 'scheduled_tasks', 'session_archive_policy_result',
   'session_preset_snapshot', 'shell_pending_approval', 'simulator_action_ack',

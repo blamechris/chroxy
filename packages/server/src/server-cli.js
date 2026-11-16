@@ -72,6 +72,7 @@ import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
 import { createPrincipalStore } from './principal-store.js'
+import { PrincipalJournal } from './principal-journal.js'
 import { StatusLineManager } from './statusline.js'
 import { warnIfClaudeConfigDirUnusable } from './utils/claude-config-dir.js'
 
@@ -1563,6 +1564,14 @@ export async function startCliServer(config) {
   })
   daemonUpdate.start()
 
+  const principalStore = createPrincipalStore()
+  const principalJournal = new PrincipalJournal({
+    dir: configPath('principal-journal'),
+    enabled: () => principalStore.hasEntries(),
+  })
+  // A journal whose session no longer exists is dead weight: drop it at boot.
+  try { principalJournal.prune((id) => sessionManager.getSession(id) != null) } catch (err) { log.warn(`principal journal prune failed: ${err?.message || err}`) }
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -1591,7 +1600,11 @@ export async function startCliServer(config) {
     // read; an absent store is empty and an untrusted one invalidates every principal.
     // Nothing can mint a token yet (landing order: S11 first), so on a real install this
     // is empty.
-    principalStore: createPrincipalStore(),
+    principalStore,
+    // #9118: the normalized event journal behind the principal read path. It records only
+    // while the principal store has an entry, so a daemon with no principals journals
+    // nothing (and writes nothing). 0600 sidecar files in <config dir>/principal-journal.
+    principalJournal,
     // #5536 — the identity keypair the WsServer uses to sign each connection's
     // ephemeral exchange public key (both eager and discrete paths). Null when
     // pinning is unavailable (no-auth / no-encrypt / keychain failure).

@@ -65,12 +65,25 @@ export const PRINCIPAL_TRANSPORT_EXEMPT = Object.freeze(['auth', 'key_exchange',
 // -- Inbound: allowlist ------------------------------------------------------
 
 /**
- * v1 allowlist: EXISTING types only. The new `principal_*` types are added by the
- * children that add their handlers; none is listed here before it exists.
- * `tier` is the lowest tier that may send the type.
+ * v1 allowlist: the five existing types, plus the `principal_*` types of the children that
+ * have landed their handlers (S3: the journal read path). A new `principal_*` type is
+ * listed here only together with its handler. `tier` is the lowest tier that may send the
+ * type.
  * @type {Readonly<Record<string, { tier: string, reason: string }>>}
  */
 export const PRINCIPAL_ALLOWED_MESSAGE_TYPES = Object.freeze({
+  principal_subscribe: Object.freeze({
+    tier: 'observe',
+    reason: 'observe: a correlated subscribe to the normalized event journal; the handler resolves EVERY explicit session id through principalMaySee and refuses the whole request scope_denied when any one is not granted',
+  }),
+  principal_unsubscribe: Object.freeze({
+    tier: 'observe',
+    reason: 'observe: stops the caller\'s own journal subscriptions; it can name only its own, so it grants nothing and leaks nothing',
+  }),
+  principal_events_read: Object.freeze({
+    tier: 'observe',
+    reason: 'observe: a paged read of the normalized event journal (limit 200); the handler resolves the explicit session id through principalMaySee',
+  }),
   input: Object.freeze({
     tier: 'steer',
     reason: 'steer: one fenced, provenance-labelled input into a leased session; the handler resolves an explicit sessionId through principalMaySee with no activeSessionId fallback',
@@ -287,6 +300,15 @@ export const PRINCIPAL_DENIED_MESSAGE_TYPES = Object.freeze({
  * @type {Readonly<Record<string, { fields: readonly string[], values?: Readonly<Record<string, readonly unknown[]>> }>>}
  */
 export const PRINCIPAL_ENVELOPES = Object.freeze({
+  principal_subscribe: Object.freeze({
+    fields: Object.freeze(['type', 'requestId', 'sessionIds', 'cursors']),
+  }),
+  principal_unsubscribe: Object.freeze({
+    fields: Object.freeze(['type', 'requestId', 'sessionIds']),
+  }),
+  principal_events_read: Object.freeze({
+    fields: Object.freeze(['type', 'requestId', 'sessionId', 'cursor', 'limit']),
+  }),
   input: Object.freeze({
     fields: Object.freeze(['type', 'sessionId', 'clientMessageId', 'data', 'leaseId', 'gen']),
   }),
@@ -585,6 +607,17 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
     'retentionExpiresAt', 'dedupScope', 'reason', 'message', 'context',
   ]),
   credential_invalidated: Object.freeze(['type', 'reason']),
+  // The journal read path (S3). Delivered by a dedicated per-subscription direct send
+  // (principal-subscriptions.js), never by a broadcast, and each is re-checked against the
+  // grant at send time. `principal_subscribed` has no top-level session: every session it
+  // lists is checked (see `frameForPrincipal`).
+  principal_subscribed: Object.freeze(['type', 'requestId', 'sessions']),
+  principal_event: Object.freeze([
+    'type', 'requestId', 'sessionId', 'journalId', 'journalSeq', 'ts', 'eventType', 'data', 'truncated', 'replay',
+  ]),
+  principal_live_fence: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'journalSeq']),
+  principal_gap: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'reason', 'fromSeq', 'toSeq', 'ended']),
+  principal_events_page: Object.freeze(['type', 'requestId', 'sessionId', 'journalId', 'events', 'headSeq', 'cursor', 'more', 'gap']),
 })
 
 /**
@@ -704,13 +737,17 @@ export function sendRawTransport(ws, client, frame) {
 
 /**
  * Frames a principal may receive on the BROADCAST path (the broadcaster and the
- * session-broadcast paths), with the fields each is delivered with. EMPTY in S2: a
- * principal receives no ordinary session broadcast of any type (contract §3.1 item 7).
- * This is the named extension point for the normalized `principal_event` path that S3
- * adds; the grant check in `frameForPrincipalBroadcast` applies to every entry.
+ * session-broadcast paths), with the fields each is delivered with. EMPTY, and it stays
+ * empty in S3: a principal receives no ordinary session broadcast of any type (contract
+ * section 3.1 item 7). S3 chose the other of the two options its predecessor left open: the
+ * `principal_event` family is delivered by a dedicated per-subscription DIRECT send
+ * (principal-subscriptions.js) through `PRINCIPAL_OUTGOING_ALLOWED`, because the fence, the
+ * held buffer and the release order are per-subscription state and because the broadcast
+ * path would need the principal on the ClientManager session index, which S2 pinned shut.
+ * The extension point and `frameForPrincipalBroadcast` remain, deny by default, for a
+ * later child that needs a true broadcast; the grant check applies to every entry.
  * @type {Readonly<Record<string, readonly string[]>>}
  */
-// S3 fills this with the normalized `principal_event` family; nothing else belongs here.
 export const PRINCIPAL_BROADCAST_ALLOWED = Object.freeze({})
 
 // Frames `frameForPrincipalBroadcast` already vetted, mapped to the ONE client each was vetted
@@ -739,12 +776,26 @@ export function frameForPrincipalBroadcast(client, message, opts = {}) {
   if (typeof message.sessionId !== 'string' || !principalMaySee(client, message.sessionId, 'observe', opts).ok) return null
   const frame = {}
   for (const field of allowed[type]) {
-    if (Object.hasOwn(message, field)) frame[field] = message[field]
+    if (Object.hasOwn(message, field)) frame[field] = cloneField(message[field])
   }
   const binding = client.boundSessionId
   if (typeof binding === 'string' && binding.length > 0 && JSON.stringify(frame).includes(binding)) return null
   VETTED_BROADCAST.set(frame, client)
-  return Object.freeze(frame)
+  return deepFreezeFrame(frame)
+}
+
+/** Freeze a vetted frame and every nested object in it: `Object.freeze` alone is shallow. */
+function deepFreezeFrame(value) {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value)
+    for (const key of Object.keys(value)) deepFreezeFrame(value[key])
+  }
+  return value
+}
+
+/** A frame field's value, deep-copied when it is an object or array. */
+function cloneField(value) {
+  return value !== null && typeof value === 'object' ? structuredClone(value) : value
 }
 
 /**
@@ -770,12 +821,25 @@ export function frameForPrincipal(client, message, opts = {}) {
   }
   const type = message?.type
   if (typeof type !== 'string' || !Object.hasOwn(PRINCIPAL_OUTGOING_ALLOWED, type)) return null
-  if (typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {
+  // The ONE frame that is delivered for a session the principal can no longer see: the notice
+  // that its own subscription ended because the grant was narrowed or the session was removed.
+  // It names only the session id the principal itself subscribed to, and nothing else.
+  const endNotice = type === 'principal_gap' && message.ended === true && (message.reason === 'scope' || message.reason === 'removed')
+  if (!endNotice && typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {
     return null
+  }
+  // `principal_subscribed` lists its sessions instead of carrying one: each must be granted.
+  if (type === 'principal_subscribed') {
+    const sessions = message.sessions
+    if (sessions !== undefined && (!Array.isArray(sessions) || !sessions.every((s) => typeof s?.sessionId === 'string' && principalMaySee(client, s.sessionId, 'observe', opts).ok))) {
+      return null
+    }
   }
   const frame = {}
   for (const field of PRINCIPAL_OUTGOING_ALLOWED[type]) {
-    if (Object.hasOwn(message, field)) frame[field] = message[field]
+    // A nested value is copied, never shared: the delivered frame holds nothing the
+    // journal (or any other owner) can still change or that could be changed through it.
+    if (Object.hasOwn(message, field)) frame[field] = cloneField(message[field])
   }
   const binding = client.boundSessionId
   if (typeof binding === 'string' && binding.length > 0 && JSON.stringify(frame).includes(binding)) return null

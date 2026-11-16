@@ -283,6 +283,11 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   its only consumer is `chroxy agent` (cli/agent-cmd.js, via the
                                           //   agent-control client). The dashboard Agents tab (S17 of #9112)
                                           //   moves it to DASHBOARD_ONLY when it lands
+  'principal_subscribed',                 // #9118 (S3 of #9112) the agent principal's journal read path: sent
+  'principal_event',                      //   ONLY to a scoped principal credential on a loopback socket, which
+  'principal_live_fence',                 //   neither the dashboard nor the mobile app ever is. Its consumer is the
+  'principal_gap',                        //   agent-control adapter (S6 of #9112). The dashboard Agents tab (S17)
+  'principal_events_page',                //   would be the only client to handle it.
   // 'memory_stack_result' removed — the dashboard now handles it (#6867); it
   // moved to DASHBOARD_ONLY below. Mobile parity is the sibling slice #6870.
 ])

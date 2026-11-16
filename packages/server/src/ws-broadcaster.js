@@ -22,6 +22,10 @@ const log = createLogger('ws')
  * @param {object} opts
  * @param {Map} opts.clients             ws → client Map (shared reference with WsServer)
  * @param {function} opts.sendFn         (ws, message) => void — handles encryption, seq, etc.
+ * @param {function} [opts.journalTap]  (message) => void — fed every outgoing session-tagged broadcast ONCE, before
+ *                                        delivery and whoever the recipients are, so the agent-principal event journal
+ *                                        (principal-journal.js) records what happened independent of who watches. Must
+ *                                        not throw; a throw is swallowed so it can never break a broadcast.
  * @param {function} [opts.principalOpts] () => PrincipalPolicyOpts — session lookups for an agent principal's
  *                                        delivery decision (principal-policy.js); optional, defaults to no lookups
  * @param {object} [opts.clientManager]  WsClientManager owning the sessionId→clients reverse
@@ -34,8 +38,9 @@ const log = createLogger('ws')
  * @param {number} [opts.backpressureMaxDrops]   close connection after this many consecutive drops
  */
 export class WsBroadcaster {
-  constructor({ clients, clientManager, sendFn, principalOpts, backpressureThreshold, backpressureMaxDrops } = {}) {
+  constructor({ clients, clientManager, sendFn, principalOpts, journalTap, backpressureThreshold, backpressureMaxDrops } = {}) {
     this._clients = clients
+    this._journalTap = typeof journalTap === 'function' ? journalTap : null
     this._principalOpts = typeof principalOpts === 'function' ? principalOpts : () => ({})
     this._clientManager = clientManager ?? null
     this._sendFn = sendFn
@@ -46,6 +51,12 @@ export class WsBroadcaster {
     // default — checked once here, not per-broadcast, so the hot path stays a
     // single boolean test. Intended for staging / reproduction, never prod.
     this._assertIndexIntegrity = process.env.CHROXY_WS_INDEX_ASSERT === '1'
+  }
+
+  /** Hand one outgoing message to the journal tap, once. Never throws. */
+  _tapJournal(message) {
+    if (this._journalTap === null) return
+    try { this._journalTap(message) } catch (err) { log.warn(`Journal tap failed: ${err?.message || err}`) }
   }
 
   /** Public broadcast: send a message to all authenticated clients */
@@ -144,7 +155,8 @@ export class WsBroadcaster {
    * continue. (No shipping filter throws today — the #4799 fix hardened the
    * default — but this is the resilient invariant the fast path already has.)
    */
-  _broadcast(message, filter = () => true) {
+  _broadcast(message, filter = () => true, skipJournal = false) {
+    if (!skipJournal) this._tapJournal(message)
     for (const [ws, client] of this._clients) {
       if (!client.authenticated || ws.readyState !== 1) continue
       let matched
@@ -221,6 +233,7 @@ export class WsBroadcaster {
    */
   _broadcastToSession(sessionId, message, filter) {
     const tagged = { ...message, sessionId }
+    this._tapJournal(tagged)
 
     if (this._assertIndexIntegrity && this._clientManager) {
       // Throws on drift, naming the offending session/client — surfaces the
@@ -260,7 +273,8 @@ export class WsBroadcaster {
       }
       return false
     })
-    this._broadcast(tagged, effectiveFilter)
+    // already journaled above: the generic path must not record it a second time
+    this._broadcast(tagged, effectiveFilter, true)
   }
 
   /**

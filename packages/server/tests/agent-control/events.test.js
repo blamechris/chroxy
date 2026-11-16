@@ -256,3 +256,41 @@ describe('classifyBroadcast allowlist', () => {
     assert.deepEqual(classifyBroadcast({ sessionId: 's' }, a), [])
   })
 })
+
+describe('thinking_level_changed: applied effort metadata is retained (#9075)', () => {
+  const effort = (extra) => ({ type: 'thinking_level_changed', sessionId: 'synthetic-session', ...extra })
+
+  it('is forwarded with the requested level and the effective string, null and absent kept distinct', () => {
+    const a = new StreamAccumulator()
+    const [high] = classifyBroadcast(effort({ level: 'high', effective: 'high' }), a)
+    assert.deepEqual(high, { sessionId: 'synthetic-session', type: 'thinking_level_changed', data: { level: 'high', effective: 'high' } })
+    const [unknown] = classifyBroadcast(effort({ level: 'high', effective: null }), a)
+    assert.equal(unknown.data.effective, null)
+    assert.equal(Object.hasOwn(unknown.data, 'effective'), true)
+    const [absent] = classifyBroadcast(effort({ level: 'high' }), a)
+    assert.equal(Object.hasOwn(absent.data, 'effective'), false)
+  })
+
+  it('an applied level that differs from the requested one, and a model change that resets it, replay in order with their cursors', () => {
+    const log = new SessionEventLog({ retention: 10 })
+    const a = new StreamAccumulator()
+    for (const frame of [
+      effort({ level: 'xhigh', effective: 'high' }),
+      { type: 'model_changed', sessionId: 'synthetic-session', model: 'haiku' },
+      effort({ level: 'xhigh', effective: null }),
+    ]) for (const e of classifyBroadcast(frame, a)) log.push(e.sessionId, e.type, e.data)
+    const read = log.read('synthetic-session', { cursor: null })
+    assert.deepEqual(read.events.map((e) => e.type), ['thinking_level_changed', 'model_changed', 'thinking_level_changed'])
+    assert.deepEqual(read.events[0].data, { level: 'xhigh', effective: 'high' })
+    assert.equal(read.events[2].data.effective, null)
+    // a reconnect (reset) is a gap, not silently resumed
+    log.reset()
+    assert.equal(log.read('synthetic-session', { cursor: read.cursor }).gapReason, 'connection_reset')
+  })
+
+  it('thinking TEXT stays excluded: effort metadata is forwarded, reasoning is not', () => {
+    const a = new StreamAccumulator()
+    assert.equal(classifyBroadcast(effort({ level: 'high', effective: 'high' }), a).length, 1)
+    assert.deepEqual(classifyBroadcast({ type: 'message', sessionId: 's', messageType: 'thinking', content: 'private' }, a), [])
+  })
+})

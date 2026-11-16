@@ -1199,6 +1199,10 @@ export class SessionManager extends EventEmitter {
     // a particular event — the general lesson this repo already learned once
     // for the environment tag.
     forgetSurveyKey(this, sessionId)
+    // #9118: the session is gone for good. `destroyAll()` (a daemon shutdown, which keeps
+    // every session for the next start) bypasses this method, so this event is exactly "removed,
+    // not shut down": the principal journal and its subscriptions are torn down on it.
+    this.emit('session_removed', { sessionId })
   }
 
   /**

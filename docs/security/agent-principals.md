@@ -287,7 +287,10 @@ All **new** types carry a **`principal_` prefix**, because `agent_event` already
 | answer | `permission_response` (**`deny` only**, field-limited, §9) | — |
 
 Server frames, all new and all prefixed: `principal_subscribed`, `principal_event`,
-`principal_events_page`, `principal_live_fence`, `principal_interrupt_ack`. S2's guard
+`principal_events_page`, `principal_live_fence`, `principal_gap` (S3: a gap, or the end of a
+subscription), `principal_interrupt_ack`. On `principal_event` and `principal_live_fence` the
+journal position is **`journalSeq`**, not `seq`: the transport stamps its own per-connection
+`seq` on every frame (`ws-client-sender.js`) and would overwrite a field of that name. S2's guard
 asserts **no new name collides with an existing client or server schema type**.
 
 History and roster reads go through the `principal_*` types, whose payloads are
@@ -829,7 +832,15 @@ broadcast frames carry no per-session sequence; `request_full_history` has no
   truncated with `truncated: true`), persisted with session state. An eviction advances
   the window start and is reported as a gap.
 - **Cursor** `{ sessionId, journalId, seq }`. Gap reasons: `evicted`, `journal_reset`,
-  `restart_loss`, `unknown_cursor`.
+  `restart_loss`, `unknown_cursor`. (S3: a subscription the daemon ends carries the extra
+  reasons `held_overflow`, `backpressure`, `scope` and `removed` on `principal_gap { ended: true }`.)
+- **Persistence (S3): a 0600 sidecar, not the session state file** —
+  `<config dir>/principal-journal/<hash>.meta.json` (id, reservation, clean flag; written
+  synchronously with the strict durable write) and `<hash>.events.json` (the window,
+  debounced). One JSON state file rewritten wholesale by many writers, parsed by the restore
+  path and written by a lenient writer is the wrong place for up to 2000 x 4 KiB per session and
+  for a reservation that must be confirmed durable. The journal records only while the
+  principal store holds an entry, so a daemon with no principals writes none (§13).
 - **Seq survives a crash by a *confirmed* reservation (E4, R14).** The journal reuses the
   seq **reservation** idea of `session-message-history.js` (`_nextSeq` / `_seqReserved`,
   `SEQ_RESERVATION_STEP`, #8259) but **not its failure handling**: `_nextSeq` advances
@@ -852,7 +863,9 @@ broadcast frames carry no per-session sequence; `request_full_history` has no
 2. Replay `principal_event` frames (`replay: true`) from the cursor to `headSeq`.
 3. `principal_live_fence { requestId, sessionId, seq }` — everything after is live.
 4. Live `principal_event` frames. Live events during replay are **held and released in
-   `seq` order** after the fence.
+   `seq` order** after the fence. (Delivery, S3: a dedicated per-subscription direct send
+   through `frameForPrincipal`, not the broadcast path; `PRINCIPAL_BROADCAST_ALLOWED` stays
+   empty and a principal stays off the ClientManager session index.)
 
 The held-live buffer is **capped (500 events or 1 MiB)**. On overflow the daemon reports a
 gap and **ends the subscription**; the client re-subscribes. Eviction between `headSeq`
@@ -892,6 +905,26 @@ honest about what redaction can promise:
 
 - **Provenance-based suppression:** the result of a tool call whose permission request was
   **floored** is replaced in the journal by a placeholder.
+- **Raw tool inputs are not journaled in v1 (S3 review), on ANY event.** Tool events are built
+  from an explicit field allowlist (`tool_start`: tool, call id, message id; `tool_result`: call id,
+  redacted result, truncated flag) and an `input` field is stripped from every other type.
+  `tool_start` keeps the tool name
+  and call id; `tool_input_delta` is never journaled; a `permission_request` keeps the tool,
+  its `floored` verdict and, only when `floored === false`, the existing bounded, sanitised
+  description (a floored request carries none). Observe tier therefore sees which tools ran,
+  not their inputs. The verdicts are kept per session, outside the journal generation, and
+  fail closed with a LATCH: a result is let through only when its call is known to have started
+  and not to be floored. A result for a call never seen start (it began before journaling or
+  crossed a restart), one already retired (a duplicate) and every result while latched are
+  withheld. The latch is set when the tracker drops information (no room for a verdict or an open
+  call, a pending verdict forgotten) and is cleared ONLY at the turn end (`result` or
+  `agent_idle`), which also retires everything the tracker holds, so emptiness never clears it.
+- **A truncated stream is not journaled.** If the accumulator had to cut an assistant stream
+  (65536 characters), the event carries a placeholder, `truncated: true` and the length, never a
+  prefix: no fixed margin can contain a credential such as a JWT that straddles the cut.
+- **Redaction runs before any lossy cut.** A frame is redacted whole (on a copy) before
+  normalization clips its strings, and an accumulated stream is redacted whole, then cut with
+  its unsafe tail dropped, so a credential straddling a cut leaves no prefix.
 - **Pattern redaction** covers known value shapes only. It cannot catch arbitrary secret
   content, and derived assistant text may repeat floored content.
 - Therefore **observe access is read access to session output**, and is granted
@@ -1041,6 +1074,29 @@ S9. S8 owns `createdBy` persistence and the gen high-water mark; S12 consumes th
 - **Owner lockout bounded by pre-emption, TTL and kill.** A principal can hold a lease and
   fill the cap-3 queue; the owner can always type (human wins), revoke or kill, and
   leases and queue entries expire (2 h, 15 min).
+- **A principal granted late sees the journal from the grant on.** The journal records only
+  while the principal store has an entry (data-at-rest minimisation, S3), so history from before
+  the first grant does not exist. Its cursors and gaps are otherwise unchanged.
+- **Observe does not show tool inputs (S3).** A supervisor sees tool names, ids, verdicts and
+  (unfloored) descriptions, not the inputs; it reads results and assistant text.
+- **Journal lifetime and incarnations (S3).** A journal is deleted with its session on any removal
+  (`session_removed`: user destroy, idle timeout, provider exhaustion, a kept failed restore) and
+  kept across a daemon shutdown. Recording is gated on the session being CURRENTLY HELD by the
+  SessionManager (no tombstone set), and every create or restore of an id (`session_created`) is a
+  new incarnation that starts a fresh journal with a new `journalId`; a late frame for a session
+  that is not live is dropped. A sidecar whose meta contradicts its events mints a new `journalId`.
+- **A subscription never ends silently (S3).** A new `journalId` (recovery after a failed
+  reservation, a reset) ends every subscription of the old one with `principal_gap { reason:
+  restart_loss, ended: true }`. A grant that no longer covers the session ends it with reason
+  `scope`, a removed session with `removed`. These two end notices are the only gap frames
+  delivered for a session the principal can no longer see (they name only the id it subscribed to).
+- **Debounced flush is synchronous (S3).** The events file is rewritten whole, durably, on the main
+  thread at most every 5 s per dirty session (up to 2000 x 4 KiB, 8 MB worst case, typically a few
+  hundred KB). Accepted for v1; an async or incremental writer is a follow-up.
+- **Floored-result suppression can over-suppress.** One pipeline names the tool call on its
+  `permission_request` (`toolUseId`), the other does not; without it the request is matched to
+  the open or next call of the same tool, so a second call of that tool can be withheld too.
+  It never under-suppresses (§8).
 - **New data at rest.** The journal persists up to 2000 normalized events per session, the
   principal store holds label/scope/suppression metadata and the dedup ledger holds ids.
   All are 0600 under the config dir and carry the session history's sensitivity; the

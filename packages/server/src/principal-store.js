@@ -360,6 +360,12 @@ export class PrincipalStore {
     return { health: this.health(), principals }
   }
 
+  /**
+   * Is any principal on record (live or not)? The journal records only while this is true,
+   * so a daemon with no principals writes no journal at all. No reload.
+   */
+  hasEntries() { return this._entries.size > 0 }
+
   /** The principals that are currently live (no reload). */
   liveSummaries() {
     return [...this._entries.keys()].filter((id) => this.isLive(id)).map((id) => this._summary(this._entries.get(id)))

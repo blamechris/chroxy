@@ -1428,6 +1428,36 @@ export const PrincipalAdminRevokeSchema = z.object({
     principalId: z.string().max(64).optional(),
     label: z.string().max(64).optional(),
 });
+// -- Agent principal journal (#9118, S3 of #9112) --
+// The read side of an agent principal (docs/security/agent-principals.md section 7.2):
+// a correlated subscribe to the daemon's normalized event journal, an unsubscribe, and a
+// paged pull. Observe tier. Every session id must be granted; a request naming one that is
+// not (or that does not exist) is refused `scope_denied` as a whole. The cursor is the one
+// the daemon handed out: `{ sessionId, journalId, seq }`, `seq` being the last event the
+// client has seen.
+export const PrincipalJournalCursorSchema = z.object({
+    sessionId: z.string().min(1).max(128),
+    journalId: z.string().min(1).max(64),
+    seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+export const PrincipalSubscribeSchema = z.object({
+    type: z.literal('principal_subscribe'),
+    requestId: z.string().min(1).max(128),
+    sessionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+    cursors: z.array(PrincipalJournalCursorSchema).max(32).optional(),
+});
+export const PrincipalUnsubscribeSchema = z.object({
+    type: z.literal('principal_unsubscribe'),
+    requestId: z.string().min(1).max(128).optional(),
+    sessionIds: z.array(z.string().min(1).max(128)).max(32).optional(),
+});
+export const PrincipalEventsReadSchema = z.object({
+    type: z.literal('principal_events_read'),
+    requestId: z.string().min(1).max(128),
+    sessionId: z.string().min(1).max(128),
+    cursor: PrincipalJournalCursorSchema.optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+});
 // -- Daemon update banner (#8331) --
 // Restart-now / postpone for the update the deploy script has queued for the
 // daily daemon. Gated server-side on a STRICT PRIMARY, UNBOUND client
@@ -2119,6 +2149,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     PrincipalAdminGrantSchema,
     PrincipalAdminListSchema,
     PrincipalAdminRevokeSchema,
+    PrincipalSubscribeSchema,
+    PrincipalUnsubscribeSchema,
+    PrincipalEventsReadSchema,
     DaemonUpdateActionSchema,
     QueryPermissionAuditSchema,
     ExtensionMessageSchema,

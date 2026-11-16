@@ -228,7 +228,8 @@ export class WsClientManager extends EventEmitter {
     if (!sessionId) return
     // S2 (agent principals): this refusal also keeps a principal OFF the subscription index (it carries a
     // sentinel binding, so every session is 'another session'). That is deliberate and fail-closed;
-    // S3 changes it on purpose, with tests/principal-dispatch-wiring.test.js pinning the current behaviour.
+    // S3 keeps it on purpose: the principal journal is delivered by its own per-subscription direct send
+    // (principal-subscriptions.js), not through this index. tests/principal-dispatch-wiring.test.js pins it.
     // A session-bound client is never subscribed (nor indexed) on a session
     // other than its binding, so the reverse index cannot stream one to it.
     if (isBoundToOtherSession(client, sessionId)) {
@@ -266,7 +267,8 @@ export class WsClientManager extends EventEmitter {
   setActiveSession(client, sessionId) {
     // S2 (agent principals): this refusal also keeps a principal OFF the subscription index (it carries a
     // sentinel binding, so every session is 'another session'). That is deliberate and fail-closed;
-    // S3 changes it on purpose, with tests/principal-dispatch-wiring.test.js pinning the current behaviour.
+    // S3 keeps it on purpose: the principal journal is delivered by its own per-subscription direct send
+    // (principal-subscriptions.js), not through this index. tests/principal-dispatch-wiring.test.js pins it.
     // A session-bound client's active session is its binding or null (cleared
     // when the bound session is gone); any other session is ignored.
     if (sessionId && isBoundToOtherSession(client, sessionId)) {

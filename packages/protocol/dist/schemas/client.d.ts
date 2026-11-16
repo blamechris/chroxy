@@ -1169,6 +1169,37 @@ export declare const PrincipalAdminRevokeSchema: z.ZodObject<{
     principalId: z.ZodOptional<z.ZodString>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const PrincipalJournalCursorSchema: z.ZodObject<{
+    sessionId: z.ZodString;
+    journalId: z.ZodString;
+    seq: z.ZodNumber;
+}, z.core.$strip>;
+export declare const PrincipalSubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_subscribe">;
+    requestId: z.ZodString;
+    sessionIds: z.ZodArray<z.ZodString>;
+    cursors: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        sessionId: z.ZodString;
+        journalId: z.ZodString;
+        seq: z.ZodNumber;
+    }, z.core.$strip>>>;
+}, z.core.$strip>;
+export declare const PrincipalUnsubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_unsubscribe">;
+    requestId: z.ZodOptional<z.ZodString>;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>;
+export declare const PrincipalEventsReadSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_events_read">;
+    requestId: z.ZodString;
+    sessionId: z.ZodString;
+    cursor: z.ZodOptional<z.ZodObject<{
+        sessionId: z.ZodString;
+        journalId: z.ZodString;
+        seq: z.ZodNumber;
+    }, z.core.$strip>>;
+    limit: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
 export declare const DaemonUpdateActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_action">;
     action: z.ZodEnum<{
@@ -2096,6 +2127,29 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
     principalId: z.ZodOptional<z.ZodString>;
     label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_subscribe">;
+    requestId: z.ZodString;
+    sessionIds: z.ZodArray<z.ZodString>;
+    cursors: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        sessionId: z.ZodString;
+        journalId: z.ZodString;
+        seq: z.ZodNumber;
+    }, z.core.$strip>>>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_unsubscribe">;
+    requestId: z.ZodOptional<z.ZodString>;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_events_read">;
+    requestId: z.ZodString;
+    sessionId: z.ZodString;
+    cursor: z.ZodOptional<z.ZodObject<{
+        sessionId: z.ZodString;
+        journalId: z.ZodString;
+        seq: z.ZodNumber;
+    }, z.core.$strip>>;
+    limit: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_action">;
     action: z.ZodEnum<{
