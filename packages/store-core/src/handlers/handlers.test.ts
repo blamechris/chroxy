@@ -10463,11 +10463,11 @@ describe('handleMessage — container-health codes (#7603)', () => {
     })
   })
 
-  it('does NOT arm from history replay (a replayed vanish is an ended outage)', () => {
+  it('does NOT arm from a replayed entry (carries historySeq; a replayed vanish is an ended outage)', () => {
     // CONTROL: prove the message actually reached the dispatch branch, so the
     // null below is the replay gate and not an early `shouldDispatch: false`
     // return that would satisfy this assertion for free.
-    const result = handleMessage(vanish, 'active-1', true, [])
+    const result = handleMessage({ ...vanish, historySeq: 3 }, 'active-1', true, [])
     expect(result.shouldDispatch).toBe(true)
     if (!result.shouldDispatch) throw new Error('unreachable')
     expect(result.chatMessage.code).toBe('CONTAINER_VANISHED')
