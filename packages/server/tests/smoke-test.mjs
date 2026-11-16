@@ -22,7 +22,7 @@ import { mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
-import { harnessVerdict, SMOKE_MIN_CASES } from './helpers/harness-floor.mjs'
+import { harnessVerdict, smokeMinCases } from './helpers/harness-floor.mjs'
 import { parseSmokeArgs, resolveSmokeTarget, USAGE } from './helpers/smoke-target.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
@@ -49,6 +49,7 @@ if (parsed.args.dryRun) {
 }
 const headed = parsed.args.headed
 const apiToken = target.token
+const requireIde = process.env.SMOKE_REQUIRE_IDE === '1'
 
 // Playwright is imported only once the target is known, so a refusal never needs a browser.
 const { chromium } = await import('playwright')
@@ -393,7 +394,6 @@ async function run() {
       // surface + fixture are REQUIRED preconditions — a graceful skip there would
       // mask a regression. SMOKE_REQUIRE_IDE=1 makes a missing palette/fixture a
       // hard failure; unset (local, non-fixture daemon) keeps the section lenient.
-      const requireIde = process.env.SMOKE_REQUIRE_IDE === '1'
       // Foreground the session view first — the Control Room section above leaves
       // its own panel open, which overlays the file viewer.
       const sessionTab = page.locator('[data-testid^="session-tab-"]').first()
@@ -502,7 +502,7 @@ async function run() {
 
   // Summary
   console.log('\n\x1b[1m--- Summary ---\x1b[0m')
-  const verdict = harnessVerdict(results, SMOKE_MIN_CASES)
+  const verdict = harnessVerdict(results, smokeMinCases(requireIde))
   const { passed, failed } = verdict
   console.log(`  \x1b[32m${passed} passed\x1b[0m, \x1b[${failed ? '31' : '32'}m${failed} failed\x1b[0m`)
   if (verdict.broken) console.log(`  \x1b[31m${verdict.summary}\x1b[0m`)
