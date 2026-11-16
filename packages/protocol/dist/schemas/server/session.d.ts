@@ -1489,6 +1489,8 @@ export declare const ServerSessionErrorSchema: z.ZodObject<{
     boundSessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     boundSessionName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     primaryClientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    attemptedSessionId: z.ZodOptional<z.ZodString>;
+    activityId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const ServerInputAckSchema: z.ZodObject<{
     type: z.ZodLiteral<"input_ack">;

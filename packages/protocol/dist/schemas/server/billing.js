@@ -113,6 +113,10 @@ export const ServerErrorSchema = z.object({
     category: z.string().optional(),
     message: z.string(),
     recoverable: z.boolean(),
+    // Short hex id the message pipeline stamps on a failed `_handleMessage` (the same id
+    // its log lines carry), so an operator can correlate the toast with the daemon log.
+    // Absent on every other server_error producer.
+    correlationId: z.string().optional(),
 });
 export const ServerPushTokenErrorSchema = z.object({
     type: z.literal('push_token_error'),

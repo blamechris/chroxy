@@ -359,25 +359,12 @@ describe('#7085 outbound schema coverage', () => {
     // session-scoped frame downstream of the producer, so most schemas rightly omit it
     // (#7108 decided it is a transport tag, not a producer field). `type` is the key.
 
-    /** Fields a producer sends and the roster names, that the schema does not declare yet. */
-    const ROSTER_FIELDS_SCHEMA_LACKS = new Map([
-      ['auth_ok', {
-        fields: ['defaultCwd', 'webFeatures', 'features'],
-        why: 'ws-history.js sends all three in auth_ok; ServerAuthOkSchema declares none, so a parse strips them',
-      }],
-      ['tool_result', {
-        fields: ['images'],
-        why: 'event-normalizer.js attaches `images` when the tool returned any; ServerToolResultSchema lacks it',
-      }],
-      ['server_error', {
-        fields: ['correlationId'],
-        why: 'ws-server.js _handleMessage\'s catch path sends it; ServerErrorSchema lacks it',
-      }],
-      ['host_status_snapshot', {
-        fields: ['requestId'],
-        why: 'control-room-handlers.js echoes the request id; ServerHostStatusSnapshotSchema lacks it (the sibling snapshots declare it)',
-      }],
-    ])
+    /**
+     * Fields a producer sends and the roster names, that the schema does not declare yet. Empty:
+     * #8551 declared every one that was confirmed. An entry is stale-checked below, so one added
+     * here must be real (roster names it, schema still lacks it).
+     */
+    const ROSTER_FIELDS_SCHEMA_LACKS = new Map()
 
     /** Everything up to the Encrypted-envelope marker: the Server -> Client section proper. */
     function rosterSectionText() {
@@ -569,17 +556,32 @@ describe('#7085 outbound schema coverage', () => {
       assert.deepEqual(unpinned, [...UNSCHEMAD].sort(), 'the lines the pin cannot see must be the UNSCHEMAD allowlist, no more and no fewer')
     })
 
-    it('a schema-gap exemption is only valid while the roster names the field and the schema still lacks it', () => {
-      for (const [type, { fields, why }] of ROSTER_FIELDS_SCHEMA_LACKS) {
-        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+    /** Why each exemption is stale (empty = all genuine). Pure so a CONTROL can feed it a bad one. */
+    function staleExemptionProblems(lacksMap) {
+      const problems = []
+      for (const [type, { fields, why }] of lacksMap) {
+        if (!(why.length > 20)) problems.push(`'${type}' needs a stated reason`)
         const entry = ENTRIES.find((e) => e.type === type)
         const schemaFields = schemaFieldsFor(type)
-        assert.ok(entry && schemaFields, `'${type}' is exempted but is not a schema-backed roster line (stale)`)
+        if (!(entry && schemaFields)) { problems.push(`'${type}' is exempted but is not a schema-backed roster line (stale)`); continue }
         for (const f of fields) {
-          assert.ok(entry.fields.some((x) => x.name === f), `'${type}.${f}' is exempted but the roster no longer names it (stale)`)
-          assert.equal(schemaFields.has(f), false, `'${type}.${f}' now HAS a schema field — drop its exemption`)
+          if (!entry.fields.some((x) => x.name === f)) problems.push(`'${type}.${f}' is exempted but the roster no longer names it (stale)`)
+          if (schemaFields.has(f)) problems.push(`'${type}.${f}' now HAS a schema field — drop its exemption`)
         }
       }
+      return problems
+    }
+
+    it('a schema-gap exemption is only valid while the roster names the field and the schema still lacks it', () => {
+      assert.deepEqual(staleExemptionProblems(ROSTER_FIELDS_SCHEMA_LACKS), [])
+    })
+
+    it('CONTROL: the stale check reports an exemption for a field the schema already declares', () => {
+      const bad = new Map([['server_error', { fields: ['correlationId'], why: 'synthetic exemption for a declared field' }]])
+      const problems = staleExemptionProblems(bad)
+      assert.equal(problems.length, 1)
+      assert.ok(problems[0].includes('now HAS a schema field'), problems[0])
+      assert.ok(staleExemptionProblems(new Map([['server_error', { fields: ['ghost'], why: 'synthetic exemption for a ghost field' }]])).length > 0)
     })
 
     it('CONTROL: a roster line that omits a schema field is reported', () => {

@@ -57,6 +57,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     dashboardBuildId: z.ZodOptional<z.ZodString>;
     serverCommit: z.ZodString;
     cwd: z.ZodNullable<z.ZodString>;
+    defaultCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     connectedClients: z.ZodArray<z.ZodObject<{
         clientId: z.ZodString;
         deviceName: z.ZodNullable<z.ZodString>;
@@ -75,6 +76,14 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     protocolVersion: z.ZodNumber;
     minProtocolVersion: z.ZodNumber;
     maxProtocolVersion: z.ZodNumber;
+    webFeatures: z.ZodOptional<z.ZodObject<{
+        available: z.ZodBoolean;
+        remote: z.ZodBoolean;
+        teleport: z.ZodBoolean;
+    }, z.core.$strip>>;
+    features: z.ZodOptional<z.ZodObject<{
+        environments: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$loose>>;
     capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
     resultTimeoutMs: z.ZodOptional<z.ZodNumber>;
     hardTimeoutMs: z.ZodOptional<z.ZodNumber>;

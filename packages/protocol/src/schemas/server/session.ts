@@ -1070,6 +1070,12 @@ export const ServerSessionErrorSchema = z.object({
   boundSessionId: z.string().nullable().optional(),
   boundSessionName: z.string().nullable().optional(),
   primaryClientId: z.string().nullable().optional(),
+  // SESSION_NOT_FOUND: the id the client addressed (input / interrupt / cancel_queued /
+  // cancel_activity), so it can tell a stale id from a missing one. Other codes omit it.
+  attemptedSessionId: z.string().optional(),
+  // CANCEL_ACTIVITY_FAILED: the activity the client tried to cancel (echoed from the
+  // request, so it is absent when the request carried none).
+  activityId: z.string().optional(),
 }).passthrough()
 
 // #7822 — server acceptance acknowledgement for a correlated input submission.

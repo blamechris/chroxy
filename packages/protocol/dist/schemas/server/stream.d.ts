@@ -90,6 +90,7 @@ export declare const ServerMessageSchema: z.ZodObject<{
     tool: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     options: z.ZodOptional<z.ZodAny>;
     timestamp: z.ZodNumber;
+    messageId: z.ZodOptional<z.ZodString>;
     code: z.ZodOptional<z.ZodString>;
     subtype: z.ZodOptional<z.ZodString>;
     compactMetadata: z.ZodOptional<z.ZodObject<{
@@ -131,6 +132,7 @@ export declare const ServerToolStartSchema: z.ZodObject<{
     tool: z.ZodString;
     input: z.ZodAny;
     serverName: z.ZodOptional<z.ZodString>;
+    timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolResultSchema: z.ZodObject<{
@@ -140,7 +142,12 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     truncated: z.ZodOptional<z.ZodBoolean>;
     isError: z.ZodOptional<z.ZodBoolean>;
     terminatedReason: z.ZodOptional<z.ZodString>;
+    images: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        mediaType: z.ZodString;
+        data: z.ZodString;
+    }, z.core.$strip>>>;
     input: z.ZodOptional<z.ZodAny>;
+    timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolInputDeltaSchema: z.ZodObject<{
@@ -659,6 +666,7 @@ export declare const ServerUserQuestionSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question">;
     toolUseId: z.ZodString;
     questions: z.ZodArray<z.ZodAny>;
+    timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
     interrupted: z.ZodOptional<z.ZodBoolean>;
     superseded: z.ZodOptional<z.ZodBoolean>;
