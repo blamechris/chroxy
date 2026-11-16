@@ -1383,6 +1383,12 @@ export class WsServer {
         this._registerSessionHookSecretIfMissing(sessionId, entry)
         this._attachPermissionAuditSink(sessionId, entry)
       }
+      // #9118: canonical removal (every destroy path and the restore-rebind branch; never a
+      // daemon shutdown, which does not pass through `_cleanupSessionMaps`): the principal
+      // journal, its sidecar and its subscriptions go with the session.
+      this._sessionRemovedHandler = ({ sessionId }) => {
+        try { this._principalJournal?.removeSession(sessionId) } catch (err) { log.warn(`principal journal removal failed: ${err?.message || err}`) }
+      }
       this._sessionDestroyedHandler = ({ sessionId }) => {
         // Look up the stored secret — the session is already removed from the map
         const secret = this._sessionHookSecrets.get(sessionId)
@@ -1461,6 +1467,7 @@ export class WsServer {
       }
       sessionManager.on('session_created', this._sessionCreatedHandler)
       sessionManager.on('session_destroyed', this._sessionDestroyedHandler)
+      sessionManager.on('session_removed', this._sessionRemovedHandler)
       sessionManager.on('session_event', this._sessionEventAuditHandler)
 
       // Retroactively register hook secrets for sessions that already exist
@@ -3810,6 +3817,8 @@ export class WsServer {
       }
       if (this._sessionDestroyedHandler) {
         this.sessionManager.off('session_destroyed', this._sessionDestroyedHandler)
+        if (this._sessionRemovedHandler) this.sessionManager.off('session_removed', this._sessionRemovedHandler)
+        this._sessionRemovedHandler = null
         this._sessionDestroyedHandler = null
       }
       if (this._sessionEventAuditHandler) {

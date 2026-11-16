@@ -905,6 +905,15 @@ honest about what redaction can promise:
 
 - **Provenance-based suppression:** the result of a tool call whose permission request was
   **floored** is replaced in the journal by a placeholder.
+- **Raw tool inputs are not journaled in v1 (S3 review).** `tool_start` keeps the tool name
+  and call id; `tool_input_delta` is never journaled; a `permission_request` keeps the tool,
+  its `floored` verdict and, only when `floored === false`, the existing bounded, sanitised
+  description (a floored request carries none). Observe tier therefore sees which tools ran,
+  not their inputs. The verdicts are kept per session, outside the journal generation, and
+  fail closed: at capacity, or when a verdict cannot be tied to a call, results are withheld.
+- **Redaction runs before any lossy cut.** A frame is redacted whole (on a copy) before
+  normalization clips its strings, and an accumulated stream is redacted whole, then cut with
+  its unsafe tail dropped, so a credential straddling a cut leaves no prefix.
 - **Pattern redaction** covers known value shapes only. It cannot catch arbitrary secret
   content, and derived assistant text may repeat floored content.
 - Therefore **observe access is read access to session output**, and is granted
@@ -1057,6 +1066,11 @@ S9. S8 owns `createdBy` persistence and the gen high-water mark; S12 consumes th
 - **A principal granted late sees the journal from the grant on.** The journal records only
   while the principal store has an entry (data-at-rest minimisation, S3), so history from before
   the first grant does not exist. Its cursors and gaps are otherwise unchanged.
+- **Observe does not show tool inputs (S3).** A supervisor sees tool names, ids, verdicts and
+  (unfloored) descriptions, not the inputs; it reads results and assistant text.
+- **Journal lifetime (S3).** A journal is deleted with its session on any removal
+  (`session_removed`: user destroy, idle timeout, provider exhaustion) and kept across a daemon
+  shutdown. A sidecar whose meta contradicts its events mints a new `journalId`.
 - **Floored-result suppression can over-suppress.** One pipeline names the tool call on its
   `permission_request` (`toolUseId`), the other does not; without it the request is matched to
   the open or next call of the same tool, so a second call of that tool can be withheld too.

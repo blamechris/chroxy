@@ -202,6 +202,24 @@ describe('the principal journal over a real server', () => {
       assert.ok(340 < HELD_MAX_EVENTS, 'the count cap was NOT what ended it')
     })
 
+    it('the byte cap counts UTF-8 BYTES: multibyte events overflow it before 500 events and before 1 MiB of UTF-16 units', async () => {
+      const { port, token } = await boot()
+      const c = await open(port, token)
+      for (let i = 1; i <= 60; i++) say('sess-1', i)
+      let yields = 0
+      server._principalSubscriptions._replayBatch = 20
+      const cjk = '\u4e2d'.repeat(1200) // 3 bytes each: ~3.6 KB per event, ~1.2 K UTF-16 units
+      server._principalSubscriptions.yieldFn = async () => {
+        if (++yields === 1) for (let i = 61; i <= 380; i++) say('sess-1', i, { content: cjk }) // 320 events
+        await new Promise((r) => setImmediate(r))
+      }
+      c.send({ type: 'principal_subscribe', requestId: 'r', sessionIds: ['sess-1'] })
+      const gap = await waitFor(() => c.messages.find((m) => m.type === 'principal_gap'), { label: 'gap' })
+      assert.equal(gap.reason, 'held_overflow')
+      const units = 320 * (cjk.length + 150)
+      assert.ok(320 < HELD_MAX_EVENTS && units < HELD_MAX_BYTES, 'neither the count cap nor a UTF-16 length count would have ended it')
+    })
+
     it('eviction between headSeq and the fence is reported as a gap, and the replay continues after it', async () => {
       const { port, token } = await boot({ journalOpts: { maxEvents: 60 } })
       const c = await open(port, token)

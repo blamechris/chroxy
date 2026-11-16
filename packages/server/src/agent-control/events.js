@@ -44,7 +44,7 @@ export const MAX_EVENT_BYTES = 8192
 // types below) is silently dropped — this is the allowlist, not a denylist,
 // so a new high-frequency broadcast type added to the protocol later does
 // NOT automatically start flooding the retained log.
-const FORWARDED_TYPES = new Set([
+export const FORWARDED_TYPES = new Set([
   'message',
   'tool_start',
   'tool_input_delta',

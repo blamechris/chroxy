@@ -65,8 +65,8 @@ import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { writeDurableFile } from './durable-write.js'
 import { readTrustedSecretFile } from './trusted-file-read.js'
-import { sanitizeToolInput } from './redaction.js'
-import { classifyBroadcast, StreamAccumulator, truncateEventData } from './agent-control/events.js'
+import { sanitizeToolInput, redactWhole, withoutUnsafeTail } from './redaction.js'
+import { classifyBroadcast, StreamAccumulator, truncateEventData, FORWARDED_TYPES } from './agent-control/events.js'
 import { SEQ_RESERVATION_STEP } from './session-message-history.js'
 
 const log = createLogger('principal-journal')
@@ -102,33 +102,50 @@ function byteLength(text) {
   return Buffer.byteLength(text, 'utf8')
 }
 
-function boundedSet(set, value, cap) {
-  set.add(value)
-  while (set.size > cap) set.delete(set.values().next().value)
-}
-
 /**
- * Which tool calls of one session the permission floor gated. In memory only: it exists
- * to decide, as events arrive, which `tool_result` must be withheld.
+ * Which tool calls of one session the permission floor gated. In memory only, and held
+ * by the journal PER SESSION, outside the per-generation journal state: a recovery that
+ * mints a new `journalId` must not forget a floored verdict recorded just before it.
+ *
+ * It exists to decide, as events arrive, which `tool_result` must be withheld, and it is
+ * FAIL CLOSED about its own limits: when it cannot hold a verdict (capacity) or cannot tell
+ * which call a verdict was for, it sets `suppressAll` and EVERY result is withheld until
+ * nothing is outstanding. Over-suppression is the only error it can make.
+ * A completed call is retired deliberately (`onToolResult`).
  */
 class FloorTracker {
   constructor() {
-    this.flooredIds = new Set()
+    /** floored calls that have no result yet */
+    this.outstanding = new Set()
     /** @type {{ tool: string }[]} floored requests not yet matched to a call */
     this.pending = []
     /** toolUseId -> tool, calls that started and have no result yet */
     this.open = new Map()
+    this.suppressAll = false
+  }
+
+  _mark(id) {
+    if (this.outstanding.has(id)) return
+    if (this.outstanding.size >= MAX_TRACKED_TOOL_CALLS) {
+      this.suppressAll = true // cannot remember one more: stop trusting every result
+      return
+    }
+    this.outstanding.add(id)
   }
 
   onToolStart(msg) {
     const id = msg.toolUseId
     if (typeof id !== 'string') return
+    if (this.open.size >= MAX_TRACKED_TOOL_CALLS) {
+      // an open call is about to be forgotten, and with it whether it was floored
+      this.open.delete(this.open.keys().next().value)
+      this.suppressAll = true
+    }
     this.open.set(id, msg.tool)
-    while (this.open.size > MAX_TRACKED_TOOL_CALLS) this.open.delete(this.open.keys().next().value)
     const at = this.pending.findIndex((p) => p.tool === msg.tool)
     if (at >= 0) {
       this.pending.splice(at, 1)
-      boundedSet(this.flooredIds, id, MAX_TRACKED_TOOL_CALLS)
+      this._mark(id)
     }
   }
 
@@ -136,22 +153,37 @@ class FloorTracker {
     // Fail closed: only an explicit `false` is "not floored".
     if (msg.floored === false) return
     if (typeof msg.toolUseId === 'string' && msg.toolUseId.length > 0) {
-      boundedSet(this.flooredIds, msg.toolUseId, MAX_TRACKED_TOOL_CALLS)
+      this._mark(msg.toolUseId)
       return
     }
     for (const [id, tool] of this.open) {
-      if (tool === msg.tool) boundedSet(this.flooredIds, id, MAX_TRACKED_TOOL_CALLS)
+      if (tool === msg.tool) this._mark(id)
+    }
+    if (this.pending.length >= MAX_PENDING_FLOORED) {
+      this.pending.shift()
+      this.suppressAll = true
     }
     this.pending.push({ tool: msg.tool })
-    while (this.pending.length > MAX_PENDING_FLOORED) this.pending.shift()
   }
 
+  /** Must this call's result be withheld? Unknown provenance is withheld. */
   isFloored(toolUseId) {
-    return typeof toolUseId === 'string' && this.flooredIds.has(toolUseId)
+    if (this.suppressAll) return true
+    if (typeof toolUseId !== 'string') return this.pending.length > 0
+    if (this.outstanding.has(toolUseId)) return true
+    // a result for a call never seen start, while a floored request is waiting for its call
+    return !this.open.has(toolUseId) && this.pending.length > 0
   }
 
+  /** The call is complete: retire it. */
   onToolResult(toolUseId) {
-    if (typeof toolUseId === 'string') this.open.delete(toolUseId)
+    if (typeof toolUseId === 'string') {
+      this.open.delete(toolUseId)
+      this.outstanding.delete(toolUseId)
+    }
+    if (this.suppressAll && this.outstanding.size === 0 && this.pending.length === 0 && this.open.size === 0) {
+      this.suppressAll = false
+    }
   }
 }
 
@@ -177,7 +209,6 @@ class FloorTracker {
  * @property {boolean} dead                a reservation failed: nothing is issued under this id
  * @property {number} retryAt
  * @property {boolean} dirty               events not yet flushed
- * @property {FloorTracker} floor
  * @property {Set<Function>} listeners
  */
 
@@ -220,6 +251,10 @@ export class PrincipalJournal {
     /** @type {Map<string, SessionJournal>} */
     this._sessions = new Map()
     this._accumulator = new StreamAccumulator()
+    /** @type {Map<string, FloorTracker>} per session, deliberately outside the journal generation */
+    this._floors = new Map()
+    /** sessions removed in this process: a late frame about one must not recreate it */
+    this._removed = new Set()
     this._flushTimer = null
     this._dirMade = false
     this._closed = false
@@ -264,7 +299,7 @@ export class PrincipalJournal {
   _fresh(sessionId, mintedBy, superseded = []) {
     return {
       sessionId, journalId: this._newId(), nextSeq: 1, confirmedReserved: 0, events: [], holes: [],
-      superseded, mintedBy, dead: false, retryAt: 0, dirty: false, floor: new FloorTracker(), listeners: new Set(),
+      superseded, mintedBy, dead: false, retryAt: 0, dirty: false, listeners: new Set(),
     }
   }
 
@@ -295,6 +330,26 @@ export class PrincipalJournal {
       }
     }
     return out
+  }
+
+  /**
+   * Does the meta agree with the window and the holes? A clean meta says the window ends AT
+   * `headSeq`, so no retained event may be above it; an unclean one is bounded by the
+   * reservation. Holes must sit inside the numbered range, must not overlap one another and
+   * must not overlap a retained event (a seq is either held or lost, never both).
+   */
+  static _consistent(m, events, holes) {
+    const ceiling = m.clean === true ? m.headSeq : m.reservedThrough
+    const top = events.length > 0 ? events[events.length - 1].seq : 0
+    if (top > ceiling) return false
+    const sorted = [...holes].sort((a, b) => a.from - b.from)
+    let prevTo = 0
+    for (const h of sorted) {
+      if (h.from <= prevTo || h.to > ceiling) return false
+      prevTo = h.to
+      if (events.some((e) => e.seq >= h.from && e.seq <= h.to)) return false
+    }
+    return true
   }
 
   /** The per-session state, loading it from the sidecar on first touch. */
@@ -331,12 +386,16 @@ export class PrincipalJournal {
     }
     const persistedHead = events.length > 0 ? events[events.length - 1].seq : 0
     if (persistedHead > m.reservedThrough) return unprovable()
+    // Cross-validate what the meta CLAIMS against what the sidecar holds. Each file parses
+    // on its own, so a doctored or half-written pair can still be inconsistent, and an
+    // inconsistent pair could let a seq be issued twice.
+    if (!PrincipalJournal._consistent(m, events, holes)) return unprovable()
 
     const state = {
       sessionId, journalId: m.journalId, nextSeq: 1, confirmedReserved: 0, events, holes,
       superseded: superseded.slice(-MAX_SUPERSEDED),
       mintedBy: ['fresh', 'restart_loss', 'journal_reset'].includes(m.mintedBy) ? m.mintedBy : 'fresh',
-      dead: false, retryAt: 0, dirty: false, floor: new FloorTracker(), listeners: new Set(),
+      dead: false, retryAt: 0, dirty: false, listeners: new Set(),
     }
     if (m.clean === true) {
       // A clean close wrote the whole window and the exact head: continue contiguously.
@@ -452,28 +511,94 @@ export class PrincipalJournal {
       if (this._closed || typeof message?.sessionId !== 'string' || message.sessionId.length === 0) return
       if (this._enabled() !== true) return
       const sessionId = message.sessionId
-      const state = this._state(sessionId)
-      if (message.type === 'tool_start') state.floor.onToolStart(message)
-      else if (message.type === 'permission_request') state.floor.onPermissionRequest(message)
-      for (const event of classifyBroadcast(message, this._accumulator)) {
-        this._append(sessionId, event.type, this._withhold(state, event))
+      if (this._removed.has(sessionId)) return
+      this._state(sessionId) // load the sidecar on first touch
+      const floor = this._floorFor(sessionId)
+      const type = message.type
+      if (type === 'tool_start') floor.onToolStart(message)
+      else if (type === 'permission_request') floor.onPermissionRequest(message)
+      let events
+      if (type === 'stream_start' || type === 'stream_delta' || type === 'stream_end') {
+        events = classifyBroadcast(message, this._accumulator)
+      } else if (FORWARDED_TYPES.has(type)) {
+        // REDACT BEFORE ANY LOSSY CUT: the classifier clips every string at 4000 characters,
+        // which would cut a credential in two and keep its unmasked prefix. The copy is
+        // redacted whole first; the frame being broadcast is never touched.
+        const safe = this._redactFrame(message)
+        events = safe === null ? [] : classifyBroadcast(safe, this._accumulator)
+      } else {
+        events = []
       }
-      if (message.type === 'tool_result') state.floor.onToolResult(message.toolUseId)
+      for (const event of events) {
+        const data = this._scrub(floor, event)
+        if (data !== null) this._append(sessionId, event.type, data)
+      }
+      if (type === 'tool_result') floor.onToolResult(message.toolUseId)
     } catch (err) {
       log.warn(`Principal journal could not record a ${String(message?.type).slice(0, 40)} frame: ${err?.message || err}`)
     }
   }
 
-  /** The floor rule: a floored call's result (and streamed input) is replaced by a placeholder. */
-  _withhold(state, event) {
-    const id = event.data?.toolUseId
-    if (event.type === 'tool_result' && state.floor.isFloored(id)) {
-      return { toolUseId: id, result: FLOORED_RESULT_PLACEHOLDER, withheld: 'floored' }
+  _floorFor(sessionId) {
+    let floor = this._floors.get(sessionId)
+    if (!floor) {
+      floor = new FloorTracker()
+      this._floors.set(sessionId, floor)
     }
-    if (event.type === 'tool_input_delta' && state.floor.isFloored(id)) {
-      return { toolUseId: id, withheld: 'floored' }
+    return floor
+  }
+
+  /** A redacted deep copy of a frame, or null when it cannot be redacted safely. */
+  _redactFrame(message) {
+    const safe = sanitizeToolInput(message, { maxChars: 2_000_000 })
+    // an over-large frame comes back summarized, which is no longer the frame: drop it
+    return safe !== null && typeof safe === 'object' && safe.type === message.type ? safe : null
+  }
+
+  /**
+   * What the journal keeps of one classified event (contract section 8). Raw tool INPUTS are
+   * never journaled in v1: `tool_start` keeps the tool and its id, `tool_input_delta` is
+   * dropped, and a `permission_request` keeps the tool, the floor verdict and, only when
+   * the request was NOT floored, its bounded, sanitised description. The result of a floored
+   * call is replaced by a placeholder. Returns null for an event that is not kept.
+   */
+  _scrub(floor, event) {
+    const d = event.data ?? {}
+    switch (event.type) {
+      case 'tool_input_delta':
+        return null
+      case 'tool_start':
+        return { ...(d.messageId !== undefined ? { messageId: d.messageId } : {}), toolUseId: d.toolUseId, tool: d.tool }
+      case 'permission_request': {
+        const floored = d.floored !== false
+        return {
+          requestId: d.requestId, tool: d.tool, floored,
+          ...(typeof d.toolUseId === 'string' ? { toolUseId: d.toolUseId } : {}),
+          ...(typeof d.explicitConsent === 'boolean' ? { explicitConsent: d.explicitConsent } : {}),
+          ...(typeof d.nonDelegable === 'boolean' ? { nonDelegable: d.nonDelegable } : {}),
+          ...(!floored && typeof d.description === 'string' ? { description: d.description } : {}),
+        }
+      }
+      case 'tool_result':
+        return floor.isFloored(d.toolUseId)
+          ? { toolUseId: d.toolUseId, result: FLOORED_RESULT_PLACEHOLDER, withheld: 'floored' }
+          : d
+      case 'assistant_text':
+        return this._safeStreamText(d)
+      default:
+        return d
     }
-    return event.data
+  }
+
+  /**
+   * An accumulated stream: the text is redacted WHOLE, then cut. When the accumulator had
+   * already cut the raw text (its own cap), the redacted tail is dropped too, because a
+   * credential straddling that cut was never seen whole.
+   */
+  _safeStreamText(d) {
+    if (typeof d.text !== 'string') return d
+    const { text, clipped } = redactWhole(d.text)
+    return { ...d, text: d.truncated === true || clipped ? withoutUnsafeTail(text) : text }
   }
 
   /**
@@ -566,7 +691,6 @@ export class PrincipalJournal {
     state.dead = false
     state.retryAt = 0
     state.dirty = false
-    state.floor = new FloorTracker()
   }
 
   // -- reading -----------------------------------------------------------------
@@ -721,6 +845,9 @@ export class PrincipalJournal {
       }
       this._sessions.delete(sessionId)
     }
+    this._floors.delete(sessionId)
+    this._removed.add(sessionId)
+    while (this._removed.size > 4096) this._removed.delete(this._removed.values().next().value)
     for (const path of [this._metaPath(sessionId), this._eventsPath(sessionId)]) {
       try { unlinkSync(path) } catch { /* absent */ }
     }

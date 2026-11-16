@@ -465,13 +465,14 @@ describe('floor provenance: the result of a floored tool call is replaced by a p
     assert.equal(resultOf(journal, 't10').data.result, 'bash output', 'a different tool is untouched')
   })
 
-  it('streamed input of a floored call is withheld too', () => {
+  it('streamed tool input is never journaled, floored or not', () => {
     const { journal } = makeJournal()
+    journal.record({ type: 'tool_input_delta', sessionId: SID, toolUseId: 't0', delta: '{"content":"api key sk-live-123"}' })
     journal.record(perm({ floored: true, toolUseId: 't1' }))
-    journal.record({ type: 'tool_input_delta', sessionId: SID, toolUseId: 't1', delta: '{"content":"api key sk-live-123"}' })
-    const e = journal.readFrom(SID, 0, 10).events.find((x) => x.type === 'tool_input_delta')
-    assert.equal(e.data.withheld, 'floored')
-    assert.equal(JSON.stringify(e).includes('sk-live'), false)
+    journal.record({ type: 'tool_input_delta', sessionId: SID, toolUseId: 't1', delta: '{"content":"api key sk-live-456"}' })
+    const events = journal.readFrom(SID, 0, 10).events
+    assert.deepEqual(events.map((x) => x.type), ['permission_request'])
+    assert.equal(JSON.stringify(events).includes('sk-live'), false)
   })
 
   it('another session\'s floored call does not affect this one', () => {
@@ -510,7 +511,7 @@ describe('bounds and redaction', () => {
   it('the cap is the whole stored entry (seq, ts, type and data), for a payload that is wide and shallow', () => {
     const { journal } = makeJournal()
     const wide = Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`k${i}`, 'v'.repeat(40)]))
-    journal.record({ type: 'tool_start', sessionId: SID, toolUseId: 't', tool: 'X', input: wide })
+    journal.record({ type: 'message', sessionId: SID, messageType: 'response', content: 'c', ...wide })
     const e = journal.readFrom(SID, 0, 10).events[0]
     assert.equal(e.truncated, true)
     assert.ok(Buffer.byteLength(JSON.stringify(e), 'utf8') <= JOURNAL_EVENT_MAX_BYTES)
@@ -610,4 +611,206 @@ describe('lifecycle', () => {
     cyclic.self = cyclic
     assert.doesNotThrow(() => { journal.record(cyclic); journal.record({ type: 'message', sessionId: SID, content: 1n }) })
   })
+})
+
+describe('raw tool inputs are never journaled (#9118 review, contract section 8)', () => {
+  const dump = (journal) => {
+    journal.flush()
+    const disk = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n')
+    return JSON.stringify(journal.readFrom(SID, 0, 1000).events) + disk
+  }
+
+  it('a floored request carries no input and no description; tool_start keeps the tool and id only', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'permission_request', sessionId: SID, requestId: 'r1', tool: 'Write', toolUseId: 'tu1', floored: true, description: 'write MARKER_DESC', input: { file_path: '/x/.env', content: 'MARKER_REQ_INPUT' } })
+    journal.record({ type: 'tool_start', sessionId: SID, toolUseId: 'tu1', tool: 'Write', messageId: 'm1', input: { content: 'MARKER_START_INPUT' } })
+    const events = journal.readFrom(SID, 0, 10).events
+    assert.deepEqual(events[0].data, { requestId: 'r1', tool: 'Write', floored: true, toolUseId: 'tu1' })
+    assert.deepEqual(events[1].data, { messageId: 'm1', toolUseId: 'tu1', tool: 'Write' })
+    const all = dump(journal)
+    for (const marker of ['MARKER_DESC', 'MARKER_REQ_INPUT', 'MARKER_START_INPUT']) assert.equal(all.includes(marker), false, marker)
+  })
+
+  it('a delta that arrives BEFORE the verdict leaves nothing either', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'tool_start', sessionId: SID, toolUseId: 'tu2', tool: 'Write', input: {} })
+    journal.record({ type: 'tool_input_delta', sessionId: SID, toolUseId: 'tu2', delta: 'MARKER_EARLY_DELTA' })
+    journal.record({ type: 'permission_request', sessionId: SID, requestId: 'r2', tool: 'Write', floored: true })
+    assert.equal(dump(journal).includes('MARKER_EARLY_DELTA'), false)
+  })
+
+  it('a request that is NOT floored keeps its bounded description (still no input)', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'permission_request', sessionId: SID, requestId: 'r3', tool: 'Bash', floored: false, description: 'ls -la', input: { command: 'MARKER_INPUT_3' } })
+    const e = journal.readFrom(SID, 0, 10).events[0]
+    assert.deepEqual(e.data, { requestId: 'r3', tool: 'Bash', floored: false, description: 'ls -la' })
+    assert.equal(dump(journal).includes('MARKER_INPUT_3'), false)
+  })
+
+  it('a request that states no verdict is floored: no description', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'permission_request', sessionId: SID, requestId: 'r4', tool: 'Bash', description: 'MARKER_D4' })
+    const e = journal.readFrom(SID, 0, 10).events[0]
+    assert.equal(e.data.floored, true)
+    assert.equal(JSON.stringify(e).includes('MARKER_D4'), false)
+  })
+})
+
+describe('floor provenance survives recovery and capacity (#9118 review)', () => {
+  const start = (id, tool = 'Read') => ({ type: 'tool_start', sessionId: SID, toolUseId: id, tool })
+  const result = (id, text = 'RESULT_TEXT') => ({ type: 'tool_result', sessionId: SID, toolUseId: id, result: text })
+  const perm = (over) => ({ type: 'permission_request', sessionId: SID, requestId: 'r', tool: 'Read', ...over })
+  const resultOf = (journal, id) => journal.readFrom(SID, 0, 5000).events.find((e) => e.type === 'tool_result' && e.data.toolUseId === id)
+
+  it('a floored verdict recorded just before a failed reservation and a recovery still withholds the result', () => {
+    const w = writer()
+    const { journal, clock } = makeJournal({ writer: w, opts: { reservationStep: 2, retryBackoffMs: 100 } })
+    journal.record(msg(1))
+    journal.record(msg(2)) // reservation 1..2 used up
+    w.mode = 'throw'
+    journal.record(perm({ floored: true, toolUseId: 'tf' })) // dies here; the verdict is still remembered
+    journal.record(start('tf'))
+    w.mode = 'ok'
+    clock.advance(101)
+    journal.record(msg(3)) // recovery: a NEW journal id
+    assert.equal(journal.head(SID).headSeq, 1)
+    journal.record(result('tf'))
+    assert.equal(resultOf(journal, 'tf').data.result, FLOORED_RESULT_PLACEHOLDER)
+    assert.equal(JSON.stringify(journal.readFrom(SID, 0, 100).events).includes('RESULT_TEXT'), false)
+  })
+
+  it('256+ later calls never evict an outstanding floored call', () => {
+    const { journal } = makeJournal({ opts: { maxEvents: 5000 } })
+    journal.record(perm({ floored: true, toolUseId: 't-old' }))
+    journal.record(start('t-old'))
+    for (let i = 0; i < 300; i++) {
+      journal.record(start(`n${i}`))
+      journal.record(result(`n${i}`, 'ordinary'))
+    }
+    journal.record(result('t-old'))
+    assert.equal(resultOf(journal, 't-old').data.result, FLOORED_RESULT_PLACEHOLDER)
+    assert.equal(resultOf(journal, 'n299').data.result, 'ordinary', 'retired calls do not accumulate into suppression')
+  })
+
+  it('at capacity (more outstanding floored calls than it can remember) it withholds, never clears', () => {
+    const { journal } = makeJournal({ opts: { maxEvents: 5000 } })
+    for (let i = 0; i < 300; i++) { journal.record(perm({ floored: true, toolUseId: `f${i}` })); journal.record(start(`f${i}`)) }
+    journal.record(start('later'))
+    journal.record(result('later'))
+    journal.record(result('f299'))
+    assert.equal(resultOf(journal, 'later').data.result, FLOORED_RESULT_PLACEHOLDER, 'unknown provenance is withheld')
+    assert.equal(resultOf(journal, 'f299').data.result, FLOORED_RESULT_PLACEHOLDER)
+  })
+
+  it('permission requests alone beyond capacity (no call started) also fail closed, and none is evicted', () => {
+    const { journal } = makeJournal({ opts: { maxEvents: 5000 } })
+    for (let i = 0; i < 300; i++) journal.record(perm({ floored: true, toolUseId: `p${i}` }))
+    journal.record(start('x'))
+    journal.record(result('x'))
+    journal.record(result('p0'))
+    assert.equal(resultOf(journal, 'p0').data.result, FLOORED_RESULT_PLACEHOLDER, 'the first outstanding verdict was not evicted')
+    assert.equal(resultOf(journal, 'x').data.result, FLOORED_RESULT_PLACEHOLDER, 'unremembered verdicts withhold every result')
+  })
+
+  it('more open calls than it can track also fails closed', () => {
+    const { journal } = makeJournal({ opts: { maxEvents: 5000 } })
+    for (let i = 0; i < 300; i++) journal.record(start(`o${i}`))
+    journal.record(result('o0'))
+    assert.equal(resultOf(journal, 'o0').data.result, FLOORED_RESULT_PLACEHOLDER)
+  })
+
+  it('a request waiting for its call (no id) withholds a result whose call was never seen', () => {
+    const { journal } = makeJournal()
+    journal.record(perm({ floored: true }))
+    journal.record(result('unseen'))
+    assert.equal(resultOf(journal, 'unseen').data.result, FLOORED_RESULT_PLACEHOLDER)
+  })
+})
+
+describe('redaction runs BEFORE any lossy cut (#9118 review)', () => {
+  const TOKEN = `ghp_${'A1b2C3d4E5'.repeat(4).slice(0, 36)}`
+  const onDisk = (journal) => {
+    journal.flush()
+    return readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n')
+  }
+  const fragments = ['ghp_A1b2', 'A1b2C3d4E5A1b2C3d4E5']
+
+  it('a credential spanning the 4000-character normalization cut leaves no prefix', () => {
+    for (const offset of [3990, 3994, 3998, 3999]) {
+      // a larger per-event cap, so the normalization cut (not the 4 KiB cap) is what is under test
+      const { journal } = makeJournal({ opts: { eventMaxBytes: 200_000 } })
+      journal.record({ type: 'message', sessionId: SID, messageType: 'response', content: `${'a'.repeat(offset)}${TOKEN} tail` })
+      const text = JSON.stringify(journal.readFrom(SID, 0, 10).events) + onDisk(journal)
+      for (const f of fragments) assert.equal(text.includes(f), false, `offset ${offset}: ${f}`)
+      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), 'chroxy-journal-'))
+    }
+  })
+
+  it('a credential spanning the accumulated-stream cap leaves no prefix', () => {
+    const { journal } = makeJournal({ opts: { eventMaxBytes: 200_000 } })
+    const pad = 'b'.repeat(65536 - 20)
+    journal.record({ type: 'stream_start', sessionId: SID, messageId: 'm' })
+    journal.record({ type: 'stream_delta', sessionId: SID, messageId: 'm', delta: pad })
+    journal.record({ type: 'stream_delta', sessionId: SID, messageId: 'm', delta: `${TOKEN} more` })
+    journal.record({ type: 'stream_end', sessionId: SID, messageId: 'm' })
+    const events = journal.readFrom(SID, 0, 10).events
+    assert.equal(events.length, 1)
+    assert.ok(events[0].data.text.length > 60000, 'control: the accumulated text really is kept up to its cap')
+    const text = JSON.stringify(events) + onDisk(journal)
+    for (const f of fragments) assert.equal(text.includes(f), false, f)
+  })
+
+  it('a credential split ACROSS stream deltas is redacted whole', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'stream_start', sessionId: SID, messageId: 'm' })
+    for (const part of [TOKEN.slice(0, 10), TOKEN.slice(10, 25), TOKEN.slice(25)]) journal.record({ type: 'stream_delta', sessionId: SID, messageId: 'm', delta: part })
+    journal.record({ type: 'stream_end', sessionId: SID, messageId: 'm' })
+    const text = JSON.stringify(journal.readFrom(SID, 0, 10).events) + onDisk(journal)
+    for (const f of fragments) assert.equal(text.includes(f), false, f)
+  })
+
+  it('the frame being broadcast is never changed by the redaction (a copy is redacted)', () => {
+    const { journal } = makeJournal()
+    const frame = { type: 'message', sessionId: SID, messageType: 'response', content: `see ${TOKEN}` }
+    journal.record(frame)
+    assert.equal(frame.content, `see ${TOKEN}`)
+  })
+})
+
+describe('a sidecar whose meta contradicts its events cannot prove its reservation (#9118 review)', () => {
+  function seeded({ clean = true } = {}) {
+    const first = makeJournal()
+    for (let i = 1; i <= 6; i++) first.journal.record(msg(i))
+    const old = first.journal.head(SID).journalId
+    if (clean) first.journal.close(); else first.journal.flush()
+    const metaPath = join(dir, readdirSync(dir).find((f) => f.endsWith('.meta.json')))
+    const edit = (fn) => { const m = JSON.parse(readFileSync(metaPath, 'utf8')); fn(m); writeFileSync(metaPath, JSON.stringify(m), { mode: 0o600 }) }
+    return { old, edit }
+  }
+  const reopened = (old) => {
+    const second = makeJournal({ idPrefix: 'z' })
+    const head = second.journal.head(SID)
+    return { head, gap: second.journal.resolveCursor(SID, { sessionId: SID, journalId: old, seq: 3 }).gap }
+  }
+
+  it('control: the untouched pair is trusted', () => {
+    const { old } = seeded()
+    assert.equal(reopened(old).head.journalId, old)
+  })
+
+  for (const [name, mutate, opts] of [
+    ['a clean headSeq below the highest retained event', (m) => { m.headSeq = 4 }, {}],
+    ['a hole that overlaps retained events', (m) => { m.holes = [{ from: 3, to: 5, reason: 'restart_loss' }] }, {}],
+    ['a hole above the reservation', (m) => { m.holes = [{ from: 9000, to: 9001, reason: 'restart_loss' }] }, { clean: false }],
+    ['two holes that overlap each other', (m) => { m.reservedThrough = 5000; m.headSeq = 6; m.holes = [{ from: 100, to: 200, reason: 'restart_loss' }, { from: 150, to: 300, reason: 'restart_loss' }] }, {}],
+    ['a reservation below the events', (m) => { m.reservedThrough = 3; m.headSeq = 3 }, {}],
+  ]) {
+    it(`${name}: a new journal id, and the old cursor reports restart_loss`, () => {
+      const { old, edit } = seeded(opts)
+      edit(mutate)
+      const { head, gap } = reopened(old)
+      assert.notEqual(head.journalId, old)
+      assert.equal(gap.reason, 'restart_loss')
+    })
+  }
 })

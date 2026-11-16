@@ -189,7 +189,7 @@ export class PrincipalSubscriptions {
     }
     if (sub.state === 'replay') {
       sub.held.push(evt.entry)
-      sub.heldBytes += JSON.stringify(evt.entry).length
+      sub.heldBytes += Buffer.byteLength(JSON.stringify(evt.entry), 'utf8')
       if (sub.held.length > this._heldMaxEvents || sub.heldBytes > this._heldMaxBytes) {
         this._end(sub, 'held_overflow', { fromSeq: sub.after + 1 })
       }
