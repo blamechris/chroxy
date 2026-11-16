@@ -21,7 +21,7 @@
  * package's fixtures change (`CHROXY_WORKTREES_ROOT` /
  * `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT`, and `CHROXY_HOOKS_TMP_PREFIXES`).
  */
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 /** Default to process.env without depending on the `process` global type (tsconfig `types: []`). */
@@ -398,4 +398,134 @@ export function deriveProjectFromCwd(cwd, env = defaultEnv()) {
     }
     const fallback = basename(dir);
     return fallback.length > 0 ? fallback : null;
+}
+/** Pointer files (`.git`, `commondir`) are a line or two; anything bigger is hostile or corrupt. */
+const GIT_POINTER_MAX_BYTES = 4096;
+/**
+ * Read a small text file. `{ absent: true }` when it does not exist; `null`
+ * for anything else that is not a usable small file (unreadable, a directory,
+ * oversized) so the caller can fail closed rather than guess.
+ */
+function readSmallFile(path) {
+    let fd;
+    try {
+        fd = openSync(path, 'r');
+    }
+    catch (err) {
+        const code = err.code;
+        return code === 'ENOENT' || code === 'ENOTDIR' ? { absent: true } : null;
+    }
+    try {
+        const st = fstatSync(fd);
+        if (!st.isFile() || st.size > GIT_POINTER_MAX_BYTES)
+            return null;
+        const buf = Buffer.alloc(st.size);
+        let off = 0;
+        while (off < st.size) {
+            const n = readSync(fd, buf, off, st.size - off, off);
+            if (n <= 0)
+                break;
+            off += n;
+        }
+        return { text: buf.subarray(0, off).toString('utf8') };
+    }
+    catch {
+        return null;
+    }
+    finally {
+        try {
+            closeSync(fd);
+        }
+        catch {
+            /* best effort */
+        }
+    }
+}
+/**
+ * Root of the repo a `.git` FILE (a linked worktree or a submodule) belongs to.
+ * Linked worktree: `gitdir: <common>/worktrees/<id>` holds a `commondir` file
+ * pointing back at the common git dir; its parent is the MAIN repo. A bare
+ * common dir (basename not `.git`) has no working-tree root → null. No
+ * `commondir` (submodule) → the directory holding the `.git` file. Null on any
+ * malformed/oversized/unreadable input.
+ */
+function rootFromGitFile(holderDir) {
+    const pointer = readSmallFile(join(holderDir, '.git'));
+    if (!pointer || 'absent' in pointer)
+        return null;
+    const match = /^gitdir:\s*(.+?)\s*$/m.exec(pointer.text);
+    if (!match)
+        return null;
+    const gitDir = resolve(holderDir, match[1]);
+    const commondir = readSmallFile(join(gitDir, 'commondir'));
+    if (commondir === null)
+        return null;
+    if ('absent' in commondir)
+        return holderDir;
+    const rel = commondir.text.trim();
+    if (rel.length === 0)
+        return null;
+    const common = resolve(gitDir, rel);
+    if (basename(common) !== '.git')
+        return null;
+    const root = dirname(common);
+    return root.length > 0 && root !== common ? root : null;
+}
+/**
+ * Canonical project identity for a working directory — the one answer a
+ * linked worktree, an agent checkout and the main repo all agree on.
+ *
+ *  1. chroxy session worktree → its parent repo.
+ *  2. nearest `.git` going up: a directory is the root; a FILE is resolved via
+ *     `commondir` to the MAIN repo (never the linked folder's own name).
+ *  3. no git root: tmp / home → null; anything else → the directory itself.
+ *
+ * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
+ * (notifications, ingest) must not change. `root` is a realpath, best effort.
+ */
+export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
+    if (typeof cwd !== 'string' || cwd.length === 0)
+        return null;
+    const dir = realResolve(cwd);
+    if (!dir)
+        return null;
+    const finish = (root) => {
+        const real = realResolve(root);
+        if (!real)
+            return null;
+        const label = basename(real);
+        return label.length > 0 ? { label, root: real } : null;
+    };
+    const chroxyTop = chroxyWorktreeTopDir(dir, env);
+    if (chroxyTop) {
+        const repo = chroxyWorktreeRepoPath(chroxyTop);
+        return repo ? finish(repo) : null;
+    }
+    let current = dir;
+    for (let i = 0; i < 256; i++) {
+        let kind = null;
+        try {
+            const st = statSync(join(current, '.git'));
+            kind = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : null;
+        }
+        catch (err) {
+            const code = err.code;
+            if (code !== 'ENOENT' && code !== 'ENOTDIR')
+                return null;
+        }
+        if (kind === 'dir')
+            return finish(current);
+        if (kind === 'file') {
+            const root = rootFromGitFile(current);
+            return root ? finish(root) : null;
+        }
+        const parent = dirname(current);
+        if (parent === current)
+            break;
+        current = parent;
+    }
+    const cls = classifyNonProjectCwd(dir, env);
+    if (cls === 'tmp' || cls === 'home')
+        return null;
+    return finish(dir);
 }

@@ -85,4 +85,22 @@ export declare function deriveProject(cwd: string, env?: ProjectEnv): string | n
  * recover the parent repo from that file, or return null rather than mint the id.
  */
 export declare function deriveProjectFromCwd(cwd: string, env?: ProjectEnv): string | null;
+/** A project's canonical identity: a display label and the root it is rooted at. */
+export interface CanonicalProject {
+    label: string;
+    root: string;
+}
+/**
+ * Canonical project identity for a working directory — the one answer a
+ * linked worktree, an agent checkout and the main repo all agree on.
+ *
+ *  1. chroxy session worktree → its parent repo.
+ *  2. nearest `.git` going up: a directory is the root; a FILE is resolved via
+ *     `commondir` to the MAIN repo (never the linked folder's own name).
+ *  3. no git root: tmp / home → null; anything else → the directory itself.
+ *
+ * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
+ * (notifications, ingest) must not change. `root` is a realpath, best effort.
+ */
+export declare function canonicalProjectForCwd(cwd: string, env?: ProjectEnv): CanonicalProject | null;
 export {};
