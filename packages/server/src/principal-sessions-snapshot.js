@@ -3,7 +3,7 @@
  * sections 4 and 7.3; #9120, S5 of #9112).
  *
  * `collectSessionsSnapshot` returns one minimal row per session asked about: its observed
- * status, what the agent declared, which model was requested and which is running, and the
+ * status, what the agent declared, which model the daemon resolved for it and which is running, and the
  * reasons a handoff must not start from it right now (#8281).
  *
  * Every row is read from THAT session's own entry and from `getHandoffBlockers`. Nothing here
@@ -41,6 +41,12 @@ const REQUEST_IDS_MAX = 100
 const REQUEST_ID_MAX = 256
 
 const UNAVAILABLE = Object.freeze({ code: 'unavailable' })
+
+const redactedModel = (value) => {
+  if (typeof value !== 'string' || value.length === 0) return null
+  const text = redactBounded(value, MODEL_MAX)
+  return text.length > 0 ? text : null
+}
 
 const boundedString = (value, max) => (typeof value === 'string' && value.length > 0 ? value.slice(0, max) : null)
 
@@ -120,14 +126,22 @@ function buildRow(sessionId, sessionManager, evaluatorPending) {
   // `evaluatorPending` is WS-layer state the accessor cannot see (its own doc says the
   // caller must pass it); it is asked per session, and a failure to ask is a failed read.
   const evaluatorFlag = read(() => evaluatorPending(sessionId) === true)
-  const rawBlockers = read(() => sessionManager.getHandoffBlockers(sessionId, { evaluatorPending: evaluatorFlag === true }))
-  let blockers = null
-  if (Array.isArray(rawBlockers)) {
-    if (rawBlockers.length === 1 && rawBlockers[0]?.code === 'not_found') return null
-    blockers = rawBlockers.map(projectBlocker)
-  } else {
-    failed = true
-  }
+  // The WHOLE inspection of the accessor's answer is guarded, not just the call: a blocker
+  // with a throwing getter must mark this row unavailable, never fail the snapshot. Two
+  // things SessionManager.getHandoffBlockers answers with "[]" (no session object, a provider
+  // without the accessor) are not "nothing blocks": it could not ask, so it is a failed read.
+  let notFound = false
+  const blockers = read(() => {
+    const rawBlockers = sessionManager.getHandoffBlockers(sessionId, { evaluatorPending: evaluatorFlag === true })
+    if (!Array.isArray(rawBlockers)) throw new Error('not a list')
+    if (rawBlockers.length === 1 && rawBlockers[0]?.code === 'not_found') { notFound = true; return null }
+    if (entry.session == null || typeof entry.session.getHandoffBlockers !== 'function') throw new Error('no accessor')
+    const projected = rawBlockers.map(projectBlocker)
+    // A provider may report ready before its async start settles: a starting session is not ready.
+    if (entry._starting === true && !projected.some((b) => b.code === 'not_ready')) projected.push({ code: 'not_ready' })
+    return projected
+  })
+  if (notFound) return null
 
   const session = entry.session
   const status = read(() => {
@@ -139,9 +153,12 @@ function buildRow(sessionId, sessionManager, evaluatorPending) {
     }
   })
   const model = read(() => ({
-    // `requested` is the explicit override (null follows the default); `observed` is what is running.
-    requested: boundedString(session?.model, MODEL_MAX),
-    observed: boundedString(session?.bootedModel, MODEL_MAX),
+    // `requested` is the model the daemon resolved for the session (at create, or the last
+    // model switch), so it includes an applied daemon default; null only when none was
+    // resolved. An explicit override cannot be told from an applied default yet. `observed`
+    // is what is running. Both are free text: redacted, then bounded.
+    requested: redactedModel(session?.model),
+    observed: redactedModel(session?.bootedModel),
   }))
   const name = read(() => (typeof entry.name === 'string' ? redactBounded(entry.name, NAME_MAX) : null))
   const provider = read(() => boundedString(entry.provider || sessionManager.providerType, PROVIDER_MAX))

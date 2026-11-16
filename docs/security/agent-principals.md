@@ -918,8 +918,11 @@ whole request is refused `scope_denied` and nothing is subscribed.
   `provider`; `status` `{ isBusy, busyReason: 'turn' | 'background-shells' | null, starting }`
   (observed); `declaredStatus` (what the agent said about itself, validated against
   `DeclaredStatusSchema`, text redacted, `null` when absent: a claim, never merged with
-  `status`); `model` `{ requested, observed }` (`requested` is the explicit override, `null`
-  follows the daemon's default; `observed` is the model actually running, `null` when unknown);
+  `status`); `model` `{ requested, observed }` (`requested` is the model the daemon resolved for the
+  session, at create or at the last model switch, so it includes an applied daemon default, and
+  is `null` only when no model was resolved and the provider's own default applies; telling an
+  explicit override from an applied default is not available yet. `observed` is the model
+  actually running, `null` when unknown; both are redacted, then bounded);
   `blockers`; `leaseHolder` (a label, always `null` until S8 fills it); `lastActivityAt`. No
   cwd, history, cost, billing or capability field. `blockers` is
   `SessionManager.getHandoffBlockers` (#8281) projected through a per-code detail whitelist:

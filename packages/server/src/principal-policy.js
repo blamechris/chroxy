@@ -39,6 +39,7 @@ import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { createLogger, loggableValue } from './logger.js'
 import { refuseBoundMessage } from './bound-client-policy.js'
+import { redactBounded } from './redaction.js'
 
 const log = createLogger('principal-policy')
 
@@ -708,6 +709,9 @@ function valueOfKind(value, kind) {
 
 const nullableString = (v) => (typeof v === 'string' ? v.slice(0, ROW_STRING_MAX) : null)
 
+/** Free text a row carries (a model id): redacted BEFORE it is clipped, so a cut cannot keep a credential's prefix. */
+const nullableRedactedString = (v) => (typeof v === 'string' ? redactBounded(v, ROW_STRING_MAX) : null)
+
 /** One blocker rebuilt from its whitelists. A value that is not a blocker reads as `unavailable`, never as nothing. */
 function rebuildBlocker(b) {
   if (b === null || typeof b !== 'object' || typeof b.code !== 'string' || b.code.length === 0) return { code: 'unavailable' }
@@ -745,7 +749,7 @@ function rebuildSessionRow(row) {
       }
       case 'model': {
         const m = v !== null && typeof v === 'object' ? v : null
-        out.model = m === null ? null : { requested: nullableString(m.requested), observed: nullableString(m.observed) }
+        out.model = m === null ? null : { requested: nullableRedactedString(m.requested), observed: nullableRedactedString(m.observed) }
         break
       }
       case 'declaredStatus': {

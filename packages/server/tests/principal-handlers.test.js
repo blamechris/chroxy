@@ -15,6 +15,11 @@ import { writeDurableFile } from '../src/durable-write.js'
 import { PrincipalSubscriptions } from '../src/principal-subscriptions.js'
 import { PRINCIPAL_ALLOWED_MESSAGE_TYPES } from '../src/principal-policy.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { principalDispatchRefusal, refusePrincipalMessage, sendPrincipalRefusal, PRINCIPAL_ENVELOPES } from '../src/principal-policy.js'
+import {
+  PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX, PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX, PRINCIPAL_SNAPSHOT_SESSION_ID_MAX,
+} from '../src/handlers/principal-handlers.js'
+import { PrincipalPendingPermissionsSchema, PrincipalSessionsSnapshotSchema } from '@chroxy/protocol'
 
 const SESSIONS = { 'sess-1': { cwd: '/tmp/a' }, other: { cwd: '/tmp/b' } }
 const OBSERVE = Object.entries(PRINCIPAL_ALLOWED_MESSAGE_TYPES).filter(([, v]) => v.tier === 'observe').map(([k]) => k)
@@ -353,5 +358,69 @@ describe('a subscription is never dropped silently (#9118 round 2)', () => {
     assert.equal(notice('scope', false), null)
     assert.equal(notice('held_overflow', true), null)
     assert.equal(notice('evicted', true), null)
+  })
+})
+
+// The frame dispatch sends for the same message: refusePrincipalMessage itself where dispatch
+// decides (an extra key), and the shared sender with the envelope reason where only the schema
+// layer caps a value.
+function dispatchRefusalFrame(client, msg) {
+  const { ctx, sent } = ctxWith()
+  if (!refusePrincipalMessage({}, client, msg, ctx)) sendPrincipalRefusal({}, client, msg, ctx, 'envelope')
+  return sent[0]
+}
+
+// Contract 4.1.1: the closed envelope is checked at the handler as well as at dispatch.
+describe('the snapshot handlers check the request envelope on their own', () => {
+  const SNAPSHOT_TYPES = ['principal_pending_permissions', 'principal_sessions_snapshot']
+  const grantedClient = () => principalClient({ principal: { tier: 'observe', constraints: { sessionIds: ['sess-1'] } } })
+  const run = (type, msg) => {
+    const { ctx, sent } = ctxWith()
+    REAL_HANDLERS[type]({}, grantedClient(), { type, ...msg }, ctx)
+    return sent
+  }
+
+  for (const type of SNAPSHOT_TYPES) {
+    it(`${type}: exactly the allowed fields (positive control) is answered, not refused`, () => {
+      assert.deepEqual([...PRINCIPAL_ENVELOPES[type].fields].sort(), ['requestId', 'sessionIds', 'type'])
+      const sent = run(type, { requestId: 'r1', sessionIds: ['sess-1'] })
+      assert.equal(sent.length, 1)
+      assert.notEqual(sent[0].type, 'session_error', JSON.stringify(sent[0]))
+      assert.equal(sent[0].requestId, 'r1')
+    })
+
+    for (const [label, msg] of [
+      ['an extra key', { requestId: 'r1', sessionIds: ['sess-1'], cwd: '/x' }],
+      ['an extra key with ids omitted', { requestId: 'r1', limit: 5 }],
+      ['an oversized requestId', { requestId: 'r'.repeat(PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX + 1), sessionIds: ['sess-1'] }],
+      ['too many ids', { requestId: 'r1', sessionIds: Array.from({ length: PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX + 1 }, (_, i) => `s${i}`) }],
+      ['an oversized id', { requestId: 'r1', sessionIds: ['s'.repeat(PRINCIPAL_SNAPSHOT_SESSION_ID_MAX + 1)] }],
+      ['non-array ids', { requestId: 'r1', sessionIds: 'sess-1' }],
+      ['ids that are not all strings', { requestId: 'r1', sessionIds: ['sess-1', 7] }],
+    ]) {
+      it(`${type}: ${label} is refused scope_denied, byte for byte as dispatch refuses it`, () => {
+        const full = { type, ...msg }
+        // Dispatch's own verdict, for the cases it decides on its own (keys); the rest are the Zod layer's.
+        if (label.startsWith('an extra key')) assert.equal(principalDispatchRefusal(grantedClient(), full), 'envelope')
+        const sent = run(type, msg)
+        assert.equal(sent.length, 1)
+        assert.equal(sent[0].type, 'session_error')
+        assert.equal(sent[0].code, 'scope_denied')
+        assert.equal(JSON.stringify(sent[0]), JSON.stringify(dispatchRefusalFrame(grantedClient(), full)))
+      })
+    }
+  }
+
+  it('the handler caps are the protocol schemas\' own boundaries', () => {
+    const ids = (n) => Array.from({ length: n }, (_, i) => `s${i}`)
+    for (const [Schema, type] of [[PrincipalPendingPermissionsSchema, 'principal_pending_permissions'], [PrincipalSessionsSnapshotSchema, 'principal_sessions_snapshot']]) {
+      const ok = (extra) => Schema.safeParse({ type, requestId: 'r', ...extra }).success
+      assert.equal(ok({ requestId: 'r'.repeat(PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX) }), true, type)
+      assert.equal(ok({ requestId: 'r'.repeat(PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX + 1) }), false, type)
+      assert.equal(ok({ sessionIds: ids(PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX) }), true, type)
+      assert.equal(ok({ sessionIds: ids(PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX + 1) }), false, type)
+      assert.equal(ok({ sessionIds: ['s'.repeat(PRINCIPAL_SNAPSHOT_SESSION_ID_MAX)] }), true, type)
+      assert.equal(ok({ sessionIds: ['s'.repeat(PRINCIPAL_SNAPSHOT_SESSION_ID_MAX + 1)] }), false, type)
+    }
   })
 })

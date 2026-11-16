@@ -16,12 +16,20 @@
  * A client that is not a principal has no use for these types (they exist for the
  * `principal_*` family) and is refused without touching the journal.
  */
-import { isPrincipalClient, principalMaySee, principalPolicyOptsFromCtx, sendPrincipalRefusal } from '../principal-policy.js'
+import { PRINCIPAL_ENVELOPES, isPrincipalClient, principalMaySee, principalPolicyOptsFromCtx, sendPrincipalRefusal } from '../principal-policy.js'
 import { collectPendingPermissions } from '../principal-pending-permissions.js'
 import { collectSessionsSnapshot } from '../principal-sessions-snapshot.js'
 
 export const PRINCIPAL_READ_DEFAULT_LIMIT = 50
 export const PRINCIPAL_READ_MAX_LIMIT = 200
+
+// The protocol schemas' caps for a snapshot request (PrincipalPendingPermissionsSchema and
+// PrincipalSessionsSnapshotSchema in @chroxy/protocol). The handler checks them itself because
+// the Zod layer is not the only way in; tests/principal-handlers.test.js pins these equal to
+// the schemas' own boundaries.
+export const PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX = 128
+export const PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX = 32
+export const PRINCIPAL_SNAPSHOT_SESSION_ID_MAX = 128
 
 /** Not a principal: the journal is for principals only. Reveals nothing about any session. */
 function refuseNonPrincipal(ws, msg, ctx) {
@@ -157,6 +165,25 @@ function handlePrincipalPendingPermissions(ws, client, msg, ctx) {
 }
 
 /**
+ * Is this request inside its type's closed envelope (principal-policy.js's table) with a
+ * well-formed `requestId` and `sessionIds`? Independent of dispatch and of the Zod layer.
+ */
+function snapshotEnvelopeOk(msg) {
+  const envelope = typeof msg?.type === 'string' && Object.hasOwn(PRINCIPAL_ENVELOPES, msg.type) ? PRINCIPAL_ENVELOPES[msg.type] : null
+  if (envelope === null || msg === null || typeof msg !== 'object' || Array.isArray(msg)) return false
+  for (const key of Object.keys(msg)) {
+    if (!envelope.fields.includes(key)) return false
+  }
+  if (typeof msg.requestId !== 'string' || msg.requestId.length === 0 || msg.requestId.length > PRINCIPAL_SNAPSHOT_REQUEST_ID_MAX) return false
+  if (msg.sessionIds !== undefined) {
+    const ids = msg.sessionIds
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > PRINCIPAL_SNAPSHOT_SESSION_IDS_MAX) return false
+    if (!ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= PRINCIPAL_SNAPSHOT_SESSION_ID_MAX)) return false
+  }
+  return true
+}
+
+/**
  * The session ids a snapshot request covers, or null after the request was refused. With
  * `sessionIds`, EVERY id goes through `principalMaySee(..., 'observe')` and one that is not
  * granted (or not there) refuses the whole request `scope_denied`, replying exactly as for a
@@ -164,6 +191,12 @@ function handlePrincipalPendingPermissions(ws, client, msg, ctx) {
  * which is a filter, not a refusal: an empty grant gets an empty snapshot.
  */
 function resolveSnapshotSessionIds(ws, client, msg, ctx) {
+  // Contract 4.1.1: the closed envelope holds at the handler as well as at dispatch, so a
+  // handler reached any other way refuses the same way (the same refusal, byte for byte).
+  if (!snapshotEnvelopeOk(msg)) {
+    sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
+    return null
+  }
   if (typeof msg?.requestId !== 'string' || msg.requestId.length === 0) {
     sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
     return null

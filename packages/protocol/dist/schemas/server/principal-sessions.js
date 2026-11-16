@@ -9,8 +9,11 @@
  *   - `status`: the OBSERVED state (busy or not, why, still starting). `declaredStatus`: what
  *     the agent in the session said about itself; it is a claim, not a fact, and the two are
  *     kept apart on purpose.
- *   - `model`: `requested` is the explicit override (null follows the daemon's default);
- *     `observed` is the model actually running (null when the daemon cannot say).
+ *   - `model`: `requested` is the model the daemon resolved for the session (at create or the
+ *     last model switch), which includes an applied daemon default; null only when none was
+ *     resolved (the provider's own default applies). An explicit override cannot be told from an
+ *     applied default yet. `observed` is the model actually running (null when the daemon
+ *     cannot say). Both are redacted free text.
  *   - `blockers`: why a handoff must not start from this session right now (#8281). An EMPTY
  *     list means nothing can still act. A row whose read failed carries `[{ code:
  *     'unavailable' }]`, never an empty list. `code` is an open string: a code a newer daemon

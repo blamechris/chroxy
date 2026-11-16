@@ -401,6 +401,152 @@ describe('principal_sessions_snapshot', () => {
     })
   })
 
+  describe('fail safe: what SessionManager.getHandoffBlockers answers "[]" to is not "clear"', () => {
+    it('a provider without the accessor reads as unavailable, not as an empty list', () => {
+      makeManager()
+      const id = create()
+      sessionOf(id).getHandoffBlockers = undefined
+      // the preconditions: the accessor really is missing, and the manager really answers []
+      assert.notEqual(typeof sessionOf(id).getHandoffBlockers, 'function')
+      assert.deepEqual(mgr.getHandoffBlockers(id), [])
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([id]), ctx, { sessionIds: [id] })
+      assert.deepEqual(sent[0].sessions[0].blockers, [{ code: 'unavailable' }])
+    })
+
+    it('an entry with no session object reads as unavailable, not as an empty list', () => {
+      makeManager()
+      const id = create()
+      const entry = mgr._sessions.get(id)
+      const real = entry.session
+      entry.session = null
+      try {
+        assert.equal(mgr.getSession(id).session, null)
+        assert.deepEqual(mgr.getHandoffBlockers(id), [])
+        const { ctx, sent } = ctxFor(mgr)
+        ask(principal([id]), ctx, { sessionIds: [id] })
+        assert.equal(sent[0].sessions.length, 1)
+        assert.deepEqual(sent[0].sessions[0].blockers, [{ code: 'unavailable' }])
+      } finally {
+        entry.session = real
+      }
+    })
+
+    it('a session that is still starting is not ready even when its provider already says it is', () => {
+      makeManager()
+      const id = create()
+      mgr._sessions.get(id)._starting = true
+      assert.equal(sessionOf(id)._processReady, true)
+      assert.equal(mgr.getHandoffBlockers(id).some((b) => b.code === 'not_ready'), false, 'the accessor alone would say clear')
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([id]), ctx, { sessionIds: [id] })
+      const row = sent[0].sessions[0]
+      assert.equal(row.status.starting, true)
+      assert.deepEqual(row.blockers, [{ code: 'not_ready' }])
+    })
+
+    it('a starting session that already reports not_ready carries it once', () => {
+      makeManager()
+      const id = create()
+      mgr._sessions.get(id)._starting = true
+      sessionOf(id)._processReady = false
+      assert.equal(mgr.getHandoffBlockers(id).filter((b) => b.code === 'not_ready').length, 1, 'precondition')
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([id]), ctx, { sessionIds: [id] })
+      assert.equal(sent[0].sessions[0].blockers.filter((b) => b.code === 'not_ready').length, 1)
+    })
+
+    it('a blocker whose field throws marks only its own row unavailable; the snapshot still lists every session', () => {
+      makeManager()
+      const good = create({ name: 'good' })
+      const bad = create({ name: 'bad' })
+      const baseline = ctxFor(mgr)
+      ask(principal([good, bad]), baseline.ctx, { sessionIds: [good, bad] })
+      sessionOf(bad).getHandoffBlockers = () => [{ code: 'queued_prompts', get detail() { throw new Error('getter boom') } }]
+      sessionOf(good).getHandoffBlockers = () => [{ code: 'queued_prompts', detail: { count: 2 } }]
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([good, bad]), ctx, { sessionIds: [good, bad] })
+      assert.equal(sent[0].type, 'principal_sessions_snapshot_result')
+      assert.deepEqual(sent[0].sessions.map((r) => r.sessionId), [good, bad])
+      assert.deepEqual(sent[0].sessions[0].blockers, [{ code: 'queued_prompts', detail: { count: 2 } }])
+      assert.deepEqual(sent[0].sessions[1].blockers, [{ code: 'unavailable' }])
+      assert.equal(sent[0].sessions[1].name, 'bad')
+      assert.notDeepEqual(baseline.sent[0].sessions[1].blockers, [{ code: 'unavailable' }], 'precondition: the unmodified session was readable')
+    })
+
+    it('a not_found answer whose code getter throws does not fail the snapshot either', () => {
+      const fake = {
+        getSession: () => ({ name: 'x', session: { getHandoffBlockers() {} } }),
+        getHandoffBlockers: () => [{ get code() { throw new Error('boom') } }],
+        providerType: 'x',
+      }
+      const out = collectSessionsSnapshot({ sessionIds: ['s'], sessionManager: fake, evaluatorPending: () => false })
+      assert.deepEqual(out.sessions.map((r) => r.blockers), [[{ code: 'unavailable' }]])
+    })
+  })
+
+  describe('free text in a row is redacted, then bounded', () => {
+    const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'
+    const run = (create_, setup) => {
+      makeManager()
+      const id = create_()
+      setup?.(id)
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([id]), ctx, { sessionIds: [id] })
+      return sent[0].sessions[0]
+    }
+
+    it('a session name carrying a credential is redacted, including one that crosses the length cap', () => {
+      const plain = run(() => create({ name: `use ${KEY} now` }))
+      assert.equal(plain.name.includes('sk-ant'), false)
+      assert.equal(plain.name.includes('abcdefghijklmnop'), false)
+      // The key starts 190 characters in: a plain slice to 200 would keep its first 10 characters.
+      const crossing = run(() => create({ name: 'n'.repeat(190) + KEY }))
+      assert.equal(crossing.name.includes('sk-ant'), false)
+      assert.equal(crossing.name.includes('sk-ant-api'.slice(0, 5)), false)
+      assert.ok(crossing.name.length <= 200)
+    })
+
+    it('model.requested and model.observed carrying a credential are redacted, including across the cap', () => {
+      const row = run(() => create({ model: `m ${KEY}` }), (id) => { sessionOf(id).bootedModel = `o ${KEY}` })
+      for (const v of [row.model.requested, row.model.observed]) {
+        assert.equal(typeof v, 'string')
+        assert.equal(v.includes('sk-ant'), false)
+        assert.equal(v.includes('abcdefghijklmnop'), false)
+      }
+      const crossing = run(() => create({ model: 'm'.repeat(195) + KEY }), (id) => { sessionOf(id).bootedModel = 'o'.repeat(195) + KEY })
+      for (const v of [crossing.model.requested, crossing.model.observed]) {
+        assert.equal(v.includes('sk-ant'), false)
+        assert.ok(v.length <= 200)
+      }
+    })
+
+    it('the outgoing frame redacts a model credential again, before it clips', () => {
+      const client = principalClient({ principal: { tier: 'observe', scope: 'observe', constraints: { sessionIds: ['sess-1'] } } })
+      const row = {
+        sessionId: 'sess-1', name: 'n', provider: 'p', status: null, declaredStatus: null,
+        model: { requested: 'm'.repeat(290) + KEY, observed: `o ${KEY}` },
+        blockers: [], leaseHolder: null, lastActivityAt: null,
+      }
+      const out = frameForPrincipal(client, { type: 'principal_sessions_snapshot_result', requestId: 'r', generatedAt: 1, sessions: [row], truncated: false }, { sessionExists: () => true })
+      for (const v of [out.sessions[0].model.requested, out.sessions[0].model.observed]) {
+        assert.equal(v.includes('sk-ant'), false)
+      }
+    })
+
+    it('model.requested is the model the daemon resolved, which includes an applied daemon default', () => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-roster-'))
+      mgr = new SessionManager({
+        skipPreflight: true, maxSessions: 10, defaultCwd: '/tmp', stateFilePath: join(dir, 'state.json'), defaultModel: 'default-model-x',
+      })
+      const noModel = mgr.createSession({ cwd: '/tmp', provider: 'test-principal-roster' })
+      const explicit = mgr.createSession({ cwd: '/tmp', provider: 'test-principal-roster', model: 'explicit-model-y' })
+      const { ctx, sent } = ctxFor(mgr)
+      ask(principal([noModel, explicit]), ctx, { sessionIds: [noModel, explicit] })
+      assert.deepEqual(sent[0].sessions.map((r) => r.model.requested), ['default-model-x', 'explicit-model-y'])
+    })
+  })
+
   describe('what a row says', () => {
     it('a row has exactly the documented fields and nothing else (no cwd, history, cost)', () => {
       makeManager()
@@ -669,10 +815,16 @@ describe('principal_sessions_snapshot', () => {
       assert.equal(ServerPrincipalSessionsSnapshotResultSchema.safeParse(all).success, true)
       assert.equal(JSON.stringify(all).includes(hidden), false)
       assert.equal(JSON.stringify(all).includes('Hidden'), false)
+      // Distinct ids so each lookup can only find its own reply (the helper searches every
+      // message received so far); the echoed id is then normalised before comparing.
       const denied = await reply('q2', { sessionIds: [a, hidden] })
-      const absent = await reply('q2', { sessionIds: [a, 'no-such-session'] })
+      const absent = await reply('q3', { sessionIds: [a, 'no-such-session'] })
+      assert.notEqual(denied, absent, 'two separate replies')
+      assert.equal(denied.requestId, 'q2')
+      assert.equal(absent.requestId, 'q3')
       assert.equal(denied.type, 'session_error')
-      assert.equal(JSON.stringify(denied), JSON.stringify(absent))
+      assert.equal(absent.type, 'session_error')
+      assert.equal(JSON.stringify({ ...denied, requestId: 'x' }), JSON.stringify({ ...absent, requestId: 'x' }))
     })
   })
 })
