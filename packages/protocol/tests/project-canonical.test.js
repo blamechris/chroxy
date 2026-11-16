@@ -220,7 +220,7 @@ describe('canonicalProjectForCwd', () => {
     assert.equal(canonicalProjectForCwd(mk('emptycd', `gitdir: ${join(m2, '.git', 'worktrees', 'w')}\n`), NO_TMP), null)
     // oversized config
     const m3 = join(b, 'm3')
-    fakeGitDir(join(m3, '.git'), '#'.repeat(70 * 1024))
+    fakeGitDir(join(m3, '.git'), '#'.repeat(1024 * 1024 + 16))
     fakeGitDir(join(m3, '.git', 'worktrees', 'w'))
     writeFileSync(join(m3, '.git', 'worktrees', 'w', 'commondir'), '../..\n')
     assert.equal(canonicalProjectForCwd(mk('bigcfg', `gitdir: ${join(m3, '.git', 'worktrees', 'w')}\n`), NO_TMP), null)
@@ -263,7 +263,7 @@ describe('canonicalProjectForCwd', () => {
   it('git repo under a tmp prefix is still a project (git check comes first)', () => {
     const b = base()
     const repo = join(b, 'tmprepo')
-    mkdirSync(join(repo, '.git'), { recursive: true })
+    fakeGitDir(join(repo, '.git'))
     const env = { CHROXY_HOOKS_TMP_PREFIXES: b }
     assert.equal(classifyNonProjectCwd(repo, env), 'tmp')
     assert.deepEqual(canonicalProjectForCwd(repo, env), { label: 'tmprepo', root: repo })
@@ -415,6 +415,13 @@ describe('config parser agrees with git (oracle)', () => {
     '[core]\n\tworktree = ../a   b   \n',
     '[core]\n\tworktree = ../a\\\\b\n',
     '[core]\n\tbare = true\n[remote "origin"]\n\turl = x\n[core]\n\tworktree = ../w\n',
+    '# note \\\n[core]\n\tbare = true\n',
+    '[core]\n\t# note \\\n\tbare = true\n',
+    '[core]\n\t; note \\\n\tworktree = ../w\n',
+    '[core]\n\tworktree = a\\\\\n\tb\n',
+    '[core]\n\tworktree = a\\\n\tb\n',
+    '[core]\n\tworktree = "a\\\n b"\n',
+    '[core]\n\tbare = tr\\\nue\n',
   ]
   const REFUSE = [
     '[include]\n\tpath = other\n[core]\n\tbare = false\n',
@@ -423,6 +430,10 @@ describe('config parser agrees with git (oracle)', () => {
     '[core]\n\tworktree = "unterminated\n',
     '[core]\n\tworktree = ../a\\qb\n',
     '[core\n\tbare = true\n',
+    '[ core]\n\tbare = true\n', // git: bad config line
+    '[core ]\n\tbare = true\n', // git: bad config line
+    '[core]\n\tworktree =\n', // git yields "": not the same as unset, so refuse
+    '[core]\n\tworktree = ""\n',
   ]
   const oracle = (text, key, type) => {
     const f = join(base(), 'cfg')
@@ -452,4 +463,73 @@ describe('config parser agrees with git (oracle)', () => {
       assert.equal(_parseCoreConfig(text), null)
     })
   }
+})
+
+
+describe('git config vs git: what git rejects we refuse', () => {
+  for (const text of ['[ core]\n\tbare = true\n', '[core ]\n\tbare = true\n']) {
+    it(`git itself rejects ${JSON.stringify(text)}`, () => {
+      const f = join(base(), 'cfg')
+      writeFileSync(f, text)
+      assert.throws(() => execFileSync('git', ['config', '--file', f, '--get', 'core.bare'], { stdio: 'pipe' }))
+    })
+  }
+})
+
+describe('large configs and stray .git directories', () => {
+  it('a config with hundreds of branch and remote entries is still read', () => {
+    const b = base()
+    const repo = join(b, 'bigcfg')
+    let cfg = '[core]\n\tbare = false\n'
+    for (let i = 0; i < 800; i++) cfg += `[remote "r${i}"]\n\turl = https://example.invalid/${i}.git\n\tfetch = +refs/heads/*:refs/remotes/r${i}/*\n[branch "b${i}"]\n\tremote = r${i}\n\tmerge = refs/heads/b${i}\n`
+    assert.ok(cfg.length > 64 * 1024)
+    fakeGitDir(join(repo, '.git'), cfg)
+    assert.deepEqual(canonicalProjectForCwd(repo, NO_TMP), { label: 'bigcfg', root: repo })
+  })
+
+  it('an empty stray .git directory is skipped: the walk continues to the parent repo, or null', () => {
+    const { repo } = realRepo('realparent')
+    const stray = join(repo, 'emptygit')
+    mkdirSync(join(stray, '.git'), { recursive: true })
+    mkdirSync(join(stray, 'sub'))
+    assert.deepEqual(canonicalProjectForCwd(join(stray, 'sub'), NO_TMP), { label: 'realparent', root: repo })
+    const b = base()
+    mkdirSync(join(b, 'lone', '.git'), { recursive: true })
+    mkdirSync(join(b, 'lone', 'sub'))
+    const saved = process.env.TMPDIR
+    process.env.TMPDIR = '/nonexistent-os-tmpdir'
+    try {
+      const got = canonicalProjectForCwd(join(b, 'lone', 'sub'), NO_TMP)
+      assert.notEqual(got?.label, 'lone', 'never the stray directory')
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = saved
+    }
+    assert.equal(canonicalProjectForCwd(join(b, 'lone', 'sub'), NO_TMP), null, 'under os.tmpdir with no repo above: null')
+  })
+
+  it('a plain .git whose config sets core.worktree is refused, with a reason and no contents', () => {
+    const b = base()
+    const d = join(b, 'wtset')
+    fakeGitDir(join(d, '.git'), '[core]\n\tworktree = /SECRET-MARKER/elsewhere\n')
+    const seen = []
+    assert.equal(canonicalProjectForCwd(d, NO_TMP, (info) => seen.push(info)), null)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].reason, 'core_worktree_in_git_dir')
+    assert.ok(!JSON.stringify(seen).includes('SECRET-MARKER'))
+  })
+
+  it('a refused config reports why through the hook; a clean repo does not', () => {
+    const b = base()
+    const bad = join(b, 'badcfg')
+    fakeGitDir(join(bad, '.git'), '[include]\n\tpath = x\n')
+    const seen = []
+    assert.equal(canonicalProjectForCwd(bad, NO_TMP, (info) => seen.push(info)), null)
+    assert.deepEqual(seen.map((x) => x.reason), ['config_unsupported_syntax'])
+    const ok = join(b, 'goodcfg')
+    fakeGitDir(join(ok, '.git'), '[core]\n\tbare = false\n')
+    const none = []
+    assert.ok(canonicalProjectForCwd(ok, NO_TMP, (info) => none.push(info)))
+    assert.deepEqual(none, [])
+  })
 })

@@ -140,6 +140,7 @@ const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
 
 // Once per process per (dir, reason) — a closed allocator is polled on every create.
 const loggedFailClosed = new Set()
+const loggedRefusals = new Set()
 
 const genName = (gen, mirror) => `session-names.g${String(gen).padStart(12, '0')}${mirror ? '.mirror' : ''}.json`
 
@@ -230,10 +231,10 @@ function validBody(body) {
 const BAD_FILE_CODES = new Set(['ECHROXY_BADFILE', 'ELOOP', 'EISDIR'])
 
 /** @returns {{state:'absent'}|{state:'error'}|{state:'invalid'}|{state:'valid',gen:number,sha256:string,body:object}} */
-function readCopy(path, gen, readFile, maxBytes) {
+function readCopy(path, gen, readFile) {
   let text
   try {
-    text = readFile(path, maxBytes)
+    text = readFile(path, MAX_STORE_BYTES)
   } catch (err) {
     if (err?.code === 'ENOENT') return { state: 'absent' }
     return BAD_FILE_CODES.has(err?.code) ? { state: 'invalid' } : { state: 'error' }
@@ -261,7 +262,7 @@ const setOwn = (obj, k, v) => Object.defineProperty(obj, k, { value: v, enumerab
  * @param {() => number} [opts.now]        wall clock (idempotency TTL only)
  * @param {{warn?:Function,error?:Function,info?:Function}} [opts.log]
  * @param {number} [opts.maxAttempts]      bound on CAS retries
- * @param {object} [opts.deps]             test seams: readFile, linkSync, syncDir, writeSync,
+ * @param {object} [opts.deps]             test seams: readFile, readdir, linkSync, syncDir, writeSync,
  *                                         afterLoad, maxBytes
  */
 export function createSessionNameAllocator({
@@ -276,8 +277,17 @@ export function createSessionNameAllocator({
   const link = deps.linkSync ?? linkSync
   const syncDir = deps.syncDir ?? defaultSyncDir
   const writeBytes = deps.writeSync ?? ((fd, buf, off, len) => writeSync(fd, buf, off, len))
+  const listDir = deps.readdir ?? readdirSync
   const afterLoad = deps.afterLoad ?? null
   const maxBytes = deps.maxBytes ?? MAX_STORE_BYTES
+
+  // A refused git config makes the project fall back to legacy names: say so once per root.
+  const onRefuse = ({ reason, dir: where }) => {
+    const k = `${where}\u0000${reason}`
+    if (loggedRefusals.has(k)) return
+    loggedRefusals.add(k)
+    emit('warn', `session names: ${where} fell back to legacy naming (${reason}); its git config is outside the supported subset`, { reason, dir: where })
+  }
 
   const emit = (level, msg, fields) => {
     try {
@@ -287,7 +297,7 @@ export function createSessionNameAllocator({
 
   const listGens = () => {
     const gens = new Map()
-    for (const name of readdirSync(dir)) {
+    for (const name of listDir(dir)) {
       const m = FILE_RE.exec(name)
       if (!m) continue
       const g = Number(m[1])
@@ -311,8 +321,8 @@ export function createSessionNameAllocator({
     }
     if (gens.size === 0) return { kind: 'ok', gen: 0, body: emptyBody() }
     const top = Math.max(...gens.keys())
-    const a = readCopy(join(dir, genName(top, false)), top, readFile, maxBytes)
-    const b = readCopy(join(dir, genName(top, true)), top, readFile, maxBytes)
+    const a = readCopy(join(dir, genName(top, false)), top, readFile)
+    const b = readCopy(join(dir, genName(top, true)), top, readFile)
     // Both gone: the store advanced and pruned this generation after we listed. Not corruption.
     if (a.state === 'absent' && b.state === 'absent') return { kind: 'retry' }
     const valid = [a, b].filter((c) => c.state === 'valid')
@@ -335,18 +345,33 @@ export function createSessionNameAllocator({
 
   const serialize = (gen, body) => JSON.stringify({ version: VERSION, gen, body, sha256: digest(VERSION, gen, body) })
 
-  /** Evict idempotency records (oldest seq first, never `keep`) until the text fits the budget. */
+  /**
+   * Fit the serialized store into the budget by evicting idempotency records, oldest seq first,
+   * never `keep`. The excess is worked out from per-record sizes and ONE batch is evicted, then
+   * the exact size is checked once (a re-serialization of a near-cap store costs tens of ms, so
+   * it must not happen once per evicted record). Returns the final text, or null (store_full).
+   */
   const fitBudget = (gen, body, keep) => {
     let text = serialize(gen, body)
-    while (Buffer.byteLength(text) > maxBytes) {
-      let victim = null
-      for (const [id, e] of Object.entries(body.keys)) {
-        if (id === keep) continue
-        if (victim === null || e.seq < body.keys[victim].seq) victim = id
+    let size = Buffer.byteLength(text)
+    if (size <= maxBytes) return text
+    const victims = Object.entries(body.keys)
+      .filter(([id]) => id !== keep)
+      .sort((x, y) => x[1].seq - y[1].seq)
+      .map(([id, e]) => ({ id, bytes: Buffer.byteLength(JSON.stringify(id)) + Buffer.byteLength(JSON.stringify(e)) + 2 }))
+    let next = 0
+    while (size > maxBytes) {
+      if (next >= victims.length) return null
+      let excess = size - maxBytes
+      while (excess > 0 && next < victims.length) {
+        const v = victims[next++]
+        delete body.keys[v.id]
+        excess -= v.bytes
       }
-      if (victim === null) return null
-      delete body.keys[victim]
+      // `excess` is an estimate (separators, the digest is fixed width): confirm exactly, and
+      // if it fell short the loop evicts a further batch.
       text = serialize(gen, body)
+      size = Buffer.byteLength(text)
     }
     return text
   }
@@ -415,8 +440,13 @@ export function createSessionNameAllocator({
     try {
       link(tmpB, mirror)
     } catch (err) {
-      tryUnlink(primary) // we created the primary; the generation is not ours
       dropTemps()
+      // EEXIST: another writer owns this generation's mirror, so our primary is a loser's debris
+      // and is retracted. Any OTHER failure leaves the primary where it is: it may already have
+      // been read (and built upon) by a concurrent writer, and retracting a visible generation
+      // lets a stale writer re-create it and issue a number the later generation never saw. A
+      // primary-only generation is valid under the load rules; the number becomes a gap.
+      if (err?.code === 'EEXIST') tryUnlink(primary)
       return classify(err)
     }
     dropTemps()
@@ -434,8 +464,7 @@ export function createSessionNameAllocator({
         return 'lost'
       }
     } catch {
-      tryUnlink(primary)
-      tryUnlink(mirror)
+      // Both names exist and may be visible: never retract them. Unconfirmed; the number is a gap.
       return 'error'
     }
     return 'won'
@@ -519,7 +548,7 @@ export function createSessionNameAllocator({
     }
     let project
     try {
-      project = canonicalProjectForCwd(cwd)
+      project = canonicalProjectForCwd(cwd, undefined, onRefuse)
     } catch {
       project = null
     }

@@ -401,8 +401,8 @@ export function deriveProjectFromCwd(cwd, env = defaultEnv()) {
 }
 /** Pointer files (`.git`, `commondir`) are a line or two; anything bigger is hostile or corrupt. */
 const GIT_POINTER_MAX_BYTES = 4096;
-/** A repo `config` is bigger, but still bounded: past this we refuse to guess. */
-const GIT_CONFIG_MAX_BYTES = 64 * 1024;
+/** A repo `config` is bigger, but still bounded (the read is fstat-checked first): past this we refuse to guess. */
+const GIT_CONFIG_MAX_BYTES = 1024 * 1024;
 /**
  * Read a small REGULAR file without ever blocking. Opened O_RDONLY|O_NONBLOCK
  * (a FIFO then opens instantly instead of waiting for a writer) and fstat'd
@@ -505,6 +505,49 @@ function parseConfigBool(value) {
     return null;
 }
 /**
+ * Join `\<newline>` continuations the way git does: only inside values. A comment
+ * ends at its newline whatever precedes it, and an escaped backslash (`\\`) followed
+ * by a newline is a complete line, not a continuation.
+ */
+function joinContinuations(text) {
+    const src = text.replace(/\r\n/g, '\n');
+    let out = '';
+    let inQuote = false;
+    let inComment = false;
+    for (let i = 0; i < src.length; i++) {
+        const c = src[i];
+        if (c === '\n') {
+            inQuote = false;
+            inComment = false;
+            out += c;
+            continue;
+        }
+        if (inComment) {
+            out += c;
+            continue;
+        }
+        if (c === '\\') {
+            const n = src[i + 1];
+            if (n === '\n') {
+                i++; // continuation
+                continue;
+            }
+            out += c;
+            if (n !== undefined) {
+                out += n;
+                i++;
+            }
+            continue;
+        }
+        if (c === '"')
+            inQuote = !inQuote;
+        else if (!inQuote && (c === '#' || c === ';'))
+            inComment = true;
+        out += c;
+    }
+    return out;
+}
+/**
  * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
  * `core.worktree` exactly as git does. Anything outside it returns null so the
  * caller REFUSES (legacy name) instead of guessing:
@@ -517,7 +560,7 @@ function parseConfigBool(value) {
  * Exported (underscore) so tests can compare it with `git config` itself.
  */
 export function _parseCoreConfig(text) {
-    const joined = text.replace(/\r\n/g, '\n').replace(/\\\n/g, '');
+    const joined = joinContinuations(text);
     let inCore = false;
     let bare = false;
     let worktree = null;
@@ -526,7 +569,7 @@ export function _parseCoreConfig(text) {
         if (line === '' || line[0] === '#' || line[0] === ';')
             continue;
         if (line[0] === '[') {
-            const m = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
+            const m = /^\[([A-Za-z0-9.-]+)(?:[ \t]+"((?:[^"\\]|\\.)*)")?\]/.exec(line);
             if (!m)
                 return null;
             const name = m[1].toLowerCase();
@@ -556,19 +599,26 @@ export function _parseCoreConfig(text) {
             if (kv[2] === undefined)
                 return null;
             const value = parseConfigValue(kv[2]);
-            if (value === null)
-                return null;
-            worktree = value.length > 0 ? value : null;
+            if (value === null || value.length === 0)
+                return null; // an empty worktree is not "unset" to git: refuse
+            worktree = value;
         }
     }
     return { bare, worktree };
 }
 /** The repo's own config, or null when it is unreadable / outside the supported subset. */
-function readCoreConfig(gitDir) {
+function readCoreConfig(gitDir, onRefuse) {
     const config = readSmallFile(join(gitDir, 'config'), GIT_CONFIG_MAX_BYTES);
-    if (config === null)
+    if (config === null) {
+        onRefuse?.({ reason: 'config_unreadable_or_oversized', dir: gitDir });
         return null;
-    return 'absent' in config ? { bare: false, worktree: null } : _parseCoreConfig(config.text);
+    }
+    if ('absent' in config)
+        return { bare: false, worktree: null };
+    const parsed = _parseCoreConfig(config.text);
+    if (parsed === null)
+        onRefuse?.({ reason: 'config_unsupported_syntax', dir: gitDir });
+    return parsed;
 }
 /** Separate-git-dir / linked identity: a `.git` dir's parent, else the git dir itself minus `.git`. */
 function identityOfCommonDir(commonDir) {
@@ -591,7 +641,7 @@ function identityOfCommonDir(commonDir) {
  *    and its linked worktrees deliberately agree on this answer).
  * Null on any malformed/oversized/unreadable/non-regular/unsupported input.
  */
-function rootFromGitFile(holderDir) {
+function rootFromGitFile(holderDir, onRefuse) {
     const pointer = readSmallFile(join(holderDir, '.git'));
     if (!pointer || 'absent' in pointer)
         return null;
@@ -613,7 +663,7 @@ function rootFromGitFile(holderDir) {
         if (!isGitDirectory(commonDir))
             return null;
     }
-    const core = readCoreConfig(commonDir);
+    const core = readCoreConfig(commonDir, onRefuse);
     if (core === null || core.bare)
         return null;
     if (core.worktree)
@@ -632,7 +682,7 @@ function rootFromGitFile(holderDir) {
  * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
  * (notifications, ingest) must not change. `root` is a realpath, best effort.
  */
-export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
+export function canonicalProjectForCwd(cwd, env = defaultEnv(), onRefuse) {
     if (typeof cwd !== 'string' || cwd.length === 0)
         return null;
     const dir = realResolve(cwd);
@@ -649,7 +699,7 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
     if (chroxyTop) {
         // Same bounded, validated metadata resolver as any linked worktree (not the legacy
         // chroxyWorktreeRepoPath reader, which blocks on a FIFO and trusts the pointer).
-        const found = rootFromGitFile(chroxyTop);
+        const found = rootFromGitFile(chroxyTop, onRefuse);
         return found ? finish(found.root, found.label) : null;
     }
     let current = dir;
@@ -667,17 +717,27 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
                 return null;
         }
         if (kind === 'dir') {
-            const core = readCoreConfig(join(current, '.git'));
-            if (core === null || core.bare)
-                return null;
-            return finish(current);
+            const gitDir = join(current, '.git');
+            // As git does: a `.git` directory counts only if it is a git dir (regular HEAD). A stray
+            // or empty one is skipped and the walk continues upward.
+            if (isGitDirectory(gitDir)) {
+                const core = readCoreConfig(gitDir, onRefuse);
+                if (core === null || core.bare)
+                    return null;
+                if (core.worktree) {
+                    // A plain .git whose config points the working tree elsewhere: not a layout we trust.
+                    onRefuse?.({ reason: 'core_worktree_in_git_dir', dir: gitDir });
+                    return null;
+                }
+                return finish(current);
+            }
         }
         if (kind === 'file') {
-            const found = rootFromGitFile(current);
+            const found = rootFromGitFile(current, onRefuse);
             return found ? finish(found.root, found.label) : null;
         }
-        if (exists)
-            return null; // a .git that is neither a directory nor a regular file (FIFO, socket): refuse
+        if (exists && kind !== 'dir')
+            return null; // neither a directory nor a regular file (FIFO, socket): refuse
         const parent = dirname(current);
         if (parent === current)
             break;

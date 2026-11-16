@@ -43,6 +43,7 @@ function tmp(prefix = 'names-') {
 function project(name, parent = tmp('names-proj-')) {
   const d = join(parent, name)
   mkdirSync(join(d, '.git'), { recursive: true })
+  writeFileSync(join(d, '.git', 'HEAD'), 'ref: refs/heads/main\n') // a `.git` without HEAD is not a git dir
   return d
 }
 const genFile = (dir, g, mirror = false) => join(dir, `session-names.g${String(g).padStart(12, '0')}${mirror ? '.mirror' : ''}.json`)
@@ -143,8 +144,10 @@ describe('labels, keys and numbering', () => {
     const base = tmp('names-case-')
     const upper = join(base, 'Chroxy')
     const lower = join(base, 'x', 'chroxy')
-    mkdirSync(join(upper, '.git'), { recursive: true })
-    mkdirSync(join(lower, '.git'), { recursive: true })
+    for (const d of [upper, lower]) {
+      mkdirSync(join(d, '.git'), { recursive: true })
+      writeFileSync(join(d, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    }
     assert.equal(alloc.allocate({ cwd: upper }).number, 1)
     const r = alloc.allocate({ cwd: lower })
     assert.equal(r.number, 2)
@@ -481,14 +484,29 @@ describe('writes never issue an unconfirmed number', () => {
     assert.deepEqual(readdirSync(f.dir), [])
   })
 
-  it('a failing mirror link issues nothing, removes the primary it created, and the number is not burned', () => {
+  it('a non-EEXIST mirror-link failure issues nothing and LEAVES the primary: the number is a gap, never reused', () => {
     const dir = tmp('names-dir-')
     const cwd = project('p')
     nums(createSessionNameAllocator({ dir }), cwd, 2)
     const bad = createSessionNameAllocator({ dir, deps: { linkSync: failMirrorLink } })
     assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
-    assert.ok(!existsSync(genFile(dir, 3)) && !existsSync(genFile(dir, 3, true)))
-    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 3)
+    assert.ok(existsSync(genFile(dir, 3)), 'a possibly-visible generation is never retracted')
+    assert.ok(!existsSync(genFile(dir, 3, true)))
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 4, 'number 3 was persisted: a gap')
+  })
+
+  it('a throwing post-publish listing leaves both files in place and the number is not reused', () => {
+    const dir = tmp('names-dir-')
+    const cwd = project('p')
+    let calls = 0
+    const bad = createSessionNameAllocator({ dir, deps: { readdir: (d) => {
+      calls += 1
+      if (calls === 2) throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' }) // load=1, post-publish=2
+      return readdirSync(d)
+    } } })
+    assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
+    assert.ok(existsSync(genFile(dir, 1)) && existsSync(genFile(dir, 1, true)))
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 2)
   })
 
   it('an unconfirmed directory fsync issues nothing; the persisted number is a gap, never reissued', () => {
@@ -608,6 +626,50 @@ describe('store budget', () => {
     const f = fresh()
     assert.equal(f.alloc.allocate({ cwd: deep }).ok, true)
     assert.ok(Array.from(readDoc(f.top().A).body.projects.d.root).length <= 512)
+  })
+})
+
+describe('eviction cost near the cap', () => {
+  it('trimming hundreds of idempotency records near the budget re-serializes the store a bounded number of times', () => {
+    const dir = tmp('names-evictcost-')
+    const body = { projects: {}, keys: {}, seq: 0 }
+    for (let i = 0; i < 2000; i++) body.projects[`proj-${i}`] = { label: `proj-${i}`, root: 'x'.repeat(300), next: 5 }
+    for (let i = 0; i < 512; i++) {
+      body.seq += 1
+      body.keys[`k-${i}`] = { key: 'proj-0', rootId: 'a'.repeat(64), n: 1, sessionId: null, at: Date.now(), seq: body.seq }
+    }
+    const doc = sign({ gen: 1, body })
+    putStore(dir, doc)
+    const size = Buffer.byteLength(JSON.stringify(doc))
+    assert.ok(size < 1024 * 1024)
+    const budget = size - 60_000 // about 260 records must go
+    const alloc = createSessionNameAllocator({ dir, deps: { maxBytes: budget, syncDir: noSync } })
+    const t0 = performance.now()
+    const r = alloc.allocate({ cwd: project('proj-0-fresh'), idempotencyKey: 'new-key' })
+    const ms = performance.now() - t0
+    assert.equal(r.ok, true, JSON.stringify(r))
+    const stored = readDoc(top(dir).A)
+    assert.ok(statSync(top(dir).A).size <= budget)
+    assert.ok(Object.keys(stored.body.keys).length < 300)
+    assert.ok('new-key' in stored.body.keys, 'the current record is kept')
+    assert.ok(!('k-0' in stored.body.keys) && 'k-511' in stored.body.keys, 'oldest by seq went first')
+    assert.ok(ms < 500, `eviction took ${ms.toFixed(0)}ms`)
+    console.log(`# eviction near cap: ${ms.toFixed(0)}ms for ${512 - Object.keys(stored.body.keys).length + 1} records`)
+  })
+})
+
+describe('refused git config visibility', () => {
+  it('logs one warning per process per root, with the reason and no config contents', () => {
+    const f = fresh()
+    const cwd = project('weirdcfg')
+    writeFileSync(join(cwd, '.git', 'config'), '[include]\n\tpath = SECRET-MARKER-path\n')
+    assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'non_project' })
+    assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'non_project' })
+    assert.deepEqual(createSessionNameAllocator({ dir: f.dir, log: { warn: (m, x) => f.logs.push({ level: 'warn', m, x }) } }).allocate({ cwd }), { ok: false, reason: 'non_project' })
+    const warns = f.logs.filter((l) => l.level === 'warn')
+    assert.equal(warns.length, 1)
+    assert.ok(/legacy naming/.test(warns[0].m) && /config_unsupported_syntax/.test(warns[0].m))
+    assert.ok(!JSON.stringify(warns).includes('SECRET-MARKER'))
   })
 })
 

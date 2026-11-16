@@ -392,8 +392,8 @@ export interface CanonicalProject {
 
 /** Pointer files (`.git`, `commondir`) are a line or two; anything bigger is hostile or corrupt. */
 const GIT_POINTER_MAX_BYTES = 4096
-/** A repo `config` is bigger, but still bounded: past this we refuse to guess. */
-const GIT_CONFIG_MAX_BYTES = 64 * 1024
+/** A repo `config` is bigger, but still bounded (the read is fstat-checked first): past this we refuse to guess. */
+const GIT_CONFIG_MAX_BYTES = 1024 * 1024
 
 /**
  * Read a small REGULAR file without ever blocking. Opened O_RDONLY|O_NONBLOCK
@@ -444,6 +444,9 @@ function isGitDirectory(dir: string): boolean {
 
 type CoreConfig = { bare: boolean; worktree: string | null }
 
+/** Called when a git config was REFUSED (project falls back to legacy naming). Never carries file contents. */
+export type RefuseHook = (info: { reason: string; dir: string }) => void
+
 /** Parse a git config value per git's rules; null = outside the supported subset (refuse). */
 function parseConfigValue(raw: string): string | null {
   let out = ''
@@ -486,6 +489,48 @@ function parseConfigBool(value: string | null): boolean | null {
 }
 
 /**
+ * Join `\<newline>` continuations the way git does: only inside values. A comment
+ * ends at its newline whatever precedes it, and an escaped backslash (`\\`) followed
+ * by a newline is a complete line, not a continuation.
+ */
+function joinContinuations(text: string): string {
+  const src = text.replace(/\r\n/g, '\n')
+  let out = ''
+  let inQuote = false
+  let inComment = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]
+    if (c === '\n') {
+      inQuote = false
+      inComment = false
+      out += c
+      continue
+    }
+    if (inComment) {
+      out += c
+      continue
+    }
+    if (c === '\\') {
+      const n = src[i + 1]
+      if (n === '\n') {
+        i++ // continuation
+        continue
+      }
+      out += c
+      if (n !== undefined) {
+        out += n
+        i++
+      }
+      continue
+    }
+    if (c === '"') inQuote = !inQuote
+    else if (!inQuote && (c === '#' || c === ';')) inComment = true
+    out += c
+  }
+  return out
+}
+
+/**
  * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
  * `core.worktree` exactly as git does. Anything outside it returns null so the
  * caller REFUSES (legacy name) instead of guessing:
@@ -498,7 +543,7 @@ function parseConfigBool(value: string | null): boolean | null {
  * Exported (underscore) so tests can compare it with `git config` itself.
  */
 export function _parseCoreConfig(text: string): CoreConfig | null {
-  const joined = text.replace(/\r\n/g, '\n').replace(/\\\n/g, '')
+  const joined = joinContinuations(text)
   let inCore = false
   let bare = false
   let worktree: string | null = null
@@ -506,7 +551,7 @@ export function _parseCoreConfig(text: string): CoreConfig | null {
     let line = rawLine.replace(/^[ \t]+/, '')
     if (line === '' || line[0] === '#' || line[0] === ';') continue
     if (line[0] === '[') {
-      const m = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line)
+      const m = /^\[([A-Za-z0-9.-]+)(?:[ \t]+"((?:[^"\\]|\\.)*)")?\]/.exec(line)
       if (!m) return null
       const name = m[1].toLowerCase()
       if (name === 'include' || name === 'includeif') return null
@@ -527,18 +572,24 @@ export function _parseCoreConfig(text: string): CoreConfig | null {
     } else if (key === 'worktree') {
       if (kv[2] === undefined) return null
       const value = parseConfigValue(kv[2])
-      if (value === null) return null
-      worktree = value.length > 0 ? value : null
+      if (value === null || value.length === 0) return null // an empty worktree is not "unset" to git: refuse
+      worktree = value
     }
   }
   return { bare, worktree }
 }
 
 /** The repo's own config, or null when it is unreadable / outside the supported subset. */
-function readCoreConfig(gitDir: string): CoreConfig | null {
+function readCoreConfig(gitDir: string, onRefuse?: RefuseHook): CoreConfig | null {
   const config = readSmallFile(join(gitDir, 'config'), GIT_CONFIG_MAX_BYTES)
-  if (config === null) return null
-  return 'absent' in config ? { bare: false, worktree: null } : _parseCoreConfig(config.text)
+  if (config === null) {
+    onRefuse?.({ reason: 'config_unreadable_or_oversized', dir: gitDir })
+    return null
+  }
+  if ('absent' in config) return { bare: false, worktree: null }
+  const parsed = _parseCoreConfig(config.text)
+  if (parsed === null) onRefuse?.({ reason: 'config_unsupported_syntax', dir: gitDir })
+  return parsed
 }
 
 /** Separate-git-dir / linked identity: a `.git` dir's parent, else the git dir itself minus `.git`. */
@@ -562,7 +613,7 @@ function identityOfCommonDir(commonDir: string): { root: string; label?: string 
  *    and its linked worktrees deliberately agree on this answer).
  * Null on any malformed/oversized/unreadable/non-regular/unsupported input.
  */
-function rootFromGitFile(holderDir: string): { root: string; label?: string } | null {
+function rootFromGitFile(holderDir: string, onRefuse?: RefuseHook): { root: string; label?: string } | null {
   const pointer = readSmallFile(join(holderDir, '.git'))
   if (!pointer || 'absent' in pointer) return null
   const match = /^gitdir:\s*(.+?)\s*$/m.exec(pointer.text)
@@ -578,7 +629,7 @@ function rootFromGitFile(holderDir: string): { root: string; label?: string } | 
     commonDir = resolve(gitDir, rel)
     if (!isGitDirectory(commonDir)) return null
   }
-  const core = readCoreConfig(commonDir)
+  const core = readCoreConfig(commonDir, onRefuse)
   if (core === null || core.bare) return null
   if (core.worktree) return { root: resolve(commonDir, core.worktree) }
   return identityOfCommonDir(commonDir)
@@ -596,7 +647,7 @@ function rootFromGitFile(holderDir: string): { root: string; label?: string } | 
  * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
  * (notifications, ingest) must not change. `root` is a realpath, best effort.
  */
-export function canonicalProjectForCwd(cwd: string, env: ProjectEnv = defaultEnv()): CanonicalProject | null {
+export function canonicalProjectForCwd(cwd: string, env: ProjectEnv = defaultEnv(), onRefuse?: RefuseHook): CanonicalProject | null {
   if (typeof cwd !== 'string' || cwd.length === 0) return null
   const dir = realResolve(cwd)
   if (!dir) return null
@@ -610,7 +661,7 @@ export function canonicalProjectForCwd(cwd: string, env: ProjectEnv = defaultEnv
   if (chroxyTop) {
     // Same bounded, validated metadata resolver as any linked worktree (not the legacy
     // chroxyWorktreeRepoPath reader, which blocks on a FIFO and trusts the pointer).
-    const found = rootFromGitFile(chroxyTop)
+    const found = rootFromGitFile(chroxyTop, onRefuse)
     return found ? finish(found.root, found.label) : null
   }
   let current = dir
@@ -626,15 +677,25 @@ export function canonicalProjectForCwd(cwd: string, env: ProjectEnv = defaultEnv
       if (code !== 'ENOENT' && code !== 'ENOTDIR') return null
     }
     if (kind === 'dir') {
-      const core = readCoreConfig(join(current, '.git'))
-      if (core === null || core.bare) return null
-      return finish(current)
+      const gitDir = join(current, '.git')
+      // As git does: a `.git` directory counts only if it is a git dir (regular HEAD). A stray
+      // or empty one is skipped and the walk continues upward.
+      if (isGitDirectory(gitDir)) {
+        const core = readCoreConfig(gitDir, onRefuse)
+        if (core === null || core.bare) return null
+        if (core.worktree) {
+          // A plain .git whose config points the working tree elsewhere: not a layout we trust.
+          onRefuse?.({ reason: 'core_worktree_in_git_dir', dir: gitDir })
+          return null
+        }
+        return finish(current)
+      }
     }
     if (kind === 'file') {
-      const found = rootFromGitFile(current)
+      const found = rootFromGitFile(current, onRefuse)
       return found ? finish(found.root, found.label) : null
     }
-    if (exists) return null // a .git that is neither a directory nor a regular file (FIFO, socket): refuse
+    if (exists && kind !== 'dir') return null // neither a directory nor a regular file (FIFO, socket): refuse
     const parent = dirname(current)
     if (parent === current) break
     current = parent

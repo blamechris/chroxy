@@ -94,6 +94,11 @@ type CoreConfig = {
     bare: boolean;
     worktree: string | null;
 };
+/** Called when a git config was REFUSED (project falls back to legacy naming). Never carries file contents. */
+export type RefuseHook = (info: {
+    reason: string;
+    dir: string;
+}) => void;
 /**
  * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
  * `core.worktree` exactly as git does. Anything outside it returns null so the
@@ -119,5 +124,5 @@ export declare function _parseCoreConfig(text: string): CoreConfig | null;
  * Deliberately separate from `deriveProjectFromCwd`, whose historical outputs
  * (notifications, ingest) must not change. `root` is a realpath, best effort.
  */
-export declare function canonicalProjectForCwd(cwd: string, env?: ProjectEnv): CanonicalProject | null;
+export declare function canonicalProjectForCwd(cwd: string, env?: ProjectEnv, onRefuse?: RefuseHook): CanonicalProject | null;
 export {};
