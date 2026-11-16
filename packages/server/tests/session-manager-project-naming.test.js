@@ -12,6 +12,21 @@ import { registerProvider } from '../src/providers.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 import { resolveSessionNaming, validateConfig } from '../src/config.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { parse } from 'acorn'
+
+const parseModule = (src) => parse(src, { ecmaVersion: 'latest', sourceType: 'module' })
+const propName = (p) => (p.key.type === 'Identifier' ? p.key.name : p.key.value)
+/** Every node under `root` that satisfies `pred`, found by walking every object-valued field. */
+function findAll(root, pred, out = []) {
+  if (!root || typeof root !== 'object') return out
+  if (Array.isArray(root)) {
+    for (const c of root) findAll(c, pred, out)
+    return out
+  }
+  if (typeof root.type === 'string' && pred(root)) out.push(root)
+  for (const k of Object.keys(root)) if (k !== 'loc') findAll(root[k], pred, out)
+  return out
+}
 
 /**
  * N2: project-scoped session names ("chroxy 7") wired into SessionManager.createSession.
@@ -546,10 +561,21 @@ describe('review fixes', () => {
 })
 
 describe('production wiring', () => {
-  it('server-cli hands the resolved sessionNaming to the SessionManager', () => {
-    const src = readFileSync(join(SRC, 'server-cli.js'), 'utf8')
-    assert.ok(/sessionNaming:\s*resolveSessionNaming\(config\)/.test(src), 'server-cli passes sessionNaming: resolveSessionNaming(config)')
-    assert.ok(/resolveSessionNaming[^\n]*from '\.\/config\.js'/.test(src), 'and imports it from config.js')
+  it('server-cli hands the resolved sessionNaming to the SessionManager (AST-checked)', () => {
+    const ast = parseModule(readFileSync(join(SRC, 'server-cli.js'), 'utf8'))
+    // The daemon builds its manager through createDaemonSessionManager(config, options).
+    const calls = findAll(ast, (n) => n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'createDaemonSessionManager')
+    assert.equal(calls.length, 1, 'server-cli builds the daemon SessionManager in one place')
+    assert.deepEqual(calls[0].arguments[0].type === 'Identifier' && calls[0].arguments[0].name, 'config')
+    const opts = calls[0].arguments[1]
+    assert.equal(opts?.type, 'ObjectExpression')
+    const prop = opts.properties.find((p) => p.type === 'Property' && !p.computed && propName(p) === 'sessionNaming')
+    assert.ok(prop, 'the options object has a sessionNaming property')
+    assert.equal(prop.value.type, 'CallExpression')
+    assert.equal(prop.value.callee.type === 'Identifier' && prop.value.callee.name, 'resolveSessionNaming')
+    assert.deepEqual(prop.value.arguments.map((a) => a.type === 'Identifier' && a.name), ['config'])
+    const imports = findAll(ast, (n) => n.type === 'ImportDeclaration' && n.source.value === './config.js')
+    assert.ok(imports.some((i) => i.specifiers.some((sp) => sp.imported?.name === 'resolveSessionNaming')), 'and imports it from config.js')
   })
 
   it("a manager built from the daemon's default config is in project mode; 'legacy' opts out", () => {
@@ -562,8 +588,79 @@ describe('production wiring', () => {
     assert.equal(optedOut.sessionNaming, 'legacy')
   })
 
-  it('ws-server advertises projectSessionNames from the manager that will do the naming', () => {
-    const src = readFileSync(join(SRC, 'ws-server.js'), 'utf8')
-    assert.ok(/get projectSessionNames\(\)\s*\{\s*return self\.sessionManager\?\.sessionNaming === 'project'/.test(src))
+  it('ws-server advertises projectSessionNames from the manager that will do the naming (AST-checked)', () => {
+    const ast = parseModule(readFileSync(join(SRC, 'ws-server.js'), 'utf8'))
+    const getters = findAll(ast, (n) => n.type === 'Property' && n.kind === 'get' && !n.computed && propName(n) === 'projectSessionNames')
+    assert.equal(getters.length, 1, 'exactly one projectSessionNames getter')
+    const ret = findAll(getters[0].value.body, (n) => n.type === 'ReturnStatement')[0]
+    const expr = ret.argument
+    assert.equal(expr.type, 'BinaryExpression')
+    assert.equal(expr.operator, '===')
+    assert.ok(expr.right.type === 'Literal' && expr.right.value === 'project')
+    const left = expr.left.type === 'ChainExpression' ? expr.left.expression : expr.left
+    assert.equal(left.type, 'MemberExpression')
+    assert.equal(left.property.name, 'sessionNaming')
+    assert.equal(left.object.property?.name, 'sessionManager')
+    assert.equal(left.object.object?.name, 'self')
+  })
+})
+
+
+describe('successor restore shapes and warning dedupe', () => {
+  const successorOf = (cwd) => ({ name: 'naming-proj 4', cwd })
+
+  it('a restore-shaped create with successorOf never allocates', () => {
+    const cwd = repo('naming-proj')
+    const state = tmp('pn-state-')
+    const sm = makeSm(state)
+    const a = create(sm, { cwd, successorOf: successorOf(cwd), preserveId: 'b'.repeat(32) })
+    assert.equal(nameOf(sm, a), 'Session 1')
+    const b = create(sm, { cwd, successorOf: successorOf(cwd), restoreWorktreePath: join(tmp('pn-rw-'), 'x') })
+    assert.equal(nameOf(sm, b), 'Session 2')
+    assert.equal(namingFiles(state).length, 0)
+  })
+
+  it('a whitespace-only name with successorOf is unnamed: the successor rule applies', () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    assert.equal(nameOf(sm, create(sm, { cwd, name: '   ', successorOf: successorOf(cwd) })), 'naming-proj 1')
+    assert.equal(nameOf(sm, create(sm, { cwd, name: '  ', successorOf: { name: 'My notes', cwd } })), 'My notes (continued)')
+  })
+
+  function warnLines(fn) {
+    const lines = []
+    const listener = (e) => { if (e.level === 'warn' && /Project session naming unavailable/.test(e.message)) lines.push(e.message) }
+    addLogListener(listener)
+    try { fn() } finally { removeLogListener(listener) }
+    return lines
+  }
+
+  it('a second project hitting a sticky failure still gets its own first warning, once', () => {
+    const one = repo('proj-one')
+    const two = repo('proj-two')
+    const sm = makeSm(tmp('pn-state-'))
+    sm._sessionNameAllocator.allocate = () => ({ ok: false, reason: 'store_full' })
+    const lines = warnLines(() => {
+      for (let i = 0; i < 3; i++) create(sm, { cwd: one })
+      for (let i = 0; i < 3; i++) create(sm, { cwd: two })
+    })
+    assert.equal(lines.length, 2, lines.join('\n'))
+  })
+
+  it('the transient-warning throttle is not stuck after a backwards clock step', () => {
+    const cwd = repo('naming-proj')
+    const sm = makeSm(tmp('pn-state-'))
+    sm._sessionNameAllocator.allocate = () => ({ ok: false, reason: 'contended' })
+    let t = 1_000_000
+    sm._namingClock = () => t
+    const lines = warnLines(() => {
+      create(sm, { cwd }) // warns
+      create(sm, { cwd }) // throttled
+      t += 61_000
+      create(sm, { cwd }) // a minute later: warns again
+      t -= 10_000_000 // the clock steps far backwards
+      create(sm, { cwd }) // must not stay suppressed
+    })
+    assert.equal(lines.length, 3, lines.join('\n'))
   })
 })

@@ -53,6 +53,7 @@ import { toWireCount } from './utils/wire-counters.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { configPath } from './config-dir.js'
 import { createSessionNameAllocator, isAllocatorNameForCwd } from './session-name-allocator.js'
+import { canonicalProjectForCwd } from '@chroxy/protocol/project'
 import {
   forwardPerSessionSettingsToProviderOpts,
   serializePerSessionSettings,
@@ -932,6 +933,7 @@ export class SessionManager extends EventEmitter {
     // the real ~/.chroxy. Nothing touches the disk until the first allocation.
     this._sessionNaming = sessionNaming === 'project' ? 'project' : 'legacy'
     this._namingWarnedAt = new Map()
+    this._namingClock = () => performance.now()
     this._sessionNameAllocator = sessionNameAllocator || createSessionNameAllocator({
       dir: dirname(this._stateFilePath),
       liveNames: () => this._liveSessionNames(),
@@ -1676,7 +1678,7 @@ export class SessionManager extends EventEmitter {
     // A successor of an archived session ("continue as a new thread") is named at the same last
     // step: a fresh number when its predecessor carried an allocator-style name, else
     // "<name> (continued)". Neither consumes the legacy counter.
-    const wantSuccessorName = !name && !!successorOf && !isRestore
+    const wantSuccessorName = unnamed && !!successorOf && !restoreShaped
     let sessionName = (wantProjectName || wantSuccessorName) ? null : (name || `Session ${++this._sessionCounter}`)
 
     // Pre-flight: verify the provider's binary exists and required credential
@@ -4595,7 +4597,7 @@ export class SessionManager extends EventEmitter {
       const key = typeof idempotencyKey === 'string' && idempotencyKey.length > 0 && idempotencyKey.length <= 256 ? idempotencyKey : undefined
       const res = this._sessionNameAllocator.allocate({ cwd, ...(key !== undefined ? { idempotencyKey: key } : {}) })
       if (!res?.ok) {
-        if (res?.reason && res.reason !== 'non_project') this._warnNamingUnavailable(res.reason)
+        if (res?.reason && res.reason !== 'non_project') this._warnNamingUnavailable(res.reason, cwd)
         return null
       }
       return { name: res.name, key: res.key, number: res.number, idempotencyKey: key }
@@ -4606,18 +4608,24 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * One WARN per reason: a closed store would otherwise repeat the same line on every create.
-   * States that stay until an operator acts (evidence_lost, inconsistent, store_full,
-   * unsupported_fs) are logged once per manager; transient ones at most once a minute.
+   * One WARN per (reason, project): a closed store would otherwise repeat the same line on
+   * every create. States that stay until an operator acts (evidence_lost, inconsistent,
+   * store_full, unsupported_fs) are logged once per manager and project; transient ones at
+   * most once a minute (on a monotonic clock; a negative step counts as elapsed).
    * @private
    */
-  _warnNamingUnavailable(reason) {
+  _warnNamingUnavailable(reason, cwd) {
     const STICKY = new Set(['evidence_lost', 'inconsistent', 'store_full', 'unsupported_fs'])
-    const last = this._namingWarnedAt.get(reason)
-    const now = Date.now()
-    if (last !== undefined && (STICKY.has(reason) || now - last < 60_000)) return
-    this._namingWarnedAt.set(reason, now)
-    log.warn(`Project session naming unavailable (${reason}); using the legacy name`)
+    let scope = cwd
+    try {
+      scope = canonicalProjectForCwd(cwd)?.root ?? cwd
+    } catch { /* fall back to the cwd */ }
+    const k = `${reason}\u0000${scope}`
+    const last = this._namingWarnedAt.get(k)
+    const now = this._namingClock()
+    if (last !== undefined && (STICKY.has(reason) || (now - last >= 0 && now - last < 60_000))) return
+    this._namingWarnedAt.set(k, now)
+    log.warn(`Project session naming unavailable (${reason}) for ${scope}; using the legacy name`)
   }
 
   /** Best-effort bind of a reserved number to the session that took it. @private */
