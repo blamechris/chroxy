@@ -5,6 +5,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { ChatSettingsDropdown, type ChatSettingsDropdownProps } from './ChatSettingsDropdown'
+import { modelDisplayTarget } from '@chroxy/store-core'
+import { FooterBar } from './FooterBar'
 
 afterEach(cleanup)
 
@@ -323,6 +325,109 @@ describe('ChatSettingsDropdown', () => {
   // a visually-truncated label is never lost to AT users. (The picker's option
   // list + default/active marking are covered in ModelPickerModal.test.tsx.)
   describe('active-model tooltip (#3888)', () => {
+    // #8594: App passes a target that has already been resolved from the
+    // selection ID. Another row may legally use that target as its own ID.
+    describe.each([true, false])('colliding model targets (caller resolves: %s)', callerResolves => {
+      const models = [
+        { id: 'chosen', fullId: 'model-one', label: 'First', contextWindow: 200000 },
+        { id: 'model-one', fullId: 'model-two', label: 'Second', contextWindow: 1000000 },
+      ]
+
+      it.each([
+        { activeModel: 'chosen', defaultModelId: 'model-one', label: 'First' },
+        { activeModel: null, defaultModelId: 'chosen', label: 'Default (First)' },
+      ])('keeps the accepted target, row and opaque selection for $label', ({ activeModel, defaultModelId, label }) => {
+        const onModelChange = vi.fn()
+        // Native Storage is a proxy: spying on the instance can silently
+        // store a key instead of replacing its method. Cover the polyfill too.
+        const prototype = Object.getPrototypeOf(localStorage) as Storage
+        const storage = typeof prototype.setItem === 'function' ? prototype : localStorage
+        const setPreference = vi.spyOn(storage, 'setItem')
+        const removePreference = vi.spyOn(storage, 'removeItem')
+        const clearPreferences = vi.spyOn(storage, 'clear')
+        try {
+          const target = modelDisplayTarget(models, activeModel, defaultModelId, 'codex')
+          expect(target).toBe('model-one')
+          renderDropdown({
+            availableModels: models,
+            activeModel,
+            defaultModelId,
+            providerLabel: 'codex',
+            modelTooltipTarget: callerResolves ? target : undefined,
+            onModelChange,
+          })
+          render(<FooterBar connectionPhase="connected" model={target!} modelLabel={label} contextWindow={200000} />)
+
+          const trigger = screen.getByTestId('chat-settings-trigger')
+          const title = 'Active model: model-one. Context window: 200,000 tokens.'
+          expect(trigger.textContent).toBe(label)
+          expect(trigger).toHaveAttribute('title', title)
+          expect(trigger).toHaveAttribute('aria-label', title)
+          expect(screen.getByTestId('footer-bar').querySelector('.footer-model')).toHaveAttribute('title', title)
+          expect(onModelChange).not.toHaveBeenCalled()
+          expect(setPreference).not.toHaveBeenCalled()
+          expect(removePreference).not.toHaveBeenCalled()
+          expect(clearPreferences).not.toHaveBeenCalled()
+
+          fireEvent.click(trigger)
+          const chosen = screen.getByTestId('model-picker-item-chosen')
+          const second = screen.getByTestId('model-picker-item-model-one')
+          expect(chosen).toHaveAttribute('aria-selected', 'true')
+          expect(chosen).toHaveAttribute('title', 'model-one')
+          expect(second).toHaveAttribute('aria-selected', 'false')
+          expect(second).toHaveAttribute('title', 'model-two')
+          expect(screen.getByText(activeModel ? 'Second (default)' : 'First (default)')).toBeInTheDocument()
+          expect(onModelChange).not.toHaveBeenCalled()
+          fireEvent.click(chosen)
+          expect(onModelChange.mock.calls).toEqual([['chosen']])
+          expect(screen.queryByTestId('model-picker')).toBeNull()
+          expect(setPreference).not.toHaveBeenCalled()
+          expect(removePreference).not.toHaveBeenCalled()
+          expect(clearPreferences).not.toHaveBeenCalled()
+        } finally {
+          setPreference.mockRestore()
+          removePreference.mockRestore()
+          clearPreferences.mockRestore()
+        }
+      })
+
+      // Duplicate provider targets are valid. Keep the exact target-ID row's
+      // metadata precedence instead of borrowing an earlier alias's window.
+      it.each([1000000, undefined])('retains duplicate-target metadata when an earlier alias has window %s', contextWindow => {
+        const duplicates = [
+          { id: 'alias', fullId: 'target', label: 'Shared', contextWindow },
+          { id: 'target', fullId: 'target', label: 'Shared', contextWindow: 200000 },
+        ]
+        const target = modelDisplayTarget(duplicates, 'target', null, 'codex')
+        expect(target).toBe('target')
+        renderDropdown({
+          availableModels: duplicates,
+          activeModel: 'target',
+          modelTooltipTarget: callerResolves ? target : undefined,
+        })
+        const trigger = screen.getByTestId('chat-settings-trigger')
+        expect(trigger.textContent).toBe('Shared')
+        expect(trigger).toHaveAttribute('title', 'Active model: target. Context window: 200,000 tokens.')
+        expect(trigger).toHaveAttribute('aria-label', trigger.title)
+      })
+
+      it('still resolves an exact selection ID before presenting its target', () => {
+        const target = modelDisplayTarget(models, 'model-one', null, 'codex')
+        expect(target).toBe('model-two')
+        renderDropdown({
+          availableModels: models,
+          activeModel: 'model-one',
+          modelTooltipTarget: callerResolves ? target : undefined,
+        })
+        const trigger = screen.getByTestId('chat-settings-trigger')
+        expect(trigger.textContent).toBe('Second')
+        expect(trigger).toHaveAttribute('title', 'Active model: model-two. Context window: 1,000,000 tokens.')
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('model-picker-item-model-one')).toHaveAttribute('aria-selected', 'true')
+        expect(screen.getByTestId('model-picker-item-chosen')).toHaveAttribute('aria-selected', 'false')
+      })
+    })
+
     it('exposes model id and context-window via title attribute', () => {
       renderDropdown({ activeModel: 'opus' })
       const trigger = screen.getByTestId('chat-settings-trigger')
