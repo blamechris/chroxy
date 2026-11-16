@@ -29,9 +29,10 @@
  * runs in the ordinary server suite — `tests/smoke-test-floor.test.js` — rather
  * than only inside the job it guards.
  *
- * A LOWER BOUND, not an equality, and the calibration is measured rather than
- * assumed: SIXTEEN successful `Dashboard Smoke` runs sampled across 2026-09-05
- * to 2026-09-10 each recorded exactly 22 cases — 16/16, no variance. Review of
+ * A LOWER BOUND, not an equality. In required-IDE mode the calibration is
+ * measured rather than assumed: SIXTEEN successful `Dashboard Smoke` runs
+ * sampled across 2026-09-05 to 2026-09-10 each recorded exactly 22 cases —
+ * 16/16, no variance. Review of
  * #7681 widened the sample from the three this comment first cited, two of
  * which were feature branches rather than main as claimed. The count is
  * not a constant the way the other sixteen are — several checks are explicitly
@@ -39,8 +40,36 @@
  * is logged, not failed") — so an equality would go red on a legitimate branch
  * difference. The floor sits below the observed figure with room for that, and
  * far above the zero a broken harness produces.
+ *
+ * Without required IDE, the healthy base path records 16 cases: the IDE can
+ * legitimately add none, and the two Control Room extras are best-effort
+ * (#8435). Select the floor from the configured mode, never from which probes
+ * happened to record results, so a collapsed required section cannot lower it.
  */
 export const SMOKE_MIN_CASES = 18
+const SMOKE_MIN_CASES_WITHOUT_IDE = 16
+
+/**
+ * The ONE decision for whether the IDE surface is required (#8435).
+ * SMOKE_REQUIRE_IDE '1' -> strict; '0' -> lenient (explicit opt-out); anything
+ * else (unset, '', 'true', a typo) is treated as unset, so a mistyped flag can
+ * never loosen CI: unset is strict when CI is truthy (GitHub Actions always
+ * sets CI=true) and lenient otherwise. Deleting the flag from the workflow
+ * therefore cannot silently lower the floor.
+ * @param {Record<string, string | undefined>} env
+ */
+export function requireIdeFrom(env) {
+  const flag = env.SMOKE_REQUIRE_IDE
+  if (flag === '1') return true
+  if (flag === '0') return false
+  const ci = env.CI
+  return Boolean(ci) && ci !== '0' && ci.toLowerCase() !== 'false'
+}
+
+/** @param {boolean} [requireIde=false] The same mode used for IDE preconditions. */
+export function smokeMinCases(requireIde = false) {
+  return requireIde ? SMOKE_MIN_CASES : SMOKE_MIN_CASES_WITHOUT_IDE
+}
 
 /**
  * @param {{status: string}[]} results Whatever the harness recorded.
