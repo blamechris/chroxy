@@ -411,7 +411,6 @@ describe('config parser agrees with git (oracle)', () => {
     '[core]\n\tworktree = ../"actual tree"\n',
     '[core]\n\tworktree = "../actual\\t tree"\n',
     '[core]\n\tworktree = "../a\\"b"  # trailing\n',
-    '[core]\n\tworktree = ../a \\\n\tb\n',
     '[core]\n\tworktree = ../a   b   \n',
     '[core]\n\tworktree = ../a\\\\b\n',
     '[core]\n\tbare = true\n[remote "origin"]\n\turl = x\n[core]\n\tworktree = ../w\n',
@@ -419,7 +418,6 @@ describe('config parser agrees with git (oracle)', () => {
     '[core]\n\t# note \\\n\tbare = true\n',
     '[core]\n\t; note \\\n\tworktree = ../w\n',
     '[core]\n\tworktree = a\\\\\n\tb\n',
-    '[core]\n\tworktree = a\\\n\tb\n',
     '[core]\n\tworktree = "a\\\n b"\n',
     '[core]\n\tbare = tr\\\nue\n',
   ]
@@ -436,6 +434,12 @@ describe('config parser agrees with git (oracle)', () => {
     '[core]\n\tbare\\\n= true\n', // continuation between key and `=`
     '[core]\n\twork\\\ntree = ../w\n', // continuation inside a key name
     '[core]\n\\\n\tbare = true\n', // a lone backslash line
+    // An unquoted tab inside a value: git < 2.4x reads it as a space, newer git keeps the tab, so
+    // there is no single meaning. Refused, and NOT compared with whatever git is installed.
+    '[core]\n\tworktree = ../a \\\n\tb\n',
+    '[core]\n\tworktree = a\\\n\tb\n',
+    '[core]\n\tworktree = ../a\tb\n',
+    '[core]\n\tbare = tr\tue\n',
     '[core]\n\tworktree =\n', // git yields "": not the same as unset, so refuse
     '[core]\n\tworktree = ""\n',
   ]
@@ -554,5 +558,13 @@ describe('symlinked HEAD', { skip: process.platform === 'win32' }, () => {
     mkdirSync(join(outside, 'sub'))
     const got = canonicalProjectForCwd(join(outside, 'sub'), NO_TMP)
     assert.notEqual(got?.label, 'outside', 'a HEAD pointing outside refs/ is not a git dir')
+  })
+})
+
+
+describe('tabs in config values', () => {
+  it('leading and trailing tabs around a value are plain padding; an escaped \\t is explicit', () => {
+    assert.deepEqual(_parseCoreConfig('[core]\n\tworktree =\t../w\t\n'), { bare: false, worktree: '../w' })
+    assert.deepEqual(_parseCoreConfig('[core]\n\tworktree = "a\\tb"\n'), { bare: false, worktree: 'a\tb' })
   })
 })

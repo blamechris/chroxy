@@ -134,9 +134,15 @@ describe('labels, keys and numbering', () => {
     assert.equal(normalizeLabel('\u0007\t '), '')
   })
 
-  it('a label that normalizes to empty is non_project', () => {
+  it('a label that normalizes to empty is non_project (control-character folder name)', { skip: process.platform === 'win32' && 'Windows paths cannot contain control characters' }, () => {
     const { alloc } = fresh()
     assert.deepEqual(alloc.allocate({ cwd: project('\u0007\u0008') }), { ok: false, reason: 'non_project' })
+  })
+
+  it('a label that normalizes to empty is non_project (whitespace-only folder name, valid on every filesystem)', () => {
+    const { alloc } = fresh()
+    assert.equal(normalizeLabel('\u2028\u00a0'), '')
+    assert.deepEqual(alloc.allocate({ cwd: project('\u2028\u00a0') }), { ok: false, reason: 'non_project' })
   })
 
   it('case-folded keys share one counter', () => {

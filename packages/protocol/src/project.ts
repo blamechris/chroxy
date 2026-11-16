@@ -459,6 +459,7 @@ function parseConfigValue(raw: string): string | null {
   let out = ''
   let inQuote = false
   let keep = 0 // length of `out` that is not trailing unquoted whitespace
+  const bareTabs: number[] = [] // positions in `out` of tabs typed OUTSIDE quotes
   let i = 0
   // leading whitespace is dropped
   while (i < raw.length && /[ \t]/.test(raw[i])) i++
@@ -478,10 +479,15 @@ function parseConfigValue(raw: string): string | null {
       continue
     }
     if (!inQuote && (c === '#' || c === ';')) break
+    if (c === '\t' && !inQuote) bareTabs.push(out.length)
     out += c
     if (inQuote || !/[ \t]/.test(c)) keep = out.length
   }
   if (inQuote) return null
+  // An unquoted tab INSIDE a value is read differently by different git versions (older git
+  // turns it into a space, newer git keeps the tab), so the value has no single meaning:
+  // refuse it rather than pick one. A tab in quotes or written as `\t` is explicit and stays.
+  if (bareTabs.some((pos) => pos < keep)) return null
   return out.slice(0, keep)
 }
 
