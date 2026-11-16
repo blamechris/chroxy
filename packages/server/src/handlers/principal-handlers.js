@@ -197,12 +197,9 @@ function resolveSnapshotSessionIds(ws, client, msg, ctx) {
     sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
     return null
   }
-  if (typeof msg?.requestId !== 'string' || msg.requestId.length === 0) {
-    sendPrincipalRefusal(ws, client, msg, ctx, 'envelope')
-    return null
-  }
   if (msg.sessionIds !== undefined) {
     const ids = sessionIdList(msg.sessionIds)
+    // The envelope check passed, so only a DUPLICATE id can still make the list null.
     if (ids === null) { sendPrincipalRefusal(ws, client, msg, ctx, 'envelope'); return null }
     // ALL-OR-NOTHING, evaluated for every id (no early exit that would time differently).
     if (!allGranted(client, ids, ctx)) { sendPrincipalRefusal(ws, client, msg, ctx, 'scope'); return null }

@@ -614,7 +614,7 @@ describe('principal_sessions_snapshot', () => {
       assert.equal(JSON.stringify(secret.sent[0]).includes('sk-ant-api03-abcdefghijklmnopqrstuvwxyz'), false)
     })
 
-    it('model: requested is the explicit override, observed is what is running; each may be null', () => {
+    it('model: requested is the model the daemon resolved (null = the provider\'s own default), observed is what is running', () => {
       makeManager()
       const both = create({ model: 'claude-opus-4' })
       const followDefault = create()
