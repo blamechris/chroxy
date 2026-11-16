@@ -1,6 +1,11 @@
 /**
- * #8599 -- a dashboard that joins an already-busy session keeps its busy state
- * (and so its Stop control) across the history replay.
+ * #8599 -- CLIENT contract test. Given the frames the server sends a late-joining
+ * dashboard for a busy session (session_list busy, a replay whose old results are
+ * NOT followed by agent_idle), the store stays busy and the InputBar busy props
+ * (the same `inputBarBusyProps` App.tsx uses) show Stop. A stray agent_idle would
+ * hide it. That the server really sends that frame sequence is pinned in
+ * packages/server/tests/late-join-busy-replay.test.js. Not covered here: pressing
+ * Stop/Escape and busy queueing (owner-path smoke).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
@@ -103,14 +108,16 @@ describe('late join of a busy session keeps Stop (#8599)', () => {
     expect(showsStop()).toBe(false)
   })
 
-  it('contract: a session_activity busy frame after the replay keeps Stop, and Stop interrupts', () => {
+  it('a session_activity busy frame restores Stop after a stray idle', () => {
     join(true)
+    send({ type: 'agent_idle', sessionId: SID })
+    expect(showsStop()).toBe(false)
     send({ type: 'session_activity', sessionId: SID, isBusy: true })
     expect(ss().isIdle).toBe(false)
     expect(showsStop()).toBe(true)
   })
 
-  it('contract: an agent_idle inside the replay of a busy session WOULD hide Stop (why the server must not send it)', () => {
+  it('an agent_idle inside the replay of a busy session WOULD hide Stop (why the server must not send it)', () => {
     join(true)
     send({ type: 'agent_idle', sessionId: SID })
     expect(showsStop()).toBe(false)
