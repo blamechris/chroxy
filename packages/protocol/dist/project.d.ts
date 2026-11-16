@@ -90,6 +90,23 @@ export interface CanonicalProject {
     label: string;
     root: string;
 }
+type CoreConfig = {
+    bare: boolean;
+    worktree: string | null;
+};
+/**
+ * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
+ * `core.worktree` exactly as git does. Anything outside it returns null so the
+ * caller REFUSES (legacy name) instead of guessing:
+ *  - only `[core]` counts (section names and keys are case-insensitive; `[core "x"]`
+ *    and `[core.x]` are other sections); `[include]`/`[includeIf ...]` are refused;
+ *  - `[section] key = value` on one line, `"` quoting, `\" \\ \n \t \b`, inline
+ *    `#`/`;` comments outside quotes, trailing-backslash continuation;
+ *  - booleans: true/yes/on/non-zero decimal and a bare key are true,
+ *    false/no/off/0/empty are false, anything else refuses.
+ * Exported (underscore) so tests can compare it with `git config` itself.
+ */
+export declare function _parseCoreConfig(text: string): CoreConfig | null;
 /**
  * Canonical project identity for a working directory — the one answer a
  * linked worktree, an agent checkout and the main repo all agree on.

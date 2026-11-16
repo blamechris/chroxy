@@ -8,30 +8,41 @@
  *
  * State lives in numbered generations, each with a primary and a mirror copy:
  *
- *   <dir>/session-names.g<gen>.json          (primary)
- *   <dir>/session-names.g<gen>.mirror.json   (mirror)
+ *   <dir>/session-names.g<12-digit gen>.json          (primary)
+ *   <dir>/session-names.g<12-digit gen>.mirror.json   (mirror)
  *
  * Each file is `{ version: 1, gen, body, sha256 }`; `sha256` covers a canonical
  * (sorted-key) serialization of `{ version, gen, body }`. Nothing else in the
  * directory is ever parsed.
  *
- * Publishing generation g+1 is the compare-and-swap:
- *   1. write the full text to a unique temp file (`session-names.tmp.<pid>.<token>`,
- *      which does not match the generation pattern) and fsync it;
- *   2. `linkSync(tmp, primary_g+1)` — an atomic create-if-absent. EEXIST means
- *      another writer won g+1: drop the temp, reload, retry;
- *   3. fsync the directory, unlink the temp;
+ * A writer OWNS generation g+1 only if it creates BOTH names itself:
+ *   1. write the full text (every byte, short writes looped) to two unique temp
+ *      files (`session-names.tmp.<pid>.<token>.a|b`, outside the generation
+ *      pattern) and fsync each;
+ *   2. `linkSync(tmpA, primary)` then `linkSync(tmpB, mirror)` — each an atomic
+ *      create-if-absent. EEXIST on EITHER means another writer owns g+1: unlink
+ *      whichever of the two names THIS writer created, reload, retry. (A rename
+ *      would overwrite and let a stale writer reclaim a generation whose other
+ *      copy was lost.)
+ *   3. fsync the directory once, unlink the temps;
  *   4. re-list the directory: if a generation GREATER than g+1 exists, this
  *      writer's view was stale (the store moved on and pruned g+1 — an ABA).
- *      Unlink our own primary and retry; never issue;
- *   5. write the mirror for g+1 with `writeDurableFile` (only the winner does);
- *   6. issue the number only when the primary publish and the mirror were both
- *      confirmed durable. Otherwise the number may already be persisted as
- *      `next`: it becomes a gap, never a reuse.
+ *      Unlink our two names and retry; never issue;
+ *   5. issue the number only when both links succeeded and the directory fsync
+ *      was confirmed. Otherwise the number may already be persisted as `next`:
+ *      it becomes a gap, never a reuse.
  * Contention is bounded (`maxAttempts`, default 8) and returns `contended`.
  * No sleeps, no lock file, no wall clock in mutual exclusion. A filesystem
  * without hard links returns `unsupported_fs` (non-closing, nothing issued).
- * After an issue the winner removes generations below g-2.
+ * Every outcome after a load (issued, lost, failed) prunes: generations below
+ * top-2 and temp files older than 10 minutes are removed; the top three
+ * generations are never touched.
+ *
+ * Two consequences of the two-link publish, both on the safe side:
+ *   - between a writer's two links a concurrent reader can see two valid copies
+ *     with different sha256 and fail closed `inconsistent` for that one call;
+ *   - a crash inside that window, in the lost-copy case, leaves a permanent
+ *     `inconsistent`: no duplicate is possible, and operator recovery applies.
  *
  * ## Load
  *
@@ -40,7 +51,9 @@
  *   - no naming files at all           -> fresh (gen 0)
  *   - either copy valid                -> use it (primary preferred)
  *   - both valid, different sha256     -> fail closed: 'inconsistent'
- *   - files present, none valid        -> fail closed: 'evidence_lost'
+ *   - at least one copy present but bad, none valid -> fail closed: 'evidence_lost'
+ *   - both copies ENOENT after listing (pruned under us) -> re-list, retry
+ *   - any other read error (EIO, EMFILE, EACCES) -> 'io_error' (non-closing)
  * An older generation is NEVER a fallback. Failing closed returns
  * `{ ok: false, reason }` from allocate and bind and WRITES NOTHING, so corrupt
  * evidence keeps the allocator closed across restarts (callers use their legacy
@@ -85,7 +98,12 @@
  * - The serialized size is checked BEFORE publishing against MAX_STORE_BYTES.
  *   Over budget: idempotency records are evicted oldest-seq first (never the
  *   current one); still over -> 'store_full' (non-closing, nothing written).
- * - Numbers stop at MAX_SAFE_INTEGER - 1 ('exhausted').
+ * - Numbers stop at MAX_SAFE_INTEGER - 1, and generations at 999999999999
+ *   ('exhausted', nothing written).
+ * - `body.projects` is deliberately unbounded: after roughly 3,000 distinct
+ *   projects, new projects get `store_full` while existing ones keep allocating.
+ * - A candidate name is checked against every live name; collisions are skipped
+ *   (at most 64) and then fail with `live_collision` (non-closing).
  * - Nothing here throws for I/O or corruption problems; those return
  *   `{ ok: false, reason }`. Only bad arguments throw (programming errors).
  */
@@ -98,7 +116,6 @@ import {
 import { join } from 'node:path'
 import { canonicalProjectForCwd } from '@chroxy/protocol/project'
 import { configDir } from './config-dir.js'
-import { writeDurableFile } from './durable-write.js'
 
 export const MAX_STORE_BYTES = 1024 * 1024
 
@@ -114,7 +131,9 @@ const DEFAULT_MAX_ATTEMPTS = 8
 const KEEP_GENERATIONS = 3
 const TMP_PREFIX = 'session-names.tmp.'
 const TMP_STALE_MS = 10 * 60 * 1000
-const FILE_RE = /^session-names\.g(\d{1,15})(\.mirror)?\.json$/
+const FILE_RE = /^session-names\.g(\d{12})(\.mirror)?\.json$/
+const MAX_GEN = 999_999_999_999
+const MAX_LIVE_SKIPS = 64
 
 const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0
 const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
@@ -200,20 +219,24 @@ function validBody(body) {
   }
   for (const [id, e] of Object.entries(body.keys)) {
     if (id.length > MAX_IDEM_KEY_LEN) return false
-    if (!isObj(e) || typeof e.key !== 'string' || typeof e.root !== 'string' || !isInt(e.n)) return false
+    if (!isObj(e) || typeof e.key !== 'string' || !/^[0-9a-f]{64}$/.test(e.rootId) || !isInt(e.n)) return false
     if (!(e.sessionId === null || (typeof e.sessionId === 'string' && e.sessionId.length <= MAX_SESSION_ID_LEN))) return false
     if (typeof e.at !== 'number' || !Number.isFinite(e.at) || !Number.isSafeInteger(e.seq) || e.seq < 0) return false
   }
   return true
 }
 
-/** @returns {{state:'absent'}|{state:'invalid'}|{state:'valid',gen:number,sha256:string,body:object}} */
+/** Reasons a naming path is "present but not usable" (as opposed to a transient I/O error). */
+const BAD_FILE_CODES = new Set(['ECHROXY_BADFILE', 'ELOOP', 'EISDIR'])
+
+/** @returns {{state:'absent'}|{state:'error'}|{state:'invalid'}|{state:'valid',gen:number,sha256:string,body:object}} */
 function readCopy(path, gen, readFile, maxBytes) {
   let text
   try {
     text = readFile(path, maxBytes)
   } catch (err) {
-    return err?.code === 'ENOENT' ? { state: 'absent' } : { state: 'invalid' }
+    if (err?.code === 'ENOENT') return { state: 'absent' }
+    return BAD_FILE_CODES.has(err?.code) ? { state: 'invalid' } : { state: 'error' }
   }
   try {
     const doc = JSON.parse(text)
@@ -238,7 +261,7 @@ const setOwn = (obj, k, v) => Object.defineProperty(obj, k, { value: v, enumerab
  * @param {() => number} [opts.now]        wall clock (idempotency TTL only)
  * @param {{warn?:Function,error?:Function,info?:Function}} [opts.log]
  * @param {number} [opts.maxAttempts]      bound on CAS retries
- * @param {object} [opts.deps]             test seams: writeDurable, readFile, linkSync, syncDir,
+ * @param {object} [opts.deps]             test seams: readFile, linkSync, syncDir, writeSync,
  *                                         afterLoad, maxBytes
  */
 export function createSessionNameAllocator({
@@ -249,10 +272,10 @@ export function createSessionNameAllocator({
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   deps = {},
 } = {}) {
-  const writeDurable = deps.writeDurable ?? writeDurableFile
   const readFile = deps.readFile ?? defaultReadFile
   const link = deps.linkSync ?? linkSync
   const syncDir = deps.syncDir ?? defaultSyncDir
+  const writeBytes = deps.writeSync ?? ((fd, buf, off, len) => writeSync(fd, buf, off, len))
   const afterLoad = deps.afterLoad ?? null
   const maxBytes = deps.maxBytes ?? MAX_STORE_BYTES
 
@@ -290,8 +313,13 @@ export function createSessionNameAllocator({
     const top = Math.max(...gens.keys())
     const a = readCopy(join(dir, genName(top, false)), top, readFile, maxBytes)
     const b = readCopy(join(dir, genName(top, true)), top, readFile, maxBytes)
+    // Both gone: the store advanced and pruned this generation after we listed. Not corruption.
+    if (a.state === 'absent' && b.state === 'absent') return { kind: 'retry' }
     const valid = [a, b].filter((c) => c.state === 'valid')
-    if (valid.length === 0) return { kind: 'closed', reason: 'evidence_lost' }
+    if (valid.length === 0) {
+      if (a.state === 'error' || b.state === 'error') return { kind: 'error', reason: 'io_error' }
+      return { kind: 'closed', reason: 'evidence_lost' }
+    }
     if (valid.length === 2 && a.sha256 !== b.sha256) return { kind: 'closed', reason: 'inconsistent' }
     return { kind: 'ok', gen: top, body: structuredClone(valid[0].body) }
   }
@@ -327,35 +355,71 @@ export function createSessionNameAllocator({
     try { unlinkSync(p) } catch { /* ignore */ }
   }
 
-  /**
-   * Publish `text` as generation `gen`. Returns 'won' | 'lost' (EEXIST or stale ABA)
-   * | 'unsupported' | 'error'. On 'won' the mirror is NOT yet written.
-   */
-  const publishPrimary = (gen, text) => {
-    const primary = join(dir, genName(gen, false))
-    const tmp = join(dir, `${TMP_PREFIX}${process.pid}.${randomBytes(6).toString('hex')}`)
+  /** Write every byte (looping over short writes) to a fresh file and fsync it. */
+  const writeTemp = (path, buf) => {
     let fd
     try {
-      fd = openSync(tmp, 'wx', 0o600)
-      writeSync(fd, text)
+      fd = openSync(path, 'wx', 0o600)
+      let off = 0
+      while (off < buf.length) {
+        const n = writeBytes(fd, buf, off, buf.length - off)
+        if (!Number.isInteger(n) || n <= 0 || n > buf.length - off) throw new Error('incomplete write')
+        off += n
+      }
       fsyncSync(fd)
+      const done = fd
+      fd = undefined
+      closeSync(done)
+    } catch (err) {
+      if (fd !== undefined) try { closeSync(fd) } catch { /* ignore */ }
+      tryUnlink(path)
+      throw err
+    }
+  }
+
+  /**
+   * Publish `text` as generation `gen` by creating BOTH names. Returns 'won' | 'lost'
+   * (another writer owns it, or a stale view) | 'unsupported' | 'error'.
+   */
+  const publish = (gen, text) => {
+    const buf = Buffer.from(text)
+    const primary = join(dir, genName(gen, false))
+    const mirror = join(dir, genName(gen, true))
+    const token = `${process.pid}.${randomBytes(6).toString('hex')}`
+    const tmpA = join(dir, `${TMP_PREFIX}${token}.a`)
+    const tmpB = join(dir, `${TMP_PREFIX}${token}.b`)
+    const dropTemps = () => {
+      tryUnlink(tmpA)
+      tryUnlink(tmpB)
+    }
+    try {
+      writeTemp(tmpA, buf)
+      writeTemp(tmpB, buf)
     } catch (err) {
       emit('warn', `session-name temp write failed: ${err?.message ?? err}`, { reason: 'write_unconfirmed' })
-      if (fd !== undefined) try { closeSync(fd) } catch { /* ignore */ }
-      tryUnlink(tmp)
+      dropTemps()
       return 'error'
     }
-    try { closeSync(fd) } catch { /* ignore */ }
-    try {
-      link(tmp, primary)
-    } catch (err) {
-      tryUnlink(tmp)
+    const classify = (err) => {
       if (err?.code === 'EEXIST') return 'lost'
       if (err?.code === 'EPERM' || err?.code === 'ENOTSUP' || err?.code === 'EOPNOTSUPP' || err?.code === 'ENOSYS') return 'unsupported'
       emit('warn', `session-name publish failed: ${err?.message ?? err}`, { reason: 'write_unconfirmed' })
       return 'error'
     }
-    tryUnlink(tmp)
+    try {
+      link(tmpA, primary)
+    } catch (err) {
+      dropTemps()
+      return classify(err)
+    }
+    try {
+      link(tmpB, mirror)
+    } catch (err) {
+      tryUnlink(primary) // we created the primary; the generation is not ours
+      dropTemps()
+      return classify(err)
+    }
+    dropTemps()
     try {
       syncDir(dir)
     } catch (err) {
@@ -366,31 +430,30 @@ export function createSessionNameAllocator({
     try {
       if (Math.max(...listGens().keys()) > gen) {
         tryUnlink(primary)
+        tryUnlink(mirror)
         return 'lost'
       }
     } catch {
       tryUnlink(primary)
+      tryUnlink(mirror)
       return 'error'
     }
     return 'won'
   }
 
-  const publishMirror = (gen, text) => {
+  /** Remove generations below top-2 and stale temp files. Never touches the top three. */
+  const prune = () => {
     try {
-      const res = writeDurable(join(dir, genName(gen, true)), text)
-      return !!res && res.durable === true
-    } catch (err) {
-      emit('warn', `session-name mirror write failed: ${err?.message ?? err}`, { reason: 'write_unconfirmed' })
-      return false
-    }
-  }
-
-  const prune = (gen) => {
-    try {
-      for (const name of readdirSync(dir)) {
+      const names = readdirSync(dir)
+      let top = 0
+      for (const name of names) {
+        const m = FILE_RE.exec(name)
+        if (m) top = Math.max(top, Number(m[1]))
+      }
+      for (const name of names) {
         const m = FILE_RE.exec(name)
         if (m) {
-          if (Number(m[1]) < gen - (KEEP_GENERATIONS - 1)) tryUnlink(join(dir, name))
+          if (Number(m[1]) < top - (KEEP_GENERATIONS - 1)) tryUnlink(join(dir, name))
         } else if (name.startsWith(TMP_PREFIX)) {
           try {
             if (Date.now() - statSync(join(dir, name)).mtimeMs > TMP_STALE_MS) tryUnlink(join(dir, name))
@@ -412,20 +475,21 @@ export function createSessionNameAllocator({
     }
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const state = load()
+      if (state.kind === 'retry') continue
       if (state.kind === 'closed') return failClosed(state.reason)
       if (state.kind === 'error') return { ok: false, reason: state.reason }
       afterLoad?.({ gen: state.gen, attempt })
       const plan = step(state)
       if (plan.done) return plan.done
       const gen = state.gen + 1
+      if (gen > MAX_GEN) return { ok: false, reason: 'exhausted' }
       const text = fitBudget(gen, plan.body, plan.keep)
       if (text === null) return { ok: false, reason: 'store_full' }
-      const outcome = publishPrimary(gen, text)
+      const outcome = publish(gen, text)
+      prune()
       if (outcome === 'lost') continue
       if (outcome === 'unsupported') return { ok: false, reason: 'unsupported_fs' }
       if (outcome === 'error') return { ok: false, reason: 'write_unconfirmed' }
-      if (!publishMirror(gen, text)) return { ok: false, reason: 'write_unconfirmed' }
-      prune(gen)
       return plan.result
     }
     return { ok: false, reason: 'contended' }
@@ -464,6 +528,8 @@ export function createSessionNameAllocator({
     if (!label) return { ok: false, reason: 'non_project' }
     const key = keyForLabel(label)
     const root = Array.from(project.root).slice(0, MAX_ROOT_CODE_POINTS).join('')
+    // Identity of the FULL realpath: two roots sharing a 512-code-point prefix must not collide.
+    const rootId = createHash('sha256').update(project.root).digest('hex')
 
     try {
       return transact((state) => {
@@ -488,7 +554,7 @@ export function createSessionNameAllocator({
         expire(body)
         const result = (n) => ({ ok: true, name: `${label} ${n}`, label, number: n, key })
         const entry = idempotencyKey !== undefined && own(body.keys, idempotencyKey) ? body.keys[idempotencyKey] : null
-        if (entry && (entry.key !== key || entry.root !== root)) {
+        if (entry && (entry.key !== key || entry.rootId !== rootId)) {
           return { done: { ok: false, reason: 'idempotency_key_conflict' } }
         }
 
@@ -505,12 +571,18 @@ export function createSessionNameAllocator({
         }
 
         const stored = own(body.projects, key) ? body.projects[key].next : 1
-        const n = Math.max(stored, floor + 1)
+        let n = Math.max(stored, floor + 1)
+        // The floor ignores huge live numbers, but the name itself must still never duplicate a live one.
+        let skips = 0
+        while (liveSet.has(`${key} ${n}`)) {
+          if (++skips > MAX_LIVE_SKIPS) return { done: { ok: false, reason: 'live_collision' } }
+          n += 1
+        }
         if (n >= Number.MAX_SAFE_INTEGER) return { done: { ok: false, reason: 'exhausted' } }
         setOwn(body.projects, key, { label, root, next: n + 1 })
         if (idempotencyKey !== undefined) {
           body.seq += 1
-          setOwn(body.keys, idempotencyKey, { key, root, n, sessionId: null, at: now(), seq: body.seq })
+          setOwn(body.keys, idempotencyKey, { key, rootId, n, sessionId: null, at: now(), seq: body.seq })
           capKeys(body, idempotencyKey)
         }
         return { body, keep: idempotencyKey, result: result(n) }
@@ -521,19 +593,22 @@ export function createSessionNameAllocator({
     }
   }
 
-  function bind(idempotencyKey, sessionId) {
+  function bind(idempotencyKey, sessionId, { number } = {}) {
     if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) throw new TypeError('bind: idempotencyKey must be a non-empty string')
     if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > MAX_SESSION_ID_LEN) {
       throw new TypeError('bind: sessionId must be a non-empty string up to 128 chars')
     }
+    if (!isInt(number)) throw new TypeError('bind: { number } (the reserved number being bound) is required')
     try {
       return transact((state) => {
         const body = state.body
         expire(body)
         if (!own(body.keys, idempotencyKey)) return { done: { ok: false, reason: 'unknown_key' } }
         const entry = body.keys[idempotencyKey]
-        if (entry.sessionId === sessionId) return { done: { ok: true } }
-        if (entry.sessionId !== null) return { done: { ok: false, reason: 'already_bound' } }
+        // A delayed bind must not attach to a replacement reservation for the same key.
+        if (entry.n !== number) return { done: { ok: false, reason: 'stale_reservation' } }
+        if (entry.sessionId !== null && entry.sessionId !== sessionId) return { done: { ok: false, reason: 'already_bound' } }
+        // Same-session retries publish too: `ok` is only ever reported behind a confirmed write.
         entry.sessionId = sessionId
         return { body, keep: idempotencyKey, result: { ok: true } }
       })

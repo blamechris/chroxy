@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import {
   canonicalProjectForCwd,
+  _parseCoreConfig,
   deriveProject,
   deriveProjectFromCwd,
   classifyNonProjectCwd,
@@ -102,7 +103,7 @@ describe('canonicalProjectForCwd', () => {
     const b = base()
     const sub = join(b, 'super', 'subproj')
     mkdirSync(sub, { recursive: true })
-    fakeGitDir(join(b, 'super', '.git', 'modules', 'subproj'))
+    fakeGitDir(join(b, 'super', '.git', 'modules', 'subproj'), '[core]\n\tworktree = ../../../subproj\n')
     writeFileSync(join(sub, '.git'), 'gitdir: ../.git/modules/subproj\n')
     assert.deepEqual(canonicalProjectForCwd(sub, NO_TMP), { label: 'subproj', root: sub })
   })
@@ -164,11 +165,13 @@ describe('canonicalProjectForCwd', () => {
     writeFileSync(join(work, 'f'), 'x')
     git(work, 'add', 'f')
     git(work, 'commit', '-q', '-m', 'i')
-    assert.deepEqual(canonicalProjectForCwd(work, NO_TMP), { label: 'sepwork', root: work })
     const lw = join(b, 'sep-linked')
     git(work, 'worktree', 'add', '-q', '--detach', lw)
-    // git records the main working tree nowhere readable: documented fallback is the common dir, `.git` stripped
-    assert.deepEqual(canonicalProjectForCwd(lw, NO_TMP), { label: 'sepstore', root: sep })
+    // git records the main working tree nowhere readable, so the main checkout and its linked
+    // worktrees must AGREE: the git dir, with `.git` stripped from the label
+    const fromMain = canonicalProjectForCwd(work, NO_TMP)
+    assert.deepEqual(fromMain, { label: 'sepstore', root: sep })
+    assert.deepEqual(canonicalProjectForCwd(lw, NO_TMP), fromMain)
   })
 
   it('submodule and a linked worktree of the submodule resolve to the submodule', () => {
@@ -328,4 +331,125 @@ describe('characterization: existing derivations are unchanged', () => {
     assert.equal(deriveProject(repo, env), 'charrepo')
     assert.equal(worktreeParent(repo, env), null)
   })
+})
+
+
+describe('managed (chroxy) worktrees use the bounded resolver', () => {
+  function managed() {
+    const b = base()
+    const root = join(b, 'worktrees')
+    mkdirSync(root, { recursive: true })
+    const env = { ...NO_TMP, CHROXY_WORKTREES_ROOT: root }
+    return { b, root, env }
+  }
+  const wtDir = (root, id) => {
+    const d = join(root, id)
+    mkdirSync(d)
+    return d
+  }
+
+  it('a real managed worktree still resolves to its parent repo', () => {
+    const { repo } = realRepo('mgdparent')
+    const { root, env } = managed()
+    const wt = join(root, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    git(repo, 'worktree', 'add', '-q', '--detach', wt)
+    assert.deepEqual(canonicalProjectForCwd(wt, env), { label: 'mgdparent', root: repo })
+  })
+
+  it('FIFO .git, oversized pointer, missing target and bare common dir are all null (and never block)', { skip: process.platform === 'win32' }, () => {
+    const { b, root, env } = managed()
+    const fifo = wtDir(root, 'f1')
+    mkfifo(join(fifo, '.git'))
+    assert.equal(inChild(fifo, env), null)
+    const big = wtDir(root, 'f2')
+    writeFileSync(join(big, '.git'), 'gitdir: ' + 'a'.repeat(5000) + '\n')
+    assert.equal(inChild(big, env), null)
+    const missing = wtDir(root, 'f3')
+    writeFileSync(join(missing, '.git'), 'gitdir: /missing/repo/.git/worktrees/f3\n')
+    assert.equal(inChild(missing, env), null)
+    assert.equal(canonicalProjectForCwd(missing, env), null)
+    const bare = join(b, 'bare.git')
+    fakeGitDir(bare, '[core]\n\tbare = true\n')
+    fakeGitDir(join(bare, 'worktrees', 'f4'))
+    writeFileSync(join(bare, 'worktrees', 'f4', 'commondir'), '../..\n')
+    const bw = wtDir(root, 'f4')
+    writeFileSync(join(bw, '.git'), `gitdir: ${join(bare, 'worktrees', 'f4')}\n`)
+    assert.equal(canonicalProjectForCwd(bw, env), null)
+  })
+})
+
+describe('bare .git directory', () => {
+  it('a plain .git directory whose own config says bare is null', () => {
+    const b = base()
+    const d = join(b, 'weird')
+    fakeGitDir(join(d, '.git'), '[core]\n\tbare = true\n')
+    assert.equal(canonicalProjectForCwd(d, NO_TMP), null)
+    const ok = join(b, 'fine')
+    fakeGitDir(join(ok, '.git'), '[core]\n\tbare = false\n')
+    assert.deepEqual(canonicalProjectForCwd(ok, NO_TMP), { label: 'fine', root: ok })
+  })
+})
+
+describe('config parser agrees with git (oracle)', () => {
+  const CASES = [
+    '[core]\n\tbare = true\n',
+    '[core]\n\tbare = false\n',
+    '[core]\n\tbare = 2\n',
+    '[core]\n\tbare = 0\n',
+    '[core]\n\tbare\n',
+    '[core]\n\tbare =\n',
+    '[core]\n\tbare = YES\n',
+    '[core]\n\tbare = off\n',
+    '[core]\n\tbare = true ; comment\n',
+    '[core]\n\tbare = "true"\n',
+    '[CORE]\n\tBARE = true\n',
+    '[core "unrelated"]\n\tbare = true\n',
+    '[core.unrelated]\n\tbare = true\n',
+    '[core] bare = true\n',
+    '[core]\n\tbare = true\n\tbare = false\n',
+    '[core]\n\tworktree = ../actual\n',
+    '[core]\n\tworktree = ../"actual tree"\n',
+    '[core]\n\tworktree = "../actual\\t tree"\n',
+    '[core]\n\tworktree = "../a\\"b"  # trailing\n',
+    '[core]\n\tworktree = ../a \\\n\tb\n',
+    '[core]\n\tworktree = ../a   b   \n',
+    '[core]\n\tworktree = ../a\\\\b\n',
+    '[core]\n\tbare = true\n[remote "origin"]\n\turl = x\n[core]\n\tworktree = ../w\n',
+  ]
+  const REFUSE = [
+    '[include]\n\tpath = other\n[core]\n\tbare = false\n',
+    '[includeIf "gitdir:~/x/"]\n\tpath = other\n',
+    '[core]\n\tbare = maybe\n',
+    '[core]\n\tworktree = "unterminated\n',
+    '[core]\n\tworktree = ../a\\qb\n',
+    '[core\n\tbare = true\n',
+  ]
+  const oracle = (text, key, type) => {
+    const f = join(base(), 'cfg')
+    writeFileSync(f, text)
+    try {
+      const out = execFileSync('git', ['config', '--file', f, ...(type ? ['--type=bool'] : []), '--get', key], { stdio: 'pipe', encoding: 'utf8' })
+      return out.replace(/\n$/, '')
+    } catch (err) {
+      return err.status === 1 ? null : 'ERROR'
+    }
+  }
+
+  for (const text of CASES) {
+    it(`matches git: ${JSON.stringify(text)}`, () => {
+      const mine = _parseCoreConfig(text)
+      const bare = oracle(text, 'core.bare', true)
+      const wt = oracle(text, 'core.worktree', false)
+      assert.notEqual(bare, 'ERROR', 'oracle accepts the fixture')
+      assert.notEqual(wt, 'ERROR', 'oracle accepts the fixture')
+      assert.ok(mine, 'parser accepts what git accepts')
+      assert.equal(mine.bare, bare === 'true')
+      assert.equal(mine.worktree, wt)
+    })
+  }
+  for (const text of REFUSE) {
+    it(`refuses: ${JSON.stringify(text)}`, () => {
+      assert.equal(_parseCoreConfig(text), null)
+    })
+  }
 })

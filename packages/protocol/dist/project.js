@@ -456,52 +456,126 @@ function isGitDirectory(dir) {
         return false;
     }
 }
-function unquoteConfigValue(raw) {
-    const v = raw.trim();
-    if (v.startsWith('"')) {
-        let out = '';
-        for (let i = 1; i < v.length; i++) {
-            const c = v[i];
-            if (c === '\\' && i + 1 < v.length) {
-                out += v[++i];
-            }
-            else if (c === '"') {
-                break;
-            }
-            else {
-                out += c;
-            }
+/** Parse a git config value per git's rules; null = outside the supported subset (refuse). */
+function parseConfigValue(raw) {
+    let out = '';
+    let inQuote = false;
+    let keep = 0; // length of `out` that is not trailing unquoted whitespace
+    let i = 0;
+    // leading whitespace is dropped
+    while (i < raw.length && /[ \t]/.test(raw[i]))
+        i++;
+    for (; i < raw.length; i++) {
+        const c = raw[i];
+        if (c === '\\') {
+            const n = raw[++i];
+            const esc = n === 'n' ? '\n' : n === 't' ? '\t' : n === 'b' ? '\b' : n === '"' ? '"' : n === '\\' ? '\\' : null;
+            if (esc === null)
+                return null;
+            out += esc;
+            keep = out.length;
+            continue;
         }
-        return out;
+        if (c === '"') {
+            inQuote = !inQuote;
+            keep = out.length;
+            continue;
+        }
+        if (!inQuote && (c === '#' || c === ';'))
+            break;
+        out += c;
+        if (inQuote || !/[ \t]/.test(c))
+            keep = out.length;
     }
-    return v.replace(/\s*[#;].*$/, '').trim();
+    if (inQuote)
+        return null;
+    return out.slice(0, keep);
 }
-/** The two `[core]` keys that decide bare-vs-working-tree. Last assignment wins, like git. */
-function parseCoreConfig(text) {
+/** git_parse_maybe_bool + decimal integers; null = unsupported. */
+function parseConfigBool(value) {
+    if (value === null)
+        return true; // `key` with no `=`
+    const v = value.toLowerCase();
+    if (v === '' || v === 'false' || v === 'no' || v === 'off')
+        return false;
+    if (v === 'true' || v === 'yes' || v === 'on')
+        return true;
+    if (/^[+-]?\d{1,15}$/.test(v))
+        return Number(v) !== 0;
+    return null;
+}
+/**
+ * Strict, git-compatible subset of config syntax, enough to read `core.bare` and
+ * `core.worktree` exactly as git does. Anything outside it returns null so the
+ * caller REFUSES (legacy name) instead of guessing:
+ *  - only `[core]` counts (section names and keys are case-insensitive; `[core "x"]`
+ *    and `[core.x]` are other sections); `[include]`/`[includeIf ...]` are refused;
+ *  - `[section] key = value` on one line, `"` quoting, `\" \\ \n \t \b`, inline
+ *    `#`/`;` comments outside quotes, trailing-backslash continuation;
+ *  - booleans: true/yes/on/non-zero decimal and a bare key are true,
+ *    false/no/off/0/empty are false, anything else refuses.
+ * Exported (underscore) so tests can compare it with `git config` itself.
+ */
+export function _parseCoreConfig(text) {
+    const joined = text.replace(/\r\n/g, '\n').replace(/\\\n/g, '');
     let inCore = false;
     let bare = false;
     let worktree = null;
-    for (const line of text.split(/\r?\n/)) {
-        const section = /^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\]/.exec(line);
-        if (section) {
-            inCore = section[1].toLowerCase() === 'core';
+    for (const rawLine of joined.split('\n')) {
+        let line = rawLine.replace(/^[ \t]+/, '');
+        if (line === '' || line[0] === '#' || line[0] === ';')
             continue;
+        if (line[0] === '[') {
+            const m = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
+            if (!m)
+                return null;
+            const name = m[1].toLowerCase();
+            if (name === 'include' || name === 'includeif')
+                return null;
+            inCore = name === 'core' && m[2] === undefined;
+            line = line.slice(m[0].length).replace(/^[ \t]+/, '');
+            if (line === '' || line[0] === '#' || line[0] === ';')
+                continue;
         }
         if (!inCore)
             continue;
-        const kv = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+        const kv = /^([A-Za-z][A-Za-z0-9-]*)[ \t]*(?:=(.*))?$/.exec(line);
         if (!kv)
-            continue;
+            return null;
         const key = kv[1].toLowerCase();
         if (key === 'bare') {
-            bare = kv[2] === undefined ? true : /^(true|yes|on|1)$/i.test(unquoteConfigValue(kv[2]));
+            const value = kv[2] === undefined ? null : parseConfigValue(kv[2]);
+            if (kv[2] !== undefined && value === null)
+                return null;
+            const b = parseConfigBool(value);
+            if (b === null)
+                return null;
+            bare = b;
         }
-        else if (key === 'worktree' && kv[2] !== undefined) {
-            const v = unquoteConfigValue(kv[2]);
-            worktree = v.length > 0 ? v : null;
+        else if (key === 'worktree') {
+            if (kv[2] === undefined)
+                return null;
+            const value = parseConfigValue(kv[2]);
+            if (value === null)
+                return null;
+            worktree = value.length > 0 ? value : null;
         }
     }
     return { bare, worktree };
+}
+/** The repo's own config, or null when it is unreadable / outside the supported subset. */
+function readCoreConfig(gitDir) {
+    const config = readSmallFile(join(gitDir, 'config'), GIT_CONFIG_MAX_BYTES);
+    if (config === null)
+        return null;
+    return 'absent' in config ? { bare: false, worktree: null } : _parseCoreConfig(config.text);
+}
+/** Separate-git-dir / linked identity: a `.git` dir's parent, else the git dir itself minus `.git`. */
+function identityOfCommonDir(commonDir) {
+    if (basename(commonDir) === '.git')
+        return { root: dirname(commonDir) };
+    const stripped = basename(commonDir).replace(/\.git$/i, '');
+    return { root: commonDir, label: stripped.length > 0 ? stripped : undefined };
 }
 /**
  * Identity of the repo a `.git` FILE (linked worktree, submodule, separate git
@@ -510,14 +584,12 @@ function parseCoreConfig(text) {
  *  - the gitdir the file points at must be a real git dir (directory + regular HEAD);
  *  - `commondir` (linked worktree) names the common git dir, validated the same way;
  *  - the common dir's `config` `[core]` decides: `bare = true` -> null;
- *    `worktree = <p>` -> that path (relative to the common dir);
- *  - no `commondir`: the file's own directory is the working tree (submodule,
- *    `--separate-git-dir` main);
- *  - `commondir` named `.git` -> its parent;
- *  - any other common dir (a separate git dir: git records the MAIN working
- *    tree nowhere readable) -> the common dir itself, labelled with a trailing
- *    `.git` stripped — the same answer `git worktree list` gives.
- * Null on any malformed/oversized/unreadable/non-regular input.
+ *    `worktree = <p>` -> that path (relative to the common dir; submodules);
+ *  - otherwise the identity is the common dir: its parent when it is named `.git`,
+ *    else the common dir itself labelled without a trailing `.git` (a separate git
+ *    dir: git records the MAIN working tree nowhere readable, so a main checkout
+ *    and its linked worktrees deliberately agree on this answer).
+ * Null on any malformed/oversized/unreadable/non-regular/unsupported input.
  */
 function rootFromGitFile(holderDir) {
     const pointer = readSmallFile(join(holderDir, '.git'));
@@ -533,7 +605,6 @@ function rootFromGitFile(holderDir) {
     if (commondir === null)
         return null;
     let commonDir = gitDir;
-    let linked = false;
     if (!('absent' in commondir)) {
         const rel = commondir.text.trim();
         if (rel.length === 0)
@@ -541,22 +612,13 @@ function rootFromGitFile(holderDir) {
         commonDir = resolve(gitDir, rel);
         if (!isGitDirectory(commonDir))
             return null;
-        linked = true;
     }
-    const config = readSmallFile(join(commonDir, 'config'), GIT_CONFIG_MAX_BYTES);
-    if (config === null)
-        return null;
-    const core = 'absent' in config ? { bare: false, worktree: null } : parseCoreConfig(config.text);
-    if (core.bare)
+    const core = readCoreConfig(commonDir);
+    if (core === null || core.bare)
         return null;
     if (core.worktree)
         return { root: resolve(commonDir, core.worktree) };
-    if (!linked)
-        return { root: holderDir };
-    if (basename(commonDir) === '.git')
-        return { root: dirname(commonDir) };
-    const stripped = basename(commonDir).replace(/\.git$/i, '');
-    return { root: commonDir, label: stripped.length > 0 ? stripped : undefined };
+    return identityOfCommonDir(commonDir);
 }
 /**
  * Canonical project identity for a working directory — the one answer a
@@ -585,8 +647,10 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
     };
     const chroxyTop = chroxyWorktreeTopDir(dir, env);
     if (chroxyTop) {
-        const repo = chroxyWorktreeRepoPath(chroxyTop);
-        return repo ? finish(repo) : null;
+        // Same bounded, validated metadata resolver as any linked worktree (not the legacy
+        // chroxyWorktreeRepoPath reader, which blocks on a FIFO and trusts the pointer).
+        const found = rootFromGitFile(chroxyTop);
+        return found ? finish(found.root, found.label) : null;
     }
     let current = dir;
     for (let i = 0; i < 256; i++) {
@@ -602,8 +666,12 @@ export function canonicalProjectForCwd(cwd, env = defaultEnv()) {
             if (code !== 'ENOENT' && code !== 'ENOTDIR')
                 return null;
         }
-        if (kind === 'dir')
+        if (kind === 'dir') {
+            const core = readCoreConfig(join(current, '.git'));
+            if (core === null || core.bare)
+                return null;
             return finish(current);
+        }
         if (kind === 'file') {
             const found = rootFromGitFile(current);
             return found ? finish(found.root, found.label) : null;

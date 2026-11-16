@@ -1,7 +1,8 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,15 +64,20 @@ function fresh(opts = {}) {
 const nums = (alloc, cwd, n) => Array.from({ length: n }, () => alloc.allocate({ cwd }).number)
 const readDoc = (p) => JSON.parse(readFileSync(p, 'utf8'))
 const snapshot = (dir) => readdirSync(dir).sort().map((f) => [f, readFileSync(join(dir, f)).toString('base64'), statSync(join(dir, f)).mtimeMs])
-/** A mirror writer that writes plain files (fast) and optionally misbehaves. */
-function mirrorWriter({ mode = 'ok' } = {}) {
-  return (p, data) => {
-    if (mode === 'throw') throw new Error('disk full')
-    if (mode === 'unconfirmed-before') return { durable: false, unconfirmed: 'EIO' }
-    writeFileSync(p, data)
-    // 'unconfirmed-after': the file IS published, then the directory fsync is reported failed
-    return mode === 'unconfirmed-after' ? { durable: false, unconfirmed: 'EIO' } : { durable: true, unconfirmed: null }
-  }
+/** linkSync that fails (EIO) for the mirror name only, i.e. after the primary was created. */
+const failMirrorLink = (a, b) => {
+  if (/\.mirror\.json$/.test(b)) throw Object.assign(new Error('EIO'), { code: 'EIO' })
+  return linkSync(a, b)
+}
+const noSync = () => {}
+const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object'
+  ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v))
+/** A checksum-VALID envelope, built independently of the module under test. */
+const sign = ({ version = 1, gen, body = { projects: {}, keys: {}, seq: 0 } }) => ({
+  version, gen, body, sha256: createHash('sha256').update(canon({ version, gen, body })).digest('hex'),
+})
+const putStore = (dir, doc) => {
+  for (const mirror of [false, true]) writeFileSync(genFile(dir, doc.gen, mirror), JSON.stringify(doc))
 }
 function waitFor(cond, ms, what) {
   return new Promise((resolve, reject) => {
@@ -199,16 +205,6 @@ describe('generation load matrix', () => {
     assert.equal(createSessionNameAllocator({ dir: f.dir }).allocate({ cwd }).number, 4)
   })
 
-  it('a primary published without its mirror (mirror write failed) is used: the number is a gap', () => {
-    const dir = tmp('names-dir-')
-    const cwd = project('p')
-    nums(createSessionNameAllocator({ dir }), cwd, 2)
-    const bad = createSessionNameAllocator({ dir, deps: { writeDurable: mirrorWriter({ mode: 'throw' }) } })
-    assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
-    assert.ok(existsSync(genFile(dir, 3)) && !existsSync(genFile(dir, 3, true)))
-    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 4)
-  })
-
   it('primary corrupt / mirror valid recovers from the mirror', () => {
     const f = fresh()
     const cwd = project('p')
@@ -226,7 +222,7 @@ describe('generation load matrix', () => {
     writeFileSync(f.top().B, 'garbage-b')
     const before = snapshot(f.dir)
     assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'evidence_lost' })
-    assert.deepEqual(f.alloc.bind('k', 's'), { ok: false, reason: 'evidence_lost' })
+    assert.deepEqual(f.alloc.bind('k', 's', { number: 1 }), { ok: false, reason: 'evidence_lost' })
     assert.deepEqual(snapshot(f.dir), before)
     assert.equal(f.logs.filter((l) => l.level === 'error').length, 1, 'logged once per process per reason')
   })
@@ -280,22 +276,93 @@ describe('generation load matrix', () => {
     assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'evidence_lost' })
   })
 
-  it('a wrong version, or a gen field that disagrees with the file name, is invalid', () => {
+  it('a checksum-valid envelope with an unsupported version is invalid', () => {
+    const dir = tmp('names-ver-')
+    const cwd = project('p')
+    const body = { projects: { p: { label: 'p', root: '/x', next: 5 } }, keys: {}, seq: 0 }
+    putStore(dir, sign({ version: 2, gen: 1, body }))
+    assert.deepEqual(createSessionNameAllocator({ dir }).allocate({ cwd }), { ok: false, reason: 'evidence_lost' })
+    // control: the same envelope at version 1 is accepted, so the helper itself is sound
+    const ok = tmp('names-ver-')
+    putStore(ok, sign({ gen: 1, body }))
+    assert.equal(createSessionNameAllocator({ dir: ok }).allocate({ cwd }).number, 5)
+  })
+
+  it('a gen field that disagrees with the file name is invalid', () => {
     const f = fresh()
     const cwd = project('p')
     nums(f.alloc, cwd, 2)
     const t = f.top()
-    const doc = readDoc(t.A)
-    writeFileSync(t.A, JSON.stringify({ ...doc, version: 2 }))
-    writeFileSync(t.B, readFileSync(genFile(f.dir, t.gen - 1))) // valid doc, but for the wrong generation
+    writeFileSync(t.A, readFileSync(genFile(f.dir, t.gen - 1)))
+    writeFileSync(t.B, readFileSync(genFile(f.dir, t.gen - 1, true)))
     assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'evidence_lost' })
+  })
+
+  it('generation file names are exactly 12 digits; other spellings are ignored', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    putStore(f.dir, sign({ gen: 7 })) // valid content under a 12-digit name would count...
+    for (const mirror of [false, true]) {
+      unlinkSync(genFile(f.dir, 7, mirror))
+      writeFileSync(join(f.dir, `session-names.g7${mirror ? '.mirror' : ''}.json`), 'garbage')
+      writeFileSync(join(f.dir, `session-names.g0000000007${mirror ? '.mirror' : ''}.json`), 'garbage')
+    }
+    assert.equal(f.alloc.allocate({ cwd }).number, 2)
+  })
+
+  it('a generation past 999999999999 is exhausted and nothing is written', () => {
+    const dir = tmp('names-gen-')
+    putStore(dir, sign({ gen: 999_999_999_999 }))
+    const before = snapshot(dir)
+    assert.deepEqual(createSessionNameAllocator({ dir }).allocate({ cwd: project('p') }), { ok: false, reason: 'exhausted' })
+    assert.deepEqual(snapshot(dir), before)
+  })
+
+  it('a pruned-under-us generation is re-listed, not treated as corruption', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    const y = createSessionNameAllocator({ dir: f.dir })
+    let first = true
+    const x = createSessionNameAllocator({
+      dir: f.dir,
+      log: { error: (m) => f.logs.push({ level: 'error', m }) },
+      deps: {
+        readFile: (path) => {
+          if (first) {
+            first = false
+            nums(y, cwd, 4) // gens 2..5; gen 1 is pruned before X reads it
+          }
+          return readFileSync(path, 'utf8')
+        },
+      },
+    })
+    const r = x.allocate({ cwd })
+    assert.equal(r.ok, true, JSON.stringify(r))
+    assert.equal(r.number, 6)
+    assert.equal(f.logs.filter((l) => l.level === 'error').length, 0)
+  })
+
+  it('a transient read error is io_error: non-closing, never logged as fail-closed', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    const flaky = createSessionNameAllocator({
+      dir: f.dir,
+      log: { error: (m) => f.logs.push({ level: 'error', m }) },
+      deps: { readFile: () => { throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' }) } },
+    })
+    assert.deepEqual(flaky.allocate({ cwd }), { ok: false, reason: 'io_error' })
+    assert.equal(f.logs.filter((l) => l.level === 'error').length, 0)
+    assert.equal(f.alloc.allocate({ cwd }).number, 2)
   })
 
   it('anything else in the directory is ignored and never parsed', () => {
     const f = fresh()
     const cwd = project('p')
     f.alloc.allocate({ cwd })
-    for (const name of ['session-names.json', 'session-names.mirror.json', 'session-names.lock', 'session-names.gabc.json', 'session-names.g0000000000099.json.bak', 'notes.txt']) {
+    for (const name of ['session-names.json', 'session-names.mirror.json', 'session-names.lock', 'session-names.gabc.json', 'session-names.g000000000099.json.bak', 'session-names.g1.json', 'notes.txt']) {
       writeFileSync(join(f.dir, name), 'garbage')
     }
     assert.equal(f.alloc.allocate({ cwd }).number, 2)
@@ -329,7 +396,7 @@ describe('compare-and-swap by generation', () => {
     const dirOf = () => f.dir
     const cwd = project('p')
     nums(f.alloc, cwd, 3)
-    f.alloc.bind('k', 's')
+    f.alloc.bind('k', 's', { number: 1 })
     for (const name of [...seen, ...readdirSync(f.dir)]) assert.ok(!/lock/i.test(name), `unexpected ${name}`)
     assert.ok(!readdirSync(f.dir).some((n) => n.startsWith('session-names.tmp.')), 'temp files cleaned up')
   })
@@ -414,27 +481,30 @@ describe('writes never issue an unconfirmed number', () => {
     assert.deepEqual(readdirSync(f.dir), [])
   })
 
-  it('an unconfirmed directory fsync issues nothing', () => {
-    const f = fresh({ deps: { syncDir: () => { throw new Error('EIO') } } })
-    assert.equal(f.alloc.allocate({ cwd: project('p') }).reason, 'write_unconfirmed')
+  it('a failing mirror link issues nothing, removes the primary it created, and the number is not burned', () => {
+    const dir = tmp('names-dir-')
+    const cwd = project('p')
+    nums(createSessionNameAllocator({ dir }), cwd, 2)
+    const bad = createSessionNameAllocator({ dir, deps: { linkSync: failMirrorLink } })
+    assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
+    assert.ok(!existsSync(genFile(dir, 3)) && !existsSync(genFile(dir, 3, true)))
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 3)
   })
 
-  for (const mode of ['throw', 'unconfirmed-before', 'unconfirmed-after']) {
-    it(`mirror ${mode}: nothing issued; the next success skips the number`, () => {
-      const dir = tmp('names-dir-')
-      const cwd = project('p')
-      const bad = createSessionNameAllocator({ dir, deps: { writeDurable: mirrorWriter({ mode }) } })
-      assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
-      assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 2, 'number 1 became a gap, never reissued')
-    })
-  }
+  it('an unconfirmed directory fsync issues nothing; the persisted number is a gap, never reissued', () => {
+    const dir = tmp('names-dir-')
+    const cwd = project('p')
+    const bad = createSessionNameAllocator({ dir, deps: { syncDir: () => { throw new Error('EIO') } } })
+    assert.deepEqual(bad.allocate({ cwd }), { ok: false, reason: 'write_unconfirmed' })
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 2)
+  })
 
   it('an idempotent retry is never answered without a confirmed write, even when the copies already match', () => {
     const dir = tmp('names-dir-')
     const cwd = project('p')
     assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd, idempotencyKey: 'k' }).number, 1)
     const genBefore = top(dir).gen
-    const bad = createSessionNameAllocator({ dir, deps: { writeDurable: mirrorWriter({ mode: 'unconfirmed-after' }) } })
+    const bad = createSessionNameAllocator({ dir, deps: { syncDir: () => { throw new Error('EIO') } } })
     assert.deepEqual(bad.allocate({ cwd, idempotencyKey: 'k' }), { ok: false, reason: 'write_unconfirmed' })
     const good = createSessionNameAllocator({ dir }).allocate({ cwd, idempotencyKey: 'k' })
     assert.equal(good.number, 1, 'same number, no new one consumed')
@@ -442,10 +512,59 @@ describe('writes never issue an unconfirmed number', () => {
     assert.ok(existsSync(top(dir).A) && existsSync(top(dir).B))
   })
 
+  it('a short write is completed, not mistaken for a whole file', () => {
+    const f = fresh({ deps: { writeSync: (fd, buf, off, len) => writeSync(fd, buf, off, Math.min(len, 7)) } })
+    const cwd = project('p')
+    assert.equal(f.alloc.allocate({ cwd }).number, 1)
+    assert.equal(createSessionNameAllocator({ dir: f.dir }).allocate({ cwd }).number, 2, 'the stored file parses')
+    assert.equal(readDoc(f.top().A).sha256, readDoc(f.top().B).sha256)
+  })
+
+  it('a failure after partial progress, or zero progress, issues nothing and leaves no files', () => {
+    let calls = 0
+    const partial = fresh({ deps: { writeSync: (fd, buf, off) => {
+      calls += 1
+      if (calls === 1) return writeSync(fd, buf, off, 10)
+      throw Object.assign(new Error('EIO'), { code: 'EIO' })
+    } } })
+    assert.deepEqual(partial.alloc.allocate({ cwd: project('p') }), { ok: false, reason: 'write_unconfirmed' })
+    assert.deepEqual(readdirSync(partial.dir), [])
+    const stuck = fresh({ deps: { writeSync: () => 0 } })
+    assert.deepEqual(stuck.alloc.allocate({ cwd: project('p') }), { ok: false, reason: 'write_unconfirmed' })
+    assert.deepEqual(readdirSync(stuck.dir), [])
+  })
+
   it('a thrown non-Error is still reported, not propagated', () => {
-    const f = fresh({ deps: { writeDurable: () => { throw undefined } } })
+    const f = fresh({ deps: { linkSync: () => { throw undefined } } })
     assert.equal(f.alloc.allocate({ cwd: project('p') }).reason, 'write_unconfirmed')
   })
+})
+
+describe('a generation is owned only by the writer that creates both names', () => {
+  for (const lost of ['primary', 'mirror']) {
+    it(`stale writer + loss of the ${lost} of the generation it missed never re-issues the number`, () => {
+      const dir = tmp('names-b1-')
+      const cwd = project('p')
+      const y = createSessionNameAllocator({ dir })
+      let yResult = null
+      let nested = false
+      const x = createSessionNameAllocator({
+        dir,
+        deps: {
+          afterLoad: () => {
+            if (nested) return
+            nested = true
+            yResult = y.allocate({ cwd }) // publishes BOTH copies of g1 and returns "p 1"
+            unlinkSync(genFile(dir, 1, lost === 'mirror'))
+          },
+        },
+      })
+      const xResult = x.allocate({ cwd })
+      assert.equal(yResult.number, 1)
+      assert.equal(xResult.number, 2, 'X must not reclaim g1 and answer "p 1" again')
+      assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 3)
+    })
+  }
 })
 
 describe('store budget', () => {
@@ -484,7 +603,7 @@ describe('store budget', () => {
 
   it('sessionId over 128 chars is a TypeError; root is capped at 512 code points', () => {
     const { alloc } = fresh()
-    assert.throws(() => alloc.bind('k', 's'.repeat(129)), TypeError)
+    assert.throws(() => alloc.bind('k', 's'.repeat(129), { number: 1 }), TypeError)
     const deep = project('d', join(tmp('names-deep-'), 'a'.repeat(120), 'b'.repeat(120), 'c'.repeat(120), 'e'.repeat(120), 'f'.repeat(120)))
     const f = fresh()
     assert.equal(f.alloc.allocate({ cwd: deep }).ok, true)
@@ -593,6 +712,22 @@ describe('live floor', () => {
   })
 })
 
+describe('live collisions', () => {
+  it('never allocates a name a live session already holds, even above the floor cutoff', () => {
+    const cwd = project('p')
+    assert.equal(fresh({ liveNames: () => ['p 1000000', 'p 1000001'] }).alloc.allocate({ cwd }).number, 1000002)
+  })
+
+  it('past 64 consecutive collisions it fails non-closing with live_collision', () => {
+    const cwd = project('p')
+    const live = ['p 1000000']
+    for (let i = 1000001; i < 1000001 + 80; i++) live.push(`p ${i}`)
+    const f = fresh({ liveNames: () => live })
+    assert.deepEqual(f.alloc.allocate({ cwd }), { ok: false, reason: 'live_collision' })
+    assert.deepEqual(readdirSync(f.dir), [])
+  })
+})
+
 describe('idempotency', () => {
   it('an unbound key returns the same number, also from a new instance, without consuming one', () => {
     const f = fresh()
@@ -617,7 +752,7 @@ describe('idempotency', () => {
     const f = fresh()
     const cwd = project('p')
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k1' }).number, 1)
-    assert.deepEqual(f.alloc.bind('k1', 'sess-1'), { ok: true })
+    assert.deepEqual(f.alloc.bind('k1', 'sess-1', { number: 1 }), { ok: true })
     assert.equal(readDoc(f.top().A).body.keys.k1.sessionId, 'sess-1')
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k1' }).number, 2)
     assert.ok(f.logs.some((l) => l.level === 'warn' && /duplicate_create_request/.test(l.m)))
@@ -656,11 +791,11 @@ describe('idempotency', () => {
     const f = fresh()
     f.alloc.allocate({ cwd: project('p'), idempotencyKey: 'k' })
     const before = snapshot(f.dir)
-    assert.deepEqual(f.alloc.bind('nope', 's'), { ok: false, reason: 'unknown_key' })
+    assert.deepEqual(f.alloc.bind('nope', 's', { number: 1 }), { ok: false, reason: 'unknown_key' })
     assert.deepEqual(snapshot(f.dir), before)
-    assert.deepEqual(f.alloc.bind('k', 'sess-a'), { ok: true })
-    assert.deepEqual(f.alloc.bind('k', 'sess-b'), { ok: false, reason: 'already_bound' })
-    assert.deepEqual(f.alloc.bind('k', 'sess-a'), { ok: true })
+    assert.deepEqual(f.alloc.bind('k', 'sess-a', { number: 1 }), { ok: true })
+    assert.deepEqual(f.alloc.bind('k', 'sess-b', { number: 1 }), { ok: false, reason: 'already_bound' })
+    assert.deepEqual(f.alloc.bind('k', 'sess-a', { number: 1 }), { ok: true })
     assert.equal(readDoc(f.top().A).body.keys.k.sessionId, 'sess-a')
   })
 
@@ -668,14 +803,14 @@ describe('idempotency', () => {
     const dir = tmp('names-dir-')
     const cwd = project('p')
     assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd, idempotencyKey: 'k' }).number, 1)
-    const bad = createSessionNameAllocator({ dir, deps: { writeDurable: mirrorWriter({ mode: 'throw' }) } })
-    assert.deepEqual(bad.bind('k', 's'), { ok: false, reason: 'write_unconfirmed' })
+    const bad = createSessionNameAllocator({ dir, deps: { linkSync: failMirrorLink } })
+    assert.deepEqual(bad.bind('k', 's', { number: 1 }), { ok: false, reason: 'write_unconfirmed' })
     assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 2)
   })
 
   it('prunes to 512 records by persisted seq, even when the clock runs backwards', () => {
     let t = 9_000_000_000
-    const f = fresh({ now: () => t--, deps: { writeDurable: mirrorWriter() } })
+    const f = fresh({ now: () => t--, deps: { syncDir: noSync } })
     const cwd = project('p')
     for (let i = 0; i < 515; i++) assert.ok(f.alloc.allocate({ cwd, idempotencyKey: `k${i}` }).ok)
     const keys = Object.keys(readDoc(f.top().A).body.keys)
@@ -686,7 +821,7 @@ describe('idempotency', () => {
 
   it('a backward clock change never drops a fresh record', () => {
     let t = 1_000_000_000
-    const f = fresh({ now: () => t, deps: { writeDurable: mirrorWriter() } })
+    const f = fresh({ now: () => t, deps: { syncDir: noSync } })
     const cwd = project('p')
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k1' }).number, 1)
     t -= 500_000_000
@@ -698,14 +833,14 @@ describe('idempotency', () => {
 
   it('TTL (24 h) is applied before lookup: a retry of an expired key is a new key', () => {
     let t = 5_000_000
-    const f = fresh({ now: () => t, deps: { writeDurable: mirrorWriter() } })
+    const f = fresh({ now: () => t, deps: { syncDir: noSync } })
     const cwd = project('p')
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'old' }).number, 1)
     t += 23 * 3600 * 1000
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'old' }).number, 1, 'still inside the TTL: same number')
     t += 25 * 3600 * 1000
     assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'old' }).number, 2, 'expired: treated as a brand-new key')
-    assert.deepEqual(f.alloc.bind('gone', 's'), { ok: false, reason: 'unknown_key' })
+    assert.deepEqual(f.alloc.bind('gone', 's', { number: 1 }), { ok: false, reason: 'unknown_key' })
   })
 
   it('a key named __proto__ is stored as data, not as a prototype', () => {
@@ -717,14 +852,93 @@ describe('idempotency', () => {
   })
 })
 
+describe('idempotency identity, binds and failed-publication hygiene', () => {
+  it('two roots that share their first 512 code points are different projects', () => {
+    const f = fresh()
+    const long = join(tmp('names-long-'), 'x'.repeat(200), 'y'.repeat(200), 'z'.repeat(200))
+    const a = project('same', join(long, 'a'))
+    const b = project('same', join(long, 'b'))
+    assert.ok(a.length > 560 && a.slice(0, 512) === b.slice(0, 512))
+    assert.equal(f.alloc.allocate({ cwd: a, idempotencyKey: 'k' }).number, 1)
+    assert.deepEqual(f.alloc.allocate({ cwd: b, idempotencyKey: 'k' }), { ok: false, reason: 'idempotency_key_conflict' })
+  })
+
+  it('a same-session bind retry is only ok behind a confirmed write', () => {
+    const dir = tmp('names-bind-')
+    const cwd = project('p')
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd, idempotencyKey: 'k' }).number, 1)
+    const bad = createSessionNameAllocator({ dir, deps: { syncDir: () => { throw new Error('EIO') } } })
+    assert.equal(bad.bind('k', 's', { number: 1 }).reason, 'write_unconfirmed') // published, but unconfirmed
+    assert.equal(bad.bind('k', 's', { number: 1 }).reason, 'write_unconfirmed', 'the retry must not report ok')
+    assert.deepEqual(createSessionNameAllocator({ dir }).bind('k', 's', { number: 1 }), { ok: true })
+  })
+
+  it('a delayed bind after a replacement reservation is stale_reservation; after expiry it is unknown_key', () => {
+    let t = 1_000
+    const f = fresh({ now: () => t, deps: { syncDir: noSync } })
+    const cwd = project('p')
+    assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k' }).number, 1)
+    assert.deepEqual(f.alloc.bind('k', 's1', { number: 1 }), { ok: true })
+    assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k' }).number, 2, 'replacement reservation')
+    assert.deepEqual(f.alloc.bind('k', 's0', { number: 1 }), { ok: false, reason: 'stale_reservation' })
+    assert.equal(readDoc(f.top().A).body.keys.k.sessionId, null)
+    t += 25 * 3600 * 1000
+    assert.deepEqual(f.alloc.bind('k', 's0', { number: 2 }), { ok: false, reason: 'unknown_key' })
+    assert.equal(f.alloc.allocate({ cwd, idempotencyKey: 'k' }).number, 3, 'a new reservation after expiry')
+    assert.deepEqual(f.alloc.bind('k', 's0', { number: 2 }), { ok: false, reason: 'stale_reservation' })
+  })
+
+  it('sustained mirror-link failure leaves a bounded number of files', () => {
+    const dir = tmp('names-fail-')
+    const cwd = project('p')
+    createSessionNameAllocator({ dir }).allocate({ cwd })
+    const bad = createSessionNameAllocator({ dir, deps: { linkSync: failMirrorLink } })
+    for (let i = 0; i < 40; i++) assert.equal(bad.allocate({ cwd }).reason, 'write_unconfirmed')
+    assert.ok(readdirSync(dir).length <= 6, readdirSync(dir).join(','))
+  })
+
+  it('sustained unconfirmed publications (both names created) never pile up generations', () => {
+    const dir = tmp('names-pile-')
+    const cwd = project('p')
+    const bad = createSessionNameAllocator({ dir, deps: { syncDir: () => { throw new Error('EIO') } } })
+    for (let i = 0; i < 40; i++) assert.equal(bad.allocate({ cwd }).reason, 'write_unconfirmed')
+    assert.ok(gensOf(dir).length <= 3, gensOf(dir).join(','))
+    assert.ok(readdirSync(dir).length <= 6)
+    assert.equal(createSessionNameAllocator({ dir }).allocate({ cwd }).number, 41, 'every persisted number stayed a gap')
+  })
+
+  it('crash-leftover temp files: old ones are reclaimed, fresh ones kept', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    const oldTmp = join(f.dir, 'session-names.tmp.99999.deadbeef.a')
+    const freshTmp = join(f.dir, 'session-names.tmp.99999.cafef00d.b')
+    writeFileSync(oldTmp, 'x')
+    writeFileSync(freshTmp, 'x')
+    const hourAgo = new Date(Date.now() - 3600 * 1000)
+    utimesSync(oldTmp, hourAgo, hourAgo)
+    f.alloc.allocate({ cwd })
+    assert.equal(existsSync(oldTmp), false, 'stale temp reclaimed')
+    assert.equal(existsSync(freshTmp), true, 'a fresh temp (maybe a live writer) is kept')
+  })
+
+  it('SIGKILL leftovers are temp files of the one naming scheme and get reclaimed', () => {
+    const f = fresh()
+    const cwd = project('p')
+    f.alloc.allocate({ cwd })
+    const tmpNames = (dir) => readdirSync(dir).filter((n) => n.startsWith('session-names.tmp.'))
+    assert.deepEqual(tmpNames(f.dir), [], 'a normal publish leaves none')
+  })
+})
+
 describe('never throws for environment failures', () => {
   it('returns reasons for write, read, directory and live-name failures', () => {
     const cwd = project('p')
-    assert.equal(fresh({ deps: { writeDurable: () => { throw new Error('x') } } }).alloc.allocate({ cwd }).reason, 'write_unconfirmed')
+    assert.equal(fresh({ deps: { linkSync: () => { throw new Error('x') } } }).alloc.allocate({ cwd }).reason, 'write_unconfirmed')
     const eacces = Object.assign(new Error('nope'), { code: 'EACCES' })
     const seeded = fresh()
     seeded.alloc.allocate({ cwd })
-    assert.equal(createSessionNameAllocator({ dir: seeded.dir, deps: { readFile: () => { throw eacces } } }).allocate({ cwd }).reason, 'evidence_lost')
+    assert.equal(createSessionNameAllocator({ dir: seeded.dir, deps: { readFile: () => { throw eacces } } }).allocate({ cwd }).reason, 'io_error')
     assert.equal(fresh({ liveNames: () => { throw new Error('boom') } }).alloc.allocate({ cwd }).reason, 'live_names_failed')
     const asFile = join(tmp('names-file-'), 'iamafile')
     writeFileSync(asFile, 'x')
@@ -744,6 +958,8 @@ describe('never throws for environment failures', () => {
     const { alloc } = fresh()
     assert.throws(() => alloc.allocate({}), TypeError)
     assert.throws(() => alloc.allocate({ cwd: project('p'), idempotencyKey: 5 }), TypeError)
-    assert.throws(() => alloc.bind('', 's'), TypeError)
+    assert.throws(() => alloc.bind('', 's', { number: 1 }), TypeError)
+    assert.throws(() => alloc.bind('k', 's'), TypeError)
+    assert.throws(() => alloc.bind('k', 's', { number: 0 }), TypeError)
   })
 })
