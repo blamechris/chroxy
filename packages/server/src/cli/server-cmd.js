@@ -35,6 +35,7 @@ export function registerServerCommands(program) {
       // 30s for the tunnel timeout. Skip when tunnel is disabled
       // (--no-auth, externalUrl) since cloudflared isn't needed.
       const needsTunnel = !!parsedTunnel && !config.noAuth && !config.externalUrl
+      let warningCount = 0
       if (!options.skipChecks) {
         const port = config.port || 8765
         // #8074 review C1: resolve the binary-provenance gate from the SAME
@@ -98,6 +99,7 @@ export function registerServerCommands(program) {
           process.exitCode = 1
           return
         }
+        warningCount = checks.filter((c) => c.status === 'warn').length
       }
       // #7162: bound the service-manager capture files exactly once per
       // service boot — here, in the process the service manager spawned,
@@ -112,6 +114,10 @@ export function registerServerCommands(program) {
         for (const { file, archive, preservedBytes } of capStdioCaptureLogs()) {
           console.log(`[chroxy] capped oversized capture log ${file} (last ${preservedBytes} bytes preserved to ${archive})`)
         }
+      }
+
+      if (warningCount > 0) {
+        console.warn(`${warningCount} preflight warning${warningCount === 1 ? '' : 's'} — run \`chroxy doctor\` for details.`)
       }
 
       const useSupervisor = !!parsedTunnel
