@@ -53,13 +53,16 @@ async function collectSources(dir = SRC, prefix = '') {
     const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir)
     if (entry.isDirectory()) {
       for (const pair of await collectSources(url, prefix + entry.name + '/')) found.set(...pair)
-    } else if (entry.name.endsWith('.js')) {
+    } else if (/\.[cm]?js$/.test(entry.name)) {
       found.set(prefix + entry.name, await readFile(url, 'utf8'))
     }
   }
   return found
 }
 
+// LIMIT: this sweep only sees VariableDeclarator bindings whose name ends in
+// `_KEYS`. A roster named otherwise (`nestedKeys`, `ALLOWED_FIELDS`) escapes it
+// by design; do not read a green run as proof that no other nested roster exists.
 function discoverRosters(sources) {
   const found = new Map()
   const exclusions = new Set()
