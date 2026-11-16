@@ -130,9 +130,13 @@ function spreadEffect(arg, consts) {
       const [x, y] = [spreadEffect(arg.consequent, consts), spreadEffect(arg.alternate, consts)]
       return x === y ? x : 'bad'
     }
-    // `c && X` adds X only when c is truthy: X can be neutral, but a vetted X is not guaranteed to
-    // be there, so it cannot count. `||` / `??` can short-circuit past the right side the same way.
-    case 'LogicalExpression': return spreadEffect(arg.right, consts) === 'neutral' ? 'neutral' : 'bad'
+    // `c && X` spreads X (or nothing): neutral only when X is neutral, since a vetted X is not
+    // guaranteed to be there. `a || X` / `a ?? X` spread the LEFT operand whenever it is truthy
+    // / non-nullish and X otherwise, so BOTH operands must be neutral.
+    case 'LogicalExpression': {
+      if (arg.operator === '&&') return spreadEffect(arg.right, consts) === 'neutral' ? 'neutral' : 'bad'
+      return spreadEffect(arg.left, consts) === 'neutral' && spreadEffect(arg.right, consts) === 'neutral' ? 'neutral' : 'bad'
+    }
     default: return 'bad'
   }
 }

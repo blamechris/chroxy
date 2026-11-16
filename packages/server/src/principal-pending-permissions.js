@@ -104,8 +104,10 @@ function readInProcess(root, sessionId, add) {
       }
     }
     const routing = holder._subagentPermissionRouting
-    // Once the ceiling blocks an admission nothing more is admitted, and a later holder's scan
-    // ends at its first unseen child (at most MAX seen ones precede it), so the work stays bounded.
+    // Once the ceiling blocks an admission nothing more is admitted. The work is bounded by the
+    // sum of the routing-map sizes of at most MAX_HOLDERS_PER_SESSION holders: a map with many
+    // entries that point at holders already seen is scanned in full. That is the cost of reading
+    // the maps at all, not something this walk adds.
     if (!(routing instanceof Map)) continue
     for (const child of routing.values()) {
       if (child == null || typeof child !== 'object' || seen.has(child)) continue

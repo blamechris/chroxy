@@ -163,12 +163,17 @@ describe('permission_resolved emit sites (#9119)', () => {
         '...(c && resolvedByField(y))',
         '...(c && { resolvedBy: RESOLVED_BY.user })',
         '...(c || resolvedByField(y))',
+        'resolvedBy: RESOLVED_BY.user, ...(x || {})',
+        'resolvedBy: RESOLVED_BY.user, ...(x ?? {})',
+        'resolvedBy: RESOLVED_BY.user, ...(x || { a: 1 })',
+        'resolvedBy: RESOLVED_BY.user, ...({ resolvedBy: undefined } || {})',
       ]
       for (const body of bad) assert.equal(scanSource(emit(body))[0].hasResolvedBy, false, body)
       const good = [
         'resolvedBy: RESOLVED_BY.timeout',
         'resolvedBy: RESOLVED_BY.cleared, ...(c ? { scope: 1 } : {}), ...stoppedToolUseField(a, b)',
         'resolvedBy: RESOLVED_BY.user, ...(c && { unrelated: 1 })',
+        'resolvedBy: RESOLVED_BY.user, ...({ a: 1 } || { b: 2 })',
         '...x, resolvedBy: RESOLVED_BY.user',
         '...x, ...resolvedByField(y)',
         "resolvedBy: undefined, ...{ resolvedBy: RESOLVED_BY.abort }",
