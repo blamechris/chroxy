@@ -42,6 +42,14 @@ export declare const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[
 /** Render order for the known categories (derived — never a second list). */
 export declare const NOTIFICATION_CATEGORY_ORDER: readonly string[];
 /**
+ * Quiet-hours bypass defaults (#4544 / #8567), also used when an older server
+ * snapshot omits the field. Permission prompts block the operator's agent;
+ * fatal session errors need attention too. Other categories stay muted.
+ * The server's copy is pinned to this set in both directions by
+ * `packages/server/tests/notification-category-roster.test.js`.
+ */
+export declare const DEFAULT_BYPASS_CATEGORIES: readonly string[];
+/**
  * Label + hint by key (derived — never a second list). Typed as a plain
  * string-keyed record because snapshots carry keys this build has never heard
  * of; lookups must be treated as possibly `undefined` and fall back to the raw
