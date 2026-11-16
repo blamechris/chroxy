@@ -543,11 +543,13 @@ export function handleMessage(
   // clients already funnel `message` through, so the dashboard and the app
   // cannot derive different states from the same payload.
   //
-  // Gated on `!receivingHistoryReplay`: the vanish is an ordinary chat entry
-  // and IS replayed on reconnect, so arming from replay would resurrect the
-  // banner for an outage that has long since ended. Nothing is hidden by the
+  // Gated on `!isReplayedEntry` (a frame carrying `historySeq`, the same test the
+  // usage-limit alert uses; #8457): the vanish is an ordinary chat entry and IS
+  // replayed on reconnect, so arming from replay would resurrect the banner for an
+  // outage that has long since ended. A LIVE vanish that lands between two replay
+  // chunks has no `historySeq` and is new, so it still arms. Nothing is hidden by the
   // gate — a container that is still gone re-surfaces on the next turn.
-  const containerLostPatch = receivingHistoryReplay
+  const containerLostPatch = isReplayedEntry
     ? null
     : handleContainerLost(msg, activeSessionId)
 

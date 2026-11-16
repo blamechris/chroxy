@@ -203,6 +203,26 @@ describe('handleMessage: replayed error bubbles (#6630)', () => {
     expect(interleaved.isRateLimitError).toBe(true)
     expect(interleaved.errorContent).toBe('Usage limit reached')
   })
+
+  describe('container-lost (#8457)', () => {
+    const lost = (over: Record<string, unknown> = {}) =>
+      error({ content: 'Container gone', code: 'CONTAINER_VANISHED', timeoutMs: undefined, ...over })
+
+    it('a LIVE container-lost error that lands while a replay window is open still marks the container lost', () => {
+      // Inside the window, but no `historySeq`: this frame is new, not a recorded entry.
+      const patch = built(lost(), true).containerLostPatch
+      expect(patch?.sessionId).toBe('s1')
+      expect(patch?.patch.containerLostAt).toEqual(expect.any(Number))
+    })
+
+    it('the same error carrying historySeq is a replayed entry and does not', () => {
+      expect(built(lost({ historySeq: 7 }), true).containerLostPatch).toBeNull()
+    })
+
+    it('outside a replay window a live container-lost error still patches', () => {
+      expect(built(lost(), false).containerLostPatch?.sessionId).toBe('s1')
+    })
+  })
 })
 
 describe('handleToolResult: a card that learns its input from the result (#6630)', () => {
