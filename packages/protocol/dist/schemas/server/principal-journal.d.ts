@@ -20,7 +20,7 @@ import { z } from 'zod';
 /** Why a cursor could not be honored exactly (section 7.1). */
 export declare const PRINCIPAL_GAP_REASON_VALUES: readonly ["evicted", "journal_reset", "restart_loss", "unknown_cursor"];
 /** Why a live subscription was ended by the daemon (section 7.2). */
-export declare const PRINCIPAL_SUBSCRIPTION_END_VALUES: readonly ["held_overflow", "backpressure"];
+export declare const PRINCIPAL_SUBSCRIPTION_END_VALUES: readonly ["held_overflow", "backpressure", "scope", "removed"];
 export declare const PrincipalGapSchema: z.ZodObject<{
     reason: z.ZodEnum<{
         evicted: "evicted";
@@ -75,12 +75,14 @@ export declare const ServerPrincipalGapFrameSchema: z.ZodObject<{
     sessionId: z.ZodString;
     journalId: z.ZodString;
     reason: z.ZodEnum<{
+        scope: "scope";
         evicted: "evicted";
         journal_reset: "journal_reset";
         restart_loss: "restart_loss";
         unknown_cursor: "unknown_cursor";
         held_overflow: "held_overflow";
         backpressure: "backpressure";
+        removed: "removed";
     }>;
     fromSeq: z.ZodOptional<z.ZodNumber>;
     toSeq: z.ZodOptional<z.ZodNumber>;

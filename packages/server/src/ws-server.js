@@ -660,6 +660,10 @@ export class WsServer {
     // journaled and `principal_subscribe` / `principal_events_read` refuse.
     this._principalJournal = principalJournal || null
     this._principalSubscriptions = null
+    // Journal only sessions the SessionManager currently holds (never a late frame about a gone one)
+    if (this._principalJournal && typeof sessionManager?.getSession === 'function') {
+      this._principalJournal.setLiveness((id) => sessionManager.getSession(id) != null)
+    }
     // #5536 — long-lived Ed25519 identity keypair. Its secret half signs each
     // connection's ephemeral exchange public key (eager + discrete paths) so a
     // pinned client can verify the exchange key came from this daemon. Null when
@@ -1382,6 +1386,8 @@ export class WsServer {
         const entry = sessionManager.getSession(sessionId)
         this._registerSessionHookSecretIfMissing(sessionId, entry)
         this._attachPermissionAuditSink(sessionId, entry)
+        // #9118: every create or restore of an id is a NEW incarnation: a fresh journal
+        try { this._principalJournal?.beginIncarnation(sessionId) } catch (err) { log.warn(`principal journal incarnation failed: ${err?.message || err}`) }
       }
       // #9118: canonical removal (every destroy path and the restore-rebind branch; never a
       // daemon shutdown, which does not pass through `_cleanupSessionMaps`): the principal

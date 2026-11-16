@@ -184,7 +184,12 @@ export class PrincipalSubscriptions {
       return
     }
     if (evt.kind === 'removed') {
-      this._drop(sub.client, sub.sessionId, false)
+      this._end(sub, 'removed')
+      return
+    }
+    // A new journal id is a new journal: this subscription's id and cursor mean nothing to it.
+    if (evt.journalId !== sub.journalId) {
+      this._end(sub, 'restart_loss')
       return
     }
     if (sub.state === 'replay') {
@@ -218,7 +223,7 @@ export class PrincipalSubscriptions {
   _sendLive(sub, entry) {
     if (sub.state === 'ended') return
     if (!this._maySee(sub.client, sub.sessionId)) {
-      this._drop(sub.client, sub.sessionId, false)
+      this._end(sub, 'scope')
       return
     }
     if (this._backedUp(sub)) {
@@ -231,11 +236,14 @@ export class PrincipalSubscriptions {
   async _pump(sub) {
     while (sub.state === 'replay') {
       if (!this._maySee(sub.client, sub.sessionId)) {
-        this._drop(sub.client, sub.sessionId, false)
+        this._end(sub, 'scope')
         return
       }
       const read = this._journal.readFrom(sub.sessionId, sub.after, this._replayBatch, sub.snapshotHead)
-      if (read.journalId !== sub.journalId) return // a reset ended it through the listener
+      if (read.journalId !== sub.journalId) {
+        this._end(sub, 'restart_loss') // never leave a replay hung on a journal that is gone
+        return
+      }
       if (read.gap) this._sendGap(sub, read.gap)
       for (const entry of read.events) this._emitEvent(sub, entry, true)
       const progressed = read.lastSeq > sub.after

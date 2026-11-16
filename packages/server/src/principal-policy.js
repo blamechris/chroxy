@@ -821,7 +821,11 @@ export function frameForPrincipal(client, message, opts = {}) {
   }
   const type = message?.type
   if (typeof type !== 'string' || !Object.hasOwn(PRINCIPAL_OUTGOING_ALLOWED, type)) return null
-  if (typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {
+  // The ONE frame that is delivered for a session the principal can no longer see: the notice
+  // that its own subscription ended because the grant was narrowed or the session was removed.
+  // It names only the session id the principal itself subscribed to, and nothing else.
+  const endNotice = type === 'principal_gap' && message.ended === true && (message.reason === 'scope' || message.reason === 'removed')
+  if (!endNotice && typeof message.sessionId === 'string' && !principalMaySee(client, message.sessionId, 'observe', opts).ok) {
     return null
   }
   // `principal_subscribed` lists its sessions instead of carrying one: each must be granted.

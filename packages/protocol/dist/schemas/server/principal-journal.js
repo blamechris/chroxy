@@ -20,7 +20,7 @@ import { z } from 'zod';
 /** Why a cursor could not be honored exactly (section 7.1). */
 export const PRINCIPAL_GAP_REASON_VALUES = ['evicted', 'journal_reset', 'restart_loss', 'unknown_cursor'];
 /** Why a live subscription was ended by the daemon (section 7.2). */
-export const PRINCIPAL_SUBSCRIPTION_END_VALUES = ['held_overflow', 'backpressure'];
+export const PRINCIPAL_SUBSCRIPTION_END_VALUES = ['held_overflow', 'backpressure', 'scope', 'removed'];
 export const PrincipalGapSchema = z.object({
     reason: z.enum(PRINCIPAL_GAP_REASON_VALUES),
     /** First and last seq that cannot be served (inclusive); absent when the whole cursor is unusable. */

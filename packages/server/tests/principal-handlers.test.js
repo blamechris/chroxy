@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { REAL_HANDLERS, principalClient, plainCtx } from './principal-test-helpers.js'
 import { PrincipalJournal } from '../src/principal-journal.js'
+import { frameForPrincipal } from '../src/principal-policy.js'
+import { writeDurableFile } from '../src/durable-write.js'
 import { PrincipalSubscriptions } from '../src/principal-subscriptions.js'
 import { PRINCIPAL_ALLOWED_MESSAGE_TYPES } from '../src/principal-policy.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
@@ -228,7 +230,7 @@ describe('a slow consumer ends the subscription instead of buffering without bou
     assert.equal(sent.some((f) => f.type === 'principal_live_fence'), false)
   })
 
-  it('a journal reset ends the subscription with the reset reason; a removed session ends it silently', async () => {
+  it('a journal reset ends the subscription with the reset reason; a removed session ends it with the removed reason', async () => {
     const journal = new PrincipalJournal({ dir, timers: { setTimeout: () => null, clearTimeout: () => {} } })
     journal.record({ type: 'message', sessionId: 'sess-1', messageType: 'response', content: 'a' })
     journal.record({ type: 'message', sessionId: 'sess-2', messageType: 'response', content: 'b' })
@@ -239,7 +241,117 @@ describe('a slow consumer ends the subscription instead of buffering without bou
     sent.length = 0
     journal.resetSession('sess-1')
     journal.removeSession('sess-2')
-    assert.deepEqual(sent.map((f) => [f.type, f.reason, f.ended]), [['principal_gap', 'journal_reset', true]])
+    assert.deepEqual(sent.map((f) => [f.type, f.sessionId, f.reason, f.ended]), [['principal_gap', 'sess-1', 'journal_reset', true], ['principal_gap', 'sess-2', 'removed', true]])
     assert.equal(subs.size, 0)
+  })
+})
+
+describe('a new journal id ends every affected subscription (#9118 round 2)', () => {
+  const NO_TIMERS = { setTimeout: () => null, clearTimeout: () => {} }
+  function deadJournal() {
+    let mode = 'ok'
+    let t = 1_800_000_000_000
+    const journal = new PrincipalJournal({
+      dir, now: () => t, timers: NO_TIMERS, reservationStep: 2, retryBackoffMs: 100,
+      writeDurable: (path, data) => { if (mode === 'throw') throw new Error('ENOSPC'); return writeDurableFile(path, data) },
+    })
+    const say = (n) => journal.record({ type: 'message', sessionId: 'sess-1', messageType: 'response', content: `m${n}` })
+    return { journal, say, fail: () => { mode = 'throw' }, heal: () => { mode = 'ok'; t += 101 } }
+  }
+
+  it('subscribed during the dead window, then recovered: ended restart_loss, and no old-id frame carries the new journal\'s seq', async () => {
+    const { journal, say, fail, heal } = deadJournal()
+    say(1); say(2)
+    fail(); say(3) // dead
+    const sent = []
+    const subs = new PrincipalSubscriptions({ journal, send: (_w, f) => sent.push(f) })
+    subs.subscribe({ ws: {}, client: principalClient(), requestId: 'r', sessions: [{ sessionId: 'sess-1' }] })
+    await new Promise((r) => setImmediate(r))
+    const oldId = journal.head('sess-1').journalId
+    heal(); say(4) // recovery: a NEW journal id, seq 1
+    assert.notEqual(journal.head('sess-1').journalId, oldId)
+    const gap = sent.find((f) => f.type === 'principal_gap')
+    assert.deepEqual({ reason: gap.reason, ended: gap.ended }, { reason: 'restart_loss', ended: true })
+    const gapAt = sent.indexOf(gap)
+    assert.equal(sent.slice(gapAt + 1).some((f) => f.type === 'principal_event'), false, 'nothing is delivered after the end')
+    assert.equal(sent.some((f) => f.type === 'principal_event' && !f.replay), false, 'the new journal\'s seq 1 was never stamped with the old id as a live event')
+    assert.equal(subs.size, 0)
+  })
+
+  it('a replay that is still running when the id changes is ended, not left hung with a leaked listener', async () => {
+    const { journal, say, fail, heal } = deadJournal()
+    say(1); say(2)
+    const sent = []
+    let yields = 0
+    const subs = new PrincipalSubscriptions({
+      journal, send: (_w, f) => sent.push(f), replayBatch: 1,
+      yieldFn: async () => { if (++yields === 1) { fail(); say(3); heal(); say(4) } },
+    })
+    subs.subscribe({ ws: {}, client: principalClient(), requestId: 'r', sessions: [{ sessionId: 'sess-1' }] })
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(sent.some((f) => f.type === 'principal_gap' && f.reason === 'restart_loss' && f.ended === true), true)
+    assert.equal(sent.some((f) => f.type === 'principal_live_fence'), false)
+    assert.equal(subs.size, 0)
+    assert.equal(journal._sessions.get('sess-1').listeners.size, 0, 'no listener leaked')
+  })
+})
+
+describe('the replay loop itself refuses a journal id that moved under it (#9118 round 2)', () => {
+  it('a mismatch seen by the pump (the listener having missed it) ends the subscription and frees its listener', async () => {
+    const journal = new PrincipalJournal({ dir, timers: { setTimeout: () => null, clearTimeout: () => {} } })
+    for (let i = 1; i <= 5; i++) journal.record({ type: 'message', sessionId: 'sess-1', messageType: 'response', content: `m${i}` })
+    const sent = []
+    const client = principalClient()
+    let subs
+    subs = new PrincipalSubscriptions({
+      journal, send: (_w, f) => sent.push(f), replayBatch: 1,
+      yieldFn: async () => { subs._byClient.get(client).get('sess-1').journalId = 'a-different-id' },
+    })
+    subs.subscribe({ ws: {}, client, requestId: 'r', sessions: [{ sessionId: 'sess-1' }] })
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(sent.some((f) => f.type === 'principal_gap' && f.reason === 'restart_loss' && f.ended === true), true)
+    assert.equal(subs.size, 0)
+    assert.equal(journal._sessions.get('sess-1').listeners.size, 0)
+  })
+})
+
+describe('a subscription is never dropped silently (#9118 round 2)', () => {
+  const NO_TIMERS = { setTimeout: () => null, clearTimeout: () => {} }
+  async function live(maySee) {
+    const journal = new PrincipalJournal({ dir, timers: NO_TIMERS })
+    journal.record({ type: 'message', sessionId: 'sess-1', messageType: 'response', content: 'a' })
+    const sent = []
+    const subs = new PrincipalSubscriptions({ journal, send: (_w, f) => sent.push(f), maySee })
+    subs.subscribe({ ws: {}, client: principalClient(), requestId: 'r', sessions: [{ sessionId: 'sess-1' }] })
+    await new Promise((r) => setImmediate(r))
+    sent.length = 0
+    return { journal, subs, sent }
+  }
+
+  it('a grant that no longer covers the session ends it with reason scope', async () => {
+    let may = true
+    const { journal, subs, sent } = await live(() => may)
+    may = false
+    journal.record({ type: 'message', sessionId: 'sess-1', messageType: 'response', content: 'b' })
+    assert.deepEqual(sent.map((f) => [f.type, f.reason, f.ended]), [['principal_gap', 'scope', true]])
+    assert.equal(subs.size, 0)
+  })
+
+  it('a removed session ends it with reason removed', async () => {
+    const { journal, subs, sent } = await live(() => true)
+    journal.removeSession('sess-1')
+    assert.deepEqual(sent.map((f) => [f.type, f.reason, f.ended]), [['principal_gap', 'removed', true]])
+    assert.equal(subs.size, 0)
+  })
+
+  it('the end notice is deliverable although the session can no longer be seen; no other gap is', () => {
+    const client = principalClient({ principal: { tier: 'observe', constraints: { sessionIds: [] } } })
+    const opts = { sessionExists: () => false }
+    const notice = (reason, ended) => frameForPrincipal(client, { type: 'principal_gap', sessionId: 'sess-1', journalId: 'j', reason, ended }, opts)
+    assert.ok(notice('scope', true))
+    assert.ok(notice('removed', true))
+    assert.equal(notice('scope', false), null)
+    assert.equal(notice('held_overflow', true), null)
+    assert.equal(notice('evicted', true), null)
   })
 })

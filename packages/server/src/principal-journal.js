@@ -65,7 +65,7 @@ import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { writeDurableFile } from './durable-write.js'
 import { readTrustedSecretFile } from './trusted-file-read.js'
-import { sanitizeToolInput, redactWhole, withoutUnsafeTail } from './redaction.js'
+import { sanitizeToolInput, redactWhole } from './redaction.js'
 import { classifyBroadcast, StreamAccumulator, truncateEventData, FORWARDED_TYPES } from './agent-control/events.js'
 import { SEQ_RESERVATION_STEP } from './session-message-history.js'
 
@@ -80,6 +80,9 @@ export const JOURNAL_RESERVATION_STEP = SEQ_RESERVATION_STEP
 export const JOURNAL_RETRY_BACKOFF_MS = 5000
 export const JOURNAL_FLUSH_DELAY_MS = 5000
 export const JOURNAL_GAP_REASONS = Object.freeze(['evicted', 'journal_reset', 'restart_loss', 'unknown_cursor'])
+
+/** What a stream the accumulator had to cut is replaced by. */
+export const TRUNCATED_STREAM_PLACEHOLDER = '[text withheld: the stream was longer than the journal can safely redact]'
 
 /** What a floored tool call's result is replaced by. */
 export const FLOORED_RESULT_PLACEHOLDER = '[result withheld: the tool call was gated by the permission floor]'
@@ -104,14 +107,20 @@ function byteLength(text) {
 
 /**
  * Which tool calls of one session the permission floor gated. In memory only, and held
- * by the journal PER SESSION, outside the per-generation journal state: a recovery that
- * mints a new `journalId` must not forget a floored verdict recorded just before it.
+ * by the journal PER SESSION, outside the journal generation: a recovery that mints a new
+ * `journalId` must not forget a floored verdict recorded just before it.
  *
- * It exists to decide, as events arrive, which `tool_result` must be withheld, and it is
- * FAIL CLOSED about its own limits: when it cannot hold a verdict (capacity) or cannot tell
- * which call a verdict was for, it sets `suppressAll` and EVERY result is withheld until
- * nothing is outstanding. Over-suppression is the only error it can make.
- * A completed call is retired deliberately (`onToolResult`).
+ * It decides, as events arrive, which `tool_result` must be withheld, and it is FAIL
+ * CLOSED. A result is let through ONLY when its call is known to have started and to not
+ * be floored (`open` and not `outstanding`). Everything else is withheld: a floored call, a
+ * call never seen start (it began before journaling, or crossed a restart), a call already
+ * retired (a duplicate result), and every call while `latched`.
+ *
+ * `latched` is set the moment the tracker drops information (a verdict or an open call it
+ * has no room for, a pending verdict it must forget). Emptiness proves nothing once
+ * information has been dropped, so a latch is cleared ONLY at an authoritative lifecycle
+ * boundary: the end of the turn (`result` or `agent_idle`), which proves the turn's calls
+ * ended. The same boundary retires everything else the tracker holds (`onTurnEnd`).
  */
 class FloorTracker {
   constructor() {
@@ -121,13 +130,13 @@ class FloorTracker {
     this.pending = []
     /** toolUseId -> tool, calls that started and have no result yet */
     this.open = new Map()
-    this.suppressAll = false
+    this.latched = false
   }
 
   _mark(id) {
     if (this.outstanding.has(id)) return
     if (this.outstanding.size >= MAX_TRACKED_TOOL_CALLS) {
-      this.suppressAll = true // cannot remember one more: stop trusting every result
+      this.latched = true // cannot remember one more verdict
       return
     }
     this.outstanding.add(id)
@@ -136,10 +145,10 @@ class FloorTracker {
   onToolStart(msg) {
     const id = msg.toolUseId
     if (typeof id !== 'string') return
-    if (this.open.size >= MAX_TRACKED_TOOL_CALLS) {
+    if (!this.open.has(id) && this.open.size >= MAX_TRACKED_TOOL_CALLS) {
       // an open call is about to be forgotten, and with it whether it was floored
       this.open.delete(this.open.keys().next().value)
-      this.suppressAll = true
+      this.latched = true
     }
     this.open.set(id, msg.tool)
     const at = this.pending.findIndex((p) => p.tool === msg.tool)
@@ -161,29 +170,32 @@ class FloorTracker {
     }
     if (this.pending.length >= MAX_PENDING_FLOORED) {
       this.pending.shift()
-      this.suppressAll = true
+      this.latched = true
     }
     this.pending.push({ tool: msg.tool })
   }
 
-  /** Must this call's result be withheld? Unknown provenance is withheld. */
+  /** Must this call's result be withheld? Anything not KNOWN to be clear is withheld. */
   isFloored(toolUseId) {
-    if (this.suppressAll) return true
-    if (typeof toolUseId !== 'string') return this.pending.length > 0
+    if (this.latched) return true
+    if (typeof toolUseId !== 'string') return true
     if (this.outstanding.has(toolUseId)) return true
-    // a result for a call never seen start, while a floored request is waiting for its call
-    return !this.open.has(toolUseId) && this.pending.length > 0
+    return !this.open.has(toolUseId)
   }
 
   /** The call is complete: retire it. */
   onToolResult(toolUseId) {
-    if (typeof toolUseId === 'string') {
-      this.open.delete(toolUseId)
-      this.outstanding.delete(toolUseId)
-    }
-    if (this.suppressAll && this.outstanding.size === 0 && this.pending.length === 0 && this.open.size === 0) {
-      this.suppressAll = false
-    }
+    if (typeof toolUseId !== 'string') return
+    this.open.delete(toolUseId)
+    this.outstanding.delete(toolUseId)
+  }
+
+  /** The turn ended: every call of it ended. Retire all state and clear the latch. */
+  onTurnEnd() {
+    this.open.clear()
+    this.outstanding.clear()
+    this.pending.length = 0
+    this.latched = false
   }
 }
 
@@ -253,8 +265,10 @@ export class PrincipalJournal {
     this._accumulator = new StreamAccumulator()
     /** @type {Map<string, FloorTracker>} per session, deliberately outside the journal generation */
     this._floors = new Map()
-    /** sessions removed in this process: a late frame about one must not recreate it */
-    this._removed = new Set()
+    /** is this session currently held by the SessionManager? A frame about one that is not is not journaled. */
+    this._live = () => true
+    /** bumps on every create or restore of a session id */
+    this._incarnations = new Map()
     this._flushTimer = null
     this._dirMade = false
     this._closed = false
@@ -511,7 +525,7 @@ export class PrincipalJournal {
       if (this._closed || typeof message?.sessionId !== 'string' || message.sessionId.length === 0) return
       if (this._enabled() !== true) return
       const sessionId = message.sessionId
-      if (this._removed.has(sessionId)) return
+      if (this._live(sessionId) !== true) return
       this._state(sessionId) // load the sidecar on first touch
       const floor = this._floorFor(sessionId)
       const type = message.type
@@ -534,6 +548,7 @@ export class PrincipalJournal {
         if (data !== null) this._append(sessionId, event.type, data)
       }
       if (type === 'tool_result') floor.onToolResult(message.toolUseId)
+      else if (type === 'result' || type === 'agent_idle') floor.onTurnEnd()
     } catch (err) {
       log.warn(`Principal journal could not record a ${String(message?.type).slice(0, 40)} frame: ${err?.message || err}`)
     }
@@ -564,11 +579,14 @@ export class PrincipalJournal {
    */
   _scrub(floor, event) {
     const d = event.data ?? {}
+    // An explicit allowlist of fields per tool event: `input` (and anything a producer adds
+    // later) is never retained.
+    const pick = (fields) => Object.fromEntries(fields.filter((f) => d[f] !== undefined).map((f) => [f, d[f]]))
     switch (event.type) {
       case 'tool_input_delta':
         return null
       case 'tool_start':
-        return { ...(d.messageId !== undefined ? { messageId: d.messageId } : {}), toolUseId: d.toolUseId, tool: d.tool }
+        return pick(['messageId', 'toolUseId', 'tool'])
       case 'permission_request': {
         const floored = d.floored !== false
         return {
@@ -582,23 +600,28 @@ export class PrincipalJournal {
       case 'tool_result':
         return floor.isFloored(d.toolUseId)
           ? { toolUseId: d.toolUseId, result: FLOORED_RESULT_PLACEHOLDER, withheld: 'floored' }
-          : d
+          : pick(['toolUseId', 'result', 'truncated'])
       case 'assistant_text':
         return this._safeStreamText(d)
-      default:
-        return d
+      default: {
+        const { input: _input, ...rest } = d
+        return rest
+      }
     }
   }
 
   /**
-   * An accumulated stream: the text is redacted WHOLE, then cut. When the accumulator had
-   * already cut the raw text (its own cap), the redacted tail is dropped too, because a
-   * credential straddling that cut was never seen whole.
+   * An accumulated stream. If the accumulator had to cut it, the text is NOT journaled: a
+   * credential straddling the cut was never seen whole and no fixed margin can contain one
+   * (a JWT is unbounded), so a placeholder, `truncated: true` and the length are kept.
+   * Otherwise the whole text is redacted.
    */
   _safeStreamText(d) {
     if (typeof d.text !== 'string') return d
-    const { text, clipped } = redactWhole(d.text)
-    return { ...d, text: d.truncated === true || clipped ? withoutUnsafeTail(text) : text }
+    if (d.truncated === true) {
+      return { ...(d.messageId !== undefined ? { messageId: d.messageId } : {}), text: TRUNCATED_STREAM_PLACEHOLDER, truncated: true, length: d.text.length }
+    }
+    return { ...d, text: redactWhole(d.text).text }
   }
 
   /**
@@ -718,6 +741,30 @@ export class PrincipalJournal {
       if (cursor <= ws - 1) ranges.push({ from: cursor, to: ws - 1, reason: 'evicted' })
     }
     return ranges.sort((a, b) => a.from - b.from)
+  }
+
+  /** Tell the journal which sessions currently exist; a frame about any other is not journaled. */
+  setLiveness(isLive) {
+    this._live = typeof isLive === 'function' ? isLive : () => true
+  }
+
+  /**
+   * A new incarnation of a session id (a create, or a restore retry that succeeded): it starts
+   * a FRESH journal. Anything held for the id is removed (its subscribers are ended), so the
+   * first frame of the new incarnation mints a new `journalId`.
+   * @returns {number} the incarnation
+   */
+  beginIncarnation(sessionId) {
+    const n = (this._incarnations.get(sessionId) ?? 0) + 1
+    this._incarnations.delete(sessionId)
+    this._incarnations.set(sessionId, n)
+    while (this._incarnations.size > 4096) this._incarnations.delete(this._incarnations.keys().next().value)
+    this.removeSession(sessionId)
+    return n
+  }
+
+  incarnation(sessionId) {
+    return this._incarnations.get(sessionId) ?? 0
   }
 
   /** The journal's current id and head, or null when the session has no journal. */
@@ -846,8 +893,6 @@ export class PrincipalJournal {
       this._sessions.delete(sessionId)
     }
     this._floors.delete(sessionId)
-    this._removed.add(sessionId)
-    while (this._removed.size > 4096) this._removed.delete(this._removed.values().next().value)
     for (const path of [this._metaPath(sessionId), this._eventsPath(sessionId)]) {
       try { unlinkSync(path) } catch { /* absent */ }
     }

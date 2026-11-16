@@ -97,6 +97,28 @@ describe('journal teardown follows canonical session removal', () => {
     gone(id)
   })
 
+  it('the subscriber is TOLD: an ended gap with reason removed reaches it', async () => {
+    const { id, messages } = await boot()
+    sm.destroySession(id)
+    const gap = await waitFor(() => messages.find((m) => m.type === 'principal_gap'), { label: 'end notice' })
+    assert.deepEqual({ reason: gap.reason, ended: gap.ended, sessionId: gap.sessionId }, { reason: 'removed', ended: true, sessionId: id })
+  })
+
+  it('a same-id restore retry (destroy, then create under the same id) journals under a NEW journalId; a late frame in between is rejected', async () => {
+    const { id } = await boot()
+    const first = journal.head(id).journalId
+    sm.destroySession(id, { archive: false })
+    server._broadcastToSession(id, { type: 'message', messageType: 'response', content: 'late stale frame' })
+    assert.equal(journal._sessions.has(id), false, 'a frame for a session that is not live recreates nothing')
+    const again = sm.createSession({ cwd: '/tmp', provider: 'test-journal-removal', preserveId: id })
+    assert.equal(again, id, 'control: the same id came back')
+    server._broadcastToSession(id, { type: 'message', messageType: 'response', content: 'new incarnation' })
+    const head = journal.head(id)
+    assert.notEqual(head.journalId, first)
+    assert.equal(head.headSeq, 1)
+    assert.equal(journal.incarnation(id) >= 1, true)
+  })
+
   it('the provider giving up (respawn_exhausted) removes them too', async () => {
     const { id } = await boot()
     sm._sessions.get(id).session.emit('respawn_exhausted', { reason: 'gave up' })

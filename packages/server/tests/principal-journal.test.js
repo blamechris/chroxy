@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readdirSync, e
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  PrincipalJournal, JOURNAL_MAX_EVENTS, JOURNAL_EVENT_MAX_BYTES, FLOORED_RESULT_PLACEHOLDER, JOURNAL_GAP_REASONS,
+  PrincipalJournal, JOURNAL_MAX_EVENTS, JOURNAL_EVENT_MAX_BYTES, FLOORED_RESULT_PLACEHOLDER, TRUNCATED_STREAM_PLACEHOLDER, JOURNAL_GAP_REASONS,
 } from '../src/principal-journal.js'
 import { writeDurableFile } from '../src/durable-write.js'
 import { classifyBroadcast, StreamAccumulator } from '../src/agent-control/events.js'
@@ -488,11 +488,12 @@ describe('bounds and redaction', () => {
   it('an oversize event is truncated to 4 KiB and marked truncated: true, never dropped', () => {
     const { journal } = makeJournal()
     const out = sink(journal)
+    journal.record({ type: 'tool_start', sessionId: SID, toolUseId: 't1', tool: 'Read' })
     journal.record({ type: 'tool_result', sessionId: SID, toolUseId: 't1', result: 'x'.repeat(4100), truncated: false })
     journal.record({ type: 'message', sessionId: SID, messageType: 'response', content: 'é'.repeat(3000), toolUseId: 'm' })
     journal.record(msg(3))
-    assert.deepEqual(out.delivered, [1, 2, 3], 'the oversize events kept their seq')
-    const events = journal.readFrom(SID, 0, 10).events
+    assert.deepEqual(out.delivered, [1, 2, 3, 4], 'the oversize events kept their seq')
+    const events = journal.readFrom(SID, 0, 10).events.slice(1)
     assert.equal(events[0].truncated, true)
     assert.equal(events[1].truncated, true)
     assert.equal(events[2].truncated, undefined)
@@ -755,9 +756,34 @@ describe('redaction runs BEFORE any lossy cut (#9118 review)', () => {
     journal.record({ type: 'stream_end', sessionId: SID, messageId: 'm' })
     const events = journal.readFrom(SID, 0, 10).events
     assert.equal(events.length, 1)
-    assert.ok(events[0].data.text.length > 60000, 'control: the accumulated text really is kept up to its cap')
+    assert.equal(events[0].data.text, TRUNCATED_STREAM_PLACEHOLDER, 'a stream the accumulator cut is not journaled')
+    assert.equal(events[0].data.truncated, true)
+    assert.equal(events[0].data.length, 65536, 'the length is kept')
     const text = JSON.stringify(events) + onDisk(journal)
     for (const f of fragments) assert.equal(text.includes(f), false, f)
+  })
+
+  it('a JWT-shaped string in a truncated stream leaves no prefix (the fixed tail margin could not contain it)', () => {
+    const { journal } = makeJournal({ opts: { eventMaxBytes: 200_000 } })
+    const jwt = `eyJ${'A'.repeat(70000)}.${'B'.repeat(20)}.${'C'.repeat(20)}`
+    journal.record({ type: 'stream_start', sessionId: SID, messageId: 'j' })
+    journal.record({ type: 'stream_delta', sessionId: SID, messageId: 'j', delta: `lead ${jwt}` })
+    journal.record({ type: 'stream_end', sessionId: SID, messageId: 'j' })
+    const text = JSON.stringify(journal.readFrom(SID, 0, 10).events) + onDisk(journal)
+    assert.equal(text.includes('eyJAAAA'), false)
+    assert.equal(text.includes('AAAAAAAAAA'), false)
+  })
+
+  it('a long ordinary stream is kept when it was not truncated and placeholdered when it was', () => {
+    const { journal } = makeJournal({ opts: { eventMaxBytes: 200_000 } })
+    for (const [id, len] of [['ok', 30000], ['cut', 70000]]) {
+      journal.record({ type: 'stream_start', sessionId: SID, messageId: id })
+      journal.record({ type: 'stream_delta', sessionId: SID, messageId: id, delta: 'w'.repeat(len) })
+      journal.record({ type: 'stream_end', sessionId: SID, messageId: id })
+    }
+    const [ok, cut] = journal.readFrom(SID, 0, 10).events
+    assert.equal(ok.data.text.length, 30000)
+    assert.equal(cut.data.text, TRUNCATED_STREAM_PLACEHOLDER)
   })
 
   it('a credential split ACROSS stream deltas is redacted whole', () => {
@@ -813,4 +839,140 @@ describe('a sidecar whose meta contradicts its events cannot prove its reservati
       assert.equal(gap.reason, 'restart_loss')
     })
   }
+})
+
+describe('tool events keep an explicit allowlist of fields (#9118 round 2)', () => {
+  it('tool_result.input from the production normalizer never reaches the journal or the sidecar', async () => {
+    const { EventNormalizer } = await import('../src/event-normalizer.js')
+    const normalizer = new EventNormalizer()
+    const { journal } = makeJournal()
+    const out = normalizer.normalize('tool_result', { toolUseId: 'tu1', result: 'ordinary', truncated: false, input: { content: 'INPUT_MARKER' } }, { sessionId: SID })
+    assert.ok(out.messages.some((m) => m.msg.input !== undefined), 'control: the production normalizer DOES forward input')
+    journal.record({ type: 'tool_start', sessionId: SID, toolUseId: 'tu1', tool: 'Write' })
+    for (const m of out.messages) journal.record({ ...m.msg, sessionId: SID })
+    journal.flush()
+    const disk = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n')
+    const all = JSON.stringify(journal.readFrom(SID, 0, 10).events) + disk
+    assert.equal(all.includes('INPUT_MARKER'), false)
+    assert.equal(journal.readFrom(SID, 0, 10).events[1].data.result, 'ordinary', 'real result content is still kept')
+  })
+
+  it('no event type retains an input field, whatever the producer adds', () => {
+    const { journal } = makeJournal()
+    journal.record({ type: 'model_changed', sessionId: SID, model: 'm', input: 'INPUT_MARKER_2' })
+    assert.equal(JSON.stringify(journal.readFrom(SID, 0, 10).events).includes('INPUT_MARKER_2'), false)
+  })
+})
+
+describe('the floor latch and unknown provenance (#9118 round 2)', () => {
+  const start = (id, tool = 'Read') => ({ type: 'tool_start', sessionId: SID, toolUseId: id, tool })
+  const result = (id, text = 'RESULT_TEXT') => ({ type: 'tool_result', sessionId: SID, toolUseId: id, result: text })
+  const perm = (over) => ({ type: 'permission_request', sessionId: SID, requestId: 'r', tool: 'Read', ...over })
+  const resultOf = (journal, id) => journal.readFrom(SID, 0, 10000).events.find((e) => e.type === 'tool_result' && e.data.toolUseId === id)
+  const big = () => makeJournal({ opts: { maxEvents: 10000 } }).journal
+
+  it('513 calls in which an evicted floored call is still outstanding: its result does not leak', () => {
+    const journal = big()
+    journal.record(perm({ floored: true, toolUseId: 'f0' }))
+    journal.record(start('f0'))
+    for (let i = 1; i < 513; i++) journal.record(start(`c${i}`)) // overflows the open-call table; f0 is evicted
+    journal.record(result('f0'))
+    assert.equal(resultOf(journal, 'f0').data.result, FLOORED_RESULT_PLACEHOLDER)
+    // emptiness proves nothing: even after every call completes, the latch holds until the turn ends
+    for (let i = 1; i < 513; i++) journal.record(result(`c${i}`, 'late'))
+    journal.record(start('after'))
+    journal.record(result('after'))
+    assert.equal(resultOf(journal, 'after').data.result, FLOORED_RESULT_PLACEHOLDER, 'latched until the turn ends')
+  })
+
+  it('257 verdicts before any call starts: the dropped verdict is not forgotten into clearance', () => {
+    const journal = big()
+    for (let i = 0; i < 257; i++) journal.record(perm({ floored: true, toolUseId: `v${i}` }))
+    for (let i = 0; i < 257; i++) { journal.record(start(`v${i}`)); journal.record(result(`v${i}`)) }
+    assert.equal(resultOf(journal, 'v256').data.result, FLOORED_RESULT_PLACEHOLDER, 'the verdict that did not fit is withheld')
+    journal.record(start('ord'))
+    journal.record(result('ord', 'fine'))
+    assert.equal(resultOf(journal, 'ord').data.result, FLOORED_RESULT_PLACEHOLDER, 'still latched')
+  })
+
+  it('65 distinct tool names of id-less verdicts latch, and the turn end clears it (and the pending verdicts)', () => {
+    const journal = big()
+    for (let i = 0; i < 65; i++) journal.record(perm({ floored: true, tool: `Tool${i}` }))
+    journal.record(start('x', 'Other'))
+    journal.record(result('x'))
+    assert.equal(resultOf(journal, 'x').data.result, FLOORED_RESULT_PLACEHOLDER)
+    journal.record({ type: 'result', sessionId: SID, cost: 0 }) // the turn ends
+    journal.record(start('y', 'Other'))
+    journal.record(result('y', 'clear again'))
+    assert.equal(resultOf(journal, 'y').data.result, 'clear again', 'unstuck at the turn boundary')
+  })
+
+  it('a pending verdict is retired at the turn end, so it cannot match a call of the NEXT turn', () => {
+    const journal = big()
+    journal.record(perm({ floored: true, tool: 'Read' })) // never matched to a call
+    journal.record({ type: 'agent_idle', sessionId: SID })
+    journal.record(start('n1', 'Read'))
+    journal.record(result('n1', 'next turn'))
+    assert.equal(resultOf(journal, 'n1').data.result, 'next turn')
+  })
+
+  it('a result whose id was never seen open is withheld; a duplicate result is withheld', () => {
+    const journal = big()
+    journal.record(result('never-started'))
+    journal.record(start('d1'))
+    journal.record(result('d1', 'first'))
+    journal.record(result('d1', 'duplicate'))
+    const results = journal.readFrom(SID, 0, 10).events.filter((e) => e.data.toolUseId === 'd1' && e.type === 'tool_result')
+    assert.equal(resultOf(journal, 'never-started').data.result, FLOORED_RESULT_PLACEHOLDER)
+    assert.equal(results[0].data.result, 'first')
+    assert.equal(results[1].data.result, FLOORED_RESULT_PLACEHOLDER)
+  })
+})
+
+describe('incarnation-gated journals (#9118 round 2)', () => {
+  it('a frame for a session that is not live is not journaled, however many sessions were removed before', () => {
+    const live = new Set([SID])
+    const { journal } = makeJournal()
+    journal.setLiveness((id) => live.has(id))
+    journal.record(msg(1))
+    for (let i = 0; i < 5000; i++) journal.removeSession(`gone-${i}`)
+    live.delete(SID)
+    journal.removeSession(SID)
+    journal.record(msg(2)) // a late frame for a removed session
+    journal.flush()
+    assert.equal(journal._sessions.has(SID), false, 'no state is recreated')
+    assert.equal(readdirSync(dir).length, 0, 'and no file')
+  })
+
+  it('a same-id retry under a new incarnation starts a NEW journal id; a stale frame in between is rejected', () => {
+    const live = new Set([SID])
+    const { journal } = makeJournal()
+    journal.setLiveness((id) => live.has(id))
+    journal.record(msg(1))
+    const first = journal.head(SID).journalId
+    const n1 = journal.incarnation(SID)
+    live.delete(SID) // the restore failed: removed (kept failed restore)
+    journal.removeSession(SID)
+    journal.record(msg(2)) // stale frame of the old incarnation
+    assert.equal(journal._sessions.has(SID), false)
+    live.add(SID) // the retry succeeds under the same id
+    const n2 = journal.beginIncarnation(SID)
+    assert.equal(n2, n1 + 1)
+    journal.record(msg(3))
+    const head = journal.head(SID)
+    assert.notEqual(head.journalId, first)
+    assert.equal(head.headSeq, 1)
+    assert.equal(journal.resolveCursor(SID, { sessionId: SID, journalId: first, seq: 1 }).gap.reason, 'unknown_cursor')
+  })
+
+  it('beginIncarnation on an id that still holds a journal replaces it and ends its subscribers', () => {
+    const { journal } = makeJournal()
+    journal.record(msg(1))
+    const old = journal.head(SID).journalId
+    const out = sink(journal)
+    journal.beginIncarnation(SID)
+    assert.equal(out.events.at(-1).kind, 'removed')
+    journal.record(msg(2))
+    assert.notEqual(journal.head(SID).journalId, old)
+  })
 })
