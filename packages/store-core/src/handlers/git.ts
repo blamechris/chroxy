@@ -226,6 +226,20 @@ export function handleGitStatusResult(
 }
 
 /**
+ * Classify canonical cwd-relative git status paths for client selection (#8187).
+ * This is a UI hint, not path validation: server containment remains authoritative.
+ */
+export function isGitPathOutsideCwd(path: string): boolean {
+  return path === '..' || path.startsWith('../')
+}
+
+/** A rename must stay selectable as a whole, never as just its inside half. */
+export function isGitFileOutsideCwd(entry: GitFileStatus): boolean {
+  return isGitPathOutsideCwd(entry.path)
+    || (entry.status === 'renamed' && entry.oldPath !== undefined && isGitPathOutsideCwd(entry.oldPath))
+}
+
+/**
  * #7292 — expand a set of selected `git_status_result` entry paths to also
  * include each RENAMED entry's `oldPath`, so staging/unstaging a rename moves
  * BOTH halves together.
@@ -246,18 +260,24 @@ export function handleGitStatusResult(
  * 'copied' entry (see GitFileStatus), but this also checks `status ===
  * 'renamed'` directly as defense in depth — this helper must stay correct
  * even if that server invariant is ever violated.
+ *
+ * #8187 — omit outside-cwd selections and whole cross-boundary renames. Do
+ * not filter only the expanded source: that would silently split a rename.
  */
 export function expandRenamePathsForStaging(
   selectedPaths: readonly string[],
   entries: readonly GitFileStatus[],
 ): string[] {
   const oldPathByPath = new Map<string, string>()
+  const outsideEntries = new Set<string>()
   for (const entry of entries) {
+    if (isGitFileOutsideCwd(entry)) outsideEntries.add(entry.path)
     if (entry.status === 'renamed' && entry.oldPath) oldPathByPath.set(entry.path, entry.oldPath)
   }
   const seen = new Set<string>()
   const out: string[] = []
   for (const path of selectedPaths) {
+    if (isGitPathOutsideCwd(path) || outsideEntries.has(path)) continue
     const oldPath = oldPathByPath.get(path)
     if (oldPath !== undefined && !seen.has(oldPath)) {
       seen.add(oldPath)

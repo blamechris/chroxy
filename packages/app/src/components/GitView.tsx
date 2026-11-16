@@ -11,11 +11,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
-// #7292 — a staged/unstaged rename or copy entry carries its pre-rename
-// `oldPath`; expandRenamePathsForStaging inserts it alongside the selected
-// `path` before a git_stage/git_unstage request so both index halves of the
-// rename move together (see @chroxy/store-core's handlers/git.ts).
-import { expandRenamePathsForStaging } from '@chroxy/store-core';
+// Renames move both index halves together; copies only act on their destination.
+import { expandRenamePathsForStaging, isGitPathOutsideCwd, isGitFileOutsideCwd } from '@chroxy/store-core';
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -32,6 +29,8 @@ interface GitViewProps {
 }
 
 type TabId = 'changes' | 'branches';
+
+const OUTSIDE_CWD_HINT = 'Outside this session’s folder';
 
 const STATUS_COLORS: Record<string, string> = {
   modified: COLORS.accentOrange,
@@ -62,6 +61,8 @@ function FileStatusItem({
   selected: boolean;
   onToggle: () => void;
 }) {
+  const outsideCwd = isGitFileOutsideCwd(file);
+  const isSelected = selected && !outsideCwd;
   const statusColor = STATUS_COLORS[file.status] || COLORS.textDim;
   const statusLabel = STATUS_LABELS[file.status] || '?';
   const fileName = file.path.split('/').pop() || file.path;
@@ -73,10 +74,12 @@ function FileStatusItem({
 
   return (
     <TouchableOpacity
-      style={styles.fileItem}
-      onPress={onToggle}
+      style={[styles.fileItem, outsideCwd && styles.fileItemDisabled]}
+      onPress={() => { if (!outsideCwd) onToggle(); }}
+      disabled={outsideCwd}
       accessibilityRole="checkbox"
-      accessibilityState={{ checked: selected }}
+      accessibilityState={{ checked: isSelected, disabled: outsideCwd }}
+      accessibilityHint={outsideCwd ? OUTSIDE_CWD_HINT : undefined}
       accessibilityLabel={`${isStaged ? 'Staged' : 'Unstaged'} ${file.status} file ${file.path}`}
     >
       <View style={[styles.statusBadge, { backgroundColor: statusColor + '22' }]}>
@@ -85,24 +88,29 @@ function FileStatusItem({
       <View style={styles.fileNameContainer}>
         {prefix ? <Text style={styles.fileDirPath}>{prefix}</Text> : null}
         <Text style={styles.fileName}>{fileName}</Text>
+        {outsideCwd && <Text style={styles.outsideCwdHint}>{OUTSIDE_CWD_HINT}</Text>}
       </View>
-      <View style={[styles.checkbox, selected && styles.checkboxSelected]}>
-        {selected && <Icon name="check" size={12} color={COLORS.textPrimary} />}
+      <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+        {isSelected && <Icon name="check" size={12} color={COLORS.textPrimary} />}
       </View>
     </TouchableOpacity>
   );
 }
 
 function UntrackedItem({ path, selected, onToggle }: { path: string; selected: boolean; onToggle: () => void }) {
+  const outsideCwd = isGitPathOutsideCwd(path);
+  const isSelected = selected && !outsideCwd;
   const fileName = path.split('/').pop() || path;
   const dirPath = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
 
   return (
     <TouchableOpacity
-      style={styles.fileItem}
-      onPress={onToggle}
+      style={[styles.fileItem, outsideCwd && styles.fileItemDisabled]}
+      onPress={() => { if (!outsideCwd) onToggle(); }}
+      disabled={outsideCwd}
       accessibilityRole="checkbox"
-      accessibilityState={{ checked: selected }}
+      accessibilityState={{ checked: isSelected, disabled: outsideCwd }}
+      accessibilityHint={outsideCwd ? OUTSIDE_CWD_HINT : undefined}
       accessibilityLabel={`Untracked file ${path}`}
     >
       <View style={[styles.statusBadge, { backgroundColor: COLORS.accentGreen + '22' }]}>
@@ -111,9 +119,10 @@ function UntrackedItem({ path, selected, onToggle }: { path: string; selected: b
       <View style={styles.fileNameContainer}>
         {dirPath ? <Text style={styles.fileDirPath}>{dirPath}</Text> : null}
         <Text style={styles.fileName}>{fileName}</Text>
+        {outsideCwd && <Text style={styles.outsideCwdHint}>{OUTSIDE_CWD_HINT}</Text>}
       </View>
-      <View style={[styles.checkbox, selected && styles.checkboxSelected]}>
-        {selected && <Icon name="check" size={12} color={COLORS.textPrimary} />}
+      <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+        {isSelected && <Icon name="check" size={12} color={COLORS.textPrimary} />}
       </View>
     </TouchableOpacity>
   );
@@ -190,6 +199,20 @@ export function GitView({ visible, onClose }: GitViewProps) {
     };
   }, [setGitStageCallback, setGitCommitCallback]);
 
+  // Status refreshes can turn an inside path into a cross-boundary rename.
+  // Drop those selections so they cannot reappear if the metadata changes again.
+  useEffect(() => {
+    const selectablePaths = new Set([
+      ...staged.filter((file) => !isGitFileOutsideCwd(file)).map((file) => file.path),
+      ...unstaged.filter((file) => !isGitFileOutsideCwd(file)).map((file) => file.path),
+      ...untracked.filter((path) => !isGitPathOutsideCwd(path)),
+    ]);
+    setSelectedPaths((previous) => {
+      const next = new Set(Array.from(previous).filter((path) => selectablePaths.has(path)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [staged, unstaged, untracked]);
+
   const toggleSelection = useCallback((path: string) => {
     setSelectedPaths((prev) => {
       const next = new Set(prev);
@@ -201,12 +224,12 @@ export function GitView({ visible, onClose }: GitViewProps) {
 
   const handleStageSelected = useCallback(() => {
     // Only stage unstaged + untracked files (not already-staged ones)
-    const unstagedPaths = new Set(unstaged.map((f) => f.path));
-    const untrackedSet = new Set(untracked);
+    const unstagedPaths = new Set(unstaged.filter((f) => !isGitFileOutsideCwd(f)).map((f) => f.path));
+    const untrackedSet = new Set(untracked.filter((path) => !isGitPathOutsideCwd(path)));
     const selectedUnstagedPaths = Array.from(selectedPaths).filter(
       (p) => unstagedPaths.has(p) || untrackedSet.has(p),
     );
-    // #7292 — a selected rename/copy entry's oldPath rides along so the
+    // #7292 — a selected rename entry's oldPath rides along so the
     // whole rename is staged, not just the destination half.
     const paths = expandRenamePathsForStaging(selectedUnstagedPaths, unstaged);
     if (paths.length === 0) return;
@@ -249,7 +272,7 @@ export function GitView({ visible, onClose }: GitViewProps) {
 
   const handleUnstageSelected = useCallback(() => {
     // Only unstage staged files (not unstaged/untracked ones)
-    const stagedPaths = new Set(staged.map((f) => f.path));
+    const stagedPaths = new Set(staged.filter((f) => !isGitFileOutsideCwd(f)).map((f) => f.path));
     const selectedStagedPaths = Array.from(selectedPaths).filter((p) => stagedPaths.has(p));
     // #7292 — see handleStageSelected: an unstaged rename entry would
     // otherwise leave its source's staged change behind.
@@ -342,10 +365,11 @@ export function GitView({ visible, onClose }: GitViewProps) {
 
   const hasChanges = staged.length > 0 || unstaged.length > 0 || untracked.length > 0;
   const hasUnstagedSelected = Array.from(selectedPaths).some(
-    (p) => unstaged.some((f) => f.path === p) || untracked.includes(p),
+    (p) => unstaged.some((f) => f.path === p && !isGitFileOutsideCwd(f))
+      || (untracked.includes(p) && !isGitPathOutsideCwd(p)),
   );
   const hasStagedSelected = Array.from(selectedPaths).some(
-    (p) => staged.some((f) => f.path === p),
+    (p) => staged.some((f) => f.path === p && !isGitFileOutsideCwd(f)),
   );
 
   const renderChangesTab = () => (
@@ -405,7 +429,7 @@ export function GitView({ visible, onClose }: GitViewProps) {
       )}
 
       {/* Action bar */}
-      {selectedPaths.size > 0 && (
+      {(hasUnstagedSelected || hasStagedSelected) && (
         <View style={styles.actionBar}>
           {hasUnstagedSelected && (
             <TouchableOpacity style={styles.actionButton} onPress={handleStageSelected} disabled={stagingInProgress} accessibilityRole="button" accessibilityLabel="Stage selected files">
@@ -660,6 +684,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     borderRadius: 6,
     minHeight: 44,
+  },
+  fileItemDisabled: {
+    opacity: 0.5,
+  },
+  outsideCwdHint: {
+    width: '100%',
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 2,
   },
   statusBadge: {
     width: 24,

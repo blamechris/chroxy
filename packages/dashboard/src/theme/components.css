@@ -11024,6 +11024,9 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .git-file-row:hover { background: var(--bg-tertiary); }
+.git-file-row-outside { opacity: 0.6; cursor: default; }
+.git-file-row-outside:hover { background: transparent; }
+.git-file-row-outside .git-file-checkbox { cursor: default; }
 
 .git-file-checkbox {
   flex-shrink: 0;

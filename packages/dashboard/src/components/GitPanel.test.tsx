@@ -520,3 +520,105 @@ describe('GitPanel', () => {
     })
   })
 })
+
+describe('GitPanel outside-session status rows (#8187)', () => {
+  const showStatus = (status: Partial<typeof GIT_STATUS_WITH_CHANGES> = {}) => {
+    act(() => capturedStatusCallback!({ branch: 'main', staged: [], unstaged: [], untracked: [], error: null, ...status }))
+  }
+  const checkbox = (path: string) => within(screen.getByTestId(`git-file-row-${path}`)).getByRole('checkbox')
+
+  it('visibly disables outside staged, unstaged and untracked rows', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [{ path: '../staged', status: 'modified' }], unstaged: [{ path: '../unstaged', status: 'modified' }], untracked: ['../new'] })
+    for (const path of ['../staged', '../unstaged', '../new']) {
+      expect(checkbox(path)).toBeDisabled()
+      expect(screen.getByTestId(`git-file-row-${path}`)).toHaveClass('git-file-row-outside')
+      expect(screen.getByTestId(`git-file-row-${path}`)).toHaveTextContent(/outside this session.s folder/i)
+      fireEvent.click(checkbox(path))
+      expect(checkbox(path)).not.toBeChecked()
+    }
+    expect(screen.queryByTestId('git-stage-selected-btn')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('git-unstage-selected-btn')).not.toBeInTheDocument()
+  })
+
+  it('Stage all keeps exactly inside changes, untracked files and atomic inside renames', () => {
+    render(<GitPanel />)
+    showStatus({ unstaged: [
+      { path: 'inside', status: 'modified' }, { path: '../outside', status: 'modified' },
+      { path: 'new', oldPath: 'old', status: 'renamed' },
+      { path: 'inbound', oldPath: '../source', status: 'renamed' },
+      { path: '../outbound', oldPath: 'source', status: 'renamed' },
+      { path: 'copy', oldPath: '../copy-source', status: 'copied' },
+    ] as any, untracked: ['fresh', '../fresh'] })
+    fireEvent.click(screen.getAllByText('Stage all')[0]!)
+    expect(mockRequestGitStage).toHaveBeenCalledExactlyOnceWith(['inside', 'old', 'new', 'copy', 'fresh'])
+  })
+
+  it('Unstage all excludes both directions of cross-boundary rename but preserves inside pairs', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [
+      { path: 'inside', status: 'modified' }, { path: '../outside', status: 'modified' },
+      { path: 'new', oldPath: 'old', status: 'renamed' },
+      { path: 'inbound', oldPath: '../source', status: 'renamed' },
+      { path: '../outbound', oldPath: 'source', status: 'renamed' },
+    ] as any })
+    fireEvent.click(screen.getByText('Unstage all'))
+    expect(mockRequestGitUnstage).toHaveBeenCalledExactlyOnceWith(['inside', 'old', 'new'])
+  })
+
+  it('does not send a bulk request when every status entry is outside', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [{ path: 'new', oldPath: '../old', status: 'renamed' }] as any, unstaged: [{ path: '../outside', status: 'modified' }], untracked: ['../fresh'] })
+    fireEvent.click(screen.getByText('Unstage all'))
+    for (const button of screen.getAllByText('Stage all')) fireEvent.click(button)
+    expect(mockRequestGitStage).not.toHaveBeenCalled()
+    expect(mockRequestGitUnstage).not.toHaveBeenCalled()
+  })
+
+  it.each(['staged', 'unstaged'] as const)('disables a cross-boundary %s rename with an inside destination', section => {
+    render(<GitPanel />)
+    showStatus({ [section]: [{ path: 'new', oldPath: '../old', status: 'renamed' }] })
+    expect(checkbox('new')).toBeDisabled()
+    expect(screen.getByTestId('git-file-row-new')).toHaveTextContent(/outside this session.s folder/i)
+    fireEvent.click(checkbox('new'))
+    expect(checkbox('new')).not.toBeChecked()
+  })
+
+  it('repeated toggles preserve ordinary inside selection and ignore outside rows', () => {
+    render(<GitPanel />)
+    showStatus({ unstaged: [{ path: '..notes', status: 'modified' }, { path: '../outside', status: 'modified' }] })
+    fireEvent.click(checkbox('..notes'))
+    fireEvent.click(checkbox('..notes'))
+    expect(screen.queryByTestId('git-stage-selected-btn')).not.toBeInTheDocument()
+    fireEvent.click(checkbox('../outside'))
+    fireEvent.click(checkbox('..notes'))
+    fireEvent.click(screen.getByTestId('git-stage-selected-btn'))
+    expect(mockRequestGitStage).toHaveBeenCalledExactlyOnceWith(['..notes'])
+  })
+
+  it('a new status disables stale selected rename paths and hides their action buttons', () => {
+    render(<GitPanel />)
+    showStatus({ unstaged: [{ path: 'new', status: 'modified' }] })
+    fireEvent.click(checkbox('new'))
+    expect(screen.getByTestId('git-stage-selected-btn')).toBeInTheDocument()
+    showStatus({ unstaged: [{ path: 'new', oldPath: '../old', status: 'renamed' }] as any })
+    expect(checkbox('new')).toBeDisabled()
+    expect(checkbox('new')).not.toBeChecked()
+    expect(screen.queryByTestId('git-stage-selected-btn')).not.toBeInTheDocument()
+    showStatus({ unstaged: [{ path: 'new', status: 'modified' }] })
+    expect(checkbox('new')).not.toBeChecked()
+    expect(screen.queryByTestId('git-stage-selected-btn')).not.toBeInTheDocument()
+    showStatus()
+    expect(screen.queryByTestId('git-stage-selected-btn')).not.toBeInTheDocument()
+    expect(mockRequestGitStage).not.toHaveBeenCalled()
+  })
+
+  it('selects a COPY with an outside source without including the source', () => {
+    render(<GitPanel />)
+    showStatus({ staged: [{ path: 'copy', oldPath: '../source', status: 'copied' }] as any })
+    expect(checkbox('copy')).not.toBeDisabled()
+    fireEvent.click(checkbox('copy'))
+    fireEvent.click(screen.getByTestId('git-unstage-selected-btn'))
+    expect(mockRequestGitUnstage).toHaveBeenCalledExactlyOnceWith(['copy'])
+  })
+})

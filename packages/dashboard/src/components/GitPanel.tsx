@@ -22,11 +22,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { ConfirmDialog } from './ConfirmDialog'
-// #7292 — a staged/unstaged rename or copy entry carries its pre-rename
+// #7292 — a staged/unstaged rename entry carries its pre-rename
 // `oldPath`; expandRenamePathsForStaging inserts it alongside the selected
 // `path` before a git_stage/git_unstage request so both index halves of the
 // rename move together (see @chroxy/store-core's handlers/git.ts).
-import { expandRenamePathsForStaging } from '@chroxy/store-core'
+import { expandRenamePathsForStaging, isGitFileOutsideCwd, isGitPathOutsideCwd } from '@chroxy/store-core'
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -69,18 +69,23 @@ function FileRow({
   selected: boolean
   onToggle: () => void
 }) {
+  const outside = status === 'untracked'
+    ? isGitPathOutsideCwd(path)
+    : isGitFileOutsideCwd({ path, oldPath, status })
   const name = path.includes('/') ? path.split('/').pop()! : path
   const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''
   const cls = status === 'untracked' ? 'git-status-untracked' : statusClass(status)
   const label = status === 'untracked' ? 'U' : statusLabel(status)
   return (
-    <label className="git-file-row" data-testid={`git-file-row-${path}`}>
+    <label className={`git-file-row${outside ? ' git-file-row-outside' : ''}`} data-testid={`git-file-row-${path}`}>
       <input
         type="checkbox"
         className="git-file-checkbox"
-        checked={selected}
-        onChange={onToggle}
-        aria-label={`${selected ? 'Deselect' : 'Select'} ${path}`}
+        checked={!outside && selected}
+        disabled={outside}
+        onChange={() => { if (!outside) onToggle() }}
+        aria-label={`${!outside && selected ? 'Deselect' : 'Select'} ${path}`}
+        aria-description={outside ? "Outside this session's folder" : undefined}
       />
       <span className={`git-status-badge ${cls}`}>{label}</span>
       <span className="git-file-path" title={oldPath ? `${oldPath} → ${path}` : path}>
@@ -91,6 +96,7 @@ function FileRow({
         {!oldPath && dir && <span className="git-file-dir">{dir}</span>}
         <span className="git-file-name">{name}</span>
       </span>
+      {outside && <span className="git-file-dir">Outside this session's folder</span>}
     </label>
   )
 }
@@ -158,6 +164,14 @@ export function GitPanel() {
       setStaged(result.staged)
       setUnstaged(result.unstaged)
       setUntracked(result.untracked)
+      // A refresh can turn a selected destination into a cross-boundary
+      // rename. Drop stale selections rather than restoring them later.
+      const selectablePaths = new Set([
+        ...result.staged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path),
+        ...result.unstaged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path),
+        ...result.untracked.filter(p => !isGitPathOutsideCwd(p)),
+      ])
+      setSelectedPaths(prev => new Set(Array.from(prev).filter(p => selectablePaths.has(p))))
     }
   }, [])
 
@@ -198,9 +212,9 @@ export function GitPanel() {
     })
   }, [])
 
-  const stagedPaths = useMemo(() => new Set(staged.map(f => f.path)), [staged])
-  const unstagedPaths = useMemo(() => new Set(unstaged.map(f => f.path)), [unstaged])
-  const untrackedSet = useMemo(() => new Set(untracked), [untracked])
+  const stagedPaths = useMemo(() => new Set(staged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path)), [staged])
+  const unstagedPaths = useMemo(() => new Set(unstaged.filter(f => !isGitFileOutsideCwd(f)).map(f => f.path)), [unstaged])
+  const untrackedSet = useMemo(() => new Set(untracked.filter(p => !isGitPathOutsideCwd(p))), [untracked])
 
   const hasUnstagedSelected = useMemo(
     () => Array.from(selectedPaths).some(p => unstagedPaths.has(p) || untrackedSet.has(p)),
@@ -247,7 +261,7 @@ export function GitPanel() {
 
   const handleStageSelected = useCallback(() => {
     const paths = Array.from(selectedPaths).filter(p => unstagedPaths.has(p) || untrackedSet.has(p))
-    // #7292 — a selected rename/copy entry's oldPath rides along so the whole
+    // #7292 — a selected rename entry's oldPath rides along so the whole
     // rename is staged, not just the destination half.
     performMutation(expandRenamePathsForStaging(paths, unstaged), requestGitStage, 'Stage not sent — reconnect and try again')
   }, [selectedPaths, unstagedPaths, untrackedSet, unstaged, performMutation, requestGitStage])
@@ -260,7 +274,7 @@ export function GitPanel() {
   }, [selectedPaths, stagedPaths, staged, performMutation, requestGitUnstage])
 
   const handleStageAll = useCallback(() => {
-    const paths = [...expandRenamePathsForStaging(unstaged.map(f => f.path), unstaged), ...untracked]
+    const paths = expandRenamePathsForStaging([...unstaged.map(f => f.path), ...untracked], unstaged)
     performMutation(paths, requestGitStage, 'Stage not sent — reconnect and try again')
   }, [unstaged, untracked, performMutation, requestGitStage])
 
@@ -583,7 +597,7 @@ export function GitPanel() {
 
           {!hasChanges && <div className="git-empty">Working tree clean</div>}
 
-          {selectedPaths.size > 0 && (
+          {(hasUnstagedSelected || hasStagedSelected) && (
             <div className="git-action-bar">
               {hasUnstagedSelected && (
                 <button
