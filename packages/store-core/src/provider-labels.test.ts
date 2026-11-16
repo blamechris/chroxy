@@ -52,11 +52,20 @@ describe('getProviderLabel', () => {
 })
 
 describe('getProviderInfo', () => {
+  it('#8228: describes Claude Agent SDK without assuming billing or authentication', () => {
+    expect(getProviderInfo('claude-sdk')).toEqual({
+      short: 'SDK',
+      label: 'Claude Code (SDK)',
+      tooltip: 'Claude Agent SDK, headless',
+      type: 'sdk',
+    })
+  })
+
   it('returns correct info for known providers', () => {
     const sdkInfo = getProviderInfo('claude-sdk')
     expect(sdkInfo.short).toBe('SDK')
     expect(sdkInfo.type).toBe('sdk')
-    expect(sdkInfo.tooltip).toContain('ANTHROPIC_API_KEY')
+    expect(sdkInfo.tooltip).toBe('Claude Agent SDK, headless')
 
     const cliInfo = getProviderInfo('claude-cli')
     expect(cliInfo.short).toBe('CLI')

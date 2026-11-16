@@ -18,7 +18,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
   'claude-sdk': {
     short: 'SDK',
     label: 'Claude Code (SDK)',
-    tooltip: 'Anthropic API — billed per token via ANTHROPIC_API_KEY',
+    tooltip: 'Claude Agent SDK, headless',
     type: 'sdk',
   },
   'claude-cli': {
