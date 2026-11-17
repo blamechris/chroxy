@@ -71,8 +71,8 @@ async function ptyOutput(pty, script, spawnOpts) {
 // native-load error counts, matched against the FIRST LINE of the message
 // (later lines carry "Require stack:" paths that mention node-pty):
 //   - code ERR_DLOPEN_FAILED
-//   - node-pty's own plain Error (NO .code): "Failed to load native module: pty.node ..."
-//   - MODULE_NOT_FOUND whose first line is "Cannot find module ... node-pty|pty.node"
+//   - node-pty's own plain Error (NO .code): "Failed to load native module: pty.node, checked: <dirs>: <cause>"
+//   - MODULE_NOT_FOUND whose first line is exactly "Cannot find module '<path naming node-pty|pty.node>'"
 // Anything else (an unrelated error, a probe timeout, a failed probe spawn)
 // throws and crashes the file RED. Every error from a spawn made through the
 // sandbox fails its test; there is no catch-and-skip around one.
@@ -100,8 +100,8 @@ if (probe.status !== 0) {
   const firstLine = String(info.message).split('\n')[0]
   const nativeLoadFailure =
     info.code === 'ERR_DLOPEN_FAILED' ||
-    (info.code === undefined && /^Failed to load native module: pty\.node/.test(firstLine)) ||
-    (info.code === 'MODULE_NOT_FOUND' && /^Cannot find module .*(node-pty|pty\.node)/.test(firstLine))
+    (info.code === undefined && /^Failed to load native module: pty\.node, checked: .+: .+$/.test(firstLine)) ||
+    (info.code === 'MODULE_NOT_FOUND' && /^Cannot find module '[^']*(node-pty|pty\.node)[^']*'$/.test(firstLine))
   if (!nativeLoadFailure) {
     throw new Error(`node-pty failed to load for a reason that is not "native addon unavailable": ${JSON.stringify(info).slice(0, 300)}`)
   }
