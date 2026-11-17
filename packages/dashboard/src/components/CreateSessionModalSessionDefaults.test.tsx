@@ -169,7 +169,11 @@ describe('CreateSessionModal effective provider (#8277)', () => {
   it('falls back to the first offered provider when the saved default is not offered', () => {
     mockStoreState.availableProviders = [{ name: 'codex', capabilities: {}, auth: READY }, { name: 'claude-sdk', capabilities: {}, auth: READY }]
     mockStoreState.defaultProvider = 'claude-tui'
+    // The notice only applies to Claude-family providers, so its absence proves
+    // the form's provider STATE is codex, not just what the select displays.
+    mockStoreState.sessionDefaultsNotice = { model: 'opus-4-6' }
     renderModal()
     expect((screen.getByLabelText('Select provider') as HTMLSelectElement).value).toBe('codex')
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
   })
 })
