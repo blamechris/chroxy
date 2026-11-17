@@ -109,6 +109,10 @@ function getDefaultStore() {
   return store
 }
 
+/** Honest wording for a refusal on the CLI-resolved default (#9178). */
+const CONFIGURED_DEFAULT_CLAUSE = (name) =>
+  `'${name}' is the configured default (config/env), which a task with no target.provider falls back to; a daemon started with --provider may use a different default.`
+
 /**
  * Build the dependency bag every exported command function runs against.
  * Every dependency is overridable so tests never touch the real
@@ -117,8 +121,12 @@ function getDefaultStore() {
  */
 function buildDeps(overrides = {}) {
   const config = readConfigSoft(configFile())
-  // NOTE: resolved from config/env tiers only (no CLI tier), so a daemon started
-  // with `--provider X` can differ from this value. Pre-existing; tracked separately.
+  // #9178: resolved from the config/env tiers only. The running daemon's
+  // effective default is NOT readable from here without a new endpoint or a
+  // wider token grant (connection.json, `/` and `/metrics` carry no provider),
+  // so a daemon started with `--provider X` can differ from this value. The
+  // CLI therefore never claims to know the daemon's default — its refusal
+  // wording below names this value as the configured one and says so.
   const defaultProviderName = overrides.defaultProviderName
     || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config }))
   return {
@@ -141,7 +149,15 @@ function buildDeps(overrides = {}) {
     // outright and never reaches mergeConfig at all).
     defaultProviderName,
     checkProviderRefusal: overrides.checkProviderRefusal
-      || ((name) => scheduledProviderRefusalReason(name, undefined, defaultProviderName)),
+      || ((name) => {
+        // `null`, not the configured default: the scheduler's own clause says
+        // "the daemon DEFAULT", which only the daemon can know (#9178).
+        const reason = scheduledProviderRefusalReason(name, undefined, null)
+        if (reason && typeof defaultProviderName === 'string' && name === defaultProviderName) {
+          return `${reason} ${CONFIGURED_DEFAULT_CLAUSE(name)}`
+        }
+        return reason
+      }),
     resolvePermissionMode: overrides.resolvePermissionMode || resolveScheduledPermissionMode,
     checkSchedulerEnabled: overrides.checkSchedulerEnabled || (() => isSchedulerEnabled(config)),
   }
