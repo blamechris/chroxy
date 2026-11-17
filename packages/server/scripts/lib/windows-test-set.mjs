@@ -181,7 +181,7 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/setup-pty-home-sandbox.test.js',
     reason: 'node-pty',
     symptom: 'timeout',
-    note: 'spawns real PTY children to prove the HOME redirect; on the Windows runner the ConPTY child run hung the job to its 20 minute kill (#9209), and ConPTY exit semantics differ. The Module._load hook it tests is still installed on Windows for every other file',
+    note: 'spawns real PTY children to prove the HOME redirect; on the Windows runner the Server Windows Tests job went silent after its last result and was cancelled at 20 minutes (#9209; it normally takes about 5), and this file was the only new real-PTY spawner; the ConPTY run is the suspected cause, inferred by elimination and not isolated, so a different cause is not ruled out. The Module._load hook it tests is still installed on Windows for every other file',
   },
   // ── spawns a POSIX shell or a .sh script (9)
   {
