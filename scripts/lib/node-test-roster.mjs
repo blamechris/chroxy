@@ -91,28 +91,44 @@ function withProbeDir(fn) {
   }
 }
 
+const PROBE_TIMEOUT_MS = 60_000
+
+/**
+ * Run a probe and return the result ONLY if the child exited on its own. A spawn error
+ * (ENOENT interpreter, ETIMEDOUT, EPERM) or a signal kill says nothing about the guard, so
+ * it throws with the cause rather than reading as "not refused" or "not guarded" (#9214).
+ * `spawnSync` cannot escalate TERM to KILL after a grace period, so the kill signal is
+ * SIGKILL outright: a probe that overruns its timeout must not be left hung.
+ */
+export function runProbe(args, { cwd, spawn = spawnSync, execPath = process.execPath, label }) {
+  const r = spawn(execPath, args, { encoding: 'utf8', cwd, timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' })
+  if (r.error) throw new Error(`${label}: probe could not run (${r.error.code ?? r.error.name}: ${r.error.message})`)
+  if (r.signal) throw new Error(`${label}: probe was killed by ${r.signal} (timeout ${PROBE_TIMEOUT_MS}ms) rather than exiting`)
+  return r
+}
+
 /** Does this package's `--import`s make a `--test-force-exit` run refuse? */
-export function packageRefusesForceExit({ repoRoot, pkg }) {
+export function packageRefusesForceExit({ repoRoot, pkg, spawn, execPath }) {
   const { packageDir, args } = relativeImportArgs(repoRoot, pkg)
   if (args.length === 0) return false
   return withProbeDir((dir) => {
     const probe = join(dir, 'probe.test.js')
     writeFileSync(probe, "import { test } from 'node:test'\ntest('probe', () => {})\n")
-    const r = spawnSync(process.execPath, [...args, '--test', '--test-force-exit', probe], {
-      encoding: 'utf8', cwd: packageDir, timeout: 60_000,
+    const r = runProbe([...args, '--test', '--test-force-exit', probe], {
+      cwd: packageDir, spawn, execPath, label: `packages/${pkg.name} force-exit probe`,
     })
     return r.status !== 0 && (r.stdout + r.stderr).includes(FORCE_EXIT_CODE)
   })
 }
 
 /** Does this package's `--import`s leave `assert.match` as the payload-guarded function? */
-export function packagePatchesAssertMatch({ repoRoot, pkg }) {
+export function packagePatchesAssertMatch({ repoRoot, pkg, spawn, execPath }) {
   const { packageDir, args } = relativeImportArgs(repoRoot, pkg)
   if (args.length === 0) return false
   return withProbeDir((dir) => {
     const probe = join(dir, 'probe.mjs')
     writeFileSync(probe, "import assert from 'node:assert/strict'\nconsole.log(assert.match.name)\n")
-    const r = spawnSync(process.execPath, [...args, probe], { encoding: 'utf8', cwd: packageDir, timeout: 60_000 })
+    const r = runProbe([...args, probe], { cwd: packageDir, spawn, execPath, label: `packages/${pkg.name} assert.match probe` })
     return r.status === 0 && r.stdout.includes(GUARDED_ASSERT_NAME)
   })
 }
@@ -122,7 +138,9 @@ export function packagePatchesAssertMatch({ repoRoot, pkg }) {
 // Source forms the scanners understand. Any other tracked file under packages/ that QUOTES
 // 'node:test' is reported (see `unclassifiedNodeTestMentions`), never skipped.
 const SCANNED_EXTENSIONS = /\.(?:mjs|cjs|js|jsx|ts|tsx|mts|cts)$/
-const NON_CODE_EXTENSIONS = /\.(?:md|json|ya?ml|lock|txt|png|jpg|jpeg|gif|svg|ico|icns|woff2?|ttf|rs|toml|sh|html|css|map|snap)$/
+// `.sh` and `.html` are deliberately NOT here (#9214): they are scanned like any unknown type,
+// so a quoted 'node:test' in one is reported. None does today; the walk pins that.
+const NON_CODE_EXTENSIONS = /\.(?:md|json|ya?ml|lock|txt|png|jpg|jpeg|gif|svg|ico|icns|woff2?|ttf|rs|toml|css|map|snap)$/
 
 // Any quoted 'node:test' specifier: static `from`, `require()`, dynamic `import()`, bare
 // `import 'node:test'`. Deliberately broad — a mention in a string or comment OVER-reports,
@@ -172,72 +190,126 @@ function trackedPackageFiles(repoRoot) {
 export function unclassifiedNodeTestMentions(repoRoot, rosterNames) {
   const roster = new Set(rosterNames)
   return trackedPackageFiles(repoRoot).filter((rel) => {
-    if (roster.has(rel.split('/')[1]) || SCANNED_EXTENSIONS.test(rel) || NON_CODE_EXTENSIONS.test(rel)) return false
+    if (roster.has(rel.split('/')[1]) || !isUnscannedCodeCandidate(rel)) return false
     return importsNodeTest(readFileSync(resolve(repoRoot, rel), 'utf8'))
   })
 }
 
+/** Is this path one whose content must be read to rule out a `node:test` mention? */
+export const isUnscannedCodeCandidate = (rel) => !SCANNED_EXTENSIONS.test(rel) && !NON_CODE_EXTENSIONS.test(rel)
+
 // ── Is each exempt file really run as `node <file>` by ci.yml? ───────────────
 
 /**
- * Commands a workflow runs, with the working directories each step could run them in.
- * A line reader, not a YAML parser (none is installable in the Scripts Tests job): it reads
- * `run:` values (inline or block scalar), the step's `working-directory:`, and any
- * `defaults.run.working-directory`. Comments are dropped; commands are split on `|`, `&&`,
- * `;` and `||`, with `\` continuations joined.
- * @returns {{cwds: string[], argv: string[]}[]}
+ * Commands a workflow runs, each with the working directory it runs in. A line reader, not a
+ * YAML parser (none is installable in the Scripts Tests job): it reads `run:` values (inline
+ * or block scalar), the step's `working-directory:`, the step's `if:`, and each JOB's own
+ * `defaults.run.working-directory`. A step's directory is its own, else its job's default,
+ * else the repo root; defaults are never pooled across jobs (#9214). Steps (and jobs) whose
+ * `if:` is the literal `false` are dropped. Comments are dropped; commands are split on `|`,
+ * `&&`, `;` and `||`, with `\` continuations joined.
+ * @returns {{cwd: string, argv: string[]}[]}
  */
 export function workflowCommands(workflowText) {
   const lines = workflowText.split('\n')
   const indentOf = (l) => l.length - l.trimStart().length
-  const defaults = []
-  const steps = [] // {wd: string[], runs: string[]}
+  const unquote = (v) => v.replace(/^['"]|['"]$/g, '')
+  // A trailing YAML comment is ` #` outside quotes; a quoted value ends at its closing quote.
+  const stripComment = (v) => {
+    const t = v.trim()
+    const q = /^(['"])(.*?)\1/.exec(t)
+    return q ? q[0] : t.replace(/\s+#.*$/, '').trim()
+  }
+  const isFalse = (v) => unquote(v.replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim()) === 'false'
+  const jobs = [] // {name, def: string|null, off: boolean, steps: {name, wd: string|null, off: boolean, runs: string[], bad: string|null}[]}
+  let job = null
+  let jobIndent = -1
   let cur = null
   let curIndent = -1
   let prev = ''
+  let jobsAt = -1
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const trimmed = line.trim()
     if (trimmed === '' || trimmed.startsWith('#')) continue
     const prevLine = prev
     prev = trimmed
+    const ind = indentOf(line)
+    if (trimmed === 'jobs:' && ind === 0) { jobsAt = 0; continue }
+    // A job key: a bare `name:` one level inside `jobs:`.
+    if (jobsAt === 0 && /^[\w-]+:\s*$/.test(trimmed) && (jobIndent === -1 ? ind > 0 : ind === jobIndent)) {
+      jobIndent = ind
+      job = { name: trimmed.slice(0, -1).trim(), def: null, off: false, steps: [] }
+      jobs.push(job)
+      cur = null
+      continue
+    }
+    if (job === null) continue
     const dashed = /^(\s*)- /.exec(line)
     if (dashed && (cur === null || dashed[1].length <= curIndent)) {
-      cur = { wd: [], runs: [] }
-      steps.push(cur)
+      cur = { name: `#${job.steps.length + 1}`, wd: null, off: false, runs: [], bad: null }
+      job.steps.push(cur)
       curIndent = dashed[1].length
     }
-    const body = trimmed.replace(/^- /, '')
-    const wd = /^working-directory:\s*(\S+)\s*$/.exec(body)
-    if (wd) {
-      const v = wd[1].replace(/^['"]|['"]$/g, '')
-      // `defaults:\n  run:\n    working-directory:` — the parent key is a bare `run:`.
-      if (prevLine === 'run:') defaults.push(v)
-      else if (cur) cur.wd.push(v)
+    const body = trimmed.replace(/^-\s+/, '')
+    // The column the key starts at. Only keys at the step's OWN column are the step's: a
+    // `working-directory:` or `if:` nested under `with:`/`env:` belongs to something else.
+    const keyCol = ind + (trimmed.length - body.length)
+    const own = cur !== null && keyCol === curIndent + 2
+    const wd = /^working-directory:\s*(.*)$/.exec(body)
+    if (wd && prevLine === 'run:') { // `defaults:\n  run:\n    working-directory:` — parent key is a bare `run:`
+      const v = stripComment(wd[1])
+      if (!/^[^\s#]+$/.test(v)) throw new Error(`workflowCommands: job "${job.name}": unreadable defaults working-directory: ${JSON.stringify(wd[1])}`)
+      job.def = unquote(v)
+      continue
+    }
+    if (wd && own) {
+      const v = stripComment(wd[1])
+      if (/^[^\s#]+$/.test(v)) cur.wd = unquote(v)
+      else cur.bad = `unreadable working-directory ${JSON.stringify(wd[1])}`
+      continue
+    }
+    const name = /^name:\s*(.*)$/.exec(body)
+    if (name && own) { cur.name = JSON.stringify(unquote(stripComment(name[1]))); continue }
+    const cond = /^if:\s*(.*)$/.exec(body)
+    if (cond && (own || cur === null)) {
+      const v = stripComment(cond[1])
+      if (v === '' || /^[|>][+-]?\d*$/.test(v)) {
+        if (cur) cur.bad = `unreadable if ${JSON.stringify(cond[1])}`
+        else throw new Error(`workflowCommands: job "${job.name}": unreadable if ${JSON.stringify(cond[1])}`)
+      } else if (cur) cur.off ||= isFalse(v)
+      else job.off ||= isFalse(v)
       continue
     }
     const run = /^run:\s*(.*)$/.exec(body)
-    if (run && cur) {
+    if (run && own) {
       const v = run[1]
-      if (/^[|>][+-]?\d*\s*$/.test(v)) {
-        const base = indentOf(line)
+      if (/^[|>][+-]?\d*\s*(#.*)?$/.test(v)) {
+        // The block ends at the next line at or below the `run:` KEY's column — for `- run: |`
+        // that is dash+2, not the dash, so a following sibling key is not swallowed.
+        const base = keyCol
         const block = []
         while (i + 1 < lines.length && (lines[i + 1].trim() === '' || indentOf(lines[i + 1]) > base)) block.push(lines[++i])
         cur.runs.push(block.join('\n'))
       } else {
-        cur.runs.push(v)
+        cur.runs.push(stripComment(v))
       }
     }
   }
   const out = []
-  for (const step of steps) {
-    const cwds = ['', ...step.wd, ...defaults]
-    for (const run of step.runs) {
-      const joined = run.replace(/\\\n/g, ' ')
-      for (const raw of joined.split(/\n|\|\||&&|;|\|/)) {
-        const cmd = raw.trim()
-        if (cmd === '' || cmd.startsWith('#')) continue
-        out.push({ cwds, argv: cmd.split(/\s+/).map((t) => t.replace(/^['"]|['"]$/g, '')) })
+  for (const j of jobs) {
+    if (j.off) continue
+    for (const step of j.steps) {
+      if (step.bad) throw new Error(`workflowCommands: job "${j.name}", step ${step.name}: ${step.bad}`)
+      if (step.off) continue
+      const cwd = step.wd ?? j.def ?? ''
+      for (const run of step.runs) {
+        const joined = run.replace(/\\\n/g, ' ')
+        for (const raw of joined.split(/\n|\|\||&&|;|\|/)) {
+          const cmd = raw.trim()
+          if (cmd === '' || cmd.startsWith('#')) continue
+          out.push({ cwd, argv: cmd.split(/\s+/).map(unquote) })
+        }
       }
     }
   }
@@ -247,9 +319,11 @@ export function workflowCommands(workflowText) {
 /** Is `relFile` invoked as `node [flags] <file>` (no `--test` runner flag) by some command? */
 export function workflowRunsFileDirectly(repoRoot, workflowText, relFile) {
   const target = resolve(repoRoot, relFile)
-  for (const { cwds, argv } of workflowCommands(workflowText)) {
-    const at = argv.indexOf('node')
-    if (at === -1) continue
+  for (const { cwd, argv } of workflowCommands(workflowText)) {
+    // The INVOKED command: first word after any `VAR=value` prefixes. `echo node x.mjs`,
+    // `cat node` and `npx node` are not an invocation of node (#9214).
+    const at = argv.findIndex((t) => !/^[A-Za-z_]\w*=/.test(t))
+    if (at === -1 || argv[at] !== 'node') continue
     const rest = argv.slice(at + 1)
     let script = null
     for (let i = 0; i < rest.length; i++) {
@@ -261,7 +335,7 @@ export function workflowRunsFileDirectly(repoRoot, workflowText, relFile) {
       break
     }
     if (script === null || isAbsolute(script)) continue
-    if (cwds.some((cwd) => resolve(repoRoot, cwd, script) === target)) return true
+    if (resolve(repoRoot, cwd, script) === target) return true
   }
   return false
 }

@@ -30,7 +30,7 @@
 
 import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -49,12 +49,15 @@ import {
   countMatchSites,
   directRunNodeTestFiles,
   importsNodeTest,
+  isUnscannedCodeCandidate,
+  packagePatchesAssertMatch,
   nodeTestPackages,
   packageRefusesForceExit,
   suspectTestFlagPackages,
   unclassifiedNodeTestMentions,
   workflowRunsFileDirectly,
   workflowCommands,
+  runProbe,
 } from '../lib/node-test-roster.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -68,7 +71,7 @@ const HOOK_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/no-test-force-exi
 // A floor on the number of cases accounted for, so a run that loses cases
 // (an early `return`, a bad refactor) goes red instead of printing a small
 // tidy "all passed".
-const MIN_CASES = 40
+const MIN_CASES = 55
 
 let pass = 0
 let fail = 0
@@ -337,6 +340,15 @@ test('every exempt suite is invoked as `node <file>` by a ci.yml step', () => {
   )
 })
 
+const throwsMatching = (fn, re, what) => {
+  let err = null
+  try { fn() } catch (e) { err = e }
+  assert(err !== null, `${what}: expected a throw, got a return`)
+  assert(re.test(err.message), `${what}: message did not match ${re}: ${err.message}`)
+}
+const cmds = (yml) => workflowCommands(yml).map((c) => `${c.cwd || '<root>'}: ${c.argv.join(' ')}`)
+const sameList = (got, want, what) => assert(JSON.stringify(got) === JSON.stringify(want), `${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`)
+
 test('the ci.yml reader tells `node <file>` from `node --test <file>` and from other scripts', () => {
   const yml = [
     'jobs:', '  j:', '    steps:',
@@ -348,21 +360,205 @@ test('the ci.yml reader tells `node <file>` from `node --test <file>` and from o
   assert(workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/desktop/scripts/a.test.mjs'), 'direct run in a working directory')
   assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/b/b.test.mjs'), '--test runner is not a direct run')
   assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/c/c.test.mjs'), 'an argument of another script is not a direct run')
-  assert(workflowCommands(yml).length >= 3, 'the reader found no commands')
+  sameList(cmds(yml), [
+    'packages/desktop: set -o pipefail',
+    'packages/desktop: node scripts/a.test.mjs',
+    'packages/desktop: tee /tmp/x',
+    '<root>: node --test packages/b/b.test.mjs',
+    '<root>: node packages/c/helper.mjs packages/c/c.test.mjs',
+  ], 'reader output')
 })
 
+// #9214 item 1: defaults.run.working-directory belongs to ONE job.
+const TWO_JOBS = [
+  'jobs:',
+  '  a:', '    defaults:', '      run:', '        working-directory: packages/a',
+  '    steps:', '      - run: node scripts/t.mjs',
+  '  b:', '    defaults:', '      run:', '        working-directory: packages/b',
+  '    steps:', '      - run: node scripts/t.mjs',
+  '      - working-directory: .', '        run: node scripts/root.mjs',
+  '  c:', '    steps:', '      - run: node scripts/none.mjs',
+].join('\n')
+
+test('defaults.run.working-directory is read per job, not pooled across jobs', () => {
+  sameList(cmds(TWO_JOBS), [
+    'packages/a: node scripts/t.mjs',
+    'packages/b: node scripts/t.mjs',
+    '.: node scripts/root.mjs',
+    '<root>: node scripts/none.mjs',
+  ], 'per-job cwd')
+  assert(workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'packages/a/scripts/t.mjs'), 'job a resolves against its own default')
+  assert(workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'packages/b/scripts/t.mjs'), 'job b resolves against its own default')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'packages/c/scripts/t.mjs'), 'no job runs it in packages/c')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'scripts/t.mjs'), 'the repo root is not job a or b default')
+  assert(workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'scripts/root.mjs'), 'a step working-directory overrides the job default')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'packages/b/scripts/root.mjs'), 'the step override replaces, not adds to, the default')
+  assert(workflowRunsFileDirectly(REPO_ROOT, TWO_JOBS, 'scripts/none.mjs'), 'a job with no default runs at the root')
+})
+
+// #9214 item 2: the INVOKED command is `node`, and disabled steps run nothing.
+test('only an invoked `node` counts; echo, wrappers-by-name and disabled steps do not', () => {
+  const yml = [
+    'jobs:',
+    '  j:', '    steps:',
+    '      - run: echo node scripts/echoed.mjs',
+    '      - run: cat node scripts/catted.mjs',
+    '      - if: false', '        run: node scripts/off1.mjs',
+    '      - name: off2', '        if: ${{ false }}', '        run: node scripts/off2.mjs',
+    "      - name: off3", "        if: 'false'", '        run: node scripts/off3.mjs',
+    '      - name: on', "        if: github.ref == 'refs/heads/main'", '        run: node scripts/on.mjs',
+    '      - run: NODE_OPTIONS=--no-warnings node scripts/envprefix.mjs',
+    '      - run: node scripts/real.mjs',
+    '  off:', '    if: false', '    steps:', '      - run: node scripts/offjob.mjs',
+  ].join('\n')
+  for (const f of ['echoed', 'catted', 'off1', 'off2', 'off3', 'offjob']) {
+    assert(!workflowRunsFileDirectly(REPO_ROOT, yml, `scripts/${f}.mjs`), `${f} must not count as run`)
+  }
+  for (const f of ['on', 'envprefix', 'real']) {
+    assert(workflowRunsFileDirectly(REPO_ROOT, yml, `scripts/${f}.mjs`), `${f} must count as run`)
+  }
+  sameList(cmds(yml), [
+    '<root>: echo node scripts/echoed.mjs',
+    '<root>: cat node scripts/catted.mjs',
+    '<root>: node scripts/on.mjs',
+    '<root>: NODE_OPTIONS=--no-warnings node scripts/envprefix.mjs',
+    '<root>: node scripts/real.mjs',
+  ], 'live commands: disabled steps and the disabled job are dropped, nothing else')
+})
+
+// Review fold: trailing comments, nested keys, block-scalar ends, and unreadable shapes.
+test('trailing comments and keys nested under `with:` do not change a step classification', () => {
+  const yml = [
+    'jobs:',
+    '  j:', '    defaults:', '      run:', '        working-directory: packages/def # the default',
+    '    steps:',
+    '      - name: commented', '        working-directory: packages/own # own dir', '        run: node scripts/a.mjs # run it',
+    '      - name: off', '        if: false # disabled for now', '        run: node scripts/off.mjs',
+    '      - name: nested', '        uses: some/action@v1', '        with:', '          working-directory: elsewhere', '          if: false',
+    '        run: node scripts/n.mjs',
+  ].join('\n')
+  sameList(cmds(yml), [
+    'packages/own: node scripts/a.mjs',
+    'packages/def: node scripts/n.mjs',
+  ], 'commented and nested')
+})
+
+test('a `- run: |` block scalar ends at the step\'s next sibling key', () => {
+  const yml = [
+    'jobs:', '  j:', '    steps:',
+    '      - run: |', '          echo hi', '          node scripts/a.mjs',
+    '        working-directory: packages/x', '        if: false',
+    '      - run: |', '          node scripts/b.mjs',
+    '        working-directory: packages/y',
+  ].join('\n')
+  sameList(cmds(yml), ['packages/y: node scripts/b.mjs'], 'dashed block scalar')
+})
+
+test('a step shape the reader cannot classify throws, naming the job and step', () => {
+  const wrap = (...step) => ['jobs:', '  myjob:', '    steps:', ...step].join('\n')
+  throwsMatching(() => workflowCommands(wrap('      - name: odd', '        working-directory: a b', '        run: node x.mjs')),
+    /job "myjob", step "odd": unreadable working-directory/, 'spaced working-directory')
+  throwsMatching(() => workflowCommands(wrap('      - name: folded', '        if: >-', '          false', '        run: node x.mjs')),
+    /job "myjob", step "folded": unreadable if/, 'block-scalar if')
+  throwsMatching(() => workflowCommands(wrap('      - run: node x.mjs', '        if:')),
+    /job "myjob", step #1: unreadable if/, 'empty if, unnamed step')
+})
+
+// #9214 item 3: a probe that could not run, or was killed, is a failure with its cause.
+test('a spawn error or signal kill fails loudly with the cause, never as a refusal or a pass', () => {
+  const pkg = nodeTestPackagesFound.find((p) => p.name === 'claude-hooks')
+  assert(pkg !== undefined, 'claude-hooks must be in the roster for this fixture')
+  const stub = (r) => (...call) => { stub.calls.push(call); return r }
+  stub.calls = []
+  const cases = [
+    ['ENOENT', { error: Object.assign(new Error('spawn x ENOENT'), { code: 'ENOENT' }), status: null, signal: null, stdout: '', stderr: '' }, /ENOENT/],
+    ['timeout', { error: Object.assign(new Error('spawnSync x ETIMEDOUT'), { code: 'ETIMEDOUT' }), status: null, signal: 'SIGKILL', stdout: '', stderr: '' }, /ETIMEDOUT/],
+    ['signal', { status: null, signal: 'SIGSEGV', stdout: '', stderr: '' }, /killed by SIGSEGV/],
+  ]
+  for (const [name, result, re] of cases) {
+    throwsMatching(() => packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg, spawn: stub(result) }), re, `refuses/${name}`)
+    throwsMatching(() => packagePatchesAssertMatch({ repoRoot: REPO_ROOT, pkg, spawn: stub(result) }), re, `patches/${name}`)
+  }
+  assert(stub.calls.length === 6 && stub.calls.every((c) => c[2].killSignal === 'SIGKILL'), 'probes must be spawned with killSignal SIGKILL')
+  // Positive controls: a child that DID exit is still read normally.
+  const exited = (stdout, stderr = '', status = 1) => stub({ status, signal: null, stdout, stderr })
+  assert(packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg, spawn: exited('', FORCE_EXIT_ERROR_CODE) }) === true, 'a real refusal reads as true')
+  assert(packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg, spawn: exited('', 'boom') }) === false, 'a non-refusing exit reads as false')
+  assert(packagePatchesAssertMatch({ repoRoot: REPO_ROOT, pkg, spawn: exited('chroxyGuardedAssert\n', '', 0) }) === true, 'a guarded assert.match reads as true')
+  assert(packagePatchesAssertMatch({ repoRoot: REPO_ROOT, pkg, spawn: exited('match\n', '', 0) }) === false, 'an unguarded assert.match reads as false')
+})
+
+test('a missing interpreter surfaces as a real ENOENT failure', () => {
+  const pkg = nodeTestPackagesFound.find((p) => p.name === 'claude-hooks')
+  const missing = join(tmpdir(), 'chroxy-no-such-node-binary')
+  throwsMatching(() => packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg, execPath: missing }), /ENOENT/, 'real ENOENT')
+  throwsMatching(() => runProbe(['-e', ''], { cwd: REPO_ROOT, execPath: missing, label: 'direct' }), /direct: probe could not run/, 'runProbe label')
+})
+
+// #9214 item 4: exact counts, not `>= 1`.
 test('the node:test scanners recognise every import and match form', () => {
   for (const src of [
     "import test from 'node:test'", "import { test } from \"node:test\"", "const t = require('node:test')",
     "const t = await import('node:test')", "import 'node:test'",
   ]) assert(importsNodeTest(src), `missed import form: ${src}`)
   assert(!importsNodeTest("import test from 'vitest'"), 'false import match')
-  for (const src of [
-    "assert.match(a, /x/)", "assert.doesNotMatch(a, /x/)", "t.assert.match(a, /x/)", "strict.match(a, /x/)",
-    "const { match } = assert", "const { match: m } = assert", "import { doesNotMatch } from 'node:assert'",
-    "const m = assert.match",
-  ]) assert(countMatchSites(src) >= 1, `missed match form: ${src}`)
-  assert(countMatchSites("assert.equal(a, b)") === 0, 'false match count')
+  for (const [src, want] of [
+    ['assert.match(a, /x/)', 1], ['assert.doesNotMatch(a, /x/)', 1], ['t.assert.match(a, /x/)', 1],
+    ['strict.match(a, /x/)', 1], ['const { match } = assert', 1], ['const { match: m } = assert', 1],
+    ["import { doesNotMatch } from 'node:assert'", 1], ['const m = assert.match', 1],
+    ['s.match(/x/)', 1], // over-counts String.prototype.match: the documented safe direction
+    ['assert.match(a, /x/)\nassert.doesNotMatch(b, /y/)\nconst { match } = assert', 3],
+    ['assert.equal(a, b)', 0], ['', 0],
+  ]) assert(countMatchSites(src) === want, `countMatchSites(${JSON.stringify(src)}) = ${countMatchSites(src)}, want ${want}`)
+})
+
+// #9214 items 4 and 5: the unclassified-mention path, positive and negative, end to end on a
+// throwaway git repo (git is already required by trackedPackageFiles).
+test('unclassified node:test mentions: exactly the unreadable file types that quote it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'chroxy-unclassified-'))
+  try {
+    const put = (rel, text) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true })
+      writeFileSync(join(root, rel), text)
+    }
+    const quoted = "import t from 'node:test'\n"
+    put('packages/x/a.sh', quoted)                // shell: scanned, reported (#9214 item 5)
+    put('packages/x/b.html', quoted)              // html: scanned, reported
+    put('packages/x/c.weird', quoted)             // unknown type: reported
+    put('packages/x/d.sh', 'echo hello\n')        // NEGATIVE: unknown type, no mention
+    put('packages/x/e.md', quoted)                // known non-code: not reported
+    put('packages/x/f.mjs', quoted)               // scanned type: handled elsewhere
+    put('packages/roster/g.sh', quoted)           // roster package: guarded via its script
+    // Isolated from ambient git state: under a git hook an exported GIT_DIR / GIT_INDEX_FILE
+    // would aim `git add` at the REAL repo, and a global excludesfile could hide a fixture file.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')))
+    Object.assign(env, { HOME: root, USERPROFILE: root, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_CONFIG_NOSYSTEM: '1' })
+    const git = (...args) => {
+      const r = spawnSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' })
+      assert(r.error === undefined && r.status === 0, `git ${args[0]} failed (${r.error?.message ?? r.signal ?? r.status}): ${r.stderr}`)
+    }
+    git('init', '-q')
+    git('add', '-A', '--', 'packages')
+    // trackedPackageFiles runs git with the process env; point it at the fixture the same way.
+    const saved = { ...process.env }
+    for (const k of Object.keys(process.env)) if (k.startsWith('GIT_')) delete process.env[k]
+    Object.assign(process.env, { GIT_CONFIG_GLOBAL: env.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: '1' })
+    let got
+    try {
+      got = unclassifiedNodeTestMentions(root, ['roster'])
+    } finally {
+      for (const k of Object.keys(process.env)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
+    sameList(got, ['packages/x/a.sh', 'packages/x/b.html', 'packages/x/c.weird'], 'unclassified mentions')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('.sh and .html are scanned, not silently skipped; known non-code types still are', () => {
+  for (const rel of ['a.sh', 'a.html', 'a.weird']) assert(isUnscannedCodeCandidate(rel), `${rel} must be scanned`)
+  for (const rel of ['a.md', 'a.json', 'a.css', 'a.mjs', 'a.tsx']) assert(!isUnscannedCodeCandidate(rel), `${rel} must not be reported as unscanned`)
 })
 
 test('no node:test mention hides in a file type the scanners cannot read', () => {
