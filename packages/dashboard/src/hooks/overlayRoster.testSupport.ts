@@ -17,6 +17,14 @@
  * Hook check: a TypeScript AST walk (typescript is a dashboard devDependency
  * already used by tsc; a regex cannot tell which JSX element a spread belongs
  * to). A spread element whose className cannot be read throws.
+ *
+ * Remaining limit (#9207): a layer class that is only ever ASSEMBLED at runtime
+ * (concatenated, built from parts, read from data) never appears as a string
+ * literal, so no scan of literals can see it. Everything else is closed: a
+ * dynamic className in a file naming a layer class throws (jsxClassElements),
+ * and every file whose literals contain a layer class must have a spreading
+ * element carrying it or sit on a reviewed allow-list (layerLiteralSites), which
+ * covers a class handed over through an exported constant or a prop.
  */
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { resolve, join, relative } from 'path'
@@ -504,6 +512,24 @@ export function filesUsingClass(cls: string, files: string[] = walkSources()): s
 /** Overlay-spreading elements across the sources, with the class tokens on each. */
 export function overlayElements(files: string[] = walkSources()): Array<{ file: string; el: JsxClassElement }> {
   return files.flatMap(f => elementsOf(f).filter(el => el.spreadsOverlay).map(el => ({ file: relative(SRC, f), el })))
+}
+
+/**
+ * Source files (relative to src) whose string literals contain a layer class,
+ * with the layer classes named and the ones carried by an element that spreads
+ * the overlay props in that same file. A named class not in `spread` reached
+ * (or could reach) an element through a constant, a prop or a lookup.
+ */
+export function layerLiteralSites(layerClasses: ReadonlySet<string>, files: string[] = walkSources()): Array<{ file: string; named: string[]; spread: string[] }> {
+  const out: Array<{ file: string; named: string[]; spread: string[] }> = []
+  for (const f of files) {
+    const sf = parseSource(readFileSync(f, 'utf-8'), relative(SRC, f))
+    const named = [...new Set(fileLiterals(sf).filter(t => layerClasses.has(t)))].sort()
+    if (named.length === 0) continue
+    const spread = [...new Set(elementsOf(f).filter(el => el.spreadsOverlay).flatMap(el => el.classes).filter(c => layerClasses.has(c)))].sort()
+    out.push({ file: relative(SRC, f), named, spread })
+  }
+  return out
 }
 
 // ------------------------------------------------------------ inline fixed styles
