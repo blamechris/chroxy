@@ -48,8 +48,16 @@
  */
 
 import { drainStdioAndExit } from '../flush-and-exit.mjs'
+import {
+  DIRECT_RUN_EXEMPTIONS,
+  EXPECTED_NODE_TEST_PACKAGES,
+  directRunNodeTestFiles,
+  nodeTestPackages,
+  packagePatchesAssertMatch,
+  suspectTestFlagPackages,
+} from '../lib/node-test-roster.mjs'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -63,7 +71,7 @@ const HOOK_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/assert-match-payl
 // A floor on the number of cases accounted for, so a run that loses cases
 // (an early `return`, a bad refactor) goes red instead of printing a small
 // tidy "all passed".
-const MIN_CASES = 6
+const MIN_CASES = 10
 
 let pass = 0
 let fail = 0
@@ -94,53 +102,54 @@ const assert = (cond, msg) => {
 // `--test-force-exit` does not match `--test` because of the trailing
 // boundary.
 
-const packagesDir = resolve(REPO_ROOT, 'packages')
-const nodeTestPackages = []
-for (const name of readdirSync(packagesDir)) {
-  const manifest = join(packagesDir, name, 'package.json')
-  if (!existsSync(manifest)) continue
-  const script = JSON.parse(readFileSync(manifest, 'utf8')).scripts?.test ?? ''
-  if (/\bnode\b/.test(script) && /--test(\s|$)/.test(script)) nodeTestPackages.push({ name, script })
-}
+const nodeTestPackagesFound = nodeTestPackages(REPO_ROOT)
 
-// A floor, because an empty walk would otherwise report "all wired" — the
-// silent-pass shape this file exists to prevent. Four packages run node --test
-// today: server, claude-hooks, protocol, design-tokens.
-test('the walk found every package that runs node --test', () => {
+// Asserted EQUAL to an explicit list, both ways (#8056 finding 2), through the same
+// derivation no-test-force-exit.test.mjs uses (scripts/lib/node-test-roster.mjs).
+test('the walk found exactly the packages that run node --test', () => {
+  const found = nodeTestPackagesFound.map((p) => p.name).sort()
+  const missing = EXPECTED_NODE_TEST_PACKAGES.filter((n) => !found.includes(n))
+  const extra = found.filter((n) => !EXPECTED_NODE_TEST_PACKAGES.includes(n))
   assert(
-    nodeTestPackages.length >= 4,
-    `only ${nodeTestPackages.length} package(s) matched: ${nodeTestPackages.map((p) => p.name).join(', ') || 'none'}`,
+    missing.length === 0 && extra.length === 0,
+    `roster drift. expected but not found: [${missing.join(', ')}]; found but not expected: [${extra.join(', ')}]`,
   )
 })
 
-// Anchored to a CALL at the start of a line, not a substring match. A plain
-// `.includes('installAssertMatchPayloadGuard(')` also matches the library's
-// own `export function installAssertMatchPayloadGuard({` definition — which
-// installs nothing on import — so a package that `--import`s the LIBRARY
-// instead of the hook (a one-token slip: dropping `-hook`) would read as
-// wired while its real suite ran unguarded (#8050 review, C1). The hook's own
-// call site (`installAssertMatchPayloadGuard()`, unindented, no `export`)
-// matches; the library's definition line and the hook's descriptive comment
-// mentioning the same name do not.
-const INSTALL_CALL = /^installAssertMatchPayloadGuard\(/m
+test('no package carries a --test flag the roster regex does not accept', () => {
+  const suspects = suspectTestFlagPackages(REPO_ROOT)
+  assert(
+    suspects.length === 0,
+    `these test scripts use --test but are outside the walk (their hooks go unchecked): ${suspects.map((p) => `${p.name}: ${p.script}`).join(' | ')}`,
+  )
+})
 
-for (const { name, script } of nodeTestPackages) {
-  test(`packages/${name} installs the payload guard in its test script`, () => {
-    const imports = [...script.matchAll(/--import\s+(\S+)/g)].map((m) => m[1].replace(/^['"]|['"]$/g, ''))
-    const installs = imports.some((spec) => {
-      if (!spec.startsWith('.')) return false // bare specifier (tsx/esm) — not ours
-      const file = resolve(packagesDir, name, spec)
-      if (!existsSync(file)) return false
-      return INSTALL_CALL.test(readFileSync(file, 'utf8'))
-    })
+// Behavioural, not textual (#8056 review S1): each package's relative `--import`s are
+// spawned and `assert.match` must come back as the guarded function. A text match credits
+// commented-out or dead calls; importing the LIBRARY instead of the hook (drop `-hook`)
+// installs nothing on import and fails the observation without special-casing (#8050 C1).
+for (const pkg of nodeTestPackagesFound) {
+  test(`packages/${pkg.name} installs the payload guard in its test script`, () => {
     assert(
-      installs,
-      `packages/${name}'s test script --imports nothing that CALLS installAssertMatchPayloadGuard() ` +
-        `at the start of a line (importing the library instead of the hook satisfies a plain substring ` +
-        `check but installs nothing):\n  ${script}`,
+      packagePatchesAssertMatch({ repoRoot: REPO_ROOT, pkg }),
+      `assert.match is NOT the guarded function under packages/${pkg.name}'s relative --imports ` +
+        `(importing the library instead of the hook, or a commented-out/dead call, installs nothing):\n  ${pkg.script}`,
     )
   })
 }
+
+// ── node:test suites outside the roster packages (#8056 finding 4) ──────────
+// Exemptions live in scripts/lib/node-test-roster.mjs and are asserted equal, both ways,
+// in no-test-force-exit.test.mjs; here the payload-relevant half: an exempt suite is only
+// safe unguarded while its assert.match count is the one the exemption was judged on.
+test('direct-run node:test suites keep the assert.match count their exemption was judged on', () => {
+  const directRun = directRunNodeTestFiles(REPO_ROOT, nodeTestPackagesFound.map((p) => p.name))
+  const bad = directRun.filter((f) => DIRECT_RUN_EXEMPTIONS[f.file]?.matchSites !== f.matchSites)
+  assert(
+    bad.length === 0,
+    `exemption out of date (new/changed assert.match sites, or no exemption): ${bad.map((f) => `${f.file}=${f.matchSites}`).join(', ')}`,
+  )
+})
 
 // ── The mechanism: does --import-ing the hook actually patch assert? ───────
 

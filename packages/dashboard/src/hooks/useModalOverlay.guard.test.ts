@@ -10,7 +10,7 @@ import { join, relative } from 'path'
 import {
   SRC, walkSources, walkStylesheets, fullScreenLayers, partialLayers, parseFixedLayers,
   elementsUsingClass, overlayElements, jsxClassElements, parseSource,
-  DYNAMIC_CLASSNAME_OK, inlinePositionSites, inlinePositionsIn,
+  DYNAMIC_CLASSNAME_OK, inlinePositionSites, inlinePositionsIn, layerLiteralSites,
 } from './overlayRoster.testSupport'
 
 const HOOK = join(SRC, 'hooks', 'useModalOverlay.ts')
@@ -195,6 +195,38 @@ describe('the scan reads what it claims to (#9198)', () => {
       }
     }
     for (const k of Object.keys(DYNAMIC_CLASSNAME_OK)) expect(live.has(k), `stale allow-list entry ${k}`).toBe(true)
+  })
+})
+
+// Files whose string literals NAME a layer class without an element of their own
+// spreading the hook's props. Each is reviewed: the literal is never rendered as
+// a className. Key: file under src. The reason must cite the class it names, and
+// the guard below asserts the list both ways.
+const LAYER_LITERAL_OK: Record<string, string> = {
+  'hooks/useShortcutDispatch.ts::shortcut-help-overlay': 'reads shortcut-help-overlay through classList.contains on mounted overlays to tell whether only the help dialog is open; a DOM query, never a rendered className',
+}
+
+describe('a layer class reaches an element only through a spreading one (#9207)', () => {
+  const layerSet = new Set(fullScreenLayers().map(l => l.selector.slice(1)))
+  const sites = layerLiteralSites(layerSet)
+  const loose = sites.filter(s => !s.spreading)
+  const key = (s: { file: string; cls: string }) => `${s.file}::${s.cls}`
+
+  it('every layer-class literal is the className of a spreading element, or allow-listed', () => {
+    expect(sites.length).toBeGreaterThan(0) // floor: a zero-site scan is a broken guard
+    expect(sites.some(s => s.spreading)).toBe(true)
+    const problems = loose
+      .filter(s => !Object.prototype.hasOwnProperty.call(LAYER_LITERAL_OK, key(s)))
+      .map(s => `${s.file}:${s.line} holds the literal "${s.cls}" outside the className of an element that spreads the overlay props (imported constant or prop path?)`)
+    expect(problems).toEqual([])
+  })
+
+  it('every allow-list entry is still such a literal, and its reason names the class', () => {
+    const live = new Set(loose.map(key))
+    for (const [k, why] of Object.entries(LAYER_LITERAL_OK)) {
+      expect(live.has(k), `stale allow-list entry ${k}: no such unspread literal remains`).toBe(true)
+      expect(why.includes(k.split('::')[1] as string), `${k}: reason must name the class`).toBe(true)
+    }
   })
 })
 
