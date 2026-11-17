@@ -5,7 +5,7 @@
  * enable refuses when the audit log is unwritable; every non-strict-primary caller is
  * refused; a principal cannot authenticate while there is no file-backed audit log.
  */
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,6 +17,7 @@ import { setLogListener, initFileLogging, closeFileLogging, getAuditLogPath, _se
 import { PrincipalKillSwitch } from '../src/principal-kill-switch.js'
 import { PrincipalStore } from '../src/principal-store.js'
 import { writeDurableFile } from '../src/durable-write.js'
+import { principalAuditor } from '../src/principal-audit.js'
 import { insertPrincipal } from './helpers/principal-store-fixture.js'
 
 class WsServer extends _WsServer {
@@ -262,11 +263,38 @@ describe('kill switch and revoke over a real socket', { skip: !posix }, () => {
       assert.equal(b.killSwitch.isDisabled('agent-1'), true)
     })
 
+    it('an enable whose directory fsync fails is refused (PERSIST_UNCONFIRMED), the daemon stays disabled and says what to do', async () => {
+      let n = 0
+      let armed = false
+      const b = await boot({ writeDurable: (p, t) => writeDurableFile(p, t, { _fsync: () => { if (armed && ++n === 2) throw Object.assign(new Error('EIO dir'), { code: 'EIO' }) } }) })
+      const { admin } = await adminAndPrincipals(b)
+      await ask(admin, { type: 'principal_admin_disable', all: true })
+      armed = true
+      const r = await ask(admin, { type: 'principal_admin_enable', all: true })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, 'PERSIST_UNCONFIRMED')
+      assert.ok(/stays disabled/.test(r.message) && /restart/.test(r.message) && /disable/.test(r.message))
+      assert.equal(b.killSwitch.isDisabled('agent-1'), true)
+    })
+
     it('enable --label cannot lift one label while all is disabled', async () => {
       const b = await boot()
       const { admin } = await adminAndPrincipals(b)
       await ask(admin, { type: 'principal_admin_disable', all: true })
       assert.equal((await ask(admin, { type: 'principal_admin_enable', label: 'agent-1' })).code, 'ALL_DISABLED')
+    })
+  })
+
+  describe('shutdown', () => {
+    it('closing the server flushes the pending collapsed refusal counts', async () => {
+      const flush = mock.method(principalAuditor, 'flushRejections')
+      try {
+        await boot()
+        assert.equal(flush.mock.callCount(), 0)
+        server.close()
+        server = null
+        assert.equal(flush.mock.callCount(), 1)
+      } finally { flush.mock.restore() }
     })
   })
 

@@ -21,8 +21,9 @@
  * shape means DISABLED FOR ALL, with `health()` saying why. Enabling from that state is
  * the operator's explicit `enable --all`, which rewrites a good file.
  *
- * The permissive direction (`enable`) flips memory only after the file is published, so a
- * failed write can never leave the daemon enabled while the file says disabled.
+ * The permissive direction (`enable`) flips memory only after the file is published AND
+ * confirmed durable, so an unconfirmed write can never leave the daemon enabled while the
+ * file may still say disabled (or the reverse after a restart).
  */
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -36,7 +37,8 @@ const log = createLogger('principal-kill-switch')
 
 export const KILL_SWITCH_VERSION = 1
 export const MAX_KILL_SWITCH_BYTES = 16 * 1024
-const MAX_LABELS = 256
+/** The one bound the writer and the reader share: a state the reader rejects is never written. */
+export const MAX_KILL_SWITCH_LABELS = 256
 
 /** `<config dir>/principals-disabled.json`, resolved per call so CHROXY_CONFIG_DIR is honored. */
 export function killSwitchPath() {
@@ -47,7 +49,7 @@ function parseFlag(content) {
   let doc
   try { doc = JSON.parse(content) } catch { return { reason: 'the kill-switch file is not valid JSON' } }
   if (doc == null || typeof doc !== 'object' || Array.isArray(doc) || doc.version !== KILL_SWITCH_VERSION ||
-      typeof doc.all !== 'boolean' || !Array.isArray(doc.labels) || doc.labels.length > MAX_LABELS ||
+      typeof doc.all !== 'boolean' || !Array.isArray(doc.labels) || doc.labels.length > MAX_KILL_SWITCH_LABELS ||
       !doc.labels.every((l) => typeof l === 'string' && PRINCIPAL_LABEL_PATTERN.test(l))) {
     return { reason: 'the kill-switch file has an unrecognised shape' }
   }
@@ -137,8 +139,12 @@ export class PrincipalKillSwitch {
    */
   disable(selector) {
     if (selector?.all === true) this._all = true
-    else if (typeof selector?.label === 'string' && PRINCIPAL_LABEL_PATTERN.test(selector.label)) this._labels.add(selector.label)
-    else return { ok: false, code: 'BAD_REQUEST' }
+    else if (typeof selector?.label === 'string' && PRINCIPAL_LABEL_PATTERN.test(selector.label)) {
+      // Never acknowledge a state the boot reader rejects (it would fail closed to disable-ALL).
+      // Re-disabling a listed label stays a no-op success.
+      if (!this._labels.has(selector.label) && this._labels.size >= MAX_KILL_SWITCH_LABELS) return { ok: false, code: 'TOO_MANY_LABELS' }
+      this._labels.add(selector.label)
+    } else return { ok: false, code: 'BAD_REQUEST' }
     const state = this.snapshot()
     const outcome = this._persist(state)
     return { ok: true, durable: outcome.durable, persistError: outcome.error, state }
@@ -163,6 +169,10 @@ export class PrincipalKillSwitch {
     const next = { all, labels: [...labels].sort() }
     const outcome = this._persist(next)
     if (!outcome.published) return { ok: false, code: 'PERSIST_FAILED', state: this.snapshot() }
+    // Published but not confirmed durable: the file may already read "enabled" and a restart
+    // could apply it. Lifting the brake on an unconfirmed write is the unsafe direction, so
+    // memory stays disabled and the operator is told to settle the state.
+    if (outcome.durable !== true) return { ok: false, code: 'PERSIST_UNCONFIRMED', persistError: outcome.error, state: this.snapshot() }
     this._all = all
     this._labels = labels
     this._health = { ok: true, status: 'ok', reason: null }

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, symlinkSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PrincipalKillSwitch } from '../src/principal-kill-switch.js'
+import { PrincipalKillSwitch, MAX_KILL_SWITCH_LABELS } from '../src/principal-kill-switch.js'
 import { createPrincipalBrakes } from '../src/principal-brakes.js'
 import { PrincipalStore } from '../src/principal-store.js'
 import { writeDurableFile } from '../src/durable-write.js'
@@ -150,6 +150,39 @@ describe('disable: memory first, then the durable write, then the verdict', () =
   })
 })
 
+describe('the label set has one bound shared by the writer and the reader', () => {
+  const labelN = (i) => `l${i}`
+  it('at the bound a disable is accepted and a reload confirms exactly those labels; the next one is refused with nothing written', { skip: !posix }, () => {
+    const d = fresh()
+    try {
+      const sw = new PrincipalKillSwitch({ path: d.path })
+      for (let i = 0; i < MAX_KILL_SWITCH_LABELS; i++) assert.equal(sw.disable({ label: labelN(i) }).ok, true)
+      const reloaded = new PrincipalKillSwitch({ path: d.path })
+      assert.equal(reloaded.health().ok, true, 'the reader accepts the full set the writer produced')
+      assert.equal(reloaded.snapshot().labels.length, MAX_KILL_SWITCH_LABELS)
+      assert.equal(reloaded.isDisabled(labelN(0)), true)
+      assert.equal(reloaded.isDisabled('another'), false, 'not disable-ALL')
+      const before = readFileSync(d.path, 'utf8')
+      const refused = sw.disable({ label: 'another' })
+      assert.deepEqual([refused.ok, refused.code], [false, 'TOO_MANY_LABELS'])
+      assert.equal(sw.isDisabled('another'), false)
+      assert.equal(readFileSync(d.path, 'utf8'), before, 'nothing written')
+      // re-disabling a listed label still succeeds
+      assert.equal(sw.disable({ label: labelN(3) }).ok, true)
+      // --all is always available
+      assert.equal(sw.disable({ all: true }).ok, true)
+    } finally { d.cleanup() }
+  })
+
+  it('a file one past the bound is rejected by the reader (the boundary is the same number)', { skip: !posix }, () => {
+    const d = fresh()
+    try {
+      writeFileSync(d.path, flag(false, Array.from({ length: MAX_KILL_SWITCH_LABELS + 1 }, (_, i) => labelN(i))), { mode: 0o600 })
+      assert.equal(new PrincipalKillSwitch({ path: d.path }).health().ok, false)
+    } finally { d.cleanup() }
+  })
+})
+
 describe('enable is explicit and the permissive direction publishes before memory flips', () => {
   it('enable --all clears everything, and survives a restart', { skip: !posix }, () => {
     const d = fresh()
@@ -188,6 +221,30 @@ describe('enable is explicit and the permissive direction publishes before memor
       assert.equal(out.code, 'PERSIST_FAILED')
       assert.equal(sw.isDisabled('x'), true)
       assert.equal(JSON.parse(readFileSync(d.path, 'utf8')).all, true)
+    } finally { d.cleanup() }
+  })
+
+  it('a directory-fsync failure during enable keeps the daemon DISABLED and refuses principal auth; a healthy enable is the control', { skip: !posix }, () => {
+    const d = fresh()
+    try {
+      const sw = new PrincipalKillSwitch({ path: d.path })
+      const store = new PrincipalStore({ path: d.storePath, allowTestInsert: true, brakes: { killSwitch: sw, auditAvailable: () => true } })
+      store.refresh()
+      const { token } = insertPrincipal(store)
+      sw.disable({ all: true })
+      let n = 0
+      sw._writeDurable = (p, t) => writeDurableFile(p, t, { _fsync: () => { if (++n === 2) throw Object.assign(new Error('EIO dir'), { code: 'EIO' }) } })
+      const out = sw.enable({ all: true })
+      assert.equal(out.ok, false)
+      assert.equal(out.code, 'PERSIST_UNCONFIRMED')
+      assert.equal(sw.isDisabled('x'), true, 'memory stays disabled')
+      assert.equal(sw.snapshot().all, true)
+      assert.equal(store.validate(token), null, 'principal auth is still refused')
+      // positive control: a healthy retry lifts the brake
+      sw._writeDurable = writeDurableFile
+      assert.equal(sw.enable({ all: true }).ok, true)
+      assert.equal(sw.isDisabled('x'), false)
+      assert.ok(store.validate(token))
     } finally { d.cleanup() }
   })
 

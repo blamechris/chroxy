@@ -4,9 +4,10 @@
  * happens when that line cannot be written, content is never logged, and repeated
  * identical rejections collapse into one counter line.
  */
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, appendFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { initFileLogging, closeFileLogging, _setAppendFileSyncForTest } from '../src/logger.js'
@@ -99,7 +100,10 @@ describe('principal audit over a real audit file', () => {
     const refused = withPrincipalEffect(client, () => ({ ok: false, reason: 'agents_off' }), { auditor: createPrincipalAuditor(), action: 'send', sessionId: 's1' }, () => { effects++ })
     assert.deepEqual(refused, { ok: false, reason: 'agents_off' })
     assert.equal(effects, 0)
-    assert.ok(agentLines().map(parse).every((l) => l.kind === 'outcome' && l.result === 'rejected:agents_off'), 'only a rejected line, never an attempt')
+    const refusedLines = agentLines().map(parse)
+    assert.equal(refusedLines.length, 1, 'exactly one record')
+    assert.equal(refusedLines[0].kind, 'outcome')
+    assert.equal(refusedLines[0].result, 'rejected:agents_off', 'a rejected line, never an attempt')
     assert.throws(() => withPrincipalEffect(client, pass, { auditor: createPrincipalAuditor(), action: 'send' }, () => { throw new Error('effect broke') }), /effect broke/)
     const last = parse(agentLines().at(-1))
     assert.equal(last.result, 'rejected:effect_error')
@@ -118,10 +122,18 @@ describe('principal audit over a real audit file', () => {
     assert.equal(raw.includes('tok-abcdef'), false)
     const lines = agentLines().map(parse)
     assert.equal(lines.length, 3)
+    const expected = createHash('sha256').update(secret, 'utf8').digest('hex')
     for (const l of lines) {
-      assert.equal(l.sha256, inputDigest(secret).sha256)
+      assert.equal(l.sha256, expected, 'an independent oracle, not the implementation\'s own helper')
       assert.equal(l.length, secret.length)
     }
+  })
+
+  it('inputDigest matches fixed SHA-256 test vectors, and a different body gives a different digest', () => {
+    assert.equal(inputDigest('abc').sha256, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    assert.equal(inputDigest('').sha256, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    assert.equal(inputDigest('abc').length, 3)
+    assert.notEqual(inputDigest('abd').sha256, inputDigest('abc').sha256)
   })
 
   it('outcome lines name the transition; failing outcome writes report it but cannot undo anything', () => {
@@ -160,5 +172,81 @@ describe('principal audit over a real audit file', () => {
     a.flushRejections()
     const counter = agentLines().map(parse).find((l) => l.collapsed)
     assert.equal(counter.count, 2)
+  })
+
+  describe('collapsed counts are not lost', () => {
+    const burst = (a, n = 3) => { for (let i = 0; i < n; i++) a.rejected(client.principal, { action: 'create' }, 'ceiling') }
+
+    it('two refusals then silence: the counter line appears when the window ends, with no later rejection', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        initFileLogging({ logDir: dir })
+        const a = createPrincipalAuditor({ collapseMs: 60_000 })
+        burst(a, 3)
+        assert.equal(agentLines().length, 1, 'only the first refusal is logged so far')
+        mock.timers.tick(59_999)
+        assert.equal(agentLines().length, 1, 'not before the window ends')
+        mock.timers.tick(1)
+        const lines = agentLines().map(parse)
+        assert.equal(lines.length, 2)
+        assert.equal(lines[1].collapsed, true)
+        assert.equal(lines[1].count, 2)
+        assert.equal(lines[1].result, 'rejected:ceiling')
+      } finally { mock.timers.reset() }
+    })
+
+    it('a lone refusal writes no counter line when its window ends (positive control: no spam)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        initFileLogging({ logDir: dir })
+        const a = createPrincipalAuditor({ collapseMs: 60_000 })
+        burst(a, 1)
+        mock.timers.tick(120_000)
+        assert.equal(agentLines().length, 1)
+        assert.equal(a.flushRejections().pending, 0)
+      } finally { mock.timers.reset() }
+    })
+
+    it('flushRejections (the shutdown path) writes pending counts and reports none left', () => {
+      initFileLogging({ logDir: dir })
+      const a = createPrincipalAuditor({ collapseMs: 60_000 })
+      burst(a, 4)
+      assert.deepEqual(a.flushRejections(), { pending: 0 })
+      assert.equal(parse(agentLines().at(-1)).count, 3)
+      assert.equal(a.flushRejections().pending, 0)
+      assert.equal(agentLines().length, 2, 'a second flush writes nothing more')
+    })
+
+    it('a failed counter write is kept and retried, not dropped', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        initFileLogging({ logDir: dir })
+        const a = createPrincipalAuditor({ collapseMs: 60_000 })
+        burst(a, 3)
+        failAudit('ENOSPC')
+        mock.timers.tick(60_000)
+        assert.equal(agentLines().length, 1, 'the counter write failed')
+        assert.equal(a.flushRejections().pending, 1, 'and the count is still held')
+        _setAppendFileSyncForTest(null)
+        assert.equal(a.flushRejections().pending, 0)
+        const last = parse(agentLines().at(-1))
+        assert.equal(last.collapsed, true)
+        assert.equal(last.count, 2)
+      } finally { mock.timers.reset() }
+    })
+
+    it('a failed timer flush is retried by the next window, within a bounded budget', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        initFileLogging({ logDir: dir })
+        const a = createPrincipalAuditor({ collapseMs: 1000 })
+        burst(a, 3)
+        failAudit('ENOSPC')
+        mock.timers.tick(1000)
+        _setAppendFileSyncForTest(null)
+        mock.timers.tick(1000)
+        assert.equal(parse(agentLines().at(-1)).count, 2, 'the re-armed timer wrote it once the disk recovered')
+      } finally { mock.timers.reset() }
+    })
   })
 })

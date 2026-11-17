@@ -156,7 +156,7 @@ function handlePrincipalAdminDisable(ws, client, msg, ctx) {
   //    are refused. 2. Then the durable write (file fsync, rename, directory fsync).
   const out = sw.disable(selector)
   if (!out.ok) {
-    reply(ws, ctx, msg, 'disable', { ok: false, code: out.code, message: 'Could not apply the request.' })
+    reply(ws, ctx, msg, 'disable', { ok: false, code: out.code, message: out.code === 'TOO_MANY_LABELS' ? 'Too many disabled labels: nothing was changed. Use --all to disable every agent.' : 'Could not apply the request.' })
     return
   }
   // The kill is a SAFETY BRAKE: it proceeds whether or not this line can be written
@@ -174,6 +174,11 @@ function handlePrincipalAdminDisable(ws, client, msg, ctx) {
   //    yet (S8), which releases them when it lands.
   ctx.services?.endPrincipalConnections?.(selector, 'disabled')
   dropQueuedWork(ctx, selector, 'killed')
+}
+
+const ENABLE_REFUSAL_MESSAGES = {
+  ALL_DISABLED: 'Every agent is disabled: re-enable with --all.',
+  PERSIST_UNCONFIRMED: 'The enable was not confirmed on disk, so the daemon stays disabled. The file may already read "enabled", so a restart could apply it: run enable again once the disk is healthy, or run disable to make the disabled state durable.',
 }
 
 function handlePrincipalAdminEnable(ws, client, msg, ctx) {
@@ -201,7 +206,7 @@ function handlePrincipalAdminEnable(ws, client, msg, ctx) {
     reply(ws, ctx, msg, 'enable', {
       ok: false,
       code: out.code,
-      message: out.code === 'ALL_DISABLED' ? 'Every agent is disabled: re-enable with --all.' : 'Could not re-enable: the switch file could not be written, so agents stay disabled.',
+      message: ENABLE_REFUSAL_MESSAGES[out.code] ?? 'Could not re-enable: the switch file could not be written, so agents stay disabled.',
     })
     return
   }

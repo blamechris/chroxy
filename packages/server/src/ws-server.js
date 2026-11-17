@@ -20,6 +20,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalMaySee, principalPolicyOptsFromCtx, sendPrincipalRefusal, PRINCIPAL_ALLOWED_MESSAGE_TYPES } from './principal-policy.js'
 import { PrincipalSubscriptions } from './principal-subscriptions.js'
+import { principalAuditor } from './principal-audit.js'
 import { handleAuthMessage, isLoopbackConnection, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
@@ -3367,10 +3368,11 @@ export class WsServer {
 
   /**
    * Why a principal connection may not continue: 'live' when it may, otherwise
-   * 'revoked', 'expired' or 'invalid' (no store, an untrusted store, an unknown grant, or
-   * an origin that is no longer loopback). Memory only: no disk read per frame.
+   * 'revoked', 'expired', 'disabled' (the kill switch) or 'invalid' (no store, an untrusted
+   * store, an unknown grant, an origin that is no longer loopback, or audit logging down).
+   * Memory only: no disk read per frame.
    * @param {object} client
-   * @returns {'live'|'revoked'|'expired'|'invalid'}
+   * @returns {'live'|'revoked'|'expired'|'disabled'|'invalid'}
    */
   _principalState(client) {
     const store = this._principalStore
@@ -3813,6 +3815,8 @@ export class WsServer {
     // seq contiguously. A failure here only leaves it marked unclean (a restart then
     // treats it as a crash, which is always safe).
     try { this._principalJournal?.close() } catch (err) { log.warn(`principal journal close failed: ${err?.message || err}`) }
+    // Write any collapsed refusal counts still waiting for their window to end.
+    try { principalAuditor.flushRejections() } catch (err) { log.warn(`principal audit flush failed: ${err?.message || err}`) }
     if (this._daemonUpdate && this._daemonUpdateChangeHandler && typeof this._daemonUpdate.off === 'function') {
       this._daemonUpdate.off('change', this._daemonUpdateChangeHandler)
       this._daemonUpdateChangeHandler = null

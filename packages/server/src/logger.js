@@ -164,6 +164,11 @@ let _logPath = null
 let _auditLogPath = null
 let _writeCount = 0
 let _quietConsole = false
+// Record framing of the audit file's tail. A failed append (ENOSPC) can leave a PREFIX of the
+// line with no newline; the next accepted line would be glued onto it and neither would parse
+// on its own. 'unchecked' (process start, after a rotation): look at the file's last byte before
+// the next write. 'dirty' (an append threw): start the next write on a fresh line. 'clean': as is.
+let _auditTail = 'unchecked'
 
 // Test seam for the file append, so a test can make it fail (ENOSPC, EBADF) without
 // breaking a real disk. Production never sets it; `null` restores the real call.
@@ -246,6 +251,7 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
   }
   _logPath = join(_logDir, 'chroxy.log')
   _auditLogPath = join(_logDir, AUDIT_LOG_NAME)
+  _auditTail = 'unchecked'
 }
 
 /**
@@ -385,6 +391,7 @@ export function closeFileLogging() {
   _logDir = defaultLogDir()
   _logPath = null
   _auditLogPath = null
+  _auditTail = 'unchecked'
   _writeCount = 0
   _quietConsole = false
   _logListeners.clear()
@@ -395,13 +402,13 @@ export function closeFileLogging() {
  * Rotate: base.N.log (overwritten) <- ... <- base.1.log <- base.log
  */
 function _maybeRotateAt(logPath, maxSize, maxFiles) {
-  if (!logPath) return
+  if (!logPath) return false
   try {
     const stats = statSync(logPath)
-    if (stats.size < maxSize) return
+    if (stats.size < maxSize) return false
   } catch (err) {
     if (err?.code !== 'ENOENT') console.error('[logger] stat failed:', err?.message)
-    return
+    return false
   }
 
   // #7162: anchored to the FINAL '.log' — a first-occurrence string replace
@@ -416,6 +423,30 @@ function _maybeRotateAt(logPath, maxSize, maxFiles) {
     } catch (err) {
       if (err?.code !== 'ENOENT') console.error('[logger] rename failed:', err?.message)
     }
+  }
+  return true
+}
+
+/**
+ * Whether the audit file's tail needs a record boundary before the next line: true after a
+ * failed append, or when the file's last byte is not a newline (a crash or a partial append
+ * from an earlier process). A file we cannot inspect counts as needing one (a stray blank
+ * line is harmless; a glued record is not).
+ */
+function _auditTailNeedsBoundary() {
+  if (_auditTail === 'clean') return false
+  if (_auditTail === 'dirty') return true
+  let fd = null
+  try {
+    const size = statSync(_auditLogPath).size
+    if (size === 0) return false
+    fd = openSync(_auditLogPath, 'r')
+    const last = Buffer.alloc(1)
+    return readSync(fd, last, 0, 1, size - 1) !== 1 || last[0] !== 0x0a
+  } catch (err) {
+    return err?.code !== 'ENOENT'
+  } finally {
+    if (fd !== null) { try { closeSync(fd) } catch { /* nothing to do */ } }
   }
 }
 
@@ -529,14 +560,17 @@ export function createLogger(component, context = {}) {
     let auditWritten = false
     if (level === 'audit' && _logToFile && _auditLogPath) {
       try {
-        _appendFileSync(_auditLogPath, line + '\n')
+        // A record boundary first, so this line parses on its own whatever the tail holds.
+        _appendFileSync(_auditLogPath, (_auditTailNeedsBoundary() ? '\n' : '') + line + '\n')
         auditWritten = true
+        _auditTail = 'clean'
       } catch {
-        // Same #746 rationale as above.
+        // Same #746 rationale as above. The append may have written a prefix.
+        _auditTail = 'dirty'
       }
       if (auditWritten) {
         try {
-          _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)
+          if (_maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)) _auditTail = 'unchecked'
         } catch {
           // The line is already on disk; a rotation failure does not un-write it.
         }

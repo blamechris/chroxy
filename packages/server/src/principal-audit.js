@@ -16,7 +16,8 @@
  * itself is never logged: fields are an allowlist, and `text` is turned into a digest
  * and dropped. The transcript is the content record (contract D7).
  *
- * Repeated identical rejections within a minute collapse into one counter line.
+ * Repeated identical rejections within a minute collapse into one counter line, written when the window ends (a bounded, unref'd timer),
+ * on graceful shutdown, or on the next flush if a write failed.
  */
 import { createHash } from 'node:crypto'
 import { auditOrRefuse as defaultAuditOrRefuse } from './logger.js'
@@ -33,6 +34,7 @@ export const PRINCIPAL_OUTCOME_RESULTS = Object.freeze(['delivered', 'queued', '
 
 export const REJECT_COLLAPSE_WINDOW_MS = 60_000
 const MAX_COLLAPSE_KEYS = 256
+const MAX_FLUSH_FAILURES = 5
 
 /** @param {string} text @returns {{ sha256: string, length: number }} */
 export function inputDigest(text) {
@@ -91,14 +93,35 @@ export function createPrincipalAuditor({ auditOrRefuse = defaultAuditOrRefuse, n
     return verdict?.ok === true ? { ok: true } : { ok: false, reason: 'audit_unavailable' }
   }
 
-  function flushCollapsed(key, entry) {
-    rejections.delete(key)
+  function drop(key, entry) {
+    if (entry.timer) clearTimeout(entry.timer)
+    if (rejections.get(key) === entry) rejections.delete(key)
+  }
+
+  /**
+   * Write the entry's collapsed count (if any) and retire it. A FAILED counter write keeps
+   * the entry, unless `force` (eviction) or the retry budget is spent, so the count is not
+   * lost to one bad write. Returns true when the entry was retired.
+   */
+  function flushCollapsed(key, entry, force = false) {
     if (entry.suppressed > 0) {
       const { kind, fields } = buildFields('outcome', new Date(now()).toISOString(), entry.principal, entry.descriptor, {
         result: `rejected:${entry.reason}`, count: entry.suppressed, collapsed: true,
       })
-      write(kind, fields)
+      if (write(kind, fields).ok !== true && !force && ++entry.failures < MAX_FLUSH_FAILURES) {
+        arm(key, entry)
+        return false
+      }
     }
+    drop(key, entry)
+    return true
+  }
+
+  /** A bounded, unref'd timer: silence after a burst still records the count. */
+  function arm(key, entry) {
+    if (entry.timer) clearTimeout(entry.timer)
+    entry.timer = setTimeout(() => { entry.timer = null; if (rejections.get(key) === entry) flushCollapsed(key, entry) }, collapseMs)
+    entry.timer.unref?.()
   }
 
   return {
@@ -127,7 +150,7 @@ export function createPrincipalAuditor({ auditOrRefuse = defaultAuditOrRefuse, n
     /**
      * A refusal line. Identical refusals (same principal, action, reason) inside the
      * collapse window are counted, not logged; the count is written as one line when the
-     * window next rolls over (or on `flushRejections`). Best effort.
+     * window ends (a window-end timer, or `flushRejections` at shutdown). Best effort.
      */
     rejected(principal, descriptor, reason) {
       const r = clip(String(reason ?? 'rejected'), 64)
@@ -138,19 +161,26 @@ export function createPrincipalAuditor({ auditOrRefuse = defaultAuditOrRefuse, n
         existing.suppressed++
         return { ok: true, collapsed: true }
       }
-      if (existing) flushCollapsed(key, existing)
+      if (existing) flushCollapsed(key, existing, true)
       if (rejections.size >= MAX_COLLAPSE_KEYS) {
         const oldest = rejections.keys().next().value
-        flushCollapsed(oldest, rejections.get(oldest))
+        flushCollapsed(oldest, rejections.get(oldest), true)
       }
-      rejections.set(key, { firstAt: t, suppressed: 0, principal, descriptor, reason: r })
+      const entry = { firstAt: t, suppressed: 0, failures: 0, timer: null, principal, descriptor, reason: r }
+      rejections.set(key, entry)
+      arm(key, entry)
       const { kind, fields } = buildFields('outcome', new Date(t).toISOString(), principal, descriptor, { result: `rejected:${r}` })
       return write(kind, fields)
     },
 
-    /** Write every pending collapsed-count line now (shutdown, tests). */
+    /**
+     * Write every pending collapsed-count line now (graceful shutdown, tests). A failed write
+     * keeps its entry for the next flush.
+     * @returns {{ pending: number }} entries still holding an unwritten count
+     */
     flushRejections() {
       for (const [key, entry] of [...rejections]) flushCollapsed(key, entry)
+      return { pending: [...rejections.values()].filter((e) => e.suppressed > 0).length }
     },
   }
 }
