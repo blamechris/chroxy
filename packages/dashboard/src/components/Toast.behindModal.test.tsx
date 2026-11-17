@@ -189,13 +189,11 @@ describe('overlay layering (#9168)', () => {
     return Number(z[1])
   }
 
-  // Overlay classes derived from the stylesheet + sources, not hardcoded.
-  const overlayClasses = (): string[] => fullScreenLayers().map(l => l.selector)
-
+  // Overlay layers (class + z-index) derived from EVERY stylesheet, not hardcoded.
   it('behind-modal z-index is below every overlay z-index', () => {
-    const classes = overlayClasses()
-    expect(classes.length).toBeGreaterThan(0)
+    const layers = fullScreenLayers()
+    expect(layers.length).toBeGreaterThan(0)
     const behind = zOf('.toast-container.toast-container-behind-modal')
-    for (const c of classes) expect(behind, c).toBeLessThan(zOf(c))
+    for (const l of layers) expect(behind, l.selector).toBeLessThan(l.z)
   })
 })
