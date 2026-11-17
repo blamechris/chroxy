@@ -337,6 +337,22 @@ export const ServerToolInputDeltaSchema = z.object({
     toolUseId: z.string(),
     partialJson: z.string(),
 });
+// #8415: the input of a tool card the client already holds without it. The server
+// learns some inputs after the `tool_start` is recorded (#7346 on the result, #8371
+// before the tool runs) and fills the recorded entry in place, without a new seq, so
+// a delta replay (which starts after the client's cursor) would never carry it. A
+// delta replay sends this frame instead, only to a client that advertised
+// `history_tool_input_backfill_v1`. It is reconcile-only: the client fills the input
+// of the held card whose id is `messageId` if that card has none, and otherwise does
+// nothing (no new card, no running tool, no terminal line). No `historySeq`, so no
+// cursor moves; sending it again is a no-op.
+export const ServerToolInputBackfillSchema = z.object({
+    type: z.literal('tool_input_backfill'),
+    sessionId: z.string(),
+    messageId: z.string(),
+    toolUseId: z.string().optional(),
+    input: z.record(z.string(), z.unknown()),
+});
 /**
  * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
  * conversation currently occupies in the model's context window.
