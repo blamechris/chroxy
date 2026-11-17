@@ -1095,6 +1095,9 @@ export class SessionManager extends EventEmitter {
     // #8326: sessionId -> daemon turns dispatched since a person last typed into it. In-memory
     // on purpose (a restart is a fresh start; see daemonTurnRefusal). Reset by recordUserIntent only.
     this._daemonWakeCount = new Map()
+    // #8327: sessionId -> Set of owners (TurnDriver instances) currently occupying it. THE one
+    // registry every driver reports to (see markTurnDriven); daemonTurnRefusal answers `orchestrated`.
+    this._turnDriven = new Map()
     // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
     // continued as a NEW thread, held until the first accepted user input carries it.
     this._continuationSeeds = new Map()
@@ -1208,6 +1211,7 @@ export class SessionManager extends EventEmitter {
     this._costBudget.removeSession(sessionId)
     this._userStopped.delete(sessionId)
     this._daemonWakeCount.delete(sessionId)
+    this._turnDriven.delete(sessionId)
     this._continuationSeeds.delete(sessionId)
     for (const [requestId, pending] of this._permissionRequests) {
       if (pending.sessionId === sessionId) this._permissionRequests.delete(requestId)
@@ -3602,6 +3606,7 @@ export class SessionManager extends EventEmitter {
     this._history.clear()
     this._costBudget.clear()
     this._userStopped.clear()
+    this._turnDriven.clear()
     // #5554: persist any pending usage records on shutdown (best-effort).
     try { this.skillsUsageRecorder?.flush() } catch { /* non-fatal */ }
   }
@@ -5794,6 +5799,13 @@ export class SessionManager extends EventEmitter {
    *                       in-memory and per daemon run — a restart starts at 0,
    *                       which is acceptable because the loop it bounds needs a
    *                       live agent pushing in this process.
+   *   - `'orchestrated'`  (#8327) a TurnDriver (scheduler, build-manager /
+   *                       orchestration run) occupies the session: a wake turn
+   *                       would interleave with the driven turn and its `result`
+   *                       could settle the driver's waiter with the wake's text.
+   *                       Checked after the user-facing reasons (they need a
+   *                       person to act; this one clears by itself when the
+   *                       driver releases) and after the cap, before the provider.
    *   - otherwise the provider's own reason (`session.daemonTurnRefusal()`): a
    *     state in which its `sendMessage` would respawn, error, or discard the
    *     user's queued follow-ups
@@ -5801,9 +5813,8 @@ export class SessionManager extends EventEmitter {
    * A provider hook that throws refuses (fail safe): not being able to tell is
    * not a reason to wake.
    *
-   * NOT covered: a session another driver occupies (orchestration TurnDriver /
-   * scheduler). Each driver keeps its occupancy in its own private set, so there
-   * is nothing cheap to ask here; building a registry for it is its own change.
+   * Order is part of the contract: no-session, budget-paused, user-stopped,
+   * wake-cap, orchestrated, provider.
    *
    * @param {string} sessionId
    * @param {{ maxConsecutiveWakes?: number }} [options]
@@ -5817,6 +5828,7 @@ export class SessionManager extends EventEmitter {
     if (Number.isFinite(maxConsecutiveWakes) && (this._daemonWakeCount.get(sessionId) ?? 0) >= maxConsecutiveWakes) {
       return 'wake-cap'
     }
+    if (this.isTurnDriven(sessionId)) return 'orchestrated'
     try {
       const reason = entry.session?.daemonTurnRefusal?.()
       return typeof reason === 'string' && reason.length > 0 ? reason : null
@@ -5824,6 +5836,34 @@ export class SessionManager extends EventEmitter {
       log.warn(`daemonTurnRefusal threw for session ${sessionId}; refusing: ${err?.message || err}`)
       return 'refusal-check-failed'
     }
+  }
+
+  /**
+   * #8327: a TurnDriver took (or queued for) the session. `owner` is the driver
+   * instance; several may hold one session at once, and it counts as driven until
+   * every owner has released. Idempotent per owner. No-op for an unknown session.
+   *
+   * @param {string} sessionId
+   * @param {object} owner
+   */
+  markTurnDriven(sessionId, owner) {
+    if (!this._sessions.has(sessionId) || !owner) return
+    let owners = this._turnDriven.get(sessionId)
+    if (!owners) { owners = new Set(); this._turnDriven.set(sessionId, owners) }
+    owners.add(owner)
+  }
+
+  /** #8327: the owner let go of the session (turn ended, errored, timed out, or driver disposed). */
+  releaseTurnDriven(sessionId, owner) {
+    const owners = this._turnDriven.get(sessionId)
+    if (!owners) return
+    owners.delete(owner)
+    if (owners.size === 0) this._turnDriven.delete(sessionId)
+  }
+
+  /** #8327: is any TurnDriver occupying this session right now? */
+  isTurnDriven(sessionId) {
+    return (this._turnDriven.get(sessionId)?.size ?? 0) > 0
   }
 
   /**
