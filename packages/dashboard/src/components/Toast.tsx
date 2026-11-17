@@ -17,6 +17,7 @@
  * otherwise disappear before a slow reader/clicker can act.
  */
 import { useEffect, useRef } from 'react'
+import { useAnyModalOverlayOpen } from '../hooks/useModalOverlay'
 import type { ServerErrorAction } from '@chroxy/store-core'
 
 const AUTO_DISMISS_MS = 5000
@@ -84,7 +85,7 @@ export interface ToastProps {
  * resume mid-interaction and dismiss while the user is still reading or
  * about to click the action button.
  */
-type PauseReason = 'hover' | 'focus'
+type PauseReason = 'hover' | 'focus' | 'modal'
 
 interface TimerState {
   timer: ReturnType<typeof setTimeout> | null
@@ -196,6 +197,20 @@ export function Toast({ items, onDismiss }: ToastProps) {
     }
   }, [items, onDismiss])
 
+  // #9168: while any modal overlay is open the stack draws beneath it and
+  // every auto-dismiss timer pauses ('modal' composes with hover/focus: a toast
+  // resumes only once every reason has cleared). The pause reason is applied
+  // to toasts that arrive mid-modal too, via the items effect above running
+  // before this one on the same commit.
+  const modalOpen = useAnyModalOverlayOpen()
+  useEffect(() => {
+    for (const id of timersRef.current.keys()) {
+      if (modalOpen) pauseTimer(id, 'modal')
+      else resumeTimer(id, 'modal')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalOpen, items])
+
   useEffect(() => {
     return () => {
       for (const state of timersRef.current.values()) {
@@ -205,7 +220,10 @@ export function Toast({ items, onDismiss }: ToastProps) {
   }, [])
 
   return (
-    <div className="toast-container" data-testid="toast-container">
+    <div
+      className={modalOpen ? 'toast-container toast-container-behind-modal' : 'toast-container'}
+      data-testid="toast-container"
+    >
       {items.map(item => (
         <div
           key={item.id}

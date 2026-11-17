@@ -14,6 +14,7 @@ import { useConnectionStore } from '../store/connection'
 import type { SymbolEntry } from '@chroxy/protocol'
 import { isImeComposing } from '../utils/ime'
 import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 export interface SymbolSearchPaletteProps {
   isOpen: boolean
@@ -28,6 +29,7 @@ const SYMBOL_KIND_ICON: Record<string, string> = {
 }
 
 export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProps) {
+  const { overlayProps } = useModalOverlay()
   const requestWorkspaceSymbols = useConnectionStore(s => s.requestWorkspaceSymbols)
   const snapshot = useConnectionStore(s => s.workspaceSymbols)
   const loading = useConnectionStore(s => s.workspaceSymbolsLoading)
@@ -110,7 +112,7 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
   return (
     <div
       className="file-open-palette-overlay"
-      data-modal-overlay
+      {...overlayProps}
       data-testid="symbol-search-palette"
       onKeyDown={handleKeyDown}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}

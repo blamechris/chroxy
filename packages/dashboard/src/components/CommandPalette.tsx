@@ -2,6 +2,7 @@
  * CommandPalette — searchable command list overlay with keyboard navigation.
  */
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 import { formatShortcutKeys } from '../utils/platform'
 import { isImeComposing } from '../utils/ime'
 
@@ -21,6 +22,7 @@ export interface CommandPaletteProps {
 }
 
 export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPaletteProps) {
+  const { overlayProps } = useModalOverlay()
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -110,7 +112,7 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
   }
 
   return (
-    <div className="command-palette" data-testid="command-palette">
+    <div {...overlayProps} className="command-palette" data-testid="command-palette">
       <div
         className="command-palette-backdrop"
         data-testid="command-palette-backdrop"

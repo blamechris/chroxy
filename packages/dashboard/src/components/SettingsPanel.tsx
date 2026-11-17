@@ -5,7 +5,7 @@
  * and persist to localStorage.
  */
 import type { UseNotificationPermissionResult } from '../hooks/useNotificationPermission'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
@@ -54,6 +54,7 @@ import {
   setAllowAutoPermissionMode,
 } from '../hooks/useTauriIPC'
 import { useDebouncedSetter } from '../hooks/useDebouncedSetter'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 /** Confirmation copy from issue #3077 — keep verbatim. */
 const AUTO_PERMISSION_CONFIRM_MESSAGE =
@@ -2381,7 +2382,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
  * now redirect to the Control Room Settings tab instead — see App.tsx.
  */
 export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, turnCompleteNotificationEnabled, onToggleTurnCompleteNotification, notificationPermission }: SettingsPanelProps) {
-  const backdropRef = useRef<HTMLDivElement>(null)
+  const { overlayRef: backdropRef, overlayProps } = useModalOverlay<HTMLDivElement>()
 
   useEffect(() => {
     if (!isOpen) return
@@ -2402,7 +2403,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
 
   return (
     <>
-      <div ref={backdropRef} className="settings-backdrop" data-modal-overlay onClick={onClose} />
+      <div {...overlayProps} className="settings-backdrop" onClick={onClose} />
       <div className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div className="settings-header">
           <h2 id="settings-title">Settings</h2>
