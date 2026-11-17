@@ -450,7 +450,7 @@ n=0
 while IFS='|' read -r BODY CAUSE; do
   n=$((n + 1)); printf '%s' "$BODY" >"$PATCH_DIR/prov$n.json"
   BEFORE="$(count_smoke_dirs)"
-  pd start --config-patch "$PATCH_DIR/prov$n.json" >/dev/null 2>"$WORK/pv.err"; RC=$?
+  pd start --config-patch "$PATCH_DIR/prov$n.json" </dev/null >/dev/null 2>"$WORK/pv.err"; RC=$?
   [ "$RC" -eq 2 ] && grep -q "REFUSING" "$WORK/pv.err" && grep -Eq "$CAUSE" "$WORK/pv.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
     && pass "--config-patch refuses provider shape $n naming its cause (exit 2, no scratch dir)" || fail "--config-patch refuses provider shape $n naming its cause (exit 2, no scratch dir)" "rc=$RC want=$CAUSE got=$(cat "$WORK/pv.err")"
 done <<'SHAPES'
