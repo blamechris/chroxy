@@ -22,6 +22,12 @@
  * order is a presentation choice with a single definition (the array order),
  * so there is no second copy of it to disagree with. It is pinned where it is
  * observable — the dashboard render test and the app constants test.
+ *
+ * The second describe block (#8567) pins the default quiet-hours bypass pair
+ * the same way: server `DEFAULT_BYPASS_CATEGORIES` (notification-prefs.js)
+ * against the protocol's `DEFAULT_BYPASS_CATEGORIES`, two independent literals
+ * checked in both directions. Add or remove a default on one side only and the
+ * matching direction fails, naming the key and the file that lacks it.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -89,7 +95,7 @@ describe('notification category roster: server <-> clients (#7429)', () => {
 })
 
 describe('default notification bypass: server <-> clients (#8567)', () => {
-  it('every server default bypass is checked by both clients', () => {
+  it('every server default bypass is present in the shared protocol set', () => {
     const missing = DEFAULT_BYPASS_CATEGORIES.filter((key) => !CLIENT_DEFAULT_BYPASS_CATEGORIES.includes(key))
     assert.deepEqual(missing, [], `server default bypass missing from ${PROTOCOL_FILE}: ${missing.join(', ')}`)
   })
