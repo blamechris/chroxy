@@ -1852,6 +1852,14 @@ jobs:
         # because the token survived via the exported API_TOKEN.
         run: bash scripts/__tests__/docker-entrypoint.test.sh
 
+      - name: Run preview-daemon.sh tests
+        # #8305 — the one recipe for an isolated preview daemon (env -i
+        # allowlist, keychain off, PID-guarded stop, never 8765). Driven
+        # against a stub daemon on a throwaway HOME; needs lsof and curl, both
+        # on the runner image. `bash -n` on the script itself is covered by
+        # scripts/parse-check-shell.sh (it enumerates every tracked *.sh).
+        run: bash scripts/__tests__/preview-daemon.test.sh
+
       - name: Run require-review-before-merge.sh tests
         # #7907 — the pre-merge review gate's "does this command mention pr
         # merge" check used to be `echo "$COMMAND" | grep -q 'pr merge'` under
