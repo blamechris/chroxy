@@ -30,7 +30,7 @@
 
 import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -46,10 +46,15 @@ import {
 import {
   DIRECT_RUN_EXEMPTIONS,
   EXPECTED_NODE_TEST_PACKAGES,
+  countMatchSites,
   directRunNodeTestFiles,
+  importsNodeTest,
   nodeTestPackages,
-  packageInstalls,
+  packageRefusesForceExit,
   suspectTestFlagPackages,
+  unclassifiedNodeTestMentions,
+  workflowRunsFileDirectly,
+  workflowCommands,
 } from '../lib/node-test-roster.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -63,7 +68,7 @@ const HOOK_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/no-test-force-exi
 // A floor on the number of cases accounted for, so a run that loses cases
 // (an early `return`, a bad refactor) goes red instead of printing a small
 // tidy "all passed".
-const MIN_CASES = 36
+const MIN_CASES = 40
 
 let pass = 0
 let fail = 0
@@ -282,20 +287,16 @@ test('no package carries a --test flag the roster regex does not accept', () => 
   )
 })
 
-// Anchored to a CALL at the start of a line. A substring check also matches the library's
-// own `export function assertNoTestForceExit(` definition, which does not run on import, so
-// a package that --imports the LIBRARY instead of the HOOK (drop `-hook`) read as wired
-// while its suite ran unrefused (#8056 finding 1). The hook and the setup modules call it
-// unindented; the library's definition and the hook's comment do not match.
-const INSTALL_CALL = /^assertNoTestForceExit\(/m
-const LIBRARY_FILES = ['scripts/lib/no-test-force-exit.mjs']
-
+// Behavioural, not textual: each package's relative `--import`s are SPAWNED with
+// `--test --test-force-exit` and must die with the refusal's error code. A text match
+// credits a call in a block comment, a template string or dead code, and importing the
+// LIBRARY instead of the hook installs nothing on import (#8056 finding 1, review S1).
 for (const pkg of nodeTestPackagesFound) {
   test(`packages/${pkg.name} installs the refusal in its test script`, () => {
     assert(
-      packageInstalls({ repoRoot: REPO_ROOT, pkg, installCall: INSTALL_CALL, libraryFiles: LIBRARY_FILES }),
-      `packages/${pkg.name}'s test script --imports nothing that CALLS assertNoTestForceExit() at the start of a line ` +
-        `(importing the library instead of the hook satisfies a substring check but installs nothing):\n  ${pkg.script}`,
+      packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg }),
+      `a \`--test --test-force-exit\` run under packages/${pkg.name}'s relative --imports was NOT refused ` +
+        `(importing the library instead of the hook, or a commented-out/dead call, installs nothing):\n  ${pkg.script}`,
     )
   })
 }
@@ -324,6 +325,49 @@ test('every direct-run exemption states a reason and its exact assert.match coun
     assert(typeof ex.reason === 'string' && ex.reason.length > 20, `${file}: exemption has no real reason`)
     assert(ex.matchSites === matchSites, `${file}: exemption says ${ex.matchSites} assert.match site(s), file has ${matchSites} — re-judge the exemption`)
   }
+})
+
+const CI_YML = readFileSync(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')
+
+test('every exempt suite is invoked as `node <file>` by a ci.yml step', () => {
+  const stale = Object.keys(DIRECT_RUN_EXEMPTIONS).filter((f) => !workflowRunsFileDirectly(REPO_ROOT, CI_YML, f))
+  assert(
+    stale.length === 0,
+    `exempted but not run as \`node <file>\` in .github/workflows/ci.yml (its exemption reason no longer holds): [${stale.join(', ')}]`,
+  )
+})
+
+test('the ci.yml reader tells `node <file>` from `node --test <file>` and from other scripts', () => {
+  const yml = [
+    'jobs:', '  j:', '    steps:',
+    '      - name: direct', '        working-directory: packages/desktop',
+    '        run: |', '          set -o pipefail', '          node scripts/a.test.mjs | tee /tmp/x',
+    '      - name: runner', '        run: node --test packages/b/b.test.mjs',
+    '      - name: other', '        run: node packages/c/helper.mjs packages/c/c.test.mjs',
+  ].join('\n')
+  assert(workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/desktop/scripts/a.test.mjs'), 'direct run in a working directory')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/b/b.test.mjs'), '--test runner is not a direct run')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/c/c.test.mjs'), 'an argument of another script is not a direct run')
+  assert(workflowCommands(yml).length >= 3, 'the reader found no commands')
+})
+
+test('the node:test scanners recognise every import and match form', () => {
+  for (const src of [
+    "import test from 'node:test'", "import { test } from \"node:test\"", "const t = require('node:test')",
+    "const t = await import('node:test')", "import 'node:test'",
+  ]) assert(importsNodeTest(src), `missed import form: ${src}`)
+  assert(!importsNodeTest("import test from 'vitest'"), 'false import match')
+  for (const src of [
+    "assert.match(a, /x/)", "assert.doesNotMatch(a, /x/)", "t.assert.match(a, /x/)", "strict.match(a, /x/)",
+    "const { match } = assert", "const { match: m } = assert", "import { doesNotMatch } from 'node:assert'",
+    "const m = assert.match",
+  ]) assert(countMatchSites(src) >= 1, `missed match form: ${src}`)
+  assert(countMatchSites("assert.equal(a, b)") === 0, 'false match count')
+})
+
+test('no node:test mention hides in a file type the scanners cannot read', () => {
+  const hidden = unclassifiedNodeTestMentions(REPO_ROOT, nodeTestPackagesFound.map((p) => p.name))
+  assert(hidden.length === 0, `quote 'node:test' in unscanned file type(s) (extend SCANNED_EXTENSIONS): [${hidden.join(', ')}]`)
 })
 
 // ── The mechanism: does a throw from --import stop a real `node --test` run? ─

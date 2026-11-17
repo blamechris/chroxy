@@ -53,7 +53,7 @@ import {
   EXPECTED_NODE_TEST_PACKAGES,
   directRunNodeTestFiles,
   nodeTestPackages,
-  packageInstalls,
+  packagePatchesAssertMatch,
   suspectTestFlagPackages,
 } from '../lib/node-test-roster.mjs'
 import { spawnSync } from 'node:child_process'
@@ -124,25 +124,16 @@ test('no package carries a --test flag the roster regex does not accept', () => 
   )
 })
 
-// Anchored to a CALL at the start of a line, not a substring match. A plain
-// `.includes('installAssertMatchPayloadGuard(')` also matches the library's
-// own `export function installAssertMatchPayloadGuard({` definition — which
-// installs nothing on import — so a package that `--import`s the LIBRARY
-// instead of the hook (a one-token slip: dropping `-hook`) would read as
-// wired while its real suite ran unguarded (#8050 review, C1). The hook's own
-// call site (`installAssertMatchPayloadGuard()`, unindented, no `export`)
-// matches; the library's definition line and the hook's descriptive comment
-// mentioning the same name do not.
-const INSTALL_CALL = /^installAssertMatchPayloadGuard\(/m
-const LIBRARY_FILES = ['scripts/lib/assert-match-payload-guard.mjs']
-
+// Behavioural, not textual (#8056 review S1): each package's relative `--import`s are
+// spawned and `assert.match` must come back as the guarded function. A text match credits
+// commented-out or dead calls; importing the LIBRARY instead of the hook (drop `-hook`)
+// installs nothing on import and fails the observation without special-casing (#8050 C1).
 for (const pkg of nodeTestPackagesFound) {
   test(`packages/${pkg.name} installs the payload guard in its test script`, () => {
     assert(
-      packageInstalls({ repoRoot: REPO_ROOT, pkg, installCall: INSTALL_CALL, libraryFiles: LIBRARY_FILES }),
-      `packages/${pkg.name}'s test script --imports nothing that CALLS installAssertMatchPayloadGuard() ` +
-        `at the start of a line (importing the library instead of the hook satisfies a plain substring ` +
-        `check but installs nothing):\n  ${pkg.script}`,
+      packagePatchesAssertMatch({ repoRoot: REPO_ROOT, pkg }),
+      `assert.match is NOT the guarded function under packages/${pkg.name}'s relative --imports ` +
+        `(importing the library instead of the hook, or a commented-out/dead call, installs nothing):\n  ${pkg.script}`,
     )
   })
 }
