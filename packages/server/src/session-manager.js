@@ -5827,6 +5827,19 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8326: a daemon turn was DISPATCHED to the model — counts toward the wake
+   * cap (see `daemonTurnRefusal`). Separate from `recordDaemonUserInput`
+   * (history/broadcast) because the claude-tui PTY route dispatches without ever
+   * being recorded. The watcher calls this exactly once per dispatched wake.
+   *
+   * @param {string} sessionId
+   */
+  noteDaemonWake(sessionId) {
+    if (!this._sessions.has(sessionId)) return
+    this._daemonWakeCount.set(sessionId, (this._daemonWakeCount.get(sessionId) ?? 0) + 1)
+  }
+
+  /**
    * #8301: make a DAEMON-authored turn visible the way a typed one is. The CI
    * wake travels the provider's `sendMessage` seam as an ordinary user turn, but
    * `input-handlers.js` is the only thing that records a user turn to history
@@ -5854,8 +5867,6 @@ export class SessionManager extends EventEmitter {
     // `source: 'daemon'` rides on the history entry and the broadcast so a client
     // can tell this from something a person typed.
     this._history.recordUserInput(sessionId, text, undefined, messageId, 'daemon')
-    // #8326: a dispatched daemon turn (recorded only once admitted) — counts toward the wake cap.
-    this._daemonWakeCount.set(sessionId, (this._daemonWakeCount.get(sessionId) ?? 0) + 1)
     this.touchActivity(sessionId)
     this.emit('session_event', {
       sessionId,

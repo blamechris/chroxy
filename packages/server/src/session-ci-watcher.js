@@ -378,6 +378,7 @@ export class SessionCiWatcher {
     survey = surveySessionPrStatus,
     notify,
     recordWakeInput,
+    noteWakeDispatched,
     daemonTurnRefusal,
     wakeAgent = true,
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
@@ -392,6 +393,7 @@ export class SessionCiWatcher {
     this._survey = survey
     this._notify = typeof notify === 'function' ? notify : null
     this._recordWakeInput = typeof recordWakeInput === 'function' ? recordWakeInput : null
+    this._noteWakeDispatched = typeof noteWakeDispatched === 'function' ? noteWakeDispatched : null
     this._daemonTurnRefusal = typeof daemonTurnRefusal === 'function' ? daemonTurnRefusal : null
     this._wakeSeq = 0
     this._wakeAgent = wakeAgent !== false
@@ -770,6 +772,16 @@ export class SessionCiWatcher {
       // flag lets the late callback say so in its own log line instead of the
       // outcome in the line below being silently stale.
       let firing = true
+      // #8326: count each DISPATCHED wake exactly once. The turn-input route
+      // reports dispatch through onAdmission('injected') (immediately, or at
+      // flush for a queued wake); the claude-tui PTY route returns 'injected'
+      // synchronously and never calls onAdmission.
+      let counted = false
+      const countOnce = () => {
+        if (counted) return
+        counted = true
+        this._noteDispatched(sessionId)
+      }
       try {
         wakeOutcome = wakeSession(this._resolveSession(sessionId), buildAgentWakeText(event), {
           turnInput: true,
@@ -782,12 +794,16 @@ export class SessionCiWatcher {
             // interrupt): recording it at enqueue left a phantom user turn in
             // history that no model ever saw. `injected` arrives immediately for
             // an idle session and at flush for a queued one.
-            if (outcome === 'injected') this._recordWake(sessionId, line, messageId)
+            if (outcome === 'injected') {
+              countOnce()
+              this._recordWake(sessionId, line, messageId)
+            }
             if (!firing) {
               this._log?.info?.(`ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
             }
           },
         })
+        if (wakeOutcome === 'injected') countOnce()
       } catch (err) {
         wakeOutcome = 'error'
         this._log?.warn?.(`ci-watch: agent wake failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
@@ -812,6 +828,16 @@ export class SessionCiWatcher {
     } catch (err) {
       this._log?.warn?.(`ci-watch: wake gate threw for ${sessionId}; withholding the wake: ${getErrorMessage(err, 'unknown error')}`)
       return 'refusal-check-failed'
+    }
+  }
+
+  /** Count a dispatched wake toward the cap; isolated like the recording. */
+  _noteDispatched(sessionId) {
+    if (!this._noteWakeDispatched) return
+    try {
+      this._noteWakeDispatched(sessionId)
+    } catch (err) {
+      this._log?.warn?.(`ci-watch: counting the wake for ${sessionId} failed: ${getErrorMessage(err, 'unknown error')}`)
     }
   }
 
@@ -923,6 +949,7 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     // input), a user Stop, and the provider's own unwilling states.
     // #8326: the cap on consecutive daemon wakes with no user-typed input between.
     daemonTurnRefusal: (sessionId) => sessionManager?.daemonTurnRefusal?.(sessionId, { maxConsecutiveWakes }) ?? null,
+    noteWakeDispatched: (sessionId) => sessionManager?.noteDaemonWake?.(sessionId),
     recordWakeInput: ({ sessionId, text, messageId }) => {
       sessionManager?.recordDaemonUserInput?.(sessionId, text, messageId)
     },

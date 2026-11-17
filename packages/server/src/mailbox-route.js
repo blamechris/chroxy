@@ -237,5 +237,8 @@ function injectWakeup(server, to, unreadCount) {
   const session = server.sessionManager?.resolveSessionByAgentCommId?.(to) ?? null
   if (!session) return 'no-session'
   const countText = unreadCount != null ? `${unreadCount} unread mailbox message(s)` : 'unread mailbox messages'
+  // #8326: deliberately NOT counted or capped by the CI wake cap. A mailbox wake
+  // is one-shot ("you have unread mail"), not a self-re-arming loop like
+  // wake -> push -> CI -> wake, and it never reaches daemonTurnRefusal.
   return wakeSession(session, `You have ${countText} — run receive_next to process them.`)
 }

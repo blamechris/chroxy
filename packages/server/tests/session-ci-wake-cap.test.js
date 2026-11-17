@@ -35,6 +35,14 @@ class SdkLikeSession extends BaseSession {
   }
 }
 
+// claude-tui shape: the PTY route returns 'injected' synchronously and never
+// reports admission (#8326 review: the cap used to count only via onAdmission).
+class TuiLikeSession {
+  static isClaudeTui = true
+  constructor() { this.isRunning = false; this.writes = [] }
+  writeTerminalInput(data) { this.writes.push(data); return true }
+}
+
 const sha = (n) => String(n).padStart(40, 'a')
 const snap = (head, state) => ({
   sessionId: 's1',
@@ -119,7 +127,7 @@ describe('consecutive daemon wake cap (#8326)', () => {
   it('a daemon input does not reset the count', async () => {
     build()
     for (let i = 1; i <= 3; i++) await cycle(i)
-    mgr.recordDaemonUserInput('s1', 'another daemon line', 'chroxy-ci-wake-x-9')
+    mgr.noteDaemonWake('s1')
     await cycle(4)
     assert.equal(session.sent.length, 3)
     assert.equal(mgr.daemonTurnRefusal('s1', { maxConsecutiveWakes: 3 }), 'wake-cap')
@@ -127,7 +135,7 @@ describe('consecutive daemon wake cap (#8326)', () => {
 
   it('counts per session, and forgets a removed session', () => {
     mgr._sessions.set('s2', { session: new SdkLikeSession(), name: 'S2', cwd: '/repo' })
-    for (let i = 0; i < 3; i++) mgr.recordDaemonUserInput('s1', 'x', `chroxy-ci-wake-a-${i}`)
+    for (let i = 0; i < 3; i++) mgr.noteDaemonWake('s1')
     assert.equal(mgr.daemonTurnRefusal('s1', { maxConsecutiveWakes: 3 }), 'wake-cap')
     assert.equal(mgr.daemonTurnRefusal('s2', { maxConsecutiveWakes: 3 }), null)
     mgr._cleanupSessionMaps('s1')
@@ -135,15 +143,43 @@ describe('consecutive daemon wake cap (#8326)', () => {
   })
 
   it('is opt-in per call: no cap option means no cap', () => {
-    for (let i = 0; i < 10; i++) mgr.recordDaemonUserInput('s1', 'x', `chroxy-ci-wake-b-${i}`)
+    for (let i = 0; i < 10; i++) mgr.noteDaemonWake('s1')
     assert.equal(mgr.daemonTurnRefusal('s1'), null)
   })
 
   it('ranks after budget-paused and user-stopped, before the provider reason', () => {
-    for (let i = 0; i < 3; i++) mgr.recordDaemonUserInput('s1', 'x', `chroxy-ci-wake-c-${i}`)
+    for (let i = 0; i < 3; i++) mgr.noteDaemonWake('s1')
     session.daemonTurnRefusal = () => 'not-started'
     assert.equal(mgr.daemonTurnRefusal('s1', { maxConsecutiveWakes: 3 }), 'wake-cap')
     mgr.recordUserInterrupt('s1')
     assert.equal(mgr.daemonTurnRefusal('s1', { maxConsecutiveWakes: 3 }), 'user-stopped')
+  })
+
+  describe('claude-tui PTY route (#8326 review)', () => {
+    beforeEach(() => {
+      session = new TuiLikeSession()
+      mgr._sessions.set('s1', { session, name: 'S1', cwd: '/repo' })
+    })
+
+    it('reaches wake-cap after N PTY wakes, push still sent, and resets on user input', async () => {
+      build()
+      for (let i = 1; i <= 3; i++) await cycle(i)
+      assert.equal(session.writes.length, 3)
+      await cycle(4)
+      assert.equal(session.writes.length, 3, 'fourth PTY wake refused')
+      assert.equal(pushes.length, 4)
+      assert.ok(logs.some((l) => l.includes('(wake: wake-cap)')))
+      mgr.recordUserIntent('s1')
+      await cycle(5)
+      assert.equal(session.writes.length, 4, 'user input re-enables the PTY wake')
+    })
+  })
+
+  it('the SDK route counts exactly once per wake (no double count with recording)', async () => {
+    build()
+    await cycle(1)
+    await cycle(2)
+    assert.equal(session.sent.length, 2)
+    assert.equal(mgr._daemonWakeCount.get('s1'), 2)
   })
 })
