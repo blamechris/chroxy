@@ -132,6 +132,13 @@ describe('principal over a real socket (server-side record stamped directly)', (
     const c = await connect(port)
     c.ws.send(JSON.stringify({ type: 'auth', token: 'primary-tok' }))
     await waitFor(() => c.messages.find((m) => m.type === 'auth_ok'), { label: 'auth_ok' })
+    // The handshake's `auth_bootstrap` is sent asynchronously, after slash-command
+    // and agent disk scans (ws-history.js sendAuthBootstrap). Wait for it BEFORE
+    // stamping the record and clearing the buffer; otherwise on a slow runner it
+    // lands after the clear and reads as a frame delivered to the stamped client.
+    // The generous timeout only matters on a slow runner: the wait returns as soon
+    // as the frame is present.
+    await waitFor(() => c.messages.find((m) => m.type === 'auth_bootstrap'), { label: 'auth_bootstrap', timeoutMs: 15000 })
     const [sws, record] = [...server.clients].find(([, rec]) => rec.authenticated)
     const stamp = principalClient({ principal: { tier: 'answer', ...principalOver } })
     record.isPrimaryToken = false
