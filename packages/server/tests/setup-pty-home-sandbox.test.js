@@ -10,15 +10,13 @@
  * Not run on Windows: `WINDOWS_EXEMPT` (node-pty / ConPTY). The install-time
  * hook itself stays active there for every other test.
  *
- * Skipped, with the reason printed, only where node-pty's native addon cannot
- * load (e.g. Docker `npm ci --ignore-scripts`). The skip is decided by actually
- * loading it, never by assuming.
+ * Skipped, with the exact load error as the reason, only where node-pty's native
+ * addon cannot load (e.g. Docker `npm ci --ignore-scripts`); see the probe below.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import ptyDefault, { spawn as ptyNamedSpawn } from 'node-pty'
 
 import { PTY_HOME_SANDBOX, SPAWN_HOME_REAL, SPAWN_HOME_ISOLATED } from './_setup.mjs'
 import { PTY_HOME_MARKER, PTY_LAUNCHERS, NODE_PTY_ENTRY } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
@@ -59,20 +57,35 @@ async function ptyOutput(pty, script, spawnOpts) {
   }
 }
 
-// Skip ONLY when node-pty's native addon is genuinely unavailable (the import
-// or the first spawn throws). A pty child that merely fails to EXIT is a real
-// failure, never a skip: it is left unskipped here so each test's own spawn
-// times out and fails with the PtyChildTimeout message above.
+// Skip ONLY when node-pty's native addon genuinely cannot load, decided by a
+// probe that runs BEFORE and OUTSIDE any sandboxed spawn: `require('node-pty')`
+// loads `pty.node` at require time (utils.loadNativeModule) and spawns nothing.
+// Only a native-load error counts: ERR_DLOPEN_FAILED, or MODULE_NOT_FOUND whose
+// message names node-pty / pty.node. Any other error (including one thrown by
+// the sandbox hook, which runs inside that require) propagates and crashes the
+// file RED. Every error from a spawn made through the sandbox fails its test;
+// there is no catch-and-skip around a spawn.
+//
+// node-pty is imported dynamically AFTER the probe (no static import), so a
+// load failure reaches the probe's skip path instead of crashing the file first.
 let nativeSkip = false
 let ptyNs = null
+let ptyDefault = null
+let ptyNamedSpawn = null
 try {
-  ptyNs = await import('node-pty')
-  // Loading the JS wrapper is not enough: the addon loads on first spawn.
-  await ptyOutput(ptyNs, '', { env: { ...process.env } })
+  require('node-pty')
 } catch (err) {
-  if (!(err instanceof PtyChildTimeout)) {
-    nativeSkip = `node-pty native addon unavailable here: ${err && err.message}`
-  }
+  const msg = String(err && err.message)
+  const nativeLoadFailure =
+    err && (err.code === 'ERR_DLOPEN_FAILED' ||
+      (err.code === 'MODULE_NOT_FOUND' && /node-pty|pty\.node/.test(msg)))
+  if (!nativeLoadFailure) throw err
+  nativeSkip = `node-pty native addon cannot load (${err.code}): ${msg}`
+}
+if (!nativeSkip) {
+  ptyNs = await import('node-pty')
+  ptyDefault = ptyNs.default
+  ptyNamedSpawn = ptyNs.spawn
 }
 const opts = nativeSkip ? { skip: nativeSkip, timeout: TEST_MS } : { timeout: TEST_MS }
 
@@ -107,12 +120,12 @@ describe('node-pty sandbox: a real pty child does not see the real home (#7949)'
     assert.notEqual(r.homedir, SPAWN_HOME_REAL)
   })
 
-  it('static default import shape is redirected', opts, async () => {
+  it('import() default export shape is redirected', opts, async () => {
     const r = await runPty(ptyDefault, { env: { ...process.env } })
     assert.equal(r.home, SPAWN_HOME_ISOLATED)
   })
 
-  it('static named import shape is redirected', opts, async () => {
+  it('import() named export shape is redirected', opts, async () => {
     const r = await runPty({ spawn: ptyNamedSpawn }, { env: { ...process.env } })
     assert.equal(r.home, SPAWN_HOME_ISOLATED)
   })
