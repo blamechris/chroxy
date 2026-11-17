@@ -17,6 +17,9 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
+import { spawnSync } from 'node:child_process'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { PTY_HOME_SANDBOX, SPAWN_HOME_REAL, SPAWN_HOME_ISOLATED } from './_setup.mjs'
 import { PTY_HOME_MARKER, PTY_LAUNCHERS, NODE_PTY_ENTRY } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
@@ -57,30 +60,52 @@ async function ptyOutput(pty, script, spawnOpts) {
   }
 }
 
-// Skip ONLY when node-pty's native addon genuinely cannot load, decided by a
-// probe that runs BEFORE and OUTSIDE any sandboxed spawn: `require('node-pty')`
-// loads `pty.node` at require time (utils.loadNativeModule) and spawns nothing.
-// Only a native-load error counts: ERR_DLOPEN_FAILED, or MODULE_NOT_FOUND whose
-// message names node-pty / pty.node. Any other error (including one thrown by
-// the sandbox hook, which runs inside that require) propagates and crashes the
-// file RED. Every error from a spawn made through the sandbox fails its test;
-// there is no catch-and-skip around a spawn.
+// Skip ONLY when node-pty's native addon genuinely cannot load, decided by an
+// OUT-OF-PROCESS probe: a child `node -e "require('node-pty')"` (that require
+// loads `pty.node` via utils.loadNativeModule and spawns nothing). Out of
+// process on purpose: loading node-pty in THIS process would make every
+// import-shape test below a second load, so none would prove the hook fires on
+// an ESM-first load; the parent's first load of node-pty is left to the tests.
 //
-// node-pty is imported dynamically AFTER the probe (no static import), so a
-// load failure reaches the probe's skip path instead of crashing the file first.
+// The child prints {code, message} for any load error and exits 3. Only a
+// native-load error counts, matched against the FIRST LINE of the message
+// (later lines carry "Require stack:" paths that mention node-pty):
+//   - code ERR_DLOPEN_FAILED
+//   - node-pty's own plain Error (NO .code): "Failed to load native module: pty.node ..."
+//   - MODULE_NOT_FOUND whose first line is "Cannot find module ... node-pty|pty.node"
+// Anything else (an unrelated error, a probe timeout, a failed probe spawn)
+// throws and crashes the file RED. Every error from a spawn made through the
+// sandbox fails its test; there is no catch-and-skip around one.
+const PROBE_SCRIPT =
+  "try{require('node-pty')}catch(e){console.log(JSON.stringify({code:e&&e.code,message:String(e&&e.message)}));process.exit(3)}"
+const probe = spawnSync(process.execPath, ['-e', PROBE_SCRIPT], {
+  cwd: dirname(fileURLToPath(import.meta.url)),
+  encoding: 'utf8',
+  timeout: 30000,
+})
 let nativeSkip = false
 let ptyNs = null
 let ptyDefault = null
 let ptyNamedSpawn = null
-try {
-  require('node-pty')
-} catch (err) {
-  const msg = String(err && err.message)
+if (probe.error || probe.status === null) {
+  throw new Error(`node-pty load probe did not complete: ${probe.error ? probe.error.message : `signal ${probe.signal}`}`)
+}
+if (probe.status !== 0) {
+  let info
+  try {
+    info = JSON.parse(probe.stdout.trim().split('\n').pop())
+  } catch {
+    throw new Error(`node-pty load probe failed unclassifiably (exit ${probe.status}): ${probe.stderr.slice(0, 300)}`)
+  }
+  const firstLine = String(info.message).split('\n')[0]
   const nativeLoadFailure =
-    err && (err.code === 'ERR_DLOPEN_FAILED' ||
-      (err.code === 'MODULE_NOT_FOUND' && /node-pty|pty\.node/.test(msg)))
-  if (!nativeLoadFailure) throw err
-  nativeSkip = `node-pty native addon cannot load (${err.code}): ${msg}`
+    info.code === 'ERR_DLOPEN_FAILED' ||
+    (info.code === undefined && /^Failed to load native module: pty\.node/.test(firstLine)) ||
+    (info.code === 'MODULE_NOT_FOUND' && /^Cannot find module .*(node-pty|pty\.node)/.test(firstLine))
+  if (!nativeLoadFailure) {
+    throw new Error(`node-pty failed to load for a reason that is not "native addon unavailable": ${JSON.stringify(info).slice(0, 300)}`)
+  }
+  nativeSkip = `node-pty native addon cannot load (${info.code ?? 'no code'}): ${firstLine}`
 }
 if (!nativeSkip) {
   ptyNs = await import('node-pty')
