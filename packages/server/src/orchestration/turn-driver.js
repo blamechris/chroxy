@@ -146,7 +146,7 @@ export class TurnDriver {
     const active = [...this._active.values()]
     this._waiters.clear()
     this._active.clear()
-    this._occupied.clear()
+    for (const id of [...this._occupied]) this._vacate(id)
     this._handoff.clear()
     for (const w of waiters) {
       try { w.reject(new TurnError('SESSION_GONE', 'TurnDriver disposed')) } catch { /* ignore */ }
@@ -178,7 +178,7 @@ export class TurnDriver {
     return new Promise((resolve, reject) => {
       const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs }, resolve, reject)
       if (!this._occupied.has(sessionId)) {
-        this._occupied.add(sessionId)
+        this._occupy(sessionId)
         start()
       } else {
         const q = this._waiters.get(sessionId) || []
@@ -269,9 +269,23 @@ export class TurnDriver {
       const next = q.shift() // stays occupied — hand the slot to the next turn
       next.start()
     } else {
-      this._occupied.delete(sessionId)
+      this._vacate(sessionId)
       this._waiters.delete(sessionId)
     }
+  }
+
+  // #8327: `_occupied` is mirrored into the SessionManager's ONE registry, so a
+  // daemon wake (daemonTurnRefusal -> 'orchestrated') can see every driver's
+  // sessions. These two are the ONLY places that touch `_occupied` — a new
+  // construction site gets the registration for free, through its sessionManager.
+  _occupy(sessionId) {
+    this._occupied.add(sessionId)
+    try { this._sm.markTurnDriven?.(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: markTurnDriven failed: ${err?.message || err}`) }
+  }
+
+  _vacate(sessionId) {
+    this._occupied.delete(sessionId)
+    try { this._sm.releaseTurnDriven?.(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: releaseTurnDriven failed: ${err?.message || err}`) }
   }
 
   _handleSessionEvent({ sessionId, event, data } = {}) {
