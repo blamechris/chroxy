@@ -1263,6 +1263,61 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { active: { conversationId: undefined } } },
   },
 
+  // #8415 — tool_input_backfill: reconcile-only. Fills the input of a held tool card
+  // that has none; never adds a card, starts a tool or writes the terminal.
+  {
+    name: 'tool_input_backfill fills a held tool card without input, adding no card and no active tool (#8415)',
+    type: 'tool_input_backfill',
+    init: {
+      sessions: {
+        s1: {
+          activeTools: [],
+          messages: [{ id: 'tool-1', type: 'tool_use', tool: 'Bash', content: 'Bash', timestamp: 1 }],
+        },
+      },
+    },
+    message: { type: 'tool_input_backfill', sessionId: 's1', messageId: 'tool-1', input: { command: 'ls' } },
+    expect: {
+      sessions: {
+        s1: {
+          activeTools: [],
+          messages: [{
+            id: 'tool-1', type: 'tool_use', tool: 'Bash',
+            toolInput: { command: 'ls' }, content: JSON.stringify({ command: 'ls' }),
+          }],
+        },
+      },
+      added: [],
+    },
+  },
+  {
+    name: 'tool_input_backfill for a card the client does not hold changes nothing (#8415)',
+    type: 'tool_input_backfill',
+    init: {
+      sessions: {
+        s1: { activeTools: [], messages: [{ id: 'tool-1', type: 'tool_use', tool: 'Bash', content: 'Bash', timestamp: 1 }] },
+      },
+    },
+    message: { type: 'tool_input_backfill', sessionId: 's1', messageId: 'tool-gone', input: { command: 'ls' } },
+    expect: { noop: true },
+  },
+  {
+    name: 'tool_input_backfill never overwrites an input the card already holds (#8415)',
+    type: 'tool_input_backfill',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'tool-1', type: 'tool_use', tool: 'Bash', content: '{"command":"pwd"}',
+            toolInput: { command: 'pwd' }, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: { type: 'tool_input_backfill', sessionId: 's1', messageId: 'tool-1', input: { command: 'ls' } },
+    expect: { noop: true },
+  },
+
   // 6. permission_rules_updated — replace session rules (active fallback)
   {
     name: 'permission_rules_updated replaces the explicit session rule set',

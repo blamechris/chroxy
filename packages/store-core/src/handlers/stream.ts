@@ -647,6 +647,34 @@ function heldToolInputReconcile(held: ChatMessage, input: unknown): MessageRecon
 }
 
 /**
+ * #8415: apply a `tool_input_backfill` frame -- the input of a tool card the client
+ * already holds without it, sent on a delta replay (which starts after the client's
+ * cursor and so never carries the entry the server filled in place).
+ *
+ * Reconcile-only: it patches the held `tool_use` card whose id is `messageId`, by
+ * the same write-once rule a replayed `tool_start` entry uses
+ * ({@link heldToolInputReconcile}), and returns `{}` for everything else (no such
+ * card, not a tool card, input already set, malformed frame). It never builds a
+ * message, never starts a tool and never touches the terminal, so a frame sent
+ * again is a no-op.
+ */
+export function handleToolInputBackfill(
+  msg: Record<string, unknown>,
+  session: { messages: ChatMessage[]; streamingMessageId?: string | null },
+): { messages?: ChatMessage[]; streamingMessageId?: null } {
+  const messageId = parseRawStringField(msg, 'messageId')
+  if (!messageId || !isPlainObject(msg.input)) return {}
+  const held = session.messages.find((m) => m.id === messageId)
+  if (!held) return {}
+  const reconcile = heldToolInputReconcile(held, msg.input)
+  if (!reconcile) return {}
+  return applyMessageReconcileToSession(
+    { messages: session.messages, streamingMessageId: session.streamingMessageId ?? null },
+    reconcile,
+  )
+}
+
+/**
  * Validate, dedup, and normalize a `tool_start` message.
  *
  * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
