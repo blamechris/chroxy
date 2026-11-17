@@ -9,11 +9,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
+import { SessionDefaultsNoticeBanner } from './CreateSessionModal'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
 import { SessionArchiveSettingsSection } from './SessionArchiveSettingsSection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
+import { resolveEffectiveProvider } from '../lib/effective-provider'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import {
   COST_BADGE_MODES,
@@ -1143,12 +1145,18 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   }, [])
 
   // Normalize: if persisted defaultProvider isn't in server's list, use first available
-  const effectiveProvider = useMemo(() => {
-    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
-      return availableProviders[0]!.name
-    }
-    return defaultProvider
-  }, [availableProviders, defaultProvider])
+  const effectiveProvider = useMemo(
+    () => resolveEffectiveProvider(defaultProvider, availableProviders),
+    [availableProviders, defaultProvider],
+  )
+
+  // #8277: the saved override is origin-global, so it can name a provider this
+  // server does not offer. It stays stored and the select must say so rather
+  // than show another provider; new sessions here use `effectiveProvider`.
+  const dormantProvider =
+    defaultProviderSource === 'user' && availableProviders.length > 0 && effectiveProvider !== defaultProvider
+      ? defaultProvider
+      : null
 
   // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
   // just above it, so it reads that provider's roster instead of whichever
@@ -1259,14 +1267,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
+                value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
                 onChange={handleProviderChange}
+                aria-describedby={dormantProvider ? 'default-provider-dormant-hint' : undefined}
               >
                 <option value="">
                   {serverDefaultProvider
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
+                {dormantProvider && (
+                  <option value={dormantProvider} disabled>
+                    {`${PROVIDER_LABELS[dormantProvider] || dormantProvider} (not offered by this server)`}
+                  </option>
+                )}
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>
@@ -1279,7 +1293,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     </>
                 }
               </select>
+              {dormantProvider && (
+                <p className="settings-hint" id="default-provider-dormant-hint" data-testid="default-provider-dormant-hint">
+                  Your saved default ({PROVIDER_LABELS[dormantProvider] || dormantProvider}) is not offered by this
+                  server, so new sessions here use {PROVIDER_LABELS[effectiveProvider] || effectiveProvider}. The
+                  saved choice is kept for servers that offer it.
+                </p>
+              )}
             </div>
+            <SessionDefaultsNoticeBanner provider={effectiveProvider} />
             {availableModels.length > 0 && (
               <div className="settings-field">
                 <label htmlFor="default-model">Default model</label>

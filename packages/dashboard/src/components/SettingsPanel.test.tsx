@@ -9,6 +9,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
+import { SessionDefaultsNoticeBanner } from './CreateSessionModal'
 
 // Mock theme-engine
 vi.mock('../theme/theme-engine', () => ({
@@ -256,6 +257,82 @@ describe('SettingsPanel', () => {
     })
   })
 
+  describe('dormant provider override and migration notice (#8277)', () => {
+    const dormantState = (extra: Record<string, unknown> = {}) =>
+      setMockState({
+        defaultProvider: 'claude-tui',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'codex',
+        availableProviders: [{ name: 'codex' }, { name: 'gemini' }],
+        ...extra,
+      })
+
+    it('shows the saved override as a disabled selected option and states what this server uses', () => {
+      dormantState()
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('claude-tui')
+      const opt = select.selectedOptions[0]!
+      expect(opt.disabled).toBe(true)
+      expect(opt.textContent).toMatch(/^Claude.*\(not offered by this server\)$/)
+      const hint = screen.getByTestId('default-provider-dormant-hint')
+      expect(hint.textContent).toMatch(/new sessions here use .*codex/i)
+    })
+
+    it('still lets the user pick an offered provider', () => {
+      const setDefaultProvider = vi.fn()
+      dormantState({ setDefaultProvider })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: 'gemini' } })
+      expect(setDefaultProvider).toHaveBeenCalledWith('gemini')
+    })
+
+    it('shows no dormant option or hint when the override is offered', () => {
+      dormantState({ defaultProvider: 'codex' })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+    })
+
+    it('shows the undismissed migration notice in Session Defaults', () => {
+      setMockState({
+        defaultProvider: 'claude-sdk',
+        availableProviders: [{ name: 'claude-sdk' }],
+        sessionDefaultsNotice: { model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: vi.fn(),
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.getByTestId('session-defaults-notice')).toBeInTheDocument()
+    })
+
+    it('shows nothing once dismissed (null notice)', () => {
+      setMockState({ availableProviders: [{ name: 'claude-sdk' }], sessionDefaultsNotice: null })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
+
+    it('dismissing in Settings or in New Session clears both (one store dismissal)', () => {
+      const dismiss = vi.fn(() => { mockState = { ...mockState, sessionDefaultsNotice: null } })
+      setMockState({
+        availableProviders: [{ name: 'claude-sdk' }],
+        sessionDefaultsNotice: { model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: dismiss,
+      })
+      const both = () => (
+        <>
+          <SettingsPanel isOpen onClose={vi.fn()} />
+          <div data-testid="new-session"><SessionDefaultsNoticeBanner provider="claude-sdk" /></div>
+        </>
+      )
+      const { rerender } = render(both())
+      expect(screen.getAllByTestId('session-defaults-notice')).toHaveLength(2)
+      fireEvent.click(screen.getAllByTestId('session-defaults-notice-dismiss')[0]!)
+      rerender(both())
+      expect(dismiss).toHaveBeenCalledTimes(1)
+      expect(screen.queryAllByTestId('session-defaults-notice')).toHaveLength(0)
+    })
+  })
+
   describe('Default model select reads the default provider OWN roster (#7728)', () => {
     const opus = { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }
     const gpt = { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5-2026-01' }
@@ -304,7 +381,9 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      // #8277: the select shows the dormant override; the roster still follows
+      // the provider new sessions here actually use.
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 

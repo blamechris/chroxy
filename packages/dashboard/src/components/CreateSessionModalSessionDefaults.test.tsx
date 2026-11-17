@@ -164,3 +164,48 @@ describe('CreateSessionModal select styling (#8611)', () => {
     selects.forEach(s => expect(s.closest('.modal-content--session-form')).not.toBeNull())
   })
 })
+
+describe('CreateSessionModal effective provider (#8277)', () => {
+  it('falls back to the first offered provider when the saved default is not offered', () => {
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: {}, auth: READY }, { name: 'claude-sdk', capabilities: {}, auth: READY }]
+    mockStoreState.defaultProvider = 'claude-tui'
+    // The notice only applies to Claude-family providers, so its absence proves
+    // the form's provider STATE is codex, not just what the select displays.
+    mockStoreState.sessionDefaultsNotice = { model: 'opus-4-6' }
+    renderModal()
+    expect((screen.getByLabelText('Select provider') as HTMLSelectElement).value).toBe('codex')
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+  })
+})
+
+describe('CreateSessionModal first open after the saved default changes (#9181)', () => {
+  it('preselects the newly saved provider, not availableProviders[0]', () => {
+    const roster = [
+      { name: 'claude-cli', capabilities: {}, auth: READY },
+      { name: 'codex', capabilities: {}, auth: READY },
+      { name: 'gemini', capabilities: {}, auth: READY },
+    ]
+    mockStoreState.availableProviders = roster
+    // Modal state initialises from a saved override this server does not offer...
+    mockStoreState.defaultProvider = 'docker-cli'
+    const { rerender } = render(
+      <CreateSessionModal open={false} onClose={vi.fn()} onCreate={vi.fn()} initialCwd="/tmp/x" knownCwds={[]} existingNames={[]} />,
+    )
+    // ...then Settings saves an offered provider, and New Session opens for the first time.
+    mockStoreState.defaultProvider = 'gemini'
+    rerender(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} initialCwd="/tmp/x" knownCwds={[]} existingNames={[]} />,
+    )
+    expect((screen.getByLabelText('Select provider') as HTMLSelectElement).value).toBe('gemini')
+  })
+
+  it('still falls back to the first offered provider when the saved default is not offered', () => {
+    mockStoreState.availableProviders = [
+      { name: 'codex', capabilities: {}, auth: READY },
+      { name: 'gemini', capabilities: {}, auth: READY },
+    ]
+    mockStoreState.defaultProvider = 'docker-cli'
+    renderModal()
+    expect((screen.getByLabelText('Select provider') as HTMLSelectElement).value).toBe('codex')
+  })
+})
