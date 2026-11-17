@@ -95,7 +95,7 @@ function parseBody(text: string, pos: { i: number }, top: boolean): { decls: Dec
         continue
       }
       if (ch === '}') {
-        if (top) { pos.i++; buf = ''; continue } // stray brace at top level: ignore
+        if (top) throw new Error(`unbalanced CSS: stray "}" near "${text.slice(Math.max(0, pos.i - 40), pos.i + 1).trim()}"`)
         pos.i++
         flushDecl()
         return { decls, children }
@@ -104,6 +104,7 @@ function parseBody(text: string, pos: { i: number }, top: boolean): { decls: Dec
     buf += ch
     pos.i++
   }
+  if (!top) throw new Error('unbalanced CSS: a block is never closed before end of input')
   flushDecl()
   return { decls, children }
 }
@@ -191,6 +192,7 @@ function plainClasses(prelude: string): string[] | null {
 export function parseFixedLayers(css: string = allStylesheetCss()): Layer[] {
   const merged = new Map<string, Decl[]>()
   const baseFixed = new Set<string>()
+  const nonPlainZ: string[] = [] // preludes of non-plain rules that set z-index
   const conditional: Array<{ at: string; rule: Rule }> = []
 
   const checkNested = (outer: string, rule: Rule) => {
@@ -231,6 +233,7 @@ export function parseFixedLayers(css: string = allStylesheetCss()): Layer[] {
     const classes = plainClasses(p)
     if (!classes) {
       if (fixed) throw new Error(`${p}: position: fixed on a non-plain-class selector "${p}"`)
+      if (rule.decls.some(([d]) => d === 'z-index')) nonPlainZ.push(p)
       nestedFixed(p, rule)
       continue
     }
@@ -245,7 +248,14 @@ export function parseFixedLayers(css: string = allStylesheetCss()): Layer[] {
   const classify = (selector: string, decls: Decl[]): Layer | null => {
     if (!isFixed(decls)) return null
     const zRaw = lastOf(decls, 'z-index')
-    if (zRaw === undefined) return null // z-index: auto — below any layer
+    if (zRaw === undefined) {
+      // z-index: auto — below any layer, UNLESS a compound selector sets it (then we cannot classify)
+      const name = selector.replace(/^\./, '').replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+      const re = new RegExp(`\\.${name}(?![\\w-])`)
+      const via = nonPlainZ.find(pre => re.test(pre))
+      if (via) throw new Error(`${selector}: position: fixed with z-index set only via non-plain selector "${via}"`)
+      return null
+    }
     if (!/^-?\d+$/.test(zRaw)) throw new Error(`${selector}: position: fixed with unreadable z-index "${zRaw}"`)
     const z = Number(zRaw)
     if (z < MIN_LAYER_Z) return null
@@ -284,6 +294,20 @@ export function parseFixedLayers(css: string = allStylesheetCss()): Layer[] {
   return out
 }
 
+/** z-index declared by the rule(s) whose selector text is exactly `selector` (compound selectors included). Throws if none. */
+export function declaredZIndex(selector: string, css: string = allStylesheetCss()): number {
+  let z: string | undefined
+  const visit = (rules: Rule[]) => {
+    for (const r of rules) {
+      if (r.prelude === selector) z = lastOf(r.decls, 'z-index') ?? z
+      if (r.prelude.startsWith('@') && !INERT_AT.test(r.prelude)) visit(r.children)
+    }
+  }
+  visit(parseStylesheet(css))
+  if (z === undefined || !/^-?\d+$/.test(z)) throw new Error(`${selector}: no readable z-index`)
+  return Number(z)
+}
+
 /** All stylesheets concatenated in path order. Each is also parsed alone first so a throw names its file. */
 export function allStylesheetCss(files: string[] = walkStylesheets()): string {
   const parts: string[] = []
@@ -308,6 +332,31 @@ export function partialLayers(css?: string): Layer[] {
 
 // ------------------------------------------------------------- JSX element scan
 
+/**
+ * Parses with the ScriptKind the extension implies (.ts is NOT parsed as TSX, so
+ * `<T>x` assertions read correctly) and THROWS on any syntax error: the parser
+ * is tolerant and would otherwise hand back a partial tree whose dropped
+ * elements read as "nothing to check".
+ */
+export function parseSource(src: string, fileName: string): ts.SourceFile {
+  const kind = /\.tsx$/i.test(fileName) ? ts.ScriptKind.TSX : /\.jsx$/i.test(fileName) ? ts.ScriptKind.JSX : /\.jsx?$/i.test(fileName) ? ts.ScriptKind.JS : ts.ScriptKind.TS
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, kind)
+  // Syntactic diagnostics through the public Program API (no emit, no resolution).
+  const options: ts.CompilerOptions = { jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.ESNext, allowJs: true, noResolve: true, noLib: true }
+  const host = ts.createCompilerHost(options)
+  host.getSourceFile = (name, lang) => (name === fileName ? ts.createSourceFile(name, src, lang, true, kind) : undefined)
+  host.fileExists = name => name === fileName
+  host.readFile = name => (name === fileName ? src : undefined)
+  const prog = ts.createProgram([fileName], options, host)
+  const errs = prog.getSyntacticDiagnostics(prog.getSourceFile(fileName))
+  if (errs.length > 0) {
+    const d = errs[0]!
+    const line = d.file && d.start !== undefined ? d.file.getLineAndCharacterOfPosition(d.start).line + 1 : 0
+    throw new Error(`${fileName}:${line}: syntax error: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`)
+  }
+  return sf
+}
+
 export interface JsxClassElement {
   /** Class tokens readable from the element's className (string/template/ternary/call literals). */
   classes: string[]
@@ -315,12 +364,40 @@ export interface JsxClassElement {
   spreadsOverlay: boolean
   /** 1-based line, for messages. */
   line: number
+  /** className holds an expression the scan cannot read (identifier, call, template with ${}, ...). */
+  dynamic: boolean
+  /** Source text of the dynamic className initializer (null when static). */
+  dynamicText: string | null
+}
+
+/** True when the expression is built only from string literals (through ternaries / && / || / ??). */
+function isStaticClassExpr(n: ts.Node): boolean {
+  if (ts.isJsxExpression(n)) return n.expression ? isStaticClassExpr(n.expression) : true
+  if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return true
+  if (ts.isParenthesizedExpression(n)) return isStaticClassExpr(n.expression)
+  if (ts.isTemplateExpression(n)) return n.templateSpans.every(sp => isStaticClassExpr(sp.expression))
+  if (ts.isIdentifier(n)) return n.text === 'undefined'
+  if (n.kind === ts.SyntaxKind.NullKeyword || n.kind === ts.SyntaxKind.FalseKeyword) return true
+  if (ts.isConditionalExpression(n)) return isStaticClassExpr(n.whenTrue) && isStaticClassExpr(n.whenFalse)
+  if (ts.isBinaryExpression(n)) {
+    const k = n.operatorToken.kind
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken) return isStaticClassExpr(n.right)
+    if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.QuestionQuestionToken) return isStaticClassExpr(n.left) && isStaticClassExpr(n.right)
+  }
+  return false
 }
 
 function literalsIn(node: ts.Node, out: string[]): void {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) out.push(node.text)
   else if (ts.isTemplateExpression(node)) out.push(node.head.text, ...node.templateSpans.map(s => s.literal.text))
   ts.forEachChild(node, c => literalsIn(c, out))
+}
+
+/** Every whitespace-separated token of every string literal in the file (a class can only reach an element through one). */
+function fileLiterals(sf: ts.SourceFile): string[] {
+  const lits: string[] = []
+  literalsIn(sf, lits)
+  return lits.join(' ').split(/\s+/).filter(Boolean)
 }
 
 /** Names bound to `overlayProps` from useModalOverlay() calls in this file. */
@@ -352,8 +429,8 @@ function overlayBindings(sf: ts.SourceFile): { calls: number; names: Set<string>
  * readable class token (the guard could not bind a class to the element), or
  * when the file calls useModalOverlay but the props binding cannot be resolved.
  */
-export function jsxClassElements(src: string, fileName = 'x.tsx'): JsxClassElement[] {
-  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+export function jsxClassElements(src: string, fileName = 'x.tsx', layerClasses?: ReadonlySet<string>, allowDynamic: ReadonlySet<string> = new Set()): JsxClassElement[] {
+  const sf = parseSource(src, fileName)
   const { calls, names } = overlayBindings(sf)
   if (calls > 0 && names.size === 0) throw new Error(`${fileName}: useModalOverlay() called but its overlayProps binding cannot be resolved`)
   const out: JsxClassElement[] = []
@@ -363,19 +440,27 @@ export function jsxClassElements(src: string, fileName = 'x.tsx'): JsxClassEleme
       let spreadsOverlay = false
       const lits: string[] = []
       let hasClassName = false
+      let dynamic = false
+      let dynamicText: string | null = null
       for (const a of n.attributes.properties) {
         if (ts.isJsxSpreadAttribute(a)) {
           if (names.has(a.expression.getText(sf))) spreadsOverlay = true
         } else if (ts.isIdentifier(a.name) && a.name.text === 'className') {
           hasClassName = true
-          if (a.initializer) literalsIn(a.initializer, lits)
+          if (a.initializer) {
+            literalsIn(a.initializer, lits)
+            if (!isStaticClassExpr(a.initializer)) { dynamic = true; dynamicText = a.initializer.getText(sf) }
+          }
         }
       }
       const classes = lits.join(' ').split(/\s+/).filter(Boolean)
       if (spreadsOverlay && classes.length === 0) {
         throw new Error(`${fileName}:${line}: element spreads the overlay props but its className has no readable class`)
       }
-      if (hasClassName || spreadsOverlay) out.push({ classes, spreadsOverlay, line })
+      if (dynamic && !spreadsOverlay && !allowDynamic.has(`${fileName}::${dynamicText}`) && layerClasses && fileLiterals(sf).some(t => layerClasses.has(t))) {
+        throw new Error(`${fileName}:${line}: cannot verify a dynamic className that does not spread the overlay props, in a file that names an overlay layer class`)
+      }
+      if (hasClassName || spreadsOverlay) out.push({ classes, spreadsOverlay, line, dynamic, dynamicText })
     }
     ts.forEachChild(n, visit)
   }
@@ -384,9 +469,24 @@ export function jsxClassElements(src: string, fileName = 'x.tsx'): JsxClassEleme
 }
 
 const elementCache = new Map<string, JsxClassElement[]>()
+/**
+ * Dynamic classNames on NON-spreading elements in files that name an overlay
+ * layer class, which are reviewed and allowed. Key: `<file under src>::<exact
+ * className expression>`. Asserted both ways by the guard test.
+ */
+export const DYNAMIC_CLASSNAME_OK: Record<string, string> = {
+  'components/Modal.tsx::{contentClassName ? `modal-content ${contentClassName}` : \'modal-content\'}':
+    'the dialog box INSIDE the registered overlay: appends a caller-supplied extra class to modal-content; it can never be the overlay layer itself',
+}
+
+let layerClassSet: Set<string> | undefined
 function elementsOf(file: string): JsxClassElement[] {
   let e = elementCache.get(file)
-  if (!e) { e = jsxClassElements(readFileSync(file, 'utf-8'), file); elementCache.set(file, e) }
+  if (!e) {
+    layerClassSet ??= new Set(fullScreenLayers().map(l => l.selector.slice(1)))
+    e = jsxClassElements(readFileSync(file, 'utf-8'), relative(SRC, file), layerClassSet, new Set(Object.keys(DYNAMIC_CLASSNAME_OK)))
+    elementCache.set(file, e)
+  }
   return e
 }
 
@@ -404,4 +504,55 @@ export function filesUsingClass(cls: string, files: string[] = walkSources()): s
 /** Overlay-spreading elements across the sources, with the class tokens on each. */
 export function overlayElements(files: string[] = walkSources()): Array<{ file: string; el: JsxClassElement }> {
   return files.flatMap(f => elementsOf(f).filter(el => el.spreadsOverlay).map(el => ({ file: relative(SRC, f), el })))
+}
+
+// ------------------------------------------------------------ inline fixed styles
+
+export interface InlineFixedSite { file: string; line: number; value: string }
+
+const isCssPropertiesType = (t: ts.TypeNode | undefined, sf: ts.SourceFile) => !!t && /CSSProperties/.test(t.getText(sf))
+
+/**
+ * Inline `position` declarations in dashboard sources, from object literals that
+ * are (a) the value of a JSX `style` attribute or (b) the initializer of a
+ * variable typed CSSProperties. Returns every one; a `position` whose value is
+ * not a string literal THROWS (cannot classify). LIMIT: styles built elsewhere
+ * (spread from a function result, an imported constant, a computed key) are
+ * invisible to this scan.
+ */
+export function inlinePositionSites(files: string[] = walkSources()): InlineFixedSite[] {
+  const out: InlineFixedSite[] = []
+  for (const f of files) {
+    inlinePositionsIn(readFileSync(f, 'utf-8'), relative(SRC, f), out)
+  }
+  return out
+}
+
+export function inlinePositionsIn(src: string, fileName: string, out: InlineFixedSite[] = []): InlineFixedSite[] {
+  const sf = parseSource(src, fileName)
+  const objects: ts.ObjectLiteralExpression[] = []
+  const visit = (n: ts.Node) => {
+    if (ts.isJsxAttribute(n) && ts.isIdentifier(n.name) && n.name.text === 'style' && n.initializer && ts.isJsxExpression(n.initializer)) {
+      const e = n.initializer.expression
+      if (e && ts.isObjectLiteralExpression(e)) objects.push(e)
+    }
+    if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectLiteralExpression(n.initializer) && isCssPropertiesType(n.type, sf)) {
+      objects.push(n.initializer)
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  for (const o of objects) {
+    for (const p of o.properties) {
+      const key = ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) ? p.name : undefined
+      if (!key || !(ts.isIdentifier(key) || ts.isStringLiteral(key)) || key.text !== 'position') continue
+      const line = sf.getLineAndCharacterOfPosition(p.getStart()).line + 1
+      if (ts.isPropertyAssignment(p) && (ts.isStringLiteral(p.initializer) || ts.isNoSubstitutionTemplateLiteral(p.initializer))) {
+        out.push({ file: fileName, line, value: p.initializer.text.trim().toLowerCase() })
+      } else {
+        throw new Error(`${fileName}:${line}: inline style position is not a string literal; cannot classify`)
+      }
+    }
+  }
+  return out
 }

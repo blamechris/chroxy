@@ -9,7 +9,8 @@ import { readFileSync } from 'fs'
 import { join, relative } from 'path'
 import {
   SRC, walkSources, walkStylesheets, fullScreenLayers, partialLayers, parseFixedLayers,
-  elementsUsingClass, overlayElements, jsxClassElements,
+  elementsUsingClass, overlayElements, jsxClassElements, parseSource,
+  DYNAMIC_CLASSNAME_OK, inlinePositionSites, inlinePositionsIn,
 } from './overlayRoster.testSupport'
 
 const HOOK = join(SRC, 'hooks', 'useModalOverlay.ts')
@@ -75,7 +76,7 @@ describe('derived overlay roster (#9168)', () => {
   it('every ELEMENT carrying a non-exempt full-screen layer class spreads the hook props', () => {
     const problems: string[] = []
     for (const layer of layers) {
-      if (layer.selector.slice(1) in EXEMPT) continue
+      if (Object.hasOwn(EXEMPT, layer.selector.slice(1))) continue
       const users = elementsUsingClass(layer.selector)
       if (users.length === 0) problems.push(`${layer.selector}: no component uses this class`)
       for (const u of users) {
@@ -107,7 +108,10 @@ describe('derived overlay roster (#9168)', () => {
   it('non-full-screen fixed layers are classified both ways', () => {
     const found = partialLayers().map(l => l.selector.slice(1)).sort()
     expect(found).toEqual(Object.keys(PARTIAL).sort())
-    for (const [name, why] of Object.entries(PARTIAL)) expect(why.length, name).toBeGreaterThan(20)
+    // Each reason must cite the layer's real z-index, so a stale or copy-pasted reason fails.
+    const zs = new Map(partialLayers().map(l => [l.selector.slice(1), l.z]))
+    for (const [name, why] of Object.entries(PARTIAL)) expect(why.includes(String(zs.get(name))), `${name}: reason must cite z ${zs.get(name)}`).toBe(true)
+    expect(new Set(Object.values(PARTIAL)).size).toBe(Object.keys(PARTIAL).length)
   })
 })
 
@@ -146,6 +150,80 @@ describe('jsxClassElements binds the class to the spreading element (#9198)', ()
     expect(jsxClassElements(renamed)[0]?.spreadsOverlay).toBe(true)
     const handle = `export const X = () => { const h = useModalOverlay(); return <div {...h.overlayProps} className="a" /> }`
     expect(jsxClassElements(handle)[0]?.spreadsOverlay).toBe(true)
+  })
+})
+
+describe('the scan reads what it claims to (#9198)', () => {
+  it('a syntax error throws, naming the file', () => {
+    expect(() => jsxClassElements('export const X = () => <div className="a"', 'broken.tsx')).toThrow(/broken\.tsx.*syntax error/)
+    expect(() => parseSource('const = ;', 'broken.ts')).toThrow(/broken\.ts:1/)
+  })
+  it('.ts is parsed as TS and .tsx as TSX', () => {
+    const assertion = 'export const f = (x: unknown) => <string>x'
+    expect(() => parseSource(assertion, 'a.ts')).not.toThrow()
+    expect(() => parseSource(assertion, 'a.tsx')).toThrow(/syntax error/)
+  })
+  const L = new Set(['modal-overlay'])
+  const file = (other: string) => `
+    import { useModalOverlay } from './h'
+    export function X() {
+      const { overlayProps } = useModalOverlay()
+      return (<>
+        <div {...overlayProps} className="modal-overlay" />
+        ${other}
+      </>)
+    }`
+  it.each([
+    ['an identifier', '<div className={cls} />'],
+    ['a template with an expression', '<div className={`a ${cls}`} />'],
+    ['a call', '<div className={clsx("a", cls)} />'],
+    ['a conditional with a dynamic branch', '<div className={on ? "a" : cls} />'],
+  ])('throws on a non-spreading dynamic className (%s) in a file naming a layer class', (_n, el) => {
+    expect(() => jsxClassElements(file(el), 'y.tsx', L)).toThrow(/cannot verify/)
+  })
+  it('reads literal-only conditionals and templates as static', () => {
+    expect(() => jsxClassElements(file('<div className={on ? "a" : "b"} /><i className={`a ${on ? "x" : ""}`} />'), 'y.tsx', L)).not.toThrow()
+  })
+  it('does not throw in a file that never names a layer class', () => {
+    expect(() => jsxClassElements('export const X = () => <div className={cls} />', 'y.tsx', L)).not.toThrow()
+  })
+  it('allow-listed dynamic classNames are reviewed, and each still exists', () => {
+    const live = new Set<string>()
+    for (const f of walkSources()) {
+      for (const el of jsxClassElements(read(f), relative(SRC, f), L, new Set(Object.keys(DYNAMIC_CLASSNAME_OK)))) {
+        if (el.dynamicText && !el.spreadsOverlay) live.add(`${relative(SRC, f)}::${el.dynamicText}`)
+      }
+    }
+    for (const k of Object.keys(DYNAMIC_CLASSNAME_OK)) expect(live.has(k), `stale allow-list entry ${k}`).toBe(true)
+  })
+})
+
+// Inline position: fixed styles are invisible to the stylesheet derivation. Each
+// is classified here with the reason it is not a modal overlay; asserted both ways.
+const INLINE_FIXED: Record<string, string> = {
+  'components/ErrorBoundary.tsx': 'z 9999 full-screen fallback that REPLACES the whole tree, so no toast stack or Modal is mounted beside it; a class component cannot use the hook',
+  'components/SessionContextMenu.tsx': 'z 1000 popup at the pointer (not full-screen, not modal); sits under toasts (2000) by design and needs no pause',
+}
+
+describe('inline position: fixed styles (#9198)', () => {
+  it('every inline-fixed site is classified, and every entry still is one', () => {
+    const sites = inlinePositionSites()
+    const fixed = [...new Set(sites.filter(s => s.value === 'fixed').map(s => s.file))].sort()
+    expect(fixed).toEqual(Object.keys(INLINE_FIXED).sort())
+    expect(sites.length).toBeGreaterThan(fixed.length) // non-fixed positions are read too (floor)
+  })
+  it('reads style attributes and CSSProperties constants, any quoting and case', () => {
+    const src = `const a: React.CSSProperties = { position: "FIXED" }
+      export const X = () => <div style={{ position: 'fixed', top: 0 }} />`
+    expect(inlinePositionsIn(src, 'z.tsx').map(s => s.value)).toEqual(['fixed', 'fixed'])
+    expect(inlinePositionsIn(`const a = () => <i style={{ position: 'absolute' }} />`, 'z.tsx')[0]?.value).toBe('absolute')
+  })
+  it('throws on a non-literal position', () => {
+    expect(() => inlinePositionsIn('export const X = () => <div style={{ position: pos }} />', 'z.tsx')).toThrow(/not a string literal/)
+    expect(() => inlinePositionsIn('const a: CSSProperties = { position }', 'z.tsx')).toThrow(/not a string literal/)
+  })
+  it('ignores a position key outside style objects', () => {
+    expect(inlinePositionsIn('const d = { position: pos }', 'z.ts')).toEqual([])
   })
 })
 
@@ -232,6 +310,15 @@ describe('parseFixedLayers hardening (#9198)', () => {
   it('throws on position: fixed declared only inside a conditional block, at any depth', () => {
     expect(() => parseFixedLayers('@media (max-width: 600px) { .x { position: fixed; inset: 0; z-index: 1500 } }')).toThrow(/@media/)
     expect(() => parseFixedLayers('@media screen { @supports (display: grid) { .x { position: fixed; z-index: 1500 } } }')).toThrow(/fixed/)
+  })
+  it('throws on unbalanced braces (unclosed block, stray close)', () => {
+    expect(() => parseFixedLayers(`.x { ${FS} inset: 0`)).toThrow(/unbalanced/)
+    expect(() => parseFixedLayers(`.x { ${FS} inset: 0 } }`)).toThrow(/unbalanced/)
+    expect(() => parseFixedLayers('@media screen { .x { color: red }')).toThrow(/unbalanced/)
+  })
+  it('throws when a fixed class gets its z-index only through a non-plain selector', () => {
+    expect(() => parseFixedLayers('.x { position: fixed; inset: 0 } .a .x { z-index: 2000 }')).toThrow(/\.x.*non-plain/)
+    expect(parseFixedLayers('.x { position: fixed; inset: 0 } .a .y { z-index: 2000 }')).toEqual([])
   })
   it('throws on fixed inside an unclassified at-rule but ignores keyframes', () => {
     expect(() => parseFixedLayers('@foo { .x { position: fixed } }')).toThrow(/at-rule/)
