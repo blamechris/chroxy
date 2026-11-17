@@ -17,11 +17,20 @@
 #       the other subcommands (or export PREVIEW_DAEMON_DIR).
 #       --config-patch  deep-merges a JSON object into the scratch config.json
 #                       before launch (objects merge, arrays and scalars replace).
-#                       Refused (exit 2, nothing created) if it touches a key the
-#                       script owns: apiToken port host tunnel tunnelName cwd
-#                       workspaceRoots sessionCi controlRoomRunnerIncludeGithub
-#                       notifications. Everything else (providers, models, ...)
-#                       is overridable.
+#                       ALLOWLIST, fail closed: only these TOP-LEVEL keys may be
+#                       set; any other key (apiToken, port, host, tunnel, noAuth,
+#                       dangerouslySkipPermissions, externalUrl, mcpServers,
+#                       codexBinary, notifications, ...) is refused with exit 2
+#                       before anything is created. Only top-level keys and the
+#                       providers rules are inspected.
+#                         providers  register stub/proxy endpoints (object form; only
+#                                    providers.anthropicCompatible, an array of HTTP
+#                                    endpoint entries; any entry key naming a binary,
+#                                    command, args, env or path is refused)
+#                         provider   which registered provider new sessions default to
+#                         model      the default model name
+#                       A baseUrl to a real API is an explicit opt-in: it only
+#                       egresses; no key reaches the daemon (env -i), so keyless.
 #       --stub-provider registers a keyless providers.anthropicCompatible entry
 #                       named smoke-stub at http://127.0.0.1:<port> (appended after
 #                       any --config-patch entries). The stub server is yours to run.
@@ -274,23 +283,43 @@ cleanup_start() {
   fi
 }
 
-# Config keys start owns for isolation; a --config-patch may not mention them.
-GUARDED_KEYS="apiToken port host tunnel tunnelName cwd workspaceRoots sessionCi controlRoomRunnerIncludeGithub notifications"
+# ALLOWLIST of top-level keys a --config-patch may set (fail closed, #9189). A
+# denylist beside a growing config schema is the false-safety shape: every new
+# escape key (noAuth, *SkipPermissions, externalUrl, mcpServers, *Binary ...)
+# would be silently allowed. Add a key here only with a reason (see usage text).
+ALLOWED_KEYS="providers provider model"
 
 # Validate a patch file: readable, valid JSON, a plain object, no guarded key.
 check_patch() {
   [ -f "$1" ] || die "--config-patch file not found: $1" 2
   "$NODE_BIN/node" -e '
-    const [, f, guarded] = process.argv
+    const [, f, allowed] = process.argv
     let v
     try { v = JSON.parse(require("fs").readFileSync(f, "utf8")) }
     catch (e) { console.error("preview-daemon: --config-patch is not valid JSON: " + e.message); process.exit(2) }
     if (v === null || typeof v !== "object" || Array.isArray(v)) {
       console.error("preview-daemon: --config-patch must be a JSON object"); process.exit(2) }
-    const bad = guarded.split(" ").filter(k => Object.prototype.hasOwnProperty.call(v, k))
-    if (bad.length) {
-      console.error("preview-daemon: REFUSING --config-patch: it touches guarded key(s): " + bad.join(", ")); process.exit(2) }' \
-    "$1" "$GUARDED_KEYS" || exit 2
+    const isObj = x => x !== null && typeof x === "object" && !Array.isArray(x)
+    const refuse = m => { console.error("preview-daemon: REFUSING --config-patch: " + m); process.exit(2) }
+    const ok = allowed.split(" ")
+    const bad = Object.keys(v).filter(k => !ok.includes(k))
+    if (bad.length) refuse("key(s) not in the allowlist (" + ok.join(", ") + "): " + bad.join(", "))
+    if ("provider" in v && typeof v.provider !== "string") refuse("provider must be a string")
+    if ("model" in v && typeof v.model !== "string") refuse("model must be a string")
+    if ("providers" in v) {
+      if (!isObj(v.providers)) refuse("providers must be an object")
+      const pk = Object.keys(v.providers).filter(k => k !== "anthropicCompatible")
+      if (pk.length) refuse("providers may only contain anthropicCompatible, not: " + pk.join(", "))
+      const list = v.providers.anthropicCompatible
+      if (list !== undefined && !Array.isArray(list)) refuse("providers.anthropicCompatible must be an array")
+      const risky = /binary|command|args|exec|path|env|spawn/i
+      const walk = (x, where) => { if (Array.isArray(x)) x.forEach((e, i) => walk(e, where + "[" + i + "]"))
+        else if (isObj(x)) for (const k of Object.keys(x)) {
+          if (risky.test(k)) refuse("provider entry key " + where + "." + k + " names a binary/command/env/path")
+          walk(x[k], where + "." + k) } }
+      walk(list || [], "anthropicCompatible")
+    }' \
+    "$1" "$ALLOWED_KEYS" || exit 2
 }
 
 cmd_start() {
