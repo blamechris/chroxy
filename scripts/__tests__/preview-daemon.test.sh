@@ -32,7 +32,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=74
+EXPECTED_CASES=76
 
 PASS=0
 FAIL=0
@@ -327,7 +327,7 @@ kill "$LISTENER_PID" 2>/dev/null; LISTENER_PID=''
 PREVIEW_DAEMON_PARENT="$WORK/outside" pd start >/dev/null 2>&1; RC=$?
 [ "$RC" -eq 2 ] && pass "start refuses a scratch parent outside \$HOME" || fail "start refuses a scratch parent outside \$HOME" "rc=$RC"
 
-PREVIEW_DAEMON_HEALTH_TIMEOUT=abc HEALTH_TIMEOUT=abc pd start >/dev/null 2>&1; RC=$?
+HEALTH_TIMEOUT=abc pd start >/dev/null 2>&1; RC=$?
 [ "$RC" -eq 2 ] && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "a non-numeric health timeout is refused before anything is launched" || fail "a non-numeric health timeout is refused before anything is launched" "rc=$RC"
 
 # Preflight: a missing lsof must be a loud refusal, never "port free".
@@ -354,14 +354,29 @@ pd clean "$WORK/elsewhere/chroxy-smoke.zzzzzz" >/dev/null 2>&1; RC=$?
 
 # A planted gh/claude in the CALLER's node dir must not be reachable.
 mkdir -p "$WORK/fakenode"
-ln -sf "$(command -v node)" "$WORK/fakenode/node"
-RN="$(PREVIEW_DAEMON_NODE_DIR=/opt/homebrew/opt/node@22/bin; [ -x "$PREVIEW_DAEMON_NODE_DIR/node" ] || PREVIEW_DAEMON_NODE_DIR="$(dirname "$(command -v node)")"; echo "$PREVIEW_DAEMON_NODE_DIR")"
+RN="$(dirname "$(command -v node)")"; [[ "$("$RN/node" -v)" == v22.* ]] || RN=/opt/homebrew/opt/node@22/bin
 ln -sf "$RN/node" "$WORK/fakenode/node"
 printf '#!/bin/sh\ntouch "%s/gh-ran"\n' "$WORK" >"$WORK/fakenode/gh"; chmod +x "$WORK/fakenode/gh"
 OUT="$(PREVIEW_DAEMON_NODE_DIR="$WORK/fakenode" pd start 2>/dev/null)"; S4="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 ok "a planted gh in the caller's node dir is not on the daemon's PATH" "PATH: $(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH)' "$S4/config/stub-env.json" 2>&1)" -- \
   node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH;if(p.split(":").includes(process.argv[2]))process.exit(1)' "$S4/config/stub-env.json" "$WORK/fakenode"
 [ -n "$S4" ] && PREVIEW_DAEMON_NODE_DIR="$WORK/fakenode" pd clean "$S4" >/dev/null 2>&1
+
+# Ambient GIT_* (as under a git hook or `rebase -x`) must not aim the fixture
+# git calls at the caller's repo.
+CALLER="$WORK/callerrepo"
+mkdir -p "$CALLER" && ( cd "$CALLER" && git init -q . && echo c >c.txt && git add c.txt \
+  && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m caller ) >/dev/null 2>&1
+snap() { git --git-dir="$CALLER/.git" rev-list --all --count; git --git-dir="$CALLER/.git" count-objects; git --git-dir="$CALLER/.git" rev-parse HEAD; cksum <"$CALLER/.git/index"; }
+SNAP_BEFORE="$(snap)"
+OUT="$(GIT_DIR="$CALLER/.git" GIT_WORK_TREE="$CALLER" GIT_INDEX_FILE="$CALLER/.git/index" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=intruder pd start 2>/dev/null)"; RC=$?
+S5="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$(snap)" = "$SNAP_BEFORE" ] && pass "ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE leave the caller's repo untouched" || fail "ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE leave the caller's repo untouched" "caller repo changed (rc=$RC)"
+[ "$RC" -eq 0 ] && [ "$(git -C "$S5/fixture" rev-list --count HEAD 2>/dev/null)" = 1 ] \
+  && [ "$(git -C "$S5/fixture" log -1 --format=%an 2>/dev/null)" = preview ] && [ -f "$S5/fixture/README.md" ] \
+  && pass "with ambient GIT_* set, the fixture is still its own correct one-commit repo" \
+  || fail "with ambient GIT_* set, the fixture is still its own correct one-commit repo" "rc=$RC"
+[ -n "$S5" ] && pd clean "$S5" >/dev/null 2>&1
 
 CLI="$STUB_WRONGROOT" pd start >/dev/null 2>"$WORK/wr.err"; RC=$?
 [ "$RC" -ne 0 ] && grep -q "Config/state root" "$WORK/wr.err" && pass "start fails when the log names a different config root" || fail "start fails when the log names a different config root" "rc=$RC $(cat "$WORK/wr.err")"

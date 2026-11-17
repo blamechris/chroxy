@@ -306,9 +306,13 @@ cmd_start() {
   SMOKE_G="$smoke"
   mkdir -p "$smoke/config" "$smoke/home" "$smoke/tmp" "$smoke/fixture" "$smoke/bin" || die "mkdir failed" 1
 
-  # Fixture repo: one committed file. The caller's git config (hooks, signing,
+  # Fixture repo: one committed file. Ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/
+  # GIT_CONFIG_PARAMETERS (git hooks, `rebase -x`) would aim these calls at the
+  # CALLER's repo, so every repo-local variable git knows is unset first. The caller's git config (hooks, signing,
   # templates, identity) must not apply, so global/system config is switched off.
   ( cd "$smoke/fixture" \
+    && local_env="$(git rev-parse --local-env-vars)" && [ -n "$local_env" ] \
+    && unset $local_env XDG_CONFIG_HOME \
     && export HOME="$smoke/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     && git -c init.templateDir= init -q . \
     && echo "# preview fixture" > README.md \
