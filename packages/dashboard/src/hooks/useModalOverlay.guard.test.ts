@@ -203,28 +203,29 @@ describe('the scan reads what it claims to (#9198)', () => {
 // a className. Key: file under src. The reason must cite the class it names, and
 // the guard below asserts the list both ways.
 const LAYER_LITERAL_OK: Record<string, string> = {
-  'hooks/useShortcutDispatch.ts': 'reads shortcut-help-overlay through classList.contains on mounted overlays to tell whether only the help dialog is open; a DOM query, never a rendered className',
+  'hooks/useShortcutDispatch.ts::shortcut-help-overlay': 'reads shortcut-help-overlay through classList.contains on mounted overlays to tell whether only the help dialog is open; a DOM query, never a rendered className',
 }
 
 describe('a layer class reaches an element only through a spreading one (#9207)', () => {
   const layerSet = new Set(fullScreenLayers().map(l => l.selector.slice(1)))
   const sites = layerLiteralSites(layerSet)
-  const unspread = sites.map(s => ({ ...s, loose: s.named.filter(c => !s.spread.includes(c)) })).filter(s => s.loose.length > 0)
+  const loose = sites.filter(s => !s.spreading)
+  const key = (s: { file: string; cls: string }) => `${s.file}::${s.cls}`
 
-  it('every file naming a layer class has a spreading element carrying it, or is allow-listed', () => {
+  it('every layer-class literal is the className of a spreading element, or allow-listed', () => {
     expect(sites.length).toBeGreaterThan(0) // floor: a zero-site scan is a broken guard
-    const problems = unspread
-      .filter(s => !Object.prototype.hasOwnProperty.call(LAYER_LITERAL_OK, s.file))
-      .map(s => `${s.file} names ${s.loose.join(', ')} in a string literal without an element that spreads the overlay props (imported constant or prop path?)`)
+    expect(sites.some(s => s.spreading)).toBe(true)
+    const problems = loose
+      .filter(s => !Object.prototype.hasOwnProperty.call(LAYER_LITERAL_OK, key(s)))
+      .map(s => `${s.file}:${s.line} holds the literal "${s.cls}" outside the className of an element that spreads the overlay props (imported constant or prop path?)`)
     expect(problems).toEqual([])
   })
 
-  it('every allow-list entry is still such a file, and its reason names the class', () => {
-    const live = new Map(unspread.map(s => [s.file, s]))
-    for (const [file, why] of Object.entries(LAYER_LITERAL_OK)) {
-      const site = live.get(file)
-      expect(site, `stale allow-list entry ${file}: it no longer names an unspread layer class`).toBeDefined()
-      for (const c of site?.loose ?? []) expect(why.includes(c), `${file}: reason must name ${c}`).toBe(true)
+  it('every allow-list entry is still such a literal, and its reason names the class', () => {
+    const live = new Set(loose.map(key))
+    for (const [k, why] of Object.entries(LAYER_LITERAL_OK)) {
+      expect(live.has(k), `stale allow-list entry ${k}: no such unspread literal remains`).toBe(true)
+      expect(why.includes(k.split('::')[1] as string), `${k}: reason must name the class`).toBe(true)
     }
   })
 })
