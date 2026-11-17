@@ -30,7 +30,7 @@
 
 import { drainStdioAndExit } from '../flush-and-exit.mjs'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -43,6 +43,19 @@ import {
   findTestForceExit,
   normalizeNodeOptionName,
 } from '../lib/no-test-force-exit.mjs'
+import {
+  DIRECT_RUN_EXEMPTIONS,
+  EXPECTED_NODE_TEST_PACKAGES,
+  countMatchSites,
+  directRunNodeTestFiles,
+  importsNodeTest,
+  nodeTestPackages,
+  packageRefusesForceExit,
+  suspectTestFlagPackages,
+  unclassifiedNodeTestMentions,
+  workflowRunsFileDirectly,
+  workflowCommands,
+} from '../lib/node-test-roster.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
@@ -55,7 +68,7 @@ const HOOK_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/no-test-force-exi
 // A floor on the number of cases accounted for, so a run that loses cases
 // (an early `return`, a bad refactor) goes red instead of printing a small
 // tidy "all passed".
-const MIN_CASES = 31
+const MIN_CASES = 40
 
 let pass = 0
 let fail = 0
@@ -250,43 +263,112 @@ test('an empty escape hatch is not an escape hatch', () => {
 // PRESENT, not that it fires. What it fires is covered above (the hook) and in
 // each package's own call-site file (the setup modules).
 
-const packagesDir = resolve(REPO_ROOT, 'packages')
-const nodeTestPackages = []
-for (const name of readdirSync(packagesDir)) {
-  const manifest = join(packagesDir, name, 'package.json')
-  if (!existsSync(manifest)) continue
-  const script = JSON.parse(readFileSync(manifest, 'utf8')).scripts?.test ?? ''
-  // `node ... --test` — vitest ("vitest run") and jest ("jest --coverage")
-  // never match, and `--test-force-exit` does not match `--test` because of
-  // the trailing boundary.
-  if (/\bnode\b/.test(script) && /--test(\s|$)/.test(script)) nodeTestPackages.push({ name, script })
-}
+const nodeTestPackagesFound = nodeTestPackages(REPO_ROOT)
 
-// A floor, because an empty walk would otherwise report "all wired" — the
-// silent-pass shape this file exists to prevent. Four packages run node --test
-// today: server, claude-hooks, protocol, design-tokens.
-test('the walk found every package that runs node --test', () => {
+// The roster is asserted EQUAL to an explicit list, both ways, not checked against a
+// floor: a floor with headroom cannot notice one package leaving the roster once a fifth
+// arrives (#8056 finding 2). Derivation and list live in scripts/lib/node-test-roster.mjs,
+// shared with assert-match-payload-guard-wiring.test.mjs.
+test('the walk found exactly the packages that run node --test', () => {
+  const found = nodeTestPackagesFound.map((p) => p.name).sort()
+  const missing = EXPECTED_NODE_TEST_PACKAGES.filter((n) => !found.includes(n))
+  const extra = found.filter((n) => !EXPECTED_NODE_TEST_PACKAGES.includes(n))
   assert(
-    nodeTestPackages.length >= 4,
-    `only ${nodeTestPackages.length} package(s) matched: ${nodeTestPackages.map((p) => p.name).join(', ') || 'none'}`,
+    missing.length === 0 && extra.length === 0,
+    `roster drift. expected but not found: [${missing.join(', ')}]; found but not expected: [${extra.join(', ')}]`,
   )
 })
 
-for (const { name, script } of nodeTestPackages) {
-  test(`packages/${name} installs the refusal in its test script`, () => {
-    const imports = [...script.matchAll(/--import\s+(\S+)/g)].map((m) => m[1].replace(/^['"]|['"]$/g, ''))
-    const installs = imports.some((spec) => {
-      if (!spec.startsWith('.')) return false // bare specifier (tsx/esm) — not ours
-      const file = resolve(packagesDir, name, spec)
-      if (!existsSync(file)) return false
-      return readFileSync(file, 'utf8').includes('assertNoTestForceExit(')
-    })
+test('no package carries a --test flag the roster regex does not accept', () => {
+  const suspects = suspectTestFlagPackages(REPO_ROOT)
+  assert(
+    suspects.length === 0,
+    `these test scripts use --test but are outside the walk (their hooks go unchecked): ${suspects.map((p) => `${p.name}: ${p.script}`).join(' | ')}`,
+  )
+})
+
+// Behavioural, not textual: each package's relative `--import`s are SPAWNED with
+// `--test --test-force-exit` and must die with the refusal's error code. A text match
+// credits a call in a block comment, a template string or dead code, and importing the
+// LIBRARY instead of the hook installs nothing on import (#8056 finding 1, review S1).
+for (const pkg of nodeTestPackagesFound) {
+  test(`packages/${pkg.name} installs the refusal in its test script`, () => {
     assert(
-      installs,
-      `packages/${name}'s test script --imports nothing that calls assertNoTestForceExit():\n  ${script}`,
+      packageRefusesForceExit({ repoRoot: REPO_ROOT, pkg }),
+      `a \`--test --test-force-exit\` run under packages/${pkg.name}'s relative --imports was NOT refused ` +
+        `(importing the library instead of the hook, or a commented-out/dead call, installs nothing):\n  ${pkg.script}`,
     )
   })
 }
+
+// ── node:test suites outside the roster packages ────────────────────────────
+//
+// CI runs these as `node <file>`; the refusal cannot be --imported there, so each is
+// exempted with a stated reason. Discovered set and exemption list are asserted EQUAL.
+const directRun = directRunNodeTestFiles(REPO_ROOT, nodeTestPackagesFound.map((p) => p.name))
+
+test('the direct-run node:test suites are exactly the exempted ones', () => {
+  const found = directRun.map((f) => f.file)
+  const exempt = Object.keys(DIRECT_RUN_EXEMPTIONS)
+  const unlisted = found.filter((f) => !exempt.includes(f))
+  const stale = exempt.filter((f) => !found.includes(f))
+  assert(
+    unlisted.length === 0 && stale.length === 0,
+    `direct-run drift. suites with no exemption (guard or exempt them in scripts/lib/node-test-roster.mjs): [${unlisted.join(', ')}]; exemptions with no suite: [${stale.join(', ')}]`,
+  )
+})
+
+test('every direct-run exemption states a reason and its exact assert.match count', () => {
+  for (const { file, matchSites } of directRun) {
+    const ex = DIRECT_RUN_EXEMPTIONS[file]
+    if (!ex) continue // reported by the equality test above
+    assert(typeof ex.reason === 'string' && ex.reason.length > 20, `${file}: exemption has no real reason`)
+    assert(ex.matchSites === matchSites, `${file}: exemption says ${ex.matchSites} assert.match site(s), file has ${matchSites} — re-judge the exemption`)
+  }
+})
+
+const CI_YML = readFileSync(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')
+
+test('every exempt suite is invoked as `node <file>` by a ci.yml step', () => {
+  const stale = Object.keys(DIRECT_RUN_EXEMPTIONS).filter((f) => !workflowRunsFileDirectly(REPO_ROOT, CI_YML, f))
+  assert(
+    stale.length === 0,
+    `exempted but not run as \`node <file>\` in .github/workflows/ci.yml (its exemption reason no longer holds): [${stale.join(', ')}]`,
+  )
+})
+
+test('the ci.yml reader tells `node <file>` from `node --test <file>` and from other scripts', () => {
+  const yml = [
+    'jobs:', '  j:', '    steps:',
+    '      - name: direct', '        working-directory: packages/desktop',
+    '        run: |', '          set -o pipefail', '          node scripts/a.test.mjs | tee /tmp/x',
+    '      - name: runner', '        run: node --test packages/b/b.test.mjs',
+    '      - name: other', '        run: node packages/c/helper.mjs packages/c/c.test.mjs',
+  ].join('\n')
+  assert(workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/desktop/scripts/a.test.mjs'), 'direct run in a working directory')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/b/b.test.mjs'), '--test runner is not a direct run')
+  assert(!workflowRunsFileDirectly(REPO_ROOT, yml, 'packages/c/c.test.mjs'), 'an argument of another script is not a direct run')
+  assert(workflowCommands(yml).length >= 3, 'the reader found no commands')
+})
+
+test('the node:test scanners recognise every import and match form', () => {
+  for (const src of [
+    "import test from 'node:test'", "import { test } from \"node:test\"", "const t = require('node:test')",
+    "const t = await import('node:test')", "import 'node:test'",
+  ]) assert(importsNodeTest(src), `missed import form: ${src}`)
+  assert(!importsNodeTest("import test from 'vitest'"), 'false import match')
+  for (const src of [
+    "assert.match(a, /x/)", "assert.doesNotMatch(a, /x/)", "t.assert.match(a, /x/)", "strict.match(a, /x/)",
+    "const { match } = assert", "const { match: m } = assert", "import { doesNotMatch } from 'node:assert'",
+    "const m = assert.match",
+  ]) assert(countMatchSites(src) >= 1, `missed match form: ${src}`)
+  assert(countMatchSites("assert.equal(a, b)") === 0, 'false match count')
+})
+
+test('no node:test mention hides in a file type the scanners cannot read', () => {
+  const hidden = unclassifiedNodeTestMentions(REPO_ROOT, nodeTestPackagesFound.map((p) => p.name))
+  assert(hidden.length === 0, `quote 'node:test' in unscanned file type(s) (extend SCANNED_EXTENSIONS): [${hidden.join(', ')}]`)
+})
 
 // ── The mechanism: does a throw from --import stop a real `node --test` run? ─
 
