@@ -10,6 +10,11 @@ import { registerProvider } from '../src/providers.js'
 import { replayHistory, CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL, CAPABILITY_HISTORY_INFLIGHT_REPLY } from '../src/ws-history.js'
 import { frameForBoundClient } from '../src/outgoing-policy.js'
 import { isBoundToOtherSession } from '../src/environments/authority.js'
+import WebSocket from 'ws'
+import { WsServer as _WsServer } from '../src/ws-server.js'
+import { PairingManager } from '../src/pairing.js'
+import { setLogListener } from '../src/logger.js'
+import { waitFor } from './test-helpers.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
@@ -300,5 +305,90 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
     // withholding another session's frame is the send path's isBoundToOtherSession drop
     assert.equal(isBoundToOtherSession({ boundSessionId: 's2' }, 's1'), true)
     assert.equal(isBoundToOtherSession({ boundSessionId: 's1' }, 's1'), false)
+  })
+})
+
+// #8415 owner requirement: delivery through the REAL send path (WsServer._send ->
+// the bound-other-session drop -> frameForBoundClient), not the two predicates alone.
+class WsServer extends _WsServer {
+  constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
+  start(...args) { super.start(...args); setLogListener(null) }
+}
+
+describe('tool_input_backfill end to end through a real WsServer (#8415)', () => {
+  let server = null
+  let pm = null
+  const sockets = []
+  afterEach(() => {
+    for (const w of sockets.splice(0)) { try { w.close() } catch { /* ignore */ } }
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function connect(port, auth) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    sockets.push(ws)
+    const messages = []
+    ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+    ws.send(JSON.stringify({ type: 'auth', ...auth }))
+    await waitFor(() => messages.find((m) => m.type === 'auth_ok'), { label: 'auth_ok' })
+    return messages
+  }
+
+  /** Two real sessions, each holding a running tool whose input was filled afterwards. */
+  async function fixture() {
+    const { mgr, sid: sidA } = boot()
+    const sidB = mgr.createSession({ cwd: '/tmp', provider: 'fake-backfill-8415' })
+    const cursors = {}
+    for (const [sid, id] of [[sidA, 'toolu_a'], [sidB, 'toolu_b']]) {
+      cursors[sid] = recordRunningTool(mgr, sid, id)
+      mgr.getSession(sid).session.emit('tool_input_recorded', { toolUseId: id, input: INPUT })
+    }
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: mgr, authRequired: true, pairingManager: pm })
+    server.start('127.0.0.1')
+    await new Promise((resolve) => server.httpServer.once('listening', resolve))
+    const port = server.httpServer.address().port
+    return { mgr, sidA, sidB, cursors, port }
+  }
+  const caps = [CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL]
+  const settle = () => new Promise((r) => setTimeout(r, 150))
+
+  it('(a) a client bound to A, at a delta cursor, receives exactly one frame for A', async () => {
+    const { sidA, cursors, port } = await fixture()
+    const token = pm.validatePairing(pm.generateBoundPairing(sidA).pairingId).sessionToken
+    const messages = await connect(port, { token, capabilities: caps, historyCursors: { [sidA]: cursors[sidA] } })
+    await waitFor(() => messages.find((m) => m.type === 'history_replay_end'), { label: 'replay end' })
+    await settle()
+    const got = backfills(messages)
+    assert.equal(got.length, 1)
+    // the wire adds a per-connection `seq`; the payload fields are what matter
+    const { seq: _seq, ...payload } = got[0]
+    assert.deepEqual(payload, { type: 'tool_input_backfill', sessionId: sidA, messageId: 'toolu_a', toolUseId: 'toolu_a', input: INPUT })
+  })
+
+  it('(b) a frame for B pushed through _send to the A-bound client is dropped; (c) the primary client gets it', async () => {
+    const { mgr, sidA, sidB, cursors, port } = await fixture()
+    const token = pm.validatePairing(pm.generateBoundPairing(sidA).pairingId).sessionToken
+    const bound = await connect(port, { token, capabilities: caps, historyCursors: { [sidA]: cursors[sidA] } })
+    const primary = await connect(port, { token: 'primary-tok', capabilities: caps })
+    await waitFor(() => bound.find((m) => m.type === 'history_replay_end'), { label: 'bound replay end' })
+
+    // the real frame for B, produced by the real replay
+    const forB = backfills(await replay(mgr, sidB, { historyCursors: { [sidB]: cursors[sidB] } }))
+    assert.equal(forB.length, 1)
+    assert.equal(forB[0].sessionId, sidB)
+
+    const boundWs = [...server.clients.entries()].find(([, c]) => c.boundSessionId === sidA)?.[0]
+    const primaryWs = [...server.clients.entries()].find(([, c]) => !c.boundSessionId)?.[0]
+    assert.ok(boundWs && primaryWs, 'both connections found')
+    const before = bound.length
+    server._send(boundWs, forB[0])
+    server._send(primaryWs, forB[0])
+    await waitFor(() => primary.find((m) => m.type === 'tool_input_backfill' && m.sessionId === sidB), { label: 'primary receives B frame' })
+    await settle()
+    assert.deepEqual(backfills(bound.slice(before)), [], 'the A-bound client never receives B\'s frame')
+    assert.equal(backfills(bound).some((m) => m.sessionId === sidB), false)
   })
 })
