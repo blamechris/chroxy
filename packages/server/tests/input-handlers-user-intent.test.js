@@ -109,6 +109,54 @@ describe('user intent vs the Stop state (#8301)', () => {
     ctx.sessions.sessionManager.isBudgetPaused = budget
   })
 
+  it('a retransmit of input sent BEFORE the Stop (rejected as a duplicate) does NOT clear the Stop or reset the wake cap (#8329)', async () => {
+    const x = { type: 'input', data: 'sent before the stop', clientMessageId: 'u1' }
+    await handleSessionMessage(WS, client, x, ctx)
+    assert.equal(sendOptions.length, 1, 'precondition: the first send was dispatched')
+    await stop()
+    assert.equal(stopped(), true)
+    mgr._daemonWakeCount.set('s1', 2)
+    await handleSessionMessage(WS, client, { ...x }, ctx)
+    assert.equal(sendOptions.length, 1, 'precondition: the retransmit was deduped, not dispatched')
+    assert.equal(stopped(), true, 'the duplicate did not clear the Stop')
+    assert.equal(mgr._daemonWakeCount.get('s1'), 2, 'the duplicate did not reset the wake cap counter')
+  })
+
+  it('a retransmit whose payload differs (payload_mismatch) does NOT clear the Stop (#8329)', async () => {
+    await handleSessionMessage(WS, client, { type: 'input', data: 'original', clientMessageId: 'u1' }, ctx)
+    await stop()
+    await handleSessionMessage(WS, client, { type: 'input', data: 'different', clientMessageId: 'u1' }, ctx)
+    assert.equal(sendOptions.length, 1, 'precondition: the mismatch was not dispatched')
+    assert.equal(stopped(), true)
+  })
+
+  it('a NEW input after the Stop still clears it, and resets the wake cap (#8329)', async () => {
+    await handleSessionMessage(WS, client, { type: 'input', data: 'first', clientMessageId: 'u1' }, ctx)
+    await stop()
+    mgr._daemonWakeCount.set('s1', 2)
+    await handleSessionMessage(WS, client, { type: 'input', data: 'second', clientMessageId: 'u2' }, ctx)
+    assert.equal(stopped(), false)
+    assert.equal(mgr._daemonWakeCount.has('s1'), false)
+  })
+
+  it('a context-only send (no text, no attachments) counts as intent (#8329)', async () => {
+    await stop()
+    await handleSessionMessage(WS, client, {
+      type: 'input',
+      clientMessageId: 'ctx1',
+      context: {
+        version: 1,
+        items: [{
+          id: 'context-1', kind: 'text', provenance: { source: 'clipboard' },
+          mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+          content: { type: 'text', text: 'selected' },
+        }],
+      },
+    }, ctx)
+    assert.equal(sendOptions.length, 1, 'precondition: the context-only send was dispatched')
+    assert.equal(stopped(), false)
+  })
+
   it('an empty send is not intent', async () => {
     await stop()
     await handleSessionMessage(WS, client, { type: 'input', data: '   ' }, ctx)

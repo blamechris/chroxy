@@ -383,17 +383,6 @@ async function handleInput(ws, client, msg, ctx) {
     return
   }
 
-  // #8301: a person just typed into this session. Record the INTENT here, at
-  // receipt: synchronously, before any await or dispatch, and whether or not the
-  // input is later rejected, queued or deduped. It must not wait for admission
-  // (`recordUserInput` runs at admission for correlated input, which a provider
-  // may reach only after awaiting its transport): input sent BEFORE a Stop could
-  // otherwise be admitted after it and silently undo it. An empty send is not
-  // intent.
-  if ((typeof text === 'string' && text.trim().length > 0) || attachments?.length) {
-    ctx.sessions.sessionManager?.recordUserIntent?.(targetSessionId)
-  }
-
   // Only negotiated clients receive the new acknowledgement/dedup behavior.
   // An explicit context envelope also opts in by construction. This keeps the
   // observable plain-input behavior unchanged for deployed older clients.
@@ -528,6 +517,9 @@ async function handleInput(ws, client, msg, ctx) {
   }
 
   if (ctx.sessions.sessionManager.isBudgetPaused(targetSessionId)) {
+    // A budget-paused rejection is still a person typing (#8301): the reservation
+    // site below is never reached, so record the intent here.
+    ctx.sessions.sessionManager?.recordUserIntent?.(targetSessionId)
     sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     if (supportsInputAck) {
       sendInputRejectionAck(ws, ctx, targetSessionId, msg, 'budget_paused', 'The input was not dispatched because the session budget is paused.')
@@ -602,6 +594,16 @@ async function handleInput(ws, client, msg, ctx) {
     return
   }
   const inputRecord = reservation.record
+
+  // #8301 / #8329: a person just typed into this session. Record the INTENT here,
+  // once the input is a NEW one (the empty-input return and the duplicate /
+  // payload_mismatch / expired / capacity rejections above have already run), so a
+  // client's retransmit of input sent before a Stop cannot undo that Stop. Nothing
+  // between receipt and this line awaits, so it still lands before any dispatch or
+  // admission wait: input sent BEFORE a Stop cannot be admitted after it and
+  // silently undo it. A context-only send counts. A budget-paused rejection
+  // records at its own return above.
+  ctx.sessions.sessionManager?.recordUserIntent?.(targetSessionId)
 
   // #3666 — hoist the per-session evaluator-await lock check above the
   // routing logic so trivial-skip-path messages also reject during an
