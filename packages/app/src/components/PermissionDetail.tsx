@@ -183,7 +183,14 @@ function AskUserQuestionPermissionBody({ toolInput }: { toolInput?: Record<strin
   );
 }
 
-export function renderPermissionDetail(tool?: string, toolInput?: Record<string, unknown>): React.ReactElement | null {
+export function renderPermissionDetail(
+  tool?: string,
+  toolInput?: Record<string, unknown>,
+  // `record` is true for a finished permission (an outcome record or a history
+  // entry): wording that offers a decision must read as what WAS asked (#9161).
+  // Passed explicitly; never inferred from text.
+  options: { record?: boolean } = {},
+): React.ReactElement | null {
   if (tool === ASK_USER_QUESTION_TOOL) return <AskUserQuestionPermissionBody toolInput={toolInput} />;
   if (!toolInput || !tool) return null;
 
@@ -191,7 +198,7 @@ export function renderPermissionDetail(tool?: string, toolInput?: Record<string,
 
   if (toolName === 'dev_preview') {
     return <View style={styles.permDetailBlock} testID="dev-preview-consent">
-      <Text style={styles.permDetailCode}>Allow once for this connection</Text>
+      <Text style={styles.permDetailCode}>{options.record ? 'Asked to allow once for this connection' : 'Allow once for this connection'}</Text>
       <Text selectable style={styles.permDetailCode}>{JSON.stringify(toolInput.target, null, 2)}</Text>
       <Text style={styles.permDetailCode}>{String(toolInput.exposure || 'Public HTTP URL. No authentication added. No WebSockets or reconnect.')}</Text>
     </View>;
@@ -689,7 +696,7 @@ export function PermissionOutcomeRecord({ message }: { message: ChatMessage }) {
   const text = noDecision ? label : `${isDenied ? ICON_CLOSE : ICON_CHECK} ${label}`;
   // Only the sanitized input already held by the message is rendered. This
   // disclosure never mounts the live card, fetches input, or exposes decisions.
-  const inspection = message.toolInput ? renderPermissionDetail(message.tool, message.toolInput) : null;
+  const inspection = message.toolInput ? renderPermissionDetail(message.tool, message.toolInput, { record: true }) : null;
   if (!inspection) {
     return (
       <View

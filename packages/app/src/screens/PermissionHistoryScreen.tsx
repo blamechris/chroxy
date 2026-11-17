@@ -137,7 +137,7 @@ function PermissionEntryRow({
       {/* Expanded detail */}
       {isExpanded && (
         <View style={styles.entryDetail}>
-          {renderPermissionDetail(entry.message.tool, entry.message.toolInput)}
+          {renderPermissionDetail(entry.message.tool, entry.message.toolInput, { record: entry.status !== 'pending' })}
         </View>
       )}
     </TouchableOpacity>

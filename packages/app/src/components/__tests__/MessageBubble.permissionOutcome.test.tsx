@@ -11,10 +11,11 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { StyleSheet, Text, TextInput } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { createDispatchTable, runDispatch, resetReplayReconcile } from '@chroxy/store-core';
 import type { ClientStoreAdapter } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
+import { renderPermissionDetail } from '../PermissionDetail';
 import type { ChatMessage } from '../../store/types';
 
 // Only state/transport boundaries are replaced. React hooks, MessageBubble,
@@ -188,11 +189,26 @@ function toggle(tree: renderer.ReactTestRenderer, id: string) {
   act(() => control!.props.onPress());
 }
 
+/**
+ * Read-only means no DECISION CONTROLS, asserted by testID / role. It must not
+ * match words: an expanded record shows model-supplied content, which may
+ * legitimately contain "Approve", "Deny" or "Send" (#9161).
+ */
 function expectReadOnly(tree: renderer.ReactTestRenderer) {
   expect(tree.root.findAll((node) => /^approval-button-/.test(node.props.testID ?? ''))).toHaveLength(0);
+  // Strict: ANY pressable node must be the record's own expand toggle, or the
+  // bubble's own wrapper that CONTAINS that toggle (message selection, not a
+  // decision). A new control with no role, no testID or a new name cannot slip
+  // past this: it is neither the toggle nor an ancestor of it.
+  const isToggle = (node: ReactTestInstance) => /^permission-outcome-/.test(String(node.props.testID ?? ''));
+  const pressables = tree.root.findAll((node) => typeof node.props.onPress === 'function');
+  for (const node of pressables) {
+    const ok = isToggle(node) || node.findAll(isToggle).length > 0;
+    expect(ok).toBe(true);
+  }
   expect(tree.root.findAllByType(TextInput)).toHaveLength(0);
   expect(tree.root.findAllByProps({ accessibilityRole: 'timer' })).toHaveLength(0);
-  expect(text(tree.root)).not.toMatch(/Action Required|Permission expires|Timed out|Approve|Deny|Send/);
+  expect(text(tree.root)).not.toMatch(/Action Required|Permission expires|Timed out/);
 }
 
 describe('MessageBubble terminal permission inspection (#8392)', () => {
@@ -354,4 +370,90 @@ describe('MessageBubble terminal permission inspection (#8392)', () => {
       expectReadOnly(tree);
     },
   );
+});
+
+describe('expectReadOnly can fail (#9161)', () => {
+  const failsFor = (element: React.ReactElement) => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(element); });
+    trees.push(tree);
+    expect(() => expectReadOnly(tree)).toThrow();
+  };
+  it('fails on an approval-button testID', () => {
+    failsFor(<View testID="approval-button-allow" />);
+  });
+  it('fails on a stray role-less, id-less pressable', () => {
+    failsFor(<Pressable onPress={() => {}}><Text>x</Text></Pressable>);
+  });
+  it('fails on a pressable under a foreign testID', () => {
+    failsFor(<Pressable testID="something-else" onPress={() => {}} />);
+  });
+  it('fails on a text input', () => {
+    failsFor(<TextInput />);
+  });
+  it('fails on a timer', () => {
+    failsFor(<View accessibilityRole="timer" />);
+  });
+  it('fails on live-card wording', () => {
+    failsFor(<Text>Action Required</Text>);
+  });
+  it('fails on a stray pressable beside the record\'s own toggle', () => {
+    failsFor(<View>
+      <Pressable testID="permission-outcome-x" onPress={() => {}} />
+      <Pressable onPress={() => {}} />
+    </View>);
+  });
+  it('passes on the record\'s own toggle alone', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(<Pressable testID="permission-outcome-x" accessibilityRole="button" onPress={() => {}} />); });
+    trees.push(tree);
+    expectReadOnly(tree);
+  });
+});
+
+describe('record read-only assertion checks controls, not words (#9161)', () => {
+  const wordy = { file_path: '/fixture/notes.md', content: 'Approve the plan, Deny the rest, Send it' };
+
+  it('an expanded record whose content says Approve / Deny / Send is still read-only', () => {
+    const record = replayOutcome([], 'allowed', 'Write', wordy);
+    const tree = render(record);
+    toggle(tree, record.id);
+    expect(text(tree.root)).toMatch(/Approve|Deny|Send/); // the old word match would have failed here
+    expectReadOnly(tree);
+  });
+
+  it('NEGATIVE CONTROL: a live card with decision controls fails the control check', () => {
+    mockStoreState.serverCapabilities.ide = true;
+    const tree = render(makeOutcome('allowed', {
+      permissionOutcome: undefined, answered: undefined, tool: 'Write', toolInput: wordy,
+      options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+      expiresAt: Date.now() + 60_000,
+    }));
+    expect(() => expectReadOnly(tree)).toThrow();
+  });
+});
+
+describe('dev_preview record wording (#9161)', () => {
+  const input = { target: { host: '127.0.0.1', port: 3100, pid: 1, command: 'x', cwd: '/tmp' }, exposure: 'Public HTTP URL.' };
+
+  it.each(['allowed', 'denied', 'expired', 'stopped'] as const)(
+    'an expanded %s dev_preview record says what was asked, not the live consent offer', (outcome) => {
+      const record = replayOutcome([], outcome, 'dev_preview', input);
+      const tree = render(record);
+      toggle(tree, record.id);
+      expect(text(tree.root)).toContain('Asked to allow once for this connection');
+      expect(text(tree.root)).not.toMatch(/(^|\s)Allow once for this connection/);
+      expect(text(tree.root)).toContain('127.0.0.1');
+      expectReadOnly(tree);
+    },
+  );
+
+  it('the live card keeps the consent copy', () => {
+    const el = renderPermissionDetail('dev_preview', input);
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(el!); });
+    trees.push(tree);
+    expect(text(tree.root)).toMatch(/^Allow once for this connection/);
+    expect(text(tree.root)).not.toContain('Asked to');
+  });
 });
