@@ -42,7 +42,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.d.ts', 'src/test-setup.ts', 'src/theme/tokens.ts'],
+      exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.testSupport.{ts,tsx}', 'src/**/*.d.ts', 'src/test-setup.ts', 'src/theme/tokens.ts'],
       reporter: ['text-summary', 'html', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
     },

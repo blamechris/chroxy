@@ -4,13 +4,11 @@
 import { StrictMode } from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
 import { Toast, type ToastItem } from './Toast'
 import { Modal } from './Modal'
 import { ShortcutHelp } from './ShortcutHelp'
 import { getModalOverlayCount } from '../hooks/useModalOverlay'
-import { fullScreenLayers } from '../hooks/overlayRoster.testSupport'
+import { fullScreenLayers, declaredZIndex } from '../hooks/overlayRoster.testSupport'
 
 afterEach(cleanup)
 
@@ -133,20 +131,32 @@ describe('toast timers vs overlays, extended (#9168)', () => {
     expect(onDismiss).toHaveBeenCalledWith('t0')
   })
 
-  it('removing a paused toast, or unmounting, leaves no pending timers', async () => {
+  it('toast timers: counted while running, none added while paused, gone on removal/unmount, never fire after', async () => {
     const onDismiss = vi.fn()
-    const base = render(<Stack toasts={[]} modal onDismiss={onDismiss} />)
-    const baseline = vi.getTimerCount()
-    base.rerender(<Stack toasts={items} modal onDismiss={onDismiss} />)
-    base.rerender(<Stack toasts={[]} modal onDismiss={onDismiss} />)
-    expect(vi.getTimerCount()).toBe(baseline)
-    base.unmount()
-    // Modal's own focus bookkeeping may leave a timer; the toast must add none.
-    const afterModalOnly = vi.getTimerCount()
-    vi.clearAllTimers()
-    const again = render(<Stack toasts={items} modal onDismiss={onDismiss} />)
-    again.unmount()
-    expect(vi.getTimerCount()).toBe(afterModalOnly)
+    // (1) the counter sees a toast timer: with NO modal, adding a toast adds >= 1
+    const free = render(<Stack toasts={[]} onDismiss={onDismiss} />)
+    const freeBase = vi.getTimerCount()
+    free.rerender(<Stack toasts={items} onDismiss={onDismiss} />)
+    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(freeBase + 1)
+    // (3a) removing a running toast returns to baseline
+    free.rerender(<Stack toasts={[]} onDismiss={onDismiss} />)
+    expect(vi.getTimerCount()).toBe(freeBase)
+    // (3b) unmounting with a running toast returns to baseline
+    free.rerender(<Stack toasts={items} onDismiss={onDismiss} />)
+    free.unmount()
+    expect(vi.getTimerCount()).toBe(freeBase)
+    // (2) while a modal is open, adding a toast adds NO timer
+    const paused = render(<Stack toasts={[]} modal onDismiss={onDismiss} />)
+    const base = vi.getTimerCount()
+    paused.rerender(<Stack toasts={items} modal onDismiss={onDismiss} />)
+    expect(vi.getTimerCount()).toBe(base)
+    // (3c) removing the paused toast and unmounting return to baseline
+    paused.rerender(<Stack toasts={[]} modal onDismiss={onDismiss} />)
+    expect(vi.getTimerCount()).toBe(base)
+    paused.rerender(<Stack toasts={items} modal onDismiss={onDismiss} />)
+    paused.unmount()
+    // (4) nothing the toast armed can fire afterwards
+    await advance(30000)
     expect(onDismiss).not.toHaveBeenCalled()
   })
 
@@ -180,22 +190,11 @@ describe('toast timers vs overlays, extended (#9168)', () => {
 })
 
 describe('overlay layering (#9168)', () => {
-  const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
-  const zOf = (cls: string): number => {
-    const m = new RegExp(`(?:^|\\n)${cls.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`).exec(css)
-    if (!m || m[1] === undefined) throw new Error(`rule for ${cls}`)
-    const z = /z-index:\s*(\d+)/.exec(m[1])
-    if (!z || z[1] === undefined) throw new Error(`z-index in ${cls}`)
-    return Number(z[1])
-  }
-
-  // Overlay classes derived from the stylesheet + sources, not hardcoded.
-  const overlayClasses = (): string[] => fullScreenLayers().map(l => l.selector)
-
+  // Overlay layers (class + z-index) derived from EVERY stylesheet, not hardcoded.
   it('behind-modal z-index is below every overlay z-index', () => {
-    const classes = overlayClasses()
-    expect(classes.length).toBeGreaterThan(0)
-    const behind = zOf('.toast-container.toast-container-behind-modal')
-    for (const c of classes) expect(behind, c).toBeLessThan(zOf(c))
+    const layers = fullScreenLayers()
+    expect(layers.length).toBeGreaterThan(0)
+    const behind = declaredZIndex('.toast-container.toast-container-behind-modal')
+    for (const l of layers) expect(behind, l.selector).toBeLessThan(l.z)
   })
 })
