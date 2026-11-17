@@ -21,6 +21,7 @@
 import { join, resolve } from 'node:path'
 import { opendir, lstat, realpath, readlink } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
+import { createLogger } from './logger.js'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd, resolveSessionCwd } from './ws-file-ops/common.js'
@@ -145,6 +146,7 @@ function globTimeoutMs() {
  * bound can be proven at a testable size. An empty or unparseable value falls
  * back to the default rather than lifting the bound.
  */
+const log = createLogger('byok-tool-executor')
 const GLOB_MAX_CONCURRENT_DEFAULT = 2
 function globMaxConcurrent() {
   const raw = (process.env.CHROXY_GLOB_MAX_CONCURRENT || '').trim()
@@ -152,7 +154,49 @@ function globMaxConcurrent() {
   const n = Number(raw)
   return n > 0 ? n : GLOB_MAX_CONCURRENT_DEFAULT
 }
-const globWalkSlots = { active: 0, queue: [] }
+const globWalkSlots = { active: 0, queue: [], capSince: null, lastWarnAt: null }
+
+// #8349 — the limiter's clock, injectable so the stuck-at-cap check is proven
+// without waiting real deadlines. null restores Date.now.
+let globLimiterNow = Date.now
+function __setGlobLimiterClockForTest(fn) {
+  globLimiterNow = fn || Date.now
+}
+
+// Track how long the limiter has sat at its cap with no slot handed back. A
+// release is progress, so it clears the clock; the pump (or a grant) that
+// refills the cap restarts it.
+function noteGlobCapState(limit) {
+  if (globWalkSlots.active >= limit) {
+    if (globWalkSlots.capSince === null) globWalkSlots.capSince = globLimiterNow()
+  } else {
+    globWalkSlots.capSince = null
+  }
+}
+
+/**
+ * #8349 — a walk stuck inside an awaited opendir/readdir (hung mount, FUSE)
+ * never sees `state.stop`, so its slot is never returned and the cap turns one
+ * hung call into a daemon-wide Glob outage. Log one warning when the limiter
+ * has been full, with no slot released, for more than a few deadlines, and at
+ * most once per that interval. Returns whether it warned. The slot is NOT
+ * force-released: the hung walk still holds a directory handle and a libuv
+ * pool thread, so freeing its slot would let new walks oversubscribe exactly
+ * the resource the cap protects.
+ */
+const GLOB_STUCK_DEADLINE_MULTIPLE = 3
+function warnIfGlobWalksStuck(deadlineMs, warn = (m) => log.warn(m)) {
+  const { capSince, active } = globWalkSlots
+  if (capSince === null) return false
+  const now = globLimiterNow()
+  const threshold = GLOB_STUCK_DEADLINE_MULTIPLE * deadlineMs
+  if (now - capSince <= threshold) return false
+  if (globWalkSlots.lastWarnAt !== null && now - globWalkSlots.lastWarnAt <= threshold) return false
+  globWalkSlots.lastWarnAt = now
+  warn(`${active} Glob walks have held every walk slot for ${Math.round((now - capSince) / 1000)}s without returning; ` +
+    'later Globs will time out waiting for a slot until one returns (a hung mount or blocked device?)')
+  return true
+}
 
 function pumpGlobWalkSlots() {
   while (globWalkSlots.queue.length > 0 && globWalkSlots.active < globWalkSlots.queue[0].limit) {
@@ -160,6 +204,8 @@ function pumpGlobWalkSlots() {
     globWalkSlots.active++
     waiter.resolve(makeGlobSlotRelease())
   }
+  if (globWalkSlots.queue.length > 0) noteGlobCapState(globWalkSlots.queue[0].limit)
+  else if (globWalkSlots.active === 0) globWalkSlots.capSince = null
 }
 
 function makeGlobSlotRelease() {
@@ -168,6 +214,8 @@ function makeGlobSlotRelease() {
     if (released) return
     released = true
     globWalkSlots.active--
+    globWalkSlots.capSince = null // a slot came back: progress, and the next stuck episode warns afresh
+    globWalkSlots.lastWarnAt = null
     pumpGlobWalkSlots()
   }
 }
@@ -183,9 +231,11 @@ function acquireGlobWalkSlot(limit) {
   const granted = new Promise((resolve) => {
     if (globWalkSlots.active < limit) {
       globWalkSlots.active++
+      noteGlobCapState(limit)
       resolve(makeGlobSlotRelease())
       return
     }
+    noteGlobCapState(limit)
     waiter = { limit, resolve }
     globWalkSlots.queue.push(waiter)
   })
@@ -665,9 +715,13 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // against this call's budget; a call that times out or is aborted while
   // still queued is dequeued below and never starts a walk.
   const slot = acquireGlobWalkSlot(globMaxConcurrent())
+  // #8349 — whether this call's walk ever got a slot. A timeout with no slot
+  // was spent queued behind other walks, which is not the same as a slow walk.
+  let walkStarted = false
   async function collectAll() {
     const release = await slot.granted
     if (release === null) return
+    if (state.stop === null) walkStarted = true
     try {
       for (const p of patterns) {
         if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
@@ -696,6 +750,13 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
   }
   if (state.stop === 'timed out') {
+    if (!walkStarted) {
+      warnIfGlobWalksStuck(timeoutMs)
+      return {
+        content: `Glob timed out after ${timeoutMs}ms (waited ${timeoutMs}ms for a free walk slot; ${globWalkSlots.active} walks were busy)`,
+        isError: true,
+      }
+    }
     return { content: `Glob timed out after ${timeoutMs}ms`, isError: true }
   }
   if (state.stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
@@ -3447,6 +3508,8 @@ export {
   walkGlob,
   acquireGlobWalkSlot,
   globWalkSlotStats,
+  warnIfGlobWalksStuck,
+  __setGlobLimiterClockForTest,
   expandBraces,
   GLOB_BRACE_EXPANSION_CAP,
   parseRangeGroup,
