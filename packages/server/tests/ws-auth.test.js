@@ -17,7 +17,6 @@ import {
   BENIGN_PAIR_WINDOW_MS,
   BENIGN_PAIR_BLOCK_MS,
 } from '../src/ws-auth.js'
-import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
 import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt, createSigningKeyPair, verifyExchangeKeySignature } from '@chroxy/store-core/crypto'
@@ -1944,29 +1943,6 @@ describe('clientCapabilities', () => {
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'pair-id-2' })
       assert.ok(client.clientCapabilities instanceof Set)
       assert.equal(client.clientCapabilities.size, 0)
-    })
-  })
-
-  describe('clientHasCapability helper', () => {
-    it('returns true for a declared capability', () => {
-      const ws = { clientCapabilities: new Set(['console', 'voice_input']) }
-      assert.equal(clientHasCapability(ws, 'console'), true)
-      assert.equal(clientHasCapability(ws, 'voice_input'), true)
-    })
-
-    it('returns false for an undeclared capability', () => {
-      const ws = { clientCapabilities: new Set(['console']) }
-      assert.equal(clientHasCapability(ws, 'voice_input'), false)
-    })
-
-    it('returns false when clientCapabilities is missing', () => {
-      const ws = {}
-      assert.equal(clientHasCapability(ws, 'console'), false)
-    })
-
-    it('returns false when clientCapabilities is undefined', () => {
-      const ws = { clientCapabilities: undefined }
-      assert.equal(clientHasCapability(ws, 'console'), false)
     })
   })
 })

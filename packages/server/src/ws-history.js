@@ -385,11 +385,18 @@ export const CAPABILITY_HISTORY_INFLIGHT_REPLY = 'history_inflight_reply_v1'
  * @param {WebSocket} ws
  * @param {string} sessionId
  * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
- * @param {{clientCapabilities?: Set<string>}|null} [client] - The client RECORD
- *   (`clients.get(ws)`), which is where the auth handshake stores the capabilities
- *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
+ * @param {{clientCapabilities?: Set<string>}|null} client - REQUIRED. The client
+ *   RECORD (`clients.get(ws)`), which is where the auth handshake stores the
+ *   capabilities it advertised. NOT `ws`: that is the raw socket and carries none
+ *   (#8374). Omitting it (`undefined`) throws: a caller that forgot it used to
+ *   downgrade every client to the older shape without a sound (#8431). `null` is
+ *   the explicit, deliberate "no record, no capabilities" and is the only way to
+ *   ask for that.
  */
-export function sendHistoryEntry(send, ws, sessionId, entry, client = null, isSessionBusy = () => false) {
+export function sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy = () => false) {
+  if (client === undefined) {
+    throw new TypeError('sendHistoryEntry: `client` is required (pass clients.get(ws), or null for a deliberately capability-less replay)')
+  }
   // #6630: a recorded error goes only to a client that said it can take one in a
   // replay (see CAPABILITY_HISTORY_ERROR_REPLAY). Skipped, not downgraded: there is
   // no older shape of an error bubble that is safe. Nothing else about the entry
@@ -1908,7 +1915,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // replay would re-send (and, with mismatched ids, duplicate) them. Forcing a
   // full rebuild on switch keeps the long-standing authoritative-replace
   // semantics and the atomic swap (#5555.4) hides the rebuild with no flash.
-  const client = clients && typeof clients.get === 'function' ? clients.get(ws) : null
+  const client = (clients && typeof clients.get === 'function' ? clients.get(ws) : null) ?? null
   const lastSeq = opts.forceFull ? undefined : client?.historyCursors?.[sessionId]
 
   // `latestSeq` rides the start frame so the client can advance its cursor even

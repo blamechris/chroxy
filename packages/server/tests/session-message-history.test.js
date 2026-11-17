@@ -408,7 +408,7 @@ describe('SessionMessageHistory', () => {
 
       const sent = []
       for (const entry of history.getHistory('s1')) {
-        sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+        sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry, null)
       }
       const start = sent.find((f) => f.type === 'tool_start')
       const result = sent.find((f) => f.type === 'tool_result')
@@ -830,7 +830,7 @@ describe('SessionMessageHistory', () => {
 
       const frames = []
       for (const entry of restored.slice(plan.startOffset)) {
-        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry, null)
       }
       assert.deepEqual(frames.map(f => f.type), ['tool_start', 'tool_result', 'user_question', 'user_question'])
       const q = frames[2]
@@ -863,7 +863,7 @@ describe('SessionMessageHistory', () => {
         )
         const frames = []
         for (const entry of restored.slice(plan.startOffset)) {
-          sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+          sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry, null)
         }
         return { plan, frames, cursor }
       }
@@ -910,7 +910,7 @@ describe('SessionMessageHistory', () => {
       h.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?' }] })
       const frames = []
       for (const entry of h.getHistory(sid)) {
-        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry, null)
       }
       assert.equal(frames.find(f => f.type === 'user_question').interrupted, undefined)
     })
@@ -1022,7 +1022,7 @@ describe('SessionMessageHistory', () => {
       const entry = h.recordInterruptedTurn('s1', 5000)
       assert.equal(entry.turnOutcome, 'interrupted')
       const frames = []
-      for (const e of h.getHistory('s1')) sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', e)
+      for (const e of h.getHistory('s1')) sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', e, null)
       const result = frames.find((f) => f.type === 'result')
       assert.equal(result.turnOutcome, 'interrupted')
       assert.equal(result.timestamp, 5000)

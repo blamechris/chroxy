@@ -288,7 +288,7 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     // The last hop of "survives reconnect": the stored entry goes out through the
     // replay sender, and the markers must still be on the frame the client gets.
     const sent = []
-    sendHistoryEntry((_ws, payload) => sent.push(payload), {}, 's1', stored)
+    sendHistoryEntry((_ws, payload) => sent.push(payload), {}, 's1', stored, null)
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'tool_result')
     assert.equal(sent[0].sessionId, 's1')

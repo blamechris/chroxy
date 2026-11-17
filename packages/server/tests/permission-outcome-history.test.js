@@ -238,7 +238,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
       const [e] = h.getHistory('s1')
       assert.equal(e.decision, token)
       const frames = []
-      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e, null)
       assert.equal(frames[0].decision, token)
     })
   }
@@ -260,7 +260,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     ])
     for (const e of h.getHistory('s1')) {
       const frames = []
-      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e, null)
       assert.equal('decision' in frames[0], false, e.requestId)
     }
   })
@@ -276,7 +276,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: shown })
     assert.deepEqual(h.getHistory('s1')[0].input, CRAFTED)
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0], null)
     assert.equal(frames[0].input.command, 'rm -rf /important')
     assert.equal(frames[0].input.dangerouslyDisableSandbox, true)
   })
@@ -385,7 +385,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     const h = new SessionMessageHistory()
     h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'expired' })
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0], null)
     assert.equal(frames.length, 1)
     assert.equal(frames[0].type, 'permission_outcome')
     assert.equal(frames[0].requestId, 'p')
@@ -400,7 +400,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     const input = { command: 'touch smoke-perm.txt', dangerouslyDisableSandbox: true }
     h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'Touch smoke file', outcome: 'allowed', input })
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0], null)
     assert.deepEqual(frames[0].input, input)
   })
 
@@ -408,7 +408,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     const h = new SessionMessageHistory()
     h.setHistory('s1', [{ type: 'permission_outcome', requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed', timestamp: 5 }])
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0], null)
     assert.equal('input' in frames[0], false)
   })
 
@@ -417,7 +417,7 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
       const h = new SessionMessageHistory()
       h.setHistory('s1', [{ type: 'permission_outcome', requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed', input: bad, timestamp: 5 }])
       const frames = []
-      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0], null)
       assert.equal('input' in frames[0], false, `${JSON.stringify(bad)} must not reach a client`)
     }
   })
@@ -523,7 +523,7 @@ describe('SessionManager records permission outcomes: in-process providers (#834
   it('#8517: a replayed session-scoped allow carries the allowSession token on the wire', async () => {
     const a = raise('s1'); a.pm.respondToPermission(a.requestId, 'allow', undefined, undefined, 'session'); await a.decided
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', outcomes(mgr, 's1')[0])
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', outcomes(mgr, 's1')[0], null)
     assert.equal(frames[0].decision, 'allowSession')
     assert.equal(frames[0].outcome, 'allowed')
   })

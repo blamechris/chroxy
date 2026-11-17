@@ -475,7 +475,7 @@ describe('recorded errors are replayed only to a client that advertises history_
   })
 
   it('a client that does not (an older build), or has no record, is sent nothing for it', () => {
-    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null]) {
       assert.deepEqual(frames(client), [])
     }
   })
@@ -732,7 +732,7 @@ describe('a text-less reasoning entry is replayed only to a client with history_
   })
 
   it('a client that does not, or has no record, is sent nothing for it (also by legacy id)', () => {
-    for (const client of [{ clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+    for (const client of [{ clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) }, { clientCapabilities: new Set() }, {}, null]) {
       assert.deepEqual(frames(client, empty), [])
       assert.deepEqual(frames(client, legacyEmpty), [])
     }

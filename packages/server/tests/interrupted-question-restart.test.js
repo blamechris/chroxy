@@ -48,7 +48,7 @@ function restartAndReplay(history, sid, cursor) {
   )
   const frames = []
   for (const entry of restored.slice(plan.startOffset)) {
-    sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry, null)
   }
   return { plan, frames }
 }
@@ -223,7 +223,7 @@ describe('history sequence survives a restart (#8336)', () => {
     const plan = resolveReplayPlan(mgr, history, sid, cursor, mgr.getLatestHistorySeq(sid))
     const frames = []
     for (const entry of history.slice(plan.startOffset)) {
-      sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry, null)
     }
     return { plan, frames }
   }
@@ -354,7 +354,7 @@ describe('internal metadata and diagnostics (#8336)', () => {
     const frames = []
     sendHistoryEntry((_ws, p) => frames.push(p), null, 's1', {
       type: 'user_question', toolUseId: 'ask-1', sourceToolUseId: 'toolu_1', questions: [{ question: 'q' }], _seq: 3,
-    })
+    }, null)
     assert.equal(frames.length, 1)
     assert.equal('sourceToolUseId' in frames[0], false)
     assert.equal(frames[0].toolUseId, 'ask-1')
@@ -459,7 +459,7 @@ describe('a question answered before a restart is not labelled interrupted (#836
     const next = boot({ history: state.history, historyLastSeq: state.historyLastSeq })
     const frames = []
     for (const entry of next.mgr.getHistory(next.sid)) {
-      sendHistoryEntry((_ws, payload) => frames.push(payload), null, next.sid, entry)
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, next.sid, entry, null)
     }
     return frames
   }

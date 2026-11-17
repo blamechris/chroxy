@@ -186,7 +186,7 @@ describe('ClaudeTuiSession hook payloads take the shared redaction floor (#8373)
       assert.ok(!JSON.stringify(entry).includes(SECRET), 'the persisted entry is clean')
 
       const sent = []
-      sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+      sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry, null)
       assert.ok(!JSON.stringify(sent).includes(SECRET))
 
       const resent = []
