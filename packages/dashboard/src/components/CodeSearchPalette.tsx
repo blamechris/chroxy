@@ -16,6 +16,7 @@ import { useConnectionStore } from '../store/connection'
 import type { SearchResultEntry } from '@chroxy/protocol'
 import { isImeComposing } from '../utils/ime'
 import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 export interface CodeSearchPaletteProps {
   isOpen: boolean
@@ -27,6 +28,7 @@ const DEBOUNCE_MS = 200
 const MIN_QUERY = 2
 
 export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
+  const { overlayProps } = useModalOverlay()
   const requestSearchContent = useConnectionStore(s => s.requestSearchContent)
   const snapshot = useConnectionStore(s => s.codeSearchResults)
   const loading = useConnectionStore(s => s.codeSearchLoading)
@@ -136,7 +138,7 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
   return (
     <div
       className="file-open-palette-overlay"
-      data-modal-overlay
+      {...overlayProps}
       data-testid="code-search-palette"
       onKeyDown={handleKeyDown}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}

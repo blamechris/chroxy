@@ -3,7 +3,8 @@
  *
  * Triggered by pressing '?'. Shows all available shortcuts grouped by section.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 export interface ShortcutEntry {
   keys: string
@@ -18,7 +19,7 @@ export interface ShortcutHelpProps {
 }
 
 export function ShortcutHelp({ isOpen, onClose, shortcuts }: ShortcutHelpProps) {
-  const backdropRef = useRef<HTMLDivElement>(null)
+  const { overlayRef: backdropRef, overlayProps } = useModalOverlay<HTMLDivElement>()
 
   useEffect(() => {
     if (!isOpen) return
@@ -47,7 +48,7 @@ export function ShortcutHelp({ isOpen, onClose, shortcuts }: ShortcutHelpProps) 
   }
 
   return (
-    <div ref={backdropRef} className="shortcut-help-overlay" data-modal-overlay onClick={onClose}>
+    <div {...overlayProps} className="shortcut-help-overlay" onClick={onClose}>
       <div
         className="shortcut-help-panel"
         role="dialog"

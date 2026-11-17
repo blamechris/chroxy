@@ -14,6 +14,7 @@ import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent }
 import { useConnectionStore } from '../store/connection'
 import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
 import type { SearchResultEntry } from '@chroxy/protocol'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 export interface ReferencesPaletteProps {
   isOpen: boolean
@@ -23,6 +24,7 @@ export interface ReferencesPaletteProps {
 const DISPLAY_CAP = 200
 
 export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
+  const { overlayProps } = useModalOverlay()
   const snapshot = useConnectionStore(s => s.referencesResult)
   const loading = useConnectionStore(s => s.referencesLoading)
   const symbol = useConnectionStore(s => s.referencesSymbol)
@@ -90,7 +92,7 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
   return (
     <div
       className="file-open-palette-overlay"
-      data-modal-overlay
+      {...overlayProps}
       data-testid="references-palette"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >

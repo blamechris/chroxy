@@ -12,6 +12,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { isImeComposing } from '../utils/ime'
+import { useModalOverlay } from '../hooks/useModalOverlay'
 
 export interface FileOpenPaletteProps {
   isOpen: boolean
@@ -21,6 +22,7 @@ export interface FileOpenPaletteProps {
 const DISPLAY_CAP = 200
 
 export function FileOpenPalette({ isOpen, onClose }: FileOpenPaletteProps) {
+  const { overlayProps } = useModalOverlay()
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
   const files = useConnectionStore(s => s.filePickerFiles)
   const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
@@ -86,7 +88,7 @@ export function FileOpenPalette({ isOpen, onClose }: FileOpenPaletteProps) {
   return (
     <div
       className="file-open-palette-overlay"
-      data-modal-overlay
+      {...overlayProps}
       data-testid="file-open-palette"
       onKeyDown={handleKeyDown}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}

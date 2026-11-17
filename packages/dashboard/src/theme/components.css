@@ -7803,6 +7803,14 @@ button.sidebar-token-view-session-row:hover {
   max-width: 380px;
 }
 
+/* #9168: while any modal overlay is open the stack draws BENEATH it (and its
+   timers pause — see Toast.tsx). Must stay below the lowest overlay z-index
+   (.modal-overlay, 1000); Toast.behindModal.test.tsx derives both sides from
+   this stylesheet. Closed-modal behaviour keeps z-index 2000 above. */
+.toast-container.toast-container-behind-modal {
+  z-index: 999;
+}
+
 .toast {
   background: #dc2626;
   color: #fff;
