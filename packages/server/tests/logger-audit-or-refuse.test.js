@@ -3,7 +3,7 @@
 // cannot fail closed.
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, appendFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { auditOrRefuse, createLogger, initFileLogging, closeFileLogging, _setAppendFileSyncForTest } from '../src/logger.js'
@@ -115,13 +115,55 @@ describe('auditOrRefuse', () => {
       assert.deepEqual(records().map((l) => payload(l).n), [0, 1, 2, 3, 4, 5])
     })
 
-    it('the non-strict audit() respects the same boundary', () => {
+    // A record framed the way the logger writes it, ending in a parseable JSON payload.
+    const FRAMED = /^\S+ \[AUDIT\] \[agent-audit\] attempt \{"n":\d+\}$/
+
+    it('the non-strict audit() respects the same boundary: the failed write leaves a REAL partial line, the retry gets its own line', () => {
       initFileLogging({ logDir: dir })
-      partialThenThrow()
-      createLogger('x').audit('torn')
+      partialThenThrow() // cuts data at 56 bytes
+      const torn = 'torn ' + 'x'.repeat(80) // the record is far longer than the cut, so the cut lands inside the message
+      createLogger('x').audit(torn)
       _setAppendFileSyncForTest(null)
+      const afterFail = readFileSync(auditPath(), 'utf8')
+      assert.ok(afterFail.length > 0 && !afterFail.endsWith('\n'), 'precondition: a partial line with no newline is on disk')
+      assert.ok(!afterFail.includes('x'.repeat(80)), 'precondition: the record was cut, not written whole')
       createLogger('agent-audit').audit(rec(9))
-      assert.deepEqual(payload(records().at(-1)), { n: 9 })
+      const physical = readFileSync(auditPath(), 'utf8').split('\n')
+      assert.equal(physical.at(-1), '', 'ends with a newline')
+      const own = physical.at(-2)
+      assert.ok(FRAMED.test(own), 'the retry occupies its own fully framed physical line')
+      assert.deepEqual(payload(own), { n: 9 })
+      assert.ok(!physical.at(-3).includes('[agent-audit]'), 'the fragment is a separate line holding nothing of the retry')
+      assert.ok(physical.at(-3).includes('torn'), 'and it is the torn record')
+    })
+
+    it('rotation: a partial tail rotated away leaves the next write on its own line at the top of the fresh file', () => {
+      writeFileSync(auditPath(), Buffer.concat([
+        Buffer.alloc(10 * 1024 * 1024, 'a'),
+        Buffer.from('\n2026-01-01T00:00:00.000Z [AUDIT] [agent-audit] attempt {"n":'),
+      ]))
+      initFileLogging({ logDir: dir })
+      assert.deepEqual(auditOrRefuse('agent-audit', rec(1)), { ok: true }) // fenced, then the file rotates
+      assert.deepEqual(auditOrRefuse('agent-audit', rec(2)), { ok: true })
+      const live = readFileSync(auditPath(), 'utf8')
+      assert.ok(FRAMED.test(live.split('\n')[0]), 'the fresh file starts with the record, no blank line or glued fragment')
+      assert.deepEqual(live.split('\n').slice(0, -1).map((l) => payload(l).n), [2])
+      const archive = readFileSync(join(dir, 'chroxy-audit.1.log'), 'utf8').split('\n')
+      assert.deepEqual(payload(archive.at(-2)), { n: 1 }, 'the fenced record parses on its own in the archive')
+      assert.ok(archive.at(-3).endsWith('{"n":'), 'and the torn fragment stays a line of its own')
+    })
+
+    it('a boundary-inspection fault fails safe: the write still lands on its own line', () => {
+      writeFileSync(auditPath(), '2026-01-01T00:00:00.000Z [AUDIT] [agent-audit] attempt {"n":')
+      chmodSync(auditPath(), 0o200) // write-only: stat works, the open-for-read throws EACCES
+      try {
+        initFileLogging({ logDir: dir })
+        assert.deepEqual(auditOrRefuse('agent-audit', rec(4)), { ok: true })
+      } finally { chmodSync(auditPath(), 0o600) }
+      const physical = readFileSync(auditPath(), 'utf8').split('\n')
+      assert.ok(FRAMED.test(physical.at(-2)), 'own framed line: the uninspectable tail was treated as needing a boundary')
+      assert.deepEqual(payload(physical.at(-2)), { n: 4 })
+      assert.ok(physical.at(-3).endsWith('{"n":'), 'the fragment is fenced off')
     })
   })
 })

@@ -235,7 +235,7 @@ describe('principal audit over a real audit file', () => {
       } finally { mock.timers.reset() }
     })
 
-    it('a failed timer flush is retried by the next window, within a bounded budget', () => {
+    it('a failed timer flush is retried by the next window, then recovers when the disk does', () => {
       mock.timers.enable({ apis: ['setTimeout'] })
       try {
         initFileLogging({ logDir: dir })
@@ -246,6 +246,29 @@ describe('principal audit over a real audit file', () => {
         _setAppendFileSyncForTest(null)
         mock.timers.tick(1000)
         assert.equal(parse(agentLines().at(-1)).count, 2, 'the re-armed timer wrote it once the disk recovered')
+      } finally { mock.timers.reset() }
+    })
+
+    it('a counter write that keeps failing is attempted exactly five times, then the entry is dropped for good', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        initFileLogging({ logDir: dir })
+        const a = createPrincipalAuditor({ collapseMs: 1000 })
+        burst(a, 3)
+        let counterAttempts = 0
+        _setAppendFileSyncForTest((path, data) => {
+          if (String(path).endsWith('chroxy-audit.log')) {
+            if (data.includes('"collapsed":true')) counterAttempts++
+            throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' })
+          }
+          return appendFileSync(path, data)
+        })
+        for (let i = 0; i < 8; i++) mock.timers.tick(1000) // well past the five windows
+        assert.equal(counterAttempts, 5, 'bounded: exactly MAX_FLUSH_FAILURES attempts')
+        assert.equal(a.flushRejections().pending, 0, 'exhausted: nothing is held any more')
+        for (let i = 0; i < 8; i++) mock.timers.tick(1000)
+        assert.equal(counterAttempts, 5, 'no further attempts after more windows have passed')
+        assert.equal(a.flushRejections().pending, 0)
       } finally { mock.timers.reset() }
     })
   })
