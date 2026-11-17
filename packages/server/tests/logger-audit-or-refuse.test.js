@@ -153,9 +153,19 @@ describe('auditOrRefuse', () => {
       assert.ok(archive.at(-3).endsWith('{"n":'), 'and the torn fragment stays a line of its own')
     })
 
-    it('a boundary-inspection fault fails safe: the write still lands on its own line', () => {
+    it('a boundary-inspection fault fails safe: the write still lands on its own line', (t) => {
       writeFileSync(auditPath(), '2026-01-01T00:00:00.000Z [AUDIT] [agent-audit] attempt {"n":')
       chmodSync(auditPath(), 0o200) // write-only: stat works, the open-for-read throws EACCES
+      // As root, or on Windows, a write-only mode does not block the read, so the
+      // inspection fault this test needs cannot be produced. Skip visibly rather than
+      // pass without ever reaching the fail-safe branch.
+      let readBlocked = false
+      try { readFileSync(auditPath()) } catch { readBlocked = true }
+      if (!readBlocked) {
+        chmodSync(auditPath(), 0o600)
+        t.skip('a write-only mode does not block reads here (root or Windows)')
+        return
+      }
       try {
         initFileLogging({ logDir: dir })
         assert.deepEqual(auditOrRefuse('agent-audit', rec(4)), { ok: true })
