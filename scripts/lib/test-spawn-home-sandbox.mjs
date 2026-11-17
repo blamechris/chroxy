@@ -135,7 +135,7 @@ function insertionIndex(args) {
  * redirect is needed (either the escape hatch is active, or the caller
  * already isolated BOTH `HOME` and `USERPROFILE` on their own).
  */
-function computeOverrideEnv({ realHome, isolatedHome, allowEnv, existingEnv }) {
+export function computeOverrideEnv({ realHome, isolatedHome, allowEnv, existingEnv }) {
   if (allowEnv && process.env[allowEnv] === '1') return null
   const source = existingEnv || process.env
   const effectiveHome = source.HOME

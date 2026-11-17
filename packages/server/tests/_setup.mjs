@@ -87,6 +87,7 @@ import { join, resolve } from 'node:path'
 
 import { installFsWriteSandbox, tmpDaemonBaseRoots } from '../../../scripts/lib/test-fs-sandbox.mjs'
 import { installSpawnHomeSandbox } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
+import { installPtyHomeSandbox } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
 import { installRealBinaryTripwire } from '../../../scripts/lib/test-real-binary-tripwire.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
 import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
@@ -275,6 +276,16 @@ export const {
   installed: SPAWN_HOME_INSTALLED,
   skipped: SPAWN_HOME_SKIPPED,
 } = installSpawnHomeSandbox({
+  realHome: REAL_HOME,
+  isolatedHome: ownedSpawnHomeTmpDir,
+  allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
+})
+
+// --- node-pty spawns get the same home redirect (#7949) -----------------------
+// node-pty's native `spawn` bypasses `child_process`, so the sandbox above
+// cannot see it. Installed as a `Module._load` hook (lazy: node-pty is only
+// touched if a test imports it). See scripts/lib/test-pty-home-sandbox.mjs.
+export const PTY_HOME_SANDBOX = installPtyHomeSandbox({
   realHome: REAL_HOME,
   isolatedHome: ownedSpawnHomeTmpDir,
   allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
