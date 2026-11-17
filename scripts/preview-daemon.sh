@@ -11,15 +11,46 @@
 # CHROXY_CONFIG_DIR). This script is the single implementation.
 #
 # Usage:
-#   scripts/preview-daemon.sh start [--expect-head <sha>]
+#   scripts/preview-daemon.sh start [--expect-head <sha>] [--config-patch <file.json>]
+#                                   [--stub-provider <port>]
 #       Prints SMOKE=<dir>, URL=<origin> and HEAD=<sha>. Pass the SMOKE dir to
 #       the other subcommands (or export PREVIEW_DAEMON_DIR).
+#       --config-patch  deep-merges a JSON object into the scratch config.json
+#                       before launch (objects merge, arrays and scalars replace).
+#                       ALLOWLIST, fail closed: only these TOP-LEVEL keys may be
+#                       set; any other key (apiToken, port, host, tunnel, noAuth,
+#                       dangerouslySkipPermissions, externalUrl, mcpServers,
+#                       codexBinary, notifications, ...) is refused with exit 2
+#                       before anything is created. Only top-level keys and the
+#                       providers rules are inspected.
+#                         providers  register stub/proxy endpoints (object form; only
+#                                    providers.anthropicCompatible, an array of HTTP
+#                                    endpoint entries; entry fields limited to id label
+#                                    baseUrl defaultModel models pricing contextWindow.
+#                                    apiKeyEnv/credentialsKey (credentials) and
+#                                    modelDiscovery are refused: a keyless stub needs none)
+#                         provider   which registered provider new sessions default to
+#                         model      the default model name
+#                       A baseUrl to a real API is an explicit opt-in: it only
+#                       egresses; no key reaches the daemon (env -i), so keyless.
+#       --stub-provider registers a keyless providers.anthropicCompatible entry
+#                       named smoke-stub at http://127.0.0.1:<port> (appended after
+#                       any --config-patch entries). The stub server is yours to run.
 #   scripts/preview-daemon.sh url    <smoke-dir>   print the daemon origin
 #   scripts/preview-daemon.sh status <smoke-dir>   exit 0 only if it is up and healthy
 #   scripts/preview-daemon.sh stop   <smoke-dir>   SIGTERM the recorded PID, PID-guarded
 #   scripts/preview-daemon.sh clean  <smoke-dir>   stop, then remove the dir (it holds the token)
 #
 # Then:  node packages/server/tests/smoke-test.mjs --preview <smoke-dir>/preview.json
+#
+# Smoke recipe with a keyless stub provider (no credentials, no CLI wrapper):
+#   node my-stub.mjs 18470 &                       # any Anthropic /v1/messages SSE stub
+#   scripts/preview-daemon.sh start --stub-provider 18470   # -> SMOKE=<dir>
+#   # create a session with provider "smoke-stub" over WS or the dashboard, send a turn
+#   scripts/preview-daemon.sh clean <dir>; kill %1
+# Or hand-roll the overlay:  --config-patch patch.json  where patch.json is
+#   {"providers":{"anthropicCompatible":[{"id":"smoke-stub","label":"smoke-stub",
+#     "baseUrl":"http://127.0.0.1:18470","defaultModel":"stub","models":["stub"]}]}}
 #
 # Exit codes: 0 ok, 1 failure, 2 usage / refused configuration,
 #             3 --expect-head mismatch, 4 stop/clean refused (PID is not ours).
@@ -48,6 +79,10 @@
 #     $HOME/chroxy-previews; pass the same env as at start).
 #   - --expect-head also refuses a tree with tracked modifications: the preview
 #     serves the working tree, so a dirty tree would make the head label a lie.
+#
+#   - A --config-patch can never weaken the isolation: the guarded keys above are
+#     refused up front (top-level key presence, however nested the value), and
+#     the patched config is rewritten mode 0600. When unsure a key is guarded.
 #
 # Test hooks (not for normal use): PREVIEW_DAEMON_CLI (daemon entry point),
 # PREVIEW_DAEMON_PORT (fixed port), PREVIEW_DAEMON_SKIP_BUILD=1,
@@ -250,19 +285,69 @@ cleanup_start() {
   fi
 }
 
+# ALLOWLIST of top-level keys a --config-patch may set (fail closed, #9189). A
+# denylist beside a growing config schema is the false-safety shape: every new
+# escape key (noAuth, *SkipPermissions, externalUrl, mcpServers, *Binary ...)
+# would be silently allowed. Add a key here only with a reason (see usage text).
+ALLOWED_KEYS="providers provider model"
+# Fields a providers.anthropicCompatible entry may set. apiKeyEnv, credentialsKey
+# (credentials) and modelDiscovery (network discovery against the endpoint) are
+# deliberately absent: a keyless smoke stub needs neither.
+ALLOWED_ENTRY_FIELDS="id label baseUrl defaultModel models pricing contextWindow"
+
+# Validate a patch file: readable, valid JSON, a plain object, no guarded key.
+check_patch() {
+  [ -f "$1" ] || die "--config-patch file not found: $1" 2
+  "$NODE_BIN/node" -e '
+    const [, f, allowed, ALLOWED_ENTRY] = process.argv
+    let v
+    try { v = JSON.parse(require("fs").readFileSync(f, "utf8")) }
+    catch (e) { console.error("preview-daemon: --config-patch is not valid JSON: " + e.message); process.exit(2) }
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      console.error("preview-daemon: --config-patch must be a JSON object"); process.exit(2) }
+    const isObj = x => x !== null && typeof x === "object" && !Array.isArray(x)
+    const refuse = m => { console.error("preview-daemon: REFUSING --config-patch: " + m); process.exit(2) }
+    const ok = allowed.split(" ")
+    const bad = Object.keys(v).filter(k => !ok.includes(k))
+    if (bad.length) refuse("key(s) not in the allowlist (" + ok.join(", ") + "): " + bad.join(", "))
+    if ("provider" in v && typeof v.provider !== "string") refuse("provider must be a string")
+    if ("model" in v && typeof v.model !== "string") refuse("model must be a string")
+    if ("providers" in v) {
+      if (!isObj(v.providers)) refuse("providers must be an object")
+      const pk = Object.keys(v.providers).filter(k => k !== "anthropicCompatible")
+      if (pk.length) refuse("providers may only contain anthropicCompatible, not: " + pk.join(", "))
+      const list = v.providers.anthropicCompatible
+      if (list !== undefined && !Array.isArray(list)) refuse("providers.anthropicCompatible must be an array")
+      const fields = ALLOWED_ENTRY.split(" ")
+      for (const [n, e] of (list || []).entries()) {
+        if (!isObj(e)) refuse("providers.anthropicCompatible[" + n + "] must be an object")
+        const xs = Object.keys(e).filter(k => !fields.includes(k))
+        if (xs.length) refuse("providers.anthropicCompatible[" + n + "] field(s) not in the entry allowlist (" + fields.join(", ") + "): " + xs.join(", "))
+      }
+    }' \
+    "$1" "$ALLOWED_KEYS" "$ALLOWED_ENTRY_FIELDS" || exit 2
+}
+
 cmd_start() {
-  local expect_head='' head parent smoke port token cfg log pid timeout cli rc deadline
+  local expect_head='' head parent smoke port token cfg log pid timeout cli rc deadline patch='' stub_port=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --expect-head) [ $# -ge 2 ] || usage; expect_head="$2"; shift 2 ;;
+      --config-patch) [ $# -ge 2 ] || usage; patch="$2"; shift 2 ;;
+      --stub-provider) [ $# -ge 2 ] || usage; stub_port="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
+  if [ -n "$stub_port" ]; then
+    case "$stub_port" in ''|*[!0-9]*) die "--stub-provider needs a port number: $stub_port" 2 ;; esac
+    [ "$stub_port" -ge 1 ] && [ "$stub_port" -le 65535 ] || die "--stub-provider port out of range: $stub_port" 2
+  fi
 
   timeout="${PREVIEW_DAEMON_HEALTH_TIMEOUT:-60}"
   case "$timeout" in ''|*[!0-9]*) die "PREVIEW_DAEMON_HEALTH_TIMEOUT is not a number: $timeout" 2 ;; esac
   validate_port_override
   NODE_BIN="$(resolve_node_dir)" || die "no Node 22 found (install node@22 or set PREVIEW_DAEMON_NODE_DIR)" 1
+  [ -z "$patch" ] || check_patch "$patch"
   head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || die "cannot read git HEAD of $ROOT" 1
   if [ -n "$expect_head" ]; then
     case "$expect_head" in ''|*[!0-9a-fA-F]*) die "--expect-head must be a hex sha: $expect_head" 2 ;; esac
@@ -351,6 +436,32 @@ cmd_start() {
       }, null, 2) + "\n", { mode: 0o600 })' "$cfg" "$token" "$port" "$smoke/fixture" ) \
     || die "could not write config.json" 1
   chmod 600 "$cfg"
+
+  # Overlay: deep-merge the (already validated) patch, then the stub provider.
+  # Written through a temp file in the same 0600 dir, then renamed and re-chmodded.
+  if [ -n "$patch" ] || [ -n "$stub_port" ]; then
+    ( umask 077
+      "$NODE_BIN/node" -e '
+        const fs = require("fs")
+        const [, cfg, patch, stub] = process.argv
+        const isObj = v => v !== null && typeof v === "object" && !Array.isArray(v)
+        const merge = (a, b) => { for (const k of Object.keys(b)) {
+          if (k === "__proto__") continue
+          a[k] = isObj(a[k]) && isObj(b[k]) ? merge(a[k], b[k]) : b[k] } return a }
+        const c = JSON.parse(fs.readFileSync(cfg, "utf8"))
+        if (patch) merge(c, JSON.parse(fs.readFileSync(patch, "utf8")))
+        if (stub) {
+          c.providers = isObj(c.providers) ? c.providers : {}
+          const list = Array.isArray(c.providers.anthropicCompatible) ? c.providers.anthropicCompatible : []
+          c.providers.anthropicCompatible = list.filter(e => !e || e.id !== "smoke-stub").concat([{
+            id: "smoke-stub", label: "smoke-stub", baseUrl: "http://127.0.0.1:" + stub,
+            defaultModel: "stub", models: ["stub"] }])
+        }
+        fs.writeFileSync(cfg + ".tmp", JSON.stringify(c, null, 2) + "\n", { mode: 0o600 })
+        fs.renameSync(cfg + ".tmp", cfg)' "$cfg" "$patch" "$stub_port" ) \
+      || die "could not apply the config overlay" 1
+    chmod 600 "$cfg"
+  fi
 
   log="$smoke/daemon.log"
   # The allowlist. `env -i` empties the environment; only these names exist in

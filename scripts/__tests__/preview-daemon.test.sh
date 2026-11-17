@@ -18,6 +18,9 @@
 #     line lacks $SMOKE
 #   - clean removes $SMOKE and refuses a directory it did not create
 #   - --expect-head refuses a mismatching head before creating anything
+#   - --config-patch merges into the scratch config (0600 kept), refuses every
+#     non-allowlisted key / invalid JSON / non-object before creating anything; and
+#     --stub-provider registers the keyless smoke-stub provider (#9189)
 #   - smoke-test.mjs accepts the script's preview.json (the override half of #8225)
 #
 # Run from anywhere:  bash scripts/__tests__/preview-daemon.test.sh
@@ -32,7 +35,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=76
+EXPECTED_CASES=116
 
 PASS=0
 FAIL=0
@@ -391,6 +394,86 @@ sleep 0.5
 HEALTH_TIMEOUT=2 CLI="$STUB_NOHEALTH" pd start >/dev/null 2>"$WORK/nh.err"; RC=$?
 [ "$RC" -ne 0 ] && grep -q "did not answer" "$WORK/nh.err" && pass "start times out (non-zero) when /health never answers" || fail "start times out (non-zero) when /health never answers" "rc=$RC $(cat "$WORK/nh.err")"
 [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "a timed-out start cleans up its scratch dir" || fail "a timed-out start cleans up its scratch dir"
+
+# =========================================================================
+# 6b. --config-patch / --stub-provider (#9189)
+# =========================================================================
+cfg_get() { node -e 'let v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const k of process.argv[2].split("."))v=v?.[k];process.stdout.write(JSON.stringify(v===undefined?null:v))' "$1" "$2"; }
+mode_of() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$1"; }
+PATCH_DIR="$WORK/patches"; mkdir -p "$PATCH_DIR"
+printf '%s' '{"providers":{"anthropicCompatible":[{"id":"smoke-stub","label":"smoke-stub","baseUrl":"http://127.0.0.1:18470","defaultModel":"stub","models":["stub"]}]}}' >"$PATCH_DIR/ok.json"
+BEFORE="$(count_smoke_dirs)"
+OUT="$(pd start --config-patch "$PATCH_DIR/ok.json" 2>"$WORK/cp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; PCFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$PCFG" providers.anthropicCompatible.0.id)" = '"smoke-stub"' ] && [ "$(cfg_get "$PCFG" providers.anthropicCompatible.0.models.0)" = '"stub"' ] \
+  && pass "--config-patch: the provider entry lands in the scratch config.json" || fail "--config-patch: the provider entry lands in the scratch config.json" "rc=$RC $(cat "$WORK/cp.err")"
+ok "--config-patch: the script's own keys survive the merge" "$(cat "$PCFG" 2>&1)" -- \
+  node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(c.host!=="127.0.0.1"||c.tunnel!=="none"||typeof c.apiToken!=="string"||c.apiToken.length<32||c.sessionCi.watch!==false||c.port!==JSON.parse(require("fs").readFileSync(process.argv[2],"utf8")).port)process.exit(1)' "$PCFG" "$SP/preview.json"
+[ "$(mode_of "$PCFG")" = 600 ] && pass "--config-patch: the patched config.json stays mode 0600" || fail "--config-patch: the patched config.json stays mode 0600" "mode=$(mode_of "$PCFG")"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+for K in apiToken port host tunnel tunnelName cwd workspaceRoots sessionCi controlRoomRunnerIncludeGithub notifications \
+  noAuth dangerouslySkipPermissions skipPermissions allowAutoPermissionMode externalUrl tunnelHostname mcpServers codexBinary repoMemoryBin controlRoomRoot totallyUnknownKey; do
+  printf '{"providers":{},"%s":{"x":1}}' "$K" >"$PATCH_DIR/guard-$K.json"
+  BEFORE="$(count_smoke_dirs)"
+  pd start --config-patch "$PATCH_DIR/guard-$K.json" >/dev/null 2>"$WORK/g.err"; RC=$?
+  [ "$RC" -eq 2 ] && grep -q "not in the allowlist" "$WORK/g.err" && grep -q "$K" "$WORK/g.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] && [ -z "$(pgrep -f "$WORK/stubs/stub-ok.js" 2>/dev/null)" ] \
+    && pass "--config-patch refuses non-allowlisted key $K (exit 2, no scratch dir, nothing launched)" \
+    || fail "--config-patch refuses non-allowlisted key $K (exit 2, no scratch dir, nothing launched)" "rc=$RC $(cat "$WORK/g.err")"
+done
+
+printf '{not json' >"$PATCH_DIR/bad.json"; printf '[1,2]' >"$PATCH_DIR/arr.json"
+BEFORE="$(count_smoke_dirs)"
+pd start --config-patch "$PATCH_DIR/bad.json" >/dev/null 2>"$WORK/b.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "not valid JSON" "$WORK/b.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "--config-patch rejects invalid JSON (exit 2, no scratch dir)" || fail "--config-patch rejects invalid JSON (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/b.err")"
+pd start --config-patch "$PATCH_DIR/arr.json" >/dev/null 2>"$WORK/b.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "must be a JSON object" "$WORK/b.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "--config-patch rejects a non-object patch (exit 2, no scratch dir)" || fail "--config-patch rejects a non-object patch (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/b.err")"
+pd start --config-patch "$PATCH_DIR/missing.json" >/dev/null 2>"$WORK/b.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "not found" "$WORK/b.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "--config-patch rejects a missing file (exit 2, no scratch dir)" || fail "--config-patch rejects a missing file (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/b.err")"
+
+# Allowlisted keys are accepted; provider entries naming a binary/command/env are not.
+printf '%s' '{"provider":"smoke-stub","model":"stub"}' >"$PATCH_DIR/allowed.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/allowed.json" 2>/dev/null)"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$SP/config/config.json" provider)" = '"smoke-stub"' ] && [ "$(cfg_get "$SP/config/config.json" model)" = '"stub"' ] \
+  && pass "--config-patch accepts the allowlisted provider and model keys" || fail "--config-patch accepts the allowlisted provider and model keys" "rc=$RC"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+printf '%s' '{"providers":{"anthropicCompatible":[{"id":"a","label":"a","baseUrl":"http://127.0.0.1:1","defaultModel":"m","models":["m"],"pricing":{"input":1,"output":2},"contextWindow":1000}]}}' >"$PATCH_DIR/fields.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/fields.json" 2>/dev/null)"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.contextWindow)" = 1000 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.pricing.output)" = 2 ] \
+  && pass "--config-patch accepts every allowed provider entry field" || fail "--config-patch accepts every allowed provider entry field" "rc=$RC"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+n=0
+for BODY in '{"providers":{"anthropicCompatible":[{"id":"x","command":"/bin/sh"}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","apiKeyEnv":"SECRET"}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","credentialsKey":"k"}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","modelDiscovery":true}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","surprise":1}]}}' \
+            '{"providers":{"acp":[{"id":"x"}]}}' \
+            '{"providers":["claude-sdk"]}'; do
+  n=$((n + 1)); printf '%s' "$BODY" >"$PATCH_DIR/prov$n.json"
+  BEFORE="$(count_smoke_dirs)"
+  pd start --config-patch "$PATCH_DIR/prov$n.json" >/dev/null 2>"$WORK/pv.err"; RC=$?
+  [ "$RC" -eq 2 ] && grep -q "REFUSING" "$WORK/pv.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+    && pass "--config-patch refuses provider shape $n (exit 2, no scratch dir)" || fail "--config-patch refuses provider shape $n (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/pv.err")"
+done
+
+OUT="$(pd start --stub-provider 18471 2>"$WORK/sp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; PCFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$PCFG" providers.anthropicCompatible.0.baseUrl)" = '"http://127.0.0.1:18471"' ] && [ "$(cfg_get "$PCFG" providers.anthropicCompatible.0.id)" = '"smoke-stub"' ] \
+  && pass "--stub-provider registers a keyless smoke-stub anthropicCompatible entry" || fail "--stub-provider registers a keyless smoke-stub anthropicCompatible entry" "rc=$RC $(cat "$WORK/sp.err")"
+[ "$(mode_of "$PCFG")" = 600 ] && pass "--stub-provider: the config.json stays mode 0600" || fail "--stub-provider: the config.json stays mode 0600" "mode=$(mode_of "$PCFG")"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+BEFORE="$(count_smoke_dirs)"
+pd start --stub-provider notaport >/dev/null 2>"$WORK/sp.err"; RC=$?
+[ "$RC" -eq 2 ] && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "--stub-provider rejects a non-numeric port (exit 2, no scratch dir)" || fail "--stub-provider rejects a non-numeric port (exit 2, no scratch dir)" "rc=$RC"
+printf '%s' '{"providers":{"anthropicCompatible":[{"id":"other","baseUrl":"http://127.0.0.1:1","models":["m"]}]}}' >"$PATCH_DIR/other.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/other.json" --stub-provider 18472 2>/dev/null)"
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.length)" = 2 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.1.id)" = '"smoke-stub"' ] \
+  && pass "--stub-provider appends after the --config-patch providers" || fail "--stub-provider appends after the --config-patch providers"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
 
 # =========================================================================
 # 7. the script itself
