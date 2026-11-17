@@ -76,7 +76,7 @@ describe('derived overlay roster (#9168)', () => {
   it('every ELEMENT carrying a non-exempt full-screen layer class spreads the hook props', () => {
     const problems: string[] = []
     for (const layer of layers) {
-      if (Object.hasOwn(EXEMPT, layer.selector.slice(1))) continue
+      if (Object.prototype.hasOwnProperty.call(EXEMPT, layer.selector.slice(1))) continue
       const users = elementsUsingClass(layer.selector)
       if (users.length === 0) problems.push(`${layer.selector}: no component uses this class`)
       for (const u of users) {
