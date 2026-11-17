@@ -1428,6 +1428,20 @@ export const PrincipalAdminRevokeSchema = z.object({
     principalId: z.string().max(64).optional(),
     label: z.string().max(64).optional(),
 });
+// Kill switch (S11, agent-principals.md section 10.2): disable or re-enable every principal
+// (`all: true`) or one label. Strict-primary and loopback-only, like the rest of the family.
+export const PrincipalAdminDisableSchema = z.object({
+    type: z.literal('principal_admin_disable'),
+    requestId: z.string().max(128).optional(),
+    all: z.literal(true).optional(),
+    label: z.string().max(64).optional(),
+});
+export const PrincipalAdminEnableSchema = z.object({
+    type: z.literal('principal_admin_enable'),
+    requestId: z.string().max(128).optional(),
+    all: z.literal(true).optional(),
+    label: z.string().max(64).optional(),
+});
 // -- Agent principal journal (#9118, S3 of #9112) --
 // The read side of an agent principal (docs/security/agent-principals.md section 7.2):
 // a correlated subscribe to the daemon's normalized event journal, an unsubscribe, and a
@@ -2158,6 +2172,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     PrincipalAdminGrantSchema,
     PrincipalAdminListSchema,
     PrincipalAdminRevokeSchema,
+    PrincipalAdminDisableSchema,
+    PrincipalAdminEnableSchema,
     PrincipalSubscribeSchema,
     PrincipalUnsubscribeSchema,
     PrincipalEventsReadSchema,

@@ -2,12 +2,12 @@
  * Server -> client reply for the agent-principal management surface (#9116).
  *
  * `principal_admin_result` answers `principal_admin_grant`, `principal_admin_list` and
- * `principal_admin_revoke` (schemas/client.ts). It goes ONLY to the strict-primary,
+ * `principal_admin_revoke`, `principal_admin_disable` and `principal_admin_enable` (schemas/client.ts). It goes ONLY to the strict-primary,
  * loopback requester that asked, and never to a session-bound client or a principal
  * (outgoing policies drop it for both). It carries no token and no token hash.
  */
 import { z } from 'zod';
-export const PRINCIPAL_ADMIN_OP_VALUES = ['grant', 'list', 'revoke'];
+export const PRINCIPAL_ADMIN_OP_VALUES = ['grant', 'list', 'revoke', 'disable', 'enable'];
 export const ServerPrincipalAdminEntrySchema = z.object({
     principalId: z.string().max(64),
     label: z.string().max(32),
@@ -22,7 +22,7 @@ export const ServerPrincipalAdminEntrySchema = z.object({
     createdAt: z.number().int(),
     expiresAt: z.number().int(),
     revokedAt: z.number().int().nullable(),
-    state: z.enum(['live', 'revoked', 'expired', 'invalid']),
+    state: z.enum(['live', 'revoked', 'expired', 'invalid', 'disabled']),
 });
 export const ServerPrincipalAdminResultSchema = z.object({
     type: z.literal('principal_admin_result'),
@@ -44,4 +44,6 @@ export const ServerPrincipalAdminResultSchema = z.object({
     alreadyRevoked: z.boolean().optional(),
     /** `revoke`: false when the revoke holds in memory but could not be confirmed on disk. */
     durable: z.boolean().optional(),
+    /** `disable` / `enable`: what the switch now says (S11). */
+    disabled: z.object({ all: z.boolean(), labels: z.array(z.string().max(32)).max(256) }).optional(),
 });
