@@ -1,4 +1,4 @@
-import { describe, it, before, after, afterEach } from 'node:test'
+import { describe, it, before, after, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -30,11 +30,18 @@ describe('late join of a busy session (#8599)', () => {
   after(() => rmSync(tmpRoot, { recursive: true, force: true }))
 
   // Every manager built here is torn down so no timer outlives the file.
+  // destroyAll() catches and LOGS a failing session.destroy(), so a throw never
+  // reaches the caller: teardown cleanliness is asserted from the logged errors.
   const managers = []
   afterEach(() => {
-    while (managers.length) {
-      try { managers.pop().destroyAll() } catch { /* already torn down */ }
+    const errors = []
+    const spy = mock.method(console, 'error', (...args) => { errors.push(args.join(' ')) })
+    try {
+      while (managers.length) managers.pop().destroyAll()
+    } finally {
+      spy.mock.restore()
     }
+    assert.deepEqual(errors, [], 'manager teardown must log no errors')
   })
 
   const turns = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)) }
@@ -46,6 +53,8 @@ describe('late join of a busy session (#8599)', () => {
       stateFilePath: join(tmpRoot, `state-${++seq}.json`),
     })
     const session = new BaseSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+    // BaseSession has no destroy(); destroyAll() calls one on every session.
+    session.destroy = () => {}
     manager._sessions.set('s1', { session, name: 'Work', cwd: '/repo', createdAt: Date.now() })
     manager._recordHistory('s1', 'message', { type: 'user_input', content: 'one', timestamp: 1 })
     manager._recordHistory('s1', 'message', { type: 'response', content: 'done one', messageId: 'r1', timestamp: 2 })
