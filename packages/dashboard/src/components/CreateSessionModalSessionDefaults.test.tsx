@@ -151,6 +151,71 @@ describe('CreateSessionModal migration notice scoping (#8611)', () => {
     expect(sessionDefaultsNoticeApplies(n, 'gemini')).toBe(false)
     expect(sessionDefaultsNoticeApplies(null, 'claude-sdk')).toBe(false)
   })
+
+  it('#9175: the server capability decides when present, the name only when absent', () => {
+    const n = { model: 'opus-4-6' }
+    const fam = (v: boolean) => ({ capabilities: { thinkingLevelLegacyFallback: v } })
+    // claude-byok has no `claude-sdk`-style special case: the capability says yes
+    expect(sessionDefaultsNoticeApplies(n, 'claude-byok', fam(true))).toBe(true)
+    // a provider whose name does not match the pattern but is Claude-family
+    expect(sessionDefaultsNoticeApplies(n, 'my-claude-proxy', fam(true))).toBe(true)
+    // explicit false beats a matching name
+    expect(sessionDefaultsNoticeApplies(n, 'claude-lookalike', fam(false))).toBe(false)
+    for (const p of ['codex', 'gemini', 'ollama', 'deepseek', 'openai-compatible']) {
+      expect(sessionDefaultsNoticeApplies(n, p, fam(false))).toBe(false)
+    }
+    // field absent (older daemon): name fallback
+    expect(sessionDefaultsNoticeApplies(n, 'claude-byok', { capabilities: {} })).toBe(true)
+    expect(sessionDefaultsNoticeApplies(n, 'ollama', { capabilities: {} })).toBe(false)
+  })
+
+  it('#9175: renders the notice on a byok provider the name pattern would skip', () => {
+    mockStoreState.availableProviders = [
+      { name: 'my-byok', capabilities: { thinkingLevelLegacyFallback: true }, auth: READY },
+      { name: 'codex', capabilities: { thinkingLevelLegacyFallback: false }, auth: READY },
+    ]
+    mockStoreState.defaultProvider = 'my-byok'
+    mockStoreState.sessionDefaultsNotice = { model: 'opus-4-6' }
+    renderModal()
+    expect(screen.getByTestId('session-defaults-notice')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'codex' } })
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+  })
+
+  it('#9175: every select and option the modal can render carries a title, for every provider', () => {
+    const ENVS = [{ id: 'e1', name: 'Env One', image: 'img:1', status: 'running' }]
+    const walk = (label: string) => {
+      const selects = Array.from(document.querySelectorAll('.modal-content--session-form select'))
+      expect(selects.length, label).toBeGreaterThan(0)
+      for (const sel of selects) {
+        expect((sel as HTMLSelectElement).title, `${label} ${sel.id}`).not.toBe('')
+        const opts = Array.from(sel.querySelectorAll('option'))
+        expect(opts.length, `${label} ${sel.id} options`).toBeGreaterThan(0)
+        for (const opt of opts) {
+          expect(opt.title, `${label} ${sel.id} option "${opt.value}"`).not.toBe('')
+        }
+      }
+      return selects.map(s => s.id)
+    }
+    const seen = new Set<string>()
+    const names = [...PROVIDERS_WITH_CODEX.map(p => p.name), null]
+    for (const name of names) {
+      mockStoreState.availableProviders = name === null
+        ? []
+        : PROVIDERS_WITH_CODEX.map(p => ({ ...p, capabilities: { ...p.capabilities, containerized: true } }))
+      mockStoreState.defaultProvider = name ?? 'claude-sdk'
+      mockStoreState.environments = ENVS
+      const { unmount } = renderModal()
+      fireEvent.click(document.querySelector('.advanced-toggle-btn') as HTMLElement)
+      walk(String(name)).forEach(id => seen.add(id))
+      unmount()
+    }
+    // the roster the walk must have reached, so a select that stops rendering
+    // cannot silently shrink the coverage
+    for (const id of ['provider-select', 'permission-mode-select', 'codex-sandbox-select', 'env-select']) {
+      expect(seen.has(id), id).toBe(true)
+    }
+  })
 })
 
 describe('CreateSessionModal select styling (#8611)', () => {

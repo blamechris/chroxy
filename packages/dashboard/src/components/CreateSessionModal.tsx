@@ -267,13 +267,32 @@ export function sessionDefaultsNoticeText(notice: SessionDefaultsNotice): string
 }
 
 /**
- * #8611: the migration notice describes a cleared Claude-family default (the
- * legacy providers it clears are claude-cli/claude-tui and the model pins are
- * Claude ids), so it only means something while the picker is on a
- * Claude-family provider. docker-* providers run the same Claude clients.
+ * #8611 / #9175: the migration notice describes a cleared Claude model pin, so
+ * it only means something while the picker is on a provider that can run
+ * Claude model ids.
+ *
+ * The signal is the server's own `capabilities.thinkingLevelLegacyFallback`,
+ * which `listProviders()` derives from the provider class's `claudeFamily`
+ * flag: true for claude-sdk/cli/tui/channel, claude-byok and every docker-*
+ * variant; false for codex, gemini, ollama, deepseek and the config-driven
+ * Anthropic-/OpenAI-compatible endpoints. When the field is absent (an older
+ * daemon, or the roster has not arrived) it falls back to the name pattern.
+ *
+ * Limit: config-driven Anthropic-compatible providers are deliberately
+ * `claudeFamily = false` server-side (strict model allowlists) and carry an
+ * operator-chosen id, so the client has no field that tells them apart from
+ * ollama/deepseek. They are not covered until the server ships such a signal.
  */
-export function sessionDefaultsNoticeApplies(notice: SessionDefaultsNotice | null, provider: string): boolean {
+export function sessionDefaultsNoticeApplies(
+  notice: SessionDefaultsNotice | null,
+  provider: string,
+  providerInfo?: { capabilities?: { thinkingLevelLegacyFallback?: boolean } } | null,
+): boolean {
   if (!notice) return false
+  // Server-pinned by packages/server/tests/provider-claude-family-capability.test.js;
+  // explicit claudeFamily capability + Anthropic-compatible gap: #9191.
+  const flag = providerInfo?.capabilities?.thinkingLevelLegacyFallback
+  if (typeof flag === 'boolean') return flag
   return /^(claude|docker)(-|$)/.test(provider)
 }
 
@@ -285,7 +304,8 @@ export function sessionDefaultsNoticeApplies(notice: SessionDefaultsNotice | nul
 export function SessionDefaultsNoticeBanner({ provider }: { provider: string }) {
   const notice = useConnectionStore(s => s.sessionDefaultsNotice)
   const dismiss = useConnectionStore(s => s.dismissSessionDefaultsNotice)
-  if (!notice || !sessionDefaultsNoticeApplies(notice, provider)) return null
+  const providerInfo = useConnectionStore(s => s.availableProviders.find(p => p.name === provider))
+  if (!notice || !sessionDefaultsNoticeApplies(notice, provider, providerInfo)) return null
   return (
     <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
       <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(notice)}</span>
@@ -1021,6 +1041,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           <label htmlFor="provider-select">Provider</label>
           <select
             id="provider-select"
+            title={PROVIDER_LABELS[provider] || provider}
             value={provider}
             onChange={e => setProvider(e.target.value)}
             aria-label="Select provider"
@@ -1043,7 +1064,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   // Mirror the live detail via title= so desktop hover
                   // tooltips still work for users who don't navigate to
                   // the option. Mobile/touch users see the panel instead.
-                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : undefined
+                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : optionLabel
                   return (
                     <option
                       key={p.name}
@@ -1055,8 +1076,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   )
                 })
               : <>
-                  <option value="claude-sdk">Claude Code (SDK)</option>
-                  <option value="claude-cli">Claude Code (CLI)</option>
+                  <option value="claude-sdk" title="Claude Code (SDK)">Claude Code (SDK)</option>
+                  <option value="claude-cli" title="Claude Code (CLI)">Claude Code (CLI)</option>
                 </>
             }
           </select>
@@ -1246,6 +1267,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             <label htmlFor="permission-mode-select">Permission mode</label>
             <select
               id="permission-mode-select"
+              title={permissionMode ? (PERMISSION_MODE_LABELS[permissionMode] ?? permissionMode) : 'Server default'}
               value={permissionMode}
               onChange={e => setPermissionMode(e.target.value)}
               aria-label="Permission mode"
@@ -1253,7 +1275,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               // description, so a screen reader announces it on focus.
               aria-describedby={autoUnavailableNote ? 'permission-mode-hint permission-mode-auto-note' : 'permission-mode-hint'}
             >
-              <option value="">Server default</option>
+              <option value="" title="Server default">Server default</option>
               {/* #4019: mode IDs come from availablePermissionModes. Labels
                   are reusable only when that active-session roster belongs to
                   the provider selected for this new session. */}
@@ -1276,7 +1298,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   ? m.label
                   : (PERMISSION_MODE_LABELS[m.id] ?? m.label)
                 return (
-                  <option key={m.id} value={m.id} disabled={unsupported || gated}>
+                  <option key={m.id} value={m.id} disabled={unsupported || gated} title={unsupported ? `${label} (unavailable)` : gated ? `${label} (disabled on this server)` : label}>
                     {unsupported
                       ? (label.includes('unavailable') ? label : `${label} (unavailable)`)
                       : gated
@@ -1331,6 +1353,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <label htmlFor="codex-sandbox-select">Codex sandbox</label>
               <select
                 id="codex-sandbox-select"
+                title={CODEX_SANDBOX_MODE_META.find(m => m.id === codexSandbox)?.label ?? 'Default'}
                 data-testid="codex-sandbox-select"
                 value={codexSandbox}
                 onChange={e => setCodexSandbox(e.target.value as '' | CodexSandboxMode)}
@@ -1340,9 +1363,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 {/* #6903: "Default" forwards no codexSandbox, so the daemon's
                     CHROXY_CODEX_SANDBOX floor (else workspace-write) is honored
                     — matching the mobile app's Default-provider omit path. */}
-                <option value="">Default</option>
+                <option value="" title="Default">Default</option>
                 {CODEX_SANDBOX_MODE_META.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
+                  <option key={m.id} value={m.id} title={m.label}>{m.label}</option>
                 ))}
               </select>
               <span id="codex-sandbox-hint" className="form-hint">
@@ -1434,13 +1457,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <label htmlFor="env-select">Environment</label>
               <select
                 id="env-select"
+                title={environments.find(e => e.id === environmentId)?.name ?? 'None (ephemeral container)'}
                 value={environmentId}
                 onChange={e => setEnvironmentId(e.target.value)}
                 aria-describedby="env-hint"
               >
-                <option value="">None (ephemeral container)</option>
+                <option value="" title="None (ephemeral container)">None (ephemeral container)</option>
                 {environments.filter(e => e.status === 'running').map(e => (
-                  <option key={e.id} value={e.id}>{e.name} ({e.image})</option>
+                  <option key={e.id} value={e.id} title={`${e.name} (${e.image})`}>{e.name} ({e.image})</option>
                 ))}
               </select>
               <span id="env-hint" className="form-hint">
