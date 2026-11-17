@@ -165,6 +165,19 @@ let _auditLogPath = null
 let _writeCount = 0
 let _quietConsole = false
 
+// Test seam for the file append, so a test can make it fail (ENOSPC, EBADF) without
+// breaking a real disk. Production never sets it; `null` restores the real call.
+let _appendFileSync = appendFileSync
+
+/**
+ * TEST ONLY. Replace the append used for the daemon log and the audit log. Pass null
+ * to restore `fs.appendFileSync`.
+ * @param {((path: string, data: string) => void) | null} fn
+ */
+export function _setAppendFileSyncForTest(fn) {
+  _appendFileSync = typeof fn === 'function' ? fn : appendFileSync
+}
+
 /** Set of callbacks for broadcasting log entries (supports multiple WsServer instances) */
 const _logListeners = new Set()
 
@@ -270,6 +283,23 @@ export function getLogPath() {
  */
 export function getAuditLogPath() {
   return _logToFile ? _auditLogPath : null
+}
+
+/**
+ * Success-reporting audit write (agent-principals.md section 10.1, `auditOrRefuse`).
+ *
+ * `logger.audit()` swallows write errors (#746), so it cannot fail closed. This one
+ * returns `{ ok: true }` ONLY when the line was appended to the dedicated audit log, and
+ * `{ ok: false, reason }` when file logging is off or the append threw. The line has the
+ * same format and redaction as `audit()`, and is also mirrored to the daemon log, the
+ * console and log listeners exactly like one. A caller that must not act unaudited
+ * (a principal effect, #7169's Discord path) acts only on `ok: true`.
+ * @param {string} component
+ * @param {string} msg
+ * @returns {{ ok: true } | { ok: false, reason: 'audit_unavailable' }}
+ */
+export function auditOrRefuse(component, msg) {
+  return createLogger(component).auditStrict(msg)
 }
 
 /**
@@ -445,7 +475,7 @@ export function createLogger(component, context = {}) {
     let fileWriteOk = false
     if (_logToFile && _logPath) {
       try {
-        appendFileSync(_logPath, line + '\n')
+        _appendFileSync(_logPath, line + '\n')
         fileWriteOk = true
         _writeCount++
         if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
@@ -495,14 +525,24 @@ export function createLogger(component, context = {}) {
     // whose retention noise can't touch. Kept fire-and-forget here — #7169's
     // fail-closed audit writer layers its success-reporting on top of this
     // sink rather than replacing the level-independent path.
+    // `auditWritten` is true ONLY when this append succeeded; `auditStrict` reports it.
+    let auditWritten = false
     if (level === 'audit' && _logToFile && _auditLogPath) {
       try {
-        appendFileSync(_auditLogPath, line + '\n')
-        _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)
+        _appendFileSync(_auditLogPath, line + '\n')
+        auditWritten = true
       } catch {
         // Same #746 rationale as above.
       }
+      if (auditWritten) {
+        try {
+          _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)
+        } catch {
+          // The line is already on disk; a rotation failure does not un-write it.
+        }
+      }
     }
+    return auditWritten
   }
 
   return {
@@ -517,6 +557,12 @@ export function createLogger(component, context = {}) {
      * listeners, and written to the daemon log file like any other line.
      */
     audit(msg) { write('audit', msg, { always: true }) },
+    /** Like `audit`, but reports whether the line reached the audit log (see `auditOrRefuse`). */
+    auditStrict(msg) {
+      return write('audit', msg, { always: true }) === true
+        ? { ok: true }
+        : { ok: false, reason: 'audit_unavailable' }
+    },
     // Backward compat alias
     log(msg) { write('info', msg) },
     /** Create a child logger tagged with a session ID. */

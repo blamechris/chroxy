@@ -140,7 +140,7 @@ describe('principal inbound roster', () => {
     // principal_admin_* is the strict-primary management surface (S1): denied to a
     // principal and to a bound client, never allowed. The S3 read path is the only
     // principal_ name that is allowed; any other needs its handler first.
-    const MANAGEMENT = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
+    const MANAGEMENT = ['principal_admin_disable', 'principal_admin_enable', 'principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
     const JOURNAL = ['principal_events_read', 'principal_pending_permissions', 'principal_subscribe', 'principal_unsubscribe']
     assert.deepEqual(allowed.filter((t) => t.startsWith('principal_')).sort(), JOURNAL)
     assert.deepEqual(denied.filter((t) => t.startsWith('principal_')).sort(), MANAGEMENT)

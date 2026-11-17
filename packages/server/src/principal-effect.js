@@ -18,6 +18,8 @@
  * this closes, so a thenable verdict is treated as a refusal.
  */
 
+import { PRINCIPAL_EFFECT_KINDS } from './principal-audit.js'
+
 /** @typedef {{ ok: true } | { ok: false, reason: string }} PrincipalCheckVerdict */
 
 /**
@@ -48,14 +50,28 @@ export function allChecks(...checks) {
 }
 
 /**
- * Run `fn` only if `check(client)` passes at this instant.
+ * Run `fn` only if `check(client)` passes at this instant AND the pre-effect audit
+ * attempt line was written (contract section 10.1). The order is fixed: check, then the
+ * attempt line, then `fn`, all in one synchronous step. If the line cannot be written
+ * (file logging off, ENOSPC, EBADF) there is NO effect and the verdict is
+ * `{ ok: false, reason: 'audit_unavailable' }`, which the caller turns into an error ack.
+ *
+ * `audit` is REQUIRED: a mutation that names no audit descriptor, an unknown effect kind
+ * or no auditor is refused (`audit_unavailable` / `bad_effect`), never run unaudited.
+ *
+ * A refused check writes a (collapsed, best-effort) `rejected` line; an `fn` that throws
+ * writes a best-effort `rejected:effect_error` outcome and the throw propagates.
+ *
  * @template T
  * @param {object} client
  * @param {(client: object) => PrincipalCheckVerdict} check
- * @param {() => T} fn  the effect; runs synchronously after the verdict
+ * @param {{ auditor: ReturnType<import('./principal-audit.js').createPrincipalAuditor>, action: string, sessionId?: string, requestId?: string, leaseId?: string, gen?: number, text?: string }} audit
+ * @param {() => T} fn  the effect; runs synchronously after the verdict and the attempt line
  * @returns {{ ok: true, value: T } | { ok: false, reason: string }}
  */
-export function withPrincipalEffect(client, check, fn) {
+export function withPrincipalEffect(client, check, audit, fn) {
+  const auditor = audit?.auditor
+  const principal = client?.principal ?? null
   let verdict
   try {
     verdict = check(client)
@@ -63,7 +79,23 @@ export function withPrincipalEffect(client, check, fn) {
     return { ok: false, reason: 'check_error' }
   }
   if (verdict == null || typeof verdict.then === 'function' || verdict.ok !== true) {
-    return { ok: false, reason: typeof verdict?.reason === 'string' ? verdict.reason : 'check' }
+    const reason = typeof verdict?.reason === 'string' ? verdict.reason : 'check'
+    try { auditor?.rejected?.(principal, audit, reason) } catch { /* a refusal line is best effort */ }
+    return { ok: false, reason }
   }
-  return { ok: true, value: fn() }
+  if (!PRINCIPAL_EFFECT_KINDS.includes(audit?.action)) return { ok: false, reason: 'bad_effect' }
+  if (typeof auditor?.attempt !== 'function') return { ok: false, reason: 'audit_unavailable' }
+  let attempt
+  try {
+    attempt = auditor.attempt(principal, audit)
+  } catch {
+    attempt = null
+  }
+  if (attempt?.ok !== true) return { ok: false, reason: 'audit_unavailable' }
+  try {
+    return { ok: true, value: fn() }
+  } catch (err) {
+    try { auditor.outcome(principal, audit, 'rejected:effect_error', err?.code || 'error') } catch { /* best effort */ }
+    throw err
+  }
 }

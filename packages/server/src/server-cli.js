@@ -72,6 +72,7 @@ import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
 import { createPrincipalStore } from './principal-store.js'
+import { createPrincipalBrakes } from './principal-brakes.js'
 import { PrincipalJournal } from './principal-journal.js'
 import { StatusLineManager } from './statusline.js'
 import { warnIfClaudeConfigDirUnusable } from './utils/claude-config-dir.js'
@@ -1566,7 +1567,9 @@ export async function startCliServer(config) {
   })
   daemonUpdate.start()
 
+  // The brakes (kill switch + file-backed audit requirement) ride on the store's state().
   const principalStore = createPrincipalStore()
+  principalStore.attachBrakes(createPrincipalBrakes())
   const principalJournal = new PrincipalJournal({
     dir: configPath('principal-journal'),
     enabled: () => principalStore.hasEntries(),

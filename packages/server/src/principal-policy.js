@@ -243,6 +243,8 @@ export const PRINCIPAL_DENIED_MESSAGE_TYPES = Object.freeze({
   principal_admin_grant: CREDENTIAL,
   principal_admin_list: CREDENTIAL,
   principal_admin_revoke: CREDENTIAL,
+  principal_admin_disable: CREDENTIAL,
+  principal_admin_enable: CREDENTIAL,
   pair_approve: 'pairing is never delegated',
   pair_deny: 'pairing is never delegated',
 
