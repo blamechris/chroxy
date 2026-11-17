@@ -35,7 +35,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=116
+EXPECTED_CASES=119
 
 PASS=0
 FAIL=0
@@ -444,20 +444,27 @@ SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 [ "$RC" -eq 0 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.contextWindow)" = 1000 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.pricing.output)" = 2 ] \
   && pass "--config-patch accepts every allowed provider entry field" || fail "--config-patch accepts every allowed provider entry field" "rc=$RC"
 [ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+# Each refusal body is paired with the cause it must name (a grep -E pattern), so a
+# patch refused for an unrelated reason does not pass (#9193).
 n=0
-for BODY in '{"providers":{"anthropicCompatible":[{"id":"x","command":"/bin/sh"}]}}' \
-            '{"providers":{"anthropicCompatible":[{"id":"x","apiKeyEnv":"SECRET"}]}}' \
-            '{"providers":{"anthropicCompatible":[{"id":"x","credentialsKey":"k"}]}}' \
-            '{"providers":{"anthropicCompatible":[{"id":"x","modelDiscovery":true}]}}' \
-            '{"providers":{"anthropicCompatible":[{"id":"x","surprise":1}]}}' \
-            '{"providers":{"acp":[{"id":"x"}]}}' \
-            '{"providers":["claude-sdk"]}'; do
+while IFS='|' read -r BODY CAUSE; do
   n=$((n + 1)); printf '%s' "$BODY" >"$PATCH_DIR/prov$n.json"
   BEFORE="$(count_smoke_dirs)"
-  pd start --config-patch "$PATCH_DIR/prov$n.json" >/dev/null 2>"$WORK/pv.err"; RC=$?
-  [ "$RC" -eq 2 ] && grep -q "REFUSING" "$WORK/pv.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
-    && pass "--config-patch refuses provider shape $n (exit 2, no scratch dir)" || fail "--config-patch refuses provider shape $n (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/pv.err")"
-done
+  pd start --config-patch "$PATCH_DIR/prov$n.json" </dev/null >/dev/null 2>"$WORK/pv.err"; RC=$?
+  [ "$RC" -eq 2 ] && grep -q "REFUSING" "$WORK/pv.err" && grep -Eq "$CAUSE" "$WORK/pv.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+    && pass "--config-patch refuses provider shape $n naming its cause (exit 2, no scratch dir)" || fail "--config-patch refuses provider shape $n naming its cause (exit 2, no scratch dir)" "rc=$RC want=$CAUSE got=$(cat "$WORK/pv.err")"
+done <<'SHAPES'
+{"providers":{"anthropicCompatible":[{"id":"x","command":"/bin/sh"}]}}|entry allowlist \(.*\): command$
+{"providers":{"anthropicCompatible":[{"id":"x","apiKeyEnv":"SECRET"}]}}|entry allowlist \(.*\): apiKeyEnv$
+{"providers":{"anthropicCompatible":[{"id":"x","credentialsKey":"k"}]}}|entry allowlist \(.*\): credentialsKey$
+{"providers":{"anthropicCompatible":[{"id":"x","modelDiscovery":true}]}}|entry allowlist \(.*\): modelDiscovery$
+{"providers":{"anthropicCompatible":[{"id":"x","surprise":1}]}}|entry allowlist \(.*\): surprise$
+{"providers":{"acp":[{"id":"x"}]}}|may only contain anthropicCompatible, not: acp$
+{"providers":["claude-sdk"]}|providers must be an object
+{"providers":{"anthropicCompatible":["smoke"]}}|anthropicCompatible\[0\] must be an object
+{"providers":{"anthropicCompatible":[null]}}|anthropicCompatible\[0\] must be an object
+{"providers":{"anthropicCompatible":[["x"]]}}|anthropicCompatible\[0\] must be an object
+SHAPES
 
 OUT="$(pd start --stub-provider 18471 2>"$WORK/sp.err")"; RC=$?
 SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; PCFG="$SP/config/config.json"
