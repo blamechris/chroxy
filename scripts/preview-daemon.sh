@@ -25,8 +25,10 @@
 #                       providers rules are inspected.
 #                         providers  register stub/proxy endpoints (object form; only
 #                                    providers.anthropicCompatible, an array of HTTP
-#                                    endpoint entries; any entry key naming a binary,
-#                                    command, args, env or path is refused)
+#                                    endpoint entries; entry fields limited to id label
+#                                    baseUrl defaultModel models pricing contextWindow.
+#                                    apiKeyEnv/credentialsKey (credentials) and
+#                                    modelDiscovery are refused: a keyless stub needs none)
 #                         provider   which registered provider new sessions default to
 #                         model      the default model name
 #                       A baseUrl to a real API is an explicit opt-in: it only
@@ -288,12 +290,16 @@ cleanup_start() {
 # escape key (noAuth, *SkipPermissions, externalUrl, mcpServers, *Binary ...)
 # would be silently allowed. Add a key here only with a reason (see usage text).
 ALLOWED_KEYS="providers provider model"
+# Fields a providers.anthropicCompatible entry may set. apiKeyEnv, credentialsKey
+# (credentials) and modelDiscovery (network discovery against the endpoint) are
+# deliberately absent: a keyless smoke stub needs neither.
+ALLOWED_ENTRY_FIELDS="id label baseUrl defaultModel models pricing contextWindow"
 
 # Validate a patch file: readable, valid JSON, a plain object, no guarded key.
 check_patch() {
   [ -f "$1" ] || die "--config-patch file not found: $1" 2
   "$NODE_BIN/node" -e '
-    const [, f, allowed] = process.argv
+    const [, f, allowed, ALLOWED_ENTRY] = process.argv
     let v
     try { v = JSON.parse(require("fs").readFileSync(f, "utf8")) }
     catch (e) { console.error("preview-daemon: --config-patch is not valid JSON: " + e.message); process.exit(2) }
@@ -312,14 +318,14 @@ check_patch() {
       if (pk.length) refuse("providers may only contain anthropicCompatible, not: " + pk.join(", "))
       const list = v.providers.anthropicCompatible
       if (list !== undefined && !Array.isArray(list)) refuse("providers.anthropicCompatible must be an array")
-      const risky = /binary|command|args|exec|path|env|spawn/i
-      const walk = (x, where) => { if (Array.isArray(x)) x.forEach((e, i) => walk(e, where + "[" + i + "]"))
-        else if (isObj(x)) for (const k of Object.keys(x)) {
-          if (risky.test(k)) refuse("provider entry key " + where + "." + k + " names a binary/command/env/path")
-          walk(x[k], where + "." + k) } }
-      walk(list || [], "anthropicCompatible")
+      const fields = ALLOWED_ENTRY.split(" ")
+      for (const [n, e] of (list || []).entries()) {
+        if (!isObj(e)) refuse("providers.anthropicCompatible[" + n + "] must be an object")
+        const xs = Object.keys(e).filter(k => !fields.includes(k))
+        if (xs.length) refuse("providers.anthropicCompatible[" + n + "] field(s) not in the entry allowlist (" + fields.join(", ") + "): " + xs.join(", "))
+      }
     }' \
-    "$1" "$ALLOWED_KEYS" || exit 2
+    "$1" "$ALLOWED_KEYS" "$ALLOWED_ENTRY_FIELDS" || exit 2
 }
 
 cmd_start() {

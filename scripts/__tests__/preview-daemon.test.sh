@@ -35,7 +35,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=112
+EXPECTED_CASES=116
 
 PASS=0
 FAIL=0
@@ -438,9 +438,18 @@ SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 [ "$RC" -eq 0 ] && [ "$(cfg_get "$SP/config/config.json" provider)" = '"smoke-stub"' ] && [ "$(cfg_get "$SP/config/config.json" model)" = '"stub"' ] \
   && pass "--config-patch accepts the allowlisted provider and model keys" || fail "--config-patch accepts the allowlisted provider and model keys" "rc=$RC"
 [ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+printf '%s' '{"providers":{"anthropicCompatible":[{"id":"a","label":"a","baseUrl":"http://127.0.0.1:1","defaultModel":"m","models":["m"],"pricing":{"input":1,"output":2},"contextWindow":1000}]}}' >"$PATCH_DIR/fields.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/fields.json" 2>/dev/null)"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.contextWindow)" = 1000 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.0.pricing.output)" = 2 ] \
+  && pass "--config-patch accepts every allowed provider entry field" || fail "--config-patch accepts every allowed provider entry field" "rc=$RC"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
 n=0
 for BODY in '{"providers":{"anthropicCompatible":[{"id":"x","command":"/bin/sh"}]}}' \
             '{"providers":{"anthropicCompatible":[{"id":"x","apiKeyEnv":"SECRET"}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","credentialsKey":"k"}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","modelDiscovery":true}]}}' \
+            '{"providers":{"anthropicCompatible":[{"id":"x","surprise":1}]}}' \
             '{"providers":{"acp":[{"id":"x"}]}}' \
             '{"providers":["claude-sdk"]}'; do
   n=$((n + 1)); printf '%s' "$BODY" >"$PATCH_DIR/prov$n.json"
