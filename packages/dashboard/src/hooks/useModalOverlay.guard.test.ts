@@ -1,55 +1,75 @@
 /**
- * #9168 roster guard, both directions: the literal `data-modal-overlay`
- * attribute lives ONLY in useModalOverlay.ts, and every source file that
- * renders an overlay uses the hook (so cannot carry the attribute unregistered).
+ * #9168 roster guard. The roster is DERIVED from the stylesheet and sources:
+ * every full-screen fixed layer (z-index >= 1000) must be rendered only by
+ * components that register through useModalOverlay, and the overlay attribute
+ * may be written nowhere except the hook itself.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'fs'
-import { resolve, join, relative } from 'path'
+import { readFileSync } from 'fs'
+import { join, relative } from 'path'
+import {
+  SRC, walkSources, fullScreenLayers, parseFixedLayers, filesUsingClass, usesOverlayHook,
+} from './overlayRoster.testSupport'
 
-const SRC = resolve(__dirname, '..')
 const HOOK = join(SRC, 'hooks', 'useModalOverlay.ts')
-
-function walk(dir: string, out: string[] = []): string[] {
-  for (const n of readdirSync(dir)) {
-    const p = join(dir, n)
-    if (statSync(p).isDirectory()) walk(p, out)
-    else if (/\.(tsx?|jsx?)$/.test(n) && !/\.test\.[tj]sx?$/.test(n)) out.push(p)
-  }
-  return out
-}
-
-const files = walk(SRC)
+const files = walkSources()
 const read = (p: string) => readFileSync(p, 'utf-8')
 
-describe('data-modal-overlay roster (#9168)', () => {
-  it('no file other than the hook writes the attribute as JSX/props', () => {
-    // Querying it (`querySelector('[data-modal-overlay]')`) is fine; setting it is not.
+// Full-screen layers that are deliberately NOT modal overlays (no toast pause,
+// no topmost-Escape participation). Each needs a reason. Currently none: every
+// full-screen layer >= 1000 in the stylesheet is a modal/palette/panel backdrop.
+const EXEMPT: Record<string, string> = {}
+
+describe('data-modal-overlay attribute writers (#9168)', () => {
+  it('no file other than the hook writes the attribute (JSX, props, setAttribute, dataset)', () => {
+    const writers = [
+      /(^|[\s{])data-modal-overlay(?=[\s=/>}])/,
+      /['"]data-modal-overlay['"]\s*:/,
+      /setAttribute\(\s*['"]data-modal-overlay['"]/,
+      /dataset\.modalOverlay|dataset\[\s*['"]modalOverlay['"]\s*\]/,
+    ]
     const offenders = files
       .filter(f => f !== HOOK)
-      .filter(f => /(^|[\s{])data-modal-overlay(?=[\s=/>}])|['"]data-modal-overlay['"]\s*:/.test(read(f)))
+      .filter(f => writers.some(re => re.test(read(f))))
       .map(f => relative(SRC, f))
     expect(offenders).toEqual([])
   })
+})
 
-  it('the hook is used at every overlay site (and the roster has not shrunk)', () => {
-    const users = files
-      .filter(f => f !== HOOK && /\buseModalOverlay\b/.test(read(f)) && read(f).includes('{...overlayProps}'))
-      .map(f => relative(SRC, f)).sort()
-    expect(users).toEqual([
-      'components/CodeSearchPalette.tsx',
-      'components/FileOpenPalette.tsx',
-      'components/Modal.tsx',
-      'components/ReferencesPalette.tsx',
-      'components/SettingsPanel.tsx',
-      'components/ShortcutHelp.tsx',
-      'components/SymbolSearchPalette.tsx',
-    ])
+describe('derived overlay roster (#9168)', () => {
+  const layers = fullScreenLayers()
+
+  it('finds full-screen layers at all (a zero-layer derivation is a broken guard)', () => {
+    expect(layers.length).toBeGreaterThan(0)
   })
 
-  it('every file that QUERIES overlays and is not a listed site does not render one', () => {
-    // Reverse direction: anything spreading overlayProps must be in the roster above.
-    const spreaders = files.filter(f => read(f).includes('{...overlayProps}')).length
-    expect(spreaders).toBe(7)
+  it('every component using a non-exempt full-screen layer registers through the hook', () => {
+    const problems: string[] = []
+    for (const layer of layers) {
+      if (layer.selector.slice(1) in EXEMPT) continue
+      const users = filesUsingClass(layer.selector)
+      if (users.length === 0) problems.push(`${layer.selector}: no component uses this class`)
+      for (const u of users) {
+        if (!usesOverlayHook(u)) problems.push(`${layer.selector} (z ${layer.z}) used by ${u} without useModalOverlay`)
+      }
+    }
+    expect(problems).toEqual([])
+  })
+
+  it('exemptions still exist and are still full-screen layers', () => {
+    const all = parseFixedLayers()
+    for (const name of Object.keys(EXEMPT)) {
+      const layer = all.find(l => l.selector === `.${name}`)
+      expect(layer, `exempt layer .${name} no longer exists`).toBeDefined()
+      expect(layer?.fullScreen, `exempt layer .${name} is no longer full-screen`).toBe(true)
+    }
+  })
+
+  it('reverse direction: every hook user renders a derived full-screen layer', () => {
+    const layerClasses = layers.map(l => l.selector)
+    const hookUsers = files.filter(f => f !== HOOK && /{\.\.\.overlayProps}/.test(read(f))).map(f => relative(SRC, f))
+    expect(hookUsers.length).toBeGreaterThan(0)
+    const orphans = hookUsers.filter(u => !layerClasses.some(c => filesUsingClass(c).includes(u)))
+    expect(orphans).toEqual([])
   })
 })

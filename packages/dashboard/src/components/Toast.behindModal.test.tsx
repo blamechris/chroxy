@@ -4,11 +4,13 @@
 import { StrictMode } from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
-import { readFileSync, readdirSync } from 'fs'
-import { resolve, join } from 'path'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import { Toast, type ToastItem } from './Toast'
 import { Modal } from './Modal'
+import { ShortcutHelp } from './ShortcutHelp'
 import { getModalOverlayCount } from '../hooks/useModalOverlay'
+import { fullScreenLayers } from '../hooks/overlayRoster.testSupport'
 
 afterEach(cleanup)
 
@@ -83,6 +85,100 @@ describe('toast stack vs modal overlay (#9168)', () => {
   })
 })
 
+function Stack({ toasts, modal = false, help = false, onDismiss }: {
+  toasts: ToastItem[]; modal?: boolean; help?: boolean; onDismiss: (id: string) => void
+}) {
+  return (
+    <>
+      <Toast items={toasts} onDismiss={onDismiss} />
+      <Modal open={modal} onClose={() => {}} title="M"><p>body</p></Modal>
+      <ShortcutHelp isOpen={help} onClose={() => {}} shortcuts={[]} />
+    </>
+  )
+}
+
+describe('toast timers vs overlays, extended (#9168)', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { cleanup(); vi.runOnlyPendingTimers(); vi.useRealTimers() })
+  const advance = (ms: number) => act(async () => { vi.advanceTimersByTime(ms) })
+
+  it('a toast added while a modal is open outlives 5s and gets its FULL 5s after close', async () => {
+    const onDismiss = vi.fn()
+    const { rerender } = render(<Stack toasts={[]} modal onDismiss={onDismiss} />)
+    rerender(<Stack toasts={items} modal onDismiss={onDismiss} />)
+    await advance(30000)
+    expect(onDismiss).not.toHaveBeenCalled()
+    rerender(<Stack toasts={items} modal={false} onDismiss={onDismiss} />)
+    await advance(4999)
+    expect(onDismiss).not.toHaveBeenCalled()
+    await advance(1)
+    expect(onDismiss).toHaveBeenCalledWith('t0')
+  })
+
+  it('two overlays: closing one keeps toasts paused, closing both resumes', async () => {
+    const onDismiss = vi.fn()
+    const { rerender } = render(<Stack toasts={items} onDismiss={onDismiss} />)
+    await advance(1000)
+    rerender(<Stack toasts={items} modal help onDismiss={onDismiss} />)
+    expect(screen.getByTestId('toast-container').classList.contains(BEHIND)).toBe(true)
+    rerender(<Stack toasts={items} modal help={false} onDismiss={onDismiss} />)
+    expect(screen.getByTestId('toast-container').classList.contains(BEHIND)).toBe(true)
+    await advance(30000)
+    expect(onDismiss).not.toHaveBeenCalled()
+    rerender(<Stack toasts={items} onDismiss={onDismiss} />)
+    expect(screen.getByTestId('toast-container').classList.contains(BEHIND)).toBe(false)
+    await advance(3999)
+    expect(onDismiss).not.toHaveBeenCalled()
+    await advance(1)
+    expect(onDismiss).toHaveBeenCalledWith('t0')
+  })
+
+  it('removing a paused toast, or unmounting, leaves no pending timers', async () => {
+    const onDismiss = vi.fn()
+    const base = render(<Stack toasts={[]} modal onDismiss={onDismiss} />)
+    const baseline = vi.getTimerCount()
+    base.rerender(<Stack toasts={items} modal onDismiss={onDismiss} />)
+    base.rerender(<Stack toasts={[]} modal onDismiss={onDismiss} />)
+    expect(vi.getTimerCount()).toBe(baseline)
+    base.unmount()
+    // Modal's own focus bookkeeping may leave a timer; the toast must add none.
+    const afterModalOnly = vi.getTimerCount()
+    vi.clearAllTimers()
+    const again = render(<Stack toasts={items} modal onDismiss={onDismiss} />)
+    again.unmount()
+    expect(vi.getTimerCount()).toBe(afterModalOnly)
+    expect(onDismiss).not.toHaveBeenCalled()
+  })
+
+  it('actionDisabled composes with the modal pause', async () => {
+    const onDismiss = vi.fn()
+    const action = { label: 'Retry', onClick: vi.fn() }
+    const disabled: ToastItem[] = [{ id: 'a', message: 'x', action, actionDisabled: true }]
+    const enabled: ToastItem[] = [{ id: 'a', message: 'x', action, actionDisabled: false }]
+    const { rerender } = render(<Stack toasts={disabled} modal onDismiss={onDismiss} />)
+    // re-enabled while the modal is still open: timer must not run
+    rerender(<Stack toasts={enabled} modal onDismiss={onDismiss} />)
+    await advance(30000)
+    expect(onDismiss).not.toHaveBeenCalled()
+    // modal closes: full 5s from resume
+    rerender(<Stack toasts={enabled} onDismiss={onDismiss} />)
+    await advance(4999)
+    expect(onDismiss).not.toHaveBeenCalled()
+    await advance(1)
+    expect(onDismiss).toHaveBeenCalledWith('a')
+  })
+
+  it('actionDisabled stays paused after the modal closes until re-enabled', async () => {
+    const onDismiss = vi.fn()
+    const action = { label: 'Retry', onClick: vi.fn() }
+    const disabled: ToastItem[] = [{ id: 'a', message: 'x', action, actionDisabled: true }]
+    const { rerender } = render(<Stack toasts={disabled} modal onDismiss={onDismiss} />)
+    rerender(<Stack toasts={disabled} onDismiss={onDismiss} />)
+    await advance(30000)
+    expect(onDismiss).not.toHaveBeenCalled()
+  })
+})
+
 describe('overlay layering (#9168)', () => {
   const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
   const zOf = (cls: string): number => {
@@ -93,29 +189,12 @@ describe('overlay layering (#9168)', () => {
     return Number(z[1])
   }
 
-  // Overlay classes derived from the sources that use the hook, not hardcoded.
-  const dir = resolve(__dirname)
-  const overlayClasses = (): string[] => {
-    const out: string[] = []
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith('.tsx') || f.includes('.test.')) continue
-      const src = readFileSync(join(dir, f), 'utf-8')
-      let i = src.indexOf('{...overlayProps}')
-      while (i !== -1) {
-        const start = src.lastIndexOf('<', i)
-        const m = /className="([^"]+)"/.exec(src.slice(start, start + 400))
-        const cls = m?.[1]?.split(' ')[0]
-        if (!cls) throw new Error(`className on overlay in ${f}`)
-        out.push('.' + cls)
-        i = src.indexOf('{...overlayProps}', i + 1)
-      }
-    }
-    return out
-  }
+  // Overlay classes derived from the stylesheet + sources, not hardcoded.
+  const overlayClasses = (): string[] => fullScreenLayers().map(l => l.selector)
 
   it('behind-modal z-index is below every overlay z-index', () => {
     const classes = overlayClasses()
-    expect(classes.length).toBe(7)
+    expect(classes.length).toBeGreaterThan(0)
     const behind = zOf('.toast-container.toast-container-behind-modal')
     for (const c of classes) expect(behind, c).toBeLessThan(zOf(c))
   })
