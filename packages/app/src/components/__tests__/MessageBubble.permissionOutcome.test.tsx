@@ -11,7 +11,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { StyleSheet, Text, TextInput } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { createDispatchTable, runDispatch, resetReplayReconcile } from '@chroxy/store-core';
 import type { ClientStoreAdapter } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
@@ -196,13 +196,15 @@ function toggle(tree: renderer.ReactTestRenderer, id: string) {
  */
 function expectReadOnly(tree: renderer.ReactTestRenderer) {
   expect(tree.root.findAll((node) => /^approval-button-/.test(node.props.testID ?? ''))).toHaveLength(0);
-  expect(tree.root.findAll((node) => /^(approve|deny|allow|send)/i.test(node.props.testID ?? '') &&
-    typeof node.props.onPress === 'function')).toHaveLength(0);
-  // The only button a record may carry is its own expand/collapse header.
-  const buttons = tree.root.findAll((node) => node.props.accessibilityRole === 'button' &&
-    typeof node.props.onPress === 'function');
-  for (const button of buttons) {
-    expect(button.props.testID).toMatch(/^permission-outcome-/);
+  // Strict: ANY pressable node must be the record's own expand toggle, or the
+  // bubble's own wrapper that CONTAINS that toggle (message selection, not a
+  // decision). A new control with no role, no testID or a new name cannot slip
+  // past this: it is neither the toggle nor an ancestor of it.
+  const isToggle = (node: ReactTestInstance) => /^permission-outcome-/.test(String(node.props.testID ?? ''));
+  const pressables = tree.root.findAll((node) => typeof node.props.onPress === 'function');
+  for (const node of pressables) {
+    const ok = isToggle(node) || node.findAll(isToggle).length > 0;
+    expect(ok).toBe(true);
   }
   expect(tree.root.findAllByType(TextInput)).toHaveLength(0);
   expect(tree.root.findAllByProps({ accessibilityRole: 'timer' })).toHaveLength(0);
@@ -368,6 +370,45 @@ describe('MessageBubble terminal permission inspection (#8392)', () => {
       expectReadOnly(tree);
     },
   );
+});
+
+describe('expectReadOnly can fail (#9161)', () => {
+  const failsFor = (element: React.ReactElement) => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(element); });
+    trees.push(tree);
+    expect(() => expectReadOnly(tree)).toThrow();
+  };
+  it('fails on an approval-button testID', () => {
+    failsFor(<View testID="approval-button-allow" />);
+  });
+  it('fails on a stray role-less, id-less pressable', () => {
+    failsFor(<Pressable onPress={() => {}}><Text>x</Text></Pressable>);
+  });
+  it('fails on a pressable under a foreign testID', () => {
+    failsFor(<Pressable testID="something-else" onPress={() => {}} />);
+  });
+  it('fails on a text input', () => {
+    failsFor(<TextInput />);
+  });
+  it('fails on a timer', () => {
+    failsFor(<View accessibilityRole="timer" />);
+  });
+  it('fails on live-card wording', () => {
+    failsFor(<Text>Action Required</Text>);
+  });
+  it('fails on a stray pressable beside the record\'s own toggle', () => {
+    failsFor(<View>
+      <Pressable testID="permission-outcome-x" onPress={() => {}} />
+      <Pressable onPress={() => {}} />
+    </View>);
+  });
+  it('passes on the record\'s own toggle alone', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(<Pressable testID="permission-outcome-x" accessibilityRole="button" onPress={() => {}} />); });
+    trees.push(tree);
+    expectReadOnly(tree);
+  });
 });
 
 describe('record read-only assertion checks controls, not words (#9161)', () => {
