@@ -127,6 +127,8 @@ function globTimeoutMs() {
   return n > 0 ? n : GLOB_TIMEOUT_DEFAULT_MS
 }
 
+const log = createLogger('byok-tool-executor')
+
 /**
  * #7356 — a cap on how many Glob walks run at once, DAEMON-WIDE.
  *
@@ -146,7 +148,6 @@ function globTimeoutMs() {
  * bound can be proven at a testable size. An empty or unparseable value falls
  * back to the default rather than lifting the bound.
  */
-const log = createLogger('byok-tool-executor')
 const GLOB_MAX_CONCURRENT_DEFAULT = 2
 function globMaxConcurrent() {
   const raw = (process.env.CHROXY_GLOB_MAX_CONCURRENT || '').trim()
@@ -154,7 +155,14 @@ function globMaxConcurrent() {
   const n = Number(raw)
   return n > 0 ? n : GLOB_MAX_CONCURRENT_DEFAULT
 }
-const globWalkSlots = { active: 0, queue: [], capSince: null, lastWarnAt: null }
+const globWalkSlots = { active: 0, queue: [], capSince: null, lastWarnAt: null, lastLimit: Infinity }
+
+// Test-only: awaited inside a walk right after it starts, so a test can park a
+// started walk deterministically (no timing race against a real directory walk).
+let globWalkStartHook = null
+function __setGlobWalkStartHookForTest(fn) {
+  globWalkStartHook = fn || null
+}
 
 // #8349 — the limiter's clock, injectable so the stuck-at-cap check is proven
 // without waiting real deadlines. null restores Date.now.
@@ -179,7 +187,9 @@ function noteGlobCapState(limit) {
  * never sees `state.stop`, so its slot is never returned and the cap turns one
  * hung call into a daemon-wide Glob outage. Log one warning when the limiter
  * has been full, with no slot released, for more than a few deadlines, and at
- * most once per that interval. Returns whether it warned. The slot is NOT
+ * most once per that interval. Returns whether it warned. It is only evaluated
+ * when a queued Glob times out, so a stuck cap with no further Glob calls is
+ * silent (no timer polls it). The slot is NOT
  * force-released: the hung walk still holds a directory handle and a libuv
  * pool thread, so freeing its slot would let new walks oversubscribe exactly
  * the resource the cap protects.
@@ -204,8 +214,9 @@ function pumpGlobWalkSlots() {
     globWalkSlots.active++
     waiter.resolve(makeGlobSlotRelease())
   }
-  if (globWalkSlots.queue.length > 0) noteGlobCapState(globWalkSlots.queue[0].limit)
-  else if (globWalkSlots.active === 0) globWalkSlots.capSince = null
+  // Unconditional: a release followed by a grant that refills the cap with an
+  // empty queue must restart the stuck clock too.
+  noteGlobCapState(globWalkSlots.lastLimit)
 }
 
 function makeGlobSlotRelease() {
@@ -227,6 +238,7 @@ function makeGlobSlotRelease() {
  * observes `state.stop` itself and releases in its own `finally`).
  */
 function acquireGlobWalkSlot(limit) {
+  globWalkSlots.lastLimit = limit
   let waiter = null
   const granted = new Promise((resolve) => {
     if (globWalkSlots.active < limit) {
@@ -721,7 +733,11 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   async function collectAll() {
     const release = await slot.granted
     if (release === null) return
+    // Known, unreachable-in-practice edge: a slot granted after the deadline
+    // already fired is not "started" (the loop below returns at once and the
+    // late grant releases in `finally`), so such a call keeps the queued message.
     if (state.stop === null) walkStarted = true
+    if (walkStarted && globWalkStartHook) await globWalkStartHook()
     try {
       for (const p of patterns) {
         if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
@@ -753,7 +769,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     if (!walkStarted) {
       warnIfGlobWalksStuck(timeoutMs)
       return {
-        content: `Glob timed out after ${timeoutMs}ms (waited ${timeoutMs}ms for a free walk slot; ${globWalkSlots.active} walks were busy)`,
+        content: `Glob timed out after ${timeoutMs}ms (waited ${timeoutMs}ms for a free walk slot; ${globWalkSlots.active} ${globWalkSlots.active === 1 ? 'walk was' : 'walks were'} busy)`,
         isError: true,
       }
     }
@@ -3510,6 +3526,7 @@ export {
   globWalkSlotStats,
   warnIfGlobWalksStuck,
   __setGlobLimiterClockForTest,
+  __setGlobWalkStartHookForTest,
   expandBraces,
   GLOB_BRACE_EXPANSION_CAP,
   parseRangeGroup,

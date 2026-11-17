@@ -10,6 +10,7 @@ import {
   globWalkSlotStats,
   warnIfGlobWalksStuck,
   __setGlobLimiterClockForTest,
+  __setGlobWalkStartHookForTest,
 } from '../src/byok-tool-executor.js'
 
 // #8349 — a Glob that spends its deadline queued says so, and a limiter stuck
@@ -33,6 +34,7 @@ describe('Glob walk limiter diagnostics (#8349)', () => {
   afterEach(() => {
     clearInterval(keepAlive)
     __setGlobLimiterClockForTest(null)
+    __setGlobWalkStartHookForTest(null)
     for (const [k, v] of [['CHROXY_GLOB_MAX_CONCURRENT', savedEnv.max], ['CHROXY_GLOB_TIMEOUT_MS', savedEnv.timeout]]) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
@@ -50,26 +52,46 @@ describe('Glob walk limiter diagnostics (#8349)', () => {
     try {
       const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
       assert.equal(r.isError, true)
-      assert.equal(r.content, 'Glob timed out after 40ms (waited 40ms for a free walk slot; 1 walks were busy)')
+      assert.equal(r.content, 'Glob timed out after 40ms (waited 40ms for a free walk slot; 1 walk was busy)')
     } finally {
       releaseHeld()
     }
   })
 
   it('a Glob whose walk started and then ran out of time keeps the plain timeout message', async () => {
-    process.env.CHROXY_GLOB_TIMEOUT_MS = '1'
-    // enough entries that a 1ms deadline lands mid-walk
-    const { mkdirSync } = await import('node:fs')
-    for (let d = 0; d < 30; d++) {
-      mkdirSync(join(dir, `d${d}`))
-      for (let f = 0; f < 200; f++) writeFileSync(join(dir, `d${d}`, `f${f}.ts`), '')
+    process.env.CHROXY_GLOB_TIMEOUT_MS = '30'
+    writeFileSync(join(dir, 'a.ts'), '')
+    // Park the started walk until the deadline has fired: deterministic, no race.
+    let unpark
+    const parked = new Promise((res) => { unpark = res })
+    __setGlobWalkStartHookForTest(() => parked)
+    const call = executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+    try {
+      const r = await call
+      assert.equal(r.isError, true)
+      assert.equal(r.content, 'Glob timed out after 30ms')
+      assert.equal(globWalkSlotStats().active, 1, 'the parked walk still holds its slot')
+    } finally {
+      unpark()
     }
-    const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
-    assert.equal(r.isError, true)
-    assert.equal(r.content, 'Glob timed out after 1ms')
-    // the timed-out walk observes its stop flag and gives the slot back
     const until = Date.now() + 5000
     while (globWalkSlotStats().active !== 0 && Date.now() < until) await new Promise((res) => setTimeout(res, 5))
+  })
+
+  it('says "walks were busy" when more than one walk holds the cap', async () => {
+    process.env.CHROXY_GLOB_MAX_CONCURRENT = '2'
+    const a = acquireGlobWalkSlot(2)
+    const b = acquireGlobWalkSlot(2)
+    const relA = await a.granted
+    const relB = await b.granted
+    process.env.CHROXY_GLOB_TIMEOUT_MS = '30'
+    try {
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*' }, ...ctx() })
+      assert.equal(r.content, 'Glob timed out after 30ms (waited 30ms for a free walk slot; 2 walks were busy)')
+    } finally {
+      relA()
+      relB()
+    }
   })
 
   describe('stuck-at-cap warning', () => {
@@ -135,6 +157,22 @@ describe('Glob walk limiter diagnostics (#8349)', () => {
         relB()
       }
       assert.equal(lines.length, 0)
+    })
+
+    it('a release that is immediately refilled (empty queue) restarts the stuck clock', async () => {
+      const a = acquireGlobWalkSlot(1)
+      const relA = await a.granted
+      const b = acquireGlobWalkSlot(1) // queued behind a
+      t += 10 * DEADLINE
+      relA() // the pump hands the slot to b: cap refilled, queue now empty
+      const relB = await b.granted
+      try {
+        assert.equal(warnIfGlobWalksStuck(DEADLINE, warn), false, 'the clock restarted at the refill')
+        t += 3 * DEADLINE + 1
+        assert.equal(warnIfGlobWalksStuck(DEADLINE, warn), true)
+      } finally {
+        relB()
+      }
     })
 
     it('a queued Glob that times out reports a stuck limiter through the log', async () => {
