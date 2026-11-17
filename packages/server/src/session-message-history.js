@@ -185,6 +185,12 @@ export class SessionMessageHistory extends EventEmitter {
     this._maxToolInput = maxToolInput || null
     this._maxPendingStreamSize = maxPendingStreamSize || MAX_PENDING_STREAM_SIZE
     this._messageHistory = new Map()    // sessionId -> Array<{ type, _seq, ...data }>
+    // #8415 -- entry object -> the last seq issued when its tool input was filled in
+    // after the entry was recorded (`backfillToolInput`). A WeakMap on purpose: the
+    // marker is no field of the entry, so it is never persisted, never copied by
+    // `truncateEntry`, and needs no seq of its own. A daemon restart (or `setHistory`)
+    // forgets it; that limitation is accepted.
+    this._toolInputFillSeqs = new WeakMap()
     this._pendingStreams = new Map()     // sessionId:messageId -> accumulated delta text
     // #6431 — messageIds whose pending stream has already been truncated, so the
     // truncation is signalled to the client ONCE per stream (every subsequent
@@ -1079,11 +1085,49 @@ export class SessionMessageHistory extends EventEmitter {
     for (let i = history.length - 1; i >= 0; i--) {
       const entry = history[i]
       if (entry && entry.type === 'tool_start' && entry.toolUseId === toolUseId) {
+        // #8415: a client whose cursor already covers this entry holds the card
+        // without its input, and the fill takes no seq of its own. Record when it
+        // happened so a delta replay can tell that client. Only a fill of an input
+        // the entry did not have counts: an entry recorded with its input (the
+        // claude-tui shape) was sent with it.
+        if (!isPlainObject(entry.input) && isPlainObject(input)) {
+          this._toolInputFillSeqs.set(entry, this.getLastIssuedSeq(sessionId))
+        }
         entry.input = input
         return true
       }
     }
     return false
+  }
+
+  /**
+   * #8415 -- the tool inputs a client at `cursor` holds a card for but not the input
+   * of: retained `tool_start` entries at or before the cursor whose input was filled
+   * in at or after it. An entry past the cursor is in the delta slice already, with
+   * its input. Stored values are returned as they are (already sanitised).
+   *
+   * @param {string} sessionId
+   * @param {number} cursor - the client's history cursor
+   * @returns {Array<{messageId: string, toolUseId?: string, input: object}>}
+   */
+  getToolInputBackfills(sessionId, cursor) {
+    const history = this._messageHistory.get(sessionId)
+    if (!Array.isArray(history)) return []
+    const out = []
+    for (const entry of history) {
+      if (!entry || entry.type !== 'tool_start') continue
+      const fillSeq = this._toolInputFillSeqs.get(entry)
+      if (fillSeq === undefined) continue
+      if (typeof entry._seq !== 'number' || !isPlainObject(entry.input)) continue
+      if (typeof entry.messageId !== 'string' || !entry.messageId) continue
+      if (!(entry._seq <= cursor && cursor <= fillSeq)) continue
+      out.push({
+        messageId: entry.messageId,
+        ...(typeof entry.toolUseId === 'string' ? { toolUseId: entry.toolUseId } : {}),
+        input: entry.input,
+      })
+    }
+    return out
   }
 
   /**

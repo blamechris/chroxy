@@ -441,6 +441,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_error', message, category?, sessionId?, recoverable?, code?, reason?, requestId?, boundSessionId?, boundSessionName?, primaryClientId?, attemptedSessionId?, activityId? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated?, conversationId?, latestSeq? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId, latestSeq? }         — end of history replay
+ *   { type: 'tool_input_backfill', sessionId, messageId, toolUseId?, input } — delta replay only, capability history_tool_input_backfill_v1: the input of a held tool card that has none (no historySeq; reconcile-only)
  *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
  *   { type: 'user_question', toolUseId, questions, timestamp?, historySeq?, interrupted?, superseded? }   — AskUserQuestion prompt from Claude
  *   { type: 'agent_busy' }                           — agent started processing (per-session)
