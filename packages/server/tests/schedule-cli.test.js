@@ -825,9 +825,32 @@ describe('buildDeps defaultProviderName resolution honours CLI > ENV > file > de
     await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, async () => {
       const { output } = resolvedProviderFromCreate()
       assert.ok(/configured default \(config\/env\)/.test(output), `got:\n${output}`)
-      assert.ok(/started with --provider may use a different default/.test(output), `got:\n${output}`)
+      assert.ok(/started with --provider or a different CHROXY_PROVIDER may use another default/.test(output), `got:\n${output}`)
       assert.ok(!/daemon DEFAULT/.test(output), `must not claim the daemon's default:\n${output}`)
     }, { provider: 'claude-tui' })
+  })
+
+  // The refusal check receives only a provider NAME, so it cannot tell an
+  // explicit target.provider from the fallback. When the explicit name equals the
+  // configured default the clause is appended; it stays true (it only says what a
+  // provider-less task falls back to), so that is the pinned behaviour.
+  it('(c5) an explicit provider equal to the configured default still gets the configured-default clause (#9178)', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, async () => {
+      const store = makeStore()
+      const w = cap()
+      runScheduleCreate({ prompt: 'x', cron: '0 9 * * *', provider: 'claude-tui' }, { store, write: w.write })
+      assert.ok(/configured default \(config\/env\)/.test(w.text()), w.text())
+      assert.ok(!/daemon DEFAULT/.test(w.text()), w.text())
+    }, { provider: 'claude-tui' })
+  })
+
+  it('(c6) a refused default that comes from CHROXY_PROVIDER in env gets the configured-default clause (#9178)', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-tui', CHROXY_PROVIDERS: undefined }, async () => {
+      const { output } = resolvedProviderFromCreate()
+      assert.match(output, /provider 'claude-tui' will be REFUSED/)
+      assert.ok(/configured default \(config\/env\)/.test(output), output)
+      assert.ok(!/daemon DEFAULT/.test(output), output)
+    }, { provider: 'claude-sdk' })
   })
 
   it('(c4) an explicitly hook-routed target.provider gets no configured-default clause (#9178)', async () => {

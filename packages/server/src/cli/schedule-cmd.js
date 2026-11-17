@@ -111,7 +111,7 @@ function getDefaultStore() {
 
 /** Honest wording for a refusal on the CLI-resolved default (#9178). */
 const CONFIGURED_DEFAULT_CLAUSE = (name) =>
-  `'${name}' is the configured default (config/env), which a task with no target.provider falls back to; a daemon started with --provider may use a different default.`
+  `'${name}' is the configured default (config/env), which a task with no target.provider falls back to; a daemon started with --provider or a different CHROXY_PROVIDER may use another default.`
 
 /**
  * Build the dependency bag every exported command function runs against.
@@ -121,12 +121,14 @@ const CONFIGURED_DEFAULT_CLAUSE = (name) =>
  */
 function buildDeps(overrides = {}) {
   const config = readConfigSoft(configFile())
-  // #9178: resolved from the config/env tiers only. The running daemon's
-  // effective default is NOT readable from here without a new endpoint or a
-  // wider token grant (connection.json, `/` and `/metrics` carry no provider),
-  // so a daemon started with `--provider X` can differ from this value. The
-  // CLI therefore never claims to know the daemon's default — its refusal
-  // wording below names this value as the configured one and says so.
+  // #9178: resolved from the config/env tiers only. `chroxy schedule`
+  // deliberately stays offline (it operates on the store and needs no running
+  // daemon), so it reports the CONFIGURED default and never claims to know the
+  // daemon's. A daemon started with `--provider X`, or with a different
+  // `CHROXY_PROVIDER` in its own environment, can default elsewhere. The
+  // running daemon does expose its default over the authenticated WebSocket
+  // path (`auth_bootstrap.defaultProvider`, `list_providers`); reading it from
+  // here is tracked as a follow-up (#9201).
   const defaultProviderName = overrides.defaultProviderName
     || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config }))
   return {
