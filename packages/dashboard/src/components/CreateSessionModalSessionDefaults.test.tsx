@@ -164,3 +164,12 @@ describe('CreateSessionModal select styling (#8611)', () => {
     selects.forEach(s => expect(s.closest('.modal-content--session-form')).not.toBeNull())
   })
 })
+
+describe('CreateSessionModal effective provider (#8277)', () => {
+  it('falls back to the first offered provider when the saved default is not offered', () => {
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: {}, auth: READY }, { name: 'claude-sdk', capabilities: {}, auth: READY }]
+    mockStoreState.defaultProvider = 'claude-tui'
+    renderModal()
+    expect((screen.getByLabelText('Select provider') as HTMLSelectElement).value).toBe('codex')
+  })
+})

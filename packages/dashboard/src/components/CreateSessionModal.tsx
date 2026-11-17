@@ -20,6 +20,7 @@ import {
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { resolveEffectiveProvider } from '../lib/effective-provider'
 import type { SessionDefaultsNotice } from '../store/session-defaults'
 import { isImeComposing } from '../utils/ime'
 
@@ -546,13 +547,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setNameError('')
     // Normalize provider: if server has responded with available providers and
     // the persisted default isn't in the list, fall back to first available
-    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
-      setProvider(availableProviders[0]!.name)
-    } else {
-      setProvider(defaultProvider)
-    }
+    const resolvedProvider = resolveEffectiveProvider(defaultProvider, availableProviders)
+    setProvider(resolvedProvider)
     setShowAdvanced(false)
-    const initialProvider = availableProviders.find(p => p.name === (availableProviders.some(p => p.name === defaultProvider) ? defaultProvider : availableProviders[0]?.name))
+    const initialProvider = availableProviders.find(p => p.name === resolvedProvider)
     setConnectionId(initialProvider?.connections?.[0]?.id || '')
     setPermissionMode('')
     setWorktree(false)

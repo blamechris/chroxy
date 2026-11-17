@@ -15,6 +15,7 @@ import { SessionArchiveSettingsSection } from './SessionArchiveSettingsSection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
+import { resolveEffectiveProvider } from '../lib/effective-provider'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import {
   COST_BADGE_MODES,
@@ -1144,12 +1145,10 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   }, [])
 
   // Normalize: if persisted defaultProvider isn't in server's list, use first available
-  const effectiveProvider = useMemo(() => {
-    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
-      return availableProviders[0]!.name
-    }
-    return defaultProvider
-  }, [availableProviders, defaultProvider])
+  const effectiveProvider = useMemo(
+    () => resolveEffectiveProvider(defaultProvider, availableProviders),
+    [availableProviders, defaultProvider],
+  )
 
   // #8277: the saved override is origin-global, so it can name a provider this
   // server does not offer. It stays stored and the select must say so rather
@@ -1270,6 +1269,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 aria-label="Default provider"
                 value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
                 onChange={handleProviderChange}
+                aria-describedby={dormantProvider ? 'default-provider-dormant-hint' : undefined}
               >
                 <option value="">
                   {serverDefaultProvider
@@ -1294,7 +1294,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 }
               </select>
               {dormantProvider && (
-                <p className="settings-hint" data-testid="default-provider-dormant-hint">
+                <p className="settings-hint" id="default-provider-dormant-hint" data-testid="default-provider-dormant-hint">
                   Your saved default ({PROVIDER_LABELS[dormantProvider] || dormantProvider}) is not offered by this
                   server, so new sessions here use {PROVIDER_LABELS[effectiveProvider] || effectiveProvider}. The
                   saved choice is kept for servers that offer it.
