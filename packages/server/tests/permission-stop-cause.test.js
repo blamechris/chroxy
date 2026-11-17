@@ -255,12 +255,23 @@ describe('a client that cannot label a stopped outcome is sent expired (#8374)',
   })
 
   it('a client that does not (an older build, which drops an outcome it cannot parse) gets "expired"', () => {
-    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null]) {
       const frame = replay(client, entry('stopped'))
       assert.equal(frame.outcome, 'expired')
       assert.equal(frame.requestId, 'p', 'the record is kept, only its label degrades')
       assert.equal(frame.historySeq, 4)
     }
+  })
+
+  it('a caller that omits the client record fails loudly instead of downgrading every client (#8431)', () => {
+    assert.throws(
+      () => sendHistoryEntry((_ws, payload) => payload, {}, 's1', entry('stopped')),
+      (err) => err instanceof TypeError && /sendHistoryEntry/.test(err.message),
+    )
+    assert.throws(
+      () => sendHistoryEntry((_ws, payload) => payload, {}, 's1', entry('stopped'), undefined),
+      TypeError,
+    )
   })
 
   it('capabilities on the raw socket are not consulted (that is not where the handshake puts them)', () => {

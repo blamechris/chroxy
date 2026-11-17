@@ -6709,7 +6709,7 @@ describe('ClaudeTuiSession', () => {
           assert.deepEqual(entry.input, { command: 'ls .', description: 'List files in current directory' })
           // The frame a session switch / reload actually re-sends for that entry.
           const sent = []
-          sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+          sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry, null)
           assert.equal(sent[0].type, 'tool_start')
           assert.deepEqual(sent[0].input, { command: 'ls .', description: 'List files in current directory' })
         } finally {

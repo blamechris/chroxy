@@ -53,7 +53,7 @@ function startTool(session, { id = 'toolu_1', name = 'Bash' } = {}) {
 function replayFrames(manager) {
   const sent = []
   for (const entry of manager._history.getHistory('s1')) {
-    sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+    sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry, null)
   }
   return sent
 }

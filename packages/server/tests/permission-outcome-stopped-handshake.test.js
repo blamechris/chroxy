@@ -17,6 +17,7 @@ import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol'
 import { WsServer as _WsServer } from '../src/ws-server.js'
+import { PairingManager } from '../src/pairing.js'
 import { createMockSession } from './test-helpers.js'
 
 class WsServer extends _WsServer {
@@ -65,6 +66,19 @@ async function connect(port, capabilities) {
   return { ws, messages }
 }
 
+// The `pair` branch of the handshake (handlePairMessage) stores capabilities by its
+// own line, separate from the `auth` branch's: a replay driven only through `auth`
+// leaves it unexercised (#8431).
+async function connectPaired(port, pairingId, capabilities) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+  const messages = []
+  ws.on('message', (d) => { try { messages.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+  ws.send(JSON.stringify({ type: 'pair', pairingId, ...(capabilities ? { capabilities } : {}) }))
+  await until(() => messages.find((m) => m.type === 'auth_ok'), 'auth_ok after pair')
+  return { ws, messages }
+}
+
 describe('permission_outcome stopped through the real handshake (#8374)', () => {
   let server
   afterEach(() => { server?.close(); server = null })
@@ -101,6 +115,45 @@ describe('permission_outcome stopped through the real handshake (#8374)', () => 
     const frame = await until(() => outcomeFrames(messages)[0], 'connect replay outcome')
     assert.equal(frame.outcome, 'expired')
     assert.equal(frame.requestId, 'perm-1')
+    ws.close()
+  })
+})
+
+describe('permission_outcome stopped through the real PAIR handshake (#8431)', () => {
+  let server
+  let pm
+  afterEach(() => { server?.close(); server = null; pm?.destroy(); pm = null })
+
+  async function boot() {
+    pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+    server = new WsServer({ port: 0, apiToken: 'tok', sessionManager: makeManager(), authRequired: true, pairingManager: pm })
+    server.start('127.0.0.1')
+    await new Promise((resolve) => server.httpServer.once('listening', resolve))
+    return server.httpServer.address().port
+  }
+
+  const outcomeFrames = (messages) => messages.filter((m) => m.type === 'permission_outcome')
+
+  it('a paired desktop client gets "stopped" on the connect replay and on a switch back', async () => {
+    const port = await boot()
+    const { ws, messages } = await connectPaired(port, pm.currentPairingId, [...CLIENT_CAPABILITIES.desktop])
+    const connectFrame = await until(() => outcomeFrames(messages)[0], 'connect replay outcome')
+    assert.equal(connectFrame.outcome, 'stopped', 'the connect-time replay')
+    messages.length = 0
+    ws.send(JSON.stringify({ type: 'switch_session', sessionId: 'sess-2' }))
+    await until(() => messages.find((m) => m.type === 'session_switched'), 'switch to sess-2')
+    messages.length = 0
+    ws.send(JSON.stringify({ type: 'switch_session', sessionId: 'sess-1' }))
+    const switched = await until(() => outcomeFrames(messages)[0], 'switch replay outcome')
+    assert.equal(switched.outcome, 'stopped', 'the switch-back replay')
+    ws.close()
+  })
+
+  it('CONTROL: a paired client advertising no capabilities gets "expired"', async () => {
+    const port = await boot()
+    const { ws, messages } = await connectPaired(port, pm.currentPairingId, undefined)
+    const frame = await until(() => outcomeFrames(messages)[0], 'connect replay outcome')
+    assert.equal(frame.outcome, 'expired')
     ws.close()
   })
 })
