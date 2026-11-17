@@ -295,7 +295,9 @@ ALLOWED_KEYS="providers provider model"
 # deliberately absent: a keyless smoke stub needs neither.
 ALLOWED_ENTRY_FIELDS="id label baseUrl defaultModel models pricing contextWindow"
 
-# Validate a patch file: readable, valid JSON, a plain object, no guarded key.
+# Validate a patch file: readable, valid JSON, a plain object, only allowlisted
+# top-level keys, and only allowlisted fields on each provider entry. Every refusal
+# names its cause (the offending key, field or entry index) on stderr, exit 2.
 check_patch() {
   [ -f "$1" ] || die "--config-patch file not found: $1" 2
   "$NODE_BIN/node" -e '
