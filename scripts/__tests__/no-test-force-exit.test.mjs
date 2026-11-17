@@ -426,6 +426,44 @@ test('only an invoked `node` counts; echo, wrappers-by-name and disabled steps d
   ], 'live commands: disabled steps and the disabled job are dropped, nothing else')
 })
 
+// Review fold: trailing comments, nested keys, block-scalar ends, and unreadable shapes.
+test('trailing comments and keys nested under `with:` do not change a step classification', () => {
+  const yml = [
+    'jobs:',
+    '  j:', '    defaults:', '      run:', '        working-directory: packages/def # the default',
+    '    steps:',
+    '      - name: commented', '        working-directory: packages/own # own dir', '        run: node scripts/a.mjs # run it',
+    '      - name: off', '        if: false # disabled for now', '        run: node scripts/off.mjs',
+    '      - name: nested', '        uses: some/action@v1', '        with:', '          working-directory: elsewhere', '          if: false',
+    '        run: node scripts/n.mjs',
+  ].join('\n')
+  sameList(cmds(yml), [
+    'packages/own: node scripts/a.mjs',
+    'packages/def: node scripts/n.mjs',
+  ], 'commented and nested')
+})
+
+test('a `- run: |` block scalar ends at the step\'s next sibling key', () => {
+  const yml = [
+    'jobs:', '  j:', '    steps:',
+    '      - run: |', '          echo hi', '          node scripts/a.mjs',
+    '        working-directory: packages/x', '        if: false',
+    '      - run: |', '          node scripts/b.mjs',
+    '        working-directory: packages/y',
+  ].join('\n')
+  sameList(cmds(yml), ['packages/y: node scripts/b.mjs'], 'dashed block scalar')
+})
+
+test('a step shape the reader cannot classify throws, naming the job and step', () => {
+  const wrap = (...step) => ['jobs:', '  myjob:', '    steps:', ...step].join('\n')
+  throwsMatching(() => workflowCommands(wrap('      - name: odd', '        working-directory: a b', '        run: node x.mjs')),
+    /job "myjob", step "odd": unreadable working-directory/, 'spaced working-directory')
+  throwsMatching(() => workflowCommands(wrap('      - name: folded', '        if: >-', '          false', '        run: node x.mjs')),
+    /job "myjob", step "folded": unreadable if/, 'block-scalar if')
+  throwsMatching(() => workflowCommands(wrap('      - run: node x.mjs', '        if:')),
+    /job "myjob", step #1: unreadable if/, 'empty if, unnamed step')
+})
+
 // #9214 item 3: a probe that could not run, or was killed, is a failure with its cause.
 test('a spawn error or signal kill fails loudly with the cause, never as a refusal or a pass', () => {
   const pkg = nodeTestPackagesFound.find((p) => p.name === 'claude-hooks')
@@ -491,11 +529,27 @@ test('unclassified node:test mentions: exactly the unreadable file types that qu
     put('packages/x/e.md', quoted)                // known non-code: not reported
     put('packages/x/f.mjs', quoted)               // scanned type: handled elsewhere
     put('packages/roster/g.sh', quoted)           // roster package: guarded via its script
-    const g = spawnSync('git', ['init', '-q'], { cwd: root, encoding: 'utf8' })
-    assert(g.status === 0, `git init failed: ${g.stderr}`)
-    const add = spawnSync('git', ['add', '-A', '--', 'packages'], { cwd: root, encoding: 'utf8' })
-    assert(add.status === 0, `git add failed: ${add.stderr}`)
-    const got = unclassifiedNodeTestMentions(root, ['roster'])
+    // Isolated from ambient git state: under a git hook an exported GIT_DIR / GIT_INDEX_FILE
+    // would aim `git add` at the REAL repo, and a global excludesfile could hide a fixture file.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')))
+    Object.assign(env, { HOME: root, USERPROFILE: root, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_CONFIG_NOSYSTEM: '1' })
+    const git = (...args) => {
+      const r = spawnSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' })
+      assert(r.error === undefined && r.status === 0, `git ${args[0]} failed (${r.error?.message ?? r.signal ?? r.status}): ${r.stderr}`)
+    }
+    git('init', '-q')
+    git('add', '-A', '--', 'packages')
+    // trackedPackageFiles runs git with the process env; point it at the fixture the same way.
+    const saved = { ...process.env }
+    for (const k of Object.keys(process.env)) if (k.startsWith('GIT_')) delete process.env[k]
+    Object.assign(process.env, { GIT_CONFIG_GLOBAL: env.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: '1' })
+    let got
+    try {
+      got = unclassifiedNodeTestMentions(root, ['roster'])
+    } finally {
+      for (const k of Object.keys(process.env)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
     sameList(got, ['packages/x/a.sh', 'packages/x/b.html', 'packages/x/c.weird'], 'unclassified mentions')
   } finally {
     rmSync(root, { recursive: true, force: true })

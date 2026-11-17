@@ -214,8 +214,14 @@ export function workflowCommands(workflowText) {
   const lines = workflowText.split('\n')
   const indentOf = (l) => l.length - l.trimStart().length
   const unquote = (v) => v.replace(/^['"]|['"]$/g, '')
-  const isFalse = (v) => unquote(v.trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim()) === 'false'
-  const jobs = [] // {def: string|null, off: boolean, steps: {wd: string|null, off: boolean, runs: string[]}[]}
+  // A trailing YAML comment is ` #` outside quotes; a quoted value ends at its closing quote.
+  const stripComment = (v) => {
+    const t = v.trim()
+    const q = /^(['"])(.*?)\1/.exec(t)
+    return q ? q[0] : t.replace(/\s+#.*$/, '').trim()
+  }
+  const isFalse = (v) => unquote(v.replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim()) === 'false'
+  const jobs = [] // {name, def: string|null, off: boolean, steps: {name, wd: string|null, off: boolean, runs: string[], bad: string|null}[]}
   let job = null
   let jobIndent = -1
   let cur = null
@@ -233,7 +239,7 @@ export function workflowCommands(workflowText) {
     // A job key: a bare `name:` one level inside `jobs:`.
     if (jobsAt === 0 && /^[\w-]+:\s*$/.test(trimmed) && (jobIndent === -1 ? ind > 0 : ind === jobIndent)) {
       jobIndent = ind
-      job = { def: null, off: false, steps: [] }
+      job = { name: trimmed.slice(0, -1).trim(), def: null, off: false, steps: [] }
       jobs.push(job)
       cur = null
       continue
@@ -241,35 +247,52 @@ export function workflowCommands(workflowText) {
     if (job === null) continue
     const dashed = /^(\s*)- /.exec(line)
     if (dashed && (cur === null || dashed[1].length <= curIndent)) {
-      cur = { wd: null, off: false, runs: [] }
+      cur = { name: `#${job.steps.length + 1}`, wd: null, off: false, runs: [], bad: null }
       job.steps.push(cur)
       curIndent = dashed[1].length
     }
-    const body = trimmed.replace(/^- /, '')
-    const wd = /^working-directory:\s*(\S+)\s*$/.exec(body)
-    if (wd) {
-      const v = unquote(wd[1])
-      // `defaults:\n  run:\n    working-directory:` — the parent key is a bare `run:`.
-      if (prevLine === 'run:') job.def = v
-      else if (cur) cur.wd = v
+    const body = trimmed.replace(/^-\s+/, '')
+    // The column the key starts at. Only keys at the step's OWN column are the step's: a
+    // `working-directory:` or `if:` nested under `with:`/`env:` belongs to something else.
+    const keyCol = ind + (trimmed.length - body.length)
+    const own = cur !== null && keyCol === curIndent + 2
+    const wd = /^working-directory:\s*(.*)$/.exec(body)
+    if (wd && prevLine === 'run:') { // `defaults:\n  run:\n    working-directory:` — parent key is a bare `run:`
+      const v = stripComment(wd[1])
+      if (!/^[^\s#]+$/.test(v)) throw new Error(`workflowCommands: job "${job.name}": unreadable defaults working-directory: ${JSON.stringify(wd[1])}`)
+      job.def = unquote(v)
       continue
     }
+    if (wd && own) {
+      const v = stripComment(wd[1])
+      if (/^[^\s#]+$/.test(v)) cur.wd = unquote(v)
+      else cur.bad = `unreadable working-directory ${JSON.stringify(wd[1])}`
+      continue
+    }
+    const name = /^name:\s*(.*)$/.exec(body)
+    if (name && own) { cur.name = JSON.stringify(unquote(stripComment(name[1]))); continue }
     const cond = /^if:\s*(.*)$/.exec(body)
-    if (cond) {
-      if (cur) cur.off ||= isFalse(cond[1])
-      else if (ind > jobIndent) job.off ||= isFalse(cond[1])
+    if (cond && (own || cur === null)) {
+      const v = stripComment(cond[1])
+      if (v === '' || /^[|>][+-]?\d*$/.test(v)) {
+        if (cur) cur.bad = `unreadable if ${JSON.stringify(cond[1])}`
+        else throw new Error(`workflowCommands: job "${job.name}": unreadable if ${JSON.stringify(cond[1])}`)
+      } else if (cur) cur.off ||= isFalse(v)
+      else job.off ||= isFalse(v)
       continue
     }
     const run = /^run:\s*(.*)$/.exec(body)
-    if (run && cur) {
+    if (run && own) {
       const v = run[1]
-      if (/^[|>][+-]?\d*\s*$/.test(v)) {
-        const base = indentOf(line)
+      if (/^[|>][+-]?\d*\s*(#.*)?$/.test(v)) {
+        // The block ends at the next line at or below the `run:` KEY's column — for `- run: |`
+        // that is dash+2, not the dash, so a following sibling key is not swallowed.
+        const base = keyCol
         const block = []
         while (i + 1 < lines.length && (lines[i + 1].trim() === '' || indentOf(lines[i + 1]) > base)) block.push(lines[++i])
         cur.runs.push(block.join('\n'))
       } else {
-        cur.runs.push(v)
+        cur.runs.push(stripComment(v))
       }
     }
   }
@@ -277,6 +300,7 @@ export function workflowCommands(workflowText) {
   for (const j of jobs) {
     if (j.off) continue
     for (const step of j.steps) {
+      if (step.bad) throw new Error(`workflowCommands: job "${j.name}", step ${step.name}: ${step.bad}`)
       if (step.off) continue
       const cwd = step.wd ?? j.def ?? ''
       for (const run of step.runs) {
