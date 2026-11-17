@@ -15,10 +15,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import ptyDefault from 'node-pty'
+import ptyDefault, { spawn as ptyNamedSpawn } from 'node-pty'
 
 import { PTY_HOME_SANDBOX, SPAWN_HOME_REAL, SPAWN_HOME_ISOLATED } from './_setup.mjs'
-import { PTY_HOME_MARKER, PTY_LAUNCHERS } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
+import { PTY_HOME_MARKER, PTY_LAUNCHERS, NODE_PTY_ENTRY } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -76,6 +76,21 @@ describe('node-pty sandbox: a real pty child does not see the real home (#7949)'
   it('static default import shape is redirected', opts, async () => {
     const r = await runPty(ptyDefault, { env: { ...process.env } })
     assert.equal(r.home, SPAWN_HOME_ISOLATED)
+  })
+
+  it('static named import shape is redirected', opts, async () => {
+    const r = await runPty({ spawn: ptyNamedSpawn }, { env: { ...process.env } })
+    assert.equal(r.home, SPAWN_HOME_ISOLATED)
+  })
+
+  it('node-pty\'s real entry still matches the pattern the hook relies on', () => {
+    let entry
+    try {
+      entry = require.resolve('node-pty')
+    } catch (err) {
+      assert.fail(`node-pty is a server dependency but does not resolve: ${err.message}`)
+    }
+    assert.ok(NODE_PTY_ENTRY.test(entry), `node-pty entry ${entry} does not match NODE_PTY_ENTRY; the sandbox would patch nothing`)
   })
 
   it('createRequire shape is redirected', opts, async () => {

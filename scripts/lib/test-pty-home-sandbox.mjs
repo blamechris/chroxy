@@ -45,7 +45,7 @@ const Module = require('node:module')
 export const PTY_HOME_MARKER = Symbol.for('chroxy.testPtyHomeSandbox')
 export const PTY_LAUNCHERS = ['spawn', 'fork', 'createTerminal']
 
-const NODE_PTY_ENTRY = /[\\/]node-pty[\\/]lib[\\/]index\.js$/
+export const NODE_PTY_ENTRY = /[\\/]node-pty[\\/]lib[\\/]index\.js$/
 
 function isNodePtyEntry(request, parent) {
   if (typeof request !== 'string' || !request.includes('node-pty')) return false
@@ -64,6 +64,22 @@ function isNodePtyEntry(request, parent) {
  * @returns {{patched: () => string[]}} names patched so far (empty until node-pty is first loaded)
  */
 export function installPtyHomeSandbox({ realHome, isolatedHome, allowEnv }) {
+  // Loud, not silent: if node-pty's entry layout ever stops matching
+  // NODE_PTY_ENTRY, the hook below would patch nothing and every pty spawn
+  // would pass through unguarded. resolve() does not load the native addon; a
+  // node-pty that is not installed at all is simply nothing to guard.
+  let resolvedEntry = null
+  try {
+    resolvedEntry = require.resolve('node-pty')
+  } catch {
+    resolvedEntry = null
+  }
+  if (resolvedEntry !== null && !NODE_PTY_ENTRY.test(resolvedEntry)) {
+    throw new Error(
+      `CHROXY_TEST_SANDBOX: node-pty resolves to ${resolvedEntry}, which test-pty-home-sandbox.mjs ` +
+      'no longer recognises (NODE_PTY_ENTRY). Its HOME redirect would silently stop applying; update the pattern.',
+    )
+  }
   const patchedNames = []
 
   function patchExports(exp) {
