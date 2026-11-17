@@ -32,7 +32,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=58
+EXPECTED_CASES=74
 
 PASS=0
 FAIL=0
@@ -61,7 +61,12 @@ done
 WORK="$(mktemp -d)"
 WORK="$(cd "$WORK" && pwd -P)"
 HOME_T="$WORK/home"
-mkdir -p "$HOME_T" "$WORK/stubs"
+mkdir -p "$HOME_T" "$WORK/stubs" "$WORK/hooks"
+# A hostile caller git config: a failing pre-commit hook, forced signing with a
+# bogus key, and a template dir. The fixture commit must be immune to all three.
+printf '#!/bin/sh\ntouch "%s/hook-fired"\nexit 1\n' "$WORK" >"$WORK/hooks/pre-commit"
+chmod +x "$WORK/hooks/pre-commit"
+printf '[core]\n\thooksPath = %s/hooks\n[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = BOGUSKEY\n' "$WORK" >"$HOME_T/.gitconfig"
 DECOY_PID=''
 LISTENER_PID=''
 cleanup() {
@@ -85,6 +90,7 @@ const MODE = '__MODE__'
 const isChild = process.argv.includes('--child')
 const cfg = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('-c') + 1], 'utf8'))
 const dir = process.env.CHROXY_CONFIG_DIR
+if (cfg.port === 8765) { console.error('stub: refusing to bind 8765'); process.exit(9) }
 const serve = () => http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"status":"ok"}')
 }).listen(cfg.port, cfg.host)
@@ -151,7 +157,9 @@ ok "preview.json records pid, port, configDir, fixture, head" "$(cat "$PJ" 2>&1)
 
 # config.json
 CFG="$SMOKE/config/config.json"
-MODE_BITS="$(stat -f '%Lp' "$CFG" 2>/dev/null || stat -c '%a' "$CFG")"
+# Not stat(1): BSD `stat -f %Lp` and GNU `stat -f` (filesystem status) diverge, and
+# on Linux the GNU form succeeds with the wrong text, so a `||` fallback never runs.
+MODE_BITS="$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$CFG")"
 [ "$MODE_BITS" = "600" ] && pass "config.json is chmod 600" || fail "config.json is chmod 600" "mode=$MODE_BITS"
 ok "config.json: loopback host, tunnel none, CI watch off, no provider" "$(cat "$CFG")" -- \
   node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(c.host!=="127.0.0.1"||c.tunnel!=="none"||c.sessionCi.watch!==false||c.controlRoomRunnerIncludeGithub!==false||"provider" in c)process.exit(1)' "$CFG"
@@ -180,15 +188,29 @@ ok "caller's CHROXY_DISCORD_WEBHOOK_URL / API_TOKEN / PORT do not reach the daem
   node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const k of ["CHROXY_DISCORD_WEBHOOK_URL","API_TOKEN","PORT"])if(k in e)process.exit(1);if(JSON.stringify(e).includes("leak-canary"))process.exit(1)' "$ENVJ"
 # The OS/`env` itself may add PWD/SHLVL/_ and, on macOS, __CF_USER_TEXT_ENCODING at exec; the allowlist is checked as a subset-and-superset of the eight names.
 WANT="CHROXY_CONFIG_DIR CHROXY_CRED_DISABLE_KEYCHAIN CHROXY_DISABLE_KEYCHAIN HOME LANG PATH TERM TMPDIR USER"
-GOT="$(printf '%s\n' $ENV_KEYS | grep -vE '^(PWD|SHLVL|_|OLDPWD|__CF_USER_TEXT_ENCODING)$' | tr '\n' ' ' | sed 's/ $//')"
+# The ONLY name tolerated beyond the allowlist is __CF_USER_TEXT_ENCODING, which
+# the macOS kernel/libc injects into every exec (env -i or not). Its VALUE is
+# asserted below, so a secret smuggled under that name would still fail.
+GOT="$(printf '%s\n' $ENV_KEYS | grep -vxE '__CF_USER_TEXT_ENCODING' | tr '\n' ' ' | sed 's/ $//')"
 [ "$GOT" = "$WANT" ] && pass "the daemon sees exactly the allowlisted variables" || fail "the daemon sees exactly the allowlisted variables" "got:  $GOT
          want: $WANT"
 ok "keychain is disabled in both layers" "$(cat "$ENVJ")" -- \
   node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(e.CHROXY_DISABLE_KEYCHAIN!=="1"||e.CHROXY_CRED_DISABLE_KEYCHAIN!=="1")process.exit(1)' "$ENVJ"
 ok "CHROXY_CONFIG_DIR is \$SMOKE/config and HOME is a fixture dir under \$SMOKE" "$(cat "$ENVJ")" -- \
   node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=process.argv[2];if(e.CHROXY_CONFIG_DIR!==s+"/config"||!e.HOME.startsWith(s+"/")||!e.TMPDIR.startsWith(s+"/"))process.exit(1)' "$ENVJ" "$SMOKE"
-ok "PATH puts a Node 22 first" "$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH)' "$ENVJ")" -- \
-  bash -c 'p="$(node -e "process.stdout.write(JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\")).PATH)" "$1")"; first="${p%%:*}"; [[ "$("$first/node" -v)" == v22.* ]]' _ "$ENVJ"
+ok "__CF_USER_TEXT_ENCODING, if present, carries only the macOS encoding triple" "value leaked" -- \
+  node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).__CF_USER_TEXT_ENCODING;if(e!==undefined&&!/^0x[0-9A-Fa-f]+:(0x)?[0-9A-Fa-f]+:(0x)?[0-9A-Fa-f]+$/.test(e))process.exit(1)' "$ENVJ"
+ok "PATH is exactly the node-only dir plus the system dirs" "$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH)' "$ENVJ")" -- \
+  node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(e.PATH!==process.argv[2]+"/bin:/usr/bin:/bin:/usr/sbin:/sbin")process.exit(1)' "$ENVJ" "$SMOKE"
+ok "the node-only dir holds node (v22) and nothing but node/npm/npx" "$(ls "$SMOKE/bin")" -- \
+  bash -c '[[ "$("$1/bin/node" -v)" == v22.* ]] && [ -z "$(ls "$1/bin" | grep -vxE "node|npm|npx")" ]' _ "$SMOKE"
+ok "the stub daemon refuses to bind 8765 itself" "stub did not refuse" -- \
+  bash -c 'printf "{\"port\":8765,\"host\":\"127.0.0.1\"}" >"$2/c8765.json"; node "$1" -c "$2/c8765.json"; [ $? -eq 9 ]' _ "$STUB_OK" "$WORK"
+ok "the picked port is below both ephemeral ranges (20000-31999)" "port=$PORT_N" -- \
+  bash -c '[ "$1" -ge 20000 ] && [ "$1" -le 31999 ]' _ "$PORT_N"
+[ ! -e "$WORK/hook-fired" ] && pass "the caller's git hooks never fire for the fixture commit" || fail "the caller's git hooks never fire for the fixture commit" "pre-commit hook ran"
+ok "the fixture commit ignores the caller's signing config (author is the fixture identity)" "$(git -C "$SMOKE/fixture" log -1 --format='%an <%ae> %G?' 2>&1)" -- \
+  bash -c '[ "$(git -C "$1" log -1 --format="%an <%ae>")" = "preview <preview@localhost>" ]' _ "$SMOKE/fixture"
 ok "daemon argv carries the isolation flags" "$(cat "$SMOKE/config/stub-argv.json")" -- \
   node -e 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).join(" ");for(const f of ["--tunnel none","--skip-checks","--no-supervisor","--host 127.0.0.1","-c "+process.argv[2]+"/config/config.json"])if(!a.includes(f))process.exit(1)' "$SMOKE/config/stub-argv.json" "$SMOKE"
 
@@ -219,6 +241,13 @@ pd stop "$SMOKE" >"$WORK/stop.out" 2>&1; RC=$?
 [ "$RC" -eq 4 ] && pass "stop exits non-zero (4) when the recorded PID's command lacks \$SMOKE" || fail "stop exits non-zero (4) when the recorded PID's command lacks \$SMOKE" "rc=$RC $(cat "$WORK/stop.out")"
 kill -0 "$DECOY_PID" 2>/dev/null && pass "stop killed nothing when it refused (decoy still alive)" || fail "stop killed nothing when it refused (decoy still alive)"
 kill -0 "$PID" 2>/dev/null && pass "the real daemon is untouched by a refused stop" || fail "the real daemon is untouched by a refused stop"
+# A decoy whose command line merely MENTIONS $SMOKE/ is still not ours.
+node -e "setTimeout(() => {}, 300000)" "$SMOKE/config/config.json" & MENTION_PID=$!
+node -e 'const f=process.argv[1],r=JSON.parse(require("fs").readFileSync(f,"utf8"));r.pid=Number(process.argv[2]);require("fs").writeFileSync(f,JSON.stringify(r))' "$PJ" "$MENTION_PID"
+pd stop "$SMOKE" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 4 ] && kill -0 "$MENTION_PID" 2>/dev/null && pass "stop refuses a PID whose command line only mentions \$SMOKE (exact shape required)" || fail "stop refuses a PID whose command line only mentions \$SMOKE (exact shape required)" "rc=$RC"
+kill "$MENTION_PID" 2>/dev/null; wait "$MENTION_PID" 2>/dev/null
+node -e 'const f=process.argv[1],r=JSON.parse(require("fs").readFileSync(f,"utf8"));r.pid=Number(process.argv[2]);require("fs").writeFileSync(f,JSON.stringify(r))' "$PJ" "$DECOY_PID"
 pd clean "$SMOKE" >/dev/null 2>&1; RC=$?
 [ "$RC" -ne 0 ] && [ -d "$SMOKE" ] && pass "clean also refuses and leaves \$SMOKE in place on a PID mismatch" || fail "clean also refuses and leaves \$SMOKE in place on a PID mismatch" "rc=$RC"
 kill "$DECOY_PID" 2>/dev/null; wait "$DECOY_PID" 2>/dev/null; DECOY_PID=''
@@ -263,10 +292,24 @@ BEFORE="$(count_smoke_dirs)"
 pd start --expect-head deadbeefdeadbeef >/dev/null 2>"$WORK/eh.err"; RC=$?
 [ "$RC" -eq 3 ] && pass "--expect-head refuses a mismatching head (exit 3)" || fail "--expect-head refuses a mismatching head (exit 3)" "rc=$RC $(cat "$WORK/eh.err")"
 [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "a refused --expect-head created no scratch dir and launched nothing" || fail "a refused --expect-head created no scratch dir and launched nothing"
-OUT="$(pd start --expect-head "${HEAD_SHA:0:12}" 2>/dev/null)"; RC=$?
+# The match and dirty cases run the script from a COPY inside a throwaway git
+# repo, so they do not depend on whether this working tree happens to be clean.
+EH="$WORK/ehrepo"
+mkdir -p "$EH/scripts" && cp "$PD" "$EH/scripts/preview-daemon.sh" && echo base >"$EH/tracked.txt"
+( cd "$EH" && git init -q . && git add . \
+  && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m base ) >/dev/null 2>&1
+EH_HEAD="$(git -C "$EH" rev-parse HEAD)"
+pd_eh() { env HOME="$HOME_T" PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_CLI="$STUB_OK" bash "$EH/scripts/preview-daemon.sh" "$@"; }
+OUT="$(pd_eh start --expect-head "${EH_HEAD:0:12}" 2>/dev/null)"; RC=$?
 S3="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
-[ "$RC" -eq 0 ] && [ -d "$S3" ] && pass "--expect-head accepts the matching head (abbreviated)" || fail "--expect-head accepts the matching head (abbreviated)" "rc=$RC"
-[ -n "$S3" ] && pd clean "$S3" >/dev/null 2>&1
+[ "$RC" -eq 0 ] && [ -d "$S3" ] && pass "--expect-head accepts the matching head (abbreviated) on a clean tree" || fail "--expect-head accepts the matching head (abbreviated) on a clean tree" "rc=$RC"
+[ -n "$S3" ] && pd_eh clean "$S3" >/dev/null 2>&1
+echo changed >"$EH/tracked.txt"
+BEFORE="$(count_smoke_dirs)"
+pd_eh start --expect-head "${EH_HEAD:0:12}" >/dev/null 2>"$WORK/dirty.err"; RC=$?
+[ "$RC" -eq 3 ] && grep -q "tracked modifications" "$WORK/dirty.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+  && pass "--expect-head refuses a matching head on a dirty tree (exit 3, nothing created)" \
+  || fail "--expect-head refuses a matching head on a dirty tree (exit 3, nothing created)" "rc=$RC $(cat "$WORK/dirty.err")"
 
 # =========================================================================
 # 6. start refuses / fails closed
@@ -283,6 +326,42 @@ PREVIEW_DAEMON_PORT="$BUSY" pd start >/dev/null 2>&1; RC=$?
 kill "$LISTENER_PID" 2>/dev/null; LISTENER_PID=''
 PREVIEW_DAEMON_PARENT="$WORK/outside" pd start >/dev/null 2>&1; RC=$?
 [ "$RC" -eq 2 ] && pass "start refuses a scratch parent outside \$HOME" || fail "start refuses a scratch parent outside \$HOME" "rc=$RC"
+
+PREVIEW_DAEMON_HEALTH_TIMEOUT=abc HEALTH_TIMEOUT=abc pd start >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 2 ] && [ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "a non-numeric health timeout is refused before anything is launched" || fail "a non-numeric health timeout is refused before anything is launched" "rc=$RC"
+
+# Preflight: a missing lsof must be a loud refusal, never "port free".
+mkdir -p "$WORK/nolsof"
+for t in dirname curl git ps; do ln -sf "$(command -v "$t")" "$WORK/nolsof/$t"; done
+env -i HOME="$HOME_T" PATH="$WORK/nolsof" /bin/bash "$PD" start >"$WORK/nolsof.out" 2>&1; RC=$?
+[ "$RC" -ne 0 ] && grep -q "lsof" "$WORK/nolsof.out" && pass "a missing lsof is refused with a clear error" || fail "a missing lsof is refused with a clear error" "rc=$RC $(cat "$WORK/nolsof.out")"
+[ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "the missing-lsof refusal created no scratch dir" || fail "the missing-lsof refusal created no scratch dir"
+
+# Trap: killing a start that is waiting on /health removes the dir and the daemon.
+( exec env HOME="$HOME_T" PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_CLI="$STUB_NOHEALTH" PREVIEW_DAEMON_HEALTH_TIMEOUT=60 bash "$PD" start ) >/dev/null 2>&1 &
+SP=$!
+for _ in $(seq 1 100); do ls "$HOME_T"/chroxy-previews/chroxy-smoke.*/config/stub-argv.json >/dev/null 2>&1 && break; sleep 0.1; done
+STUB_PID="$(pgrep -f "$WORK/stubs/stub-nohealth.js" | head -1)"
+kill -TERM "$SP" 2>/dev/null; wait "$SP" 2>/dev/null; RC=$?
+[ "$RC" -eq 143 ] && pass "an interrupted start exits 143" || fail "an interrupted start exits 143" "rc=$RC"
+[ "$(count_smoke_dirs)" = "$BEFORE" ] && pass "an interrupted start removes the scratch dir (the token)" || fail "an interrupted start removes the scratch dir (the token)"
+[ -n "$STUB_PID" ] && ! kill -0 "$STUB_PID" 2>/dev/null && pass "an interrupted start kills the daemon it launched" || fail "an interrupted start kills the daemon it launched" "stub=$STUB_PID"
+
+# clean's parent guard: a well-formed smoke dir outside the previews root is refused.
+mkdir -p "$WORK/elsewhere/chroxy-smoke.zzzzzz/config" && echo '{"pid":1}' >"$WORK/elsewhere/chroxy-smoke.zzzzzz/preview.json"
+pd clean "$WORK/elsewhere/chroxy-smoke.zzzzzz" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 4 ] && [ -d "$WORK/elsewhere/chroxy-smoke.zzzzzz" ] && pass "clean refuses a smoke-shaped dir that is not directly under the previews root" || fail "clean refuses a smoke-shaped dir that is not directly under the previews root" "rc=$RC"
+
+# A planted gh/claude in the CALLER's node dir must not be reachable.
+mkdir -p "$WORK/fakenode"
+ln -sf "$(command -v node)" "$WORK/fakenode/node"
+RN="$(PREVIEW_DAEMON_NODE_DIR=/opt/homebrew/opt/node@22/bin; [ -x "$PREVIEW_DAEMON_NODE_DIR/node" ] || PREVIEW_DAEMON_NODE_DIR="$(dirname "$(command -v node)")"; echo "$PREVIEW_DAEMON_NODE_DIR")"
+ln -sf "$RN/node" "$WORK/fakenode/node"
+printf '#!/bin/sh\ntouch "%s/gh-ran"\n' "$WORK" >"$WORK/fakenode/gh"; chmod +x "$WORK/fakenode/gh"
+OUT="$(PREVIEW_DAEMON_NODE_DIR="$WORK/fakenode" pd start 2>/dev/null)"; S4="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+ok "a planted gh in the caller's node dir is not on the daemon's PATH" "PATH: $(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH)' "$S4/config/stub-env.json" 2>&1)" -- \
+  node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).PATH;if(p.split(":").includes(process.argv[2]))process.exit(1)' "$S4/config/stub-env.json" "$WORK/fakenode"
+[ -n "$S4" ] && PREVIEW_DAEMON_NODE_DIR="$WORK/fakenode" pd clean "$S4" >/dev/null 2>&1
 
 CLI="$STUB_WRONGROOT" pd start >/dev/null 2>"$WORK/wr.err"; RC=$?
 [ "$RC" -ne 0 ] && grep -q "Config/state root" "$WORK/wr.err" && pass "start fails when the log names a different config root" || fail "start fails when the log names a different config root" "rc=$RC $(cat "$WORK/wr.err")"

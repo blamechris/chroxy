@@ -30,11 +30,24 @@
 #     CHROXY_CRED_DISABLE_KEYCHAIN). Nothing the caller exported reaches it.
 #   - Keychain access is off in both layers; HOME is a fixture dir under the
 #     scratch dir, so nothing reads the real ~/.claude or ~/.chroxy.
-#   - It never uses port 8765, 3131, 8080 or 3000, and the chosen port must be
-#     free before launch.
-#   - stop only signals the recorded PID after `ps` shows the scratch dir in
-#     that process's command line. Never a pattern kill, never SIGKILL.
-#   - clean refuses to remove anything that is not a dir this script created.
+#   - The daemon's PATH is a node-only symlink dir under $SMOKE plus
+#     /usr/bin:/bin:/usr/sbin:/sbin, so gh/claude/codex (which keep their own
+#     login-keychain items that CHROXY_*_DISABLE_KEYCHAIN does not cover) are not
+#     reachable. RESIDUAL: a CLI installed under /usr/bin or /bin is still on
+#     PATH, and a smoke that genuinely needs a provider CLI must get an explicit
+#     opt-in flag, never the default.
+#   - It never uses port 8765, 3131, 8080 or 3000. The port is picked just before
+#     launch, from 20000-31999 (below the Linux 32768+ and macOS 49152+ ephemeral
+#     ranges), and must be free.
+#   - An interrupted or failed `start` kills the daemon it launched and removes
+#     the scratch dir (it holds the token) via an EXIT/INT/TERM trap.
+#   - stop only signals the recorded PID after `ps` shows the exact launched
+#     command shape (`start -c $SMOKE/config/config.json`) for that process. Never a pattern kill, never SIGKILL.
+#   - clean refuses to remove anything that is not a dir this script created,
+#     directly under the previews root ($PREVIEW_DAEMON_PARENT or
+#     $HOME/chroxy-previews; pass the same env as at start).
+#   - --expect-head also refuses a tree with tracked modifications: the preview
+#     serves the working tree, so a dirty tree would make the head label a lie.
 #
 # Test hooks (not for normal use): PREVIEW_DAEMON_CLI (daemon entry point),
 # PREVIEW_DAEMON_PORT (fixed port), PREVIEW_DAEMON_SKIP_BUILD=1,
@@ -70,6 +83,15 @@ resolve_node_dir() {
   return 1
 }
 
+# A missing lsof must never read as "port free": refuse up front.
+preflight() {
+  local t missing=''
+  for t in lsof curl git ps; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  [ -z "$missing" ] || die "required tool(s) not on PATH:$missing" 1
+}
+
 port_listener_pids() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null || true; }
 
 is_banned_port() {
@@ -78,17 +100,25 @@ is_banned_port() {
   return 1
 }
 
+# Validate the test-hook override early (before anything is created).
+validate_port_override() {
+  [ -n "${PREVIEW_DAEMON_PORT:-}" ] || return 0
+  case "$PREVIEW_DAEMON_PORT" in ''|*[!0-9]*) die "PREVIEW_DAEMON_PORT is not a number: $PREVIEW_DAEMON_PORT" 2 ;; esac
+  is_banned_port "$PREVIEW_DAEMON_PORT" && die "port $PREVIEW_DAEMON_PORT is reserved (production/common dev port); refusing" 2
+  return 0
+}
+
+# Called immediately before launch, so the window between "free" and "bound" is
+# as small as it can be. Range 20000-31999 avoids both ephemeral ranges.
 pick_port() {
   local p tries=0
   if [ -n "${PREVIEW_DAEMON_PORT:-}" ]; then
     p="$PREVIEW_DAEMON_PORT"
-    case "$p" in ''|*[!0-9]*) die "PREVIEW_DAEMON_PORT is not a number: $p" 2 ;; esac
-    is_banned_port "$p" && die "port $p is reserved (production/common dev port); refusing" 2
     [ -z "$(port_listener_pids "$p")" ] || die "port $p already has a listener; refusing" 2
     echo "$p"; return 0
   fi
   while [ "$tries" -lt 50 ]; do
-    p=$((20000 + (RANDOM * 32768 + RANDOM) % 40000))
+    p=$((20000 + RANDOM % 12000))
     tries=$((tries + 1))
     is_banned_port "$p" && continue
     [ -z "$(port_listener_pids "$p")" ] || continue
@@ -112,12 +142,13 @@ canonical_dir() {
 }
 
 # Is the recorded pid ours? 0 = ours, 1 = no such process, 4 = alive but NOT ours.
+# Ours means the exact launched shape, not merely a command line mentioning the dir.
 pid_ownership() {
   local pid="$1" smoke="$2" cmd
   cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
   [ -n "$cmd" ] || return 1
   case "$cmd" in
-    *"$smoke/"*) return 0 ;;
+    *" start -c $smoke/config/config.json "*) return 0 ;;
     *) return 4 ;;
   esac
 }
@@ -134,7 +165,7 @@ cmd_stop() {
 
   pid_ownership "$pid" "$smoke"; rc=$?
   if [ "$rc" -eq 4 ]; then
-    die "REFUSING to stop pid $pid: its command line does not contain $smoke/ (stale pid reused by another process?). Nothing was killed." 4
+    die "REFUSING to stop pid $pid: its command line is not \"start -c $smoke/config/config.json\" (stale pid reused by another process?). Nothing was killed." 4
   fi
   if [ "$rc" -eq 0 ]; then
     kill -TERM "$pid" 2>/dev/null || true
@@ -163,7 +194,11 @@ cmd_clean() {
   case "$base" in "$MARKER"*) ;; *) die "REFUSING to remove $smoke: not a $MARKER* dir" 4 ;; esac
   [ -f "$smoke/preview.json" ] && [ -d "$smoke/config" ] \
     || die "REFUSING to remove $smoke: no preview.json/config (not created by this script)" 4
-  cmd_stop "$smoke" || die "stop failed; leaving $smoke in place" 4
+  local want_parent; want_parent="$(cd "${PREVIEW_DAEMON_PARENT:-${HOME:-/nonexistent}/chroxy-previews}" 2>/dev/null && pwd -P)" \
+    || die "REFUSING to remove $smoke: the previews root does not exist" 4
+  [ "$(dirname "$smoke")" = "$want_parent" ] \
+    || die "REFUSING to remove $smoke: not directly under the previews root $want_parent" 4
+  cmd_stop "$smoke"   # exits non-zero (leaving $smoke) if the daemon cannot be stopped
   rm -rf -- "$smoke"
   echo "removed $smoke"
 }
@@ -193,8 +228,30 @@ cmd_status() {
   [ "$rc" -eq 0 ] && [ "$listener" = "$pid" ] && [ "$health" = ok ]
 }
 
+# State for the EXIT/INT/TERM trap armed by cmd_start.
+SMOKE_G=''
+PID_G=''
+START_OK=0
+
+cleanup_start() {
+  [ "$START_OK" = 1 ] && return 0
+  [ -n "$SMOKE_G" ] || return 0
+  local i=0
+  if [ -n "$PID_G" ] && pid_ownership "$PID_G" "$SMOKE_G"; then
+    kill -TERM "$PID_G" 2>/dev/null || true
+    while [ "$i" -lt 50 ] && kill -0 "$PID_G" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+  fi
+  # A survivor of SIGTERM keeps the dir (and token) so it can be inspected and
+  # stopped; never delete the directory under a live process.
+  if [ -n "$PID_G" ] && kill -0 "$PID_G" 2>/dev/null; then
+    echo "preview-daemon: pid $PID_G survived SIGTERM; leaving $SMOKE_G in place" >&2
+  else
+    rm -rf -- "$SMOKE_G"
+  fi
+}
+
 cmd_start() {
-  local expect_head='' head parent smoke port token cfg log pid i timeout cli rc
+  local expect_head='' head parent smoke port token cfg log pid timeout cli rc deadline
   while [ $# -gt 0 ]; do
     case "$1" in
       --expect-head) [ $# -ge 2 ] || usage; expect_head="$2"; shift 2 ;;
@@ -202,6 +259,9 @@ cmd_start() {
     esac
   done
 
+  timeout="${PREVIEW_DAEMON_HEALTH_TIMEOUT:-60}"
+  case "$timeout" in ''|*[!0-9]*) die "PREVIEW_DAEMON_HEALTH_TIMEOUT is not a number: $timeout" 2 ;; esac
+  validate_port_override
   NODE_BIN="$(resolve_node_dir)" || die "no Node 22 found (install node@22 or set PREVIEW_DAEMON_NODE_DIR)" 1
   head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || die "cannot read git HEAD of $ROOT" 1
   if [ -n "$expect_head" ]; then
@@ -211,13 +271,15 @@ cmd_start() {
       "$expect_head"*) ;;
       *) die "REFUSING: HEAD is $head, expected $expect_head" 3 ;;
     esac
+    [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+      || die "REFUSING: HEAD matches but the tree has tracked modifications; the preview would not be $expect_head" 3
   fi
 
   [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not a directory" 1
   local home_real; home_real="$(cd "$HOME" && pwd -P)"
   parent="${PREVIEW_DAEMON_PARENT:-$HOME/chroxy-previews}"
   mkdir -p -- "$parent" || die "cannot create $parent" 1
-  parent="$(cd "$parent" && pwd -P)"
+  parent="$(cd "$parent" && pwd -P)" || die "cannot enter $parent" 1
   case "$parent/" in
     "$home_real"/*) ;;
     *) die "scratch parent $parent is not under \$HOME ($home_real); Browse could not list it" 2 ;;
@@ -225,9 +287,6 @@ cmd_start() {
 
   cli="${PREVIEW_DAEMON_CLI:-$ROOT/packages/server/src/cli.js}"
   [ -f "$cli" ] || die "daemon entry point not found: $cli" 1
-  port="$(pick_port)"; rc=$?
-  [ "$rc" -eq 0 ] && [ -n "$port" ] || die "port selection failed (rc=$rc)" "$([ "$rc" -eq 2 ] && echo 2 || echo 1)"
-  case "$port" in 8765) die "port 8765 selected; refusing" 2 ;; esac
 
   if [ "${PREVIEW_DAEMON_SKIP_BUILD:-0}" != 1 ]; then
     echo "building protocol + dashboard at $head ..." >&2
@@ -236,19 +295,42 @@ cmd_start() {
       || die "build failed" 1
   fi
 
+  # From here on, anything that goes wrong or interrupts us removes the scratch
+  # dir (it holds the token) and the daemon we launched.
+  trap cleanup_start EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   smoke="$(mktemp -d "$parent/${MARKER}XXXXXX")" || die "mktemp failed" 1
-  smoke="$(cd "$smoke" && pwd -P)"
-  mkdir -p "$smoke/config" "$smoke/home" "$smoke/tmp" "$smoke/fixture" || die "mkdir failed" 1
+  SMOKE_G="$smoke"
+  smoke="$(cd "$smoke" && pwd -P)" || die "cannot enter $smoke" 1
+  SMOKE_G="$smoke"
+  mkdir -p "$smoke/config" "$smoke/home" "$smoke/tmp" "$smoke/fixture" "$smoke/bin" || die "mkdir failed" 1
 
-  # Fixture repo: one committed file, no dependence on the caller's git config.
+  # Fixture repo: one committed file. The caller's git config (hooks, signing,
+  # templates, identity) must not apply, so global/system config is switched off.
   ( cd "$smoke/fixture" \
-    && git init -q . \
+    && export HOME="$smoke/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    && git -c init.templateDir= init -q . \
     && echo "# preview fixture" > README.md \
     && git add README.md \
-    && git -c user.name=preview -c user.email=preview@localhost -c commit.gpgsign=false commit -q -m "fixture" ) \
-    >/dev/null 2>&1 || { rm -rf -- "$smoke"; die "could not create the fixture repo" 1; }
+    && git -c core.hooksPath=/dev/null -c user.name=preview -c user.email=preview@localhost \
+         -c commit.gpgsign=false commit -q --no-verify -m "fixture" ) \
+    >/dev/null 2>&1 || die "could not create the fixture repo" 1
 
-  token="$("$NODE_BIN/node" -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))')"
+  # Node-only PATH dir: node (and npm/npx when present), nothing else.
+  local t
+  for t in node npm npx; do
+    [ -e "$NODE_BIN/$t" ] && ln -s "$NODE_BIN/$t" "$smoke/bin/$t"
+  done
+  [ -x "$smoke/bin/node" ] || die "could not link node into $smoke/bin" 1
+
+  # The port is chosen as late as possible, right before launch.
+  port="$(pick_port)"; rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$port" ] || exit "$([ "$rc" -eq 2 ] && echo 2 || echo 1)"
+  case "$port" in 8765) die "port 8765 selected; refusing" 2 ;; esac
+
+  token="$("$NODE_BIN/node" -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))')" \
+    || die "could not generate a token" 1
   cfg="$smoke/config/config.json"
   ( umask 077
     "$NODE_BIN/node" -e '
@@ -263,7 +345,7 @@ cmd_start() {
         sessionCi: { watch: false },
         controlRoomRunnerIncludeGithub: false,
       }, null, 2) + "\n", { mode: 0o600 })' "$cfg" "$token" "$port" "$smoke/fixture" ) \
-    || { rm -rf -- "$smoke"; die "could not write config.json" 1; }
+    || die "could not write config.json" 1
   chmod 600 "$cfg"
 
   log="$smoke/daemon.log"
@@ -275,38 +357,26 @@ cmd_start() {
     TERM="${TERM:-dumb}" \
     LANG="${LANG:-en_US.UTF-8}" \
     TMPDIR="$smoke/tmp" \
-    PATH="$NODE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+    PATH="$smoke/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     CHROXY_CONFIG_DIR="$smoke/config" \
     CHROXY_DISABLE_KEYCHAIN=1 \
     CHROXY_CRED_DISABLE_KEYCHAIN=1 \
     "$NODE_BIN/node" "$cli" start -c "$cfg" --tunnel none --skip-checks --no-supervisor --host 127.0.0.1 \
     </dev/null >"$log" 2>&1 &
   pid=$!
+  PID_G="$pid"
 
   fail_start() {
     echo "preview-daemon: start failed: $1" >&2
     echo "--- last log lines ---" >&2
     tail -n 20 "$log" 2>/dev/null | sed -E 's/[0-9a-f]{32,}/<redacted>/g' >&2
-    if pid_ownership "$pid" "$smoke"; then
-      kill -TERM "$pid" 2>/dev/null || true
-      i=0; while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
-    fi
-    # A survivor of SIGTERM keeps the dir (and token) so it can be inspected
-    # and stopped; do not delete the directory under a live process.
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "preview-daemon: pid $pid survived SIGTERM; leaving $smoke in place" >&2
-    else
-      rm -rf -- "$smoke"
-    fi
-    exit 1
+    exit 1   # the EXIT trap kills the daemon and removes $smoke
   }
 
-  timeout="${PREVIEW_DAEMON_HEALTH_TIMEOUT:-60}"
-  i=0
+  deadline=$((SECONDS + timeout))
   until curl -fsS --max-time 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; do
     kill -0 "$pid" 2>/dev/null || fail_start "daemon exited before /health answered"
-    i=$((i + 1))
-    [ "$i" -le $((timeout * 5)) ] || fail_start "/health did not answer within ${timeout}s"
+    [ "$SECONDS" -lt "$deadline" ] || fail_start "/health did not answer within ${timeout}s"
     sleep 0.2
   done
 
@@ -327,11 +397,16 @@ cmd_start() {
     }, null, 2) + "\n")' "$smoke/preview.json" "$pid" "$port" "$smoke/config" "$smoke/fixture" "$head" \
     || fail_start "could not write preview.json"
 
+  START_OK=1
+  trap - EXIT INT TERM
   echo "SMOKE=$smoke"
   echo "URL=http://127.0.0.1:$port"
   echo "HEAD=$head"
 }
 
+case "${1:-}" in
+  start|url|status|stop|clean) preflight ;;
+esac
 case "${1:-}" in
   start)  shift; cmd_start "$@" ;;
   url)    shift; cmd_url "$@" ;;
