@@ -13,30 +13,36 @@ const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 
 // Top-level rules only (brace depth 0). A same-named rule nested in @media /
 // @supports is a different rule; matching it would let a test pass on a
 // conditional override while the base rule is wrong (#9175).
-const topLevel: Array<{ selector: string; body: string }> = []
-{
+function parseTopLevel(source: string): Array<{ selector: string; body: string }> {
+  const out: Array<{ selector: string; body: string }> = []
   let depth = 0
   let start = 0
   let sel = ''
   let bodyStart = 0
-  for (let i = 0; i < css.length; i++) {
-    const c = css[i]
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]
     if (c === '{') {
-      if (depth === 0) { sel = css.slice(start, i); bodyStart = i + 1 }
+      if (depth === 0) { sel = source.slice(start, i); bodyStart = i + 1 }
       depth++
     } else if (c === '}') {
       depth--
       if (depth === 0) {
-        topLevel.push({ selector: sel.replace(/\/\*[\s\S]*?\*\//g, '').trim().replace(/\s+/g, ' '), body: css.slice(bodyStart, i) })
+        out.push({ selector: sel.replace(/\/\*[\s\S]*?\*\//g, '').trim().replace(/\s+/g, ' '), body: source.slice(bodyStart, i) })
         start = i + 1
       }
     }
   }
+  return out
 }
 
-function rule(selector: string): string {
+function ruleIn(rules: Array<{ selector: string; body: string }>, selector: string): string {
   const want = selector.trim().replace(/\s+/g, ' ')
-  return topLevel.find(r => r.selector === want)?.body ?? ''
+  return rules.find(r => r.selector === want)?.body ?? ''
+}
+
+const topLevel = parseTopLevel(css)
+function rule(selector: string): string {
+  return ruleIn(topLevel, selector)
 }
 
 describe('New Session modal sizing (#8611)', () => {
@@ -78,9 +84,15 @@ describe('New Session modal sizing (#8611)', () => {
     expect(/cursor:\s*not-allowed/.test(d)).toBe(true)
     expect(/color:\s*var\(--text-muted\)/.test(d)).toBe(true)
   })
-  test('rule() ignores a same-named rule nested in @media (#9175)', () => {
-    expect(rule('.nonexistent-selector-xyz')).toBe('')
-    // every top-level selector is brace-depth 0: no at-rule header is one
-    expect(topLevel.some(r => r.selector.startsWith('@media') && r.body.length === 0)).toBe(false)
+  test('the parser returns the top-level rule, not a same-named one nested in @media (#9175)', () => {
+    const sheet = '.x { color: red; }\n@media (min-width: 1px) {\n  .x { color: blue; }\n  .y { top: 0; }\n}\n'
+    const rules = parseTopLevel(sheet)
+    expect(ruleIn(rules, '.x')).toContain('color: red')
+    expect(ruleIn(rules, '.x')).not.toContain('blue')
+    // a selector that exists ONLY inside the @media block is not a top-level rule
+    expect(ruleIn(rules, '.y')).toBe('')
+    // reversed: the nested rule comes first in source order
+    const rev = parseTopLevel('@media (min-width: 1px) { .x { color: blue; } }\n.x { color: red; }')
+    expect(ruleIn(rev, '.x')).toContain('color: red')
   })
 })

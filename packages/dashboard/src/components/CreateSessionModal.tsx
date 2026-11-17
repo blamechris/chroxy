@@ -289,6 +289,8 @@ export function sessionDefaultsNoticeApplies(
   providerInfo?: { capabilities?: { thinkingLevelLegacyFallback?: boolean } } | null,
 ): boolean {
   if (!notice) return false
+  // Server-pinned by packages/server/tests/provider-claude-family-capability.test.js;
+  // explicit claudeFamily capability + Anthropic-compatible gap: #9191.
   const flag = providerInfo?.capabilities?.thinkingLevelLegacyFallback
   if (typeof flag === 'boolean') return flag
   return /^(claude|docker)(-|$)/.test(provider)
