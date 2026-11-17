@@ -102,15 +102,15 @@ describe('parseFixedLayers classifies or throws, never skips (#9168)', () => {
     expect(l.map(x => x.selector)).toEqual(['.a', '.b'])
   })
   it('throws on a var() z-index', () => {
-    expect(() => parseFixedLayers('.x { position: fixed; inset: 0; z-index: var(--z) }')).toThrow(/\.x.*z-index/)
+    expect(() => parseFixedLayers('.x { position: fixed; inset: 0; z-index: var(--z, 1000) }')).toThrow(/\.x.*z-index/)
   })
   it('throws on a var() edge', () => {
-    expect(() => parseFixedLayers('.x { position: fixed; inset: var(--e); z-index: 1500 }')).toThrow(/\.x/)
+    expect(() => parseFixedLayers('.x { position: fixed; inset: var(--e, 0); z-index: 1500 }')).toThrow(/\.x/)
   })
   it('throws on a compound selector with position: fixed', () => {
     expect(() => parseFixedLayers('.a .b { position: fixed; inset: 0; z-index: 1500 }')).toThrow(/\.a \.b/)
   })
   it('ignores non-fixed rules with odd selectors', () => {
-    expect(parseFixedLayers('.a .b { color: red } .c:hover { z-index: var(--z) }')).toEqual([])
+    expect(parseFixedLayers('.a .b { color: red } .c:hover { z-index: var(--z, 1000) }')).toEqual([])
   })
 })
