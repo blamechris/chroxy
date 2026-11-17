@@ -1384,6 +1384,9 @@ export class SdkSession extends BaseSession {
     // so a stop request cannot be made (and must not be pretended to have been).
     let queryFailed = false
     let queryClosed = false
+    // #8329: set by the catch when the user's Stop is what aborted the turn, so the
+    // shell report says "stopped" rather than "ended abnormally".
+    let endedByUserStop = false
     // #8302: THE routine that asks the CLI to stop the turn's still-tracked
     // shells and turns the answers into reports. Used by the prompt's own result
     // (`finishTurn`, for shells no live task names) AND by the `finally` (every
@@ -1427,7 +1430,7 @@ export class SdkSession extends BaseSession {
             ? `Background shell "${task.description}" was still running when the turn ended and was stopped with it; ${tail}`
             : asked
               ? `Background shell "${task.description}" was still running when the turn ended; the CLI did not acknowledge a stop request, so its termination is UNCONFIRMED. ${tail}`
-              : `Background shell "${task.description}" was still tracked when the turn ended abnormally; the turn's query was no longer usable, so it could not be asked to stop and its termination is UNCONFIRMED. ${tail}`,
+              : `Background shell "${task.description}" was still tracked when the turn ${endedByUserStop ? 'was stopped' : 'ended abnormally'}; the turn's query was no longer usable, so it could not be asked to stop and its termination is UNCONFIRMED. ${tail}`,
           toolUseId: null,
           taskId: task.taskId,
           stopped: outcome === 'stopped',
@@ -1651,10 +1654,11 @@ export class SdkSession extends BaseSession {
             code: 'background_task_ended_with_turn',
             message: stopped
               ? `Background ${kind} "${task.description}" was still running when the turn ended and was stopped with it; a claude-sdk session runs background work only within the turn that started it.`
-              : `Background ${kind} "${task.description}" was still running when the turn ended and could not be stopped; it may still be running. A claude-sdk session runs background work only within the turn that started it.`,
+              : `Background ${kind} "${task.description}" was still running when the turn ended; the CLI did not acknowledge a stop request, so its termination is UNCONFIRMED. A claude-sdk session runs background work only within the turn that started it.`,
             toolUseId: task.toolUseId,
             taskId: task.taskId,
             stopped,
+            unconfirmed: !stopped,
             recoverable: true,
           })
           // A background shell's `task_id` is the shell id the tool_result
@@ -2334,6 +2338,7 @@ export class SdkSession extends BaseSession {
       // classification), and a Stop that lands during that await did not end a turn
       // that had already failed.
       const userStopEndedTurn = this._permissions.isUserStopInFlight()
+      if (wasIntentionalStop) endedByUserStop = true
       if (!this._destroying) {
         if (closedAfterResult && isQueryCloseError(err)) {
           // #8300: finishTurn already emitted this turn's result and closed

@@ -5853,7 +5853,8 @@ export class SessionManager extends EventEmitter {
    * what a session is called. No `clientId` goes out — there is no sender, so
    * every viewer renders it (a client skips only the `user_input` it sent).
    *
-   * Call it only once the provider has ADMITTED the line (dispatched or queued).
+   * Call it only once the provider has DISPATCHED the line (a wake that queued
+   * behind a running turn is recorded when it flushes, never at enqueue).
    * Nothing is recorded for a session that no longer exists.
    *
    * @param {string} sessionId

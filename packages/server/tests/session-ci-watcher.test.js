@@ -1367,6 +1367,22 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
     assert.ok(h.logs.some((l) => /wake for session s1 admitted late \(wake: injected\)/.test(l)), JSON.stringify(h.logs))
   })
 
+  it('logs a wake the provider rejects AFTER the wake returned as rejected, not "admitted" (#8329)', async () => {
+    class LateReject extends SdkLikeSession {
+      async sendMessage(p, a, o = {}) {
+        await new Promise((resolve) => setImmediate(resolve))
+        reportInputAdmission(o, { status: 'rejected', delivery: 'not_dispatched', reason: 'queue_full' })
+      }
+    }
+    const h = turnHarness({ session: new LateReject() })
+    await settle(h)
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(h.recorded, [])
+    assert.ok(h.logs.some((l) => /wake for session s1 rejected late.*\(wake: rejected\)/.test(l)), JSON.stringify(h.logs))
+    assert.ok(!h.logs.some((l) => /admitted late \(wake: rejected\)/.test(l)), JSON.stringify(h.logs))
+  })
+
   it('keeps the TUI route unchanged: PTY typing, never sendMessage, nothing recorded', async () => {
     const session = tuiSession()
     let sendMessageCalls = 0

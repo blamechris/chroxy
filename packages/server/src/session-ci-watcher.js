@@ -361,8 +361,8 @@ export class SessionCiWatcher {
    *   exists only for a turn that really ran. A queued wake is visible to clients
    *   meanwhile through the provider's own `message_queued`/`message_dequeued`
    *   mirror, which shows and then removes it from the queued strip: the flushed
-   *   wake therefore ends as exactly one chat bubble, a cancelled one as none. Absent = the wake still reaches the agent but
-   *   clients do not see it.
+   *   wake therefore ends as exactly one chat bubble, a cancelled one as none.
+   *   Absent = the wake still reaches the agent but clients do not see it.
    * @param {number} [opts.tickIntervalMs]
    * @param {number} [opts.discoveryIntervalMs]
    * @param {number} [opts.maxSurveysPerTick]
@@ -799,7 +799,9 @@ export class SessionCiWatcher {
               this._recordWake(sessionId, line, messageId)
             }
             if (!firing) {
-              this._log?.info?.(`ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
+              this._log?.info?.(outcome === 'rejected'
+                ? `ci-watch: #${event.prNumber} wake for session ${sessionId} rejected late, after dispatch was first attempted (wake: ${outcome})`
+                : `ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
             }
           },
         })
@@ -942,7 +944,7 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     // review, measured: 0.5 -> 0 surveys per tick).
     ...(positive(sessionCi.maxSurveysPerTick) ? { maxSurveysPerTick: Math.max(1, Math.floor(sessionCi.maxSurveysPerTick)) } : {}),
     ...(survey ? { survey } : {}),
-    // #8301: a turn-input wake is a user turn the provider ADMITTED — put it in
+    // #8301: a turn-input wake is a user turn the provider DISPATCHED — put it in
     // history and on the wire the way a typed input is. The manager method is the
     // seam: this module never imports a transport.
     // One refusal seam on the manager: the cost-budget pause (which refuses typed

@@ -667,7 +667,8 @@ describe('SdkSession turn input (#8300)', () => {
       const loss = events.filter((e) => e.name === 'error')
       assert.equal(loss.length, 1)
       assert.equal(loss[0].stopped, false)
-      assert.match(loss[0].message, /could not be stopped; it may still be running/)
+      assert.equal(loss[0].unconfirmed, true)
+      assert.match(loss[0].message, /did not acknowledge a stop request, so its termination is UNCONFIRMED/)
       assert.equal(state.closeCalls, 1, 'the query is still closed')
     })
 
@@ -1211,6 +1212,17 @@ describe('SdkSession turn input (#8300)', () => {
           assert.doesNotMatch(loss[0].message, /could not be stopped; it may still be running/)
           assert.equal(session._pendingBackgroundShells.size, 0)
           assert.equal(session.isRunning, false)
+        })
+
+        it('words a deliberate user Stop as "stopped", not "ended abnormally" (#8329)', async () => {
+          const events = capture(session)
+          wire(session, announcedOnly('sh-u', () => { session._intentionalStop = true }, { __throw: abort() }), state)
+          await session.sendMessage('run it')
+          const loss = events.filter((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn')
+          assert.equal(loss.length, 1)
+          assert.match(loss[0].message, /when the turn was stopped/)
+          assert.doesNotMatch(loss[0].message, /ended abnormally/)
+          assert.equal(loss[0].unconfirmed, true)
         })
 
         it('also reports a ROSTERED shell on an abnormal exit (it never reached the stop pass)', async () => {
