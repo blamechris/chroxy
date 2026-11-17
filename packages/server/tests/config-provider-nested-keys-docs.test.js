@@ -40,6 +40,7 @@ const NON_NESTED = new Map([
   ['per-session-settings.js:REQUIRED_DEFINITION_KEYS', 'internal setting definitions'],
   ['skills-frontmatter.js:FRONTMATTER_KEYS', 'skill metadata, not provider config'],
   ['session-name-allocator.js:MAX_KEYS', 'numeric record-count cap, not a key roster'],
+  ['principal-audit.js:MAX_COLLAPSE_KEYS', 'numeric cap on collapsed rejection-counter entries, not a key roster'],
 ])
 const READONLY_USES = new Map([
   ['MODEL_DISCOVERY_KEYS', { methods: ['has'] }],
