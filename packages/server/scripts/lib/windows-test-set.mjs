@@ -170,12 +170,18 @@ export const MAX_EXEMPT_RATIO = 0.20
 // containment seam rather than guarding tests, which is why nine whole files
 // came off rather than individual assertions being skipped.
 export const WINDOWS_EXEMPT = [
-  // ── node-pty / ConPTY (1)
+  // ── node-pty / ConPTY (2)
   {
     file: 'tests/claude-tui-session.test.js',
     reason: 'node-pty',
     symptom: 'timeout',
     note: 'drives a real PTY for the claude TUI trust dialog; on Windows the ConPTY session never reaches the expected state and the file does not terminate',
+  },
+  {
+    file: 'tests/setup-pty-home-sandbox.test.js',
+    reason: 'node-pty',
+    symptom: 'timeout',
+    note: 'spawns real PTY children to prove the HOME redirect; on the Windows runner the ConPTY child run hung the job to its 20 minute kill (#9209), and ConPTY exit semantics differ. The Module._load hook it tests is still installed on Windows for every other file',
   },
   // ── spawns a POSIX shell or a .sh script (9)
   {

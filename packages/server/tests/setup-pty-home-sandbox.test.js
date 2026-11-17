@@ -7,6 +7,9 @@
  * `claude-tui-session.js` / `user-shell-session.js` load it
  * (`await import('node-pty')`), plus the other import shapes.
  *
+ * Not run on Windows: `WINDOWS_EXEMPT` (node-pty / ConPTY). The install-time
+ * hook itself stays active there for every other test.
+ *
  * Skipped, with the reason printed, only where node-pty's native addon cannot
  * load (e.g. Docker `npm ci --ignore-scripts`). The skip is decided by actually
  * loading it, never by assuming.
@@ -22,33 +25,52 @@ import { PTY_HOME_MARKER, PTY_LAUNCHERS, NODE_PTY_ENTRY } from '../../../scripts
 
 const require = createRequire(import.meta.url)
 
+// Hard bounds (the file once hung a required Windows job to its 20 min kill).
+// PTY_CHILD_MS bounds one child; TEST_MS bounds a whole test and must exceed it.
+const PTY_CHILD_MS = 10000
+const TEST_MS = 20000
+
+// Run `node -e script` under `pty`, resolve with its output once it exits. A
+// child that never exits REJECTS after PTY_CHILD_MS, and is always killed
+// through the pty's own kill() in `finally`.
+async function ptyOutput(pty, script, spawnOpts) {
+  let term = null
+  let timer = null
+  try {
+    return await new Promise((resolve, reject) => {
+      let out = ''
+      term = pty.spawn(process.execPath, ['-e', script], { cols: 200, rows: 24, ...spawnOpts })
+      timer = setTimeout(
+        () => reject(new Error(`pty child did not exit within ${PTY_CHILD_MS}ms; output so far: ${JSON.stringify(out.slice(0, 200))}`)),
+        PTY_CHILD_MS,
+      )
+      term.onData((d) => { out += d })
+      term.onExit(() => resolve(out))
+    })
+  } finally {
+    clearTimeout(timer)
+    if (term) { try { term.kill() } catch { /* already exited */ } }
+  }
+}
+
 let nativeSkip = false
 let ptyNs = null
 try {
   ptyNs = await import('node-pty')
   // Loading the JS wrapper is not enough: the addon loads on first spawn.
-  const probe = ptyNs.spawn(process.execPath, ['-e', ''], { env: { ...process.env } })
-  await new Promise((resolve) => { probe.onExit(resolve) })
+  await ptyOutput(ptyNs, '', { env: { ...process.env } })
 } catch (err) {
-  nativeSkip = `node-pty native addon unavailable here: ${err && err.message}`
+  nativeSkip = `node-pty native addon unavailable or pty child did not exit here: ${err && err.message}`
 }
-const opts = nativeSkip ? { skip: nativeSkip } : {}
+const opts = nativeSkip ? { skip: nativeSkip, timeout: TEST_MS } : { timeout: TEST_MS }
 
 const REPORT = "console.log('HOME=' + process.env.HOME + '|UP=' + process.env.USERPROFILE + '|HD=' + require('os').homedir())"
 
-function runPty(pty, spawnOpts) {
-  return new Promise((resolve, reject) => {
-    let out = ''
-    const t = pty.spawn(process.execPath, ['-e', REPORT], { cols: 200, rows: 24, ...spawnOpts })
-    const timer = setTimeout(() => { try { t.kill() } catch {} reject(new Error('pty child timed out')) }, 15000)
-    t.onData((d) => { out += d })
-    t.onExit(() => {
-      clearTimeout(timer)
-      const m = /HOME=(.*?)\|UP=(.*?)\|HD=(.*)/.exec(out)
-      if (!m) return reject(new Error(`no report in pty output: ${JSON.stringify(out.slice(0, 200))}`))
-      resolve({ home: m[1].trim(), userProfile: m[2].trim(), homedir: m[3].trim() })
-    })
-  })
+async function runPty(pty, spawnOpts) {
+  const out = await ptyOutput(pty, REPORT, spawnOpts)
+  const m = /HOME=(.*?)\|UP=(.*?)\|HD=(.*)/.exec(out)
+  if (!m) throw new Error(`no report in pty output: ${JSON.stringify(out.slice(0, 200))}`)
+  return { home: m[1].trim(), userProfile: m[2].trim(), homedir: m[3].trim() }
 }
 
 describe('node-pty sandbox: a real pty child does not see the real home (#7949)', () => {
@@ -83,7 +105,7 @@ describe('node-pty sandbox: a real pty child does not see the real home (#7949)'
     assert.equal(r.home, SPAWN_HOME_ISOLATED)
   })
 
-  it('node-pty\'s real entry still matches the pattern the hook relies on', () => {
+  it('node-pty\'s real entry still matches the pattern the hook relies on', { timeout: TEST_MS }, () => {
     let entry
     try {
       entry = require.resolve('node-pty')
