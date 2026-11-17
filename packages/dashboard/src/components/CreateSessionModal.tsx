@@ -577,10 +577,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // This runs independently of the fresh-open guard above (#2679).
   useEffect(() => {
     if (!open || availableProviders.length === 0) return
-    if (!availableProviders.some(p => p.name === provider)) {
-      setProvider(availableProviders[0]!.name)
-    }
-  }, [open, availableProviders, provider])
+    // Functional update: it applies on top of a fresh-open resolution queued in
+    // the same commit instead of overriding it with the stale `provider` (#9181).
+    setProvider(current => resolveEffectiveProvider(current, availableProviders))
+  }, [open, availableProviders])
 
   useEffect(() => {
     const connections = availableProviders.find(p => p.name === provider)?.connections || []
