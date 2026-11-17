@@ -4,6 +4,7 @@ import { DEFAULT_BYPASS_CATEGORIES, NOTIFICATION_CATEGORY_ORDER } from '../src/n
 
 describe('default notification bypass categories (#8567)', () => {
   it('preserves the documented operator-blocking defaults', () => {
+    // Deliberate change detector: this literal is NOT a third copy to remove (#9163).
     assert.deepEqual([...DEFAULT_BYPASS_CATEGORIES], ['permission', 'activity_error'])
   })
 

@@ -67,6 +67,13 @@ import { configPath } from './config-dir.js'
  * (`notification-categories.ts`) by `tests/notification-category-roster.test.js`
  * (#7429): add a new category there too, or that test names the one missing.
  *
+ * Deliberately an independent literal, NOT derived from `@chroxy/protocol`
+ * (#9163): the protocol exports only the client render roster
+ * (`NOTIFICATION_CATEGORIES`), whose order differs from the wire order here,
+ * and the daemon must not decide what it can fire from a UI table. Deriving
+ * this list from that roster would also make the roster test compare a value
+ * with itself and unable to go red.
+ *
  * History: the issue text (#4541) sketches `permission / question / error /
  * result / inactivity` as user-facing labels; the wire-level set below is
  * the actual server-emitted categories (the UI in sub-issues #4542/#4543
@@ -126,6 +133,8 @@ export const CATEGORY_DEFAULTS = Object.freeze(
  * global list to silence even errors if they want.
  * Pinned in both directions to the shared client default in
  * `@chroxy/protocol` by `tests/notification-category-roster.test.js` (#8567).
+ * Kept as its own literal for the same reason as `ALL_CATEGORIES` (#9163):
+ * importing the protocol value would turn that two-sided pin into a tautology.
  */
 export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error'])
 
