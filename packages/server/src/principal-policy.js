@@ -39,6 +39,7 @@ import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { createLogger, loggableValue } from './logger.js'
 import { refuseBoundMessage } from './bound-client-policy.js'
+import { redactBounded } from './redaction.js'
 
 const log = createLogger('principal-policy')
 
@@ -87,6 +88,10 @@ export const PRINCIPAL_ALLOWED_MESSAGE_TYPES = Object.freeze({
   principal_pending_permissions: Object.freeze({
     tier: 'observe',
     reason: 'observe: a read-only snapshot of the pending permission requests of the granted sessions (#9119); it grants no decision authority; the handler resolves EVERY explicit session id through principalMaySee and refuses the whole request scope_denied when any one is not granted',
+  }),
+  principal_sessions_snapshot: Object.freeze({
+    tier: 'observe',
+    reason: 'observe: a read-only roster of the granted sessions (observed and declared status, handoff blockers, model requested and observed) (#9120); the handler resolves EVERY explicit session id through principalMaySee and refuses the whole request scope_denied when any one is not granted',
   }),
   input: Object.freeze({
     tier: 'steer',
@@ -314,6 +319,9 @@ export const PRINCIPAL_ENVELOPES = Object.freeze({
     fields: Object.freeze(['type', 'requestId', 'sessionId', 'cursor', 'limit']),
   }),
   principal_pending_permissions: Object.freeze({
+    fields: Object.freeze(['type', 'requestId', 'sessionIds']),
+  }),
+  principal_sessions_snapshot: Object.freeze({
     fields: Object.freeze(['type', 'requestId', 'sessionIds']),
   }),
   input: Object.freeze({
@@ -629,6 +637,9 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
   // like `principal_subscribed` it has no top-level session: every request it lists is
   // checked against the grant and rebuilt from `PRINCIPAL_PENDING_PERMISSION_FIELDS`.
   principal_pending_permissions_result: Object.freeze(['type', 'requestId', 'generatedAt', 'permissions', 'truncated']),
+  // The session roster snapshot (S5). Like the two above it has no top-level session: every
+  // row it lists is checked against the grant and rebuilt from the whitelists below.
+  principal_sessions_snapshot_result: Object.freeze(['type', 'requestId', 'generatedAt', 'sessions', 'truncated']),
 })
 
 /**
@@ -640,6 +651,128 @@ export const PRINCIPAL_OUTGOING_ALLOWED = Object.freeze({
 export const PRINCIPAL_PENDING_PERMISSION_FIELDS = Object.freeze([
   'requestId', 'sessionId', 'tool', 'floored', 'explicitConsent', 'nonDelegable', 'origin', 'createdAt', 'expiresAt', 'description',
 ])
+
+/**
+ * The only fields of one row in a `principal_sessions_snapshot_result` (#9120, S5), and of
+ * the objects nested in it. There is no cwd, history, cost, billing or capability field.
+ * `leaseHolder` is a label, `null` until S8 (leases) fills it.
+ * @type {readonly string[]}
+ */
+export const PRINCIPAL_SESSION_ROW_FIELDS = Object.freeze([
+  'sessionId', 'name', 'provider', 'status', 'declaredStatus', 'model', 'blockers', 'leaseHolder', 'lastActivityAt',
+])
+/** @type {readonly string[]} */
+export const PRINCIPAL_SESSION_STATUS_FIELDS = Object.freeze(['isBusy', 'busyReason', 'starting'])
+/** @type {readonly string[]} */
+export const PRINCIPAL_SESSION_MODEL_FIELDS = Object.freeze(['requested', 'observed'])
+/** The fields of a row's `declaredStatus` (the daemon's own `DeclaredStatusSchema`, field for field). */
+export const PRINCIPAL_DECLARED_STATUS_FIELDS = Object.freeze({
+  state: 'string', summary: 'string', next: 'string', blockedOn: 'string', etaMinutes: 'number', decision: 'string', updatedAt: 'number', source: 'string',
+})
+/**
+ * The detail a blocker carries, per code, and the kind of value each field must hold. A code
+ * that is not listed (a future one, or one with no detail) is delivered as `{ code }` alone:
+ * it is still a blocker. A field whose value has the wrong kind is dropped.
+ * @type {Readonly<Record<string, Readonly<Record<string, 'count'|'bool'|'string'|'strings'>>>>}
+ */
+export const PRINCIPAL_BLOCKER_DETAIL_FIELDS = Object.freeze({
+  queued_prompts: Object.freeze({ count: 'count' }),
+  pending_permission: Object.freeze({ requestIds: 'strings' }),
+  pending_question: Object.freeze({ count: 'count' }),
+  active_agents: Object.freeze({ count: 'count' }),
+  background_shells: Object.freeze({ count: 'count', soft: 'bool' }),
+  automation_owned: Object.freeze({ scheduledTaskId: 'string', orchestrationRunId: 'string' }),
+})
+/** The longest list, string and code the roster frame carries. */
+export const PRINCIPAL_SESSION_ROWS_MAX = 100
+const BLOCKER_IDS_MAX = 100
+const ROW_STRING_MAX = 300
+
+/**
+ * One value of the given kind, or `undefined` when it is not of that kind.
+ * @param {unknown} value
+ * @param {'count'|'bool'|'string'|'number'|'strings'} kind
+ */
+function valueOfKind(value, kind) {
+  switch (kind) {
+    case 'count': return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+    case 'number': return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+    case 'bool': return typeof value === 'boolean' ? value : undefined
+    case 'string': return typeof value === 'string' ? value.slice(0, ROW_STRING_MAX) : undefined
+    case 'strings':
+      return Array.isArray(value) && value.every((v) => typeof v === 'string')
+        ? value.slice(0, BLOCKER_IDS_MAX).map((v) => v.slice(0, ROW_STRING_MAX))
+        : undefined
+    default: return undefined
+  }
+}
+
+const nullableString = (v) => (typeof v === 'string' ? v.slice(0, ROW_STRING_MAX) : null)
+
+/** Free text a row carries (a model id): redacted BEFORE it is clipped, so a cut cannot keep a credential's prefix. */
+const nullableRedactedString = (v) => (typeof v === 'string' ? redactBounded(v, ROW_STRING_MAX) : null)
+
+/** One blocker rebuilt from its whitelists. A value that is not a blocker reads as `unavailable`, never as nothing. */
+function rebuildBlocker(b) {
+  if (b === null || typeof b !== 'object' || typeof b.code !== 'string' || b.code.length === 0) return { code: 'unavailable' }
+  const out = { code: b.code.slice(0, 64) }
+  const spec = Object.hasOwn(PRINCIPAL_BLOCKER_DETAIL_FIELDS, b.code) ? PRINCIPAL_BLOCKER_DETAIL_FIELDS[b.code] : null
+  if (spec && b.detail !== null && typeof b.detail === 'object') {
+    const detail = {}
+    for (const [field, kind] of Object.entries(spec)) {
+      if (!Object.hasOwn(b.detail, field)) continue
+      const v = valueOfKind(b.detail[field], kind)
+      if (v !== undefined) detail[field] = v
+    }
+    if (Object.keys(detail).length > 0) out.detail = detail
+  }
+  return out
+}
+
+/** One roster row rebuilt from `PRINCIPAL_SESSION_ROW_FIELDS` and the nested whitelists. */
+function rebuildSessionRow(row) {
+  const out = {}
+  for (const field of PRINCIPAL_SESSION_ROW_FIELDS) {
+    const v = row[field]
+    switch (field) {
+      case 'sessionId': out.sessionId = row.sessionId; break
+      case 'name': case 'provider': case 'leaseHolder': out[field] = nullableString(v); break
+      case 'lastActivityAt': out.lastActivityAt = valueOfKind(v, 'number') ?? null; break
+      case 'status': {
+        const s = v !== null && typeof v === 'object' ? v : null
+        out.status = s === null ? null : {
+          isBusy: s.isBusy === true,
+          busyReason: s.busyReason === 'turn' || s.busyReason === 'background-shells' ? s.busyReason : null,
+          starting: s.starting === true,
+        }
+        break
+      }
+      case 'model': {
+        const m = v !== null && typeof v === 'object' ? v : null
+        out.model = m === null ? null : { requested: nullableRedactedString(m.requested), observed: nullableRedactedString(m.observed) }
+        break
+      }
+      case 'declaredStatus': {
+        if (v === null || typeof v !== 'object') { out.declaredStatus = null; break }
+        const d = {}
+        for (const [key, kind] of Object.entries(PRINCIPAL_DECLARED_STATUS_FIELDS)) {
+          if (!Object.hasOwn(v, key)) continue
+          const value = valueOfKind(v[key], kind)
+          if (value !== undefined) d[key] = value
+        }
+        out.declaredStatus = d
+        break
+      }
+      case 'blockers':
+        // A blocker list that is not a list is NOT an empty one: an empty list reads as
+        // "safe to hand off".
+        out.blockers = Array.isArray(v) ? v.slice(0, 32).map(rebuildBlocker) : [{ code: 'unavailable' }]
+        break
+      default: break
+    }
+  }
+  return out
+}
 
 /**
  * Every other real server frame: a principal is never sent one on the direct-reply
@@ -855,6 +988,21 @@ export function frameForPrincipal(client, message, opts = {}) {
     if (sessions !== undefined && (!Array.isArray(sessions) || !sessions.every((s) => typeof s?.sessionId === 'string' && principalMaySee(client, s.sessionId, 'observe', opts).ok))) {
       return null
     }
+  }
+  // The roster lists sessions instead of carrying one: each must be granted, and each row is
+  // rebuilt from its own whitelists. A frame that holds more rows than the cap is refused.
+  if (type === 'principal_sessions_snapshot_result') {
+    const rows = message.sessions
+    if (rows !== undefined && (!Array.isArray(rows) || rows.length > PRINCIPAL_SESSION_ROWS_MAX ||
+      !rows.every((r) => r !== null && typeof r === 'object' && typeof r.sessionId === 'string' && principalMaySee(client, r.sessionId, 'observe', opts).ok))) {
+      return null
+    }
+    const rebuilt = {}
+    for (const field of PRINCIPAL_OUTGOING_ALLOWED[type]) {
+      if (field === 'sessions') { if (rows !== undefined) rebuilt.sessions = rows.map(rebuildSessionRow) }
+      else if (Object.hasOwn(message, field)) rebuilt[field] = cloneField(message[field])
+    }
+    return withoutBindingValue(client, rebuilt)
   }
   // The snapshot lists requests instead of carrying one session: each must be granted, and
   // each is rebuilt from its own whitelist (no input, a description only when not floored).

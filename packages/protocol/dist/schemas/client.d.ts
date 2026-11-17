@@ -1205,6 +1205,11 @@ export declare const PrincipalPendingPermissionsSchema: z.ZodObject<{
     requestId: z.ZodString;
     sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
+export declare const PrincipalSessionsSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_sessions_snapshot">;
+    requestId: z.ZodString;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>;
 export declare const DaemonUpdateActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_action">;
     action: z.ZodEnum<{
@@ -2157,6 +2162,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     limit: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"principal_pending_permissions">;
+    requestId: z.ZodString;
+    sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_sessions_snapshot">;
     requestId: z.ZodString;
     sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>, z.ZodObject<{

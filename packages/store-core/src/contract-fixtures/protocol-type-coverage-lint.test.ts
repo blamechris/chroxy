@@ -291,6 +291,8 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
   'principal_pending_permissions_result', // #9119 (S4 of #9112) the principal's pending-permission snapshot: same
                                           //   audience as the journal frames above (a scoped principal, never the
                                           //   dashboard or app); consumer is the agent-control adapter (S6)
+  'principal_sessions_snapshot_result',   // #9120 (S5 of #9112) the principal's session roster snapshot: same audience
+                                          //   and consumer as the pending-permission snapshot above
   // 'memory_stack_result' removed — the dashboard now handles it (#6867); it
   // moved to DASHBOARD_ONLY below. Mobile parity is the sibling slice #6870.
 ])

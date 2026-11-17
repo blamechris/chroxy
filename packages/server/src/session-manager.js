@@ -2992,6 +2992,19 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * When this session last saw meaningful activity (what `listSessions()` reports as
+   * `lastActivityAt`), read for one session without touching any other session or any provider
+   * getter. `null` when the session is not there (#9120).
+   * @param {string} sessionId
+   * @returns {number|null}
+   */
+  getLastActivityAt(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return null
+    return this._sessionLastActivityAt.get(sessionId) || entry.createdAt || null
+  }
+
+  /**
    * List all sessions with summary info.
    * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
