@@ -10,10 +10,33 @@ import * as path from 'path'
 
 const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
 
+// Top-level rules only (brace depth 0). A same-named rule nested in @media /
+// @supports is a different rule; matching it would let a test pass on a
+// conditional override while the base rule is wrong (#9175).
+const topLevel: Array<{ selector: string; body: string }> = []
+{
+  let depth = 0
+  let start = 0
+  let sel = ''
+  let bodyStart = 0
+  for (let i = 0; i < css.length; i++) {
+    const c = css[i]
+    if (c === '{') {
+      if (depth === 0) { sel = css.slice(start, i); bodyStart = i + 1 }
+      depth++
+    } else if (c === '}') {
+      depth--
+      if (depth === 0) {
+        topLevel.push({ selector: sel.replace(/\/\*[\s\S]*?\*\//g, '').trim().replace(/\s+/g, ' '), body: css.slice(bodyStart, i) })
+        start = i + 1
+      }
+    }
+  }
+}
+
 function rule(selector: string): string {
-  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
-  const m = css.match(new RegExp(`(?:^|\\})\\s*${esc}\\s*\\{([^}]*)\\}`, 'm'))
-  return m?.[1] ?? ''
+  const want = selector.trim().replace(/\s+/g, ' ')
+  return topLevel.find(r => r.selector === want)?.body ?? ''
 }
 
 describe('New Session modal sizing (#8611)', () => {
@@ -25,6 +48,11 @@ describe('New Session modal sizing (#8611)', () => {
   })
   test('a body taller than the viewport scrolls inside the box', () => {
     expect(/max-height:\s*calc\(100vh - 32px\)/.test(box)).toBe(true)
+    // #9175: dvh follows the collapsing mobile URL bar; the vh line must come
+    // FIRST so browsers without dvh keep it (a later invalid decl is dropped).
+    const vh = box.indexOf('max-height: calc(100vh - 32px)')
+    const dvh = box.indexOf('max-height: calc(100dvh - 32px)')
+    expect(vh >= 0 && dvh > vh).toBe(true)
     expect(/overflow-y:\s*auto/.test(box)).toBe(true)
   })
   test('selects shrink and ellipsize; the Connection row owns the full width', () => {
@@ -43,5 +71,16 @@ describe('New Session modal sizing (#8611)', () => {
   test('every select shares the dark control rule, with its focus state', () => {
     expect(/background:\s*var\(--bg-session-bar\)/.test(rule('.provider-select select,\n.modal-content--session-form select'))).toBe(true)
     expect(/border-color:\s*var\(--accent-blue\)/.test(rule('.provider-select select:focus,\n.modal-content--session-form select:focus'))).toBe(true)
+  })
+  test('a disabled select reads as disabled on the dark control (#9175)', () => {
+    const d = rule('.provider-select select:disabled,\n.modal-content--session-form select:disabled')
+    expect(/opacity:\s*0\.5/.test(d)).toBe(true)
+    expect(/cursor:\s*not-allowed/.test(d)).toBe(true)
+    expect(/color:\s*var\(--text-muted\)/.test(d)).toBe(true)
+  })
+  test('rule() ignores a same-named rule nested in @media (#9175)', () => {
+    expect(rule('.nonexistent-selector-xyz')).toBe('')
+    // every top-level selector is brace-depth 0: no at-rule header is one
+    expect(topLevel.some(r => r.selector.startsWith('@media') && r.body.length === 0)).toBe(false)
   })
 })

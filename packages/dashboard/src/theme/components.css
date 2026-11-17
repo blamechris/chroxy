@@ -7959,6 +7959,7 @@ button.sidebar-token-view-session-row:hover {
   min-width: 0;
   max-width: min(640px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
   overflow-y: auto;
 }
 
@@ -8283,6 +8284,14 @@ button.sidebar-token-view-session-row:hover {
 .modal-content--session-form select:focus {
   outline: none;
   border-color: var(--accent-blue);
+}
+
+/* #9175: a disabled select reads as disabled, still on the dark control. */
+.provider-select select:disabled,
+.modal-content--session-form select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: var(--text-muted);
 }
 
 .modal-buttons {

@@ -151,6 +151,50 @@ describe('CreateSessionModal migration notice scoping (#8611)', () => {
     expect(sessionDefaultsNoticeApplies(n, 'gemini')).toBe(false)
     expect(sessionDefaultsNoticeApplies(null, 'claude-sdk')).toBe(false)
   })
+
+  it('#9175: the server capability decides when present, the name only when absent', () => {
+    const n = { model: 'opus-4-6' }
+    const fam = (v: boolean) => ({ capabilities: { thinkingLevelLegacyFallback: v } })
+    // claude-byok has no `claude-sdk`-style special case: the capability says yes
+    expect(sessionDefaultsNoticeApplies(n, 'claude-byok', fam(true))).toBe(true)
+    // a provider whose name does not match the pattern but is Claude-family
+    expect(sessionDefaultsNoticeApplies(n, 'my-claude-proxy', fam(true))).toBe(true)
+    // explicit false beats a matching name
+    expect(sessionDefaultsNoticeApplies(n, 'claude-lookalike', fam(false))).toBe(false)
+    for (const p of ['codex', 'gemini', 'ollama', 'deepseek', 'openai-compatible']) {
+      expect(sessionDefaultsNoticeApplies(n, p, fam(false))).toBe(false)
+    }
+    // field absent (older daemon): name fallback
+    expect(sessionDefaultsNoticeApplies(n, 'claude-byok', { capabilities: {} })).toBe(true)
+    expect(sessionDefaultsNoticeApplies(n, 'ollama', { capabilities: {} })).toBe(false)
+  })
+
+  it('#9175: renders the notice on a byok provider the name pattern would skip', () => {
+    mockStoreState.availableProviders = [
+      { name: 'my-byok', capabilities: { thinkingLevelLegacyFallback: true }, auth: READY },
+      { name: 'codex', capabilities: { thinkingLevelLegacyFallback: false }, auth: READY },
+    ]
+    mockStoreState.defaultProvider = 'my-byok'
+    mockStoreState.sessionDefaultsNotice = { model: 'opus-4-6' }
+    renderModal()
+    expect(screen.getByTestId('session-defaults-notice')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'codex' } })
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+  })
+
+  it('#9175: every select in the modal carries a title with its full label', () => {
+    mockStoreState.availableProviders = PROVIDERS_WITH_CODEX
+    renderModal()
+    fireEvent.click(screen.getByText(/Advanced/))
+    const selects = Array.from(document.querySelectorAll('.modal-content--session-form select'))
+    expect(selects.length).toBeGreaterThan(1)
+    for (const sel of selects) {
+      expect((sel as HTMLSelectElement).title, sel.id).not.toBe('')
+      for (const opt of Array.from(sel.querySelectorAll('option'))) {
+        expect(opt.title, `${sel.id} option ${opt.value}`).not.toBe('')
+      }
+    }
+  })
 })
 
 describe('CreateSessionModal select styling (#8611)', () => {
