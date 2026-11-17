@@ -123,7 +123,7 @@ const MIN_HARNESSES = 12
 
 
 /** One case per harness, plus the fixed cases below. */
-const FIXED_CASES = 17
+const FIXED_CASES = 18
 
 /**
  * WHAT COUNTS AS A SUBJECT, and why it is the shebang.
@@ -235,13 +235,29 @@ const FLOOR_CONSTANT = /^.*\b(?:EXPECTED_CASES|MIN_CASES)\s*=.*$/gm
  * environment is handed to the harness copies, because it is the environment CI
  * gives them.
  */
-const CLEAN_ENV = { ...process.env }
-for (const k of [
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
-  'GIT_COMMON_DIR', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES',
-  'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS',
-  'GIT_ICASE_PATHSPECS', 'CDPATH',
-]) delete CLEAN_ENV[k]
+const scrubEnv = (base) => {
+  const env = { ...base }
+  for (const k of [
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+    'GIT_COMMON_DIR', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES',
+    'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS',
+    'GIT_ICASE_PATHSPECS', 'CDPATH',
+    // #9194. `node --test` sets NODE_TEST_CONTEXT=child-v8 on the child it
+    // spawns (probed on Node 22.23, where it is the only variable the
+    // runner injects; later Nodes add others, e.g. NODE_TEST_WORKER_ID on 26, which do
+    // not switch the channel. This is the one that does; NODE_OPTIONS is untouched). A probed
+    // node:test harness that inherits it reports over the runner's V8-serialized
+    // IPC channel instead of TAP, so its floor line sits inside a binary frame
+    // FLOOR_LINE cannot match: "expected exactly one floor line, saw 0". That
+    // fails closed, but red for the wrong reason, and only under `node --test`.
+    // CI runs this file with plain `node`, where the variable is absent.
+    // NODE_OPTIONS and NODE_V8_COVERAGE are deliberately NOT scrubbed: neither
+    // changes the reporting channel, and CI may set them on purpose.
+    'NODE_TEST_CONTEXT',
+  ]) delete env[k]
+  return env
+}
+const CLEAN_ENV = scrubEnv(process.env)
 
 /**
  * Probe copies are removed in a `finally`, which covers a normal exit and a
@@ -325,9 +341,9 @@ const STEP_START_WORST_MS = 130_000
  * run. SIGKILL after SIGTERM because a harness with a `trap ... TERM` (several
  * of them are about signals) can ignore the first.
  */
-const run = (cmd, args, cwd, timeoutMs = HARNESS_TIMEOUT_MS) => new Promise((resolve) => {
+const run = (cmd, args, cwd, timeoutMs = HARNESS_TIMEOUT_MS, env = CLEAN_ENV) => new Promise((resolve) => {
   const started = Date.now()
-  const child = spawn(cmd, args, { cwd, env: CLEAN_ENV, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
   let out = ''
   let timedOut = false
   let spawnFailed = false
@@ -765,6 +781,60 @@ for (const [mode, spec] of Object.entries(CONTROL_MODES)) {
     }
   })
 }
+
+/**
+ * #9194. A synthetic floored node:test harness, probed through the SAME
+ * neuter -> run() -> assertGoesRed path as the real roster, with the runner's
+ * NODE_TEST_CONTEXT in the parent environment. Its floor line goes to stderr in
+ * `beforeExit`, as check-project-rules.test.mjs's does.
+ */
+const nodeTestHarness = (floored) => `import { test } from 'node:test'
+let pass = 0
+let fail = 0
+const EXPECTED_CASES = 2
+for (const n of ['a', 'b']) {
+  await test(n, () => { pass++ })
+}
+process.once('beforeExit', () => {
+  if (${floored ? 'pass + fail !== EXPECTED_CASES' : 'false'}) {
+    console.error(\`HARNESS BROKEN: ran \${pass + fail} cases, expected \${EXPECTED_CASES} — a case stopped executing\`)
+    process.exitCode = 1
+  }
+})
+`
+
+const runNodeTestHarness = async (floored, env) => {
+  const p = join(CONTROL_DIR, `nodetest-${floored ? 'floored' : 'unfloored'}.mjs`)
+  writeFileSync(p, nodeTestHarness(floored))
+  const src = readFileSync(p, 'utf8')
+  let substitutions = 0
+  const neutered = src.replace(JS_INCREMENT, () => { substitutions++; return 'void 0' })
+  const np = `${p}.neutered.mjs`
+  writeFileSync(np, neutered)
+  return { substitutions, ...(await run(process.execPath, [np], CONTROL_DIR, HARNESS_TIMEOUT_MS, env)), neutered, src }
+}
+
+await test('CONTROL: a floored node:test harness is still seen under the test runner\'s NODE_TEST_CONTEXT (#9194)', async () => {
+  const leaked = { ...process.env, NODE_TEST_CONTEXT: 'child-v8' }
+  // Without this the case below could pass because the variable is harmless on
+  // this Node, which would make the scrub unproven rather than proven.
+  const raw = await runNodeTestHarness(true, leaked)
+  const rawWhy = rejectionOf(raw, 'nodetest-unscrubbed')
+  // ANY rejection would satisfy "not null": a timeout, a spawn failure or a
+  // crash is rejected too, and says nothing about the leaked variable.
+  assert(rawWhy !== null && rawWhy.includes('expected exactly one floor line') &&
+    // The harness DID print its floor; it is only unparseable. A crash that
+    // printed nothing gives the same "saw 0" message, so check the text is there.
+    raw.out.includes('HARNESS BROKEN') && !raw.timedOut && !raw.spawnFailed && !raw.signal,
+    'PRECONDITION DID NOT REPRODUCE: NODE_TEST_CONTEXT=child-v8 no longer hides a node:test harness\'s floor ' +
+    'line on this Node (expected the "expected exactly one floor line, saw 0" rejection, with no timeout, ' +
+    `signal or spawn failure), so the scrub in scrubEnv() is unproven: re-measure before relaxing this. Got: ${
+      rawWhy === null ? 'accepted' : rawWhy.slice(0, 200)}`)
+  const scrubbed = await runNodeTestHarness(true, scrubEnv(leaked))
+  const why = rejectionOf(scrubbed, 'nodetest-scrubbed')
+  assert(why === null,
+    `with NODE_TEST_CONTEXT scrubbed the floored node:test harness must still be seen going red: ${why}`)
+})
 
 await test('a harness that cannot be spawned is reported as FAILED TO SPAWN, not as an exit', async () => {
   const r = await run(join(CONTROL_DIR, 'no-such-interpreter'), [], CONTROL_DIR)
