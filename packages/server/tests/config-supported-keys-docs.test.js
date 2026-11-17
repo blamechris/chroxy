@@ -897,6 +897,11 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
 
     // ---- #8564: a computed key must be reported, not invisible ----
 
+    // Every shape the rule reports is listed here: a static template key in any
+    // position, and a computed link followed by a further member in `=== true`,
+    // `== true`, `true === <chain>` (optional chaining accepted) or `= true`. Paired
+    // with the BOUNDARY test below, this pins the rule in both directions: this one
+    // goes red if the rule shrinks, that one if it grows (#9172).
     for (const [name, body] of [
       ['c[`features`].ide === true (template literal key)', 'return c[`features`].ide === true'],
       ['c?.[`features`]?.ide === true', 'return c?.[`features`]?.ide === true'],
@@ -905,6 +910,10 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
       ['true === c[key].ide', "const key = 'features'\n  return true === c[key].ide"],
       ['c[key].ide = true (enabling write)', "const key = 'features'\n  c[key].ide = true"],
       ['c[`features`].ide = true', 'c[`features`].ide = true'],
+      ['c[key].ide == true (loose equality)', "const key = 'features'\n  return c[key].ide == true"],
+      ['true == c[key].ide (loose equality, literal on the left)', "const key = 'features'\n  return true == c[key].ide"],
+      ['c?.[key]?.ide === true (optional chain, variable key)', "const key = 'features'\n  return c?.[key]?.ide === true"],
+      ['const f = c[`features`] (static template key outside a gate position)', 'const f = c[`features`]\n  return f'],
     ]) {
       it(`computed key fails closed: \`${name}\``, () => {
         const r = checkFeatures(fixtureGate(`export const g = c => {\n  ${body}\n}\n`), md)
@@ -1097,6 +1106,20 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
       assert.throws(() => parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  ...EXTRA,\n  port: 'number',\n"), 'src/config.js'), /REFUSE: .*not a plain/)
       assert.throws(() => parseConfigSchema(mutate(configSrc, "  port: 'number',\n", "  [portKey]: 'number',\n"), 'src/config.js'), /REFUSE: .*not a plain/)
       assert.throws(() => parseConfigSchema('export const x = 1\n', 'x.js'), /REFUSE: x\.js: no `const CONFIG_SCHEMA/)
+    })
+
+    // Tables that are not per-key tables (PVC / quota / ConfigMap ...) belong BELOW
+    // the closing `### Environment variable names` heading; a table added above it is
+    // reported as `unrecognised-table` by design, since the region before it must be
+    // per-key tables only.
+    it('a CONFIG.md with no closing `### Environment variable names` heading REFUSES in checkSchemaRows', () => {
+      const broken = mutate(md, '### Environment variable names', '### Environment variable naming')
+      assert.throws(() => checkSchemaRows(schema, broken), /REFUSE: CONFIG\.md: no "### Environment variable names" heading closing the per-key tables/)
+    })
+
+    it('a closing `### Environment variable names` heading that sits AFTER the next `## ` section REFUSES (region end past section end)', () => {
+      const broken = mutate(md, '### Environment variable names', '## Elsewhere\n\n### Environment variable names')
+      assert.throws(() => checkSchemaRows(schema, broken), /REFUSE: CONFIG\.md: no "### Environment variable names" heading closing the per-key tables/)
     })
 
     it('a renamed per-key table header REFUSES instead of parsing zero rows', () => {
