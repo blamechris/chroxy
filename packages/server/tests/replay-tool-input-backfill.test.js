@@ -174,7 +174,7 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
       c.mgr._flushPersist()
       const state = JSON.parse(readFileSync(c.stateFilePath, 'utf8'))
       const [s] = state.sessions
-      return JSON.stringify({ history: s.history.map(({ timestamp, ...rest }) => rest), last: s.historyLastSeq })
+      return JSON.stringify({ history: s.history.map(({ timestamp: _timestamp, ...rest }) => rest), last: s.historyLastSeq })
     }
     assert.equal(persisted(filled), persisted(direct))
   })
