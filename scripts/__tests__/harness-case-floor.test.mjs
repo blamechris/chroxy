@@ -243,8 +243,9 @@ const scrubEnv = (base) => {
     'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS',
     'GIT_ICASE_PATHSPECS', 'CDPATH',
     // #9194. `node --test` sets NODE_TEST_CONTEXT=child-v8 on the child it
-    // spawns (measured on Node 22.23: it is the ONLY variable the runner
-    // injects; NODE_OPTIONS is untouched and execArgv is empty). A probed
+    // spawns (probed on Node 22.23, where it is the only variable the
+    // runner injects; later Nodes add others, e.g. NODE_TEST_WORKER_ID on 26, which do
+    // not switch the channel. This is the one that does; NODE_OPTIONS is untouched). A probed
     // node:test harness that inherits it reports over the runner's V8-serialized
     // IPC channel instead of TAP, so its floor line sits inside a binary frame
     // FLOOR_LINE cannot match: "expected exactly one floor line, saw 0". That
@@ -818,9 +819,17 @@ await test('CONTROL: a floored node:test harness is still seen under the test ru
   // Without this the case below could pass because the variable is harmless on
   // this Node, which would make the scrub unproven rather than proven.
   const raw = await runNodeTestHarness(true, leaked)
-  assert(rejectionOf(raw, 'nodetest-unscrubbed') !== null,
-    'NODE_TEST_CONTEXT=child-v8 no longer hides a node:test harness\'s floor line on this Node, so the scrub ' +
-    'in scrubEnv() is unproven: re-measure before relaxing this.')
+  const rawWhy = rejectionOf(raw, 'nodetest-unscrubbed')
+  // ANY rejection would satisfy "not null": a timeout, a spawn failure or a
+  // crash is rejected too, and says nothing about the leaked variable.
+  assert(rawWhy !== null && rawWhy.includes('expected exactly one floor line') &&
+    // The harness DID print its floor; it is only unparseable. A crash that
+    // printed nothing gives the same "saw 0" message, so check the text is there.
+    raw.out.includes('HARNESS BROKEN') && !raw.timedOut && !raw.spawnFailed && !raw.signal,
+    'PRECONDITION DID NOT REPRODUCE: NODE_TEST_CONTEXT=child-v8 no longer hides a node:test harness\'s floor ' +
+    'line on this Node (expected the "expected exactly one floor line, saw 0" rejection, with no timeout, ' +
+    `signal or spawn failure), so the scrub in scrubEnv() is unproven: re-measure before relaxing this. Got: ${
+      rawWhy === null ? 'accepted' : rawWhy.slice(0, 200)}`)
   const scrubbed = await runNodeTestHarness(true, scrubEnv(leaked))
   const why = rejectionOf(scrubbed, 'nodetest-scrubbed')
   assert(why === null,
