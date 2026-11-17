@@ -33,15 +33,21 @@ const TEST_MS = 20000
 // Run `node -e script` under `pty`, resolve with its output once it exits. A
 // child that never exits REJECTS after PTY_CHILD_MS, and is always killed
 // through the pty's own kill() in `finally`.
+class PtyChildTimeout extends Error {}
+
 async function ptyOutput(pty, script, spawnOpts) {
   let term = null
   let timer = null
+  const started = Date.now()
   try {
     return await new Promise((resolve, reject) => {
       let out = ''
       term = pty.spawn(process.execPath, ['-e', script], { cols: 200, rows: 24, ...spawnOpts })
       timer = setTimeout(
-        () => reject(new Error(`pty child did not exit within ${PTY_CHILD_MS}ms; output so far: ${JSON.stringify(out.slice(0, 200))}`)),
+        () => reject(new PtyChildTimeout(
+          `pty child pid ${term.pid} did not exit within ${PTY_CHILD_MS}ms (elapsed ${Date.now() - started}ms) ` +
+          `while awaiting its onExit after \`node -e\`; output so far: ${JSON.stringify(out.slice(0, 200))}`,
+        )),
         PTY_CHILD_MS,
       )
       term.onData((d) => { out += d })
@@ -53,6 +59,10 @@ async function ptyOutput(pty, script, spawnOpts) {
   }
 }
 
+// Skip ONLY when node-pty's native addon is genuinely unavailable (the import
+// or the first spawn throws). A pty child that merely fails to EXIT is a real
+// failure, never a skip: it is left unskipped here so each test's own spawn
+// times out and fails with the PtyChildTimeout message above.
 let nativeSkip = false
 let ptyNs = null
 try {
@@ -60,7 +70,9 @@ try {
   // Loading the JS wrapper is not enough: the addon loads on first spawn.
   await ptyOutput(ptyNs, '', { env: { ...process.env } })
 } catch (err) {
-  nativeSkip = `node-pty native addon unavailable or pty child did not exit here: ${err && err.message}`
+  if (!(err instanceof PtyChildTimeout)) {
+    nativeSkip = `node-pty native addon unavailable here: ${err && err.message}`
+  }
 }
 const opts = nativeSkip ? { skip: nativeSkip, timeout: TEST_MS } : { timeout: TEST_MS }
 
