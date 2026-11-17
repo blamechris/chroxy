@@ -1076,8 +1076,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   )
                 })
               : <>
-                  <option value="claude-sdk">Claude Code (SDK)</option>
-                  <option value="claude-cli">Claude Code (CLI)</option>
+                  <option value="claude-sdk" title="Claude Code (SDK)">Claude Code (SDK)</option>
+                  <option value="claude-cli" title="Claude Code (CLI)">Claude Code (CLI)</option>
                 </>
             }
           </select>
@@ -1363,7 +1363,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 {/* #6903: "Default" forwards no codexSandbox, so the daemon's
                     CHROXY_CODEX_SANDBOX floor (else workspace-write) is honored
                     — matching the mobile app's Default-provider omit path. */}
-                <option value="">Default</option>
+                <option value="" title="Default">Default</option>
                 {CODEX_SANDBOX_MODE_META.map((m) => (
                   <option key={m.id} value={m.id} title={m.label}>{m.label}</option>
                 ))}
@@ -1462,7 +1462,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 onChange={e => setEnvironmentId(e.target.value)}
                 aria-describedby="env-hint"
               >
-                <option value="">None (ephemeral container)</option>
+                <option value="" title="None (ephemeral container)">None (ephemeral container)</option>
                 {environments.filter(e => e.status === 'running').map(e => (
                   <option key={e.id} value={e.id} title={`${e.name} (${e.image})`}>{e.name} ({e.image})</option>
                 ))}

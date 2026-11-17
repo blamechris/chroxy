@@ -182,17 +182,38 @@ describe('CreateSessionModal migration notice scoping (#8611)', () => {
     expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
   })
 
-  it('#9175: every select in the modal carries a title with its full label', () => {
-    mockStoreState.availableProviders = PROVIDERS_WITH_CODEX
-    renderModal()
-    fireEvent.click(screen.getByText(/Advanced/))
-    const selects = Array.from(document.querySelectorAll('.modal-content--session-form select'))
-    expect(selects.length).toBeGreaterThan(1)
-    for (const sel of selects) {
-      expect((sel as HTMLSelectElement).title, sel.id).not.toBe('')
-      for (const opt of Array.from(sel.querySelectorAll('option'))) {
-        expect(opt.title, `${sel.id} option ${opt.value}`).not.toBe('')
+  it('#9175: every select and option the modal can render carries a title, for every provider', () => {
+    const ENVS = [{ id: 'e1', name: 'Env One', image: 'img:1', status: 'running' }]
+    const walk = (label: string) => {
+      const selects = Array.from(document.querySelectorAll('.modal-content--session-form select'))
+      expect(selects.length, label).toBeGreaterThan(0)
+      for (const sel of selects) {
+        expect((sel as HTMLSelectElement).title, `${label} ${sel.id}`).not.toBe('')
+        const opts = Array.from(sel.querySelectorAll('option'))
+        expect(opts.length, `${label} ${sel.id} options`).toBeGreaterThan(0)
+        for (const opt of opts) {
+          expect(opt.title, `${label} ${sel.id} option "${opt.value}"`).not.toBe('')
+        }
       }
+      return selects.map(s => s.id)
+    }
+    const seen = new Set<string>()
+    const names = [...PROVIDERS_WITH_CODEX.map(p => p.name), null]
+    for (const name of names) {
+      mockStoreState.availableProviders = name === null
+        ? []
+        : PROVIDERS_WITH_CODEX.map(p => ({ ...p, capabilities: { ...p.capabilities, containerized: true } }))
+      mockStoreState.defaultProvider = name ?? 'claude-sdk'
+      mockStoreState.environments = ENVS
+      const { unmount } = renderModal()
+      fireEvent.click(document.querySelector('.advanced-toggle-btn') as HTMLElement)
+      walk(String(name)).forEach(id => seen.add(id))
+      unmount()
+    }
+    // the roster the walk must have reached, so a select that stops rendering
+    // cannot silently shrink the coverage
+    for (const id of ['provider-select', 'permission-mode-select', 'codex-sandbox-select', 'env-select']) {
+      expect(seen.has(id), id).toBe(true)
     }
   })
 })
