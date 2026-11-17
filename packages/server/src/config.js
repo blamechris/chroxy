@@ -210,7 +210,8 @@ const CONFIG_SCHEMA = {
   sessionArchive: 'object',
   // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
   // boolean, intervalMs?: number, discoveryIntervalMs?: number,
-  // maxSurveysPerTick?: number }` (#7436 added the per-tick cap). `watch`
+  // maxSurveysPerTick?: number, maxConsecutiveWakes?: number }` (#7436 added
+  // the per-tick cap). `watch`
   // defaults ON — the daemon periodically surveys each session's PR through the
   // user's own `gh` and, when a run settles, notifies (`ci_complete`) and wakes
   // the agent with one daemon-authored line: typed into a claude-tui prompt, or
@@ -218,6 +219,9 @@ const CONFIG_SCHEMA = {
   // `capabilities.daemonTurnInput` — claude-sdk included (#8301). Set
   // `watch: false` on a host that should make no background GitHub calls;
   // `wakeAgent: false` keeps the notification but never wakes a session.
+  // `maxConsecutiveWakes` (#8326, default 3) bounds the wake -> push -> CI ->
+  // wake loop: after that many daemon wakes with no user-typed input between,
+  // the next is refused (`wake-cap`) while the notification still goes out.
   sessionCi: 'object',
   sandbox: 'object',
   // Optional allowlist of absolute directory paths that sessions may use
@@ -581,7 +585,7 @@ export const SESSION_ARCHIVE_SUPPORTED_KEYS = new Set([
   'enabled', 'maxEntries', 'maxAgeDays', 'maxMegabytes',
 ])
 export const SESSION_CI_SUPPORTED_KEYS = new Set([
-  'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick',
+  'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick', 'maxConsecutiveWakes',
 ])
 export const RANCHER_SUPPORTED_KEYS = new Set([
   'rancherUrl', 'clusterId', 'token', 'tokenEnv', 'tokenFile', 'caData', 'skipTLSVerify', 'defaultProjectId',
@@ -1605,7 +1609,7 @@ export function validateConfig(config, verbose = false) {
           warnings.push(`Invalid type for 'sessionCi.${key}': expected boolean, got ${typeof config.sessionCi[key]}`)
         }
       }
-      for (const key of ['intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick']) {
+      for (const key of ['intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick', 'maxConsecutiveWakes']) {
         if (!Object.prototype.hasOwnProperty.call(config.sessionCi, key)) continue
         const v = config.sessionCi[key]
         if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {

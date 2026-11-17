@@ -125,6 +125,14 @@ export const DEFAULT_DISCOVERY_INTERVAL_MS = 5 * 60_000
 export const DEFAULT_MAX_SURVEYS_PER_TICK = 4
 
 /**
+ * #8326: consecutive daemon wakes a session gets with no user-typed input in
+ * between, before the next one is refused (`wake-cap`; the push still goes out).
+ * 3 = the failing-CI -> fix -> push cycle gets a few honest attempts, while a
+ * runaway model that never converges is stopped within a handful of turns.
+ */
+export const DEFAULT_MAX_CONSECUTIVE_WAKES = 3
+
+/**
  * Consecutive `'undeterminable'` SWEEP readings after which a session is demoted
  * from every-tick to a capped backoff (#7443).
  *
@@ -892,6 +900,9 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
   // A non-positive interval would spin the sweep; config.js warns about it, and
   // the value is ignored here rather than honoured.
   const positive = v => typeof v === 'number' && Number.isFinite(v) && v > 0
+  const maxConsecutiveWakes = positive(sessionCi.maxConsecutiveWakes)
+    ? Math.max(1, Math.floor(sessionCi.maxConsecutiveWakes))
+    : DEFAULT_MAX_CONSECUTIVE_WAKES
   return new SessionCiWatcher({
     listSessions: () => sessionManager?.listSessions?.() ?? [],
     resolveSession: sessionId => sessionManager?.getSession?.(sessionId)?.session ?? null,
@@ -910,7 +921,8 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     // seam: this module never imports a transport.
     // One refusal seam on the manager: the cost-budget pause (which refuses typed
     // input), a user Stop, and the provider's own unwilling states.
-    daemonTurnRefusal: (sessionId) => sessionManager?.daemonTurnRefusal?.(sessionId) ?? null,
+    // #8326: the cap on consecutive daemon wakes with no user-typed input between.
+    daemonTurnRefusal: (sessionId) => sessionManager?.daemonTurnRefusal?.(sessionId, { maxConsecutiveWakes }) ?? null,
     recordWakeInput: ({ sessionId, text, messageId }) => {
       sessionManager?.recordDaemonUserInput?.(sessionId, text, messageId)
     },

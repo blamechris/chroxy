@@ -79,3 +79,15 @@ describe('config.sessionCi (#7424)', () => {
     )
   })
 })
+
+describe('config.sessionCi.maxConsecutiveWakes (#8326)', () => {
+  it('accepts a positive number', () => {
+    assert.deepEqual(validateConfig({ sessionCi: { maxConsecutiveWakes: 5 } }).warnings, [])
+  })
+  for (const bad of [0, -1, '3', null, NaN]) {
+    it(`warns on ${String(bad)}`, () => {
+      const result = validateConfig({ sessionCi: { maxConsecutiveWakes: bad } })
+      assert.ok(result.warnings.some(w => w.includes('sessionCi.maxConsecutiveWakes')), JSON.stringify(result.warnings))
+    })
+  }
+})

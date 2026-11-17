@@ -1092,6 +1092,9 @@ export class SessionManager extends EventEmitter {
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     // #8301: sessions whose user pressed Stop and has not typed since — daemon turns are refused (see daemonTurnRefusal).
     this._userStopped = new Set()
+    // #8326: sessionId -> daemon turns dispatched since a person last typed into it. In-memory
+    // on purpose (a restart is a fresh start; see daemonTurnRefusal). Reset by recordUserIntent only.
+    this._daemonWakeCount = new Map()
     // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
     // continued as a NEW thread, held until the first accepted user input carries it.
     this._continuationSeeds = new Map()
@@ -1204,6 +1207,7 @@ export class SessionManager extends EventEmitter {
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
     this._userStopped.delete(sessionId)
+    this._daemonWakeCount.delete(sessionId)
     this._continuationSeeds.delete(sessionId)
     for (const [requestId, pending] of this._permissionRequests) {
       if (pending.sessionId === sessionId) this._permissionRequests.delete(requestId)
@@ -5703,6 +5707,8 @@ export class SessionManager extends EventEmitter {
    */
   recordUserIntent(sessionId) {
     this._userStopped.delete(sessionId)
+    // #8326: a person typing is also what ends a run of consecutive daemon wakes.
+    this._daemonWakeCount.delete(sessionId)
   }
 
   /**
@@ -5781,6 +5787,13 @@ export class SessionManager extends EventEmitter {
    *   - `'no-session'`    the session is gone or being torn down
    *   - `'budget-paused'` the cost budget pause (typed input is refused for this)
    *   - `'user-stopped'`  the user pressed Stop and has not typed since
+   *   - `'wake-cap'`      (#8326) `options.maxConsecutiveWakes` daemon turns have
+   *                       already been dispatched with no user-typed input between
+   *                       (`recordUserIntent` resets; `recordDaemonUserInput`
+   *                       counts). Opt-in per call: absent = no cap. The count is
+   *                       in-memory and per daemon run — a restart starts at 0,
+   *                       which is acceptable because the loop it bounds needs a
+   *                       live agent pushing in this process.
    *   - otherwise the provider's own reason (`session.daemonTurnRefusal()`): a
    *     state in which its `sendMessage` would respawn, error, or discard the
    *     user's queued follow-ups
@@ -5793,13 +5806,17 @@ export class SessionManager extends EventEmitter {
    * is nothing cheap to ask here; building a registry for it is its own change.
    *
    * @param {string} sessionId
+   * @param {{ maxConsecutiveWakes?: number }} [options]
    * @returns {string|null}
    */
-  daemonTurnRefusal(sessionId) {
+  daemonTurnRefusal(sessionId, { maxConsecutiveWakes } = {}) {
     const entry = this._sessions.get(sessionId)
     if (!entry || entry._destroying) return 'no-session'
     if (this._costBudget.isPaused(sessionId)) return 'budget-paused'
     if (this._userStopped.has(sessionId)) return 'user-stopped'
+    if (Number.isFinite(maxConsecutiveWakes) && (this._daemonWakeCount.get(sessionId) ?? 0) >= maxConsecutiveWakes) {
+      return 'wake-cap'
+    }
     try {
       const reason = entry.session?.daemonTurnRefusal?.()
       return typeof reason === 'string' && reason.length > 0 ? reason : null
@@ -5837,6 +5854,8 @@ export class SessionManager extends EventEmitter {
     // `source: 'daemon'` rides on the history entry and the broadcast so a client
     // can tell this from something a person typed.
     this._history.recordUserInput(sessionId, text, undefined, messageId, 'daemon')
+    // #8326: a dispatched daemon turn (recorded only once admitted) — counts toward the wake cap.
+    this._daemonWakeCount.set(sessionId, (this._daemonWakeCount.get(sessionId) ?? 0) + 1)
     this.touchActivity(sessionId)
     this.emit('session_event', {
       sessionId,
