@@ -2010,11 +2010,13 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     : []
   // #8415 -- DELTA replays only: a full replay's `tool_start` entries carry their
   // input. The frames lead the slice (after `history_replay_start`, before the end).
+  // The typeof guard tolerates stub/test managers. The frames carry the stored input,
+  // already capped by sanitizeToolInput, so there is no second cap here.
   const backfills = !fullHistory && typeof lastSeq === 'number'
     && typeof sessionManager.getToolInputBackfills === 'function'
     && client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL)
     ? sessionManager.getToolInputBackfills(sessionId, lastSeq).map((b) => ({
-      [TOOL_INPUT_BACKFILL_FRAME]: { type: 'tool_input_backfill', sessionId, ...b },
+      [TOOL_INPUT_BACKFILL_FRAME]: { ...b, type: 'tool_input_backfill', sessionId },
     }))
     : []
   const replayEntries = pending.length > 0 || backfills.length > 0

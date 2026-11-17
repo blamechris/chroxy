@@ -45,4 +45,20 @@ describe('handleToolInputBackfill', () => {
     for (const input of [null, [1], 'ls', undefined]) expect(handleToolInputBackfill(frame({ input }), s)).toEqual({})
     for (const messageId of ['', 5, undefined]) expect(handleToolInputBackfill(frame({ messageId }), s)).toEqual({})
   })
+
+  it('patches the LAST of two copies of the same id and leaves the earlier one untouched', () => {
+    const first = card()
+    const second = card()
+    const out = handleToolInputBackfill(frame(), { messages: [first, second] })
+    expect(out.messages).toHaveLength(2)
+    expect(out.messages![0]).toBe(first)
+    expect(out.messages![0].toolInput).toBeUndefined()
+    expect(out.messages![1]).toMatchObject({ toolInput: { command: 'ls' } })
+  })
+
+  it('leaves a same-id message that is not a tool_use unchanged', () => {
+    const msgs = [card({ type: 'response' })]
+    expect(handleToolInputBackfill(frame(), { messages: msgs })).toEqual({})
+    expect(msgs[0].toolInput).toBeUndefined()
+  })
 })

@@ -81,4 +81,11 @@ describe('tool_input_backfill through the dashboard handler (#8415)', () => {
     expect(session().messages[0]).toMatchObject({ toolInput: { command: 'pwd' }, content: '{"command":"pwd"}' })
     expect(appendTerminalData).not.toHaveBeenCalled()
   })
+
+  it('positive control: a real tool_start for a new card DOES write a terminal line (the spy can fire)', () => {
+    const { session, send, appendTerminalData } = boot([bare])
+    send({ type: 'tool_start', sessionId: SID, messageId: 'tool-new', toolUseId: 'tool-new', tool: 'Bash', input: INPUT })
+    expect(session().messages.some((m) => m.id === 'tool-new')).toBe(true)
+    expect(appendTerminalData).toHaveBeenCalled()
+  })
 })

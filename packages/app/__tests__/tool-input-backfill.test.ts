@@ -218,4 +218,13 @@ describe('tool_input_backfill through the mobile handler (#8415)', () => {
     expect(session().messages).toHaveLength(1);
     expect(session().messages[0]).toMatchObject({ toolInput: { command: 'pwd' }, content: '{"command":"pwd"}' });
   });
+
+  it('positive control: a real terminal frame through the same handler DOES reach both terminal spies (they can fire)', () => {
+    // The mobile tool_start has no terminal side effect (that is dashboard-only), so
+    // terminal_output is the real frame that proves both spies are wired to the handler.
+    const { appendTerminalData } = boot([bare]);
+    handleMessage({ type: 'terminal_output', sessionId: SID, data: 'hello' });
+    expect(appendTerminalData).toHaveBeenCalled();
+    expect(mockTerminalAppend).toHaveBeenCalled();
+  });
 });

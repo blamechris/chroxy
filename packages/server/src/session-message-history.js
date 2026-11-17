@@ -1104,7 +1104,12 @@ export class SessionMessageHistory extends EventEmitter {
    * #8415 -- the tool inputs a client at `cursor` holds a card for but not the input
    * of: retained `tool_start` entries at or before the cursor whose input was filled
    * in at or after it. An entry past the cursor is in the delta slice already, with
-   * its input. Stored values are returned as they are (already sanitised).
+   * its input. Stored values are returned as they are (already sanitised): the frame
+   * inherits the `sanitizeToolInput` cap.
+   *
+   * With cursor == fillSeq the frame repeats on every reconnect until a newer entry is
+   * recorded. That is idempotent (a client never overwrites a held input) and bounded
+   * by the history ring.
    *
    * @param {string} sessionId
    * @param {number} cursor - the client's history cursor

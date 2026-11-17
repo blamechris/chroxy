@@ -7,7 +7,9 @@ import { SessionManager } from '../src/session-manager.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
 import { BaseSession } from '../src/base-session.js'
 import { registerProvider } from '../src/providers.js'
-import { replayHistory, CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL } from '../src/ws-history.js'
+import { replayHistory, CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL, CAPABILITY_HISTORY_INFLIGHT_REPLY } from '../src/ws-history.js'
+import { frameForBoundClient } from '../src/outgoing-policy.js'
+import { isBoundToOtherSession } from '../src/environments/authority.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
@@ -59,6 +61,7 @@ async function replay(mgr, sid, clientRecord = {}, opts) {
   for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r))
   return sent
 }
+const types = (sent) => sent.map((m) => m.type)
 const backfills = (sent) => sent.filter((m) => m.type === 'tool_input_backfill')
 const INPUT = { command: 'ls -la' }
 
@@ -82,6 +85,8 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
     assert.equal(sent[0].type, 'history_replay_start')
     assert.equal(sent.indexOf(frames[0]) > 0 && sent.indexOf(frames[0]) < sent.length - 1, true, 'inside the replay')
     assert.equal(sent.at(-1).type, 'history_replay_end')
+    // exactly this: no entry at or before the cursor is resent
+    assert.deepEqual(types(sent), ['history_replay_start', 'tool_input_backfill', 'history_replay_end'])
   })
 
   it('A1: a completed tool (#7346) -- the frame arrives alongside the replayed tool_result', async () => {
@@ -92,6 +97,7 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
     assert.equal(sent[0].fullHistory, false)
     assert.deepEqual(backfills(sent).map((f) => f.input), [INPUT])
     assert.ok(sent.some((m) => m.type === 'tool_result'), 'the result is replayed')
+    assert.deepEqual(types(sent), ['history_replay_start', 'tool_input_backfill', 'tool_result', 'history_replay_end'])
   })
 
   it('A7: the frame has no historySeq or timestamp, and latestSeq is the same as without it', async () => {
@@ -125,7 +131,7 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
     }
   })
 
-  it('A9: a full replay (no cursor, cursor ahead, trim gap, forceFull) sends no frame', async () => {
+  it('A9: a full replay (no cursor, cursor ahead, trim gap, forceFull) sends no frame (only forceFull isolates the !fullHistory guard; the others are also stopped by the cursor window; the guard is defence in depth)', async () => {
     const { mgr, sid } = boot()
     const seq = recordRunningTool(mgr, sid)
     mgr._history.backfillToolInput(sid, 'toolu_1', INPUT)
@@ -243,5 +249,56 @@ describe('tool_input_backfill on a delta replay (#8415)', () => {
     assert.deepEqual(h.getToolInputBackfills('s', 1), [])
     h.backfillToolInput('s', 'a', INPUT)
     assert.equal(h.getToolInputBackfills('s', 1).length, 1)
+  })
+
+  it('8(a): a cursor strictly between the entry seq and fillSeq still yields exactly one frame', async () => {
+    const { mgr, sid } = boot()
+    const seq = recordRunningTool(mgr, sid)
+    mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'more', timestamp: 2 })
+    const later = mgr.getLatestHistorySeq(sid)
+    assert.ok(later > seq)
+    mgr._history.backfillToolInput(sid, 'toolu_1', INPUT)
+    for (const cursor of [seq, later]) {
+      const sent = await replay(mgr, sid, { historyCursors: { [sid]: cursor } })
+      assert.equal(sent[0].fullHistory, false, `cursor ${cursor}`)
+      assert.equal(backfills(sent).length, 1, `cursor ${cursor}`)
+    }
+  })
+
+  it('8(c): both capabilities, an open stream and a backfill -- frames first, then the spliced slice, nothing twice', async () => {
+    const { mgr, sid } = boot()
+    const seq = recordRunningTool(mgr, sid)
+    mgr._history.backfillToolInput(sid, 'toolu_1', INPUT)
+    mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'next', timestamp: 2 })
+    mgr._recordHistory(sid, 'stream_start', { messageId: 'r1' })
+    mgr._recordHistory(sid, 'stream_delta', { messageId: 'r1', delta: 'partial' })
+    const caps = new Set([CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL, CAPABILITY_HISTORY_INFLIGHT_REPLY])
+    const sent = await replay(mgr, sid, { clientCapabilities: caps, historyCursors: { [sid]: seq } })
+    assert.equal(sent[0].fullHistory, false)
+    const body = sent.slice(1, -1)
+    assert.equal(body[0].type, 'tool_input_backfill')
+    assert.equal(body.filter((m) => m.type === 'tool_input_backfill').length, 1)
+    const rest = body.slice(1)
+    assert.deepEqual(rest.map((m) => m.type === 'message' ? `${m.messageType || m.type}:${m.content}` : m.type), ['user_input:next', 'response:partial'])
+    assert.equal(rest.filter((m) => m.type === 'tool_start').length, 0, 'the entry at the cursor is not resent')
+  })
+
+  it('8(d): the #8371 fill site end to end -- a session tool_input_recorded reaches a delta replay', async () => {
+    const { mgr, sid } = boot()
+    const seq = recordRunningTool(mgr, sid)
+    mgr.getSession(sid).session.emit('tool_input_recorded', { toolUseId: 'toolu_1', input: INPUT })
+    const sent = await replay(mgr, sid, { historyCursors: { [sid]: seq } })
+    assert.deepEqual(backfills(sent).map((f) => f.input), [INPUT])
+  })
+
+  it('bound delivery: a bound client is sent the frame for its own session and not for another', () => {
+    const frame = { type: 'tool_input_backfill', sessionId: 's1', messageId: 'm', input: INPUT }
+    assert.deepEqual(frameForBoundClient(frame), frame)
+    // the same classification as tool_start, which bound clients already receive
+    const start = { type: 'tool_start', sessionId: 's1', messageId: 'm' }
+    assert.ok(frameForBoundClient(start), 'tool_start control')
+    // withholding another session's frame is the send path's isBoundToOtherSession drop
+    assert.equal(isBoundToOtherSession({ boundSessionId: 's2' }, 's1'), true)
+    assert.equal(isBoundToOtherSession({ boundSessionId: 's1' }, 's1'), false)
   })
 })

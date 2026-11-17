@@ -664,7 +664,14 @@ export function handleToolInputBackfill(
 ): { messages?: ChatMessage[]; streamingMessageId?: null } {
   const messageId = parseRawStringField(msg, 'messageId')
   if (!messageId || !isPlainObject(msg.input)) return {}
-  const held = session.messages.find((m) => m.id === messageId)
+  // The LAST copy: during an overlapping full rebuild the array holds the old prefix
+  // (discarded at replay end) followed by the rebuilt tail, and the kept one is the
+  // later. A reverse loop, as the dashboard lib is ES2020 (no findLast).
+  let held: ChatMessage | undefined
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i]
+    if (m && m.id === messageId) { held = m; break }
+  }
   if (!held) return {}
   const reconcile = heldToolInputReconcile(held, msg.input)
   if (!reconcile) return {}
