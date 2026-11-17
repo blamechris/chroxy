@@ -43,6 +43,16 @@ describe('derived overlay roster (#9168)', () => {
     expect(layers.length).toBeGreaterThan(0)
   })
 
+  // FLOOR, not the roster: these must always be derived. It catches the parser
+  // rotting into skipping real layers; GROWTH (a new overlay) is caught by the
+  // derivation itself requiring every derived layer's users to use the hook.
+  it('the derived roster includes the known overlays (parser-rot floor)', () => {
+    const got = layers.map(l => l.selector)
+    const missing = ['.modal-overlay', '.settings-backdrop', '.shortcut-help-overlay',
+      '.file-open-palette-overlay', '.command-palette'].filter(c => !got.includes(c))
+    expect(missing).toEqual([])
+  })
+
   it('every component using a non-exempt full-screen layer registers through the hook', () => {
     const problems: string[] = []
     for (const layer of layers) {
@@ -71,5 +81,36 @@ describe('derived overlay roster (#9168)', () => {
     expect(hookUsers.length).toBeGreaterThan(0)
     const orphans = hookUsers.filter(u => !layerClasses.some(c => filesUsingClass(c).includes(u)))
     expect(orphans).toEqual([])
+  })
+})
+
+describe('parseFixedLayers classifies or throws, never skips (#9168)', () => {
+  const full = (decl: string) => `.x { position: fixed; ${decl}; z-index: 1500 }`
+  it('classifies inset shorthands and a final declaration with no semicolon', () => {
+    expect(parseFixedLayers('.x { position: fixed; inset: 0; z-index: 1500 }')[0]?.fullScreen).toBe(true)
+    expect(parseFixedLayers(full('inset: 0 0 0 0'))[0]?.fullScreen).toBe(true)
+    expect(parseFixedLayers(full('inset: 0 0'))[0]?.fullScreen).toBe(true)
+    expect(parseFixedLayers(full('top: 0; right: 0; bottom: 0; left: 0'))[0]?.fullScreen).toBe(true)
+    expect(parseFixedLayers(full('inset: 0 0 8px 0'))[0]?.fullScreen).toBe(false)
+  })
+  it('merges position and edges split across two rules of one class', () => {
+    const l = parseFixedLayers('.x { position: fixed; z-index: 2000 }\n.x { inset: 0 }')
+    expect(l).toEqual([{ selector: '.x', z: 2000, fullScreen: true }])
+  })
+  it('splits comma selectors', () => {
+    const l = parseFixedLayers('.a, .b { position: fixed; inset: 0; z-index: 1200 }')
+    expect(l.map(x => x.selector)).toEqual(['.a', '.b'])
+  })
+  it('throws on a var() z-index', () => {
+    expect(() => parseFixedLayers('.x { position: fixed; inset: 0; z-index: var(--z) }')).toThrow(/\.x.*z-index/)
+  })
+  it('throws on a var() edge', () => {
+    expect(() => parseFixedLayers('.x { position: fixed; inset: var(--e); z-index: 1500 }')).toThrow(/\.x/)
+  })
+  it('throws on a compound selector with position: fixed', () => {
+    expect(() => parseFixedLayers('.a .b { position: fixed; inset: 0; z-index: 1500 }')).toThrow(/\.a \.b/)
+  })
+  it('ignores non-fixed rules with odd selectors', () => {
+    expect(parseFixedLayers('.a .b { color: red } .c:hover { z-index: var(--z) }')).toEqual([])
   })
 })
