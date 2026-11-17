@@ -17,6 +17,16 @@
  * Hook check: a TypeScript AST walk (typescript is a dashboard devDependency
  * already used by tsc; a regex cannot tell which JSX element a spread belongs
  * to). A spread element whose className cannot be read throws.
+ *
+ * Remaining limit (#9207): a layer class that is only ever ASSEMBLED at runtime
+ * (concatenated, built from parts, read from data) never appears as a string
+ * literal, so no scan of literals can see it. Everything else is closed: a
+ * dynamic className in a file naming a layer class throws (jsxClassElements),
+ * and every string-literal occurrence of a layer class must be the className of
+ * an element spreading the hook's props, or sit on a reviewed allow-list
+ * (layerLiteralSites, per literal site), which covers a class handed over
+ * through an exported constant or a prop. The one remaining limit: fully
+ * computed class strings, and selector literals such as '.cls'.
  */
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { resolve, join, relative } from 'path'
@@ -504,6 +514,56 @@ export function filesUsingClass(cls: string, files: string[] = walkSources()): s
 /** Overlay-spreading elements across the sources, with the class tokens on each. */
 export function overlayElements(files: string[] = walkSources()): Array<{ file: string; el: JsxClassElement }> {
   return files.flatMap(f => elementsOf(f).filter(el => el.spreadsOverlay).map(el => ({ file: relative(SRC, f), el })))
+}
+
+export interface LayerLiteralSite { file: string; line: number; cls: string; spreading: boolean }
+
+/**
+ * EVERY occurrence of a full-screen layer class in a string literal (or template
+ * chunk) of a non-test source file, with whether that very literal is part of
+ * the className of an element that spreads the overlay props. Judged per
+ * literal site, not per file: a file that renders the class on a spreading
+ * element AND exports it as a constant is still reported at the constant.
+ * A plain string data-testid value is skipped (a test hook, not a class position).
+ * Only full-screen layers are scanned (pass fullScreenLayers() names), not
+ * partial ones. Sources walked are .ts/.tsx/.js/.jsx; src holds no .mjs or .cjs
+ * today, and one added there would need walkSources widened.
+ * LIMITS: a class only ever assembled at runtime (no literal holds it), and a
+ * selector literal like '.cls' (the token is '.cls', not 'cls').
+ */
+export function layerLiteralSites(layerClasses: ReadonlySet<string>, files: string[] = walkSources()): LayerLiteralSite[] {
+  const out: LayerLiteralSite[] = []
+  for (const f of files) {
+    const rel = relative(SRC, f)
+    const sf = parseSource(readFileSync(f, 'utf-8'), rel)
+    const { names } = overlayBindings(sf)
+    const spreadingClassName = (n: ts.Node): boolean => {
+      for (let cur: ts.Node | undefined = n; cur; cur = cur.parent) {
+        if (ts.isJsxAttribute(cur)) {
+          if (!ts.isIdentifier(cur.name) || cur.name.text !== 'className') return false
+          const el = cur.parent.parent
+          return el.attributes.properties.some(a => ts.isJsxSpreadAttribute(a) && names.has(a.expression.getText(sf)))
+        }
+        if (ts.isJsxOpeningElement(cur) || ts.isJsxSelfClosingElement(cur) || ts.isStatement(cur)) return false
+      }
+      return false
+    }
+    // A data-testid value is a test hook, never a class position.
+    const isTestId = (n: ts.Node) => ts.isJsxAttribute(n.parent) && ts.isIdentifier(n.parent.name) && n.parent.name.text === 'data-testid'
+    const isTestIdSafe = (n: ts.Node) => ts.isStringLiteral(n) && isTestId(n)
+    const visit = (n: ts.Node) => {
+      if (isTestIdSafe(n)) return
+      if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
+        const line = sf.getLineAndCharacterOfPosition(n.getStart()).line + 1
+        for (const t of n.text.split(/\s+/)) {
+          if (layerClasses.has(t)) out.push({ file: rel, line, cls: t, spreading: spreadingClassName(n) })
+        }
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
+  }
+  return out
 }
 
 // ------------------------------------------------------------ inline fixed styles
