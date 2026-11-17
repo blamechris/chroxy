@@ -1117,6 +1117,11 @@ describe('CONFIG.md per-key tables vs CONFIG_SCHEMA, and its own structure (#856
       assert.throws(() => checkSchemaRows(schema, broken), /REFUSE: CONFIG\.md: no "### Environment variable names" heading closing the per-key tables/)
     })
 
+    it('a closing `### Environment variable names` heading that sits AFTER the next `## ` section REFUSES (region end past section end)', () => {
+      const broken = mutate(md, '### Environment variable names', '## Elsewhere\n\n### Environment variable names')
+      assert.throws(() => checkSchemaRows(schema, broken), /REFUSE: CONFIG\.md: no "### Environment variable names" heading closing the per-key tables/)
+    })
+
     it('a renamed per-key table header REFUSES instead of parsing zero rows', () => {
       assert.throws(() => checkSchemaRows(schema, md.replaceAll('| Key | Type | CLI Flag |', '| Name | Type | CLI Flag |')), /REFUSE: .*0 per-key tables/)
     })
