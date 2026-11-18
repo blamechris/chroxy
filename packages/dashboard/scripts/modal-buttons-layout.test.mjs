@@ -37,7 +37,8 @@ import { chromium } from 'playwright'
 //     dev proxy) is never loaded; only what the fixture needs is restated (the React
 //     plugin, the __APP_VERSION__ define, the `@` alias and React dedupe), with
 //     `envDir: false` so no repo .env file is read.
-//   - The build goes to a fresh temp directory outside the repo, and an owned static
+//   - The build goes to a fresh temp directory outside the repo (under the OS temp dir,
+//     or under MODAL_LAYOUT_BUILD_PARENT when a launcher passes a directory it owns), and an owned static
 //     server on 127.0.0.1 (port 0) serves only the fixture page and regular files whose
 //     path is contained both lexically and by real path in that directory (GET/HEAD,
 //     known MIME types, nosniff); a missing file is 404 and any other read error 500.
@@ -61,6 +62,7 @@ const MIME = {
 let browser
 let server
 let outDir
+let buildParent
 let origin
 
 // Every regular file under `dir`, as paths relative to it (the build output is small).
@@ -146,7 +148,11 @@ async function measure(page) {
 describe('modal footer button layout (#8779)', () => {
   before(async () => {
     const pkg = JSON.parse(readFileSync(resolve(root, '../../package.json'), 'utf-8'))
-    outDir = mkdtempSync(join(realpathSync(tmpdir()), BUILD_PREFIX))
+    // A launcher may pass a directory it owns (MODAL_LAYOUT_BUILD_PARENT) so it can remove the
+    // build even if this process is killed; otherwise the OS temp dir is used.
+    buildParent = realpathSync(process.env.MODAL_LAYOUT_BUILD_PARENT || tmpdir())
+    assert.equal(lstatSync(buildParent).isDirectory(), true, 'the build parent is a directory')
+    outDir = mkdtempSync(join(buildParent, BUILD_PREFIX))
     await build({
       configFile: false,
       root,
@@ -192,7 +198,7 @@ describe('modal footer button layout (#8779)', () => {
         }
       } finally {
         // Remove only the directory this run created.
-        if (outDir && basename(outDir).startsWith(BUILD_PREFIX) && dirname(outDir) === realpathSync(tmpdir())) {
+        if (outDir && basename(outDir).startsWith(BUILD_PREFIX) && dirname(outDir) === buildParent) {
           rmSync(outDir, { recursive: true, force: true })
         }
       }
