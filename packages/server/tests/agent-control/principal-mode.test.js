@@ -13,6 +13,7 @@
  */
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -231,6 +232,7 @@ describe('MCP dispatch in principal mode (in-memory transport)', () => {
  */
 function scriptedClient({ pages = {}, subscribe = 'ok', subscribeReply = null } = {}) {
   const listeners = new Set()
+  const emitter = new EventEmitter()
   const pending = new Set()
   const log = []
   const client = {
@@ -270,9 +272,18 @@ function scriptedClient({ pages = {}, subscribe = 'ok', subscribeReply = null } 
       })
       return { promise, cancel }
     },
-    /** Deliver one frame; stamps the live subscribe id unless the frame names another. */
+    // The real client is an EventEmitter that emits every ready-state frame as
+    // 'message'; the observer's persistent gap capture listens there.
+    on(event, fn) { emitter.on(event, fn); return client },
+    removeListener(event, fn) { emitter.removeListener(event, fn); return client },
+    /**
+     * Deliver one frame, synchronously, the way one ws 'message' event does:
+     * persistent 'message' listeners first (registered earlier), then one-shot bells.
+     * Stamps the live subscribe id unless the frame names another.
+     */
     push(msg) {
       const frame = { requestId: client.subscribeId, ...msg }
+      emitter.emit('message', frame)
       for (const e of [...listeners]) if (e.predicate(frame)) { clearTimeout(e.timer); listeners.delete(e); e.resolve(frame) }
     },
     teardown(err) {
@@ -280,7 +291,7 @@ function scriptedClient({ pages = {}, subscribe = 'ok', subscribeReply = null } 
       for (const e of [...listeners]) { clearTimeout(e.timer); listeners.delete(e); e.reject(err) }
       for (const reject of [...pending]) { pending.delete(reject); reject(err) }
     },
-    listenerCount: () => listeners.size,
+    listenerCount: () => listeners.size + emitter.listenerCount('message'),
   }
   return client
 }
@@ -320,7 +331,7 @@ describe('PrincipalObserver.waitEvents', () => {
     const cursor = encodeCursor({ sessionId: 'a', journalId: 'j1', seq: 2 })
     const waiting = new PrincipalObserver(client).waitEvents({ sessionIds: ['a'], cursors: [cursor], timeoutMs: 5000 })
     await settle()
-    assert.equal(client.listenerCount(), 1, 'the bell is armed while the subscription is open')
+    assert.equal(client.listenerCount(), 2, 'the bell and the gap capture are attached while the subscription is open')
     const sub = client.log.find((m) => m.type === 'principal_subscribe')
     assert.deepEqual(sub.cursors, [{ sessionId: 'a', journalId: 'j1', seq: 2 }], 'subscribes from the read position, so nothing in between is missed')
     client.push({ type: 'principal_event', sessionId: 'other', journalSeq: 9 })
@@ -380,6 +391,91 @@ describe('PrincipalObserver.waitEvents', () => {
     assert.deepEqual(r.gaps, [{ sessionId: 'a', reason: 'removed', ended: true }])
     assert.equal(r.timedOut, false)
     assert.equal(reads, 1, 'the removed session was read once, before the wait, never after its end')
+  })
+
+  /** A session whose first read succeeds and whose later reads are refused as removed. */
+  const removedAfterFirstRead = (onSecondRead = () => {}) => {
+    let reads = 0
+    const fn = () => {
+      reads++
+      if (reads > 1) {
+        onSecondRead()
+        throw Object.assign(new Error("daemon refused 'principal_events_read' (scope_denied)"), { code: 'scope_denied' })
+      }
+      return { type: 'principal_events_page', sessionId: 'a', journalId: 'j1', events: [], headSeq: 0, cursor: { sessionId: 'a', journalId: 'j1', seq: 0 }, more: false }
+    }
+    fn.reads = () => reads
+    return fn
+  }
+
+  it('an event and a terminal gap in the same burst: the event rings, the gap is still reported', async () => {
+    // The bell fires once, for the event; the gap lands before the wait continues.
+    // Mutation: stop attaching the persistent `onFrame` capture -> the gap is lost and
+    // the re-read of the removed session throws scope_denied out of the wait.
+    const a = removedAfterFirstRead()
+    const client = scriptedClient({ pages: { a, b: [{}, { events: [ev(5)], cursor: { sessionId: 'b', journalId: 'j1', seq: 5 } }] } })
+    const waiting = new PrincipalObserver(client).waitEvents({ sessionIds: ['a', 'b'], timeoutMs: 5000 })
+    await settle()
+    client.push({ type: 'principal_event', sessionId: 'b', journalSeq: 5 })
+    client.push({ type: 'principal_gap', sessionId: 'a', journalId: 'j1', reason: 'removed', ended: true })
+    const r = await waiting
+    assert.equal(r.timedOut, false)
+    assert.deepEqual(r.events.map((e) => [e.sessionId, e.seq]), [['b', 5]])
+    assert.deepEqual(r.gaps, [{ sessionId: 'a', reason: 'removed', ended: true }])
+    assert.equal(a.reads(), 1, 'the removed session was not re-read')
+    assert.equal(client.listenerCount(), 0, 'capture and bell are both detached')
+  })
+
+  it('a terminal gap that arrives while its session is being read: the refused read is absorbed and the gap reported', async () => {
+    // Mutation: drop the `endedGaps.has(sid) && code === scope_denied` catch -> the wait rejects.
+    let client
+    const a = removedAfterFirstRead(() => client.push({ type: 'principal_gap', sessionId: 'a', journalId: 'j1', reason: 'removed', ended: true }))
+    client = scriptedClient({ pages: { a, b: [{}, { events: [ev(2)], cursor: { sessionId: 'b', journalId: 'j1', seq: 2 } }] } })
+    const waiting = new PrincipalObserver(client).waitEvents({ sessionIds: ['a', 'b'], timeoutMs: 5000 })
+    await settle()
+    client.push({ type: 'principal_event', sessionId: 'b', journalSeq: 2 })
+    const r = await waiting
+    assert.deepEqual(r.events.map((e) => [e.sessionId, e.seq]), [['b', 2]])
+    assert.deepEqual(r.gaps, [{ sessionId: 'a', reason: 'removed', ended: true }])
+  })
+
+  it('a refusal for a session that did NOT end is still thrown', async () => {
+    // Positive control for the absorb rule above: it is narrow, not a blanket catch.
+    const a = removedAfterFirstRead()
+    const client = scriptedClient({ pages: { a } })
+    const waiting = new PrincipalObserver(client).waitEvents({ sessionIds: ['a'], timeoutMs: 5000 })
+    await settle()
+    client.push({ type: 'principal_event', sessionId: 'a', journalSeq: 1 })
+    await assert.rejects(waiting, { code: 'scope_denied' })
+    assert.equal(client.listenerCount(), 0)
+  })
+
+  it('a terminal gap captured while the subscribe ack is pending is reported', async () => {
+    let client
+    client = scriptedClient({
+      subscribeReply: null,
+      pages: { a: [{}] },
+    })
+    const original = client.request.bind(client)
+    client.request = async (type, fields, opts) => {
+      const reply = await original(type, fields, opts)
+      // The gap frame is delivered before the subscribe ack resolves.
+      if (type === 'principal_subscribe') client.push({ type: 'principal_gap', sessionId: 'a', journalId: 'j1', reason: 'scope', ended: true })
+      return reply
+    }
+    const r = await new PrincipalObserver(client).waitEvents({ sessionIds: ['a'], timeoutMs: 5000 })
+    assert.deepEqual(r.gaps, [{ sessionId: 'a', reason: 'scope', ended: true }])
+    assert.equal(r.timedOut, false)
+  })
+
+  it('a gap reported both at subscribe time and by the page read appears once', async () => {
+    const gap = { reason: 'unknown_cursor' }
+    const client = scriptedClient({
+      pages: { a: [{}, { gap }] },
+      subscribeReply: { type: 'principal_subscribed', sessions: [{ sessionId: 'a', journalId: 'j1', headSeq: 0, gap }] },
+    })
+    const r = await new PrincipalObserver(client).waitEvents({ sessionIds: ['a'], timeoutMs: 5000 })
+    assert.deepEqual(r.gaps, [{ sessionId: 'a', reason: 'unknown_cursor' }])
   })
 
   it('a teardown while the subscribe is in flight rejects promptly with no unhandled rejection', async () => {

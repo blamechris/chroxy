@@ -41,6 +41,8 @@ export const MAX_CURSOR_CHARS = 1024
  */
 export const WAIT_READ_GRACE_MS = 5_000
 export const REQUEST_CEILING_MS = 15_000
+/** Non-terminal gaps kept per wait; terminal ones are kept one per watched session. */
+export const MAX_CAPTURED_GAPS = 32
 
 const CURSOR_PREFIX = 'pjc1_'
 const REFUSAL_TYPES = ['session_error']
@@ -257,31 +259,74 @@ export class PrincipalObserver {
       cursors.set(c.sessionId, c)
     }
 
-    // Gaps delivered as frames (and at subscribe time) during this call. A session
-    // whose subscription the daemon ENDED (`ended: true`: removed, scope, overflow,
+    // Gaps the daemon reports for THIS call's subscription (frames, and the subscribe
+    // reply), recorded for the subscription's whole life by a persistent listener, not
+    // by the one-shot bell: a bell that already fired for an event cannot see a
+    // terminal gap that lands in the same burst, or while the subscribe ack or a read
+    // is pending, and that gap must not be lost. Bounded: at most one terminal
+    // (`ended: true`) gap per watched session (<= MAX_SESSION_IDS) plus at most
+    // MAX_CAPTURED_GAPS others; `gapsTruncated` says when others were dropped.
+    //
+    // A session whose subscription the daemon ENDED (removed, scope, overflow,
     // backpressure) is not read again in this call: re-reading a removed or no
-    // longer granted session is refused, which would throw the gap away.
-    const frameGaps = []
-    const ended = new Set()
+    // longer granted session is refused, and the terminal gap already says why.
+    const endedGaps = new Map()
+    const otherGaps = []
+    let gapsTruncated = false
+    const capture = (sessionId, rawGap) => {
+      const gap = pickGap(rawGap)
+      if (!gap) return
+      if (gap.ended) {
+        if (!endedGaps.has(sessionId)) endedGaps.set(sessionId, { sessionId, ...gap })
+      } else if (otherGaps.length < MAX_CAPTURED_GAPS) {
+        otherGaps.push({ sessionId, ...gap })
+      } else {
+        gapsTruncated = true
+      }
+    }
+    const hasCaptured = () => endedGaps.size > 0 || otherGaps.length > 0
+
     const readAll = async () => {
       const events = []
-      const gaps = [...frameGaps]
+      const pageGaps = []
       let more = false
       let room = limit
       for (const sid of sessionIds) {
-        if (ended.has(sid)) continue
+        if (endedGaps.has(sid)) continue
         if (room <= 0) { more = true; break }
-        const page = await this._readPage(sid, cursors.get(sid), Math.min(room, MAX_PAGE_LIMIT), budget())
+        let page
+        try {
+          page = await this._readPage(sid, cursors.get(sid), Math.min(room, MAX_PAGE_LIMIT), budget())
+        } catch (err) {
+          // The daemon ended this session's subscription while the read was in
+          // flight (removed, or no longer granted), so the read was refused for that
+          // same reason. The captured terminal gap reports it; any other failure,
+          // including a refusal for a session that did NOT end, is thrown.
+          if (endedGaps.has(sid) && err?.code === 'scope_denied') continue
+          throw err
+        }
         if (page._daemonCursor) cursors.set(sid, page._daemonCursor)
         events.push(...page.events)
         room -= page.events.length
         if (page.more) more = true
-        if (page.gap) gaps.push({ sessionId: sid, ...page.gap })
+        if (page.gap) pageGaps.push({ sessionId: sid, ...page.gap })
       }
       // An ARRAY of opaque cursors, in sessionIds order: exactly the shape the
       // `cursors` argument takes, so a caller passes it straight back.
       const out = sessionIds.map((sid) => cursors.get(sid)).filter(Boolean).map(encodeCursor)
-      return { sessionIds, events, cursors: out, gaps, more, ...extras }
+      // Collected AFTER the reads: everything the capture listener recorded up to the
+      // last await is included, and no frame can be delivered between here and the
+      // caller's synchronous return (frames arrive as later event-loop tasks).
+      // The same condition can arrive twice (a subscribe-time or frame gap, then the
+      // page read reporting it again); report each distinct gap once.
+      const seen = new Set()
+      const gaps = [...pageGaps, ...otherGaps, ...endedGaps.values()].filter((g) => {
+        const key = `${g.sessionId}\u0000${g.reason}\u0000${g.fromSeq ?? ''}\u0000${g.toSeq ?? ''}\u0000${g.ended === true}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      return { sessionIds, events, cursors: out, gaps, more, ...(gapsTruncated ? { gapsTruncated } : {}), ...extras }
     }
     const isNews = (r) => r.events.length > 0 || r.gaps.length > 0
 
@@ -293,23 +338,27 @@ export class PrincipalObserver {
     const subscribeId = randomUUID()
     // Correlated: the daemon stamps every principal_event and principal_gap of a
     // subscription with that subscribe's requestId, so a late frame from an earlier
-    // subscription on this connection can never ring this call's bell.
-    const rings = (msg) => (msg?.type === 'principal_event' || msg?.type === 'principal_gap')
-      && msg.requestId === subscribeId && idSet.has(msg.sessionId)
+    // subscription on this connection can never ring this call's bell or be captured.
+    const ours = (msg) => msg?.requestId === subscribeId && idSet.has(msg?.sessionId)
+    const rings = (msg) => (msg?.type === 'principal_event' || msg?.type === 'principal_gap') && ours(msg)
+    const onFrame = (msg) => { if (msg?.type === 'principal_gap' && ours(msg)) capture(msg.sessionId, msg) }
     const arm = () => {
-      const bell = this._client.waitForMessage(rings, Math.max(0, deadline - now()))
+      const b = this._client.waitForMessage(rings, Math.max(0, deadline - now()))
       // A teardown rejects the bell at once, possibly while this call is still
       // awaiting the subscribe or a read. Mark the rejection handled here; the
       // `await bell.promise` below still sees it, and the read's own rejection
       // carries the same teardown error out.
-      bell.promise.catch(() => {})
-      return bell
+      b.promise.catch(() => {})
+      return b
     }
-    // Arm BEFORE subscribing, so a replayed or live event that lands while the
-    // subscribe is in flight cannot be missed.
-    let bell = arm()
+    let bell = null
     let attempted = false
     try {
+      // Capture listener and bell both attach BEFORE subscribing, so a replayed or
+      // live frame that lands while the subscribe is in flight is neither missed nor
+      // dropped. Both are removed in `finally` on every exit path.
+      this._client.on('message', onFrame)
+      bell = arm()
       const daemonCursors = [...cursors.values()].filter(Boolean)
       // Set before the send: a subscribe whose ack is lost (timeout) or refused may
       // still have been registered, so the unsubscribe below runs for it too.
@@ -318,32 +367,36 @@ export class PrincipalObserver {
       const reply = await this._request('principal_subscribe', { sessionIds, ...(daemonCursors.length ? { cursors: daemonCursors } : {}) }, 'principal_subscribed', {
         requestId: subscribeId, ...budget(),
       })
-      // A subscribe-time gap (an evicted or unknown cursor) is news by itself.
+      // A subscribe-time gap (an evicted or unknown cursor) is news by itself, as is
+      // any gap frame captured while the ack was in flight.
       for (const s of Array.isArray(reply.sessions) ? reply.sessions : []) {
-        const gap = s && idSet.has(s.sessionId) ? pickGap(s.gap) : null
-        if (gap) frameGaps.push({ sessionId: s.sessionId, ...gap })
+        if (s && idSet.has(s.sessionId) && s.gap) capture(s.sessionId, s.gap)
       }
-      if (frameGaps.length > 0) {
+      if (hasCaptured()) {
         result = await readAll()
         return { ...result, timedOut: false }
       }
       for (;;) {
         const msg = await bell.promise
-        if (msg === null) return { ...result, timedOut: true }
-        if (msg.type === 'principal_gap') {
-          const gap = pickGap(msg)
-          if (gap) frameGaps.push({ sessionId: msg.sessionId, ...gap })
-          if (msg.ended === true) ended.add(msg.sessionId)
+        if (msg === null) {
+          // Defensive: a gap captured but not yet reported is still news.
+          if (hasCaptured()) {
+            result = await readAll()
+            return { ...result, timedOut: false }
+          }
+          return { ...result, timedOut: true }
         }
         // Re-arm BEFORE re-reading: an event that arrives during the read rings the
-        // new bell, and the read itself covers everything before it.
+        // new bell, and the read itself covers everything before it. Gap frames are
+        // recorded by `onFrame`, not here, so they cannot be lost between bells.
         bell = arm()
         result = await readAll()
         if (isNews(result)) return { ...result, timedOut: false }
         if (now() >= deadline) return { ...result, timedOut: true }
       }
     } finally {
-      bell.cancel()
+      this._client.removeListener('message', onFrame)
+      bell?.cancel()
       if (attempted && this._client.state === 'ready') {
         // principal_unsubscribe has no reply frame. If the connection is going away
         // the daemon drops the subscription with the socket.
