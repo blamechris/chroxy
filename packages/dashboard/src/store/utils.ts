@@ -742,8 +742,15 @@ export function getOwn<T>(rec: Readonly<Record<string, T>> | null | undefined, k
  */
 export function markSessionNotificationsClosed<
   T extends { sessionId: string; sessionClosedAt?: number },
->(notifications: readonly T[], removedIds: readonly string[], now: number): readonly T[] {
-  if (removedIds.length === 0) return notifications;
+>(
+  notifications: readonly T[] | undefined,
+  removedIds: readonly string[],
+  now: number,
+): readonly T[] | undefined {
+  // `undefined` is a real input: `sessionNotifications` is typed required, but the
+  // store's neighbouring readers all `?? []` it and partially-seeded state omits
+  // it. Nothing to stamp, and the unchanged reference tells the caller so.
+  if (!notifications || removedIds.length === 0) return notifications;
   const removed = new Set(removedIds);
   let changed = false;
   const next = notifications.map((n) => {

@@ -171,8 +171,8 @@ describe('#9222 — markSessionNotificationsClosed', () => {
     ]
     const out = markSessionNotificationsClosed(rows, ['gone'], NOW)
     expect(out).toHaveLength(2)
-    expect(out[0].sessionClosedAt).toBe(NOW)
-    expect(out[1].sessionClosedAt).toBeUndefined()
+    expect(out?.[0]?.sessionClosedAt).toBe(NOW)
+    expect(out?.[1]?.sessionClosedAt).toBeUndefined()
   })
 
   it('returns the SAME array when nothing matches (no subscriber churn)', () => {
@@ -181,11 +181,15 @@ describe('#9222 — markSessionNotificationsClosed', () => {
     expect(markSessionNotificationsClosed(rows, [], NOW)).toBe(rows)
   })
 
+  it('tolerates undefined state (partially-seeded store) and returns it unchanged', () => {
+    expect(markSessionNotificationsClosed(undefined, ['gone'], NOW)).toBeUndefined()
+  })
+
   it('does not restamp an already-retired row', () => {
     const rows = [notification({ sessionId: 'gone', sessionClosedAt: 5 })]
     const out = markSessionNotificationsClosed(rows, ['gone'], NOW)
     expect(out).toBe(rows)
-    expect(out[0].sessionClosedAt).toBe(5)
+    expect(out?.[0]?.sessionClosedAt).toBe(5)
   })
 })
 
