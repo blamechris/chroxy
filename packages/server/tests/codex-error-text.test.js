@@ -91,6 +91,8 @@ describe('describeCodexError / formatCodexError (#8610)', () => {
 
   it('treats array-like text as unreadable, well-formed, malformed or oversized', () => {
     assert.equal(describeCodexError({ message: '["a","b"]' }), null)
+    assert.equal(describeCodexError('["metadata"]'), null)
+    assert.equal(describeCodexError('  ["metadata"]  '), null)
     assert.equal(describeCodexError('[not json'), null)
     assert.equal(describeCodexError(`[${'"x",'.repeat(MAX_CODEX_ERROR_PARSE)}"x"]`), null)
     assert.equal(describeCodexError({ message: '{"error":"[1,2,3]"}' }), null)
