@@ -2523,6 +2523,7 @@ describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => 
     writeConnectionInfo({
       wsUrl: 'wss://auth-test.example.com',
       apiToken: 'auth-token-xyz789',
+      pid: process.pid,
     })
 
     server = new WsServer({
@@ -3017,6 +3018,7 @@ describe('GET /connect redacts connectionUrl in no-auth mode (#753)', () => {
       httpUrl: 'https://keep-url-test.example.com',
       apiToken: 'auth-tok-753',
       connectionUrl: 'chroxy://keep-url-test.example.com?token=auth-tok-753',
+      pid: process.pid,
     })
 
     server = new WsServer({
@@ -4154,6 +4156,7 @@ describe('CORS origin restrictions (#1533)', () => {
       httpUrl: 'https://cors-test.example.com',
       apiToken: 'tok-cors-qr',
       connectionUrl: 'chroxy://cors-test.example.com?token=tok-cors-qr',
+      pid: process.pid,
     })
 
     server = new WsServer({
@@ -4190,6 +4193,7 @@ describe('CORS origin restrictions (#1533)', () => {
       httpUrl: 'https://cors-test2.example.com',
       apiToken: 'tok-cors-qr2',
       connectionUrl: 'chroxy://cors-test2.example.com?token=tok-cors-qr2',
+      pid: process.pid,
     })
 
     server = new WsServer({
@@ -4287,6 +4291,7 @@ describe('CORS origin restrictions (#1533)', () => {
       httpUrl: 'https://cors-connect.example.com',
       apiToken: 'tok-cors-connect',
       connectionUrl: 'chroxy://cors-connect.example.com?token=tok-cors-connect',
+      pid: process.pid,
     })
 
     server = new WsServer({

@@ -23,6 +23,7 @@ const { fetchPairingCode } = await import('../src/cli/pair-code-cmd.js')
 const { postPairDiscord } = await import('../src/cli/pair-discord-cmd.js')
 const { runPagesListCmd } = await import('../src/cli/pages-cmd.js')
 const { runShellListCmd } = await import('../src/cli/shell-cmd.js')
+const { runAgentList, runAgentRevoke } = await import('../src/cli/agent-cmd.js')
 
 after(() => {
   try { rmSync(testDir, { recursive: true, force: true }) } catch { /* gone */ }
@@ -96,4 +97,59 @@ describe('an unverified record fails closed (#9074)', () => {
       assert.equal(sentBearer(calls), true)
     })
   }
+})
+
+// `chroxy agent` (cli/agent-cmd.js) resolves the daemon through agent-control's
+// resolveLocalConnection. A liveness_unverified refusal must reach the user as that
+// reason, and no client may ever be constructed for it (no socket, no auth frame,
+// no token). Pure: the resolver and the client class are injected, so no server is
+// started and nothing is dialed.
+describe('chroxy agent: an unverified record is refused before any client exists (#9074)', () => {
+  /** Run `fn` with process.stderr captured (reportConnectFailure writes there directly). */
+  async function withStderr(fn) {
+    const lines = []
+    const original = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (s) => { lines.push(String(s)); return true }
+    try { return { result: await fn(), lines } } finally { process.stderr.write = original }
+  }
+  const neverConstructedClient = (counter) => class {
+    constructor () { counter.n++; throw new Error('an AgentControlClient must not be constructed') }
+  }
+
+  it('list and revoke fail with liveness_unverified, say so, and never construct a client', async () => {
+    // Mutation: map every resolver failure to not_running in connectToLocalDaemon ->
+    // the reason (and the message) is not_running, and this goes red.
+    const counter = { n: 0 }
+    const deps = {
+      resolveLocalConnection: () => ({ ok: false, reason: 'liveness_unverified' }),
+      AgentControlClient: neverConstructedClient(counter),
+      out: () => {},
+      err: () => {},
+    }
+    const { result: results, lines } = await withStderr(async () => [
+      await runAgentList({}, deps),
+      await runAgentRevoke('some-label', {}, deps),
+    ])
+    for (const r of results) {
+      assert.equal(r.ok, false)
+      assert.equal(r.reason, 'liveness_unverified')
+    }
+    assert.equal(counter.n, 0, 'no client was constructed, so no socket was opened and no token was used')
+    assert.equal(lines.filter((l) => /Could not verify that the Chroxy daemon in connection\.json is running/.test(l)).length, 2)
+    assert.equal(lines.some((l) => /not running\. Start it/.test(l)), false, 'not reported as "not running"')
+  })
+
+  it('positive control: not_running is still reported as not running, also without a client', async () => {
+    const counter = { n: 0 }
+    const deps = {
+      resolveLocalConnection: () => ({ ok: false, reason: 'not_running' }),
+      AgentControlClient: neverConstructedClient(counter),
+      out: () => {},
+      err: () => {},
+    }
+    const { result, lines } = await withStderr(() => runAgentList({}, deps))
+    assert.equal(result.reason, 'not_running')
+    assert.equal(counter.n, 0)
+    assert.ok(lines.some((l) => /not running\. Start it/.test(l)))
+  })
 })
