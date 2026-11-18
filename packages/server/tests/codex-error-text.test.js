@@ -68,6 +68,13 @@ describe('describeCodexError / formatCodexError (#8610)', () => {
 
   it('does not let a plain-text error code outrank a real message', () => {
     assert.equal(describeCodexError({ error: 'invalid_request_error', message: 'real message' }).message, 'real message')
+    // With no message: prose is the last resort; a bare code-shaped token is not.
+    assert.equal(describeCodexError({ error: 'rate limit exceeded' }).message, 'rate limit exceeded')
+    assert.equal(describeCodexError({ error: 'rate limit exceeded', message: 'own message' }).message, 'own message')
+    assert.equal(describeCodexError({ error: 'invalid_request_error' }), null)
+    assert.equal(describeCodexError({ error: 'ERR_RATE_LIMIT' }), null)
+    assert.equal(describeCodexError({ error: '["meta"]' }), null)
+    assert.equal(describeCodexError({ error: '{"broken' }), null)
   })
 
   it('follows only the error and message keys', () => {
@@ -96,6 +103,7 @@ describe('describeCodexError / formatCodexError (#8610)', () => {
     assert.equal(describeCodexError('[not json'), null)
     assert.equal(describeCodexError(`[${'"x",'.repeat(MAX_CODEX_ERROR_PARSE)}"x"]`), null)
     assert.equal(describeCodexError({ message: '{"error":"[1,2,3]"}' }), null)
+    assert.equal(describeCodexError({ message: '{"message":"[1,2,3]"}' }), null)
   })
 
   it('an array-like branch does not hide a readable one', () => {
@@ -124,6 +132,15 @@ describe('describeCodexError / formatCodexError (#8610)', () => {
     assert.equal(at(400, 'error').type, null)
     assert.equal(at(400, 'has spaces in it').type, null)
     assert.equal(at(400, `t${'x'.repeat(80)}`).type, null)
+  })
+
+  it('takes status and type from the deepest layer that has a valid one', () => {
+    const d = describeCodexError({ status: 500, type: 'outer_type', error: { status: 400, type: 'inner_type', message: 'm' } })
+    assert.equal(d.status, 400)
+    assert.equal(d.type, 'inner_type')
+    const f = describeCodexError({ status: 503, type: 'outer_type', error: { status: 'bad', type: 'has spaces', message: 'm' } })
+    assert.equal(f.status, 503)
+    assert.equal(f.type, 'outer_type')
   })
 
   it('bounds the whole formatted text, details included', () => {
@@ -212,6 +229,26 @@ describe('Codex terminal error text (#8610)', () => {
       s._onNotification(errorNote('turn-1', ISSUE_ENVELOPE(), { willRetry: true }))
       assert.deepEqual(errors, [])
       assert.ok(s._activeTurn)
+    } finally { cleanup() }
+  })
+
+  it('a prose params.error string is shown as the message', () => {
+    const { s, errors, cleanup } = mkSession()
+    try {
+      openTurn(s)
+      s._onNotification(errorNote('turn-1', 'rate limit exceeded', { willRetry: false }))
+      assert.deepEqual(errors, [{ message: 'Codex error: rate limit exceeded' }])
+      assert.equal(s._activeTurn, null)
+    } finally { cleanup() }
+  })
+
+  it('a code-shaped params.error string is not shown as a message', () => {
+    const { s, errors, cleanup } = mkSession()
+    try {
+      openTurn(s)
+      s._onNotification(errorNote('turn-1', 'invalid_request_error', { willRetry: false }))
+      assert.deepEqual(errors, [{ message: UNREADABLE_CODEX_ERROR }])
+      assert.equal(s._activeTurn, null)
     } finally { cleanup() }
   })
 
