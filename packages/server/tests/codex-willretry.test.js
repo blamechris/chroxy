@@ -128,8 +128,11 @@ describe('codex willRetry on an active turn (#8754)', () => {
       s._onNotification(errorNote('turn-1', connectFailed(), { willRetry: true }))
       s._onNotification(errorNote('turn-1', reconnectShaped(), { willRetry: true }))
       assert.ok(s._reconnectWatchdog, 'watchdog still armed')
-      assert.notEqual(s._reconnectWatchdog, firstWatchdog, 'watchdog re-armed (slides) on each tick')
-      assert.equal(s._reconnectDeadline, firstDeadline, 'same deadline handle after later ticks')
+      // Identity compared as a boolean, so a failure reports plain values. Comparing the
+      // function-bearing handles directly was observed to surface as ERR_TEST_FAILURE
+      // rather than ERR_ASSERTION in the test runner's report.
+      assert.equal(s._reconnectWatchdog !== firstWatchdog, true, 'watchdog re-armed (slides) on each tick')
+      assert.equal(s._reconnectDeadline === firstDeadline, true, 'same deadline handle after later ticks')
       assert.equal(timers.set.length, 1, 'deadline never re-armed')
       assert.equal(timers.cleared.length, 0, 'deadline never cleared by a retry tick')
     } finally { cleanup() }
