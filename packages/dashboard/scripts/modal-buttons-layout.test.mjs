@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { before, after, describe, test } from 'node:test'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
+import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 
 // #8779: the shared modal footer buttons rendered 29px high. The REAL New
@@ -14,14 +17,23 @@ import { chromium } from 'playwright'
 //   - the footer renders exactly the expected buttons in the expected
 //     enabled/disabled states (so a case that rendered nothing cannot pass);
 //   - each button's box is at least 44x44;
-//   - each button sits inside its footer and the viewport, is the topmost
-//     element at its centre, and its label fits without overflow.
+//   - after scrolling it into view, each button's box lies inside its footer and
+//     the viewport, the button is the topmost element at its centre point, and its
+//     label does not overflow the button (scroll size vs client size).
+// These are box, centre-point and overflow checks: they do not prove every pixel
+// of a button is unobscured.
 // jsdom lays nothing out, so this cannot live in vitest (ModalButtonTapTarget.test.ts
 // only pins the CSS declarations). Runs in the Dashboard Smoke job beside the
 // other *-layout.test.mjs files. No button is clicked and every handler in the
-// fixture is a no-op. Each case runs in a fresh browser context with service
-// workers blocked, HTTP(S) to anything but the Vite origin aborted and every
-// WebSocket refused, all set up before navigation; any blocked attempt fails the case.
+// fixture is a no-op.
+// Isolation:
+//   - Vite runs with `configFile: false`, so vite.config.ts's dev proxy (/ws ->
+//     localhost:7860) is never loaded; only what the fixture needs is restated (the
+//     React plugin, the __APP_VERSION__ define, the `@` alias and React dedupe), and
+//     the resolved proxy is asserted empty before any page loads.
+//   - Each case runs in a fresh browser context with service workers blocked,
+//     HTTP(S) to anything but the Vite origin aborted and every WebSocket refused,
+//     all installed before navigation; any blocked attempt fails the case.
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 let browser
@@ -69,12 +81,16 @@ async function measure(page) {
 
 describe('modal footer button layout (#8779)', () => {
   before(async () => {
+    const pkg = JSON.parse(readFileSync(resolve(root, '../../package.json'), 'utf-8'))
     vite = await createServer({
+      configFile: false,
       root,
       base: '/',
       logLevel: 'error',
+      define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+      resolve: { alias: { '@': resolve(root, 'src') }, dedupe: ['react', 'react-dom'] },
       server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
-      plugins: [{
+      plugins: [react(), {
         name: 'modal-buttons-layout-fixture',
         configureServer(server) {
           server.middlewares.use(async (req, res, next) => {
@@ -90,6 +106,11 @@ describe('modal footer button layout (#8779)', () => {
         },
       }],
     })
+    // No config file was loaded and no server-side proxy is configured, so nothing the
+    // page requests on the Vite origin can be forwarded anywhere else.
+    assert.equal(vite.config.configFile, undefined, 'no Vite config file was loaded')
+    const proxy = vite.config.server.proxy
+    assert.equal(proxy === undefined || Object.keys(proxy).length === 0, true, 'the Vite dev proxy is empty')
     await vite.listen()
     origin = `http://127.0.0.1:${vite.httpServer.address().port}`
     browser = await chromium.launch({ headless: true })
@@ -106,21 +127,23 @@ describe('modal footer button layout (#8779)', () => {
         // blocked, every HTTP(S) request to anything but the Vite origin is aborted,
         // and every WebSocket is refused. Blocked attempts are recorded and fail the case.
         const context = await browser.newContext({ viewport, serviceWorkers: 'block' })
-        const blocked = []
-        await context.route('**/*', (route) => {
-          const u = new URL(route.request().url())
-          if (u.origin === origin) return route.continue()
-          blocked.push(route.request().url())
-          return route.abort('blockedbyclient')
-        })
-        await context.routeWebSocket(/.*/, (ws) => {
-          blocked.push(`websocket ${ws.url()}`)
-          return ws.close()
-        })
-        const page = await context.newPage()
-        const errors = []
-        page.on('pageerror', e => { errors.push(String(e)) })
+        // Everything after the context exists, setup included, is inside the try, so a
+        // failed route/routeWebSocket/newPage still closes the context.
         try {
+          const blocked = []
+          await context.route('**/*', (route) => {
+            const u = new URL(route.request().url())
+            if (u.origin === origin) return route.continue()
+            blocked.push(route.request().url())
+            return route.abort('blockedbyclient')
+          })
+          await context.routeWebSocket(/.*/, (ws) => {
+            blocked.push(`websocket ${ws.url()}`)
+            return ws.close()
+          })
+          const page = await context.newPage()
+          const errors = []
+          page.on('pageerror', e => { errors.push(String(e)) })
           page.setDefaultTimeout(10000)
           await page.goto(`${origin}/__modal-buttons-layout?case=${caseName}`)
           const m = await measure(page)
@@ -143,7 +166,7 @@ describe('modal footer button layout (#8779)', () => {
         assert.deepEqual(small, [], `a footer button under ${FLOOR}x${FLOOR}`)
       }))
 
-      test(`${caseName} ${vpName}: no footer button is clipped, covered or truncated`, () => withPage(m => {
+      test(`${caseName} ${vpName}: each footer button's box is in its footer and the viewport, topmost at its centre, label not overflowing`, () => withPage(m => {
         const bad = []
         for (const b of m) {
           if (!b.footer) { bad.push(`${b.cls}: not inside a footer`); continue }

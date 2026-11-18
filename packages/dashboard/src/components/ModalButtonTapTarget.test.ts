@@ -40,11 +40,12 @@ describe('Modal footer button tap targets (#8779)', () => {
   for (const cls of ['.btn-modal-cancel', '.btn-modal-create', '.btn-modal-danger']) {
     test(`${cls}: its last declared min-height and min-width are 44px and it declares no height cap`, () => {
       const bodies = rulesFor(cls)
-      expect(bodies.length > 0).toBe(true)
-      expect(lastValue(bodies, 'min-height') === '44px').toBe(true)
-      expect(lastValue(bodies, 'min-width') === '44px').toBe(true)
-      expect(lastValue(bodies, 'height') === null).toBe(true)
-      expect(lastValue(bodies, 'max-height') === null).toBe(true)
+      // Each assertion is named, so a failure says which property broke.
+      expect(bodies.length > 0, `${cls}: a rule names the class`).toBe(true)
+      expect(lastValue(bodies, 'min-height') === '44px', `${cls}: min-height is 44px`).toBe(true)
+      expect(lastValue(bodies, 'min-width') === '44px', `${cls}: min-width is 44px`).toBe(true)
+      expect(lastValue(bodies, 'height') === null, `${cls}: no height declared`).toBe(true)
+      expect(lastValue(bodies, 'max-height') === null, `${cls}: no max-height declared`).toBe(true)
     })
   }
 })

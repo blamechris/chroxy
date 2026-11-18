@@ -2361,9 +2361,9 @@ jobs:
         # #8779 — the shared modal footer buttons (New Session enabled and
         # creating, ConfirmDialog plain and danger, DirectoryBrowser) measured in a
         # real browser at 1280x800 and 360x740: expected buttons and states, at
-        # least 44x44, not clipped, covered or truncated. 30 = 5 cases x 2
-        # viewports x 3 checks; the floor catches a run that discovered nothing
-        # (#7447's class).
+        # least 44x44, box inside its footer and the viewport, topmost at its
+        # centre, label not overflowing. 30 = 5 cases x 2 viewports x 3 checks;
+        # the floor catches a run that discovered nothing (#7447's class).
         run: |
           set -o pipefail
           node packages/dashboard/scripts/modal-buttons-layout.test.mjs | tee /tmp/chroxy-modal-buttons-layout.tap
