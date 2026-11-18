@@ -71,7 +71,14 @@ export interface PermissionPromptProps {
    * #6773: `reason` carries the operator's free-text deny note (only on a Deny) —
    * the server feeds it back to the agent as the denial message.
    */
-  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: PermissionEditedInput | null, reason?: string) => void
+  /**
+   * Returns the store's `sendPermissionResponse` result when the caller passes it
+   * through: `'sent'` / `'queued'` mean the answer went out, `false` means it was
+   * REFUSED (disconnected, closing socket, or a retired request — #9222) and the
+   * prompt must stay answerable. A callback that returns nothing (`void`) is
+   * treated as sent, which is the pre-existing contract.
+   */
+  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: PermissionEditedInput | null, reason?: string) => 'sent' | 'queued' | false | void
   /**
    * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
    * derived by the renderer from the message's `originSessionId`. Rendered as
@@ -241,18 +248,27 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     const ruleOk = isRuleEligibleTool(tool) && providerSupportsRules
     const effective: PermissionDecision =
       (decision === 'allowSession' || decision === 'allowAlways') && !ruleOk ? 'allow' : decision
-    if (intervalRef.current) clearInterval(intervalRef.current)
     // #6543: carry the per-hunk / command edits on an approve only (never on deny).
     // #6773: carry the free-text deny reason on a deny only (trimmed; the reason
     // arg is passed ONLY when non-blank so a plain deny keeps the 3-arg call shape
     // and the server falls back to its default 'User denied').
     const isDeny = effective === 'deny'
     const trimmedReason = denyReason.trim()
-    if (isDeny && trimmedReason.length > 0) {
-      onRespond(requestId, effective, null, trimmedReason)
-    } else {
-      onRespond(requestId, effective, isDeny ? null : editedInput)
+    const result = isDeny && trimmedReason.length > 0
+      ? onRespond(requestId, effective, null, trimmedReason)
+      : onRespond(requestId, effective, isDeny ? null : editedInput)
+    if (result === false) {
+      // #9222 — the send was REFUSED (socket flipped to CLOSING, or the request
+      // was retired), so `answered` will never flip to release the latch. Release
+      // it so the prompt stays answerable, and leave the countdown running (the
+      // interval is only stopped once a send actually went out). The latch is held
+      // for the whole synchronous call above, so double-click / key-repeat
+      // protection (#2852) is unchanged.
+      submittingRef.current = false
+      setSubmitting(false)
+      return
     }
+    if (intervalRef.current) clearInterval(intervalRef.current)
   }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected, editedInput, denyReason])
 
   // #6287 — the Cmd/Ctrl+Y, Cmd/Ctrl+Shift+Y and Escape keyboard shortcuts moved
