@@ -405,7 +405,7 @@ The default provider is `claude-sdk` (the Claude Agent SDK, see #8266).
 
 1. **Credential route**: which credential Chroxy detects for a session (an `ANTHROPIC_API_KEY`, an OAuth token, an on-disk `claude login`, or a non-Claude provider key).
 2. **Billing class**: the label Chroxy assigns from that route (`api-key`, `subscription`, or `programmatic-credit`).
-3. **Cost estimate**: a dollar figure Chroxy computes locally from token counts and its own pricing table. The dashboard header badge shows this estimate for any class, and its tooltip says "Total session cost so far". The sidebar token view groups sessions by class and labels subscription sessions "Included (subscription)". Neither the label nor the estimate proves what a provider charged or deducted from an allowance.
+3. **Cost estimate**: a dollar figure Chroxy computes locally from token counts and its own pricing table. In its default `cost` mode the dashboard header badge shows the estimate whenever the provider reported usage, whatever the class, and its tooltip says "Total session cost so far" (some providers, such as `claude-tui`, report no cost). The sidebar token view groups sessions by class and labels subscription sessions "Included (subscription)". Neither the label nor the estimate proves what a provider charged or deducted from an allowance.
 
 What a vendor actually bills, what a subscription includes, and whether a subscription login may be driven by a third-party app are outside this repository and are **not verified here**. Check your provider account and Anthropic's current published terms.
 
