@@ -326,6 +326,8 @@ function describeConnectionFailure(reason) {
   switch (reason) {
     case 'not_running':
       return 'chroxy daemon is not running locally (no connection.json). Start it with `chroxy start`, or pass --url with CHROXY_AGENT_CONTROL_TOKEN set for a remote daemon.'
+    case 'liveness_unverified':
+      return "could not verify that the daemon recorded in connection.json is running (its process could not be inspected from here, e.g. inside a sandbox), so its token was not used. The record was left in place."
     case 'no_local_token':
       return 'chroxy daemon is running without an auth token (--no-auth) or the token could not be read locally.'
     case 'remote_requires_token':

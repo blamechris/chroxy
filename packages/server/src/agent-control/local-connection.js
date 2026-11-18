@@ -29,6 +29,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { isIPv4 } from 'node:net'
 import { getConnectionInfoPath } from '../connection-info.js'
+import { probePidLiveness, PID_ALIVE, PID_DEAD } from '../utils/pid-liveness.js'
 
 export const DEFAULT_LOCAL_PORT = 8765
 const MIN_PORT = 1
@@ -37,16 +38,27 @@ const MAX_PORT = 65535
 /**
  * Non-mutating equivalent of `readConnectionInfo()` — reads and parses
  * connection.json (respecting `CHROXY_CONFIG_DIR` via `getConnectionInfoPath`)
- * and reports whether the recorded pid still looks alive, but never unlinks
- * the file. Returns `null` for "no file" or "unparseable", exactly like the
- * mutating version, so callers can't distinguish those cases either way.
+ * and classifies the recorded pid, but never unlinks the file. Returns `null`
+ * for "no file" or "unparseable".
+ *
+ * The pid is classified by `probePidLiveness` (#9074), and only a verified-alive
+ * record comes back unmarked:
+ *   - `_stale: true`: the pid is proven gone (ESRCH).
+ *   - `_livenessUnverified: true`: liveness could not be established. That covers
+ *     EPERM under a sandbox, any other probe error, and a missing or malformed pid.
+ *     It is neither "running" nor "dead": resolveLocalConnection refuses it
+ *     WITHOUT handing out the token.
+ * Neither marker deletes the file: a connection.json is evidence, not litter this
+ * module gets to clean up.
  *
  * @param {object} [deps]
  * @param {function} [deps.getConnectionInfoPath]
+ * @param {function} [deps.probePidLiveness] - test seam (mocked errno only)
  * @returns {object|null}
  */
 export function readConnectionInfoNonMutating(deps = {}) {
   const getPath = deps.getConnectionInfoPath || getConnectionInfoPath
+  const probe = typeof deps.probePidLiveness === 'function' ? deps.probePidLiveness : probePidLiveness
   const path = getPath()
   if (!existsSync(path)) return null
   let info
@@ -56,17 +68,9 @@ export function readConnectionInfoNonMutating(deps = {}) {
     return null
   }
   if (!info || typeof info !== 'object') return null
-  if (info.pid != null) {
-    try {
-      process.kill(info.pid, 0) // signal 0 = existence check, no side effect
-    } catch {
-      // Stale — the daemon that wrote this is gone. Report it as such
-      // (resolveLocalConnection treats a dead pid the same as "not running"
-      // below) WITHOUT deleting the file — a stale connection.json is
-      // evidence, not litter this module gets to clean up.
-      return { ...info, _stale: true }
-    }
-  }
+  const liveness = probe(info.pid)
+  if (liveness === PID_DEAD) return { ...info, _stale: true }
+  if (liveness !== PID_ALIVE) return { ...info, _livenessUnverified: true }
   return info
 }
 
@@ -165,13 +169,23 @@ function loopbackPortFromUrl(url) {
  *
  * @param {object} [deps] - injection seam for tests
  * @param {function} [deps.readConnectionInfo]
- * @returns {{ ok: true, url: string, token: string|null, port: number } | { ok: false, reason: string }}
+ * A record whose pid is proven gone resolves `not_running`. A record whose liveness
+ * could not be verified (`_livenessUnverified`, #9074) resolves
+ * `liveness_unverified` BEFORE the token is read, so this resolver never hands out the
+ * primary bearer on an unverified record. A verified-alive pid is not proof of the
+ * daemon's identity either (see utils/pid-liveness.js); the existing auth and
+ * transport checks still apply to whatever is dialed.
+ *
+ * @returns {{ ok: true, url: string, token: string|null, port: number } | { ok: false, reason: 'not_running'|'liveness_unverified' }}
  */
 export function resolveLocalConnection(deps = {}) {
   const readInfo = deps.readConnectionInfo || readConnectionInfoNonMutating
   const info = readInfo()
   if (!info || info._stale) {
     return { ok: false, reason: 'not_running' }
+  }
+  if (info._livenessUnverified) {
+    return { ok: false, reason: 'liveness_unverified' }
   }
   const port =
     (isValidPort(info.port) && info.port)

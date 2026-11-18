@@ -23,7 +23,9 @@ const err = (s) => process.stderr.write(`${s}\n`)
 async function connectToLocalDaemon(deps = {}) {
   const resolveLocalConnection = deps.resolveLocalConnection || (await import('../agent-control/local-connection.js')).resolveLocalConnection
   const conn = resolveLocalConnection()
-  if (!conn.ok) return { ok: false, reason: 'not_running' }
+  // #9074: keep "could not verify" distinct from "not running"; both refuse before
+  // any token is used.
+  if (!conn.ok) return { ok: false, reason: conn.reason === 'liveness_unverified' ? 'liveness_unverified' : 'not_running' }
   if (!conn.token) return { ok: false, reason: 'no_token' }
   const { AgentControlClient } = deps.AgentControlClient ? { AgentControlClient: deps.AgentControlClient } : await import('../agent-control/client.js')
   const client = new AgentControlClient({ url: conn.url, token: conn.token, silent: true, deviceName: 'chroxy-agent-cli' })
@@ -42,6 +44,7 @@ async function connectToLocalDaemon(deps = {}) {
 function reportConnectFailure(result) {
   switch (result.reason) {
     case 'not_running': err('Chroxy server is not running. Start it with `chroxy start`.'); break
+    case 'liveness_unverified': err("Could not verify that the Chroxy daemon in connection.json is running (its process could not be inspected from here, e.g. inside a sandbox). Its token was not used and the record was left in place. Run this where the daemon's process is visible."); break
     case 'no_token': err('Server is running without an auth token: agent management is unavailable.'); break
     default: err(`Could not reach the daemon: ${result.message || result.reason}`)
   }

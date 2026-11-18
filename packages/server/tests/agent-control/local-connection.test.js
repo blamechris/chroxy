@@ -14,13 +14,13 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import {
   resolveLocalConnection,
   resolveConnectionTarget,
   readConnectionInfoNonMutating,
   validateExplicitUrl,
 } from '../../src/agent-control/local-connection.js'
+import { probePidLiveness } from '../../src/utils/pid-liveness.js'
 
 describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   let dir
@@ -42,8 +42,15 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   // inside the latter rather than passing `getConnectionInfoPath` straight
   // through (which `resolveLocalConnection` simply ignores, silently
   // falling back to the REAL default `~/.chroxy/connection.json`).
-  const readDeps = () => ({ getConnectionInfoPath: () => connFile })
-  const resolveDeps = () => ({ readConnectionInfo: () => readConnectionInfoNonMutating(readDeps()) })
+  //
+  // #9074: no real pid is probed. `readDeps` runs the real classifier with a MOCKED
+  // `kill` (synthetic pid 4242 answers "alive" by default; a case passes its own).
+  const readDeps = (kill = () => {}) => ({
+    getConnectionInfoPath: () => connFile,
+    probePidLiveness: (pid) => probePidLiveness(pid, { kill }),
+  })
+  const resolveDeps = (kill) => ({ readConnectionInfo: () => readConnectionInfoNonMutating(readDeps(kill)) })
+  const SYNTHETIC_PID = 4242
 
   it('missing connection.json resolves to a typed not_running failure', () => {
     assert.equal(readConnectionInfoNonMutating(readDeps()), null)
@@ -57,7 +64,7 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   })
 
   it('a LIVE pid resolves ok:true with the local port and token', () => {
-    writeFileSync(connFile, JSON.stringify({ pid: process.pid, port: 9123, apiToken: 'tok-live' }), 'utf-8')
+    writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, port: 9123, apiToken: 'tok-live' }), 'utf-8')
     const result = resolveLocalConnection(resolveDeps())
     assert.equal(result.ok, true)
     assert.equal(result.port, 9123)
@@ -66,28 +73,29 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   })
 
   it('a DEAD pid resolves not_running AND leaves the stale file on disk (never deletes it)', () => {
-    // Spawn a real child and let it exit, so its pid is genuinely free.
-    const child = spawnSync(process.execPath, ['-e', 'process.exit(0)'])
-    assert.equal(child.status, 0)
-    const deadPid = child.pid
-    writeFileSync(connFile, JSON.stringify({ pid: deadPid, port: 9123, apiToken: 'tok-dead' }), 'utf-8')
+    // #9074: a mocked ESRCH stands in for a genuinely free pid (no real child, no real probe).
+    writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, port: 9123, apiToken: 'tok-dead' }), 'utf-8')
+    const esrch = () => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }) }
 
-    const result = resolveLocalConnection(resolveDeps())
+    const result = resolveLocalConnection(resolveDeps(esrch))
     assert.equal(result.ok, false)
     assert.equal(result.reason, 'not_running')
     assert.ok(existsSync(connFile), 'a stale connection.json must NOT be deleted by this read-only module')
   })
 
-  it('a missing pid field (no liveness claim) is trusted as-is', () => {
+  it('a missing pid field is NOT trusted: liveness cannot be verified, so it is refused (#9074)', () => {
+    // Behaviour change in #9074: before, a pid-less record was trusted as-is and its
+    // token handed out. Every real writer records a pid, so a pid-less record has no
+    // liveness claim at all, and the resolver now refuses it before reading the token.
     writeFileSync(connFile, JSON.stringify({ port: 9123, apiToken: 'tok-no-pid' }), 'utf-8')
     const result = resolveLocalConnection(resolveDeps())
-    assert.equal(result.ok, true)
-    assert.equal(result.port, 9123)
+    assert.deepEqual(result, { ok: false, reason: 'liveness_unverified' })
+    assert.ok(existsSync(connFile))
   })
 
   it('an out-of-range port field is never trusted (falls back to default, not the invalid value)', () => {
     for (const badPort of [0, -1, 70000, 1.5, 'nine']) {
-      writeFileSync(connFile, JSON.stringify({ pid: process.pid, port: badPort, apiToken: 'tok' }), 'utf-8')
+      writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, port: badPort, apiToken: 'tok' }), 'utf-8')
       const result = resolveLocalConnection(resolveDeps())
       assert.equal(result.ok, true)
       assert.notEqual(result.port, badPort)
@@ -95,7 +103,7 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   })
 
   it('a port derived from httpUrl/wsUrl is used ONLY when the URL host is loopback', () => {
-    writeFileSync(connFile, JSON.stringify({ pid: process.pid, httpUrl: 'http://127.0.0.1:9200/dashboard', apiToken: 'tok' }), 'utf-8')
+    writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, httpUrl: 'http://127.0.0.1:9200/dashboard', apiToken: 'tok' }), 'utf-8')
     const local = resolveLocalConnection(resolveDeps())
     assert.equal(local.ok, true)
     assert.equal(local.port, 9200)
@@ -103,7 +111,7 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   })
 
   it('a public tunnel URL\'s port is NEVER extracted for the local dial target', () => {
-    writeFileSync(connFile, JSON.stringify({ pid: process.pid, httpUrl: 'https://some-tunnel.trycloudflare.com:54321/', apiToken: 'tok' }), 'utf-8')
+    writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, httpUrl: 'https://some-tunnel.trycloudflare.com:54321/', apiToken: 'tok' }), 'utf-8')
     const local = resolveLocalConnection(resolveDeps())
     assert.equal(local.ok, true)
     // A non-default URL port survives URL normalization and exercises the guard.
@@ -114,7 +122,7 @@ describe('readConnectionInfoNonMutating / resolveLocalConnection', () => {
   })
 
   it('the explicit port field is preferred over a loopback URL-derived one', () => {
-    writeFileSync(connFile, JSON.stringify({ pid: process.pid, port: 8888, httpUrl: 'http://127.0.0.1:9999/', apiToken: 'tok' }), 'utf-8')
+    writeFileSync(connFile, JSON.stringify({ pid: SYNTHETIC_PID, port: 8888, httpUrl: 'http://127.0.0.1:9999/', apiToken: 'tok' }), 'utf-8')
     const local = resolveLocalConnection(resolveDeps())
     assert.equal(local.port, 8888)
   })
@@ -166,7 +174,7 @@ describe('resolveConnectionTarget', () => {
   it('a running local daemon with a token resolves ok:true with source "local"', () => {
     const result = resolveConnectionTarget({
       env: {},
-      deps: { readConnectionInfo: () => ({ pid: process.pid, port: 8765, apiToken: 'tok-local' }) },
+      deps: { readConnectionInfo: () => ({ pid: 4242, port: 8765, apiToken: 'tok-local' }) },
     })
     assert.deepEqual(result, { ok: true, url: 'ws://127.0.0.1:8765', token: 'tok-local', source: 'local' })
   })
@@ -277,7 +285,7 @@ describe('resolveConnectionTarget: ws:// to a non-loopback host (#7969)', () => 
   })
 
   it('the local default path is untouched by the option (no explicit URL, nothing to refuse)', () => {
-    const deps = { readConnectionInfo: () => ({ pid: process.pid, port: 8765, apiToken: 'tok-local' }) }
+    const deps = { readConnectionInfo: () => ({ pid: 4242, port: 8765, apiToken: 'tok-local' }) }
     assert.deepEqual(
       resolveConnectionTarget({ env: {}, deps }),
       { ok: true, url: 'ws://127.0.0.1:8765', token: 'tok-local', source: 'local' },
@@ -361,7 +369,7 @@ describe('validateExplicitUrl (#7969)', () => {
       ['wsUrl', 'ws://[::1]:9305/', 9305],
     ]
     for (const [field, url, port] of cases) {
-      const info = { pid: process.pid, [field]: url, apiToken: 'tok' }
+      const info = { pid: 4242, [field]: url, apiToken: 'tok' }
       assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, port, `${field}: ${url}`)
     }
   })
@@ -372,7 +380,7 @@ describe('validateExplicitUrl (#7969)', () => {
     // port here, and so must this.
     for (const url of ['http://127.0.0.2:9300/', 'http://127.1.2.3:9300/', 'http://127.0.0.1.evil.com:9301/', 'http://0.0.0.0:9302/', 'http://localhost.:9303/', 'http://foo.localhost:9304/']) {
       for (const field of ['httpUrl', 'wsUrl']) {
-        const info = { pid: process.pid, [field]: url, apiToken: 'fixture' }
+        const info = { pid: 4242, [field]: url, apiToken: 'fixture' }
         const result = resolveLocalConnection({ readConnectionInfo: () => info })
         assert.equal(result.port, 8765, `${field}: ${url} must not donate its port`)
         assert.equal(result.url, 'ws://127.0.0.1:8765', `${field}: ${url}`)
@@ -382,7 +390,80 @@ describe('validateExplicitUrl (#7969)', () => {
 
   it('the gate and the port fallback disagree on 127.0.0.2, deliberately', () => {
     assert.deepEqual(validateExplicitUrl('ws://127.0.0.2:9'), { ok: true, insecureRemoteWs: false }, 'the gate admits it as an explicit URL, and not as an insecure remote one')
-    const info = { pid: process.pid, httpUrl: 'http://127.0.0.2:9300/', apiToken: 'fixture' }
+    const info = { pid: 4242, httpUrl: 'http://127.0.0.2:9300/', apiToken: 'fixture' }
     assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, 8765, 'the fallback does not borrow its port')
+  })
+})
+
+// #9074: liveness of the recorded pid, by MOCKED errno only (no real pid is probed).
+describe('readConnectionInfoNonMutating / resolveLocalConnection: unverified liveness (#9074)', () => {
+  let dir
+  let connFile
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-agent-control-liveness-'))
+    connFile = join(dir, 'connection.json')
+  })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  const errno = (code) => Object.assign(new Error(code), { code })
+  const TOKEN = 'tok-must-not-be-handed-out'
+  const write = (extra = {}) => writeFileSync(connFile, JSON.stringify({ pid: 4242, port: 9123, apiToken: TOKEN, ...extra }), 'utf-8')
+  const readWith = (kill) => () => readConnectionInfoNonMutating({
+    getConnectionInfoPath: () => connFile,
+    probePidLiveness: (pid) => probePidLiveness(pid, { kill }),
+  })
+
+  it('EPERM marks the record unverified and the resolver refuses BEFORE handing out the token', () => {
+    // Mutation: drop the `_livenessUnverified` refusal in resolveLocalConnection -> the
+    // result carries the token and this goes red.
+    write()
+    const read = readWith(() => { throw errno('EPERM') })
+    const info = read()
+    assert.equal(info._livenessUnverified, true)
+    assert.equal(info._stale, undefined, 'unverified is not dead')
+    const result = resolveLocalConnection({ readConnectionInfo: read })
+    assert.deepEqual(result, { ok: false, reason: 'liveness_unverified' })
+    assert.equal(JSON.stringify(result).includes(TOKEN), false, 'no token in a refused result')
+    assert.ok(existsSync(connFile), 'the record is kept')
+  })
+
+  it('a missing or malformed pid is unverified, not running and not stale', () => {
+    for (const pid of [undefined, 0, -1, '4242']) {
+      write({ pid })
+      let probed = 0
+      const read = readWith(() => { probed++ })
+      assert.deepEqual(resolveLocalConnection({ readConnectionInfo: read }), { ok: false, reason: 'liveness_unverified' }, `pid ${JSON.stringify(pid)}`)
+      assert.equal(probed, 0, `pid ${JSON.stringify(pid)} is never probed`)
+    }
+  })
+
+  it('ESRCH stays not_running, and the file is still never deleted', () => {
+    write()
+    const read = readWith(() => { throw errno('ESRCH') })
+    assert.equal(read()._stale, true)
+    assert.deepEqual(resolveLocalConnection({ readConnectionInfo: read }), { ok: false, reason: 'not_running' })
+    assert.ok(existsSync(connFile))
+  })
+
+  it('positive control: a verified-alive pid resolves with the local url and token', () => {
+    write()
+    const result = resolveLocalConnection({ readConnectionInfo: readWith(() => {}) })
+    assert.equal(result.ok, true)
+    assert.equal(result.url, 'ws://127.0.0.1:9123')
+    assert.equal(result.token, TOKEN)
+  })
+
+  it('resolveConnectionTarget passes liveness_unverified through, and an explicit URL never consults the pid', () => {
+    write()
+    const read = readWith(() => { throw errno('EPERM') })
+    assert.deepEqual(resolveConnectionTarget({ env: {}, deps: { readConnectionInfo: read } }), { ok: false, reason: 'liveness_unverified' })
+    let consulted = 0
+    const explicit = resolveConnectionTarget({
+      env: { CHROXY_AGENT_CONTROL_URL: 'ws://127.0.0.1:9123', CHROXY_AGENT_CONTROL_TOKEN: 'explicit-token' },
+      deps: { readConnectionInfo: () => { consulted++; return null } },
+    })
+    assert.equal(explicit.ok, true)
+    assert.equal(explicit.token, 'explicit-token')
+    assert.equal(consulted, 0, 'the explicit path does not read connection.json at all')
   })
 })
