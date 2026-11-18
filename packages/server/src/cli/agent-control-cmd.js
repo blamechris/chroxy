@@ -52,14 +52,15 @@ export function registerAgentControlCommand(program) {
     .option('--allow-insecure-ws', 'Accept a ws:// --url (or CHROXY_AGENT_CONTROL_URL) to a non-loopback host, sending the bearer token in cleartext before any key exchange — anyone on the network path can read it and --pin-identity cannot protect it. Argv only: there is no environment-variable equivalent. Prints a startup WARNING. Prefer wss://.')
     .option('--pin-identity <key>', "Pin the daemon's Ed25519 identity public key (base64) — or set CHROXY_AGENT_CONTROL_PIN")
     .option('--allow-command-approvals', "Let the connected planner approve command-style tool calls (Bash, PowerShell, Monitor, codex shell) via chroxy_respond_permission — off by default because the protected-path floor cannot see through an arbitrary command string (e.g. `cat .env` looks like an ordinary, unfloored Bash call). Still subject to the floored/ownership gates. Logs a startup warning when enabled.")
+    .option('--principal', 'Read-only observer mode on a scoped, revocable agent principal token instead of the primary token (#9121). The token is read ONLY from the 0600 file named by CHROXY_AGENT_TOKEN_FILE; connection.json and CHROXY_AGENT_CONTROL_TOKEN are never read. Loopback only: the default is ws://127.0.0.1:8765, or a loopback --url. Tools: chroxy_list_sessions, chroxy_get_events, chroxy_pending_permissions, chroxy_wait_events, chroxy_daemon_info; every mutation tool is absent and refused.')
     .action(async (options) => {
       if (!options.stdio) {
         process.stderr.write('chroxy agent-control requires --stdio (the only supported mode).\n')
-        process.stderr.write('Usage: chroxy agent-control --stdio [--read-only] [--url <url>] [--pin-identity <key>] [--allow-command-approvals] [--allow-insecure-ws]\n')
+        process.stderr.write('Usage: chroxy agent-control --stdio [--principal] [--read-only] [--url <url>] [--pin-identity <key>] [--allow-command-approvals] [--allow-insecure-ws]\n')
         process.exitCode = 1
         return
       }
       const { main } = await import('../agent-control/mcp-server.js')
-      await main({ readOnly: options.readOnly, url: options.url, identityPublicKey: options.pinIdentity, allowCommandApprovals: options.allowCommandApprovals, allowInsecureWs: options.allowInsecureWs })
+      await main({ principal: options.principal, readOnly: options.readOnly, url: options.url, identityPublicKey: options.pinIdentity, allowCommandApprovals: options.allowCommandApprovals, allowInsecureWs: options.allowInsecureWs })
     })
 }

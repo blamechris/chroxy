@@ -290,6 +290,103 @@ of `npx chroxy agent-control --stdio`. **The `npx chroxy agent-control --stdio` 
 once this ships in a published release** — swap it back in at that point; until then,
 `src/cli.js` is the entry point every host config below must point at.
 
+## Principal mode: a scoped, read-only observer (#9121)
+
+Every mode above authenticates with the daemon's **primary token**, which carries full host
+authority. The ownership and permission gates run in this MCP process, so any client holding
+that token can skip them. `--principal` instead runs agent-control on an **agent principal**
+token ([`../security/agent-principals.md`](../security/agent-principals.md), epic #9112). That
+token is scoped to named sessions, expires and can be revoked, and the daemon enforces its
+scope. This is S6 of that epic: the **read side only**. A supervisor (one coordinating chat
+watching several implementer sessions, say) can follow status, output and permission prompts
+without polling a UI, and without being handed the primary token.
+
+```bash
+CHROXY_AGENT_TOKEN_FILE=/path/to/principal.token chroxy agent-control --stdio --principal
+CHROXY_AGENT_TOKEN_FILE=/path/to/principal.token chroxy agent-control --stdio --principal --url ws://127.0.0.1:9000
+```
+
+**Availability.** The daemon can authenticate a principal, but nothing can **mint** one yet.
+`chroxy agent grant` refuses with "agent principals not yet enabled" until the audit writer
+and kill switch (S11) and a minting step land; contract §12 fixes that order. Until then
+there is no way to obtain a principal token outside the test fixtures, so this mode cannot
+be used against a real daemon.
+
+**Credential rules.** Each one fails closed: the process refuses to start, prints one stderr
+line, exits non-zero and writes nothing on stdout.
+
+- The token is read **only** from the file named by `CHROXY_AGENT_TOKEN_FILE`. There is no
+  token argv flag. The file must be a regular file, not a symlink, owned by this user, with
+  mode exactly `0600`, at most 4 KiB, holding one base64url line. It is re-read on every
+  reconnect.
+- **No fallback to the primary token.** Principal mode never reads
+  `CHROXY_AGENT_CONTROL_TOKEN` and never opens `connection.json`, so the primary token is
+  not loaded into the process at all. As a consequence it can't learn a non-default port
+  from `connection.json`: it dials `ws://127.0.0.1:8765` unless you pass `--url`.
+- **Loopback only.** The daemon accepts a principal token only from a loopback peer (D8), so
+  `--url` / `CHROXY_AGENT_CONTROL_URL` must name `localhost`, `127.0.0.0/8` or `[::1]`, with
+  either scheme. A remote URL is refused before any socket opens, and `--allow-insecure-ws`
+  does not change that.
+- `--principal` is read-only by construction. `--read-only` is implied, and
+  `--allow-command-approvals` and `--allow-insecure-ws` print a "has no effect" line.
+
+**Tools.** Each one is a daemon-side `principal_*` read. The daemon decides what is visible
+(only the sessions the grant names), redacts it and bounds it. A session outside the grant is
+refused `scope_denied`, exactly as if it did not exist.
+
+| Tool | Daemon read | Returns |
+|---|---|---|
+| `chroxy_list_sessions` | `principal_sessions_snapshot` (S5) | granted sessions at `generatedAt`: observed `status`, `declaredStatus` (the session's own claim), `blockers` and `model` requested/observed. `blockers` is an observed snapshot: an empty list means none was seen at that instant, not that nothing will act later |
+| `chroxy_get_events` | `principal_events_read` (S3) | one page of the session's normalized journal, an opaque `cursor`, `more`, and a `gap` when events could not be served |
+| `chroxy_pending_permissions` | `principal_pending_permissions` (S4) | waiting permission requests: tool, `floored`, `explicitConsent`, `nonDelegable`, deadline; never the input. It cannot answer them |
+| `chroxy_wait_events` | `principal_subscribe` as a doorbell, then `principal_events_read` | blocks until any watched session has events past its cursor, a gap, or the timeout (max 60 s) |
+| `chroxy_daemon_info` | handshake metadata | version, encryption, capabilities |
+
+The four mutation tools are not advertised, and a direct call to one is refused
+`READ_ONLY_MODE` before anything is sent. As a second line, the client refuses to put any
+frame type on the wire outside the transport handshake and the five `principal_*` reads.
+
+**Waiting instead of polling.** `chroxy_wait_events` returns `{ events, cursors, gaps, more,
+timedOut }`. `cursors` is an array in exactly the shape of the `cursors` argument: pass it
+back unchanged on the next call to continue where this one stopped. Permission requests are
+journal events, so a session that stops on a permission prompt wakes the call. Read
+`chroxy_pending_permissions` for the details.
+
+Limits:
+
+- `timedOut: true` with no events means nothing new arrived, never that the work is finished.
+- A `gaps` entry means events between your cursor and now could not be served (evicted,
+  journal reset, restart loss, unknown cursor).
+- A gap with `ended: true` means the daemon ended that session's subscription: it was
+  removed, is no longer granted, or overflowed. It is not read again in that call; the next
+  call subscribes again from your cursor (a removed or no-longer-granted session is then
+  refused `scope_denied`).
+- Only one wait runs at a time per connection; a second is refused `WAIT_IN_PROGRESS`.
+- The whole call returns within `timeoutMs` plus about 5 s for the final reads, or fails
+  with `TIMEOUT`. Keep `timeoutMs` comfortably under your MCP host's own tool-call timeout
+  (many default to about 60 s), for example 30–45 s.
+
+**Connection loss and revocation.** If the connection drops, a blocked wait returns an error
+straight away instead of hanging, and the next call reconnects; resume with your last
+`cursors`. A revoked or expired principal is cut off by the daemon (close code 4401) the next
+time its connection is checked. The daemon checks it on the next frame the principal sends,
+so a wait can stay blocked until that happens or its own timeout passes. Every later call
+fails authentication.
+
+Example (Claude Code CLI). The env var holds a **path**, not the token, so the config itself
+contains no secret:
+
+```bash
+claude mcp add chroxy-observer \
+  --env CHROXY_AGENT_TOKEN_FILE=/absolute/path/to/principal.token \
+  -- node /absolute/path/to/chroxy/packages/server/src/cli.js agent-control --stdio --principal
+```
+
+The legacy (primary-token) modes print a one-line startup `NOTICE` that they hold full host
+authority and that `--principal` is the scoped alternative. Moving the default off the
+primary token is S16. The `chroxy doctor` row that warns about a primary-token MCP
+configuration, and #8217 / #8218, are not part of this slice.
+
 ## Host configuration examples (token-free, local case)
 
 > Claude Code and Gemini CLI syntax below has been independently verified against each

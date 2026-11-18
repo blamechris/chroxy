@@ -29,6 +29,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { isIPv4 } from 'node:net'
 import { getConnectionInfoPath } from '../connection-info.js'
+import { readTrustedSecretFile } from '../trusted-file-read.js'
 
 export const DEFAULT_LOCAL_PORT = 8765
 const MIN_PORT = 1
@@ -272,4 +273,76 @@ export function resolveConnectionTarget(opts = {}) {
     return { ok: false, reason: 'no_local_token' }
   }
   return { ok: true, url: local.url, token: local.token, source: 'local' }
+}
+
+/** Env var naming the 0600 file that holds an agent principal token (#9121). */
+export const PRINCIPAL_TOKEN_FILE_ENV = 'CHROXY_AGENT_TOKEN_FILE'
+
+// A principal token is `randomBytes(32).toString('base64url')` (43 chars, contract
+// section 3). Accept the base64url alphabet with a generous length band, so a later
+// token length needs no client change, and refuse anything else (whitespace, a pasted
+// JSON blob) before it is ever sent.
+const PRINCIPAL_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,256}$/
+const PRINCIPAL_TOKEN_FILE_MAX_SIZE = 4096
+
+/**
+ * Read a principal token file (#9121) through the trusted-file read: exactly mode
+ * 0600, owned by this uid, not a symlink, at most 4 KiB, read from the same fd that
+ * was checked. One trailing newline is tolerated. Never throws for an expected
+ * outcome and never puts the file's content into a reason.
+ *
+ * @param {string} path
+ * @param {object} [deps] - `readTrustedSecretFile` test seam
+ * @returns {{ ok: true, token: string } | { ok: false, reason: 'principal_token_file_absent'|'principal_token_file_untrusted'|'principal_token_file_malformed', code?: string }}
+ */
+export function readPrincipalTokenFile(path, deps = {}) {
+  const read = deps.readTrustedSecretFile || readTrustedSecretFile
+  const result = read(path, { mode: 0o600, checkOwner: true, maxSize: PRINCIPAL_TOKEN_FILE_MAX_SIZE })
+  if (result.status === 'absent') return { ok: false, reason: 'principal_token_file_absent' }
+  if (result.status !== 'ok') return { ok: false, reason: 'principal_token_file_untrusted', code: typeof result.code === 'string' ? result.code.slice(0, 32) : 'EUNKNOWN' }
+  const token = String(result.content).replace(/\r?\n$/, '')
+  if (!PRINCIPAL_TOKEN_PATTERN.test(token)) return { ok: false, reason: 'principal_token_file_malformed' }
+  return { ok: true, token }
+}
+
+/**
+ * Resolve the connection for agent-control's principal (read-only observer) mode
+ * (#9121, S6 of #9112; docs/security/agent-principals.md sections 2 and 3).
+ *
+ * - The token file is validated FIRST, and the token comes ONLY from the file named
+ *   by `CHROXY_AGENT_TOKEN_FILE` (`readPrincipalTokenFile`). This path never reads
+ *   `CHROXY_AGENT_CONTROL_TOKEN` and NEVER opens connection.json, so the primary
+ *   token is not loaded into this process at all, not even to be discarded. A
+ *   missing or untrusted file fails closed; there is no fallback in either direction.
+ * - Because connection.json is not read, the local default is `ws://127.0.0.1` at
+ *   DEFAULT_LOCAL_PORT. A daemon on another port is named with an explicit
+ *   `--url` / `CHROXY_AGENT_CONTROL_URL`, which must pass `validateExplicitUrl`
+ *   (with no insecure opt-in) and must then name a host that stays on this machine
+ *   (`hostStaysOnThisMachine`), whatever its scheme: the daemon accepts a principal
+ *   only from a loopback peer (D8).
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.explicitUrl]
+ * @param {string} [opts.tokenFile] - overrides the env var (tests / programmatic callers)
+ * @param {object} [opts.env]
+ * @param {object} [opts.deps] - forwarded to readPrincipalTokenFile
+ * @returns {{ ok: true, url: string, token: string, source: 'explicit'|'default' } | { ok: false, reason: string, code?: string }}
+ */
+export function resolvePrincipalConnectionTarget(opts = {}) {
+  const env = opts.env || process.env
+  const tokenFile = opts.tokenFile || env[PRINCIPAL_TOKEN_FILE_ENV] || null
+  if (!tokenFile) return { ok: false, reason: 'principal_token_file_unset' }
+  const read = readPrincipalTokenFile(tokenFile, opts.deps)
+  if (!read.ok) return read
+
+  const explicitUrl = opts.explicitUrl || env.CHROXY_AGENT_CONTROL_URL || null
+  if (!explicitUrl) {
+    return { ok: true, url: `ws://127.0.0.1:${DEFAULT_LOCAL_PORT}`, token: read.token, source: 'default' }
+  }
+  const validation = validateExplicitUrl(explicitUrl, { allowInsecureWs: false })
+  if (!validation.ok) return validation
+  if (!hostStaysOnThisMachine(new URL(explicitUrl).hostname)) {
+    return { ok: false, reason: 'principal_requires_loopback' }
+  }
+  return { ok: true, url: explicitUrl, token: read.token, source: 'explicit' }
 }
