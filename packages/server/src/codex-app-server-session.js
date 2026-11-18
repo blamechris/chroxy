@@ -16,6 +16,7 @@ import {
   MODEL_UNSUPPORTED_CODE, detectModelRejection, codexClientKey, recordModelRejection,
   rejectedDefaultFor, rejectedModelsFor, suggestFallbackModel,
 } from './codex-model-rejections.js'
+import { describeCodexError, formatCodexError, UNREADABLE_CODEX_ERROR } from './codex-error-text.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
@@ -1545,11 +1546,17 @@ export class CodexAppServerSession extends BaseSession {
   /**
    * #8710 — what a turn-ending codex error tells the client. A usage limit
    * carries codex's own sentence (it names when the limit resets) and the
-   * `usage_limit` code claude-tui sessions use for the same stop (#8400); any
-   * other error keeps the raw payload this path has always shown, and a failed
-   * turn that names no error says only that it failed.
+   * `usage_limit` code claude-tui sessions use for the same stop (#8400); a
+   * failed turn that names no error says only that it failed.
    * `usageLimitExceeded` is the v2 `CodexErrorInfo` spelling (codex-cli 0.163.0
    * `generate-json-schema`).
+   *
+   * #8610 — any other error shows its readable message, decoding nested
+   * JSON-encoded errors within fixed bounds (codex-error-text.js), with HTTP
+   * status and error type as secondary detail. When nothing readable is found it
+   * says so; the raw payload is never shown. The usage-limit and model-rejection
+   * branches above keep their precedence, and nothing here changes whether the
+   * turn ends.
    */
   _terminalErrorPayload(err, raw) {
     if (err?.codexErrorInfo === 'usageLimitExceeded' && typeof err.message === 'string' && err.message) {
@@ -1558,7 +1565,8 @@ export class CodexAppServerSession extends BaseSession {
     const rejection = detectModelRejection(err, raw)
     if (rejection) return this._modelUnsupportedPayload(rejection)
     if (raw == null) return { message: 'Codex turn failed' }
-    return { message: `Codex error: ${JSON.stringify(raw).slice(0, 200)}` }
+    const readable = describeCodexError(err ?? raw)
+    return { message: readable ? formatCodexError(readable) : UNREADABLE_CODEX_ERROR }
   }
 
   /**

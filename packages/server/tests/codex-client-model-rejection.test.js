@@ -333,10 +333,10 @@ describe('CodexAppServerSession — backend model rejection (#8609)', () => {
     } finally { s.destroy() }
   })
 
-  it('an unrelated error keeps its raw-payload message and no model code', async () => {
+  it('an unrelated error shows its readable message and no model code (#8610)', async () => {
     const { s } = await startSession()
     try {
-      assert.deepEqual(s._terminalErrorPayload({ message: 'boom' }, { message: 'boom' }), { message: 'Codex error: {"message":"boom"}' })
+      assert.deepEqual(s._terminalErrorPayload({ message: 'boom' }, { message: 'boom' }), { message: 'Codex error: boom' })
     } finally { s.destroy() }
   })
 
