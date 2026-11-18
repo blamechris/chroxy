@@ -82,8 +82,10 @@ describe('maskToken (#1893)', () => {
 
     try {
       process.env.CHROXY_CONFIG_DIR = `${tmpDir}/chroxy-mask-test-${Date.now()}`
-      writeConnectionInfo({ apiToken: fullToken, wsUrl: 'ws://localhost:8765' })
-      const info = readConnectionInfo()
+      // #9074: a record is returned only for a verified-alive pid; this test is about
+      // token storage, so it records a pid and injects an "alive" probe (no real probe).
+      writeConnectionInfo({ apiToken: fullToken, wsUrl: 'ws://localhost:8765', pid: 4242 })
+      const info = readConnectionInfo({ probePidLiveness: () => 'alive' })
       assert.equal(info.apiToken, fullToken,
         'connection.json must store the full unmasked token for app authentication')
       assert.notEqual(info.apiToken, maskedToken,

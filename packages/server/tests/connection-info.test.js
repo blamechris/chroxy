@@ -1,6 +1,7 @@
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs'
+import { probePidLiveness } from '../src/utils/pid-liveness.js'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -36,7 +37,7 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://example.com?token=test-token-123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: process.pid,
+      pid: 4242,
     }
     writeConnectionInfo(info)
 
@@ -58,11 +59,11 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://test.example.com?token=tok-read-test',
       tunnelMode: 'cloudflare:named',
       startedAt: '2026-02-22T12:00:00.000Z',
-      pid: process.pid, // use current PID so liveness check passes
+      pid: 4242, // synthetic: the read below mocks the probe (#9074)
     }
     writeConnectionInfo(info)
 
-    const result = readConnectionInfo()
+    const result = readConnectionInfo({ probePidLiveness: (pid) => probePidLiveness(pid, { kill: () => {} }) })
     assert.deepEqual(result, info)
     cleanup()
   })
@@ -98,11 +99,11 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://roundtrip.example.com?token=tok-roundtrip-abc123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T08:30:00.000Z',
-      pid: process.pid, // use current PID so liveness check passes
+      pid: 4242, // synthetic: the read below mocks the probe (#9074)
     }
 
     writeConnectionInfo(info)
-    const result = readConnectionInfo()
+    const result = readConnectionInfo({ probePidLiveness: (pid) => probePidLiveness(pid, { kill: () => {} }) })
 
     assert.equal(result.wsUrl, info.wsUrl)
     assert.equal(result.httpUrl, info.httpUrl)
@@ -114,39 +115,71 @@ describe('connection-info', () => {
     cleanup()
   })
 
-  it('readConnectionInfo() returns null and cleans up when PID is dead (stale file)', () => {
-    cleanup()
-    const info = {
-      wsUrl: 'wss://stale.example.com',
-      httpUrl: 'https://stale.example.com',
-      apiToken: 'tok-stale',
-      connectionUrl: 'chroxy://stale.example.com?token=tok-stale',
-      tunnelMode: 'cloudflare:quick',
-      startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 99999, // non-existent process
-    }
-    writeConnectionInfo(info)
+  // #9074: the liveness of the recorded pid, by MOCKED errno only (no real pid is
+  // probed here). Only a verified-alive record is returned. The existing ESRCH cleanup
+  // is retained; every other failure, which used to delete too, now keeps the file.
+  describe('liveness (#9074)', () => {
+    const errno = (code) => Object.assign(new Error(code), { code })
+    const probeWith = (kill) => (pid) => probePidLiveness(pid, { kill })
+    const record = (extra = {}) => ({ wsUrl: 'wss://liveness.example.com', apiToken: 'tok-liveness', pid: 4242, ...extra })
 
-    const filePath = getConnectionInfoPath()
-    assert.ok(existsSync(filePath), 'file should exist before read')
+    it('a verified-alive pid returns the record', () => {
+      cleanup()
+      writeConnectionInfo(record())
+      assert.deepEqual(readConnectionInfo({ probePidLiveness: probeWith(() => {}) }), record())
+      cleanup()
+    })
 
-    const result = readConnectionInfo()
-    assert.equal(result, null, 'should return null for dead PID')
-    assert.ok(!existsSync(filePath), 'stale file should be removed')
-  })
+    it('a dead pid (ESRCH) returns null and removes the record, as before #9074', () => {
+      // ESRCH is the only proof of absence. Its existing cleanup is retained. Before
+      // #9074 every probe error deleted; the other outcomes now preserve the record
+      // (see the cases below).
+      // Mutation: drop the ESRCH removal -> the file survives and this goes red.
+      cleanup()
+      writeConnectionInfo(record())
+      assert.equal(readConnectionInfo({ probePidLiveness: probeWith(() => { throw errno('ESRCH') }) }), null)
+      assert.equal(existsSync(getConnectionInfoPath()), false, 'a proven-dead record is removed')
+      cleanup()
+    })
 
-  it('readConnectionInfo() returns info when no pid field is present', () => {
-    cleanup()
-    const info = {
-      wsUrl: 'wss://nopid.example.com',
-      httpUrl: 'https://nopid.example.com',
-      apiToken: 'tok-nopid',
-    }
-    writeConnectionInfo(info)
+    it('an unverified pid (EPERM) returns null and keeps the file', () => {
+      // Mutation: classify EPERM as alive -> the record (and its token) comes back.
+      cleanup()
+      writeConnectionInfo(record())
+      assert.equal(readConnectionInfo({ probePidLiveness: probeWith(() => { throw errno('EPERM') }) }), null, 'unverified is not healthy')
+      assert.ok(existsSync(getConnectionInfoPath()), 'unverified is not dead either')
+      cleanup()
+    })
 
-    const result = readConnectionInfo()
-    assert.deepEqual(result, info)
-    cleanup()
+    it('any other probe error is unverified: null, file kept', () => {
+      cleanup()
+      writeConnectionInfo(record())
+      assert.equal(readConnectionInfo({ probePidLiveness: probeWith(() => { throw errno('EINVAL') }) }), null)
+      assert.ok(existsSync(getConnectionInfoPath()))
+      cleanup()
+    })
+
+    it('a missing or malformed pid fails closed without probing: null, file kept', () => {
+      for (const pid of [undefined, null, 0, -1, 1.5, '4242', 2 ** 53]) {
+        cleanup()
+        writeConnectionInfo(record({ pid }))
+        let probed = 0
+        const result = readConnectionInfo({ probePidLiveness: probeWith(() => { probed++ }) })
+        assert.equal(result, null, `pid ${JSON.stringify(pid)} is never treated as alive`)
+        assert.equal(probed, 0, `pid ${JSON.stringify(pid)} is never probed (0 and negatives address process groups)`)
+        assert.ok(existsSync(getConnectionInfoPath()))
+      }
+      cleanup()
+    })
+
+    it('malformed JSON returns null and keeps the file', () => {
+      cleanup()
+      writeConnectionInfo(record())
+      writeFileSync(getConnectionInfoPath(), '{ not json', 'utf-8')
+      assert.equal(readConnectionInfo({ probePidLiveness: probeWith(() => {}) }), null)
+      assert.ok(existsSync(getConnectionInfoPath()))
+      cleanup()
+    })
   })
 
   it('getConnectionInfoPath() returns path inside config dir', () => {
