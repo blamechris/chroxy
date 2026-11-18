@@ -103,6 +103,27 @@ describe('codex willRetry on an active turn (#8754)', () => {
     } finally { cleanup() }
   })
 
+  it('willRetry: true re-arms the #6629 watchdog on every tick, does not mark the turn ended, and the turn goes on', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error', 'stream_start', 'stream_delta'])
+      openTurn(s)
+      s._onNotification(errorNote('turn-1', connectFailed(), { willRetry: true }))
+      const firstWatchdog = s._reconnectWatchdog
+      s._onNotification(errorNote('turn-1', connectFailed(), { willRetry: true }))
+      assert.ok(s._reconnectWatchdog, 'watchdog still armed')
+      assert.notEqual(s._reconnectWatchdog, firstWatchdog, 'watchdog re-armed (slides) on each tick')
+      assert.equal(s._endedNativeTurnIds.has('turn-1'), false, 'a retry is not an end')
+      const messageId = s._activeTurn.messageId
+      // codex recovers: its next notification for the same turn maps onto it.
+      s._onNotification({ method: 'item/agentMessage/delta', params: { threadId: THREAD, turnId: 'turn-1', delta: 'hi' } })
+      assert.deepEqual(ev.map(([e]) => e), ['stream_start', 'stream_delta'])
+      assert.equal(ev[1][1].messageId, messageId, 'same turn, no new one')
+      assert.equal(s._reconnectWatchdog, null, 'forward progress disarms the watchdog')
+      assert.equal(s._reconnectDeadline, null, 'forward progress disarms the deadline')
+    } finally { cleanup() }
+  })
+
   it('the one-shot deadline still fails a willRetry: true turn that never recovers', () => {
     const { s, timers, cleanup } = mkSession()
     try {
@@ -172,28 +193,36 @@ describe('codex willRetry with no turn open (#8754)', () => {
       }, { willRetry: false }))
       assert.deepEqual(ev.map(([e]) => e), ['error'], 'explicit false is an end with no turn open too')
       assert.equal(s._activeTurn, null, 'no turn is opened for it')
+      assert.equal(s._isBusy, false)
+      assert.equal(s._endedNativeTurnIds.has('turn-x'), true, 'recorded as ended (#8710 straggler filter)')
+      // A straggler for the ended turn opens nothing.
+      s._onNotification({ method: 'item/agentMessage/delta', params: { threadId: THREAD, turnId: 'turn-x', delta: 'late' } })
+      assert.equal(s._activeTurn, null, 'no phantom turn from a straggler')
     } finally { cleanup() }
   })
 
-  it('willRetry: true is not surfaced and opens no turn', () => {
-    const { s, cleanup } = mkSession()
-    try {
-      const ev = capture(s, ['error'])
-      s._onNotification(errorNote('turn-x', connectFailed(), { willRetry: true }))
-      assert.equal(ev.length, 0)
-      assert.equal(s._activeTurn, null)
-    } finally { cleanup() }
-  })
-
-  it('without willRetry, a reconnect-shaped message is still read as a retry (heuristic fallback)', () => {
-    const { s, cleanup } = mkSession()
-    try {
-      const ev = capture(s, ['error'])
-      s._onNotification(errorNote('turn-x', reconnectShaped()))
-      assert.equal(ev.length, 0)
-      assert.equal(s._activeTurn, null)
-    } finally { cleanup() }
-  })
+  // A retry with no turn open must neither open a turn nor mark codex's turn
+  // ended: its later notifications are live and are followed (#8710).
+  for (const [label, error, extra] of [
+    ['willRetry: true', connectFailed(), { willRetry: true }],
+    ['no willRetry, reconnect-shaped (heuristic fallback)', reconnectShaped(), {}],
+  ]) {
+    it(`${label}: not surfaced, no phantom turn, not marked ended, and later notifications are followed`, () => {
+      const { s, cleanup } = mkSession()
+      try {
+        const ev = capture(s, ['error', 'stream_start', 'stream_delta'])
+        s._onNotification(errorNote('turn-x', error, extra))
+        assert.equal(ev.length, 0, 'nothing surfaced')
+        assert.equal(s._activeTurn, null, 'no phantom turn')
+        assert.equal(s._isBusy, false, 'not marked busy')
+        assert.equal(s._endedNativeTurnIds.has('turn-x'), false, 'not marked ended')
+        s._onNotification({ method: 'item/agentMessage/delta', params: { threadId: THREAD, turnId: 'turn-x', delta: 'work' } })
+        assert.deepEqual(ev.map(([e]) => e), ['stream_start', 'stream_delta'], 'codex\'s turn is followed')
+        assert.ok(s._activeTurn, 'a turn is opened for the live notification')
+        assert.equal(s._activeTurn.turnId, 'turn-x')
+      } finally { cleanup() }
+    })
+  }
 })
 
 describe('_codexWillRetry (#8754)', () => {
