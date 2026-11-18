@@ -638,6 +638,15 @@ export interface SessionNotification {
    * need a server-side persistence model (see PR #4890 follow-ups).
    */
   readAt?: number;
+  /**
+   * #9222 — set to `Date.now()` when a roster removal (`session_list` prune or
+   * `session_timeout`) retires the session this alert belongs to. The alert is
+   * kept as history (#7353) but can never be answered: the permission banner
+   * renders it as a retired record and `sendPermissionResponse` refuses it.
+   * Only a removal the client OBSERVED stamps this, so a banner that merely
+   * predates its session's hydration is never mistaken for a closed one.
+   */
+  sessionClosedAt?: number;
 }
 
 /**

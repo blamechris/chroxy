@@ -4695,6 +4695,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
+    // #9222 — a request whose session this client watched leave the roster can
+    // never be answered. The banner renders such a row as a retired record, but a
+    // click can race the re-render, so the choke point refuses too (read FRESH
+    // from the store, not from the row that was on screen). Returning false keeps
+    // the callers' "only dismiss on a send" contract: the row is held, not erased.
+    if (get().sessionNotifications.some((n) => n.requestId === requestId && n.sessionClosedAt !== undefined)) {
+      return false;
+    }
     // allowSession: wire decision is still 'allow' — session-scoped behaviour
     // is implemented client-side via a follow-up set_permission_rules message.
     // #6771 allowAlways: sent VERBATIM — the server persists a durable

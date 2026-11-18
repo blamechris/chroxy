@@ -234,7 +234,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { filterThinking, nextMessageId, createEmptySessionPanels } from './utils';
+import { filterThinking, nextMessageId, createEmptySessionPanels, markSessionNotificationsClosed } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
@@ -5305,6 +5305,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           delete newStates[id];
         }
         patch.sessionStates = newStates;
+        // #9222 — keep the alerts as history but mark them retired, so a banner
+        // cannot keep offering Allow/Deny for a session this snapshot removed.
+        const closedNotifs = markSessionNotificationsClosed(get().sessionNotifications, removedIds, Date.now());
+        if (closedNotifs !== get().sessionNotifications) patch.sessionNotifications = closedNotifs as SessionNotification[];
         // #5163: drop the Control Room activity tree for any session that
         // dropped out of the list so a closed session's tree doesn't linger.
         let nextActivity = get().activity;
@@ -7189,6 +7193,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const patch: Partial<ConnectionState> = { sessionStates: newStates, sessions: newSessions };
         // The one removed id, in the shape both pruners take.
         const removedIds = [timeoutSessionId];
+        // #9222 — same retirement stamp as the session_list prune.
+        const closedNotifs = markSessionNotificationsClosed(get().sessionNotifications, removedIds, Date.now());
+        if (closedNotifs !== get().sessionNotifications) patch.sessionNotifications = closedNotifs as SessionNotification[];
         // #5163 — drop the Control Room activity tree for the timed-out session,
         // exactly as the session_list prune does. Without it the tree lingers for
         // a session the user can no longer select. `clearSessionActivity` returns

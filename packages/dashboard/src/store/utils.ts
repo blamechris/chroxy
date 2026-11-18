@@ -734,6 +734,26 @@ export function getOwn<T>(rec: Readonly<Record<string, T>> | null | undefined, k
  * holding a narrower projection of the roster can still use it — and so this
  * file keeps its "pure functions with no store dependency" property.
  */
+/**
+ * #9222 — stamp `sessionClosedAt` on every notification that belongs to a
+ * session the client just watched leave the roster. Pure; returns the SAME array
+ * reference when nothing needed stamping so subscribers do not churn. Already
+ * stamped rows keep their original timestamp.
+ */
+export function markSessionNotificationsClosed<
+  T extends { sessionId: string; sessionClosedAt?: number },
+>(notifications: readonly T[], removedIds: readonly string[], now: number): readonly T[] {
+  if (removedIds.length === 0) return notifications;
+  const removed = new Set(removedIds);
+  let changed = false;
+  const next = notifications.map((n) => {
+    if (!removed.has(n.sessionId) || n.sessionClosedAt !== undefined) return n;
+    changed = true;
+    return { ...n, sessionClosedAt: now };
+  });
+  return changed ? next : notifications;
+}
+
 export function isSessionListed(
   sessions: readonly { sessionId: string }[],
   sessionId: string,

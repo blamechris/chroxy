@@ -97,7 +97,7 @@ const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
  * the dead click `sendPermissionResponse`'s own contract comment
  * (`connection.ts:3718-3721`) exists to prevent.
  */
-export type PermissionBannerStatus = 'actionable' | 'disconnected' | 'not-pending'
+export type PermissionBannerStatus = 'actionable' | 'disconnected' | 'not-pending' | 'session-closed'
 
 /**
  * #7466 — is this banner's permission still answerable, and if not, why not?
@@ -123,6 +123,10 @@ export function permissionNotificationStatus(
   connected: boolean,
 ): PermissionBannerStatus {
   if (n.eventType !== 'permission' || !n.requestId) return 'actionable'
+  // #9222 — AUTHORITATIVE retirement beats the conservative-on-absence rule
+  // below: the store stamped this row because it watched the session leave the
+  // roster, so a missing prompt here means "gone", not "not hydrated yet".
+  if (n.sessionClosedAt !== undefined) return 'session-closed'
   if (!isStillPending(n, sessionStates, now)) return 'not-pending'
   // Pending-ness is checked FIRST: a request that already expired is dead
   // whether or not the socket is up, and offering "reconnect to answer" for a
@@ -366,14 +370,14 @@ export function NotificationBanners({
               >
                 Dismiss
               </button>
-            ) : status === 'not-pending' ? (
+            ) : status === 'not-pending' || status === 'session-closed' ? (
               <>
                 {/* #7466 — say WHY the buttons are gone. A silently button-less
                     permission banner reads as a rendering bug; this reads as the
-                    record it now is. */}
+                    record it now is. #9222 — a retired session gets its own words. */}
                 <span
                   className="notification-banner-stale"
-                  data-testid="notification-banner-stale"
+                  data-testid={status === 'session-closed' ? 'notification-banner-session-closed' : 'notification-banner-stale'}
                   // #7474 — a live region for the same reason the disconnected
                   // hint below is one: since the click-time re-check, this
                   // marker can APPEAR in direct response to a click, replacing
@@ -382,7 +386,7 @@ export function NotificationBanners({
                   // silent dead click this issue is about.
                   role="status"
                 >
-                  No longer pending
+                  {status === 'session-closed' ? 'Session closed — can no longer be answered' : 'No longer pending'}
                 </span>
                 <button
                   type="button"
