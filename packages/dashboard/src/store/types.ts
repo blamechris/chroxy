@@ -639,14 +639,20 @@ export interface SessionNotification {
    */
   readAt?: number;
   /**
-   * #9222 — set to `Date.now()` when a roster removal (`session_list` prune or
-   * `session_timeout`) retires the session this alert belongs to. The alert is
-   * kept as history (#7353) but can never be answered: the permission banner
-   * renders it as a retired record and `sendPermissionResponse` refuses it.
-   * Only a removal the client OBSERVED stamps this, so a banner that merely
-   * predates its session's hydration is never mistaken for a closed one.
+   * #9222 — set when this client WATCHED the alert's session leave its roster
+   * (`session_list` prune or `session_timeout`). A removal can also be a scope or
+   * visibility change, so this means "unavailable to this client", NOT "closed".
+   * The alert is kept as history (#7353); the banner shows no Allow/Deny and
+   * `sendPermissionResponse` refuses the request. Only an OBSERVED removal stamps
+   * it (never absence alone), so a banner that predates hydration stays live.
+   * A session reappearing in the roster does not clear it; only a verified
+   * replay of the SAME request id does (`pushSessionNotification`).
    */
-  sessionClosedAt?: number;
+  sessionUnavailableAt?: number;
+  /**
+   * #9222 — definitive: the server told us the session timed out. Never recovered.
+   */
+  sessionEndedAt?: number;
 }
 
 /**
