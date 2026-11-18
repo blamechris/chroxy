@@ -89,6 +89,19 @@ describe('describeCodexError / formatCodexError (#8610)', () => {
     assert.equal(describeCodexError({ message: big }), null)
   })
 
+  it('treats array-like text as unreadable, well-formed, malformed or oversized', () => {
+    assert.equal(describeCodexError({ message: '["a","b"]' }), null)
+    assert.equal(describeCodexError('[not json'), null)
+    assert.equal(describeCodexError(`[${'"x",'.repeat(MAX_CODEX_ERROR_PARSE)}"x"]`), null)
+    assert.equal(describeCodexError({ message: '{"error":"[1,2,3]"}' }), null)
+  })
+
+  it('an array-like branch does not hide a readable one', () => {
+    assert.equal(describeCodexError({ message: '["meta"]', error: { message: 'real cause' } }).message, 'real cause')
+    assert.equal(describeCodexError({ error: '["meta"]', message: 'real cause' }).message, 'real cause')
+    assert.equal(describeCodexError({ error: { message: '[1]' }, message: 'fallback' }).message, 'fallback')
+  })
+
   it('stops at the depth bound', () => {
     // Nest through `error` objects; the readable string sits at depth (wraps + 1).
     const nest = (wraps) => {

@@ -12,9 +12,10 @@
 //   JSON-encoded object) is tried first; only if it yields no readable message is the
 //   object's own `message` used. So a wrapper's generic message ("Request failed") does
 //   not hide the nested error's real one. A plain-text `error` is not a source.
-// - A string that looks like JSON (starts with `{`) is decoded only when it is at most
-//   MAX_CODEX_ERROR_PARSE characters (checked BEFORE parsing) and parses to an object;
-//   otherwise that branch is unreadable. A JSON-looking string is never shown as text.
+// - A string that looks like JSON (starts with `{` or `[`) is never shown as text. One
+//   starting with `{` is decoded only when it is at most MAX_CODEX_ERROR_PARSE characters
+//   (checked BEFORE parsing) and parses to an object; one starting with `[` (an array,
+//   well-formed or not) is never a message source. Either way, otherwise unreadable.
 // - The walk is bounded: at most MAX_CODEX_ERROR_DEPTH levels, two branches per level.
 // - `status` is kept only as an integer HTTP status 100-599; `type` only as a short
 //   identifier. The deepest valid value wins.
@@ -43,6 +44,7 @@ function read(node, depth) {
   if (typeof node === 'string') {
     const t = node.trim()
     if (!t) return null
+    if (t.startsWith('[')) return null // array or array-like text: never a message, never shown
     if (t.startsWith('{')) {
       if (t.length > MAX_CODEX_ERROR_PARSE) return null
       let parsed
@@ -73,7 +75,11 @@ export function describeCodexError(err) {
   return read(err, 0)
 }
 
-/** `Codex error: <message> (status 400, invalid_request_error)`, at most MAX_CODEX_ERROR_TEXT chars. */
+/**
+ * `Codex error: <message> (status 400, invalid_request_error)`, at most MAX_CODEX_ERROR_TEXT chars.
+ * Takes ONLY the validated output of describeCodexError (a non-JSON message, an integer
+ * HTTP status or null, a short identifier type or null); it does not re-validate.
+ */
 export function formatCodexError({ message, status, type }) {
   const detail = [status != null ? `status ${status}` : null, type].filter(Boolean).join(', ')
   const suffix = detail ? ` (${detail})` : ''
