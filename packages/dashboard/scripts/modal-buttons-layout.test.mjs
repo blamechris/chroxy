@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import { before, after, describe, test } from 'node:test'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { createServer } from 'node:http'
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createServer } from 'vite'
+import { build } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 
@@ -27,18 +29,80 @@ import { chromium } from 'playwright'
 // other *-layout.test.mjs files. No button is clicked and every handler in the
 // fixture is a no-op.
 // Isolation:
-//   - Vite runs with `configFile: false`, so vite.config.ts's dev proxy (/ws ->
-//     localhost:7860) is never loaded; only what the fixture needs is restated (the
-//     React plugin, the __APP_VERSION__ define, the `@` alias and React dedupe), and
-//     the resolved proxy is asserted empty before any page loads.
+//   - The fixture is built ONCE with Vite's production `build()` (no dev server). A
+//     dev-server page always loads /@vite/client, which opens an HMR WebSocket (the
+//     HTML, every hot module and every JS-imported stylesheet import it); a production
+//     bundle contains none of that, and the build output is asserted to name no
+//     `@vite/client`. The build uses `configFile: false`, so vite.config.ts (and its
+//     dev proxy) is never loaded; only what the fixture needs is restated (the React
+//     plugin, the __APP_VERSION__ define, the `@` alias and React dedupe), with
+//     `envDir: false` so no repo .env file is read.
+//   - The build goes to a fresh temp directory outside the repo, and an owned static
+//     server on 127.0.0.1 (port 0) serves only the fixture page and regular files whose
+//     path is contained both lexically and by real path in that directory (GET/HEAD,
+//     known MIME types, nosniff); a missing file is 404 and any other read error 500.
+//     Server, browser and build directory are all removed in `after()`.
 //   - Each case runs in a fresh browser context with service workers blocked,
-//     HTTP(S) to anything but the Vite origin aborted and every WebSocket refused,
-//     all installed before navigation; any blocked attempt fails the case.
+//     HTTP(S) to anything but that server's origin aborted and every WebSocket
+//     refused, all installed before navigation; any blocked attempt fails the case.
 
 const root = fileURLToPath(new URL('../', import.meta.url))
+const FIXTURE = 'scripts/modal-buttons-layout.fixture.tsx'
+const PAGE = '/__modal-buttons-layout'
+const BUILD_PREFIX = 'chroxy-modal-layout-build-'
+const MIME = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
 let browser
-let vite
+let server
+let outDir
 let origin
+
+// Every regular file under `dir`, as paths relative to it (the build output is small).
+function listFiles(dir, rel = '') {
+  return readdirSync(join(dir, rel), { withFileTypes: true }).flatMap((e) => {
+    const p = rel ? `${rel}/${e.name}` : e.name
+    return e.isDirectory() ? listFiles(dir, p) : e.isFile() ? [p] : []
+  })
+}
+
+// Serve the fixture page and regular files contained in `outDir`; everything else 404/405.
+function serveBuild(html) {
+  return createServer((req, res) => {
+    const send = (status, type, body) => {
+      res.writeHead(status, { 'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' })
+      res.end(req.method === 'HEAD' ? undefined : body)
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, 'text/plain', 'method not allowed')
+    let pathname
+    try {
+      pathname = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname)
+    } catch {
+      return send(400, 'text/plain', 'bad request')
+    }
+    if (pathname === PAGE) return send(200, 'text/html; charset=utf-8', html)
+    if (pathname.includes('\0')) return send(400, 'text/plain', 'bad request')
+    // Lexical containment first, then the real path: a symlink anywhere on the way
+    // (the file or an intermediate directory) must still land inside the real outDir.
+    const file = resolve(outDir, '.' + pathname)
+    const type = MIME[extname(file)]
+    if (!file.startsWith(outDir + sep) || !type) return send(404, 'text/plain', 'not found')
+    let body
+    try {
+      const real = realpathSync(file)
+      if (!real.startsWith(outDir + sep) || !lstatSync(real).isFile()) return send(404, 'text/plain', 'not found')
+      body = readFileSync(real)
+    } catch (e) {
+      return e && e.code === 'ENOENT' ? send(404, 'text/plain', 'not found') : send(500, 'text/plain', 'read failed')
+    }
+    send(200, type, body)
+  })
+}
 
 const FLOOR = 44
 const VIEWPORTS = [
@@ -82,49 +146,64 @@ async function measure(page) {
 describe('modal footer button layout (#8779)', () => {
   before(async () => {
     const pkg = JSON.parse(readFileSync(resolve(root, '../../package.json'), 'utf-8'))
-    vite = await createServer({
+    outDir = mkdtempSync(join(realpathSync(tmpdir()), BUILD_PREFIX))
+    await build({
       configFile: false,
       root,
       base: '/',
       logLevel: 'error',
+      // No .env files are loaded from the repo, and no public dir is copied.
+      envDir: false,
+      publicDir: false,
       define: { __APP_VERSION__: JSON.stringify(pkg.version) },
       resolve: { alias: { '@': resolve(root, 'src') }, dedupe: ['react', 'react-dom'] },
-      server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
-      plugins: [react(), {
-        name: 'modal-buttons-layout-fixture',
-        configureServer(server) {
-          server.middlewares.use(async (req, res, next) => {
-            if (!req.url.startsWith('/__modal-buttons-layout')) return next()
-            try {
-              const html = await server.transformIndexHtml(req.url, '<!doctype html><html><head></head><body><div id="root"></div><script type="module" src="/scripts/modal-buttons-layout.fixture.tsx"></script></body></html>')
-              res.setHeader('Content-Type', 'text/html')
-              res.end(html)
-            } catch (error) {
-              next(error)
-            }
-          })
-        },
-      }],
+      plugins: [react()],
+      build: {
+        outDir,
+        emptyOutDir: true,
+        manifest: true,
+        copyPublicDir: false,
+        rollupOptions: { input: resolve(root, FIXTURE) },
+      },
     })
-    // No config file was loaded and no server-side proxy is configured, so nothing the
-    // page requests on the Vite origin can be forwarded anywhere else.
-    assert.equal(vite.config.configFile, undefined, 'no Vite config file was loaded')
-    const proxy = vite.config.server.proxy
-    assert.equal(proxy === undefined || Object.keys(proxy).length === 0, true, 'the Vite dev proxy is empty')
-    await vite.listen()
-    origin = `http://127.0.0.1:${vite.httpServer.address().port}`
+    const manifest = JSON.parse(readFileSync(join(outDir, '.vite', 'manifest.json'), 'utf-8'))
+    const entry = manifest[FIXTURE]
+    assert.equal(Boolean(entry && entry.isEntry && entry.file), true, `the build manifest has an entry for ${FIXTURE}`)
+    // A production bundle carries no dev client; if one ever appears, it would open a socket.
+    const files = listFiles(outDir).filter(f => f.endsWith('.js') || f.endsWith('.css'))
+    const withClient = files.filter(f => readFileSync(join(outDir, f), 'utf-8').includes('@vite/client'))
+    assert.deepEqual(withClient, [], 'no built file references @vite/client')
+    const css = (entry.css ?? []).map(f => `<link rel="stylesheet" href="/${f}">`).join('')
+    const html = `<!doctype html><html><head><meta charset="utf-8">${css}</head><body><div id="root"></div><script type="module" src="/${entry.file}"></script></body></html>`
+    server = serveBuild(html)
+    await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok) })
+    origin = `http://127.0.0.1:${server.address().port}`
     browser = await chromium.launch({ headless: true })
   })
 
   after(async () => {
-    try { await browser?.close() } finally { await vite?.close() }
+    try {
+      await browser?.close()
+    } finally {
+      try {
+        if (server) {
+          server.closeAllConnections?.()
+          await new Promise(ok => server.close(() => ok()))
+        }
+      } finally {
+        // Remove only the directory this run created.
+        if (outDir && basename(outDir).startsWith(BUILD_PREFIX) && dirname(outDir) === realpathSync(tmpdir())) {
+          rmSync(outDir, { recursive: true, force: true })
+        }
+      }
+    }
   })
 
   for (const [caseName, expected] of Object.entries(CASES)) {
     for (const [vpName, viewport] of VIEWPORTS) {
       const withPage = async (fn) => {
         // A fresh context per case, isolated BEFORE navigation: service workers are
-        // blocked, every HTTP(S) request to anything but the Vite origin is aborted,
+        // blocked, every HTTP(S) request to anything but the fixture server is aborted,
         // and every WebSocket is refused. Blocked attempts are recorded and fail the case.
         const context = await browser.newContext({ viewport, serviceWorkers: 'block' })
         // Everything after the context exists, setup included, is inside the try, so a
@@ -150,7 +229,7 @@ describe('modal footer button layout (#8779)', () => {
           console.log(`# ${caseName} ${vpName}: ${JSON.stringify(m)}`)
           assert.deepEqual(errors, [], 'the fixture page raised no error')
           await fn(m)
-          assert.deepEqual(blocked, [], 'no request left the Vite origin and no WebSocket was attempted')
+          assert.deepEqual(blocked, [], 'no request left the fixture server and no WebSocket was attempted')
         } finally {
           await context.close()
         }
