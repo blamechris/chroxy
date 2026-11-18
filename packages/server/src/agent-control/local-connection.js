@@ -38,8 +38,9 @@ const MAX_PORT = 65535
 /**
  * Non-mutating equivalent of `readConnectionInfo()` — reads and parses
  * connection.json (respecting `CHROXY_CONFIG_DIR` via `getConnectionInfoPath`)
- * and classifies the recorded pid, but never unlinks the file. Returns `null`
- * for "no file" or "unparseable".
+ * and classifies the recorded pid, but never unlinks the file. Returns `null` for
+ * "no file" or "unparseable". Otherwise it returns the record, marked as below when
+ * its pid is not verified alive.
  *
  * The pid is classified by `probePidLiveness` (#9074), and only a verified-alive
  * record comes back unmarked:

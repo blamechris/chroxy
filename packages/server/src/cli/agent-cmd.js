@@ -44,7 +44,7 @@ async function connectToLocalDaemon(deps = {}) {
 function reportConnectFailure(result) {
   switch (result.reason) {
     case 'not_running': err('Chroxy server is not running. Start it with `chroxy start`.'); break
-    case 'liveness_unverified': err("Could not verify that the Chroxy daemon in connection.json is running (its process could not be inspected from here, e.g. inside a sandbox). Its token was not used and the record was left in place. Run this where the daemon's process is visible."); break
+    case 'liveness_unverified': err('Could not verify that the Chroxy daemon in connection.json is running: the record has no valid pid, or that pid could not be inspected from here (for example inside a sandbox). Its token was not used, and the record was left in place.'); break
     case 'no_token': err('Server is running without an auth token: agent management is unavailable.'); break
     default: err(`Could not reach the daemon: ${result.message || result.reason}`)
   }

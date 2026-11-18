@@ -2,7 +2,7 @@ import { join } from 'path'
 import { existsSync, readFileSync, unlinkSync, mkdirSync } from 'fs'
 import { writeFileRestricted } from './platform.js'
 import { configDir, configPath } from './config-dir.js'
-import { probePidLiveness, PID_ALIVE } from './utils/pid-liveness.js'
+import { probePidLiveness, PID_ALIVE, PID_DEAD } from './utils/pid-liveness.js'
 
 export function getConnectionInfoPath() {
   return configPath('connection.json')
@@ -28,12 +28,21 @@ export function writeConnectionInfo(info) {
  * claim only: some process with that PID exists. It is not proof that the process
  * is the daemon, or that the daemon listens on the recorded port.
  *
- * This read never deletes the file, whatever it finds. A read-time unlink races a
- * restarting daemon: the reader can probe the old record's dead PID, the new daemon
- * can write its own record, and the unlink then removes the LIVE one. The record's
- * lifecycle belongs to its writer, which overwrites it at start (supervisor,
- * startup display) and removes it at shutdown (`removeConnectionInfo`). A stale
- * record left by a crash is replaced by the next start.
+ * Deletion: before #9074 this read deleted the record on ANY probe error. The existing
+ * cleanup for a pid proven dead (ESRCH) is retained. Every other failure (EPERM, any
+ * other probe error, a missing or malformed pid) now preserves the record: "could not
+ * verify" is not "dead".
+ *
+ * Known, pre-existing race (documented, not introduced here): a reader can probe the
+ * old record's dead PID, a restarting daemon can then write its own record, and this
+ * unlink removes the new one. What this call does in that case: it returns null and
+ * transmits no credential. No claim is made here about what callers do next. Until
+ * the daemon writes its record again, readers find none.
+ *
+ * Known debt (#9074, deferred): CLI callers get null for "unverified" exactly as for
+ * "not running", so they fail closed but still word it as "not running". Reporting
+ * unverified liveness truthfully in those CLIs and in `status` is follow-up work.
+ * This reader does not claim to fix status semantics.
  *
  * @param {{ probePidLiveness?: (pid: unknown) => 'alive' | 'dead' | 'unverified' }} [deps]
  * @returns {object|null}
@@ -49,7 +58,12 @@ export function readConnectionInfo(deps = {}) {
     return null
   }
   if (!info || typeof info !== 'object') return null
-  return probe(info.pid) === PID_ALIVE ? info : null
+  const liveness = probe(info.pid)
+  if (liveness === PID_DEAD) {
+    removeConnectionInfo() // the existing ESRCH cleanup, retained (see above)
+    return null
+  }
+  return liveness === PID_ALIVE ? info : null
 }
 
 export function removeConnectionInfo() {

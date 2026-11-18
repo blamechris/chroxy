@@ -116,8 +116,8 @@ describe('connection-info', () => {
   })
 
   // #9074: the liveness of the recorded pid, by MOCKED errno only (no real pid is
-  // probed here). Only a verified-alive record is returned, and the read never
-  // deletes the file, whatever the probe says.
+  // probed here). Only a verified-alive record is returned. The existing ESRCH cleanup
+  // is retained; every other failure, which used to delete too, now keeps the file.
   describe('liveness (#9074)', () => {
     const errno = (code) => Object.assign(new Error(code), { code })
     const probeWith = (kill) => (pid) => probePidLiveness(pid, { kill })
@@ -130,12 +130,15 @@ describe('connection-info', () => {
       cleanup()
     })
 
-    it('a dead pid (ESRCH) returns null and does NOT delete the file', () => {
-      // Mutation: restore the read-time unlink -> the file is gone and this goes red.
+    it('a dead pid (ESRCH) returns null and removes the record, as before #9074', () => {
+      // ESRCH is the only proof of absence. Its existing cleanup is retained. Before
+      // #9074 every probe error deleted; the other outcomes now preserve the record
+      // (see the cases below).
+      // Mutation: drop the ESRCH removal -> the file survives and this goes red.
       cleanup()
       writeConnectionInfo(record())
       assert.equal(readConnectionInfo({ probePidLiveness: probeWith(() => { throw errno('ESRCH') }) }), null)
-      assert.ok(existsSync(getConnectionInfoPath()), 'a read never deletes the record (a restarting daemon may have just written it)')
+      assert.equal(existsSync(getConnectionInfoPath()), false, 'a proven-dead record is removed')
       cleanup()
     })
 
