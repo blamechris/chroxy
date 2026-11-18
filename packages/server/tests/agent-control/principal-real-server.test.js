@@ -44,17 +44,32 @@ const MUTATIONS = [
 
 describe('agent-control --principal over a real encrypted server', () => {
   let server
-  const cleanups = []
+  // Teardown runs in three ordered stages, never as one stack: the MCP client side,
+  // then the server, then the temp directories. `WsServer.close()` closes the principal
+  // journal, which flushes its window and writes the clean meta into `journalDir`; the
+  // journal creates that directory once (`_dirMade`) and does not recreate it, so
+  // removing the directory BEFORE `server.close()` turns those writes into ENOENT.
+  const clientClosers = []
+  const tempDirs = []
+  let journalWarnings = []
   let stderrLines = []
   let restoreConsole = null
 
   afterEach(async () => {
-    while (cleanups.length) {
-      const fn = cleanups.pop()
+    for (const fn of clientClosers.splice(0).reverse()) {
       try { await fn() } catch { /* best effort */ }
     }
     if (server) { server.close(); server = null }
+    for (const fn of tempDirs.splice(0).reverse()) {
+      try { fn() } catch { /* best effort */ }
+    }
+    setLogListener(null)
     if (restoreConsole) { restoreConsole(); restoreConsole = null }
+    // The shutdown-ordering guard: a journal write that failed during this test or its
+    // teardown fails the test. Mutation: move `server.close()` after the temp-dir
+    // removal -> 'Principal journal write failed (ENOENT)' is recorded and this throws.
+    const failures = journalWarnings.splice(0)
+    assert.deepEqual(failures, [], 'no principal journal write failed, teardown included')
   })
 
   async function boot() {
@@ -65,20 +80,28 @@ describe('agent-control --principal over a real encrypted server', () => {
     restoreConsole = () => { console.error = original }
 
     const fixture = tempPrincipalDir()
-    cleanups.push(fixture.cleanup)
+    tempDirs.push(fixture.cleanup)
     const store = testPrincipalStore(fixture.path)
     const { token } = insertPrincipal(store, { principalId: 'pr-1', label: 'indi', scope: 'observe', constraints: { sessionIds: ['sess-1', 'sess-2'] } })
     const journalDir = mkdtempSync(join(tmpdir(), 'chroxy-principal-mcp-journal-'))
-    cleanups.push(() => rmSync(journalDir, { recursive: true, force: true }))
+    tempDirs.push(() => rmSync(journalDir, { recursive: true, force: true }))
     const journal = new PrincipalJournal({ dir: journalDir, timers: { setTimeout: () => null, clearTimeout: () => {} } })
     const { manager } = createMockSessionManager(SESSIONS)
     server = new EncryptedWsServer({ port: 0, apiToken: PRIMARY, sessionManager: manager, authRequired: true, principalStore: store, principalJournal: journal })
     server.start('127.0.0.1')
     await once(server.httpServer, 'listening')
+    // After start() (which clears the listeners): record any journal write failure, for
+    // the shutdown-ordering assertion in afterEach.
+    journalWarnings = []
+    setLogListener((entry) => {
+      if (entry?.component === 'principal-journal' && /write failed/.test(String(entry.message))) {
+        journalWarnings.push(String(entry.message).slice(0, 120))
+      }
+    })
     const port = server.httpServer.address().port
 
     const tokenDir = mkdtempSync(join(tmpdir(), 'chroxy-principal-token-'))
-    cleanups.push(() => rmSync(tokenDir, { recursive: true, force: true }))
+    tempDirs.push(() => rmSync(tokenDir, { recursive: true, force: true }))
     const tokenFile = join(tokenDir, 'indi.token')
     writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 })
     chmodSync(tokenFile, 0o600)
@@ -88,7 +111,7 @@ describe('agent-control --principal over a real encrypted server', () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     await mcp.connect(serverTransport)
     await sdk.connect(clientTransport)
-    cleanups.push(async () => { await sdk.close(); await mcp.close(); await clientManager.close() })
+    clientClosers.push(async () => { await sdk.close(); await mcp.close(); await clientManager.close() })
 
     const results = []
     const call = async (name, args = {}) => {
