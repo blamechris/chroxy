@@ -2079,15 +2079,19 @@ export class CodexAppServerSession extends BaseSession {
   // or a turn-ending error? Since codex-cli 0.163.0 the app-server says so:
   // `ErrorNotification.willRetry` is required, `true` for an EventMsg::StreamError that
   // codex retries itself and `false` for a turn-ending EventMsg::Error. When the field
-  // is a boolean it decides, both ways: `true` keeps the turn open even when the
+  // is PRESENT it decides, both ways: only `true` keeps the turn open, even when the
   // message does not look like a reconnect (e.g. responseStreamConnectionFailed), and
-  // `false` ends it even when the message does. Only a payload WITHOUT a boolean
-  // `willRetry` (an older codex) falls back to the #6623 heuristic above. Keeping the
-  // turn open never removes the hard bounds: the #6629 watchdog and the #6856
-  // one-shot deadline are armed exactly as for a #6623 reconnect.
+  // anything else ends it, even when the message does. That includes a malformed value
+  // (`null`, `'true'`, `1`): a codex that sends the field has stopped promising the
+  // #6623 shape, so its message is no evidence of a retry, and ending the turn is the
+  // conservative reading. Only a payload WITHOUT the field (an older codex) falls back
+  // to the #6623 heuristic above. Keeping the turn open never removes the hard bounds:
+  // the #6629 watchdog and the #6856 one-shot deadline are armed exactly as for a
+  // #6623 reconnect.
   _codexWillRetry(params, err) {
-    if (params?.willRetry === true) return true
-    if (params?.willRetry === false) return false
+    if (params && typeof params === 'object' && Object.hasOwn(params, 'willRetry')) {
+      return params.willRetry === true
+    }
     return this._isTransientReconnect(err)
   }
 
