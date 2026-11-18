@@ -1428,9 +1428,10 @@ export class CodexAppServerSession extends BaseSession {
         // notification — the result timeout (re-armed by _resetResultTimeout above)
         // is the backstop if codex never recovers, and codex's terminal give-up
         // (a disconnect WITHOUT a reconnecting message) still falls through to fail.
+        // #8754 — codex says whether it retries (`willRetry`); see _codexWillRetry.
         const err = this._errorPayload(params)
-        if (this._isTransientReconnect(err)) {
-          ;(this._log || log).warn(`codex app-server response stream reconnecting (turn kept open): ${err.message || 'responseStreamDisconnected'}`)
+        if (this._codexWillRetry(params, err)) {
+          ;(this._log || log).warn(`codex app-server retrying (turn kept open): ${err.message || 'stream error'}`)
           // #6629 — arm the bounded watchdog so a reconnect that NEVER recovers
           // (nor emits codex's terminal give-up) still reconciles the stale
           // working state, even when a pending permission has paused the result
@@ -1505,7 +1506,9 @@ export class CodexAppServerSession extends BaseSession {
       const err = this._errorPayload(params)
       // `willRetry` (required in 0.163.0) marks codex's own retry of a turn it is
       // still running: not an end, and that turn's later notifications are live.
-      if (params?.willRetry === true || this._isTransientReconnect(err)) {
+      // #8754: the same rule as an active turn (_codexWillRetry), so an explicit
+      // `willRetry: false` is an end here too.
+      if (this._codexWillRetry(params, err)) {
         tlog.debug(`codex app-server retrying with no turn open: ${err.message || 'stream error'}`)
         return false
       }
@@ -2070,6 +2073,22 @@ export class CodexAppServerSession extends BaseSession {
     const disconnected = info && typeof info === 'object' && info.responseStreamDisconnected != null
     if (!disconnected) return false
     return /reconnect/i.test(typeof err?.message === 'string' ? err.message : '')
+  }
+
+  // #8754 — is this `error` notification codex retrying on its own (the turn goes on)
+  // or a turn-ending error? Since codex-cli 0.163.0 the app-server says so:
+  // `ErrorNotification.willRetry` is required, `true` for an EventMsg::StreamError that
+  // codex retries itself and `false` for a turn-ending EventMsg::Error. When the field
+  // is a boolean it decides, both ways: `true` keeps the turn open even when the
+  // message does not look like a reconnect (e.g. responseStreamConnectionFailed), and
+  // `false` ends it even when the message does. Only a payload WITHOUT a boolean
+  // `willRetry` (an older codex) falls back to the #6623 heuristic above. Keeping the
+  // turn open never removes the hard bounds: the #6629 watchdog and the #6856
+  // one-shot deadline are armed exactly as for a #6623 reconnect.
+  _codexWillRetry(params, err) {
+    if (params?.willRetry === true) return true
+    if (params?.willRetry === false) return false
+    return this._isTransientReconnect(err)
   }
 
   // #6638: also release cached fileChange diffs when per-turn state is cleared
