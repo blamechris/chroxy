@@ -8351,6 +8351,16 @@ button.sidebar-token-view-session-row:hover {
 }
 .btn-modal-danger:hover { filter: brightness(1.1); }
 
+/* #8779 — the shared modal footer buttons (New Session, ConfirmDialog,
+ * DirectoryBrowser) meet the 44px tap-target floor (AGENTS.md). Their 6px
+ * vertical padding alone rendered them 29px high. */
+.btn-modal-cancel,
+.btn-modal-create,
+.btn-modal-danger {
+  min-height: 44px;
+  min-width: 44px;
+}
+
 /* #5206 — ConfirmDialog body text. */
 .confirm-dialog-message {
   margin: 0 0 14px;
