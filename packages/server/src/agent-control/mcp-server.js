@@ -32,7 +32,8 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { isEntryPoint } from '../utils/is-entry-point.js'
 import { getErrorMessage } from '../utils/error-message.js'
 import { AgentControlClient, redactPublicText, CLIENT_MESSAGE_ID_PATTERN, RESERVED_CLIENT_MESSAGE_IDS } from './client.js'
-import { resolveConnectionTarget, validateExplicitUrl } from './local-connection.js'
+import { resolveConnectionTarget, resolvePrincipalConnectionTarget, validateExplicitUrl, PRINCIPAL_TOKEN_FILE_ENV } from './local-connection.js'
+import { PrincipalObserver, publicPage, MAX_WAIT_EVENTS_MS, MAX_PAGE_LIMIT, MAX_SESSION_IDS, MAX_CURSOR_CHARS } from './principal-observer.js'
 
 export const SERVER_NAME = 'chroxy-agent-control'
 export const SERVER_VERSION = '0.1.0'
@@ -172,11 +173,68 @@ const TOOLS = {
   },
 }
 
+// #9121 (S6 of #9112): the tool set of `--principal` mode. Each handler receives a
+// PrincipalObserver, never a raw client, and each is a daemon-side `principal_*` read:
+// the daemon decides scope, redaction, bounds, cursors and gaps. There is no mutation
+// tool in this table at all; the four mutation names are ALSO refused at CallTool
+// (see `createAgentControlMcpServer`) so an un-advertised call cannot reach anything.
+const PrincipalSessionIds = z.array(SessionId.max(128)).min(1).max(MAX_SESSION_IDS)
+const PrincipalCursor = z.string().min(1).max(MAX_CURSOR_CHARS)
+const PRINCIPAL_TOOLS = {
+  chroxy_daemon_info: TOOLS.chroxy_daemon_info,
+
+  chroxy_list_sessions: {
+    description: "List the sessions this agent principal is granted (read-only observer mode). Each row is the daemon's bounded snapshot: `status` { isBusy, busyReason, starting } is OBSERVED; `declaredStatus` is what the session's agent said about itself (a claim, never merged with status); `blockers` lists what held the session at `generatedAt` (queued prompts, a pending permission or question, active agents, background shells, …): an observed snapshot, so an empty list means no blocker was seen at that instant, not a guarantee that nothing will act later; `model` { requested, observed }. Sessions outside the grant are not listed. No cwd, history or cost.",
+    argsSchema: z.object({
+      sessionIds: PrincipalSessionIds.optional().describe('Restrict to these granted session ids. Naming any session that is not granted (or does not exist) refuses the whole call with scope_denied.'),
+    }).strict(),
+    async handler(observer, args) {
+      return textResult(await observer.sessionsSnapshot(args.sessionIds))
+    },
+  },
+
+  chroxy_get_events: {
+    description: "Read one page of a granted session's daemon-side event journal (normalized assistant text, tool start/result, permission requests and resolutions, status changes — never raw terminal bytes or thinking text, and never tool inputs). Pass the `cursor` from the previous result to read only newer events; omit it to start from the oldest retained event. `gap` means events between your cursor and this page could not be served (evicted, journal reset, daemon restart loss, unknown cursor) — not that anything failed. `more: true` means more retained events follow; read again with the new cursor. An empty page means nothing NEW, never 'the agent finished'.",
+    argsSchema: z.object({
+      sessionId: SessionId.max(128),
+      cursor: PrincipalCursor.optional().describe('Opaque cursor from a previous chroxy_get_events / chroxy_wait_events result for this session.'),
+      limit: z.number().int().min(1).max(MAX_PAGE_LIMIT).optional().describe(`Max events (default 50, max ${MAX_PAGE_LIMIT}).`),
+    }).strict(),
+    async handler(observer, args) {
+      return textResult(publicPage(await observer.readEvents(args.sessionId, { cursor: args.cursor, limit: args.limit })))
+    },
+  },
+
+  chroxy_pending_permissions: {
+    description: "Snapshot of the permission requests currently waiting for an answer in the granted sessions: tool name, whether the protected-path floor forces it to a human (`floored`), `explicitConsent`, `nonDelegable`, origin and deadline, and a short redacted description only for unfloored requests. Never the tool input. READ ONLY: this mode cannot answer, extend or reroute a request; the person at the session answers it.",
+    argsSchema: z.object({
+      sessionIds: PrincipalSessionIds.optional().describe('Restrict to these granted session ids (all-or-nothing scope check).'),
+    }).strict(),
+    async handler(observer, args) {
+      return textResult(await observer.pendingPermissions(args.sessionIds))
+    },
+  },
+
+  chroxy_wait_events: {
+    description: `Block until any of the given granted sessions has journal events past its cursor, a gap, or the timeout (max ${MAX_WAIT_EVENTS_MS} ms) — use this instead of polling. Permission requests are journal events, so a session that starts waiting on a permission prompt wakes the call. Returns { events, cursors, gaps, more, timedOut }: \`cursors\` is an array in exactly the shape of the \`cursors\` argument, so pass it back unchanged to continue where this call stopped. \`timedOut: true\` with no events means nothing new arrived, never that the work is done. A gap with \`ended: true\` means the daemon ended that session's subscription (removed, no longer granted, overflow); it is not read again in that call. Omit sessionIds to watch the first ${MAX_SESSION_IDS} granted sessions (\`sessionsTruncated\` says when there were more). One wait at a time per connection. The whole call returns within timeoutMs plus about 5 s for the final reads.`,
+    argsSchema: z.object({
+      sessionIds: PrincipalSessionIds.optional().describe('Granted session ids to watch. Any id that is not granted refuses the call with scope_denied.'),
+      cursors: z.array(PrincipalCursor).max(MAX_SESSION_IDS).optional().describe('Cursors from a previous result, at most one per session; a session without one starts from its oldest retained event.'),
+      timeoutMs: z.number().int().min(0).max(MAX_WAIT_EVENTS_MS).optional().describe(`How long to wait for something new (default 30000, max ${MAX_WAIT_EVENTS_MS}). 0 reads once without waiting.`),
+      limit: z.number().int().min(1).max(MAX_PAGE_LIMIT).optional().describe(`Max events returned across all sessions (default 50, max ${MAX_PAGE_LIMIT}).`),
+    }).strict(),
+    async handler(observer, args) {
+      return textResult(await observer.waitEvents(args))
+    },
+  },
+}
+
 // Freeze each tool's derived MCP `definition` (name/description/inputSchema)
 // once, at module load — the JSON Schema is pure derivation from argsSchema
 // and never changes at runtime, so deriving it per `tools/list` call would
 // just be repeated work for the same answer.
-for (const [name, tool] of Object.entries(TOOLS)) {
+for (const [name, tool] of [...Object.entries(TOOLS), ...Object.entries(PRINCIPAL_TOOLS)]) {
+  if (tool.definition) continue
   tool.definition = {
     name,
     description: tool.description,
@@ -246,8 +304,29 @@ class ClientManager {
     return this._connecting
   }
 
+  /**
+   * #9121: the PrincipalObserver over the current principal-mode client — one per
+   * connection, so its one-wait-at-a-time guard is per connection and a reconnect
+   * starts clean. Refuses outright on a manager that is not in principal mode.
+   */
+  async getObserver() {
+    if (this._clientOpts.principal !== true) throw new Error('getObserver() requires principal mode')
+    const client = await this.get()
+    if (!this._observer || this._observerClient !== client) {
+      this._observer = new PrincipalObserver(client)
+      this._observerClient = client
+    }
+    return this._observer
+  }
+
   async _connect() {
-    const target = resolveConnectionTarget(this._connectionOpts)
+    const principal = this._clientOpts.principal === true
+    // #9121: principal mode resolves through its own resolver, which reads ONLY the
+    // principal token file and never opens connection.json or reads
+    // CHROXY_AGENT_CONTROL_TOKEN; there is no fallback to the primary resolver.
+    const target = principal
+      ? resolvePrincipalConnectionTarget({ explicitUrl: this._connectionOpts.explicitUrl, tokenFile: this._connectionOpts.tokenFile })
+      : resolveConnectionTarget(this._connectionOpts)
     if (!target.ok) {
       throw Object.assign(new Error(describeConnectionFailure(target.reason)), { code: target.reason })
     }
@@ -255,7 +334,8 @@ class ClientManager {
     const client = new AgentControlClient({
       url: target.url,
       token: target.token,
-      readOnly: this._clientOpts.readOnly === true,
+      principal,
+      readOnly: this._clientOpts.readOnly === true || principal,
       identityPublicKey: this._clientOpts.identityPublicKey,
       allowCommandApprovals: this._clientOpts.allowCommandApprovals === true,
       // TEST SEAM ONLY: `undefined` in production (the client then uses the
@@ -337,6 +417,16 @@ function describeConnectionFailure(reason) {
       return '--url must not embed credentials (ws://token@host/...) — pass the token via CHROXY_AGENT_CONTROL_TOKEN instead.'
     case 'insecure_remote_ws':
       return INSECURE_REMOTE_WS_REFUSAL
+    case 'principal_token_file_unset':
+      return `--principal needs ${PRINCIPAL_TOKEN_FILE_ENV} to name the principal token file (written by \`chroxy agent grant\`). There is no token argv flag, and principal mode never falls back to the primary token.`
+    case 'principal_token_file_absent':
+      return `the principal token file named by ${PRINCIPAL_TOKEN_FILE_ENV} does not exist.`
+    case 'principal_token_file_untrusted':
+      return `the principal token file named by ${PRINCIPAL_TOKEN_FILE_ENV} was refused: it must be a regular file (not a symlink) owned by this user with mode 0600, at most 4 KiB.`
+    case 'principal_token_file_malformed':
+      return `the principal token file named by ${PRINCIPAL_TOKEN_FILE_ENV} does not hold a principal token (one base64url line).`
+    case 'principal_requires_loopback':
+      return 'principal mode connects only to a loopback daemon URL (localhost, 127.0.0.0/8 or [::1]): the daemon accepts a principal token from a loopback peer only.'
     default:
       return `could not resolve a daemon connection (${reason})`
   }
@@ -367,13 +457,20 @@ function describeConnectionFailure(reason) {
  * @returns {{ mcp: Server, clientManager: ClientManager }}
  */
 export function createAgentControlMcpServer(opts = {}) {
-  const readOnly = opts.readOnly === true
+  // #9121: principal mode is read-only by construction; `readOnly` is forced on.
+  const principal = opts.principal === true
+  const readOnly = opts.readOnly === true || principal
   const clientManager = opts.clientManager || new ClientManager(
-    { explicitUrl: opts.url, explicitToken: opts.token, allowInsecureWs: opts.allowInsecureWs === true },
-    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true, WebSocketImpl: opts.WebSocketImpl },
+    principal
+      // Principal mode passes NO token field and no insecure opt-in: the principal
+      // resolver reads only the token file and only accepts a loopback URL.
+      ? { explicitUrl: opts.url, tokenFile: opts.tokenFile }
+      : { explicitUrl: opts.url, explicitToken: opts.token, allowInsecureWs: opts.allowInsecureWs === true },
+    { readOnly, principal, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: !principal && opts.allowCommandApprovals === true, WebSocketImpl: opts.WebSocketImpl },
   )
 
-  const toolNames = Object.keys(TOOLS).filter((name) => readOnly ? !MUTATION_TOOL_NAMES.has(name) : true)
+  const toolTable = principal ? PRINCIPAL_TOOLS : TOOLS
+  const toolNames = Object.keys(toolTable).filter((name) => readOnly ? !MUTATION_TOOL_NAMES.has(name) : true)
 
   const mcp = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -381,18 +478,20 @@ export function createAgentControlMcpServer(opts = {}) {
   )
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolNames.map((name) => TOOLS[name].definition),
+    tools: toolNames.map((name) => toolTable[name].definition),
   }))
 
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name
-    const tool = TOOLS[name]
-    if (!tool) return errorResult(`unknown tool: ${name}`)
-    // Hard gate — independent of what ListTools advertised. "read-only mode
-    // mutation tools must be absent AND unavailable by direct call."
+    // Hard gate — independent of what ListTools advertised, and checked BEFORE the
+    // tool lookup so it holds in principal mode too, where the mutation tools are not
+    // in the table at all. "read-only mode mutation tools must be absent AND
+    // unavailable by direct call."
     if (readOnly && MUTATION_TOOL_NAMES.has(name)) {
-      return errorResult(`'${name}' is a mutation tool and this agent-control server is running in --read-only mode`, { code: 'READ_ONLY_MODE' })
+      return errorResult(`'${name}' is a mutation tool and this agent-control server is running in ${principal ? '--principal (read-only observer)' : '--read-only'} mode`, { code: 'READ_ONLY_MODE' })
     }
+    const tool = Object.hasOwn(toolTable, name) ? toolTable[name] : null
+    if (!tool) return errorResult(`unknown tool: ${String(name).slice(0, 64)}`)
     // Runtime validation against the BOUNDED zod schema — the JSON Schema in
     // `definition.inputSchema` documents shape to the MCP host, but a
     // description is not a guard; this is the actual enforcement, run
@@ -402,8 +501,8 @@ export function createAgentControlMcpServer(opts = {}) {
       return errorResult(`invalid arguments for '${name}': ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`, { code: 'INVALID_ARGUMENTS' })
     }
     try {
-      const client = await clientManager.get()
-      return await tool.handler(client, parsed.data)
+      const target = principal ? await clientManager.getObserver() : await clientManager.get()
+      return await tool.handler(target, parsed.data)
     } catch (err) {
       const message = redactPublicText(getErrorMessage(err), clientManager.lastToken)
       logToStderr(`tool '${name}' failed:`, message)
@@ -425,9 +524,11 @@ export async function main(options) {
         'pin-identity': { type: 'string' },
         'allow-command-approvals': { type: 'boolean' },
         'allow-insecure-ws': { type: 'boolean' },
+        principal: { type: 'boolean' },
       },
     })
     return {
+      principal: values.principal,
       readOnly: values['read-only'],
       url: values.url,
       identityPublicKey: values['pin-identity'],
@@ -435,6 +536,7 @@ export async function main(options) {
       allowInsecureWs: values['allow-insecure-ws'],
     }
   })()
+  if (parsed.principal === true) return mainPrincipal(parsed)
   const readOnly = parsed.readOnly === true
   const url = parsed.url
   const allowCommandApprovals = parsed.allowCommandApprovals === true
@@ -507,8 +609,44 @@ export async function main(options) {
     }
   }
 
-  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey, allowCommandApprovals, allowInsecureWs })
+  // #9121: say once, at startup, what this mode holds. The legacy mode authenticates
+  // with the daemon's PRIMARY token (full host authority; its ownership and
+  // permission gates run in this process, not the daemon), and `--principal` is the
+  // scoped, revocable alternative. No token, URL or host appears in the line.
+  logToStderr('NOTICE: agent-control is using the daemon PRIMARY token (full host authority; the ownership and permission gates run in this process). For a scoped, revocable, read-only observer use --principal with CHROXY_AGENT_TOKEN_FILE (docs/guides/agent-control.md).')
 
+  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey, allowCommandApprovals, allowInsecureWs })
+  await serveStdio(mcp, clientManager, `ready (readOnly=${readOnly}, target=${explicitTarget ? 'remote' : 'local'})`)
+}
+
+/**
+ * #9121: `--principal` startup. Fails fast (one stderr line, exitCode 1, nothing on
+ * stdout, nothing started) when the principal token file is unset, absent, untrusted
+ * or malformed, or when an explicit URL is not loopback, so an MCP host never
+ * registers a server that can only fail. The check is the same resolver every
+ * connect uses. The token it reads is not kept here: each connect re-reads the file,
+ * so a rotated token takes effect on the next reconnect.
+ */
+async function mainPrincipal(parsed) {
+  const url = parsed.url
+  const identityPublicKey = parsed.identityPublicKey ?? process.env.CHROXY_AGENT_CONTROL_PIN
+  const check = resolvePrincipalConnectionTarget({ explicitUrl: url })
+  if (!check.ok) {
+    logToStderr(`refusing to start in --principal mode: ${describeConnectionFailure(check.reason)}`)
+    process.exitCode = 1
+    return
+  }
+  if (parsed.allowCommandApprovals === true) {
+    logToStderr('--allow-command-approvals has no effect: --principal mode is read-only, so chroxy_respond_permission (and every other mutation tool) is absent and hard-refused.')
+  }
+  if (parsed.allowInsecureWs === true) {
+    logToStderr('--allow-insecure-ws has no effect: --principal mode connects only to a loopback daemon URL.')
+  }
+  const { mcp, clientManager } = createAgentControlMcpServer({ principal: true, url, identityPublicKey })
+  await serveStdio(mcp, clientManager, `ready (principal=true, readOnly=true, target=${url || process.env.CHROXY_AGENT_CONTROL_URL ? 'explicit-loopback' : 'default-loopback'})`)
+}
+
+async function serveStdio(mcp, clientManager, readyLine) {
   let shuttingDown = false
   const shutdown = async (signal) => {
     if (shuttingDown) return
@@ -529,11 +667,10 @@ export async function main(options) {
   await mcp.connect(new StdioServerTransport())
   // Deliberately never logs the URL itself — even a validated ws(s):// URL
   // with no embedded credentials is still connection metadata this process
-  // doesn't need to put in a log stream; "remote" vs "local" is all a reader
-  // needs to know which path was taken.
-  // `explicitTarget` (hoisted above) counts `CHROXY_AGENT_CONTROL_URL` too —
-  // otherwise an env-configured remote target would be logged as 'local'.
-  logToStderr(`ready (readOnly=${readOnly}, target=${explicitTarget ? 'remote' : 'local'})`)
+  // doesn't need to put in a log stream; the target CLASS is all a reader
+  // needs to know which path was taken. (Callers compute it so that a
+  // `CHROXY_AGENT_CONTROL_URL` target is not logged as 'local'.)
+  logToStderr(readyLine)
 }
 
 const isDirectRun = isEntryPoint(import.meta.url)

@@ -121,6 +121,47 @@ const SERIAL_REPLY_TYPES = {
 const PRE_READY_BUFFERED_TYPES = new Set(['permission_request', 'permission_resolved', 'permission_expired'])
 const MAX_PRE_READY_BUFFER = 100
 
+/**
+ * #9121 (S6 of #9112): the ONLY frame types a principal-mode client may put on the
+ * wire — the transport handshake plus the observe-tier `principal_*` reads. The
+ * daemon's dispatch allowlist (`principal-policy.js`) is the authority; this is the
+ * client's own second line, so a bug in this process (or a tool added later) cannot
+ * even ask for a host or mutation type with a principal credential. A test checks it
+ * against the daemon's observe-tier roster in both directions.
+ */
+export const PRINCIPAL_CLIENT_OUTBOUND_TYPES = Object.freeze([
+  'auth',
+  'key_exchange',
+  'ping',
+  'principal_subscribe',
+  'principal_unsubscribe',
+  'principal_events_read',
+  'principal_pending_permissions',
+  'principal_sessions_snapshot',
+])
+// Membership is checked against a module-private Set built once from the frozen
+// array: the export cannot be widened at runtime (a frozen Set's `.add()` still works),
+// and nothing outside this module can reach the Set.
+const PRINCIPAL_OUTBOUND = new Set(PRINCIPAL_CLIENT_OUTBOUND_TYPES)
+
+/** A principal-mode client refused to send a type outside its outbound allowlist. */
+export class PrincipalScopeError extends Error {
+  constructor(type) {
+    super(`agent-control is in principal (read-only observer) mode: refusing to send '${typeof type === 'string' ? type.slice(0, 64) : typeof type}'`)
+    this.name = 'PrincipalScopeError'
+    this.code = 'PRINCIPAL_SCOPE'
+  }
+}
+
+/** The daemon answered a correlated request with a refusal (`session_error` echoing its requestId). */
+export class RequestRefusedError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'RequestRefusedError'
+    this.code = code
+  }
+}
+
 /** A mutation was requested while the client is in read-only mode. */
 export class ReadOnlyModeError extends Error {
   constructor(operation) {
@@ -234,7 +275,12 @@ export class AgentControlClient extends EventEmitter {
 
     this._url = opts.url
     this._token = opts.token
-    this.readOnly = opts.readOnly === true
+    // #9121: a principal-mode client authenticates with a scoped principal token and
+    // may send only PRINCIPAL_CLIENT_OUTBOUND_TYPES (checked in `_assertOutboundAllowed`).
+    // It is read-only by construction: no principal tier reachable in v1 S6 has a
+    // mutation this client implements.
+    this.principal = opts.principal === true
+    this.readOnly = opts.readOnly === true || this.principal
     this._connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
     this._requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     this._pinnedIdentityKey = opts.identityPublicKey || null
@@ -536,9 +582,8 @@ export class AgentControlClient extends EventEmitter {
    * @param {{ replyType: string, timeoutMs?: number }} opts
    * @returns {Promise<object>}
    */
-  async request(type, fields, { replyType, timeoutMs = this._requestTimeoutMs }) {
+  async request(type, fields, { replyType, timeoutMs = this._requestTimeoutMs, requestId = randomUUID(), refusalTypes = [] }) {
     this._assertReady()
-    const requestId = randomUUID()
     return new Promise((resolve, reject) => {
       // Registered with the common pending-operation cleanup (`_rejectAllPending`), so
       // close(), a socket close and a connection failure all settle it with that error.
@@ -546,10 +591,62 @@ export class AgentControlClient extends EventEmitter {
       const done = (fn, v) => { clearTimeout(timer); this.removeListener('message', onMsg); this._pendingRequests.delete(abort); fn(v) }
       const timer = setTimeout(() => done(reject, new TimeoutError(type, timeoutMs)), timeoutMs)
       this._pendingRequests.add(abort)
-      const onMsg = (msg) => { if (msg?.type === replyType && msg.requestId === requestId) done(resolve, msg) }
+      const onMsg = (msg) => {
+        if (msg?.requestId !== requestId) return
+        if (msg.type === replyType) done(resolve, msg)
+        // #9121: a refusal that echoes THIS request's id (the daemon's principal
+        // dispatch refusal is a `session_error { code, requestId }`) settles the
+        // request at once instead of letting it run to the timeout. The frame is
+        // already deep-redacted by `_processReadyMessage`; only bounded fields are kept.
+        else if (refusalTypes.includes(msg.type)) {
+          const code = typeof msg.code === 'string' ? msg.code.slice(0, 64) : 'refused'
+          const detail = typeof msg.message === 'string' ? msg.message.slice(0, 300) : 'request refused'
+          done(reject, new RequestRefusedError(code, `daemon refused '${type}' (${code}): ${detail}`))
+        }
+      }
       this.on('message', onMsg)
-      try { this._send({ type, requestId, ...fields }) } catch (err) { done(reject, err) }
+      try { this._send({ ...fields, type, requestId }) } catch (err) { done(reject, err) }
     })
+  }
+
+  /**
+   * Send one frame that has no reply (#9121: `principal_unsubscribe`). Goes through
+   * `_send`, so the principal outbound allowlist applies exactly as for `request()`.
+   * @param {string} type
+   * @param {object} [fields]
+   */
+  notify(type, fields = {}) {
+    this._assertReady()
+    this._send({ ...fields, type })
+  }
+
+  /**
+   * Wait for the first ready-state message `predicate` accepts (#9121: the principal
+   * observer's doorbell). Resolves with the message, or with `null` when `timeoutMs`
+   * elapses; REJECTS with the teardown error when the connection closes, fails or is
+   * closed locally (it is registered with the same `_pendingRequests` cleanup as
+   * `request()`), so a waiter can never outlive its connection.
+   * @param {(msg: object) => boolean} predicate
+   * @param {number} timeoutMs
+   * @returns {{ promise: Promise<object|null>, cancel: () => void }}
+   */
+  waitForMessage(predicate, timeoutMs) {
+    this._assertReady()
+    let cancel
+    const promise = new Promise((resolve, reject) => {
+      const abort = (err) => done(reject, err)
+      const done = (fn, v) => { clearTimeout(timer); this.removeListener('message', onMsg); this._pendingRequests.delete(abort); fn(v) }
+      const timer = setTimeout(() => done(resolve, null), Math.max(0, timeoutMs))
+      const onMsg = (msg) => {
+        let hit = false
+        try { hit = predicate(msg) === true } catch { hit = false }
+        if (hit) done(resolve, msg)
+      }
+      cancel = () => done(resolve, null)
+      this._pendingRequests.add(abort)
+      this.on('message', onMsg)
+    })
+    return { promise, cancel }
   }
 
   async listSessions() {
@@ -1291,7 +1388,20 @@ export class AgentControlClient extends EventEmitter {
     return chained
   }
 
+  /**
+   * #9121: the principal-mode outbound gate. Called first by BOTH send paths (plaintext
+   * handshake and encrypted application frames), before the socket is touched, so a
+   * type outside PRINCIPAL_CLIENT_OUTBOUND_TYPES never reaches the wire on a principal
+   * credential. A no-op for a primary-token client.
+   */
+  _assertOutboundAllowed(payload) {
+    if (this.principal && !PRINCIPAL_OUTBOUND.has(payload?.type)) {
+      throw new PrincipalScopeError(payload?.type)
+    }
+  }
+
   _sendPlain(payload) {
+    this._assertOutboundAllowed(payload)
     if (!this._ws || this._ws.readyState !== this._ws.OPEN) {
       throw new NotConnectedError('socket is not open')
     }
@@ -1299,6 +1409,7 @@ export class AgentControlClient extends EventEmitter {
   }
 
   _send(payload) {
+    this._assertOutboundAllowed(payload)
     if (!this._ws || this._ws.readyState !== this._ws.OPEN) {
       throw new NotConnectedError('socket is not open')
     }
