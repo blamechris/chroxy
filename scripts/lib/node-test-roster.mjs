@@ -362,6 +362,10 @@ export const DIRECT_RUN_EXEMPTIONS = {
     matchSites: 0,
     reason: `${CI_DIRECT}; no assert.match/doesNotMatch, so the payload guard has nothing to bound`,
   },
+  'packages/dashboard/scripts/modal-buttons-layout.test.mjs': {
+    matchSites: 0,
+    reason: `${CI_DIRECT}; no assert.match/doesNotMatch, so the payload guard has nothing to bound`,
+  },
   'packages/dashboard/scripts/panel-header-layout.test.mjs': {
     matchSites: 0,
     reason: `${CI_DIRECT}; no assert.match/doesNotMatch, so the payload guard has nothing to bound`,

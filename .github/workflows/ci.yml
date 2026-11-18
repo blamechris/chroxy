@@ -2357,6 +2357,18 @@ jobs:
           node packages/dashboard/scripts/panel-header-layout.test.mjs | tee /tmp/chroxy-panel-header-layout.tap
           node scripts/lib/assert-test-count.mjs --min 10 cat /tmp/chroxy-panel-header-layout.tap > /dev/null
 
+      - name: Verify modal footer button layout
+        # #8779 — the shared modal footer buttons (New Session enabled and
+        # creating, ConfirmDialog plain and danger, DirectoryBrowser) measured in a
+        # real browser at 1280x800 and 360x740: expected buttons and states, at
+        # least 44x44, not clipped, covered or truncated. 30 = 5 cases x 2
+        # viewports x 3 checks; the floor catches a run that discovered nothing
+        # (#7447's class).
+        run: |
+          set -o pipefail
+          node packages/dashboard/scripts/modal-buttons-layout.test.mjs | tee /tmp/chroxy-modal-buttons-layout.tap
+          node scripts/lib/assert-test-count.mjs --min 30 cat /tmp/chroxy-modal-buttons-layout.tap > /dev/null
+
       - name: Run dashboard smoke test
         working-directory: packages/server
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
