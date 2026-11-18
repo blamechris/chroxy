@@ -6,8 +6,10 @@ import { chromium } from 'playwright'
 
 // #8779: the shared modal footer buttons rendered 29px high. The REAL New
 // Session modal (Create enabled, and disabled while creating), ConfirmDialog
-// (plain and danger) and DirectoryBrowser are mounted with the production
-// stylesheet, one case per page, at a desktop and a narrow viewport. Every
+// (plain and danger) and DirectoryBrowser (in a representative New Session modal
+// shell; see the fixture) are mounted with the production stylesheet, one case
+// per page, at a desktop and a narrow viewport. Only Create has a disabled state;
+// the other footers' buttons are always enabled. Every
 // footer button is measured in a real browser:
 //   - the footer renders exactly the expected buttons in the expected
 //     enabled/disabled states (so a case that rendered nothing cannot pass);

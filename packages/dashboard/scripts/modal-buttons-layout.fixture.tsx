@@ -42,10 +42,12 @@ function Case() {
     case 'confirm-danger':
       return <ConfirmDialog open danger title="Close session?" message="The session will be closed." confirmLabel="Close session" onConfirm={noop} onCancel={noop} />
     case 'directory':
-      // Production embeds DirectoryBrowser inside the New Session modal; here it
-      // sits in the same Modal shell so its footer is measured in a modal width.
+      // A representative shell, not the full production view: production renders
+      // DirectoryBrowser inside the New Session modal while browsing. Here it sits in
+      // the same Modal with the same content class (so the same width rules), but
+      // without the rest of the New Session form around it.
       return (
-        <Modal open onClose={noop} title="Choose a directory">
+        <Modal open onClose={noop} title="New Session" contentClassName="modal-content--session-form">
           <DirectoryBrowser
             entries={[{ name: 'api', isDirectory: true }, { name: 'web', isDirectory: true }]}
             currentPath="/work"
