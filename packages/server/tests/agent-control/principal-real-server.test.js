@@ -179,7 +179,11 @@ describe('agent-control --principal over a real encrypted server', () => {
     assert.equal(everything.includes(PRIMARY), false, 'the primary token never appears either')
   })
 
-  it('revocation ends a blocked wait promptly, and the next call cannot authenticate', async () => {
+  // Revocation is not pushed to an idle connection: the daemon cuts a revoked principal
+  // (4401) the next time it checks that connection, on the next frame the principal
+  // sends or at the keepalive sweep. This test drives that check with a probe call; a
+  // wait with no other traffic would instead end at the sweep or at its own timeout.
+  it('after revocation, the next frame the principal sends ends a blocked wait with an error, and the next call cannot authenticate', async () => {
     const { token, store, call, results } = await boot()
     say('sess-1', 1)
     const first = await call('chroxy_get_events', { sessionId: 'sess-1' })
@@ -187,7 +191,7 @@ describe('agent-control --principal over a real encrypted server', () => {
     await delay(150)
     const started = Date.now()
     store.revoke({ principalId: 'pr-1' })
-    // The next inbound frame on the connection is re-checked and ends it 4401.
+    // The probe: the next inbound frame on the connection is re-checked and ends it 4401.
     const probe = await call('chroxy_list_sessions')
     assert.equal(probe.isError, true)
     const ended = await waiting
