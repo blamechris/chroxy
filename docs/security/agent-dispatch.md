@@ -443,7 +443,7 @@ is authoritative**.
 | `sending` | **Persisted before the provider is called**, with the nonce hash (§6.6). Stays `sending` until acceptance, a provider `zero_effect`, `uncertain`, or the operator's `mark_uncertain` (§6.8); a provider `queued` admission keeps it `sending` | `uncertain` |
 | `delivered` | An **acceptance signal belonging to that turn** (below), §6.8's safe reconciliation, or an operator `adopt` (basis `operator`) | `delivered` |
 | `rejected:not_dispatched` | A provider `zero_effect` verdict for the send | terminal |
-| `dropped:<reason>` | **Only from `pending`**, on any P §6.5 drop cause: `session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off` (per-session or global), the queue TTL (`expired`), a cancel (`cancelled`), a coordinator swap (`coordinator_changed`), or an operator `close`/`supersede` or a closed attempt at send time (`closed`) | terminal |
+| `dropped:<reason>` | **Only from `pending`**, on any P §6.5 drop cause: `session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off` (per-session or global), the queue TTL (`expired`), a cancel (`cancelled`), a coordinator swap (`coordinator_changed`), an operator `close`/`supersede` or a closed attempt at send time (`closed`), or a held issue at send time (`held`) | terminal |
 | `uncertain` | A provider `uncertain` outcome, a lost transport, a restart during `sending`, a drop cause during `sending`, or `mark_uncertain` (basis `operator`) | `uncertain` (§6.8) |
 
 **Drop versus send is serialized.** The `pending` → `sending` transition and every drop are
@@ -451,11 +451,14 @@ taken under the **per-session agent delivery lock**, each a synchronous check-an
 (§6.1), so exactly one wins. The step that appends `sending`, immediately before the
 provider call, re-validates credential, kill switch, "agents off", lease and `gen` **current
 at send time** (never the command's stored values), **attempt open** and **issue not held**;
-a `pending` delivery whose attempt is closed is not sent and is recorded `dropped:closed`. A
+a `pending` delivery whose attempt is closed or whose issue is held is not sent and is
+recorded `dropped:closed` or `dropped:held` (known unsent; `delivery_dropped`). A
 drop cause during `sending` yields `uncertain` unless the provider returns a `zero_effect`
 verdict for that send, which wins (`rejected:not_dispatched`); a later `zero_effect` for a
 delivery already `uncertain` reconciles it to `rejected:not_dispatched` (the provider itself
-says nothing happened). A drop cause at `delivered` changes nothing. A kill, revoke or
+says nothing happened). An event not listed for a state (a drop cause at `uncertain` or
+`delivered`, a `queued` admission at `uncertain`, a `zero_effect` at `delivered`) leaves the
+state unchanged and is recorded as an observation. A kill, revoke or
 "agents off" drain removes the queue entry even if its append fails (latching); at boot a
 `pending` record becomes `dropped:restart`.
 
@@ -586,6 +589,11 @@ and `supersede` are the operator's evidence-based decision (the reconcile eviden
 first) that the task may be given up or tried again; the attempt is fenced, and the residual
 risk that the old send started a worker is the operator's to accept. **There is no resend:**
 to try again the operator supersedes, and a later dispatch command creates the next attempt.
+**Attempt state is evaluated first:** on a closed attempt (`closed`, `superseded`,
+`cancelled`, `dropped`) every verb but the task-level `raise_cap` is refused `attempt_closed`
+(`cancel`: `cancel_not_applicable`) whatever the delivery state, so `adopt` never revives a
+fenced attempt. `close`/`supersede` on a `delivered` attempt leaves a running worker running
+(fenced) beside any new attempt; the operator should cancel first or wait for the turn end.
 
 | Verb | `pending` | `sending` | `uncertain` | `delivered` | `rejected`, `dropped`, or attempt closed |
 |---|---|---|---|---|---|
@@ -666,11 +674,11 @@ keeps one meaning.
 
 | Channel | Codes |
 |---|---|
-| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `cursor_unavailable` |
+| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `attempt_closed` (shared with the worker ACK route), `cursor_unavailable` |
 | P §6.7 codes reused (fences and queue) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`, `human_queue_nonempty`, `agent_queue_full` |
 | Command result | `accepted` (a repeat carries `replayed: true` and the current state); cancel outcomes `cancel_requested`, `cancel_not_applicable`, `cancel_not_applied` |
 | Worker ACK route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
-| Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`, `closed`), `uncertain` |
+| Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`, `closed`, `held`), `uncertain` |
 | Attempt close outcomes | `dropped`, `cancelled`, `closed`, `superseded` |
 | Observed state detail | `awaiting_input`, `queued`, `quota`, `budget_pause`, `hold`, `owner_decision:<id>`, `gate_failed`, `reason_unknown` |
 | Reconciliation results | `admission_observed`, `reconcile_inconclusive` |
@@ -715,8 +723,9 @@ control: a clean dispatch renders the expected line.
   share one. An unacknowledged event is re-hinted on a bounded schedule (§15 decision 8), then
   marked `hint_exhausted`; that is the **only** signal tied to an ACK, and it is informational.
 - **The operator's attention list** (uncertain deliveries, overdue clocks, completed but
-  unclosed attempts, `session_gone`, a latched ledger) is derived from **ledger state alone**,
-  never from hints or acknowledgments.
+  unclosed attempts, `session_gone`, a latched ledger) covers **open attempts only**, from
+  **ledger state alone**, never hints or ACKs; an `uncertain` delivery under a closed attempt
+  is terminal history, its attempt outcome the exit.
 - **The event ACK is the one observe-tier write**, and a **proposed amendment** to P §4 and
   P §11's definition of observe (§15 decision 14). `principal_event_ack` advances only the
   caller's **own** acknowledgment cursor on its **own** event stream. The cursor is **not a
@@ -900,6 +909,10 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   in its repository; the record, lease, closed envelope and daemon-built text bound the rest.
 - **Closing an `uncertain` attempt** may leave a worker the old send started; the operator
   accepts that on the shown evidence, and the fenced attempt's late reports are refused (§6.8).
+- **Closing a `delivered` attempt** whose worker still runs leaves it running beside a new
+  attempt; it is fenced, and the operator should cancel first or wait for the turn to end.
+- **`rejected:not_dispatched` is known unsent** only as far as the provider's `zero_effect`
+  verdict is truthful, a trusted input defined by the P §6.9 write boundary.
 - Pointers: completed attempts hold capacity until closed (§5.2); same-user containment (§2);
   part 2 proves receipt only (§6.7); unattributed starts before S14 (§6.6); the event ACK is an
   assertion (§8); `uncertain` costs operator attention (§6.8); hook-routed timeouts read
