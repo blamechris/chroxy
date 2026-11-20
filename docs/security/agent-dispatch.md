@@ -84,11 +84,9 @@ a durable record for a cooperative but fallible agent; it is **not a sandbox** a
 hostile local process, and inside the worker anything in its process tree can present the
 worker's per-session secret (§6.7).
 
-**Untrusted content.** Issue text, pull request comments, worker output, review text and
-anything arriving on a notification channel are data, never wake text, an instruction, an
-eligibility verdict or an authority. **No broker, no write-back:** the ledger is a local
-durable journal, GitHub is **read-only** to the dispatcher, and principals stay refused on
-every HTTP route (P §4.5).
+**Untrusted content.** Issue text, comments, worker output, review text and channel input
+are data, never wake text, an instruction, a verdict or an authority. **No broker, no
+write-back:** GitHub is **read-only** to the dispatcher; principals stay off HTTP (P §4.5).
 
 ## 3. Identity: the Work Key
 
@@ -122,14 +120,12 @@ the key; one delivery's tries at the provider are **sends** (§6.5).
 This design adds no second task store: the work key is the dispatch-side identity of the
 #7823 record, and dispatch records reference it.
 
-Tests. (a) **Every record carries the full key**: the test enumerates the ledger's record
-kinds from an independently written list, checked in both directions against the
-reducer's kinds, and asserts each fixture record has all four parts; mutation: drop
-`successor` from the delivery record; positive control: a complete record passes.
-(b) **Stale successor**: a cancel and an ACK naming `s0` after `s1` is registered are refused;
-mutation: compare `attempt` only; positive control: the same messages at `s1` succeed.
-(c) **Attempt monotonicity** across an unclean restart, against an independent oracle
-sequence; mutation: derive the next attempt from the in-memory count.
+Tests. (a) Every fixture record of every kind (an independent list, checked both ways
+against the reducer) has all four parts; mutation: drop `successor` from the delivery record.
+(b) A cancel and an ACK naming `s0` after `s1` is registered are refused; mutation: compare
+`attempt` only; positive control: both succeed at `s1`. (c) Attempts stay monotonic across an
+unclean restart and a compaction, against an independent oracle; mutation: derive the next
+attempt from the in-memory count.
 
 ## 4. Roles and What Each May Do
 
@@ -137,7 +133,7 @@ sequence; mutation: derive the next attempt from the in-memory count.
 |---|---|---|---|---|---|---|
 | Read work view, dispatch events, audit in scope | yes | yes | observe grant, sessions it may see | no | no channel in v1 | no |
 | Dispatch | no channel in v1 | yes | no (`not_coordinator_of_record`) | no | no | no |
-| Cancel; request a reconcile pass | passes run on the daemon's timer | yes | no | no | no | no |
+| Cancel; request a reconcile pass | cancel via `principal_admin_task_resolve`; passes run on the daemon's timer | yes | no | no | no | no |
 | Request an owner decision | — | yes | no | no channel in v1 | no channel in v1 | no |
 | Register a successor session | yes | no in v1 (§15 decision 4) | no | no | no | no |
 | Resolve an attempt (adopt, resend, close, supersede, operator cancel) | yes (§6.8) | **no** | no | no | no | no |
@@ -252,17 +248,14 @@ Rules:
   `cleared` to `permission_outcome: expired`, and reason `stopped` to `stopped`; only the
   live frames distinguish the endings folded into `expired`.
 
-Tests. A fixture per row asserts the recorded ending, including a snapshot read at the
-instant of a `permission_expired` that still lists the request and an answerer reply that
-changes nothing; a `permission_expired` then `cleared` pair records one ending; a question
-ending records nothing. Mutation: map `permission_expired` to `permission_timed_out`; treat
-a resolution with neither `reason` nor `resolvedBy` as a deny; record the second frame as a
-second ending. Positive control: an in-process timeout records `permission_timed_out`, and a
-hook-routed deny records `permission_denied`. **Roster:** a syntax-tree test enumerates every
-`permission_resolved` and `permission_expired` emit and send site, question sites included
-and classified explicitly, modelled on `tests/permission-resolved-by-roster.test.js` (P §9),
-and fails on a site absent from the classification constant this table mirrors; mutation:
-add an unclassified emit site.
+Tests. A fixture per row, including a snapshot read during a `permission_expired` that still
+lists the request, an answerer reply (no change), an expired-then-`cleared` pair (one ending)
+and a question ending (nothing). Mutation: map `permission_expired` to timed out; deny on a
+resolution lacking both `reason` and `resolvedBy`; record a second ending. Positive control:
+an in-process timeout and a hook-routed deny record their states. **Roster:** a syntax-tree
+test, modelled on `tests/permission-resolved-by-roster.test.js` (P §9), enumerates every
+`permission_resolved` and `permission_expired` site, question sites classified explicitly,
+and fails on one absent from the constant this table mirrors; mutation: add one.
 
 ### 5.5 Declared status is a projection
 
@@ -288,7 +281,8 @@ it, to the P §5.4 standard (file fsync, and directory fsync where a file is cre
 renamed), the confirmed-durable discipline `PrincipalJournal` (`principal-journal.js`)
 applies to its sequence reservation. The ledger stores **work keys, ids, hashes, lengths
 and references**, never prompt text, issue text or tool inputs. Closed tasks are compacted
-after their tombstone (§15 decision 13), snapshot plus journal, as `RunLedger` does.
+after their tombstone (§15 decision 13), snapshot plus journal, as `RunLedger` does; the
+snapshot keeps each task's attempt counter, so monotonicity and the attempt cap survive.
 
 **Every ledger transition is a synchronous check-and-append** against the reducer's current
 state, exactly like the commit step of §6.2: the precondition is evaluated and the record
@@ -297,14 +291,15 @@ longer holds refuses the transition instead of writing it.
 
 **A failed append latches dispatch off.** An append that throws or is not confirmed durable
 refuses every later command `ledger_unavailable`, and every new `sending` transition, until
-the next boot re-reads the ledger; nothing is retried in-process. Where a written but
-unconfirmed record may exist, the guarantee is **no delivery**, not "no record": the boot
-sweep settles it (§10). **At boot:** a torn **final** record (an incomplete line) is copied to
-a side file, the journal is **durably truncated** to the last good record, and only then is a
-`system` record appended, so no later boot sees a bad record mid-file; dispatch proceeds. An
-unreadable or invalid record **before** the final one, an unknown record version `v`, an
-unknown record kind, a wrong mode or owner, or a symlink **disables dispatch**, and
-`chroxy doctor` names the recovery.
+the next boot re-reads the ledger; nothing is retried in-process. A queued `pending` entry
+then has no exit until that re-read; that is safe, and the attention list shows the latch.
+Where a written but unconfirmed record may exist, the guarantee is **no delivery**, not "no
+record": the boot sweep settles it (§10). **At boot:** a torn **final** record (an
+**incomplete line**, the only torn case) is copied to a side file, the journal is **durably
+truncated** to the last good record, and only then is a `system` record appended; dispatch
+proceeds. Any complete but invalid record (final or not), an unknown record version `v` or
+kind, a wrong mode or owner, or a symlink **disables dispatch**, and `chroxy doctor` names
+the recovery.
 
 Tests: after an fsync failure a second command under a new `commandId` is refused and no
 pending delivery is sent; a crash with a torn tail, two boots, then a dispatch is admitted
@@ -322,9 +317,11 @@ Gates 1 to 7 follow P §6.4, so **no task state is revealed before session autho
 2. **Closed envelope** (§7.1) — any extra field `scope_denied`.
 3. **Credential valid** — close 4401 (P §3.0).
 4. **Kill switch and ledger health** — `agents_off`; `ledger_unavailable`.
-5. **Scope** — tier ≥ drive **and** `principalMaySee(client, sessionId, 'drive')` called for
-   grant and tier only, without the lease option — `scope_denied`.
-6. **Lease and `gen`** — `lease_required`, `lease_stale`, `lease_suspended`.
+5. **Scope and tier** — gates 5 and 6 are **one call**, `principalMaySee(client, sessionId,
+   'drive', opts)` with `leaseFor` supplied (`principal-policy.js`), which checks grant, then
+   tier, then the lease. Its reasons `scope` and `tier` are gate 5's `scope_denied`.
+6. **Lease and `gen`** — the same call's `lease_required`, reached only after scope and tier
+   pass; then the `gen` and suspension checks (`lease_stale`, `lease_suspended`).
 7. **Per-session "agents off"** — `agents_off`.
 8. **Coordinator of record** for the command's `repo` — `not_coordinator_of_record`.
 9. **Field validation** (charsets, bounds; `ackBy` and `firstActivityBy` no longer than the
@@ -356,14 +353,15 @@ Gates 1 to 7 follow P §6.4, so **no task state is revealed before session autho
     reducer; `auditOrRefuse` writes the **audit pre-effect record** (§11; failure is
     `audit_unavailable` with no ledger append); then **one durable append** writes the
     `dispatch_reserved` record: the reservation, the capacity hold, the outbox entry in
-    `pending`, the deadlines and the semantic hash, under one work key and `bootGen`, so they
-    cannot disagree. The append and its fsync are **synchronous calls** inside the step, as
-    `writeDurableFile` (`durable-write.js`) is synchronous, so no other command interleaves.
-    An implementation that appends with asynchronous I/O must instead serialize every commit
-    through one writer and count **in-flight** reservations in the idempotency, attempt and
-    capacity gates. If the append is not confirmed durable there is **no delivery** (memory
-    is not advanced), the reply is `ledger_unavailable`, an outcome line records the failure,
-    and §6.1's latch is set.
+    `pending`, the deadlines and the semantic hash, under one work key and `bootGen`; the
+    agent-queue entry is created in the same step, so the room checked at gate 15 cannot be
+    lost. The append and its fsync are **synchronous calls** (as `writeDurableFile`,
+    `durable-write.js`, is), and a command arriving while a commit is in progress is refused
+    or serialized by a **commit-in-progress re-entry guard**, never evaluated against
+    un-advanced state. An asynchronous implementation must instead serialize every commit
+    through one writer and count **in-flight** reservations in gates 10, 13 and 15. If the
+    append is not confirmed durable there is **no delivery** (memory is not advanced), the
+    reply is `ledger_unavailable`, an outcome line records it, and §6.1's latch is set.
 17. **Reply** `principal_command_result { status: 'accepted', workKey, reservationId,
     deliveryId, ledgerSeq, bootGen }`; then delivery begins (§6.5).
 
@@ -378,10 +376,10 @@ eligibility). (b) A revoke, kill, lease bump, coordinator change and issue hold 
 every `await` before gate 16 cause zero effect (P §3.0 item 3); mutation: append outside
 `withPrincipalEffect`, or drop gate 8 from the re-check. (c) A failed pre-effect write or
 append (throw, unconfirmed fsync) yields no delivery and `audit_unavailable` or
-`ledger_unavailable`; mutation: reply before the fsync verdict. (d) **Synchronous path:** a
-spy on the append injects, inside it, a second command for the same task and one for a full
-pool; neither is admitted until the first commit returns; mutation: an asynchronous append
-without the serializer. An asynchronous implementation must also pass both cases against a
+`ledger_unavailable`; mutation: reply before the fsync verdict. (d) **Re-entry guard:** a spy
+on the append injects, inside it, a second command for the same task and one for a full
+pool; each is refused or serialized, never evaluated against un-advanced state; mutation:
+remove the re-entry refusal. An asynchronous implementation must pass both cases against a
 **slow writer**; mutation: drop in-flight counting. Positive control: a clean dispatch writes
 one `dispatch_reserved` record and replies `accepted`.
 
@@ -405,9 +403,8 @@ positive control: a released slot admits the next dispatch.
   delivery that was dropped. A refused command leaves a denial audit record and **no
   idempotency record**, so the same `commandId` may be retried and is evaluated afresh. A
   different semantic hash under an accepted key is `payload_mismatch` (the P §6.7 reason).
-- `principal_task_cancel`, `principal_task_reconcile` and `principal_decision_request` follow
-  the same `(principalId, commandId)` rule, each hashing its own semantic fields.
-- A record lives **as long as the task plus a tombstone** of at least the credential's
+- Cancel, reconcile and decision requests follow the same rule on their own semantic fields.
+  A record lives **as long as the task plus a tombstone** of at least the credential's
   maximum lifetime (§15 decision 7), never a process-local window (contrast
   `reserveInputRequest`, `INPUT_DEDUP_*` in `handlers/input-handlers.js`).
 - At a per-principal cap new commands are refused `dispatch_capacity`; nothing is evicted.
@@ -424,8 +421,9 @@ a new `commandId` for a new task is admitted.
 
 **On main**, `handleInput` (`handlers/input-handlers.js`) refuses every principal at its
 first statement (`refusePrincipalHandler`); host input reaches a provider through
-`entry.session.sendMessage(text, attachments, { clientMessageId, onInputAdmission, … })` in
-that handler, and the CI-completion wake through the same provider call from
+`entry.session.sendMessage(text, attachments, { clientMessageId, … })` in that handler, with
+`onInputAdmission` passed when the handler tracks admission, and the CI wake through the
+same provider call from
 `wakeViaTurnInput` (`session-wake.js`). That call and its admission report are the
 **turn-input seam**. **A dispatch delivery** goes through the principal input path S9 adds
 behind `handleInput`: framing (P §6.2, §6.3), the fence (P §6.4), the agent delivery lock and
@@ -441,47 +439,54 @@ is authoritative**.
 
 | Delivery state | Written when | After a daemon restart |
 |---|---|---|
-| `pending` | With the reservation, and while the fence holds the queued entry (`fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`) | `dropped:restart` |
-| `sending` | **Persisted before the provider is called**, with a `sendId` and the nonce hash (§6.6) | `uncertain` |
+| `pending` | With the reservation; **only before any provider call**. The fence may hold the entry in the daemon's own agent queue (`fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`); a fence-cause `zero_effect` for an entry that never left that queue is the one case that keeps `pending` | `dropped:restart` |
+| `sending` | **Persisted before the provider is called**, with a `sendId` and the nonce hash (§6.6); also from `uncertain` for an operator `resend`, through the same queue, fence and send-time re-validation (failing them, the delivery stays `uncertain`). Stays `sending` until acceptance, a provider `zero_effect` or `uncertain`; a provider `queued` admission keeps it `sending` | `uncertain` |
 | `delivered` | An **acceptance signal belonging to that turn** (below), §6.8's safe reconciliation, or an operator `adopt` (basis `operator`) | `delivered` |
-| `rejected:not_dispatched` | A provider `zero_effect` outcome that is not a fence cause | terminal |
-| `dropped:<reason>` | **Only from `pending`**, on any P §6.5 drop cause: `session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off` (per-session or global), the queue TTL (`expired`), a cancel (`cancelled`), or a coordinator swap (`coordinator_changed`) | terminal |
-| `uncertain` | A provider `uncertain` outcome, a lost transport, a restart during `sending`, or a drop cause that arrives during `sending` | `uncertain` (§6.8) |
+| `rejected:not_dispatched` | A provider `zero_effect` verdict for the send | terminal |
+| `dropped:<reason>` | **Only from `pending`**, on any P §6.5 drop cause: `session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off` (per-session or global), the queue TTL (`expired`), a cancel (`cancelled`), a coordinator swap (`coordinator_changed`), or an operator `close`/`supersede` or a closed attempt at send time (`closed`) | terminal |
+| `uncertain` | A provider `uncertain` outcome, a lost transport, a restart during `sending`, or a drop cause during `sending` | `uncertain` (§6.8) |
 
 **Drop versus send is serialized.** The `pending` → `sending` transition and every drop are
-taken under the **per-session agent delivery lock** and each is a synchronous check-and-append
-(§6.1), so exactly one of them wins. In the same synchronous step that appends `sending`,
-immediately before the provider call, credential, kill switch, "agents off", lease and `gen`
-are re-validated against the values **current at send time**, never the command's stored
-`leaseId`/`gen`. A drop cause that arrives once the delivery is `sending` yields `uncertain`,
-never `dropped`; one that arrives at `delivered` changes no delivery state. A kill, revoke or
-"agents off" drain removes the queue entry even if its ledger append fails (the latch is then
-set); the ledger catches up at the boot sweep, where a `pending` record becomes
-`dropped:restart`. Nothing reaches the provider before `sending` is persisted, so an S10
-durable-dedup record (P §6.6) for a dispatch send found in `reserved` or `committed(queued)`
-at boot is reclassified `dropped:restart`, not `uncertain`.
+taken under the **per-session agent delivery lock**, each a synchronous check-and-append
+(§6.1), so exactly one wins. The step that appends `sending`, immediately before the provider
+call, re-validates credential, kill switch, "agents off", lease and `gen` **current at send
+time** (never the command's stored values), **attempt open** and **issue not held**; a send
+whose attempt is closed is not made and is recorded `dropped:closed`. A drop cause during
+`sending` yields `uncertain` unless the provider returns a `zero_effect` verdict for that
+send, which wins (`rejected:not_dispatched`); a later `zero_effect` for a send already
+`uncertain` is evidence and reconciles it to `rejected:not_dispatched` only if it belongs to
+that `sendId`. A drop cause at `delivered` changes nothing. A kill, revoke or "agents off"
+drain removes the queue entry even if its append fails (latching); at boot a `pending` record
+becomes `dropped:restart`.
+
+**The ledger is the authority for a dispatch delivery's state.** The `sending` append is
+written **before** the S10 durable-dedup record (P §6.6) reaches `dispatching` and before the
+provider call, so the ledger never says `pending` for what S10 says was dispatching. The S10
+record keeps exactly the state P §6.6 gives it (a `reserved` record still reads `uncertain`
+there, which only means that `clientMessageId` is never auto-retried); the dispatch reducer
+does not read S10 to decide delivery state.
 
 A **dropped** or **rejected** delivery is therefore **known unsent**: one audit record, the
-attempt closes `dropped` (`cancelled` when the cause is a cancel), and its reservation and
-capacity are released by that recorded transition, with a `delivery_dropped` event. A later
-dispatch is a new command and a new attempt; that is not a blind redispatch.
+attempt closes `dropped` (`cancelled` for a cancel; `closed` or `superseded` for the operator
+verbs), and its reservation and capacity are released by that recorded transition, with a
+`delivery_dropped` event. A later dispatch is a new command and a new attempt.
 
 **The acceptance signal** is the provider's `onInputAdmission` report `{ status: 'accepted',
 delivery: 'dispatch_started' }` for the send's `clientMessageId`, on a provider that declares
 the seam (`capabilities.daemonTurnInput === true`, read by `supportsDaemonTurnInput` in
-`session-wake.js`); a `queued` admission is **not** delivery. On claude-tui, a PTY write that
-returns true is a write, not an acceptance; a claude-tui delivery needs a turn start caused
-by it (S14's proposed `turn_started { causedBy }`) and the composer detector that P §6.9 gates
-principal input on.
+`session-wake.js`); a `queued` admission leaves the delivery `sending`. On claude-tui a PTY
+write that returns true is not an acceptance; it needs a turn start caused by the send (S14's
+proposed `turn_started { causedBy }`) and the composer detector P §6.9 gates input on.
 
 Tests. Each drop cause at `pending` yields `dropped:<reason>`, one audit record, a released
-reservation and **zero sends**. **Race:** a cancel, a lease loss and a revoke injected at the
-`sending` append each yield either (`dropped`, zero sends) or (`sending` then `uncertain`),
-never (`dropped` and sent). A fixture provider that admits, queues then admits, rejects and
-fails mid-write maps to `delivered`, `pending` then `delivered`, `rejected:not_dispatched` and
-`uncertain`. Mutation: allow a drop from `sending`; keep `pending` across a kill; mark
-`delivered` on `queued`; persist `sending` after the provider call; send under the stored
-`gen`. Positive control: an undisturbed delivery sends once and is `delivered`.
+reservation and **zero sends**. **Race:** a cancel, a lease loss and a revoke at the `sending`
+append yield (`dropped`, zero sends) or (`sending` then `uncertain`), never (`dropped` and
+sent). An operator `close` at `pending` with a fenced entry, then the fence clears: zero
+sends. A fixture provider that admits, queues then admits, rejects and fails mid-write maps to
+`delivered`, `sending` then `delivered`, `rejected:not_dispatched` and `uncertain`. Mutation:
+allow a drop from `sending`; map a provider `queued` admission to `pending`; let `close` leave
+a `pending` entry queued; keep `pending` across a kill; persist `sending` after the provider
+call; send under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 ### 6.6 The two-part acknowledgment and the observed start
 
@@ -495,17 +500,17 @@ fails mid-write maps to `delivered`, `pending` then `delivered`, `rejected:not_d
   target (`wrong_session`), at the **current successor** (`ack_stale_successor`); the delivery
   is `sending`, `delivered` or `uncertain` (`delivery_not_open`); the attempt is open
   (`attempt_closed`); and the nonce matches (constant-time) the hash of one of that
-  delivery's sends (`nonce_mismatch`). It records part 2 durably with the send it matched;
-  against `uncertain`, part 2 is evidence and reconciles toward `delivered` (§6.8). The nonce
+  delivery's sends (`nonce_mismatch`). It records part 2 durably **once per send**, with the
+  send it matched (a repeat is acknowledged without a new record); against `uncertain`, part
+  2 is evidence and reconciles toward `delivered` (§6.8). The nonce
   binds the ACK to the send, the credential binds it to the session; the nonce is not a
   secret and confers nothing alone.
 - A **verified durable ACK** is both parts on disk under the same work key and `sendId`. Each
   part records its own `bootGen`. Either part alone is shown as what it is.
-- **Work start** is a third fact: the first tool event (`tool_start` in the session journal)
-  in the target session after part 1, **in the turn that send caused**. It is observed,
-  **never declared**. Attribution needs S14's `turn_started { causedBy }`; until then a tool
-  event after part 1 is recorded as an **unattributed start** (`start_unattributed`) and
-  cannot satisfy the live dispatch acceptance (the fixture provider supplies causation).
+- **Work start** is a third, observed fact, **never declared**: the first tool event
+  (`tool_start`) after part 1 **in the turn that send caused**. Attribution needs S14's
+  `turn_started { causedBy }`; until then it is an **unattributed start**
+  (`start_unattributed`), which cannot pass the live dispatch acceptance.
 - **Starts are counted per attempt and delivery**, summed over all sends of the delivery. The
   acceptance quantity is "observed starts attributable to the delivery": **0, 1, more than 1,
   or unknown**; a journal gap yields `unknown`, never 0. Counting **detects** a second start
@@ -513,12 +518,11 @@ fails mid-write maps to `delivered`, `pending` then `delivered`, `rejected:not_d
 - **Overdue clocks emit events and a reconcile, nothing else**: `ack_overdue` at `ackBy`,
   `start_overdue` at `firstActivityBy`. These two clocks belong to the delivery slice (D3).
 
-Test: part 2 before part 1 is recorded as part 2 only; part 2 against an `uncertain` delivery
-moves it to `delivered`; part 2 matching the first of two sends records that send; a declared
-"started" with no tool event records no start; a gap reads `unknown`; starts across two sends
-are summed. Mutation: accept a declared start; drop the successor check; count a gap as 0;
-count per send only. Positive control: both parts and one attributed tool event yield a
-verified ACK and a count of 1.
+Test: part 2 before part 1 is part 2 only; against `uncertain` it moves to `delivered`; it
+records the send it matched, once (a repeat adds no record); a declared start with no tool
+event is no start; a gap reads `unknown`; starts over two sends are summed. Mutation: accept a
+declared start; drop the successor check; count a gap as 0. Positive control: both parts and
+one attributed tool event yield a verified ACK and a count of 1.
 
 ### 6.7 The worker acknowledgment credential (§15 decision 1)
 
@@ -536,7 +540,7 @@ decides which session is speaking. The classes of
 |---|---|---|---|
 | Primary token | no | everything | refuse |
 | Pairing-bound session token | yes (`generateBoundPairing`, `pairing.js`) | input, permission answers and declared-status writes **for that session** | refuse: a worker holding it could answer its own permission prompts |
-| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and `ClaudeTuiSession` (`claude-tui-session.js`), in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **recommend** |
+| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and, only when a port is configured, `ClaudeTuiSession` (`claude-tui-session.js`); in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **recommend** |
 | Daemon-level ingest secret | no: daemon-wide; the caller names the session | notifications, declared status, mailbox wakeups | refuse |
 | Agent principal | no; a worker is not a principal | its tier | refuse |
 | Discord-return secret | not built; channel-scoped | — | refuse |
@@ -562,17 +566,15 @@ hook-secret route that writes durable state**, so §5's reasoning that this clas
 nothing beyond a prompt or a read (the "strictly less" argument made for
 `POST /permission-floor`) must be re-argued there, not assumed.
 
-**Honest limits.** The secret is in the worker's process environment (the `cli-session.js`
-comment beside it says so), so anything in that process tree can present it: part 2 proves
-the nonce came from **inside that session's process tree**, evidence of receipt, not of
-intent or authority. Providers that mint no hook secret (claude-sdk, Codex, ACP) cannot
-produce part 2 and claude-tui cannot yet produce part 1 (§6.5); hence §15 decision 2.
+**Honest limits.** Anything in the worker's process tree can read the secret (the
+`cli-session.js` comment says so): part 2 is evidence of receipt **from inside that tree**, not
+of intent. claude-sdk, Codex and ACP mint no hook secret, and claude-tui cannot yet produce
+part 1 (§6.5); hence §15 decision 2.
 
-Test: an ACK presented with each refused class, from a non-loopback peer, with another
-session's secret, with an older successor's secret and with a wrong nonce is refused
-uniformly and audited with the specific reason; mutation: take the session from the body, or
-drop the nonce check; positive control: the target session's secret with the right nonce
-records part 2.
+Test: an ACK with each refused class, from a non-loopback peer, with another session's or an
+older successor's secret, or a wrong nonce is refused uniformly and audited specifically;
+mutation: take the session from the body, or drop the nonce check; positive control: the
+target session's secret and nonce record part 2.
 
 ### 6.8 Uncertainty, attempt close and no blind redispatch
 
@@ -584,45 +586,47 @@ with no admission leaves it `uncertain`, as does a gap. While an attempt is open
 a new dispatch for the task is refused (`attempt_open`, `attempt_uncertain`). A target session
 that disappears makes the attempt `unknown`, emits `session_gone`, and waits for `close`.
 
-**Operator verbs** (`principal_admin_task_resolve`). Before acting on an `uncertain` delivery
-the operator is **shown the reconcile evidence**.
+**Operator verbs** (`principal_admin_task_resolve`), by **delivery state**; no verb releases a
+reservation while a send can still land. The reconcile evidence is shown before any verb on
+an `uncertain` delivery. `adopt` and `resend` need an open attempt (`attempt_closed`).
 
-| Verb | Valid from | Effect |
-|---|---|---|
-| `adopt` | `uncertain` only | The operator asserts the delivery landed: `delivered`, basis `operator` |
-| `resend` | `uncertain` only | A new send (§6.6) to the same target; its `sending` append re-checks in the same synchronous step that the delivery is **still** `uncertain`, else refused `delivery_not_uncertain` |
-| `cancel` | any open attempt | As a coordinator cancel (below), including the interrupt rule |
-| `close` | any state | The attempt closes `closed`; reservation and capacity released |
-| `supersede` | any open or uncertain attempt | Closes it `superseded` and fences it; it does **not** dispatch: a later dispatch command creates the next attempt |
+| Verb | `pending` | `sending` | `uncertain` | `delivered`, `rejected`, `dropped` |
+|---|---|---|---|---|
+| `adopt` | `delivery_not_uncertain` | `delivery_not_uncertain` | `delivered`, basis `operator` | `delivery_not_uncertain` |
+| `resend` | `delivery_not_uncertain` | `delivery_not_uncertain` | a new send (§6.6) via the `uncertain` → `sending` path of §6.5, whose append re-checks the delivery is **still** `uncertain` (`delivery_not_uncertain`) | `delivery_not_uncertain` |
+| `cancel` | as the coordinator cancel below | as below | refused `attempt_uncertain` (use another verb) | as below |
+| `close`, `supersede` | in one synchronous step, `dropped:closed` and the queue entry drained, then the attempt closes `closed`/`superseded` | refused `delivery_sending` | allowed; the attempt is fenced | allowed |
+| `raise_cap` (field `attemptCap`) | raises the task's attempt cap | same | same | same |
 
-**Attempt-close transitions that exist before the completion slice:** `dropped` (§6.5),
-`cancelled`, `closed` and `superseded`. Each releases the reservation by its recorded
-transition; nothing else does, and every open attempt is on the operator's attention list
-(§8), so no reservation is held without an operator-visible state. A superseded or closed
+The operator `cancel` does **not** run the coordinator gates but keeps the same interrupt rule.
+`supersede` never dispatches: a later dispatch command creates the next attempt.
+
+**Attempt-close transitions before the completion slice:** `dropped` (§6.5), `cancelled`,
+`closed` and `superseded`; each releases the reservation by its recorded transition, nothing
+else does, and every open attempt is on the attention list (§8). A closed or superseded
 attempt is **fenced**: a late ACK, start or report from it is refused and raised as
-`late_report_refused`, so an old worker cannot overwrite the attempt that replaced it.
-**Supersede is operator-only** until completion fencing exists; no coordinator message asks.
+`late_report_refused`. **Supersede is operator-only** until completion fencing exists.
 
-**Cancel** (`principal_task_cancel`) runs gates 1 to 10 of §6.2, then checks the work key's
-successor (`stale_successor`) and, before any interrupt, the P §4.1.1 interrupt envelope rules
-and the P §4.1.3 fences (`fenced_pty_dirty`, `fenced_human_active`, `human_queue_nonempty`, and
-answer scope while a prompt is pending). Its command result embeds the P §7.4 interrupt-ack
-fields (`status`, `reason?`).
+**Coordinator cancel** (`principal_task_cancel`) runs gates 1 to 10 of §6.2, then checks the
+work key's successor (`stale_successor`) and, before any interrupt, the P §4.1.1 interrupt
+envelope rules and the P §4.1.3 fences (`fenced_pty_dirty`, `fenced_human_active`,
+`human_queue_nonempty`, answer scope while a prompt is pending). Its result embeds the P §7.4
+interrupt-ack fields (`status`, `reason?`).
 
 | Delivery state | Cancel outcome |
 |---|---|
 | `pending` | `dropped:cancelled`; the attempt closes `cancelled` |
-| `sending` | `cancel_requested` is recorded; when the delivery settles at `delivered`, the `delivered` rule applies after gates 3 to 7 and the P §4.1.3 fences are re-run at apply time (a refusal records `cancel_not_applicable`); at `uncertain` (including by restart), a `cancel_not_applied` record and event, nothing interrupted |
-| `delivered` | Interrupt **only** if the session's current turn was caused by this delivery (S14); otherwise `cancel_not_applicable`, so a human's turn is never interrupted by a dispatch cancel |
+| `sending` | `cancel_requested` is recorded; settling at `delivered`, the `delivered` rule applies after gates 3 to 8 and the P §4.1.3 fences re-run (a refusal records `cancel_not_applicable`); settling `uncertain` (also by restart), a `cancel_not_applied` record and event, nothing interrupted |
+| `delivered` | Interrupt **only** a turn caused by this delivery (S14), else `cancel_not_applicable`; a human's turn is never interrupted. The attempt **stays open** and keeps its capacity until `close` |
 | `uncertain` | Refused `attempt_uncertain` |
-| `rejected`, `dropped`, or a closed attempt | `cancel_not_applicable` |
+| `rejected`, `dropped`, closed attempt | `cancel_not_applicable` |
 
 Tests: a restart during `sending`, then every reconcile outcome, leaves at most one attributed
-start and no second delivery; a `resend` raced with a part 2 arrival is refused
-`delivery_not_uncertain`; a cancel while a human's turn runs interrupts nothing; a cancel
-requested during `sending` that settles `uncertain` interrupts nothing; a vanished session
-waits for `close`. Mutation: resend on a continuous empty journal; resend without the
-still-`uncertain` re-check; interrupt any running turn on cancel. Positive control: an
+start; a `resend` raced with a part 2 is refused `delivery_not_uncertain`; a `resend` on a
+closed attempt is refused `attempt_closed`; `close` at `sending` is refused `delivery_sending`;
+a cancel during a human's turn, or settling `uncertain`, interrupts nothing; a vanished session
+waits for `close`. Mutation: resend on an empty continuous journal; drop the still-`uncertain`
+re-check; let `close` release at `sending`; interrupt any running turn. Positive control: an
 operator `resend` delivers once.
 
 ## 7. Message Types and Codes
@@ -648,7 +652,7 @@ roster** (an amendment D1 owns): they are strict-primary and loopback-only, and 
 | `principal_event_ack` (proposed; §15 decision 14) | observe (the one exception, §8) | `type, requestId, journalId, journalSeq` | `principal_event_ack_result` |
 | `principal_audit_read` | observe | `type, requestId, workKey?, afterLedgerSeq?, limit` (≤ 200) | `principal_audit_page` |
 | `principal_admin_coordinator_set` | operator | `type, requestId, repo, principalId \| null` | direct reply |
-| `principal_admin_task_resolve` | operator | `type, requestId, workKey, action` | direct reply |
+| `principal_admin_task_resolve` | operator | `type, requestId, workKey, action, attemptCap?` | direct reply |
 | `principal_admin_successor_register` | operator | `type, requestId, workKey, sessionId, handoffRef` | direct reply |
 | `principal_admin_decision_answer` | operator | `type, requestId, decisionId, answer` | direct reply |
 | `POST /task-ack` (proposed; §15 decision 1) | worker, per-session hook secret | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
@@ -665,11 +669,11 @@ keeps one meaning.
 
 | Channel | Codes |
 |---|---|
-| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `cursor_unavailable` |
+| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_sending`, `cursor_unavailable` |
 | P §6.7 codes reused (fences and queue) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`, `human_queue_nonempty`, `agent_queue_full` |
 | Command result | `accepted` (a repeat carries `replayed: true` and the current state); cancel outcomes `cancel_requested`, `cancel_not_applicable`, `cancel_not_applied` |
 | Worker ACK route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
-| Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`), `uncertain` |
+| Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`, `closed`), `uncertain` |
 | Attempt close outcomes | `dropped`, `cancelled`, `closed`, `superseded` |
 | Observed state detail | `awaiting_input`, `queued`, `quota`, `budget_pause`, `hold`, `owner_decision:<id>`, `gate_failed`, `reason_unknown` |
 | Reconciliation results | `admission_observed`, `reconcile_inconclusive` |
@@ -719,15 +723,17 @@ control: a clean dispatch renders the expected line.
 - **The event ACK is the one observe-tier write**, and a **proposed amendment** to P §4 and
   P §11's definition of observe (§15 decision 14). `principal_event_ack` advances only the
   caller's **own** acknowledgment cursor on its **own** event stream. The cursor is **not a
-  ledger record**: it is persisted durably in its own per-principal cursor record before the
-  reply; a failed cursor write returns `cursor_unavailable` and does **not** set the ledger
-  latch; over the limit is `rate_limited`. It changes no task, delivery or attempt state, and
-  an ACK past the head or for another principal's stream is refused. It proves the principal
-  **asserted** receipt, nothing about reading.
-- **Channels are one-way.** Nothing arriving on a notification channel is a command; a reply,
-  reaction or forwarded hint has no effect on the daemon. With no open attempt nothing polls;
-  otherwise a coordinator reads `principal_work_view` with `sinceVersion` or follows its
-  subscription.
+  ledger record**: it is persisted durably in the **dispatch cursor store** (one 0600 file
+  under the config dir, one record per principal, P §5.4 standard) before the reply. On the
+  wire, `journalId` names the ledger's event-stream incarnation and `journalSeq` is the
+  event's monotonic position in that principal's stream; each event record carries both
+  beside its global `ledgerSeq`, which is not exposed on the stream. A failed cursor write
+  returns `cursor_unavailable` and does **not** latch the ledger; over the limit is
+  `rate_limited`. It changes no task, delivery or attempt state; an ACK past the head or for
+  another stream is refused. It proves only that the principal **asserted** receipt.
+- **Channels are one-way**: nothing arriving on a notification channel affects the daemon.
+  With no open attempt nothing polls; otherwise a coordinator reads `principal_work_view`
+  with `sinceVersion` or follows its subscription.
 
 Tests: an event is on disk before its hint (fault-inject the append: no hint); a replayed hint
 has no second effect; a forged hint on the channel causes no command; an adapter restart
@@ -771,10 +777,9 @@ reached while up emits exactly one event.
   older generation as current is refused `stale_generation`.
 - **Boot sequence, before the first admission:** the ledger is re-read under §6.1's rules
   (a torn tail truncated first); every `pending` delivery becomes `dropped:restart` (one audit
-  record each, attempt closed, reservation released); every S10 dedup record of a dispatch
-  send in `reserved` or `committed(queued)` is reclassified `dropped:restart` (§6.5); every
-  `sending` delivery becomes `uncertain`; every attempt's observed state becomes `unknown`;
-  deadlines are swept (§9); a reconciliation pass runs (§5.3).
+  record each, attempt closed, reservation released); S10 records keep their P §6.6 states
+  and are not read for delivery state (§6.5); every `sending` delivery becomes `uncertain`;
+  observed states become `unknown`; deadlines are swept (§9); a reconciliation pass runs.
 - **Restart blocker.** An open reservation that has not reached work start, and any `sending`
   delivery, adds a reason to `computeDaemonIdleState` (`daemon-idle-state.js`), so the idle
   auto-deploy (#8324) does not restart the daemon under it. Fail safe: an unreadable ledger
@@ -811,14 +816,12 @@ journal cursor), `content { sha256, len }` and `prev`, the hash of the previous 
 is **not** a defence. `principal_audit_read` returns records for tasks on sessions the caller
 may observe and its own commands and denials only.
 
-Test: inject a failure of the pre-effect write and, separately, of the ledger append (ENOSPC,
-EBADF, unconfirmed fsync) before **every** effect kind (reserve, send, ACK part, cancel,
-decision) and assert no effect for the first and no delivery plus an outcome line for the
-second; assert the pre-effect record precedes the effect and exists once per effect; assert
-a payload marker never appears in any record. Mutation: make the writer report success
-unconditionally; append the ledger record before the pre-effect line; write a second
-pre-effect record for a send; log a body prefix. Positive control: with a healthy writer each
-effect occurs with its records.
+Test: a failed pre-effect write, and separately a failed append (ENOSPC, EBADF, unconfirmed
+fsync), before **every** effect kind (reserve, send, ACK part, cancel, decision) yields no
+effect, or no delivery plus an outcome line; the pre-effect record precedes each effect, once;
+no payload marker appears in any record. Mutation: an always-successful writer; the ledger
+record before the pre-effect line; two pre-effect records for a send; a logged body prefix.
+Positive control: a healthy writer records every effect.
 
 ## 12. Acceptance Split
 
@@ -833,11 +836,10 @@ durable idempotency, loopback delivery with its `ackBy` and `firstActivityBy` cl
 two-part ACK, one attributed start.** Out of scope: completion, successors beyond `s0`,
 supersede, events and every external channel, the general deadline timer (D7), GitHub (a
 fixture row), UI, anything on a long-running daemon. Cases, each with its mutation: happy
-path; duplicate; same id, different semantic payload; second dispatch for the task; pool
-full; append failing (no delivery, latched); torn tail across two boots; each drop cause; the
-drop-versus-send race; restart with `pending` and during `sending` (attributed starts 0 or 1,
-never 2); wrong nonce; another session's secret; no ACK by `ackBy`; a gap (`unknown`); a
-stale view. **Proves** the ledger logic, nothing about a real provider, session or channel.
+path; duplicate; changed payload; second dispatch; pool full; append failing (latched); torn
+tail across two boots; each drop cause; the drop-versus-send race; restart at `pending` and at
+`sending` (attributed starts 0 or 1, never 2); wrong nonce; another session's secret; no ACK
+by `ackBy`; a gap; a stale view. **Proves** the ledger logic, nothing about a real provider.
 
 ### 12.2 Live wake acceptance
 
@@ -880,8 +882,7 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 
 ## 13. What This Document Does Not Authorize
 
-- No implementation beyond the slices of §12.4, each under its own review; nothing here mints a
-  principal or enables `grant`.
+- No implementation beyond the §12.4 slices, each reviewed; nothing mints a principal.
 - **No change to any P invariant** (deny-only answers, no agent-initiated lease request, the
   never table, the permission floor, `skipPermissions: false`, the auto-mode gates, every
   bound-client and strict-primary refusal). Proposed amendments to P: the `via: 'dispatch'`
@@ -890,10 +891,8 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   by #7823 and #6691; this document specifies only the admission checks a dispatch must pass,
   and its timers apply only to a dispatched attempt.
 - No GitHub write-back, webhook intake, broker, REST plane or new P §3 grant dimension.
-  Untouched: mailbox delivery (#7437); `session-wake.js` and its gates (a dispatch delivery
-  goes through the principal input path and the provider's `sendMessage` seam, never through
-  `wakeSession` or `wakeViaTurnInput`, §6.5); `POST /api/events` and the declared-status
-  routes.
+  Untouched: mailbox delivery (#7437), `session-wake.js` and its gates (dispatch never calls
+  `wakeSession` or `wakeViaTurnInput`, §6.5), `POST /api/events`, the declared-status routes.
 - A PR that widens dispatch authority (a coordinator supersede, an automatic resend, a
   coordinator-registered successor, a new class reaching the ACK route) is reviewed at HIGH
   tier against this document and left for the owner to merge.
@@ -910,7 +909,8 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   starts before S14 (§6.6); the event ACK is an assertion (§8); every `uncertain` delivery
   costs operator attention (§6.8); hook-routed timeouts read `reason_unknown` (§5.4); provider
   coverage (§15 decision 2); eligibility is as fresh as the last read (§15 decision 11).
-- **New data at rest**: work keys, ids, hashes and references, 0600 under the config dir.
+- **New data at rest**: work keys, ids, hashes and references in the ledger and the dispatch
+  cursor store, 0600 under the config dir.
 
 ## 15. Decisions Needed at the Gate
 
@@ -928,5 +928,5 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 | 10 | Dispatch event stream wire shape | Sibling `principal_dispatch_*` types with the P §7.2 shapes, leaving the session-journal handlers unchanged | Sibling types |
 | 11 | Eligibility read staleness limit | 10 minutes | 10 minutes |
 | 12 | Observation freshness window | 120 seconds | 120 seconds |
-| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK route: 10 per session per minute. Attempts per task: 3 (`attempt_cap_reached`; only the operator raises it). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
+| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK route: 10 per session per minute. Attempts per task: 3 (`attempt_cap_reached`; raised only by the operator's `raise_cap`). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
 | 14 | Event-ACK tier | Accept the own-cursor observe exception (§8) as an amendment to P §4 and §11 | Require drive tier for `principal_event_ack` |
