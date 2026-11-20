@@ -53,10 +53,10 @@ Three asymmetries control the design:
 1. **A dispatch is advice plus a record.** The wake text is advice to a worker, framed and
    fenced exactly as P §6.3 and §6.4 frame principal input. Neither the text, the
    acknowledgment nor any event authorizes a host action.
-2. **Only the operator can decide that a delivery did not land, or send it again.**
-   Evidence may move an uncertain delivery toward "delivered" (§6.8); nothing moves it the
-   other way. A delivery the daemon *knows* was never sent is dropped (§6.5), which is not a
-   redispatch. No timeout anywhere in this design starts a second worker.
+2. **One delivery, one send; only the operator gives up on an uncertain one.** Evidence may
+   move an uncertain delivery toward "delivered" (§6.8); only the operator may close or
+   supersede it, accepting that the old send may still have started a worker. A delivery the
+   daemon *knows* was never sent is dropped (§6.5). No timeout ever starts a second worker.
 3. **A human always wins** (P §1, §5.3). A dispatch never pre-empts human input, never
    takes the primary role and never writes to the human's queue.
 
@@ -101,7 +101,7 @@ same four-part **work key**:
 | `successor` (`s<n>`) | Which session in the attempt's lineage holds it; **0 first** | A session is replaced (context limit, provider change, handoff) |
 
 Written form: `owner/repo#123/t1/a1/s0`. In this document "attempt" means only this part of
-the key; one delivery's tries at the provider are **sends** (§6.5).
+the key; an attempt has one delivery, and a delivery has exactly **one send** (§6.5).
 
 - **One open attempt per task**, enforced inside the reservation step (§6.2), and at most
   the configured number of attempts per task (`attempt_cap_reached`, §15 decision 13).
@@ -136,7 +136,7 @@ attempt from the in-memory count.
 | Cancel; request a reconcile pass | cancel via `principal_admin_task_resolve`; passes run on the daemon's timer | yes | no | no | no | no |
 | Request an owner decision | — | yes | no | no channel in v1 | no channel in v1 | no |
 | Register a successor session | yes | no in v1 (§15 decision 4) | no | no | no | no |
-| Resolve an attempt (adopt, resend, close, supersede, operator cancel) | yes (§6.8) | **no** | no | no | no | no |
+| Resolve an attempt (adopt, mark uncertain, close, supersede, operator cancel) | yes (§6.8) | **no** | no | no | no | no |
 | ACK a delivery | no | no | no | **yes**, own session, current successor | no | no |
 | Declare progress (existing declared status) | no | no | no | yes, recorded as declared | no | no |
 | Declare a deliverable; attach a review record | no | no | no | no channel in v1 | no channel in v1 | no |
@@ -423,14 +423,14 @@ a new `commandId` for a new task is admitted.
 first statement (`refusePrincipalHandler`); host input reaches a provider through
 `entry.session.sendMessage(text, attachments, { clientMessageId, … })` in that handler, with
 `onInputAdmission` passed when the handler tracks admission, and the CI wake through the
-same provider call from
-`wakeViaTurnInput` (`session-wake.js`). That call and its admission report are the
-**turn-input seam**. **A dispatch delivery** goes through the principal input path S9 adds
-behind `handleInput`: framing (P §6.2, §6.3), the fence (P §6.4), the agent delivery lock and
-queue (P §6.5) and the provider write boundary (P §6.9), ending in that same `sendMessage`
-call with the send's `sendId` as `clientMessageId`. It adds **no second send path** and never
-calls `wakeSession` or `wakeViaTurnInput`, so session-wake.js's gates (idle only, the PTY
-route, `sanitizeWakeText`) do not apply; only `MAX_WAKE_TEXT_CHARS` is reused (§7.3).
+same provider call from `wakeViaTurnInput` (`session-wake.js`). That call and its admission
+report are the **turn-input seam**. **A dispatch delivery** goes through the principal input
+path S9 adds behind `handleInput`: framing (P §6.2, §6.3), the fence (P §6.4), the agent
+delivery lock and queue (P §6.5) and the provider write boundary (P §6.9), ending in that
+same `sendMessage` call with the `deliveryId` as `clientMessageId` (one per delivery, never
+reused). It adds **no second send path** and never calls `wakeSession` or
+`wakeViaTurnInput`, so session-wake.js's gates (idle only, the PTY route,
+`sanitizeWakeText`) do not apply; only `MAX_WAKE_TEXT_CHARS` is reused (§7.3).
 
 Queue entries are tagged with the coordinator's **`principalId`**, so kill, revoke and
 "agents off" drains reach them, plus a **`via: 'dispatch'`** marker, a **proposed extension of
@@ -440,24 +440,24 @@ is authoritative**.
 | Delivery state | Written when | After a daemon restart |
 |---|---|---|
 | `pending` | With the reservation; **only before any provider call**. The fence may hold the entry in the daemon's own agent queue (`fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`); a fence-cause `zero_effect` for an entry that never left that queue is the one case that keeps `pending` | `dropped:restart` |
-| `sending` | **Persisted before the provider is called**, with a `sendId` and the nonce hash (§6.6); also from `uncertain` for an operator `resend`, through the same queue, fence and send-time re-validation (failing them, the delivery stays `uncertain`). Stays `sending` until acceptance, a provider `zero_effect` or `uncertain`; a provider `queued` admission keeps it `sending` | `uncertain` |
+| `sending` | **Persisted before the provider is called**, with the nonce hash (§6.6). Stays `sending` until acceptance, a provider `zero_effect`, `uncertain`, or the operator's `mark_uncertain` (§6.8); a provider `queued` admission keeps it `sending` | `uncertain` |
 | `delivered` | An **acceptance signal belonging to that turn** (below), §6.8's safe reconciliation, or an operator `adopt` (basis `operator`) | `delivered` |
 | `rejected:not_dispatched` | A provider `zero_effect` verdict for the send | terminal |
 | `dropped:<reason>` | **Only from `pending`**, on any P §6.5 drop cause: `session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off` (per-session or global), the queue TTL (`expired`), a cancel (`cancelled`), a coordinator swap (`coordinator_changed`), or an operator `close`/`supersede` or a closed attempt at send time (`closed`) | terminal |
-| `uncertain` | A provider `uncertain` outcome, a lost transport, a restart during `sending`, or a drop cause during `sending` | `uncertain` (§6.8) |
+| `uncertain` | A provider `uncertain` outcome, a lost transport, a restart during `sending`, a drop cause during `sending`, or `mark_uncertain` (basis `operator`) | `uncertain` (§6.8) |
 
 **Drop versus send is serialized.** The `pending` → `sending` transition and every drop are
 taken under the **per-session agent delivery lock**, each a synchronous check-and-append
-(§6.1), so exactly one wins. The step that appends `sending`, immediately before the provider
-call, re-validates credential, kill switch, "agents off", lease and `gen` **current at send
-time** (never the command's stored values), **attempt open** and **issue not held**; a send
-whose attempt is closed is not made and is recorded `dropped:closed`. A drop cause during
-`sending` yields `uncertain` unless the provider returns a `zero_effect` verdict for that
-send, which wins (`rejected:not_dispatched`); a later `zero_effect` for a send already
-`uncertain` is evidence and reconciles it to `rejected:not_dispatched` only if it belongs to
-that `sendId`. A drop cause at `delivered` changes nothing. A kill, revoke or "agents off"
-drain removes the queue entry even if its append fails (latching); at boot a `pending` record
-becomes `dropped:restart`.
+(§6.1), so exactly one wins. The step that appends `sending`, immediately before the
+provider call, re-validates credential, kill switch, "agents off", lease and `gen` **current
+at send time** (never the command's stored values), **attempt open** and **issue not held**;
+a `pending` delivery whose attempt is closed is not sent and is recorded `dropped:closed`. A
+drop cause during `sending` yields `uncertain` unless the provider returns a `zero_effect`
+verdict for that send, which wins (`rejected:not_dispatched`); a later `zero_effect` for a
+delivery already `uncertain` reconciles it to `rejected:not_dispatched` (the provider itself
+says nothing happened). A drop cause at `delivered` changes nothing. A kill, revoke or
+"agents off" drain removes the queue entry even if its append fails (latching); at boot a
+`pending` record becomes `dropped:restart`.
 
 **The ledger is the authority for a dispatch delivery's state.** The `sending` append is
 written **before** the S10 durable-dedup record (P §6.6) reaches `dispatching` and before the
@@ -466,10 +466,9 @@ record keeps exactly the state P §6.6 gives it (a `reserved` record still reads
 there, which only means that `clientMessageId` is never auto-retried); the dispatch reducer
 does not read S10 to decide delivery state.
 
-A **dropped** or **rejected** delivery is therefore **known unsent**: one audit record, the
-attempt closes `dropped` (`cancelled` for a cancel; `closed` or `superseded` for the operator
-verbs), and its reservation and capacity are released by that recorded transition, with a
-`delivery_dropped` event. A later dispatch is a new command and a new attempt.
+A **dropped** or **rejected** delivery is **known unsent**: one audit record, the attempt
+closes `dropped` (or `cancelled`, `closed`, `superseded` for those verbs), its capacity is
+released by that transition, and `delivery_dropped` is emitted.
 
 **The acceptance signal** is the provider's `onInputAdmission` report `{ status: 'accepted',
 delivery: 'dispatch_started' }` for the send's `clientMessageId`, on a provider that declares
@@ -478,51 +477,47 @@ the seam (`capabilities.daemonTurnInput === true`, read by `supportsDaemonTurnIn
 write that returns true is not an acceptance; it needs a turn start caused by the send (S14's
 proposed `turn_started { causedBy }`) and the composer detector P §6.9 gates input on.
 
-Tests. Each drop cause at `pending` yields `dropped:<reason>`, one audit record, a released
-reservation and **zero sends**. **Race:** a cancel, a lease loss and a revoke at the `sending`
-append yield (`dropped`, zero sends) or (`sending` then `uncertain`), never (`dropped` and
-sent). An operator `close` at `pending` with a fenced entry, then the fence clears: zero
-sends. A fixture provider that admits, queues then admits, rejects and fails mid-write maps to
-`delivered`, `sending` then `delivered`, `rejected:not_dispatched` and `uncertain`. Mutation:
-allow a drop from `sending`; map a provider `queued` admission to `pending`; let `close` leave
-a `pending` entry queued; keep `pending` across a kill; persist `sending` after the provider
-call; send under the stored `gen`. Positive control: an undisturbed delivery sends once.
+Tests. Each drop cause at `pending`: `dropped:<reason>`, one audit record, capacity released,
+**zero sends**. **Race:** a cancel, lease loss or revoke at the `sending` append yields
+(`dropped`, zero sends) or (`sending`, then `uncertain`), never both. `close` at `pending`
+with a fenced entry, then the fence clears: zero sends. A fixture provider that admits,
+queues then admits, rejects, and fails mid-write maps to `delivered`, `sending` then
+`delivered`, `rejected:not_dispatched`, `uncertain`. Mutation: drop from `sending`; map
+`queued` to `pending`; leave a closed entry queued; persist `sending` after the call; send
+under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 ### 6.6 The two-part acknowledgment and the observed start
 
-- **Part 1, daemon-observed**: the provider accepted the turn that carried this send (§6.5).
-- **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when a **send** is
-  created; its `sending` record carries the `sendId` and the nonce **hash**, and the plaintext
-  exists only in memory while the wake text is built. An operator `resend` (§6.8) creates a
-  **new** `sendId` (a new `clientMessageId`, so it does not collide with P §6.6 dedup) and a
-  new nonce. The worker returns the nonce through the route of §6.7. In one synchronous step
-  the daemon checks that the credential resolves to exactly one session, the delivery's
-  target (`wrong_session`), at the **current successor** (`ack_stale_successor`); the delivery
-  is `sending`, `delivered` or `uncertain` (`delivery_not_open`); the attempt is open
-  (`attempt_closed`); and the nonce matches (constant-time) the hash of one of that
-  delivery's sends (`nonce_mismatch`). It records part 2 durably **once per send**, with the
-  send it matched (a repeat is acknowledged without a new record); against `uncertain`, part
-  2 is evidence and reconciles toward `delivered` (§6.8). The nonce
-  binds the ACK to the send, the credential binds it to the session; the nonce is not a
-  secret and confers nothing alone.
-- A **verified durable ACK** is both parts on disk under the same work key and `sendId`. Each
-  part records its own `bootGen`. Either part alone is shown as what it is.
+- **Part 1, daemon-observed**: the provider accepted the turn that carried the send (§6.5).
+- **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when the single
+  send is created; the `sending` record carries its **hash**, and the plaintext exists only in
+  memory while the wake text is built. The worker returns the nonce through the route of
+  §6.7. In one synchronous step the daemon checks that the credential resolves to exactly one
+  session, the delivery's target (`wrong_session`), at the **current successor**
+  (`ack_stale_successor`); the delivery is `sending`, `delivered` or `uncertain`
+  (`delivery_not_open`); the attempt is open (`attempt_closed`); and the nonce matches the
+  stored hash, constant-time (`nonce_mismatch`). Part 2 is recorded durably **once**; a repeat
+  is acknowledged without a new record. Against `uncertain` it is evidence and reconciles
+  toward `delivered` (§6.8). The nonce binds the ACK to the delivery and the credential to the
+  session; the nonce is not a secret and confers nothing alone.
+- A **verified durable ACK** is both parts on disk under the same work key and `deliveryId`.
+  Each part records its own `bootGen`. Either part alone is shown as what it is.
 - **Work start** is a third, observed fact, **never declared**: the first tool event
-  (`tool_start`) after part 1 **in the turn that send caused**. Attribution needs S14's
+  (`tool_start`) after part 1 **in the turn the delivery caused**. Attribution needs S14's
   `turn_started { causedBy }`; until then it is an **unattributed start**
   (`start_unattributed`), which cannot pass the live dispatch acceptance.
-- **Starts are counted per attempt and delivery**, summed over all sends of the delivery. The
-  acceptance quantity is "observed starts attributable to the delivery": **0, 1, more than 1,
-  or unknown**; a journal gap yields `unknown`, never 0. Counting **detects** a second start
-  (`second_start`); the reservation and uncertainty rules are what **prevent** one.
+- **Starts are counted per attempt and delivery.** The acceptance quantity is "observed starts
+  attributable to the delivery": **0, 1, more than 1, or unknown**; a journal gap yields
+  `unknown`, never 0. Counting **detects** a second start (`second_start`); the reservation
+  and uncertainty rules are what **prevent** one.
 - **Overdue clocks emit events and a reconcile, nothing else**: `ack_overdue` at `ackBy`,
   `start_overdue` at `firstActivityBy`. These two clocks belong to the delivery slice (D3).
 
-Test: part 2 before part 1 is part 2 only; against `uncertain` it moves to `delivered`; it
-records the send it matched, once (a repeat adds no record); a declared start with no tool
-event is no start; a gap reads `unknown`; starts over two sends are summed. Mutation: accept a
-declared start; drop the successor check; count a gap as 0. Positive control: both parts and
-one attributed tool event yield a verified ACK and a count of 1.
+Test: part 2 before part 1 is part 2 only; against `uncertain` it moves to `delivered`; a
+repeat adds no record; a declared start with no tool event is no start; a gap reads
+`unknown`. Mutation: accept a declared start; drop the successor check; count a gap as 0.
+Positive control: both parts and one attributed tool event yield a verified ACK and a count
+of 1.
 
 ### 6.7 The worker acknowledgment credential (§15 decision 1)
 
@@ -559,12 +554,10 @@ oracle for other sessions' deliveries; the audit records the specific reason.
 **What it must not be able to do:** answer, create or extend any permission request; send
 input; interrupt; read any session data, roster, journal or ledger; write declared status;
 acknowledge for another session or an older successor; register a successor; change any
-ledger state other than recording part 2. **The bearer-token-authority delta it needs**
-(with D4, at HIGH): the §1 trust sentence, §5, the §7 lifecycle table, the §9 step 1 class
-list, and an entry in `tests/http-routes-scoped-token.test.js`. It would be the **first
-hook-secret route that writes durable state**, so §5's reasoning that this class causes
-nothing beyond a prompt or a read (the "strictly less" argument made for
-`POST /permission-floor`) must be re-argued there, not assumed.
+ledger state other than recording part 2. **Its bearer-token-authority delta** (with D4, at
+HIGH): §1, §5, the §7 table, the §9 step 1 list, `tests/http-routes-scoped-token.test.js`. As
+the **first hook-secret route that writes durable state**, it needs §5's "strictly less"
+argument (made for `POST /permission-floor`) re-argued there, not assumed.
 
 **Honest limits.** Anything in the worker's process tree can read the secret (the
 `cli-session.js` comment says so): part 2 is evidence of receipt **from inside that tree**, not
@@ -580,32 +573,36 @@ target session's secret and nonce record part 2.
 
 `uncertain` means the delivery may have been accepted. Reconciliation may move it to
 `delivered` **only in the safe direction**: when the session journal positively shows the
-input admitted under one of the delivery's `sendId`s (`admission_observed`), or when a valid
-part 2 arrives. It **never** concludes "not sent", resends or releases; a continuous journal
-with no admission leaves it `uncertain`, as does a gap. While an attempt is open or uncertain
-a new dispatch for the task is refused (`attempt_open`, `attempt_uncertain`). A target session
-that disappears makes the attempt `unknown`, emits `session_gone`, and waits for `close`.
+input admitted under the `deliveryId` (`admission_observed`), or when a valid part 2 or
+acceptance signal arrives. It **never** concludes "not sent", sends or releases; a continuous
+journal with no admission leaves it `uncertain`, as does a gap. While an attempt is open or
+uncertain a new dispatch for the task is refused (`attempt_open`, `attempt_uncertain`). A
+target session that disappears makes the attempt `unknown`, emits `session_gone`, and waits
+for `close`.
 
-**Operator verbs** (`principal_admin_task_resolve`), by **delivery state**; no verb releases a
-reservation while a send can still land. The reconcile evidence is shown before any verb on
-an `uncertain` delivery. `adopt` and `resend` need an open attempt (`attempt_closed`).
+**Operator verbs** (`principal_admin_task_resolve`), by **delivery state**. No verb releases a
+reservation while a send is **known to be in flight** (`sending`). From `uncertain`, `close`
+and `supersede` are the operator's evidence-based decision (the reconcile evidence is shown
+first) that the task may be given up or tried again; the attempt is fenced, and the residual
+risk that the old send started a worker is the operator's to accept. **There is no resend:**
+to try again the operator supersedes, and a later dispatch command creates the next attempt.
 
-| Verb | `pending` | `sending` | `uncertain` | `delivered`, `rejected`, `dropped` |
-|---|---|---|---|---|
-| `adopt` | `delivery_not_uncertain` | `delivery_not_uncertain` | `delivered`, basis `operator` | `delivery_not_uncertain` |
-| `resend` | `delivery_not_uncertain` | `delivery_not_uncertain` | a new send (§6.6) via the `uncertain` → `sending` path of §6.5, whose append re-checks the delivery is **still** `uncertain` (`delivery_not_uncertain`) | `delivery_not_uncertain` |
-| `cancel` | as the coordinator cancel below | as below | refused `attempt_uncertain` (use another verb) | as below |
-| `close`, `supersede` | in one synchronous step, `dropped:closed` and the queue entry drained, then the attempt closes `closed`/`superseded` | refused `delivery_sending` | allowed; the attempt is fenced | allowed |
-| `raise_cap` (field `attemptCap`) | raises the task's attempt cap | same | same | same |
+| Verb | `pending` | `sending` | `uncertain` | `delivered` | `rejected`, `dropped`, or attempt closed |
+|---|---|---|---|---|---|
+| `adopt` | `delivery_not_uncertain` | `delivery_sending` | `delivered`, basis `operator` | `delivery_not_uncertain` | `attempt_closed` |
+| `mark_uncertain` | `delivery_not_sending` | `uncertain`, basis `operator`; releases and sends nothing | `delivery_not_sending` | `delivery_not_sending` | `attempt_closed` |
+| `cancel` | as the coordinator cancel below | as below | `attempt_uncertain` | as below | `cancel_not_applicable` |
+| `close`, `supersede` | in one synchronous step `dropped:closed`, queue entry drained, attempt `closed`/`superseded` | `delivery_sending` | attempt `closed`/`superseded`, fenced | attempt `closed`/`superseded` | `attempt_closed` |
+| `raise_cap` (field `attemptCap`) | raises the task's attempt cap | same | same | same | same |
 
-The operator `cancel` does **not** run the coordinator gates but keeps the same interrupt rule.
-`supersede` never dispatches: a later dispatch command creates the next attempt.
-
-**Attempt-close transitions before the completion slice:** `dropped` (§6.5), `cancelled`,
-`closed` and `superseded`; each releases the reservation by its recorded transition, nothing
-else does, and every open attempt is on the attention list (§8). A closed or superseded
-attempt is **fenced**: a late ACK, start or report from it is refused and raised as
-`late_report_refused`. **Supersede is operator-only** until completion fencing exists.
+`mark_uncertain` is the operator's exit from a `sending` delivery that never settles (a
+restart is the other); a later acceptance or part 2 still reconciles it to `delivered`. The
+operator `cancel` skips the coordinator gates but keeps the interrupt rule. **Attempt-close
+transitions** before the completion slice are `dropped` (§6.5), `cancelled`, `closed` and
+`superseded`; each releases capacity **exactly once**, nothing else does, and every open
+attempt is on the attention list (§8). A closed or superseded attempt is **fenced**: a late
+acceptance, ACK, start or report is refused and raised as `late_report_refused`.
+**Supersede is operator-only** until completion fencing exists.
 
 **Coordinator cancel** (`principal_task_cancel`) runs gates 1 to 10 of §6.2, then checks the
 work key's successor (`stale_successor`) and, before any interrupt, the P §4.1.1 interrupt
@@ -621,13 +618,13 @@ interrupt-ack fields (`status`, `reason?`).
 | `uncertain` | Refused `attempt_uncertain` |
 | `rejected`, `dropped`, closed attempt | `cancel_not_applicable` |
 
-Tests: a restart during `sending`, then every reconcile outcome, leaves at most one attributed
-start; a `resend` raced with a part 2 is refused `delivery_not_uncertain`; a `resend` on a
-closed attempt is refused `attempt_closed`; `close` at `sending` is refused `delivery_sending`;
-a cancel during a human's turn, or settling `uncertain`, interrupts nothing; a vanished session
-waits for `close`. Mutation: resend on an empty continuous journal; drop the still-`uncertain`
-re-check; let `close` release at `sending`; interrupt any running turn. Positive control: an
-operator `resend` delivers once.
+Tests: a restart during `sending`, then any reconcile, leaves at most one attributed start;
+`close` at `sending` is `delivery_sending`; `mark_uncertain` releases nothing; a second
+`close` is `attempt_closed` and releases nothing; `close` from `uncertain`, then a late
+acceptance and a late ACK: both refused as fenced and raised, the next attempt unchanged; a
+cancel during a human's turn interrupts nothing. Mutation: send again from `uncertain`;
+release at `sending`; release twice; accept a late ACK on a fenced attempt; interrupt any
+turn. Positive control: `adopt` from `uncertain` records `delivered` once.
 
 ## 7. Message Types and Codes
 
@@ -669,7 +666,7 @@ keeps one meaning.
 
 | Channel | Codes |
 |---|---|
-| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_sending`, `cursor_unavailable` |
+| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `cursor_unavailable` |
 | P §6.7 codes reused (fences and queue) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`, `human_queue_nonempty`, `agent_queue_full` |
 | Command result | `accepted` (a repeat carries `replayed: true` and the current state); cancel outcomes `cancel_requested`, `cancel_not_applicable`, `cancel_not_applied` |
 | Worker ACK route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
@@ -810,7 +807,7 @@ observed state, with its evidence), `reconciliation` (sources, result, remainder
 and `system` (boot, generation, latch, torn tail, kill switch, store health). Envelope
 fields: `v`, `ledgerSeq`, `ts`, `bootGen`, `kind`, `phase`, `actor { class, id, label }`
 (`class` is `operator`, `principal`, `worker`, `reviewer` or `system`), `action`,
-`commandId`, the work key, `result`, `reason`, references (reservation, `sendId`, session,
+`commandId`, the work key, `result`, `reason`, references (reservation, `deliveryId`, session,
 journal cursor), `content { sha256, len }` and `prev`, the hash of the previous record. The
 `prev` chain lets an honest reader detect gaps and edits; within the same-user limit (§2) it
 is **not** a defence. `principal_audit_read` returns records for tasks on sessions the caller
@@ -859,8 +856,8 @@ and S14 land. Hops: one dispatch `accepted`; delivery `delivered`; a verified du
 **observed starts attributable to the delivery = 1**. Controls: the same command twice (one
 reservation, a replay, count 1); a restart between `sending` and the ACK (`uncertain`,
 nothing resent, count ≤ 1); a wrong nonce and another session's ACK (refused, audited); a
-dispatch against an open attempt; an operator `resend` of an `uncertain` delivery whose
-original landed (evidence shown first; the second start detected as `second_start`).
+dispatch against an open attempt; an operator `close` from `uncertain` followed by a late ACK
+(refused as fenced, raised as an event).
 **Proves** one delivered, acknowledged, started task. **Neither acceptance proves**
 completion, quality, behaviour while the host sleeps, or latency.
 
@@ -893,24 +890,21 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 - No GitHub write-back, webhook intake, broker, REST plane or new P §3 grant dimension.
   Untouched: mailbox delivery (#7437), `session-wake.js` and its gates (dispatch never calls
   `wakeSession` or `wakeViaTurnInput`, §6.5), `POST /api/events`, the declared-status routes.
-- A PR that widens dispatch authority (a coordinator supersede, an automatic resend, a
-  coordinator-registered successor, a new class reaching the ACK route) is reviewed at HIGH
-  tier against this document and left for the owner to merge.
+- **A second send within one attempt** (an operator or automatic resend) is out of this
+  design. It, a coordinator supersede, a coordinator-registered successor, and a new class
+  reaching the ACK route each widen authority: reviewed at HIGH tier, left for the owner.
 
 ## 14. Residual Risks
 
-- **Prompt-injection relay.** A coordinator that reads issues and session output can be steered
-  by them; the record, the lease, the closed envelope and the daemon-built text bound it, but a
-  dispatch can still point a worker at the wrong issue within its repository.
-- **Operator resend can double-start** if the original landed unobserved; the evidence is shown
-  first and a second start is detected, not prevented (§6.8).
-- **Completed attempts hold capacity** until the operator closes them, before D8 (§5.2).
-- Pointers: same-user containment (§2); part 2 is evidence of receipt only (§6.7); unattributed
-  starts before S14 (§6.6); the event ACK is an assertion (§8); every `uncertain` delivery
-  costs operator attention (§6.8); hook-routed timeouts read `reason_unknown` (§5.4); provider
-  coverage (§15 decision 2); eligibility is as fresh as the last read (§15 decision 11).
-- **New data at rest**: work keys, ids, hashes and references in the ledger and the dispatch
-  cursor store, 0600 under the config dir.
+- **Prompt-injection relay.** A steered coordinator can still point a worker at the wrong issue
+  in its repository; the record, lease, closed envelope and daemon-built text bound the rest.
+- **Closing an `uncertain` attempt** may leave a worker the old send started; the operator
+  accepts that on the shown evidence, and the fenced attempt's late reports are refused (§6.8).
+- Pointers: completed attempts hold capacity until closed (§5.2); same-user containment (§2);
+  part 2 proves receipt only (§6.7); unattributed starts before S14 (§6.6); the event ACK is an
+  assertion (§8); `uncertain` costs operator attention (§6.8); hook-routed timeouts read
+  `reason_unknown` (§5.4); provider coverage and eligibility freshness (§15 decisions 2, 11).
+- **New data at rest**: ids, hashes and references in the ledger and cursor store, 0600.
 
 ## 15. Decisions Needed at the Gate
 
