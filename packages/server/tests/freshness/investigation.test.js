@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { itemIds } from './model/keys.js'
 import { DEFAULT_POLICY } from './model/policy.js'
 import { MIN, OWNER, T0, createHarness } from './helpers/harness.js'
-import { LITERAL, MUTANTS } from './helpers/variants.js'
+import { LITERAL, MUTANTS, staleOwnerBlockInconclusive } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const CAD = 15
@@ -190,14 +190,31 @@ describe('classification', () => {
     ticks(h, 'codex', T0, 20)
     assert.deepEqual(classes(h, x.sk), ['1:waiting_on_owner'])
     assert.deepEqual(h.openItems().map((i) => i.origin), ['declared'])
+    assert.deepEqual(h.item(itemIds.declared(x.s)).carried, [], 'and its own item carries no stale condition about it')
   })
 
-  it('gap witness: read literally, a stale owner block is inconclusive twice and raises a second item', () => {
-    const h = setup({}, LITERAL.staleOwnerBlockInconclusive.policy)
+  it('a session rewound to an owner-block line its item already used is not waiting on that item: the stale line is surfaced', () => {
+    const h = setup()
+    const x = session(h, 'codex', 'x')
+    W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'approve', owner: OWNER })
+    let t = ticks(h, 'codex', T0, 1)
+    W.author(h.world, x.sk, t + MIN, { state: 'running', next: 'go' })
+    t = ticks(h, 'codex', t, 1)
+    assert.equal(h.item(itemIds.declared(x.s)).state, 'closed')
+    W.rewind(h.world, x.sk, 0)
+    ticks(h, 'codex', t, 20)
+    assert.equal(h.item(itemIds.declared(x.s)).episode, 1, 'the used line never reopens its item')
+    assert.deepEqual(classes(h, x.sk), ['1:blocked_unresolved'])
+    assert.ok(attentionFor(h, x)?.open, 'surfaced as attention instead')
+  })
+
+  it('read literally, a stale owner block is inconclusive twice: its own item then carries a stale condition about the wait it already shows', () => {
+    const h = setup({}, staleOwnerBlockInconclusive)
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'approve', owner: OWNER })
     ticks(h, 'codex', T0, 20)
-    assert.deepEqual(h.openItems().map((i) => i.origin).sort(), ['attention', 'declared'])
+    assert.deepEqual(h.openItems().map((i) => i.origin), ['declared'])
+    assert.deepEqual(h.item(itemIds.declared(x.s)).carried.map((c) => c.trigger), ['stale_report'])
   })
 })
 

@@ -37,15 +37,9 @@ export const LITERAL = {
   },
   // The key table: only a send is looked up before it is made; a resumed step re-reads.
   reReadOnResume: { expect: 'I3a', policy: withPolicy({ reuseRecorded: () => null }) },
-  // A stale owner block matches no classification row but `inconclusive`.
-  staleOwnerBlockInconclusive: {
-    expect: 'I9',
-    policy: withPolicy({
-      classify(ev, config) {
-        return DEFAULT_POLICY.classify({ ...ev, ownerBlock: false }, config)
-      },
-    }),
-  },
+  // The earlier rule: an attention item is raised beside the session's open
+  // owner-block item, and one already open stays open beside a new one.
+  raiseBesideOwnerBlock: { expect: 'I9', policy: withPolicy({ attentionBesideOwnerBlock: 'raise' }) },
   // The prompt origin: resolved only by an answer to the item's own (latest seen) prompt.
   onlyOwnPromptAnswer: {
     expect: 'I4a',
@@ -77,6 +71,13 @@ export function literalPreempts(challenger, active, now, config) {
 function onePerSession(candidates) {
   return DEFAULT_POLICY.selectInvestigations(candidates, { cycleBudget: Infinity, recheckBudget: Infinity })
 }
+
+/** A stale owner block read literally: it matches no classification row but `inconclusive`. */
+export const staleOwnerBlockInconclusive = withPolicy({
+  classify(ev, config) {
+    return DEFAULT_POLICY.classify({ ...ev, ownerBlock: false }, config)
+  },
+})
 
 export const MUTANTS = {
   I1a: withPolicy({ canShow: () => true }),
@@ -174,9 +175,13 @@ export const MUTANTS = {
   'I7f.window': withPolicy({ withinActivityWindow: () => true }),
   // A disagreement read wider than the rule: `running` with a turn in flight.
   I7i: withPolicy({ disagreementStates: new Set(['idle', 'done', 'running']) }),
-  I9: withPolicy({
-    classify(ev, config) {
-      return DEFAULT_POLICY.classify({ ...ev, ownerBlock: false }, config)
-    },
-  }),
+  // The reverse order left alone: an attention item already open stays open
+  // when its session gets an owner-block item.
+  I9: withPolicy({ mergeOpenAttention: false }),
+  // A condition beside an open owner-block item is neither raised nor merged.
+  I11: withPolicy({ attentionBesideOwnerBlock: 'drop' }),
+  // A condition still carried when its owner-block item closes is not handed on.
+  'I11.handover': withPolicy({ handOverOnClose: false }),
+  // A condition handed back starts its attention episode with fresh counters.
+  I12: withPolicy({ inheritCountersOnHandover: false }),
 }

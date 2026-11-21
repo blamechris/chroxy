@@ -223,6 +223,34 @@ export const DEFAULT_POLICY = Object.freeze({
     return item.counters.shows_counted < config.surface.max_presentations
   },
 
+  // ── one session, one item ──
+  // When a session already has an open owner-block item, an attention item
+  // about that session is not raised beside it: its condition is merged into
+  // the open item as an `updated` step that names it ('merge'). 'raise' is
+  // the earlier behaviour (both items); 'drop' loses the condition (a
+  // mutant, for the liveness proof).
+  attentionBesideOwnerBlock: 'merge',
+  // The reverse order: an attention item already open when the session gets
+  // an owner-block item is withdrawn as merged and its condition carried.
+  mergeOpenAttention: true,
+  // A carried condition still holding when its owner-block item closes is
+  // handed on: to the session's other open owner-block item, else raised as
+  // its own attention item.
+  handOverOnClose: true,
+  // DESIGN-GAP: a condition's send history belongs to the condition, not to
+  // the attention episode. A condition handed back to its own attention item
+  // opens that episode with the counters its previous episode ended with
+  // (presentation, counted shows, reminders, returns), so across any number
+  // of merges and handovers it gets at most the show limit, two reminders
+  // and one return. A condition that was never shown starts from zero.
+  inheritCountersOnHandover: true,
+  // DESIGN-GAP: a session can hold a declared block and a pending prompt at
+  // once, and the decision names one open owner-block item. A condition is
+  // merged into the declared item when it is open, else into the prompt item.
+  mergeTarget(items) {
+    return items.find((i) => i.origin === 'declared') ?? items.find((i) => i.origin === 'prompt') ?? null
+  },
+
   orderKey,
 
   // DESIGN-GAP: a preempted item goes to the front of its class, and prompts
@@ -282,8 +310,11 @@ export const DEFAULT_POLICY = Object.freeze({
   // between. The key repeats with a different payload, the ledger records an
   // idempotency_conflict, and the item stays queued for good. A re-queue
   // always carries new content, so the model adds the content reference.
+  // A carried condition changes the content without changing the content
+  // reference, so once an item has carried one the ordinal also names the
+  // latest carried-condition change.
   surfaceOrdinal(step, ctx) {
-    if (step === 'exhausted') return `${ctx.presentation}:${ctx.contentRef ?? ''}`
+    if (step === 'exhausted') return `${ctx.presentation}:${ctx.contentRef ?? ''}${ctx.carryRef ? `:${ctx.carryRef}` : ''}`
     return surfaceOrdinal(step, ctx)
   },
 
@@ -387,9 +418,9 @@ export const DEFAULT_POLICY = Object.freeze({
     const live = n != null && n.available
     if (live && n.pending) return 'waiting_on_owner'
     // DESIGN-GAP: a stale owner block (4 h at the starting thresholds) matches
-    // no row but `inconclusive`, so two cycles later it is surfaced a second
-    // time as an attention item beside its own owner-block item. The model
-    // classifies it `waiting_on_owner`: the owner-block item carries it.
+    // no row but `inconclusive`, so two cycles later its own owner-block item
+    // would carry a stale condition about the wait it already shows. The
+    // model classifies it `waiting_on_owner`: the owner-block item is enough.
     if (ev.ownerBlock) return 'waiting_on_owner'
     if (live && n.answering_now && n.turn_in_flight) return 'working_unreported'
     const after = ev.events.filter((e) => e.activity_at != null && e.activity_at > ev.reportAt)

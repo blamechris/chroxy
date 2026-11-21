@@ -22,10 +22,11 @@ import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const SEEDS = {
-  I1a: 1, I1b: 1, I1c: 1, I1d: 1, I2: 1, I2b: 1, I2c: 2093, 'I2c.front': 782, I3a: 1, I3b: 14, I4a: 3, I4b: 8, 'I4b.lapsed': 1, I5: 11, I6: 158,
-  I7a: 1, 'I7a.onset': 1, I7i: 2, I7b: 1, I7c: 2, I7d: 14, I7f: 30, 'I7f.window': 875, I7g: 7, I8: 2, I8b: 1, I9: 11, I10: 1,
-  ackFreesSlot: 1, anyNewReportIsContent: 158, contentMayMoveBack: 12, reReadOnResume: 1, staleOwnerBlockInconclusive: 11,
-  onlyOwnPromptAnswer: 232, noRecheckAfterOwnerWait: 151,
+  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, I2c: 2093, 'I2c.front': 2093, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 4, I6: 271,
+  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4,
+  I11: 7, 'I11.handover': 65, I12: 119,
+  ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 325, reReadOnResume: 4, raiseBesideOwnerBlock: 7,
+  onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
 }
 const SEARCH = 300
 
@@ -95,6 +96,28 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'seed' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'owner_stated_unverified' } } : d)
     const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
     assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I4b (fault): an attention item withdrawn as merged with no owner-block item carrying it is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'attention' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'merged' } } : d)
+    const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I11 (fault): a carried condition whose clearing is never written stays named after it ended, and is caught', () => {
+    const dropAppend = (d) => d.kind === 'surface' && d.body.step === 'updated' && d.body.carry?.op === 'clear'
+    const f = firstFailure('I11', 1, { fault: { dropAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I11 (fault): an owner-block item whose recorded list does not match its own changes is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.carry?.op === 'carry' ? { ...d, body: { ...d.body, carried: [] } } : d)
+    const f = firstFailure('I11', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /content names 0 conditions where its changes add up to 1/)
     assert.ok(runSequence(f.seed).ok)
   })
 

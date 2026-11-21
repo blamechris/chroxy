@@ -83,9 +83,11 @@ payload is ignored; with a different payload it appends one
 
 The surface ordinal by step: 0 for `queued`, `resolved` and `withdrawn`; the
 presentation number for `shown`, `expired` and `preempted`; the presentation
-number and content reference for `exhausted`; k (1 or 2) for `reminded`; 1
-for `returned`; the message id for `deferred`; the changing report or prompt
-id for `updated`.
+number and content reference for `exhausted`, followed by the latest
+carried-condition change once the item has carried one; k (1 or 2) for
+`reminded`; 1 for `returned`; the message id for `deferred`; for `updated`,
+the changing report or prompt id, or for a carried-condition change
+H('carried', change, attention item, opening reference).
 
 A send is an **attempt** record, then the send, then an **outcome** record. An
 attempt uses up its step whether or not the send is confirmed; an attempt with
@@ -101,7 +103,7 @@ an episode and the only evidence that closes it:
 |---|---|---|
 | Declared block | an authored report that is an owner block | a newer authored report that is not one |
 | Pending prompt | a prompt pending at a live read | an owner answer to the latest prompt; withdrawn as lapsed when nothing is pending and the session authored a newer report |
-| Attention | an investigation that surfaces | a newer authored report; withdrawn if dismissed or superseded |
+| Attention | an investigation that surfaces | a newer authored report; withdrawn if dismissed, superseded or merged |
 | Gone | an investigation that confirms the session left | the session listed again |
 | Source outage | a source-level investigation | a successful check of the source |
 | Seed handoff | a report that names a seed to paste | a different session in the seed's scope whose first report is later than the seed |
@@ -130,8 +132,8 @@ Four counters are stored on every surface record: `presentation`,
 | acknowledged | next tick, none, no return used | returned | yes | active |
 | acknowledged | next tick, none, return used | exhausted | no | exhausted |
 | any open | closing evidence | resolved | no | closed |
-| any open | dismissal, lapse or superseded | withdrawn | no | closed |
-| any open | content changes | updated | no | same; from exhausted, queued if a counted show is left |
+| any open | dismissal, lapse, superseded or merged | withdrawn | no | closed |
+| any open | content changes (a new report or prompt, or a carried condition added or dropped) | updated | no | same; from exhausted, queued if a counted show is left |
 
 Edges at exact equality: a reminder or the time limit is due at the very
 moment its interval has passed since the latest show or return. A deadline
@@ -146,6 +148,63 @@ the seed's `written_at` is not later than the seed. An open-turn event exactly
 One item holds the slot at a time. Order: owner blocks with a deadline
 (earliest first), other owner blocks (prompts first), outages, attention
 items, seeds.
+
+### One session, one item
+
+An **owner-block item** is a declared block or a pending prompt. When a
+session already has an open owner-block item, a second item of a different
+kind about that session is merged into the open item and is not shown
+separately. For attention items that works as follows.
+
+- **Merged, not raised.** An investigation that surfaces a session with an
+  open owner-block item raises no attention item. Its **condition** is
+  recorded on the owner-block item by an `updated` step, and the item's
+  content lists every condition it carries: the attention item it would have
+  been (session and report), the reference that would have opened it, the
+  trigger, and the time the condition began (the check at its onset). It is
+  merged only where the attention item would have been raised: that item is
+  not open, the opening reference was never used or carried before, and its
+  closing evidence has not arrived. With both owner-block items open, the
+  policy rule `mergeTarget` gives it to the declared block.
+- **The `updated` row, nothing more.** The step sends nothing by itself.
+  From `exhausted` it queues the item again only if a counted show is left,
+  and every show after that uses one, so a condition that comes and goes
+  cannot add a show beyond the limit.
+- **Dropped when it ends.** A carried condition ends on the attention item's
+  own closing evidence: a newer authored report than its report, or the
+  session confirmed gone (superseded). Another `updated` step then drops it
+  from the content, so the item names only what still holds. This is checked
+  at every tick of the session's source and just before the owner-block item
+  closes.
+- **Handed on when the item closes.** If the owner-block item closes while a
+  condition still holds, the same tick merges the condition into the
+  session's other open owner-block item, or else raises its own attention
+  item, opened by the reference that would have opened it, exactly as for a
+  session with no open item. Under the default `mergeTarget` the first of
+  these is rare: the declared block takes every condition while it is open,
+  and it closes only on a newer authored report, which also ends any
+  condition about an earlier report. It happens only for a condition about a
+  report newer than that one, such as a relayed declaration. (A prompt item
+  answered while a newer prompt is pending hands its conditions to its own
+  next episode.)
+- **One send history per condition.** A condition keeps the reference that
+  first opened it (its root) through every merge and handover. When it is
+  handed back to its attention item, the new episode starts with the
+  counters its previous episode ended with: the presentation number,
+  counted shows, reminders and returns. However many owner-block cycles it
+  outlives, one condition gets at most the show limit in counted shows, two
+  reminders and one return; once its shows are used, a handover leaves it
+  exhausted and listed, not shown. A condition first raised by a handover
+  (merged before it was ever shown) starts from zero.
+- **The reverse order.** An attention item already open when its session
+  gets an owner-block item is withdrawn, reason `merged`, after its condition
+  is carried on the owner-block item. If that condition is later handed back,
+  the attention item opens a new episode under a reference derived from its
+  used one and the owner-block episode that carried it.
+
+The rule covers attention items. A `gone` item, a source outage item, a seed
+item, or a pending prompt beside a declared block can still be open for the
+same session as an owner-block item.
 
 ### Evidence classes
 
@@ -239,14 +298,25 @@ ledger and the simulated world for inspection.
 | I7i | An investigation is opened only for a trigger the monitor also sees holding |
 | I8 | Freshness never improves for one report under one configuration |
 | I8b | Graded freshness equals the monitor's own computation |
-| I9 | An owner-block report is not surfaced a second time as an attention item, except in the three cases listed under Open |
+| I9 | A session with an open owner-block item never also has an open attention item, whatever its trigger |
 | I10 | By the end of each tick, the latest prompt pending at a live read has an open prompt item, and an authored owner-block report has an open owner-block item, unless that item already used the same opening reference |
+| I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner-block item whose content names it; no owner-block item names a condition that has ended; and the list each carried-condition record states equals the changes so far |
+| I12 | One condition, across every attention episode it opens, gets at most the show limit in counted shows, two reminders and one return |
 
 **Limits of the monitor.** It uses the model's own `isOwnerBlock` (for
-declared resolutions in I4b, and in I9 and I10) and the model-computed
+declared resolutions in I4b, and in I10) and the model-computed
 `block_fingerprint` (I6), so a defect in the default owner-block rule or in
 the fingerprint is invisible to those checks. For the source-level outage
-investigation, I7a uses the model's onset.
+investigation, I7a uses the model's onset. I11 starts a condition at an
+investigation's decision to surface, as the investigation's close record
+states it; whether that decision comes in time is I7f's to check against the
+world. Everything else I11 and I12 use (which items are open, what each
+owner-block item carries, the closing evidence, the sends) is the monitor's
+own account: it folds each carried-condition change itself and checks the
+list the record states against that fold. One link is not: the monitor ties a
+handed-back episode to the condition's earlier episodes through the record's
+own `handover_of` (and a carry's `from`). A model that both gave a handed-back
+episode fresh counters and left that link out would not be caught by I12.
 
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
@@ -291,6 +361,18 @@ at reads that carried native state. A seed is unclosable by evidence when its na
 source gives no working directory; "done" then withdraws it. "Next tick" for
 verification is the item's own source's next tick. Owner actions on an item
 that is not active do nothing. The deferral time is stored on the record.
+A carried condition whose closing evidence arrives while its owner-block
+item is open is dropped from the content by another `updated` step, not
+kept. An attention item withdrawn as merged has used its opening reference,
+so when its condition is handed back it opens under a reference derived from
+that one and the carrying owner-block episode. A handover belongs to the
+tick that closed the owner-block item, and a crash re-runs it there. A
+condition's trigger, for one surfaced by a recheck, is the trigger of the
+cycle that led to the recheck. A reference that was carried and then
+dropped is spent: it is neither merged nor raised again. Added fields: the
+carried-condition change (`carry`) and the list carried (`carried`) on
+`updated`, the condition (`condition`) and the handover (`handover_of`) on an
+attention item's `queued`.
 
 **policy.js.**
 - An acknowledged item keeps the slot until it is verified. (W)
@@ -302,7 +384,22 @@ that is not active do nothing. The deferral time is stored on the record.
   expected kind counts, so a key collision is recorded, not hidden. (W)
 - A prompt answered between two ticks still resolves its item. (W)
 - A prompt-based `waiting_on_owner` is rechecked. (W)
-- A stale owner block is `waiting_on_owner`, not a second item. (W)
+- A stale owner block is `waiting_on_owner`, so its own item does not carry
+  a stale condition about the wait it already shows; but only while its
+  declared item is open. A session rewound to an owner-block line whose item
+  already used it has no item carrying it, so it is classified, and
+  rechecked, as any other stale line.
+- Both owner-block items open: `mergeTarget` gives a condition to the
+  declared block. The reverse order (an attention item already open when its
+  session gets an owner-block item) is merged too. (W)
+- A condition's counters continue across the attention episodes it opens.
+  Reminders and the time limit still count from the episode's own latest
+  show or return: the previous show came before the merge and is no anchor
+  for a show not yet made. An owner deferral pending when a condition is
+  merged does not survive the merge. (W)
+- The `exhausted` ordinal also names the latest carried-condition change, so
+  an item exhausted, queued again by a carried condition and exhausted at the
+  same presentation never repeats its key.
 - Preemption: only for a showable challenger with an earlier deadline;
   deadline order wins inside the deadline class; and a preempted item waits
   behind its preemptor while that is still queued, even if the preemptor's
@@ -316,18 +413,3 @@ that is not active do nothing. The deferral time is stored on the record.
   on a source without it counts as nothing shown.
 - `finished_unreported` is never surfaced, because the model links no work;
   I7f exempts exactly those sessions.
-
-**Open, not fixed: places where the owner hears twice about one session.**
-An attention item is identified by session and report, and each of these
-puts one beside the session's still-open owner-block item. They are exempt
-from I9 by name; merging them is a rule for whoever builds the real thing to
-choose, not the model.
-
-- `repeated_error`: the session's own reads keep failing. The item shares
-  its identity with a stale-report attention item for the same report, so
-  one absorbs the other.
-- `dropped_from_list` on a source that cannot confirm `gone`: two
-  inconclusive cycles surface it as attention. (DESIGN-GAP)
-- `dropped_from_list` where every confirming read found the session listed
-  again (a list that intermittently omits it): also two inconclusive
-  cycles. (DESIGN-GAP)

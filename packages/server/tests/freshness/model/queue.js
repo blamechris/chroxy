@@ -15,10 +15,12 @@ import { sourceCaps } from './config.js'
 import { effectiveState, sessionsOf } from './derive.js'
 import { compareKeys } from './policy.js'
 import { put } from './checks.js'
+import { H } from './hash.js'
 import { SENDING_STEPS, itemIds, ownerAckKey, sessionKey, surfaceKey, systemKey } from './keys.js'
 
 const ZERO = Object.freeze({ presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 })
 const DISMISSABLE = new Set(['seed', 'issue', 'attention', 'gone'])
+const OWNER_BLOCK_ORIGINS = new Set(['declared', 'prompt'])
 
 function envOf(item) {
   return item.session ? { source: item.session.source, native_id: item.session.native_id, incarnation: item.session.incarnation ?? null } : null
@@ -51,7 +53,7 @@ function body(item, step, phase, n, c, extra) {
 
 /** A step that sends nothing: one surface record with phase `none`. */
 function* step(ctx, item, name, { ordCtx = {}, c = item.counters, extra = {}, now }) {
-  const ordinal = ctx.policy.surfaceOrdinal(name, { presentation: c.presentation, returns: c.returns_used, contentRef: item.contentRef, ...ordCtx })
+  const ordinal = ctx.policy.surfaceOrdinal(name, { presentation: c.presentation, returns: c.returns_used, contentRef: item.contentRef, carryRef: item.carryRef, ...ordCtx })
   const id = surfaceKey(item.itemId, item.episode, name, ordinal, 'none')
   return yield put({ kind: 'surface', id, session: envOf(item), body: body(item, name, 'none', ordinal, c, extra) }, now)
 }
@@ -81,7 +83,7 @@ export function* sweepUnknownDeliveries(ctx, now) {
   }
 }
 
-function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, now }) {
+function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, condition, handoverOf, counters = ZERO, now }) {
   const st = ctx.state
   const existing = st.items.get(itemId)
   if (!ctx.policy.mayOpenEpisode(existing, ref, origin)) return false
@@ -92,20 +94,30 @@ function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, 
     session,
     source,
     episode: (existing?.episode ?? 0) + 1,
-    counters: { ...ZERO },
+    counters: { ...counters },
     openedBy: ref,
     fingerprint,
     reportId,
   }
   yield* step(ctx, item, 'queued', {
-    c: ZERO,
+    c: item.counters,
     now,
-    extra: { content_ref: contentRef ?? ref, content_at: contentAt, deadline: deadline ?? null, order_time: orderTime ?? null, closable, seed },
+    extra: {
+      content_ref: contentRef ?? ref,
+      content_at: contentAt,
+      deadline: deadline ?? null,
+      order_time: orderTime ?? null,
+      closable,
+      seed,
+      ...(condition ? { condition } : {}),
+      ...(handoverOf ? { handover_of: handoverOf } : {}),
+    },
   })
   return true
 }
 
 function* resolve(ctx, item, { now, evidence }) {
+  yield* clearCarried(ctx, item, now)
   if (item.state === 'acknowledged' && item.ack) {
     const vk = ownerAckKey(item.itemId, item.episode, item.ack.ackRef, 'verify')
     yield put({ kind: 'owner_ack', id: vk, session: envOf(item), body: { item_id: item.itemId, episode: item.episode, ack_ref: item.ack.ackRef, phase: 'verify', intent: 'done', basis: 'owner_direct', verified: true } }, now)
@@ -114,6 +126,7 @@ function* resolve(ctx, item, { now, evidence }) {
 }
 
 function* withdraw(ctx, item, { now, reason }) {
+  yield* clearCarried(ctx, item, now)
   yield* step(ctx, item, 'withdrawn', { now, extra: { reason } })
 }
 
@@ -130,6 +143,202 @@ function* update(ctx, item, { now, changeRef, changeAt = null, fingerprint, repo
 
 function reportBody(st, id) {
   return id ? (st.reports.get(id)?.body ?? null) : null
+}
+
+// ── conditions carried by an owner-block item ─────────────────────────────
+//
+// A condition is what an attention item would have said: the attention item
+// it would be (session and report), the reference that would open it, the
+// trigger and the time the condition began. An owner-block item carries a
+// list of them as part of its content; each change is one `updated` step.
+
+function openOwnerBlocks(st, sk) {
+  return [...st.items.values()].filter((it) => it.open && it.sk === sk && OWNER_BLOCK_ORIGINS.has(it.origin))
+}
+
+function carries(items, attentionId) {
+  return items.some((it) => it.carried.some((c) => c.attention_item === attentionId))
+}
+
+/** The trigger whose onset this is: a recheck's opening reference is the onset of the cycle that led to it. */
+function triggerAt(st, sk, onset, trigger) {
+  if (trigger && trigger !== 'recheck') return trigger
+  for (const inv of st.investigations.values()) {
+    if (inv.sk === sk && inv.onset === onset && inv.trigger !== 'recheck') return inv.trigger
+  }
+  return trigger ?? null
+}
+
+function conditionOf(st, { attentionId, ref, root, reportId, sk, trigger, since, now }) {
+  return {
+    attention_item: attentionId,
+    opened_by: ref,
+    // The reference that first opened (or would have opened) the condition,
+    // kept through every merge and handover: the condition's identity.
+    root: root ?? ref,
+    report_id: reportId ?? null,
+    trigger: triggerAt(st, sk, ref, trigger),
+    since: since ?? st.checks.get(ref)?.body.checked_at ?? now,
+  }
+}
+
+/** The evidence that closes an attention item: a newer authored report than its own. */
+function conditionResolved(st, sk, cond) {
+  const s = st.sessions.get(sk)
+  const latest = reportBody(st, s?.latestAuthored)
+  if (!latest) return false
+  const opening = reportBody(st, cond.report_id)
+  return !opening || latest.last_report_at > opening.last_report_at
+}
+
+/**
+ * One change to the conditions an owner-block item carries: `carry` adds
+ * one, `clear` drops one. It is the `updated` row of the transition table:
+ * it sends nothing, and from exhausted it queues the item again only if a
+ * counted show is left.
+ */
+function* carryStep(ctx, item, { now, op, cond, path, from = null }) {
+  const cfg = ctx.state.config
+  const requeue = item.state === 'exhausted' && ctx.policy.requeueFromExhausted(item, cfg)
+  const carried = op === 'carry' ? [...item.carried, cond] : item.carried.filter((c) => c.attention_item !== cond.attention_item)
+  // A condition is carried at most once per episode and cleared at most once
+  // after that, so the change reference never repeats.
+  const changeRef = H('carried', op, cond.attention_item, cond.opened_by)
+  yield* step(ctx, item, 'updated', {
+    now,
+    ordCtx: { changeRef },
+    extra: { requeue, carry: { op, path, from, ...cond }, carried },
+  })
+}
+
+/**
+ * DESIGN-GAP: what becomes of a carried condition whose own closing evidence
+ * arrives while the owner-block item is still open. The model drops it from
+ * the content with another `updated` step, so the item names only what still
+ * holds; the dropped condition stays in the item's history.
+ */
+function* clearCarried(ctx, item, now, { reason = 'resolved', all = false } = {}) {
+  if (!OWNER_BLOCK_ORIGINS.has(item.origin) || !item.carried?.length) return
+  for (const c of item.carried.slice()) {
+    if (all || conditionResolved(ctx.state, item.sk, c)) yield* carryStep(ctx, item, { now, op: 'clear', cond: c, path: reason })
+  }
+}
+
+/**
+ * An attention signal for a session. With no open owner-block item it raises
+ * the attention item, as it always did. With one, the condition is merged
+ * into that item instead, if the attention item would have been raised: it
+ * is not open, its opening reference is unused and was never carried, and
+ * its closing evidence has not arrived.
+ */
+function* attentionSignal(ctx, sig, now) {
+  const st = ctx.state
+  const P = ctx.policy
+  const attentionId = itemIds.attention(sig.session, sig.reportId)
+  const consumed = st.carriedRefs.get(attentionId)?.has(sig.onset) ?? false
+  const obs = P.attentionBesideOwnerBlock === 'raise' ? [] : openOwnerBlocks(st, sig.sk)
+  const rep = reportBody(st, sig.reportId)
+  const condition = { trigger: triggerAt(st, sig.sk, sig.onset, sig.trigger), since: st.checks.get(sig.onset)?.body.checked_at ?? now, root: sig.onset }
+  if (obs.length === 0) {
+    if (consumed) return
+    yield* raise(ctx, {
+      itemId: attentionId,
+      kind: 'session_attention',
+      origin: 'attention',
+      session: sig.session,
+      source: sig.session.source,
+      ref: sig.onset,
+      reportId: sig.reportId,
+      orderTime: rep ? rep.last_report_at : now,
+      condition,
+      now,
+    })
+    return
+  }
+  if (P.attentionBesideOwnerBlock === 'drop') return
+  const existing = st.items.get(attentionId)
+  // An open attention item is merged by the reverse-order rule below.
+  if (existing?.open || consumed || !P.mayOpenEpisode(existing, sig.onset, 'attention')) return
+  if (carries(obs, attentionId)) return
+  const cond = conditionOf(st, { attentionId, ref: sig.onset, reportId: sig.reportId, sk: sig.sk, ...condition, now })
+  if (conditionResolved(st, sig.sk, cond)) return
+  yield* carryStep(ctx, P.mergeTarget(obs), { now, op: 'carry', cond, path: 'signal' })
+}
+
+/**
+ * A condition that an owner-block item still carried when it closed: merged
+ * into the session's other open owner-block item, or else raised as its own
+ * attention item, as for a session with no open item. Runs in the tick that
+ * closed the item (a crash re-runs it there).
+ *
+ * DESIGN-GAP: an attention item withdrawn as merged has used its opening
+ * reference, and a new episode never opens on a used reference. Its
+ * condition is raised again under a reference derived from that one and the
+ * owner-block episode that carried it, which no other episode can use.
+ */
+function* handOver(ctx, ho, cond, now) {
+  const st = ctx.state
+  const P = ctx.policy
+  const attentionId = cond.attention_item
+  const existing = st.items.get(attentionId)
+  if (existing?.open || conditionResolved(st, ho.sk, cond)) return
+  const obs = openOwnerBlocks(st, ho.sk)
+  if (obs.length > 0) {
+    if (carries(obs, attentionId)) return
+    const target = P.mergeTarget(obs)
+    if (target.carriedEver.has(`${attentionId}|${cond.opened_by}`)) return
+    yield* carryStep(ctx, target, { now, op: 'carry', cond, path: 'handover', from: ho.key })
+    return
+  }
+  const ref = existing?.usedRefs.has(cond.opened_by) ? H(cond.opened_by, 'unmerged', ho.itemId, ho.episode) : cond.opened_by
+  const root = cond.root ?? cond.opened_by
+  const rep = reportBody(st, cond.report_id)
+  // DESIGN-GAP (counters): the episode continues the counters of the
+  // condition's previous attention episode. Reminders and the time limit
+  // count from this episode's own latest show or return, as for any episode:
+  // the previous show was made before the merge and is no anchor for a show
+  // not yet made. An owner deferral pending when the condition was merged
+  // does not survive it; deferrals keep their meaning within an episode.
+  const counters = (P.inheritCountersOnHandover && existing?.rootCounters.get(root)) || ZERO
+  yield* raise(ctx, {
+    itemId: attentionId,
+    kind: 'session_attention',
+    origin: 'attention',
+    session: ho.session,
+    source: ho.source,
+    ref,
+    reportId: cond.report_id,
+    orderTime: rep ? rep.last_report_at : now,
+    condition: { trigger: cond.trigger, since: cond.since, root },
+    handoverOf: ho.key,
+    counters,
+    now,
+  })
+}
+
+/** Per session of the source with an open owner-block item: drop what has ended; merge what is open beside it. */
+function* reconcileOwnerBlocks(ctx, source, now) {
+  const st = ctx.state
+  const P = ctx.policy
+  for (const s of sessionsOf(st, source)) {
+    const obs = openOwnerBlocks(st, s.sk)
+    if (obs.length === 0) continue
+    for (const ob of obs) yield* clearCarried(ctx, ob, now)
+    if (P.attentionBesideOwnerBlock === 'raise' || !P.mergeOpenAttention) continue
+    // DESIGN-GAP (reverse order): an attention item already open when its
+    // session gets an owner-block item is withdrawn, reason `merged`, after
+    // its condition is carried on the owner-block item (carried first, so a
+    // crash between the two loses nothing).
+    for (const a of [...st.items.values()]) {
+      if (!a.open || a.origin !== 'attention' || a.sk !== s.sk) continue
+      const current = openOwnerBlocks(st, s.sk)
+      if (!carries(current, a.itemId)) {
+        const cond = conditionOf(st, { attentionId: a.itemId, ref: a.openedBy, root: a.root, reportId: a.reportId, sk: s.sk, trigger: a.condition?.trigger, since: a.condition?.since, now })
+        yield* carryStep(ctx, P.mergeTarget(current), { now, op: 'carry', cond, path: 'open_attention' })
+      }
+      yield* withdraw(ctx, a, { now, reason: 'merged' })
+    }
+  }
 }
 
 // ── origins ────────────────────────────────────────────────────────────────
@@ -237,20 +446,15 @@ function* attention(ctx, source, now, signals) {
       yield* resolve(ctx, it, { now, evidence: s.latestAuthored })
     }
   }
+  if (ctx.policy.handOverOnClose) {
+    for (const ho of [...st.handovers.values()]) {
+      if (ho.source !== source) continue
+      for (const c of ho.carried) yield* handOver(ctx, ho, c, now)
+    }
+  }
   for (const sig of signals) {
     if (sig.type === 'attention') {
-      const rep = reportBody(st, sig.reportId)
-      yield* raise(ctx, {
-        itemId: itemIds.attention(sig.session, sig.reportId),
-        kind: 'session_attention',
-        origin: 'attention',
-        session: sig.session,
-        source: sig.session.source,
-        ref: sig.onset,
-        reportId: sig.reportId,
-        orderTime: rep ? rep.last_report_at : now,
-        now,
-      })
+      yield* attentionSignal(ctx, sig, now)
     } else if (sig.type === 'gone') {
       const raised = yield* raise(ctx, {
         itemId: itemIds.gone(sig.session),
@@ -269,9 +473,12 @@ function* attention(ctx, source, now, signals) {
             yield* withdraw(ctx, it, { now, reason: 'superseded' })
           }
         }
+        // A condition carried for the session is superseded the same way.
+        for (const ob of openOwnerBlocks(st, sessionKey(sig.session))) yield* clearCarried(ctx, ob, now, { reason: 'superseded', all: true })
       }
     }
   }
+  yield* reconcileOwnerBlocks(ctx, source, now)
 }
 
 function* outages(ctx, source, now, signals, tickId) {
