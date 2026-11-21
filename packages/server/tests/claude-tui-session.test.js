@@ -800,8 +800,9 @@ describe('ClaudeTuiSession', () => {
       }
       await origSpawnPty.call(candidate, false)
       assert.deepEqual(spawnedArgs.slice(2, 4), ['--settings', candidate._settingsPath])
-      assert.deepEqual(spawnedArgs.slice(4, 6), ['--setting-sources', 'user'],
-        'the TUI spawn loads only user-scope Claude settings')
+      const ssIdx = spawnedArgs.indexOf('--setting-sources')
+      assert.ok(ssIdx >= 0, 'the TUI spawn passes --setting-sources')
+      assert.equal(spawnedArgs[ssIdx + 1], 'user', 'the TUI spawn loads only user-scope Claude settings')
       const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
       assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
       for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')

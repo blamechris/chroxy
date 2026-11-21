@@ -1,7 +1,9 @@
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { readdirSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import {
   claudeSettingSources,
@@ -150,9 +152,10 @@ describe('web task argv', () => {
 
 describe('status line settings sources', () => {
   it('statusLineSettingsPaths lists only user-level files', () => {
-    assert.deepEqual(statusLineSettingsPaths('/proj', '/home/u/.claude'), [
-      '/home/u/.claude/project-settings.json',
-      '/home/u/.claude/settings.json',
+    const claudeDir = join(tmpdir(), 'u', '.claude')
+    assert.deepEqual(statusLineSettingsPaths(join(tmpdir(), 'proj'), claudeDir), [
+      join(claudeDir, 'project-settings.json'),
+      join(claudeDir, 'settings.json'),
     ])
   })
 
@@ -206,5 +209,43 @@ describe('.mcp.json permission floor', () => {
   })
   it('does not floor an ordinary file', () => {
     assert.equal(isFlooredTarget('Write', { file_path: join(cwd, 'mcp.json') }, cwd), false)
+  })
+})
+
+// Every Agent SDK query() call site must choose its setting sources through
+// claude-setting-sources.js, or load none. A new call site that leaves
+// settingSources unset would get the SDK default (user, project and local).
+describe('Agent SDK call sites choose setting sources explicitly', () => {
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+  const files = []
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (name.endsWith('.js')) files.push(p)
+    }
+  }
+  walk(srcDir)
+  const callsQuery = (text) => /from '@anthropic-ai\/claude-agent-sdk'/.test(text) &&
+    text.split('\n').some((l) => !/^\s*(\*|\/\/)/.test(l) && /\b(query|queryFn|sdkQuery)\(/.test(l))
+
+  it('finds the known call sites (the sweep is not vacuous)', () => {
+    const names = files.filter((p) => callsQuery(readFileSync(p, 'utf8'))).map((p) => p.slice(srcDir.length + 1))
+    for (const known of ['sdk-session.js', 'summarize-session.js', 'claude-model-refresh.js']) {
+      assert.ok(names.includes(known), `${known} should be detected as an SDK query() call site`)
+    }
+  })
+
+  it('each call site sets settingSources from the helper or to []', () => {
+    for (const p of files) {
+      const text = readFileSync(p, 'utf8')
+      if (!callsQuery(text)) continue
+      const code = text.split('\n').filter((l) => !/^\s*(\*|\/\/)/.test(l))
+      const lines = code.filter((l) => /\bsettingSources\s*:/.test(l))
+      assert.ok(lines.length > 0, `${p} calls query() without setting settingSources`)
+      for (const l of lines) {
+        assert.match(l, /settingSources\s*:\s*(claudeSettingSources\(|\[\])/, `${p}: ${l.trim()}`)
+      }
+    }
   })
 })

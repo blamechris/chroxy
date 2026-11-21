@@ -98,7 +98,7 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 
 ### Claude settings scope
 
-Sessions now load only user-scope Claude settings. Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned.
+Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) now load only user-scope Claude settings. Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned. BYOK sessions are unchanged: each MCP server they start still needs an approval first.
 
 ### Choose between SDK, CLI, and TUI
 
