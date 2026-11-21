@@ -311,9 +311,12 @@ investigation, I7a uses the model's onset. I11 starts a condition at an
 investigation's decision to surface, as the investigation's close record
 states it; whether that decision comes in time is I7f's to check against the
 world. Everything else I11 and I12 use (which items are open, what each
-owner-block item carries, a condition's root, the closing evidence, the
-sends) is the monitor's own account: it folds each carried-condition change
-itself and checks the list the record states against that fold.
+owner-block item carries, the closing evidence, the sends) is the monitor's
+own account: it folds each carried-condition change itself and checks the
+list the record states against that fold. One link is not: the monitor ties a
+handed-back episode to the condition's earlier episodes through the record's
+own `handover_of` (and a carry's `from`). A model that both gave a handed-back
+episode fresh counters and left that link out would not be caught by I12.
 
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
