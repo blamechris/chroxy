@@ -54,8 +54,8 @@ caller.
   write) is recorded but never graded by age: it is `unknown` with the reason
   `relayed_declaration`.
 - A report stamped later than the check by more than the skew limit, or a
-  source clock off by more than the limit, makes the read `error: clock_skew`.
-  A line whose time cannot be trusted writes no report record.
+  source clock off by more than the limit, makes the read `error: clock_skew`;
+  exactly the limit is not skew. A line whose time cannot be trusted writes no report record.
 - On a source that stamps a declaration only when it changes, an identical
   repeat is not a new report, and that source's decisions are carried forward
   (`possibly_inherited`).
@@ -132,6 +132,16 @@ Four counters are stored on every surface record: `presentation`,
 | any open | closing evidence | resolved | no | closed |
 | any open | dismissal, lapse or superseded | withdrawn | no | closed |
 | any open | content changes | updated | no | same; from exhausted, queued if a counted show is left |
+
+Edges at exact equality: a reminder or the time limit is due at the very
+moment its interval has passed since the latest show or return. A deadline
+equal to the present has passed, so it does not preempt; a challenger
+preempts only with a deadline strictly before the active item's next reminder
+and strictly before the active item's own deadline, and an active item whose
+deadline equals the present has none left. A report with the same time as the
+opening report is not newer, and a session whose first report is at exactly
+the seed's `written_at` is not later than the seed. An open-turn event exactly
+`activity_window_minutes` old is still inside the window.
 
 One item holds the slot at a time. Order: owner blocks with a deadline
 (earliest first), other owner blocks (prompts first), outages, attention
@@ -310,7 +320,7 @@ that is not active do nothing. The deferral time is stored on the record.
 **Open, not fixed: places where the owner hears twice about one session.**
 An attention item is identified by session and report, and each of these
 puts one beside the session's still-open owner-block item. They are exempt
-from I9 by name; merging them is a rule for the specification's owner to
+from I9 by name; merging them is a rule for whoever builds the real thing to
 choose, not the model.
 
 - `repeated_error`: the session's own reads keep failing. The item shares

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { itemIds } from './model/keys.js'
+import { DEFAULT_POLICY } from './model/policy.js'
 import { MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
@@ -66,6 +67,17 @@ describe('classification', () => {
     W.dieMidTurn(m.world, c.sk)
     ticks(m, 'chroxy', T0, 4)
     assert.equal(classes(m, c.sk)[0], '1:working_unreported', 'mutation: with the window ignored, old activity reads as working')
+  })
+
+  it('an open-turn event exactly the activity window old is still working; one millisecond older is not', () => {
+    const config = { investigation: { activity_window_minutes: 20 } }
+    const base = { rungBlocked: false, sourceLevel: false, trigger: 'stale_report', rereadFailed: false, native: null, ownerBlock: false, state: 'running', reportAt: T0, now: T0 + 60 * MIN }
+    const at = (activity_at) => [{ basis: 'open_turn_event_after_report', activity_at }]
+    const edge = base.now - 20 * MIN
+    assert.equal(DEFAULT_POLICY.withinActivityWindow({ activity_at: edge }, base.now, config), true)
+    assert.equal(DEFAULT_POLICY.withinActivityWindow({ activity_at: edge - 1 }, base.now, config), false)
+    assert.equal(DEFAULT_POLICY.classify({ ...base, events: at(edge) }, config), 'working_unreported')
+    assert.equal(DEFAULT_POLICY.classify({ ...base, events: at(edge - 1) }, config), 'running_claim_unverified')
   })
 
   it('a tool start after the report and then a turn ending in error: not working_unreported', () => {

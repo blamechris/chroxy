@@ -96,6 +96,18 @@ describe('freshness never improves for a fixed report under fixed configuration'
     assert.ok(AGE_ORDER[second.freshness] < AGE_ORDER[first.freshness])
   })
 
+  it('clock skew: exactly the limit is not skew, one millisecond past it is (report ahead of the check, source clock either side)', () => {
+    const limit = cfg.max_source_skew_seconds * 1000
+    const ahead = grade({ lastReportAt: T + limit, checkedAt: T })
+    assert.deepEqual([ahead.freshness, ahead.errorCode, ahead.ageS], ['fresh', null, 0])
+    assert.equal(grade({ lastReportAt: T + limit + 1, checkedAt: T }).errorCode, 'clock_skew')
+    for (const sign of [1, -1]) {
+      const at = grade({ sourceNow: T + sign * limit })
+      assert.deepEqual([at.freshness, at.errorCode], ['fresh', null])
+      assert.equal(grade({ sourceNow: T + sign * (limit + 1) }).errorCode, 'clock_skew')
+    }
+  })
+
   it('gap witness: across the skew limit a fixed report goes from error to fresh as time passes', () => {
     // The rules say freshness only gets worse for a fixed report; they
     // give no order between `error` and the age values, and a report stamped

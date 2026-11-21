@@ -5,7 +5,7 @@ import { itemIds, surfaceOrdinal as surfaceOrdinalLiteral } from './model/keys.j
 import { planConfig, run } from './model/reconciler.js'
 import { deriveState } from './model/derive.js'
 import { append, createLedger } from './model/ledger.js'
-import { DEFAULT_POLICY, withPolicy } from './model/policy.js'
+import { DEFAULT_POLICY, nextReminderAt, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { literalPreempts } from './helpers/variants.js'
 import * as W from './helpers/world.js'
@@ -498,6 +498,21 @@ describe('origins and their closing evidence', () => {
     assert.equal(h.item(id).state, 'closed')
   })
 
+  it('a seed is not closed by a session whose first report is exactly at the seed\'s written_at; one millisecond later closes it', () => {
+    for (const [offset, closed] of [[0, false], [1, true]]) {
+      const h = setup()
+      const x = session(h, 'codex', 'x', 'repo-a')
+      W.author(h.world, x.sk, T0, { state: 'idle', seed: { scope: 'repo-a', session: 'x', written_at: T0 } })
+      const id = itemIds.seed('repo-a', 'x')
+      const n = session(h, 'chroxy', 'n', 'repo-a')
+      W.author(h.world, n.sk, T0 + offset, { state: 'running', next: 'start' })
+      const t = ticks(h, 'codex', T0, 1)
+      ticks(h, 'chroxy', T0, 1)
+      ticks(h, 'codex', t, 1)
+      assert.equal(h.item(id).state === 'closed', closed, `first report ${offset} ms after written_at`)
+    }
+  })
+
   it('a resolved seed whose session never authors again raises no new episode in ten ticks (and dropping the used-reference rule cannot show it)', () => {
     for (const mutated of [false, true]) {
       const h = setup({}, mutated ? withPolicy({ mayOpenEpisode: (item) => !item || !item.open }) : undefined)
@@ -578,5 +593,67 @@ describe('preemption', () => {
   it('gap witness: read literally, two deadline items preempt each other on alternate ticks', () => {
     const { h } = twoDeadlines(withPolicy({ preempts: literalPreempts }))
     assert.ok(h.records('surface').filter((r) => r.body.step === 'preempted').length >= 2)
+  })
+})
+
+describe('equality edges of the time rules', () => {
+  const config = makeConfig()
+  const P = DEFAULT_POLICY
+  const counters = (reminders_used = 0, shows_counted = 1) => ({ presentation: 1, shows_counted, reminders_used, returns_used: 0 })
+  const active = (over = {}) => ({ kind: 'owner_block', deadline: null, counters: counters(), lastShowAt: T0, ...over })
+  const challenger = (deadline, over = {}) => ({ kind: 'owner_block', deadline, counters: counters(0, 0), ...over })
+
+  it('the next reminder is reminder 2 after one is used, and the expiry only after both are', () => {
+    assert.equal(nextReminderAt(active({ counters: counters(0) }), config), T0 + 60 * MIN)
+    assert.equal(nextReminderAt(active({ counters: counters(1) }), config), T0 + 180 * MIN)
+    assert.equal(nextReminderAt(active({ counters: counters(2) }), config), T0 + 8 * HOUR)
+  })
+
+  it('a reminder and the time limit are due exactly at their time, not a millisecond before', () => {
+    const a = active()
+    assert.equal(P.reminderDue(a, T0 + 60 * MIN - 1, config), null)
+    assert.equal(P.reminderDue(a, T0 + 60 * MIN, config), 1)
+    assert.equal(P.expiryDue(a, T0 + 8 * HOUR - 1, config), false)
+    assert.equal(P.expiryDue(a, T0 + 8 * HOUR, config), true)
+  })
+
+  it('a challenger whose deadline is exactly now has passed and does not preempt', () => {
+    const now = T0 + 10 * MIN
+    assert.equal(P.preempts(challenger(now + 1), active(), now, config), true)
+    assert.equal(P.preempts(challenger(now), active(), now, config), false)
+  })
+
+  it('a challenger whose deadline is exactly the active item\'s next reminder does not preempt', () => {
+    const now = T0 + 10 * MIN
+    const reminder = T0 + 60 * MIN
+    assert.equal(P.preempts(challenger(reminder - 1), active(), now, config), true)
+    assert.equal(P.preempts(challenger(reminder), active(), now, config), false)
+  })
+
+  it('preemption counts the next reminder from reminder 2 once one is used (not the expiry)', () => {
+    const now = T0 + 70 * MIN
+    const a = active({ counters: counters(1) })
+    assert.equal(P.preempts(challenger(T0 + 180 * MIN - 1), a, now, config), true)
+    assert.equal(P.preempts(challenger(T0 + 180 * MIN), a, now, config), false)
+  })
+
+  it('an active item whose own deadline is exactly now has none left; a challenger with a later deadline may preempt', () => {
+    const now = T0 + 10 * MIN
+    assert.equal(P.preempts(challenger(now + 5 * MIN), active({ deadline: now }), now, config), true)
+    assert.equal(P.preempts(challenger(now + 5 * MIN), active({ deadline: now + 1 }), now, config), false)
+  })
+
+  it('a challenger whose deadline equals the active item\'s own deadline does not preempt; one earlier does', () => {
+    const now = T0 + 10 * MIN
+    const a = active({ deadline: now + 30 * MIN })
+    assert.equal(P.preempts(challenger(now + 30 * MIN), a, now, config), false)
+    assert.equal(P.preempts(challenger(now + 30 * MIN - 1), a, now, config), true)
+  })
+
+  it('a declared block is not resolved by a non-block report stamped exactly at the opening report\'s time; one millisecond later resolves it', () => {
+    const opening = { state: 'blocked', owner_named: OWNER, last_report_at: T0 }
+    const cfg = makeConfig({ owner_name: OWNER })
+    assert.equal(P.declaredResolvedBy({ state: 'running', last_report_at: T0 }, opening, cfg), false)
+    assert.equal(P.declaredResolvedBy({ state: 'running', last_report_at: T0 + 1 }, opening, cfg), true)
   })
 })
