@@ -2551,9 +2551,10 @@ export class BaseSession extends EventEmitter {
       // only: not on a watchdog, a timeout or an error that was converted to
       // `stopped`), mint the marker first, so the client idles on it and `stopped`
       // follows.
-      const explicit = args[0] && typeof args[0] === 'object' && args[0].stopRequested === true
-      if (args[0] && typeof args[0] === 'object' && 'stopRequested' in args[0]) {
-        const { stopRequested: _signal, ...rest } = args[0]
+      const stoppedPayload = args[0]
+      const explicit = !!stoppedPayload && typeof stoppedPayload === 'object' && stoppedPayload.stopRequested === true
+      if (stoppedPayload && typeof stoppedPayload === 'object' && 'stopRequested' in stoppedPayload) {
+        const { stopRequested: _signal, ...rest } = stoppedPayload
         args[0] = rest // internal: never on the wire
       }
       if (explicit && this._shouldMintStopBeforeReply()) this._emitStopBeforeReplyResult()
