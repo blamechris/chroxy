@@ -2552,6 +2552,15 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
   // Per-id dedup runs on every history replay path (#2901), so we no longer
   // need a "pending-switch" hint to distinguish user-initiated session switches
   // from auth-triggered ones.
+  // #8488 — reset the per-active-session panels only when this frame CHANGES the
+  // active session. `switchSession` sets `activeSessionId` before it sends
+  // `switch_session` (both branches) and has already reset the panels, so the
+  // echo of the user's own switch arrives with an equal id and must not clear:
+  // a `memory_read` / `query_permission_audit` fired right after the click may
+  // already be answered. A server-started switch (create confirm, checkpoint
+  // restore, the initial one after auth_ok) changes the id, so the old
+  // session's panels are stale. Read before the `set` below overwrites it.
+  const activeChanges = get().activeSessionId !== sessionId;
   set((state: ConnectionState) => {
     // Initialize session state if it doesn't exist
     const sessionStates = { ...state.sessionStates };
@@ -2565,6 +2574,7 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
     const ss = sessionStates[sessionId];
     return {
       activeSessionId: sessionId,
+      ...(activeChanges ? createEmptySessionPanels() : {}),
       sessionStates,
       // Sync flat state from the switched-to session
       messages: ss.messages,
@@ -4970,6 +4980,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           // socket invalidates readiness and any in-flight stream id
           // regardless. This spread agrees with it.)
           ...createEmptyFlatSessionMirror(),
+          // #8488 — the per-active-session panels (permission-audit history,
+          // memory stack) go with the roster for the same reason: this branch
+          // nulls `activeSessionId` and empties `sessionStates`, so any panel
+          // data describes a session it just deleted. `auth_ok` is the first
+          // frame on the new socket, so this cannot wipe the answer to a pull
+          // sent on it. Non-reconnect only: a silent reconnect keeps its roster.
+          ...createEmptySessionPanels(),
           // #7470 authok-reset-end
           customAgents: [],
         });
@@ -5920,7 +5937,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           attemptedSessionId: parsed.attemptedSessionId ?? null,
           message: parsed.message ?? 'Session not found.',
         });
-        set({ activeSessionId: null });
+        // #8488 — the active session is gone, so the per-active-session panels
+        // (permission-audit history, memory stack) describe a session that no
+        // longer exists: reset them in the same write as the id, like the two
+        // death paths in `session_list` / `session_timeout` (#7588).
+        set({ activeSessionId: null, ...createEmptySessionPanels() });
         if (parsed.message) {
           _adapters.alert.alert('Session Restarted', parsed.message);
           get().addServerError(parsed.message);

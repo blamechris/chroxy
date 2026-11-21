@@ -40,6 +40,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
+import ts from 'typescript'
 
 // connection.ts reads persisted settings at module scope (same idiom as the sibling
 // store tests).
@@ -59,11 +60,13 @@ vi.mock('../utils/auth', () => ({ getAuthToken: () => 'local-token' }))
 const { useConnectionStore } = await import('./connection')
 // Captured before any test mutates the store: what the store was CONSTRUCTED with.
 const INITIAL = { ...useConnectionStore.getState() } as unknown as Record<string, unknown>
+// The REAL connect(): earlier cells replace it with a stub and never put it back.
+const REAL_CONNECT = useConnectionStore.getState().connect
 const {
   createEmptySessionPanels, createEmptyConnectionReadings, createEmptySessionState,
   createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptyDaemonSnapshots, createEmptyFlatSessionMirror,
 } = await import('./utils')
-const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags } =
+const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags, setLastConnectedUrl } =
   await import('./message-handler')
 type State = import('./types').ConnectionState
 
@@ -513,5 +516,338 @@ describe('#7588 completeness: the factory covers the panel families, and the sto
       (n) => (FAMILIES.some((p) => n.startsWith(p))) && !PANEL_KEYS.includes(n) && !READING_KEYS.includes(n),
     )
     expect(missing).toEqual(['memoryStackStale'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8488 BEHAVIOUR 4 — the three paths #7588 left out: SESSION_NOT_FOUND, auth_ok's
+// non-reconnect branch, and a SERVER-STARTED session_switched. And the one a blind
+// reset would break: the echo of the user's OWN switch.
+// ---------------------------------------------------------------------------
+describe('#8488 every active-session change clears the panels', () => {
+  const sock = () => ({ send: vi.fn(), close: vi.fn(), readyState: 1, addEventListener: vi.fn(), removeEventListener: vi.fn() })
+  const ctx = (over: Record<string, unknown> = {}) => ({
+    url: 'wss://t', token: 'tok', isReconnect: false, silent: false, socket: sock(), ...over,
+  })
+  const AUTH_OK = {
+    type: 'auth_ok', serverMode: 'cli', cwd: '/b', defaultCwd: '/b', serverVersion: '0.9.0',
+    protocolVersion: 3, clientId: 'client-b', connectedClients: [],
+  }
+
+  function seedPanels(): Roster {
+    clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
+    const dirty = dirtyOf(PANELS)
+    useConnectionStore.setState({
+      ...dirty,
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' }, { sessionId: 's2', name: 'S2' }],
+      sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() },
+      socket: null,
+    } as unknown as Partial<State>)
+    return dirty
+  }
+
+  it('control: the panels are populated before each path runs', () => {
+    const dirty = seedPanels()
+    expectUntouched(dirty, PANEL_KEYS, 'seeding')
+  })
+
+  it('session_error SESSION_NOT_FOUND clears the panels with the dead active id', () => {
+    seedPanels()
+    handleMessage(
+      { type: 'session_error', code: 'SESSION_NOT_FOUND', message: 'gone', attemptedSessionId: 's1' } as never,
+      ctx() as never,
+    )
+    expect(read().activeSessionId, 'the active id was not nulled').toBeNull()
+    expectRoster(PANELS, PANEL_KEYS, 'SESSION_NOT_FOUND')
+  })
+
+  it('auth_ok (non-reconnect) clears the panels along with the roster it empties', () => {
+    seedPanels()
+    handleMessage(AUTH_OK as never, ctx({ isReconnect: false }) as never)
+    expect(read().activeSessionId, 'the non-reconnect branch did not run').toBeNull()
+    expectRoster(PANELS, PANEL_KEYS, 'auth_ok non-reconnect')
+  })
+
+  it('POSITIVE CONTROL: auth_ok on the RECONNECT branch leaves the panels alone', () => {
+    const dirty = seedPanels()
+    handleMessage(AUTH_OK as never, ctx({ isReconnect: true }) as never)
+    expect(read().sessionStates, 'the reconnect branch must keep the roster').toHaveProperty('s1')
+    expectUntouched(dirty, PANEL_KEYS, 'auth_ok reconnect')
+  })
+
+  it('session_switched to a DIFFERENT session (server-started) clears the panels', () => {
+    seedPanels()
+    handleMessage({ type: 'session_switched', sessionId: 's2', name: 'S2', cwd: '/x' } as never, ctx() as never)
+    expect(read().activeSessionId).toBe('s2')
+    expectRoster(PANELS, PANEL_KEYS, 'a server-started session_switched')
+  })
+
+  it('an answered pull SURVIVES the echo of the user\'s own switch', () => {
+    seedPanels()
+    useConnectionStore.setState({ socket: sock() as unknown as WebSocket } as unknown as Partial<State>)
+    useConnectionStore.getState().switchSession('s2')
+    expect(read().activeSessionId).toBe('s2')
+    expectRoster(PANELS, PANEL_KEYS, 'switchSession itself')
+    // The user opens the panels right after the click and the daemon answers both
+    // before the session_switched echo lands.
+    expect(useConnectionStore.getState().requestMemoryRead()).toBe(true)
+    const reqId = read().lastMemoryStackRequestId as string
+    useConnectionStore.getState().queryPermissionAudit()
+    handleMessage({
+      type: 'memory_stack_result', requestId: reqId, error: null, memoryFile: null,
+      entries: [{
+        scope: 'project', importedFrom: null, path: '/s2/CLAUDE.md', exists: true,
+        content: 'B memory', truncated: false, skipped: false, error: null,
+      }],
+    } as never, ctx() as never)
+    handleMessage({
+      type: 'permission_audit_result', entries: [{ type: 'decision', timestamp: 1, sessionId: 's2' }],
+    } as never, ctx() as never)
+    const answered = { entries: read().memoryStackEntries, audit: read().permissionAudit }
+    expect(answered.entries, 'control: memory pull answered').not.toBeNull()
+    expect(answered.audit, 'control: audit pull answered').not.toBeNull()
+
+    handleMessage({ type: 'session_switched', sessionId: 's2', name: 'S2', cwd: '/x' } as never, ctx() as never)
+
+    expect(read().memoryStackEntries, 'the echo wiped the answered memory pull').toEqual(answered.entries)
+    expect(read().permissionAudit, 'the echo wiped the answered audit pull').toEqual(answered.audit)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8488 DERIVED ROSTER — every writer of `activeSessionId` takes the panel factory, or is
+// exempt for a stated reason. The list of writers is READ OFF the two source files with the
+// TypeScript parser; nothing below names a site by hand except the exemptions, and those are
+// checked against the derived list in BOTH directions. The factory docstring used to name its
+// sites by hand, was wrong within a PR (three sites missing), and nothing could say so.
+// ---------------------------------------------------------------------------
+describe('#8488 derived roster of activeSessionId writers', () => {
+  interface Writer { id: string; covered: boolean }
+
+  const isPanelsCall = (n: ts.Node): boolean =>
+    ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'createEmptySessionPanels'
+
+  const containsPanelsCall = (root: ts.Node): boolean => {
+    let found = false
+    const walk = (n: ts.Node): void => {
+      if (found) return
+      if (isPanelsCall(n)) { found = true; return }
+      ts.forEachChild(n, walk)
+    }
+    walk(root)
+    return found
+  }
+
+  /** The nearest NAMED function-ish ancestor: a declaration, a method, or an `x: () => {}` member. */
+  function enclosingName(node: ts.Node, sf: ts.SourceFile): string {
+    for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+      if ((ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n)) && n.name) return n.name.getText(sf)
+      if (
+        ts.isPropertyAssignment(n) && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+      ) return n.name.getText(sf)
+      if (
+        ts.isVariableDeclaration(n) && n.initializer &&
+        (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+      ) return n.name.getText(sf)
+    }
+    return '(store-init)'
+  }
+
+  /** Is `Object.assign(<target>, createEmptySessionPanels())` inside the NEAREST enclosing block? */
+  function blockAssignsPanels(node: ts.Node, target: string, sf: ts.SourceFile): boolean {
+    let block: ts.Node | undefined = node.parent
+    while (block && !ts.isBlock(block)) block = block.parent
+    if (!block) return false
+    let found = false
+    const walk = (n: ts.Node): void => {
+      if (found) return
+      if (
+        ts.isCallExpression(n) && n.expression.getText(sf) === 'Object.assign' &&
+        n.arguments.length >= 2 && n.arguments[0]!.getText(sf) === target &&
+        n.arguments.slice(1).some(isPanelsCall)
+      ) { found = true; return }
+      ts.forEachChild(n, walk)
+    }
+    walk(block)
+    return found
+  }
+
+  /** Every write of `activeSessionId` in one file: `{ activeSessionId: … }`, `{ activeSessionId }`, `x.activeSessionId = …`. */
+  function findWriters(file: string, source: string): Writer[] {
+    const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ES2020, true)
+    const raw: Array<{ base: string; covered: boolean }> = []
+    const visit = (n: ts.Node): void => {
+      if (
+        (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) &&
+        n.name.getText(sf) === 'activeSessionId' && ts.isObjectLiteralExpression(n.parent)
+      ) {
+        const lit = n.parent
+        // `({ activeSessionId } = x)` is a destructuring READ, not a write.
+        const isPattern = ts.isBinaryExpression(lit.parent) && lit.parent.left === lit
+        if (!isPattern) {
+          const covered = lit.properties.some((p) => ts.isSpreadAssignment(p) && containsPanelsCall(p.expression))
+          raw.push({ base: `${file}:${enclosingName(n, sf)}:${n.getText(sf).replace(/\s+/g, ' ')}`, covered })
+        }
+      } else if (
+        ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(n.left) && n.left.name.text === 'activeSessionId'
+      ) {
+        raw.push({
+          base: `${file}:${enclosingName(n, sf)}:${n.getText(sf).replace(/\s+/g, ' ')}`,
+          covered: blockAssignsPanels(n, n.left.expression.getText(sf), sf),
+        })
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
+    // Disambiguate identical (function, text) pairs by source order: `#1`, `#2`.
+    const total: Record<string, number> = {}
+    for (const r of raw) total[r.base] = (total[r.base] ?? 0) + 1
+    const seen: Record<string, number> = {}
+    return raw.map((r) => {
+      seen[r.base] = (seen[r.base] ?? 0) + 1
+      return { id: total[r.base]! > 1 ? `${r.base}#${seen[r.base]}` : r.base, covered: r.covered }
+    })
+  }
+
+  const WRITERS: Writer[] = [
+    ...findWriters('connection.ts', storeSrc),
+    ...findWriters('message-handler.ts', handlerSrc),
+  ]
+  const UNCOVERED = WRITERS.filter((w) => !w.covered).map((w) => w.id)
+
+  // Writers that change `activeSessionId` WITHOUT the panel factory, each with its reason.
+  // Keyed by the derived id, so a renamed function or a rewritten line goes red here rather
+  // than silently re-exempting. Every entry must match an uncovered writer that exists.
+  const EXEMPT: Record<string, string> = {
+    'connection.ts:switchSession:activeSessionId: sessionId#1':
+      'optimistic cached-branch write; the `set(createEmptySessionPanels())` ahead of both branches covers it',
+    'connection.ts:switchSession:activeSessionId: sessionId#2':
+      'optimistic uncached-branch write; the same preceding `set(createEmptySessionPanels())` covers it',
+    'connection.ts:(store-init):activeSessionId: null':
+      'the initial store construction: the panels are constructed from the factory (completeness test)',
+    'connection.ts:loadSavedConnection:updates.activeSessionId = persisted.activeSessionId':
+      'hydration at startup, before any panel is pulled; the panels hold their constructed (empty) values',
+    'connection.ts:retargetToServer:activeSessionId: persisted.activeSessionId':
+      'runs straight after `_resetSessionMemory()` in the same action, which spreads the factory',
+    'message-handler.ts:handleStreamDelta:activeSessionId: get().activeSessionId':
+      'not a store write: a read-through argument handed to the shared delta handler',
+  }
+
+  it('non-vacuity: the derivation found the writers, including the three paths of #8488', () => {
+    const ids = WRITERS.map((w) => w.id)
+    expect(ids.length, 'the derivation found (almost) no writers').toBeGreaterThanOrEqual(13)
+    const covered = WRITERS.filter((w) => w.covered).map((w) => w.id)
+    for (const want of [
+      'message-handler.ts:handleSessionSwitched:activeSessionId: sessionId',
+      'message-handler.ts:dispatchFrame:activeSessionId: null#1',
+      'message-handler.ts:dispatchFrame:activeSessionId: null#2',
+      'message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#1',
+      'message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#2',
+      'connection.ts:forgetSession:activeSessionId: null',
+      'connection.ts:_resetSessionMemory:activeSessionId: null',
+    ]) {
+      expect(covered.includes(want), `${want} is not found as a COVERED writer`).toBe(true)
+    }
+    expect(new Set(ids).size, 'writer ids must be unique').toBe(ids.length)
+  })
+
+  it('every writer takes the panel factory or is exempt (a new uncovered writer is red)', () => {
+    expect(
+      UNCOVERED.filter((id) => !(id in EXEMPT)),
+      'a path changes the active session without createEmptySessionPanels(): the Memory panel and the ' +
+      'permission-history view keep the previous session\'s data (#8488). Spread the factory into the ' +
+      'write, or add the writer to EXEMPT with the reason it cannot carry stale panels.',
+    ).toEqual([])
+  })
+
+  it('every exemption still names an uncovered writer that exists (a stale exemption is red)', () => {
+    expect(
+      Object.keys(EXEMPT).filter((id) => !UNCOVERED.includes(id)),
+      'an exemption matches no uncovered writer: the writer was removed, renamed, or now takes the factory',
+    ).toEqual([])
+  })
+
+  it('the derivation is red on a phantom exemption and on a phantom uncovered writer', () => {
+    // The same predicates against phantoms, so both directions are permanent cells.
+    const phantomExempt = { ...EXEMPT, 'connection.ts:noSuchAction:activeSessionId: null': 'phantom' }
+    expect(Object.keys(phantomExempt).filter((id) => !UNCOVERED.includes(id))).toEqual([
+      'connection.ts:noSuchAction:activeSessionId: null',
+    ])
+    const phantomUncovered = [...UNCOVERED, 'message-handler.ts:newPath:activeSessionId: null']
+    expect(phantomUncovered.filter((id) => !(id in EXEMPT))).toEqual(['message-handler.ts:newPath:activeSessionId: null'])
+  })
+
+  it('the parser really tells a covered literal from an uncovered one', () => {
+    const w = findWriters('x.ts', [
+      'function a() { set({ activeSessionId: null, ...createEmptySessionPanels() }) }',
+      'function b() { set({ activeSessionId: null }) }',
+      'function c(patch: any) { patch.activeSessionId = 1; Object.assign(patch, createEmptySessionPanels()) }',
+      'function d(patch: any) { patch.activeSessionId = 1 }',
+      'function e(s) { return { activeSessionId: s, ...(s ? createEmptySessionPanels() : {}) } }',
+      'interface T { activeSessionId: string | null }',
+      'function f(get) { const { activeSessionId } = get(); return activeSessionId }',
+    ].join('\n'))
+    expect(w.map((x) => `${x.id}=${x.covered}`)).toEqual([
+      'x.ts:a:activeSessionId: null=true',
+      'x.ts:b:activeSessionId: null=false',
+      'x.ts:c:patch.activeSessionId = 1=true',
+      'x.ts:d:patch.activeSessionId = 1=false',
+      'x.ts:e:activeSessionId: s=true',
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8488 the auth_ok route probe: can a REAL route reach the non-reconnect branch with
+// populated panels? `connect()` computes `isReconnect = lastConnectedUrl === url` but only
+// tears down when `isDifferentDaemonUrl(wsUrl, url)`. Both are the raw string comparison, and
+// `wsUrl` / `lastConnectedUrl` are written together at auth_ok and cleared together by every
+// teardown, so a URL that makes `isReconnect` false also makes the self-clear fire. These
+// cells drive that route and record that it arrives at `auth_ok` with the panels ALREADY
+// empty. The spread in `auth_ok` stays regardless (belt and braces for a future route).
+// ---------------------------------------------------------------------------
+describe('#8488 auth_ok route probe: non-reconnect connects arrive with the panels already cleared', () => {
+  const A_URL = 'wss://server-a/ws'
+  beforeEach(() => {
+    useConnectionStore.setState({ connect: REAL_CONNECT } as unknown as Partial<State>)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    useConnectionStore.setState({ connect: REAL_CONNECT } as unknown as Partial<State>)
+    setLastConnectedUrl(null)
+  })
+
+  /** Run the real connect() with its network edge cut, observe, THEN cancel the attempt
+   *  (the cancelling disconnect() clears the panels itself, so it must come after). */
+  function startedConnect(url: string, observe: () => void): void {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    try {
+      useConnectionStore.getState().connect(url, 'tok')
+      observe()
+    } finally { useConnectionStore.getState().disconnect() }
+  }
+
+  it.each([
+    ['a trailing-slash variant of the same daemon (raw !== so it self-clears)', `${A_URL}/`],
+    ['a different daemon', 'wss://server-b/ws'],
+  ])('connect() to %s clears the panels before auth_ok can run', (_label, url) => {
+    setLastConnectedUrl(A_URL)
+    seed({ wsUrl: A_URL, connectionPhase: 'connected' } as unknown as Partial<State>)
+    expect(read().permissionAudit, 'control: populated first').not.toBeNull()
+    expect(A_URL === url, 'control: the target is not the recorded URL, so isReconnect would be false').toBe(false)
+    startedConnect(url, () => expectRoster(PANELS, PANEL_KEYS, `connect(${url})`))
+  })
+
+  it('disconnect() then connect() to the same URL arrives non-reconnect with the panels already cleared', () => {
+    setLastConnectedUrl(A_URL)
+    seed({ wsUrl: A_URL, connectionPhase: 'connected' } as unknown as Partial<State>)
+    useConnectionStore.getState().disconnect()
+    expect(read().wsUrl, 'control: disconnect() keeps wsUrl (so connect() does not self-clear)').toBe(A_URL)
+    expectRoster(PANELS, PANEL_KEYS, 'disconnect()')
   })
 })
