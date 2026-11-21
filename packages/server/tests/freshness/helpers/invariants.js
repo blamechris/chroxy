@@ -7,7 +7,7 @@
  * with this account, or as a bound the account says was crossed. Ground truth
  * about sessions comes from the simulated world.
  *
- * Each failure carries an invariant id (I1a .. I11, with I7i) so a mutation proof can
+ * Each failure carries an invariant id (I1a .. I12, with I7i) so a mutation proof can
  * assert WHICH invariant went red. The full list is in ../README.md.
  *
  * What the monitor derives for itself rather than reading from the model:
@@ -101,6 +101,12 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     // and every (attention item, opening reference) an owner-block item carried.
     conds: new Map(),
     carriedEver: new Set(),
+    // What each owner-block episode carried when it closed: "item|episode" ->
+    // Map(attention item -> condition root), for the handover that follows.
+    closedCarried: new Map(),
+    // I12: sends per condition, by the condition's root (the reference that
+    // first opened it), across every episode that condition opened.
+    condCounts: new Map(),
     stats: { records: 0, sends: 0, shows: 0, reminders: 0, returns: 0, investigations: 0, rechecks: 0, episodes: 0, resolved: 0, withdrawn: 0, exhausted: 0, crashes: 0 },
   }
 }
@@ -228,12 +234,23 @@ function justifyWithdrawn(mon, it, reason) {
     case 'superseded':
       return [...mon.items.values()].some((g) => g.open && g.origin === 'gone' && g.sk === it.sk)
     case 'merged':
-      return openOwnerBlocksOf(mon, it.sk).some((ob) => ob.carried.some((c) => c.attention_item === it.id))
+      return openOwnerBlocksOf(mon, it.sk).some((ob) => ob.own?.has(it.id))
     case 'owner_stated_unverified':
       return mon.ownerDone.has(`${it.id}|${it.episode}`) && !sourceCaps(mon.config, it.source).scope
     default:
       return false
   }
+}
+
+/** One condition's sends: its attention item and its root, across its episodes. */
+function account(mon, it) {
+  const key = `${it.id}|${it.root}`
+  let a = mon.condCounts.get(key)
+  if (!a) {
+    a = { counted: 0, reminders: 0, returns: 0, deferrals: 0 }
+    mon.condCounts.set(key, a)
+  }
+  return a
 }
 
 function openOwnerBlocksOf(mon, sk) {
@@ -376,8 +393,12 @@ function onRecord(mon, h, r) {
         if (it.open) fail('I5', `a second episode opened while one is open (${b.origin})`)
         if (it.usedRefs.has(b.opened_by)) fail('I5', `an episode opened on an opening reference already used (${b.origin})`)
         if (b.episode !== it.episode + 1) fail('I5', `episode ${b.episode} after ${it.episode}`)
-        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Set() })
+        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map() })
         it.usedRefs.add(b.opened_by)
+        // A condition's root, from this monitor's own account: the opening
+        // reference, unless the episode is a handover of a condition that a
+        // closed owner-block episode carried, which keeps that one's root.
+        if (b.origin === 'attention') it.root = (b.handover_of && mon.closedCarried.get(b.handover_of)?.get(b.item_id)) || b.opened_by
         mon.stats.episodes += 1
         break
       }
@@ -406,12 +427,16 @@ function onRecord(mon, h, r) {
           // I1a: a counted show stays within the limit in force when it is made.
           if (sending && counted && it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max})`)
           if (sending && counted && b.shows_counted > max) fail('I1a', `stored shows_counted ${b.shows_counted} above max ${max}`)
+          // I12: one condition, however many episodes, within the show limit.
+          if (sending && counted && it.root && ++account(mon, it).counted > max) fail('I12', `one condition was shown ${account(mon, it).counted} counted times across its episodes (max ${max})`)
           break
         case 'reminded':
           it.reminders += 1
           mon.stats.reminders += 1
+          if (sending && it.root && ++account(mon, it).reminders > 2) fail('I12', `one condition was reminded ${account(mon, it).reminders} times across its episodes`)
           break
         case 'returned':
+          if (sending && it.root && ++account(mon, it).returns > 1) fail('I12', `one condition was returned ${account(mon, it).returns} times across its episodes`)
           it.returns += 1
           it.state = 'active'
           mon.stats.returns += 1
@@ -424,6 +449,7 @@ function onRecord(mon, h, r) {
           mon.lastPreempted = it.id
           break
         case 'deferred':
+          if (it.root) account(mon, it).deferrals += 1
           it.deferrals += 1
           it.state = 'deferred'
           break
@@ -436,15 +462,25 @@ function onRecord(mon, h, r) {
           if (b.carry) {
             // A carried-condition change: judged against this monitor's own
             // account of what the item carries, not the record's list.
-            const own = it.own ?? new Set()
+            const own = it.own ?? new Map()
             const key = b.carry.attention_item
             const changed = b.carry.op === 'carry' ? !own.has(key) : own.has(key)
             if (b.carry.op === 'carry') {
-              own.add(key)
+              // The condition's root: that of the attention item being merged,
+              // or of the closed owner-block episode handing it on, else the
+              // reference that would have opened it.
+              const att = mon.items.get(key)
+              const root = (att?.open && att.root) || (b.carry.from && mon.closedCarried.get(b.carry.from)?.get(key)) || b.carry.opened_by
+              own.set(key, root)
               mon.carriedEver.add(`${key}|${b.carry.opened_by}`)
             } else own.delete(key)
             it.own = own
             it.carried = b.carried ?? []
+            // I11: what the record says the item names is what this monitor's
+            // own account says it carries.
+            const named = it.carried.map((c) => c.attention_item).sort()
+            const mine = [...own.keys()].sort()
+            if (named.length !== mine.length || named.some((k, i) => k !== mine[i])) fail('I11', `an owner-block item's content names ${named.length} conditions where its changes add up to ${mine.length}`)
             if (b.requeue) {
               if (it.exhausted && changed && it.counted < max) it.exhausted = false
               it.state = 'queued'
@@ -468,6 +504,7 @@ function onRecord(mon, h, r) {
         }
         case 'resolved':
           if (!justifyResolved(mon, it)) fail('I4b', `an item (${it.origin}) was resolved without its origin's closing evidence`)
+          if (it.own) mon.closedCarried.set(`${it.id}|${it.episode}`, new Map(it.own))
           it.open = false
           it.state = 'closed'
           mon.stats.resolved += 1
@@ -477,6 +514,7 @@ function onRecord(mon, h, r) {
           if (!justifyWithdrawn(mon, it, b.reason)) fail('I4b', `an item (${it.origin}) was withdrawn as '${b.reason}' without the evidence for it`)
           if (b.reason === 'dismissed' && it.reportId) mon.dismissedReports.add(`${sk}|${it.reportId}`)
           if (b.reason === 'dismissed' && it.origin === 'attention') mon.conds.delete(it.id)
+          if (it.own) mon.closedCarried.set(`${it.id}|${it.episode}`, new Map(it.own))
           it.open = false
           it.state = 'closed'
           mon.stats.withdrawn += 1
@@ -492,7 +530,10 @@ function onRecord(mon, h, r) {
       // ...and from the model's stored counters.
       if (b.reminders_used > 2) fail('I1b', `stored reminders_used ${b.reminders_used}`)
       if (b.returns_used > 1) fail('I1c', `stored returns_used ${b.returns_used}`)
-      if (b.presentation > b.shows_counted + it.deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${it.deferrals} deferrals`)
+      // A condition's episodes continue one presentation count, so its stored
+      // count is bounded by the deferrals of all of them.
+      const deferrals = it.root ? account(mon, it).deferrals : it.deferrals
+      if (b.presentation > b.shows_counted + deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${deferrals} deferrals`)
       break
     }
     case 'owner_ack': {
@@ -651,11 +692,11 @@ export function checkStep(mon, h, { complete = true } = {}) {
   }
   for (const c of mon.conds.values()) {
     if (mon.items.get(c.id)?.open) continue
-    if (openOwnerBlocksOf(mon, c.sk).some((ob) => ob.carried.some((x) => x.attention_item === c.id))) continue
+    if (openOwnerBlocksOf(mon, c.sk).some((ob) => ob.own?.has(c.id))) continue
     fail('I11', `a surfaced condition has neither its attention item nor an owner-block item that names it`)
   }
   for (const ob of mon.items.values()) {
     if (!ob.open || !OWNER_BLOCK_ORIGINS.has(ob.origin)) continue
-    for (const x of ob.carried) if (!mon.conds.has(x.attention_item)) fail('I11', `an owner-block item names a condition that has ended`)
+    for (const id of ob.own?.keys() ?? []) if (!mon.conds.has(id)) fail('I11', `an owner-block item names a condition that has ended`)
   }
 }

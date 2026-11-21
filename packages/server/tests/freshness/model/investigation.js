@@ -16,6 +16,7 @@ import {
   checkInvestigationKey,
   investigationId,
   investigationKey,
+  itemIds,
   recheckInvestigationId,
   sourceInvestigationId,
 } from './keys.js'
@@ -233,6 +234,11 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
         rungs.push({ rung: 'activity_read', outcome: 'unavailable' })
       }
     }
+    // DESIGN-GAP: a stale owner block is explained by its owner-block item
+    // only while that item is open. A session rewound to an owner-block line
+    // whose item already used it (and so never reopens) has no item carrying
+    // it, and is classified, and rechecked, as any other stale line.
+    const declaredOpen = Boolean(st.items.get(itemIds.declared(session))?.open)
     const latestRead = st.sessions.get(s.sk)?.latestRead
     const rep = latestRead ? st.reports.get(latestRead)?.body : report
     reportAgeMs = rep ? now - rep.last_report_at : null
@@ -248,7 +254,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
       events: st.sessions.get(s.sk)?.events ?? [],
       reportAt: rep ? rep.last_report_at : -Infinity,
       state: rep ? rep.state : 'none',
-      ownerBlock: rep ? P.isOwnerBlock(rep, cfg) : false,
+      ownerBlock: rep ? P.isOwnerBlock(rep, cfg) && declaredOpen : false,
       now,
       reportAgeMs,
     }
@@ -259,7 +265,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
   const surface = P.surfaceFor(classification, cand.kind === 'recheck' ? null : cand.cycle, { reportAgeMs }, cfg)
   // DESIGN-GAP (added field): which owner the session waits on, so that a
   // recheck can tell a pending prompt from an owner block.
-  const reportIsOwnerBlock = report ? P.isOwnerBlock(report, cfg) : false
+  const reportIsOwnerBlock = report ? P.isOwnerBlock(report, cfg) && Boolean(st.items.get(itemIds.declared(session))?.open) : false
   const ownerWaitBasis = classification === 'waiting_on_owner' ? (reportIsOwnerBlock || !pendingSeen ? 'owner_block' : 'prompt') : null
   // DESIGN-GAP: an attention item's opening reference is "the trigger's
   // onset", but a recheck (which can surface waiting_on_background) has no

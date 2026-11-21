@@ -165,7 +165,7 @@ separately. For attention items that works as follows.
   merged only where the attention item would have been raised: that item is
   not open, the opening reference was never used or carried before, and its
   closing evidence has not arrived. With both owner-block items open, the
-  declared block takes it.
+  policy rule `mergeTarget` gives it to the declared block.
 - **The `updated` row, nothing more.** The step sends nothing by itself.
   From `exhausted` it queues the item again only if a counted show is left,
   and every show after that uses one, so a condition that comes and goes
@@ -180,7 +180,22 @@ separately. For attention items that works as follows.
   condition still holds, the same tick merges the condition into the
   session's other open owner-block item, or else raises its own attention
   item, opened by the reference that would have opened it, exactly as for a
-  session with no open item.
+  session with no open item. Under the default `mergeTarget` the first of
+  these is rare: the declared block takes every condition while it is open,
+  and it closes only on a newer authored report, which also ends any
+  condition about an earlier report. It happens only for a condition about a
+  report newer than that one, such as a relayed declaration. (A prompt item
+  answered while a newer prompt is pending hands its conditions to its own
+  next episode.)
+- **One send history per condition.** A condition keeps the reference that
+  first opened it (its root) through every merge and handover. When it is
+  handed back to its attention item, the new episode starts with the
+  counters its previous episode ended with: the presentation number,
+  counted shows, reminders and returns. However many owner-block cycles it
+  outlives, one condition gets at most the show limit in counted shows, two
+  reminders and one return; once its shows are used, a handover leaves it
+  exhausted and listed, not shown. A condition first raised by a handover
+  (merged before it was ever shown) starts from zero.
 - **The reverse order.** An attention item already open when its session
   gets an owner-block item is withdrawn, reason `merged`, after its condition
   is carried on the owner-block item. If that condition is later handed back,
@@ -285,7 +300,8 @@ ledger and the simulated world for inspection.
 | I8b | Graded freshness equals the monitor's own computation |
 | I9 | A session with an open owner-block item never also has an open attention item, whatever its trigger |
 | I10 | By the end of each tick, the latest prompt pending at a live read has an open prompt item, and an authored owner-block report has an open owner-block item, unless that item already used the same opening reference |
-| I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner-block item whose content names it; and no owner-block item names a condition that has ended |
+| I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner-block item whose content names it; no owner-block item names a condition that has ended; and the list each carried-condition record states equals the changes so far |
+| I12 | One condition, across every attention episode it opens, gets at most the show limit in counted shows, two reminders and one return |
 
 **Limits of the monitor.** It uses the model's own `isOwnerBlock` (for
 declared resolutions in I4b, and in I10) and the model-computed
@@ -294,8 +310,10 @@ the fingerprint is invisible to those checks. For the source-level outage
 investigation, I7a uses the model's onset. I11 starts a condition at an
 investigation's decision to surface, as the investigation's close record
 states it; whether that decision comes in time is I7f's to check against the
-world. Everything else I11 uses (which items are open, what each owner-block
-item's content names, the closing evidence) is the monitor's own account.
+world. Everything else I11 and I12 use (which items are open, what each
+owner-block item carries, a condition's root, the closing evidence, the
+sends) is the monitor's own account: it folds each carried-condition change
+itself and checks the list the record states against that fold.
 
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
@@ -364,10 +382,18 @@ attention item's `queued`.
 - A prompt answered between two ticks still resolves its item. (W)
 - A prompt-based `waiting_on_owner` is rechecked. (W)
 - A stale owner block is `waiting_on_owner`, so its own item does not carry
-  a stale condition about the wait it already shows.
-- Both owner-block items open: a condition is merged into the declared
-  block. The reverse order (an attention item already open when its session
-  gets an owner-block item) is merged too. (W)
+  a stale condition about the wait it already shows; but only while its
+  declared item is open. A session rewound to an owner-block line whose item
+  already used it has no item carrying it, so it is classified, and
+  rechecked, as any other stale line.
+- Both owner-block items open: `mergeTarget` gives a condition to the
+  declared block. The reverse order (an attention item already open when its
+  session gets an owner-block item) is merged too. (W)
+- A condition's counters continue across the attention episodes it opens.
+  Reminders and the time limit still count from the episode's own latest
+  show or return: the previous show came before the merge and is no anchor
+  for a show not yet made. An owner deferral pending when a condition is
+  merged does not survive the merge. (W)
 - The `exhausted` ordinal also names the latest carried-condition change, so
   an item exhausted, queued again by a carried condition and exhausted at the
   same presentation never repeats its key.

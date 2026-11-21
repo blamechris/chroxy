@@ -182,4 +182,6 @@ export const MUTANTS = {
   I11: withPolicy({ attentionBesideOwnerBlock: 'drop' }),
   // A condition still carried when its owner-block item closes is not handed on.
   'I11.handover': withPolicy({ handOverOnClose: false }),
+  // A condition handed back starts its attention episode with fresh counters.
+  I12: withPolicy({ inheritCountersOnHandover: false }),
 }

@@ -237,6 +237,13 @@ export const DEFAULT_POLICY = Object.freeze({
   // handed on: to the session's other open owner-block item, else raised as
   // its own attention item.
   handOverOnClose: true,
+  // DESIGN-GAP: a condition's send history belongs to the condition, not to
+  // the attention episode. A condition handed back to its own attention item
+  // opens that episode with the counters its previous episode ended with
+  // (presentation, counted shows, reminders, returns), so across any number
+  // of merges and handovers it gets at most the show limit, two reminders
+  // and one return. A condition that was never shown starts from zero.
+  inheritCountersOnHandover: true,
   // DESIGN-GAP: a session can hold a declared block and a pending prompt at
   // once, and the decision names one open owner-block item. A condition is
   // merged into the declared item when it is open, else into the prompt item.

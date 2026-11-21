@@ -323,6 +323,8 @@ function newItem(r) {
     deferrals: 0,
     seed: null,
     condition: null,
+    root: null,
+    rootCounters: new Map(),
     carried: [],
     carriedEver: new Set(),
     carryRef: null,
@@ -359,6 +361,9 @@ function foldSurface(state, r) {
     refs.add(b.carry.opened_by)
     state.carriedRefs.set(b.carry.attention_item, refs)
   }
+  // The counters an attention episode ended with belong to its condition, so
+  // that a handover of the same condition continues them.
+  if ((b.step === 'resolved' || b.step === 'withdrawn') && it.origin === 'attention' && it.root) it.rootCounters.set(it.root, { ...it.counters })
   if ((b.step === 'resolved' || b.step === 'withdrawn') && OWNER_BLOCK_ORIGINS.has(it.origin) && it.carried.length > 0) {
     const key = `${it.itemId}|${it.episode}`
     state.handovers.set(key, { key, itemId: it.itemId, episode: it.episode, session: it.session, sk: it.sk, source: it.source, carried: it.carried.slice() })
@@ -400,6 +405,7 @@ function applyStep(it, b, at, seq) {
       it.seed = b.seed ?? null
       it.preemptedBy = null
       it.condition = b.condition ?? null
+      it.root = b.condition?.root ?? b.opened_by
       it.carried = []
       it.carriedEver = new Set()
       it.carryRef = null

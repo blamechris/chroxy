@@ -83,7 +83,7 @@ export function* sweepUnknownDeliveries(ctx, now) {
   }
 }
 
-function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, condition, handoverOf, now }) {
+function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, condition, handoverOf, counters = ZERO, now }) {
   const st = ctx.state
   const existing = st.items.get(itemId)
   if (!ctx.policy.mayOpenEpisode(existing, ref, origin)) return false
@@ -94,13 +94,13 @@ function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, 
     session,
     source,
     episode: (existing?.episode ?? 0) + 1,
-    counters: { ...ZERO },
+    counters: { ...counters },
     openedBy: ref,
     fingerprint,
     reportId,
   }
   yield* step(ctx, item, 'queued', {
-    c: ZERO,
+    c: item.counters,
     now,
     extra: {
       content_ref: contentRef ?? ref,
@@ -169,10 +169,13 @@ function triggerAt(st, sk, onset, trigger) {
   return trigger ?? null
 }
 
-function conditionOf(st, { attentionId, ref, reportId, sk, trigger, since, now }) {
+function conditionOf(st, { attentionId, ref, root, reportId, sk, trigger, since, now }) {
   return {
     attention_item: attentionId,
     opened_by: ref,
+    // The reference that first opened (or would have opened) the condition,
+    // kept through every merge and handover: the condition's identity.
+    root: root ?? ref,
     report_id: reportId ?? null,
     trigger: triggerAt(st, sk, ref, trigger),
     since: since ?? st.checks.get(ref)?.body.checked_at ?? now,
@@ -235,7 +238,7 @@ function* attentionSignal(ctx, sig, now) {
   const consumed = st.carriedRefs.get(attentionId)?.has(sig.onset) ?? false
   const obs = P.attentionBesideOwnerBlock === 'raise' ? [] : openOwnerBlocks(st, sig.sk)
   const rep = reportBody(st, sig.reportId)
-  const condition = { trigger: triggerAt(st, sig.sk, sig.onset, sig.trigger), since: st.checks.get(sig.onset)?.body.checked_at ?? now }
+  const condition = { trigger: triggerAt(st, sig.sk, sig.onset, sig.trigger), since: st.checks.get(sig.onset)?.body.checked_at ?? now, root: sig.onset }
   if (obs.length === 0) {
     if (consumed) return
     yield* raise(ctx, {
@@ -288,7 +291,15 @@ function* handOver(ctx, ho, cond, now) {
     return
   }
   const ref = existing?.usedRefs.has(cond.opened_by) ? H(cond.opened_by, 'unmerged', ho.itemId, ho.episode) : cond.opened_by
+  const root = cond.root ?? cond.opened_by
   const rep = reportBody(st, cond.report_id)
+  // DESIGN-GAP (counters): the episode continues the counters of the
+  // condition's previous attention episode. Reminders and the time limit
+  // count from this episode's own latest show or return, as for any episode:
+  // the previous show was made before the merge and is no anchor for a show
+  // not yet made. An owner deferral pending when the condition was merged
+  // does not survive it; deferrals keep their meaning within an episode.
+  const counters = (P.inheritCountersOnHandover && existing?.rootCounters.get(root)) || ZERO
   yield* raise(ctx, {
     itemId: attentionId,
     kind: 'session_attention',
@@ -298,8 +309,9 @@ function* handOver(ctx, ho, cond, now) {
     ref,
     reportId: cond.report_id,
     orderTime: rep ? rep.last_report_at : now,
-    condition: { trigger: cond.trigger, since: cond.since },
+    condition: { trigger: cond.trigger, since: cond.since, root },
     handoverOf: ho.key,
+    counters,
     now,
   })
 }
@@ -321,7 +333,7 @@ function* reconcileOwnerBlocks(ctx, source, now) {
       if (!a.open || a.origin !== 'attention' || a.sk !== s.sk) continue
       const current = openOwnerBlocks(st, s.sk)
       if (!carries(current, a.itemId)) {
-        const cond = conditionOf(st, { attentionId: a.itemId, ref: a.openedBy, reportId: a.reportId, sk: s.sk, trigger: a.condition?.trigger, since: a.condition?.since, now })
+        const cond = conditionOf(st, { attentionId: a.itemId, ref: a.openedBy, root: a.root, reportId: a.reportId, sk: s.sk, trigger: a.condition?.trigger, since: a.condition?.since, now })
         yield* carryStep(ctx, P.mergeTarget(current), { now, op: 'carry', cond, path: 'open_attention' })
       }
       yield* withdraw(ctx, a, { now, reason: 'merged' })

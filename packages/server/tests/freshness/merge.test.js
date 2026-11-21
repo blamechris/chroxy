@@ -11,6 +11,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_CONFIG } from './model/config.js'
+import { withPolicy } from './model/policy.js'
 import { itemIds } from './model/keys.js'
 import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
@@ -285,8 +286,12 @@ describe('a merge is the updated row of the transition table', () => {
       assert.equal(h.item(id).state, 'exhausted')
       // The condition clears while a counted show is left: queued, shown.
       // The fault records the clearing as a second carry of what is already
-      // carried, which changes nothing.
-      if (fault) h.rewriteAppend = (d) => (d.kind === 'surface' && d.body.carry?.op === 'clear' ? { ...d, body: { ...d.body, carry: { ...d.body.carry, op: 'carry' } } } : d)
+      // carried (its list still naming it), which changes nothing.
+      const again = (d) => {
+        const { op: _op, path: _path, from: _from, ...cond } = d.body.carry
+        return { ...d, body: { ...d.body, carry: { ...d.body.carry, op: 'carry' }, carried: [...d.body.carried, cond] } }
+      }
+      if (fault) h.rewriteAppend = (d) => (d.kind === 'surface' && d.body.carry?.op === 'clear' ? again(d) : d)
       W.author(h.world, x.sk, at(91), ownerBlock())
       ticks([[105]])
       return h
@@ -376,6 +381,106 @@ describe('the condition outlives the owner-block item; the reverse order leaves 
     assert.notEqual(att.openedBy, opened, 'a used opening reference is never reopened')
     assert.deepEqual(h.openItems().map((i) => i.origin), ['attention'])
   })
+
+  it('one standing condition across four prompt cycles is shown at most the show limit in total, then exhausted', () => {
+    const run = (policy) => {
+      const sc = attentionThenPrompt(policy)
+      const { h, x } = sc
+      sc.ticks = sc.ticks.slice(0, sc.merge)
+      let t = 75
+      for (let k = 0; k < 4; k++) {
+        let ref = null
+        const raisedAt = at(t + 1)
+        const answeredAt = at(t + 16)
+        sc.ticks.push({ source: 'chroxy', at: at(t + 15), before: (hh) => (ref = W.raisePrompt(hh.world, x.sk, raisedAt, 7200)) })
+        sc.ticks.push({ source: 'chroxy', at: at(t + 30), before: (hh) => W.answerPrompt(hh.world, x.sk, ref, answeredAt) })
+        t += 30
+      }
+      let error = null
+      try {
+        play(sc)
+      } catch (e) {
+        if (!(e instanceof InvariantError)) throw e
+        error = e.id
+      }
+      const att = attentionIdOf(sc)
+      const pid = itemIds.prompt(x.s)
+      const sends = h.sends.map((s) => `${s.item_id === att ? 'attention' : s.item_id === pid ? 'prompt' : '?'}:${s.episode}:${s.step}${s.n}`)
+      return { h, att, sends, error }
+    }
+    const model = run()
+    assert.equal(model.error, null)
+    assert.deepEqual(model.sends, [
+      'attention:1:shown1',
+      'prompt:1:shown1',
+      'attention:2:shown2',
+      'prompt:2:shown1',
+      'attention:3:shown3',
+      'prompt:3:shown1',
+      'prompt:4:shown1',
+    ])
+    const a = model.h.item(model.att)
+    assert.equal(a.episode, 5)
+    assert.equal(a.state, 'exhausted', 'listed, not shown again')
+    assert.equal(a.counters.shows_counted, 3)
+    assert.equal(model.h.conflicts().length, 0)
+    // Fresh counters on every handover: one condition is shown once per
+    // owner-block cycle, and I12 goes red.
+    const fresh = run(MUTANTS.I12)
+    assert.equal(fresh.error, 'I12')
+    assert.ok(fresh.sends.filter((s) => s.startsWith('attention:')).length > 3)
+  })
+
+  // Under the default policy the declared block takes every condition while it
+  // is open, and it closes only on a newer authored report, which also ends a
+  // condition about the earlier one: a handover to the session's other
+  // owner-block item cannot happen. With the prompt item preferred it can.
+  for (const sameTick of [false, true]) {
+    it(`with the prompt item preferred, a condition handed on to the session's other open owner-block item${sameTick ? ' (a second prompt pending when the first is answered: its next episode)' : ' (the declared block)'}: no send, no conflict`, () => {
+      const promptFirst = withPolicy({ mergeTarget: (items) => items.find((i) => i.origin === 'prompt') ?? items.find((i) => i.origin === 'declared') ?? null })
+      const sc = setup({}, promptFirst)
+      const { h } = sc
+      const c = session(h, 'chroxy', 'c')
+      const y = session(h, 'chroxy', 'y')
+      W.author(h.world, c.sk, T0, ownerBlock())
+      W.author(h.world, y.sk, T0, { state: 'idle' })
+      const bad = failing('c')
+      let p1 = null
+      sc.ticks = [
+        { source: 'chroxy', at: at(15) },
+        // A prompt with a deadline far beyond the declared item's reminders, so it never preempts.
+        { source: 'chroxy', at: at(30), before: (hh) => (p1 = W.raisePrompt(hh.world, c.sk, at(16), 36000)) },
+        { source: 'chroxy', at: at(45), reads: bad },
+        { source: 'chroxy', at: at(60), reads: bad },
+        { source: 'chroxy', at: at(75), reads: bad },
+        {
+          source: 'chroxy',
+          at: at(90),
+          before: (hh) => {
+            W.answerPrompt(hh.world, c.sk, p1, at(76))
+            if (sameTick) W.raisePrompt(hh.world, c.sk, at(77), 36000)
+          },
+        },
+      ]
+      play(sc, { upTo: 5 })
+      const declared = itemIds.declared(c.s)
+      const prompt = itemIds.prompt(c.s)
+      assert.equal(h.item(declared).state, 'active')
+      assert.deepEqual(carries(h, prompt).map((r) => `${r.body.carry.op}:${r.body.carry.path}`), ['carry:signal'])
+      assert.deepEqual(h.item(declared).carried, [])
+      const sendsBefore = h.sends.length
+      play(sc, { from: 5 })
+      const target = sameTick ? prompt : declared
+      const [handed] = carries(h, target).filter((r) => r.body.carry.path === 'handover')
+      assert.ok(handed, 'a carry with path handover')
+      assert.equal(handed.body.carry.from, `${prompt}|1`)
+      if (sameTick) assert.equal(handed.body.episode, 2)
+      assert.deepEqual(h.item(target).carried.map((x) => x.trigger), ['repeated_error'])
+      assert.equal(h.item(itemIds.attention(c.s, h.ctx.state.sessions.get(c.sk).latestAuthored)), undefined, 'no attention item')
+      assert.equal(h.sends.length, sendsBefore, 'nothing sent')
+      assert.equal(h.conflicts().length, 0)
+    })
+  }
 
   it('mutation: the reverse order left alone keeps both items and turns I9 red', () => {
     const sc = attentionThenPrompt(MUTANTS.I9)
