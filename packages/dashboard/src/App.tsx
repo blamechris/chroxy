@@ -3253,6 +3253,7 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
+                        loading={connectionPhase !== 'connected' || isSwitchingSession}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         scrollToBottomSignal={scrollToBottomSignal}
@@ -3302,6 +3303,7 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
+                        loading={connectionPhase !== 'connected' || isSwitchingSession}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}

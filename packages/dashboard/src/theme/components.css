@@ -3254,6 +3254,14 @@ button.sidebar-token-view-session-row:hover {
   position: relative;
 }
 
+.chat-empty-hint {
+  margin: auto;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -11621,8 +11629,10 @@ button.sidebar-token-view-session-row:hover {
 
 .server-picker-header {
   display: flex;
+  flex-wrap: wrap; /* #8231 — 44px buttons may not fit beside the title in the narrow sidebar */
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   padding: 0 12px 6px;
 }
 
@@ -11637,13 +11647,17 @@ button.sidebar-token-view-session-row:hover {
 /* #5512 — header action cluster ("Have a code?" + add). */
 .server-picker-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
 
+/* #8231 — 44px tap-target floor (AGENTS.md). */
 .server-have-code-btn {
   font-size: 11px;
   padding: 3px 8px;
+  min-height: 44px;
+  min-width: 44px;
 }
 
 .server-btn {
@@ -11674,13 +11688,14 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .server-btn-add {
-  width: 24px;
-  height: 24px;
-  padding: 0;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  gap: 4px;
+  font-size: 12px;
   line-height: 1;
   border-radius: 4px;
 }

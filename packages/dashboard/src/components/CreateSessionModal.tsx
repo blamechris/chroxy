@@ -19,7 +19,7 @@ import {
   type CodexSandboxMode,
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
-import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { PROVIDER_LABELS, getProviderInfo } from '../lib/provider-labels'
 import { resolveEffectiveProvider } from '../lib/effective-provider'
 import type { SessionDefaultsNotice } from '../store/session-defaults'
 import { isImeComposing } from '../utils/ime'
@@ -1064,7 +1064,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   // Mirror the live detail via title= so desktop hover
                   // tooltips still work for users who don't navigate to
                   // the option. Mobile/touch users see the panel instead.
-                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : optionLabel
+                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : getProviderInfo(p.name).tooltip
                   return (
                     <option
                       key={p.name}
@@ -1081,6 +1081,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 </>
             }
           </select>
+          {/* #8231: one line saying what the chosen provider is. The same text
+              the option title= carries, but visible without hovering — a native
+              <select> has no per-option description on touch or keyboard. */}
+          <span className="provider-billing-hint" data-testid="provider-description">
+            {getProviderInfo(provider).tooltip}
+          </span>
           {/* #8265: say where the preselection came from, so a saved
               override is never mistaken for the daemon's default. */}
           {provider === defaultProvider && defaultProviderSource !== 'builtin' ? (

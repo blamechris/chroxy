@@ -169,6 +169,13 @@ export interface ChatViewProps {
    *  for the presence rail when a tool is mid-flight, so the rail reflects WHICH
    *  tool is running. undefined → the rail keeps its activity-state colour. */
   inFlightToolColor?: string
+  /**
+   * #8231 — true while the transcript is not yet trustworthy (connecting,
+   * reconnecting, switching session). An empty list in that window means
+   * "history has not arrived", not "nothing was said", so the first-run hint
+   * stays hidden until the parent reports a settled connection.
+   */
+  loading?: boolean
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
   /**
@@ -628,7 +635,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, loading, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
@@ -1471,6 +1478,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
               data-testid="chat-window-bottom-spacer"
               style={{ flex: '0 0 auto', height: range.bottomSpacer }}
             />
+          )}
+          {/* #8231 — first-run hint: one calm, non-interactive line for a session
+              with nothing in it yet. Hidden while history is loading and the
+              moment any row, streaming bubble or working indicator exists. */}
+          {messages.length === 0 && !loading && !isStreaming && !isBusy && (
+            <p className="chat-empty-hint" data-testid="chat-empty-hint">
+              Nothing here yet. Type a message below to start; / opens commands.
+            </p>
           )}
           {(isStreaming || isBusy) && <WorkingIndicator label={workingLabel} />}
         </div>
