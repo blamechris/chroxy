@@ -288,19 +288,26 @@ export function createEmptyConnectionScope() {
  * reset them, the death paths did not, and a dead session's memory stack and
  * permission history rendered against whichever session became active next.
  *
- * It is spread or applied at exactly six sites: `switchSession` (one `set` ahead
- * of both the cached and the uncached branch), the `session_list` active-removal
- * death path, the `session_timeout` death path, `disconnect()`, `forgetSession`
- * and `_resetSessionMemory`. A panel field added here is cleared at all six; one
- * added anywhere else is not, and `store/reset-factories.test.ts` holds that line.
+ * It is spread or applied at every site that changes the active session, or empties
+ * the roster it was pulled for: `switchSession` (one `set` ahead of both the cached
+ * and the uncached branch), the `session_list` active-removal death path, the
+ * `session_timeout` death path, the `session_error` SESSION_NOT_FOUND write,
+ * `auth_ok`'s non-reconnect branch, `handleSessionSwitched` (conditionally, below),
+ * `disconnect()`, `forgetSession` and `_resetSessionMemory` (#8488 added the
+ * SESSION_NOT_FOUND, `auth_ok` and `session_switched` sites). A panel field added here
+ * is cleared at all of them; one added anywhere else is not, and
+ * `store/reset-factories.test.ts` holds that line by DERIVING the list of
+ * `activeSessionId` writers from `connection.ts` / `message-handler.ts` and demanding
+ * each either take this factory or sit in a reasoned exemption map.
  *
- * It is NOT every path that changes the active session. `handleSessionSwitched`
- * (`session_switched`), `auth_ok`'s non-reconnect branch (`activeSessionId: null`)
- * and the `session_error` SESSION_NOT_FOUND write (`activeSessionId: null`) move
- * the active session without it; they predate this factory and are tracked
- * (#8488). `session_switched` in particular is not given the reset blindly: it
- * also echoes the user's own switch, which `switchSession` has already reset, and
- * an unconditional clear there could wipe a pull that was answered in between.
+ * `handleSessionSwitched` resets only when the frame's session id differs from the
+ * active id at arrival. `session_switched` also echoes the user's OWN switch:
+ * `switchSession` sets `activeSessionId` before it sends `switch_session` and has
+ * already reset the panels, so that echo arrives with an equal id, and a
+ * `memory_read` / `query_permission_audit` fired right after the click may already
+ * be answered; clearing there would wipe it. A server-started switch (create
+ * confirm, checkpoint restore, the initial one after `auth_ok`) changes the id and
+ * must clear.
  *
  * `permissionAuditLoading` and `memoryStackLoading` ALSO belong to
  * `createEmptyInFlightMarkers()` (the transport-drop clear, #8378), with the same

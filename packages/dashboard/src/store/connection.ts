@@ -5907,13 +5907,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     // #7588 — the per-active-session panels (the #6772 permission-audit history and
     // the #6996 memory stack, with their loading + error flags) reset in ONE place,
-    // `createEmptySessionPanels()`, which the two active-session death paths in
-    // message-handler.ts and both full-reset sites spread too. Both branches below
-    // run after this, so the switch is unconditional. Clearing on every switch is
-    // what stops the Settings "Permission history" view and the MemoryPanel (whose
-    // `entries === null` mount-guard would otherwise never re-fire) rendering the
-    // PREVIOUS session's data against the new one, and the loading/error flags
-    // reset so an in-flight pull for the old session cannot wedge the button.
+    // `createEmptySessionPanels()`, which every other active-session change in
+    // message-handler.ts and the full-reset sites take too (#8488). Both branches
+    // below run after this, so the switch is unconditional. The `session_switched`
+    // echo of THIS switch arrives with an equal id and deliberately does not clear
+    // again (`handleSessionSwitched`), so a pull answered in between survives.
+    // Clearing on every switch is what stops the Settings "Permission history" view
+    // and the MemoryPanel (whose `entries === null` mount-guard would otherwise
+    // never re-fire) rendering the PREVIOUS session's data against the new one, and
+    // the loading/error flags reset so an in-flight pull for the old session cannot
+    // wedge the button.
     // `lastMemoryStackRequestId` is deliberately left alone: nulling it would make
     // the old session's in-flight reply apply (see the factory).
     set(createEmptySessionPanels());
