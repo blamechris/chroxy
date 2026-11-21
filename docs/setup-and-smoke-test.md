@@ -155,12 +155,12 @@ aborts the call and falls back to the truncation label rather than leaking a
 never-settling request; override it with `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS=<ms>`
 or the `summarize.titleTimeoutMs` config key.
 
-**Metering note:** this one-shot runs through the Agent SDK / headless path
-(the same call the `summarize.model` summarizer uses). On a Claude
-subscription, headless/SDK calls are billed against the separate metered pool,
-not the plan's main quota — so an opted-in user on a subscription spends one
-(small) metered-pool call per new session's first turn. The cost is
-negligible, but it is non-zero and separate from your interactive usage.
+**Cost note:** this one-shot runs through the Agent SDK / headless path
+(the same call the `summarize.model` summarizer uses), so an opted-in user
+spends one small extra model call per new session's first turn. Chroxy
+classifies the session by its credential route (`api-key` or `subscription`;
+see [Billing & API usage](../README.md#billing--api-usage)). How your provider
+meters that call is not verified here; it is small in tokens but not free.
 
 ---
 

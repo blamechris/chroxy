@@ -42,7 +42,7 @@ When an agent wants something the session's rules don't already cover, Chroxy pa
 ### Beyond the shell
 
 - **Multi-provider, not Claude-only** — Pick `claude-sdk` (default), `claude-tui`, `claude-cli`, `claude-byok`, `gemini`, `codex`, `deepseek`, `ollama` (local models), or any config-driven OpenAI/Anthropic-compatible endpoint per session. See [docs/providers.md](docs/providers.md).
-- **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage).
+- **Provider flexibility** — If you hit a usage limit on one provider or want a different backend, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Chroxy classifies Codex and Gemini as `api-key` and estimates their cost locally. See [Billing & API usage](#billing--api-usage).
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Discord notifications** — A live status embed per project that pings when a session is ready for input or needs approval — even for plain Claude Code sessions outside chroxy, via the `chroxy-hooks` installer. See [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md).
 - **Idle-only daemon auto-deploy** — `scripts/deploy-daemon.mjs` fast-forwards a launchd-managed daemon to the latest `main`, builds, restarts and rolls back on failure, but only while no session is busy or waiting on you. See [docs/guides/daemon-auto-deploy.md](docs/guides/daemon-auto-deploy.md).
@@ -100,7 +100,7 @@ Chroxy reads provider API keys from environment variables at server startup. The
 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
 | Codex (OpenAI) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
 
-> Claude can also authenticate via your existing `claude` CLI login if you'd rather not set `ANTHROPIC_API_KEY`. Setting the key bypasses your Claude subscription's programmatic credit pool and bills the raw API account — see [Billing & API usage](#billing--api-usage).
+> Claude can also authenticate via your existing `claude` CLI login if you'd rather not set `ANTHROPIC_API_KEY`. Setting the key makes Chroxy classify `claude-sdk` sessions as `api-key`; it does not apply to `claude-cli`, which strips the key before spawning — see [Billing & API usage](#billing--api-usage).
 
 Add the keys you'll use to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
@@ -399,27 +399,29 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
 ## Billing & API usage
 
-The default provider is `claude-sdk` (the Claude Agent SDK, see #8266), which uses your Claude login and bills against your subscription today. Anthropic announced that, from **June 15, 2026**, programmatic usage on Claude subscriptions (the Agent SDK and `claude -p`, i.e. `claude-sdk` and `claude-cli`) would draw from a separate monthly credit pool. That change was **paused the day it was due and has not taken effect** (#7333); if it is ever revived, the server's provider `auth.detail` and `chroxy doctor`'s billing canary report it. The announced pool was:
+The default provider is `claude-sdk` (the Claude Agent SDK, see #8266).
 
-| Plan | Programmatic credit / month |
-|---|---|
-| Pro | $20 |
-| Max 5x | $100 |
-| Max 20x | $200 |
-| Team Standard | $20 / seat |
-| Team Premium | $100 / seat |
+**What this section can and cannot tell you.** Chroxy shows three different things, and none of them is an invoice:
 
-> Figures as of 2026-05 from Anthropic's published plan details — see [anthropic.com/pricing](https://www.anthropic.com/pricing) for the authoritative source. Anthropic may adjust the cutover date or amounts; trust the link above over this table if they ever disagree.
+1. **Credential route**: which credential Chroxy detects for a session (an `ANTHROPIC_API_KEY`, an OAuth token, an on-disk `claude login`, or a non-Claude provider key).
+2. **Billing class**: the label Chroxy assigns from that route (`api-key`, `subscription`, or `programmatic-credit`).
+3. **Cost estimate**: a dollar figure Chroxy computes locally from token counts and its own pricing table. In its default `cost` mode the dashboard header badge shows the estimate whenever the provider reported usage, whatever the class, and its tooltip says "Total session cost so far" (some providers, such as `claude-tui`, report no cost). The sidebar token view groups sessions by class and labels subscription sessions "Included (subscription)". Neither the label nor the estimate proves what a provider charged or deducted from an allowance.
 
-Credits reset each billing cycle and don't roll over. When the credit is exhausted, you can either enable paid usage credits (billed at API rates) or have programmatic usage pause until reset.
+What a vendor actually bills, what a subscription includes, and whether a subscription login may be driven by a third-party app are outside this repository and are **not verified here**. Check your provider account and Anthropic's current published terms.
 
-**For heavy users:** set `ANTHROPIC_API_KEY` to bypass the subscription credit pool entirely and bill the raw Anthropic API account directly. Same SDK, predictable per-token pricing.
+| Provider | Credential route | Chroxy class |
+|---|---|---|
+| `claude-sdk` (default) | `ANTHROPIC_API_KEY` in the environment | `api-key` |
+| `claude-sdk` | `CLAUDE_CODE_OAUTH_TOKEN` or `claude login` | `subscription` |
+| `claude-cli` | `claude login` (it strips `ANTHROPIC_API_KEY` before spawn) | `subscription` |
+| `claude-tui`, `claude-channel` | `claude login` (a key is rejected) | `subscription` |
+| `claude-byok`, `deepseek`, `codex`, `gemini`, other API-key providers | their own key | `api-key` |
 
-**`claude-tui` stays available:** it drives the interactive `claude` TUI under a PTY instead of the SDK, and was the default from #5819 until #8266 as a hedge against the credit pool above. Select it with `--provider claude-tui` / `CHROXY_PROVIDER=claude-tui`. Trade-off: no live token streaming, no live model switch, no plan mode — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
+**Historical note: a paused announcement.** Anthropic announced that, from 2026-06-15, programmatic usage on Claude subscriptions (the Agent SDK and `claude -p`) would draw from a separate monthly credit pool. That change was paused on the day it was due (#7333). Chroxy keeps a `programmatic-credit` class, assigned only when an operator sets `CHROXY_PROGRAMMATIC_CREDIT_ERA=1`; the date alone does not trigger it. The amounts announced at the time were Pro $20, Max 5x $100, Max 20x $200, Team Standard $20/seat and Team Premium $100/seat per month. These are historical May 2026 figures, not current pricing, and Chroxy has not verified them. Only the optional `billing.creditTier` budget meter uses them.
 
-A second subscription-billed path, `claude-channel`, is in **research preview**: it will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`) rather than scraping the TUI, and — once the backend lands — will add live streaming plus a first-party permission relay. It is currently a scaffold whose session backend isn't runnable yet (the bridge lands in a follow-up); when it does run it will require `claude` ≥ 2.1.80 and the `--dangerously-load-development-channels` flag — see [docs/providers.md#claude-channel-research-preview](docs/providers.md#claude-channel-research-preview).
+**Choosing a route.** To have `claude-sdk` classified as `api-key`, set `ANTHROPIC_API_KEY`. `claude-cli` cannot be switched this way because it strips the key. `claude-tui` stays available (`--provider claude-tui` / `CHROXY_PROVIDER=claude-tui`); it trades away live token streaming, live model switch and plan mode, see [docs/providers.md#claude-tui](docs/providers.md#claude-tui). `claude-channel` is a **research preview** scaffold whose session backend isn't runnable yet; when it does run it will require `claude` ≥ 2.1.80 and the `--dangerously-load-development-channels` flag. See [docs/providers.md#claude-channel-research-preview](docs/providers.md#claude-channel-research-preview).
 
-Chroxy includes cost controls to help you stay within budget — see `CHROXY_COST_BUDGET` and `CHROXY_SESSION_TIMEOUT` in [packages/server/CONFIG.md](packages/server/CONFIG.md). Prompt caching is enabled by default and typically reduces credit burn 5–10x on long sessions.
+Chroxy includes local cost controls; see `CHROXY_COST_BUDGET` and `CHROXY_SESSION_TIMEOUT` in [packages/server/CONFIG.md](packages/server/CONFIG.md). They act on Chroxy's estimates, not on any vendor-side limit.
 
 ## Project Structure
 

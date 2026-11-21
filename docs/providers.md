@@ -4,9 +4,9 @@ Chroxy runs AI coding sessions through pluggable **providers**. Each provider wr
 
 Nine first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
 
-- `claude-sdk` — **default** (#8266). Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process). Fastest, most feature-rich (live streaming, model/mode switching, resume, plan mode — #8153); a subscription login bills as the flat subscription (the announced 2026-06-15 programmatic-credit change was paused and never took effect, #7333).
+- `claude-sdk` — **default** (#8266). Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process). Fastest, most feature-rich (live streaming, model/mode switching, resume, plan mode — #8153); Chroxy classifies an `ANTHROPIC_API_KEY` in the environment as `api-key` and a subscription login as `subscription` (the announced 2026-06-15 programmatic-credit change was paused, #7333; see [Billing & API usage](../README.md#billing--api-usage)).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable.
-- `claude-tui` — Interactive `claude` TUI driven under a PTY (the default from #5819 until #8266). Drives the interactive CLI, which **today** bills against your Claude subscription's interactive allowance rather than the programmatic credit pool — a best-effort bet, not a guarantee: Anthropic may reclassify or enforce against third-party apps that drive a subscription login programmatically. It was the default to keep a zero-config setup off that credit pool, which never shipped; it trades away live streaming, live model switch, plan mode, attachments, agent tracking, and cost reporting (see [Known limits → `claude-tui`](#claude-tui)). See [Billing & API usage](../README.md#billing--api-usage).
+- `claude-tui` — Interactive `claude` TUI driven under a PTY (the default from #5819 until #8266). Drives the interactive CLI under your `claude` login, which Chroxy classifies as `subscription`. How Anthropic meters or permits a subscription login driven this way is not verified here and may change. It trades away live streaming, live model switch, plan mode, attachments, agent tracking, and cost reporting (see [Known limits → `claude-tui`](#claude-tui)). See [Billing & API usage](../README.md#billing--api-usage).
 - `claude-channel` — **Research preview, scaffold only (not yet runnable).** Will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`): same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape, and — once the backend lands — live streaming plus a first-party permission relay. See [`claude-channel`](#claude-channel-research-preview).
 - `claude-byok` — "Bring your own key": the Anthropic Messages API driven directly via `@anthropic-ai/sdk`, no `claude` binary. Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP servers).
 - `deepseek` — DeepSeek's Anthropic-compatible API. A subclass of `claude-byok` — same agent loop, DeepSeek credentials/endpoint/pricing.
@@ -36,8 +36,8 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 
 | Provider | Binary / SDK | Env vars | Default model | Auth | Notes |
 |----------|--------------|----------|---------------|------|-------|
-| `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support. **Billing class (#5629):** explicit `ANTHROPIC_API_KEY` → raw API (per-token, api-key). OAuth/subscription login (`claude auth login`) → a flat Claude **subscription before 2026-06-15 UTC**, and Anthropic's monthly **programmatic credit pool on/after** that date. |
-| `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess; plan mode supported (also on `claude-sdk`, #8153); permission hook via HTTP. **Billing class (#5629):** the CLI strips `ANTHROPIC_API_KEY` before spawn, so it always auths via the host pool — a flat Claude **subscription before 2026-06-15 UTC**, and the monthly **programmatic credit pool on/after** that date. |
+| `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support. **Billing class (#5629, #7333):** Chroxy classifies by the credential it finds: an `ANTHROPIC_API_KEY` in the environment → `api-key`; a `CLAUDE_CODE_OAUTH_TOKEN` in the environment or an on-disk `claude auth login` → `subscription`. `programmatic-credit` is assigned only when an operator sets `CHROXY_PROGRAMMATIC_CREDIT_ERA=1`; the 2026-06-15 date alone does not change it. This is Chroxy's label for the credential route, not an invoice. |
+| `claude-cli` | `claude` (Claude Code CLI) | `claude` CLI login (`ANTHROPIC_API_KEY` is stripped before spawn) | Deferred to `claude` CLI | Subscription login | Subprocess; plan mode supported (also on `claude-sdk`, #8153); permission hook via HTTP. **Billing class (#5629, #7333):** the CLI strips `ANTHROPIC_API_KEY` before spawn, so Chroxy always classifies it by the host login — `subscription`, or `programmatic-credit` only when `CHROXY_PROGRAMMATIC_CREDIT_ERA=1` — and never as `api-key`. This is Chroxy's label for the credential route, not an invoice. |
 | `claude-tui` | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The default from #5819 until #8266. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` / `GOOGLE_API_KEY`, **or** `gemini login` OAuth | `gemini-2.5-pro` | Google AI Studio API key or a `gemini login` session | No permissions, no plan mode, no resume, no attachments |
@@ -108,15 +108,17 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 | Thinking level control | Yes | No | No |
 | Reasoning shown while it works (#7393) | Yes | Yes (block ends first) | Yes (as claude writes each block; set `CHROXY_TUI_THINKING=0` to turn off) |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
-| Auth | API key or `claude auth login` | API key or `claude auth login` | `claude auth login` only (`ANTHROPIC_API_KEY` rejected) |
-| Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** (today; best-effort, not guaranteed) |
+| Auth | API key or `claude auth login` | `claude auth login` (`ANTHROPIC_API_KEY` stripped before spawn) | `claude auth login` only (`ANTHROPIC_API_KEY` rejected) |
+| Billing class (Chroxy's label) | `api-key` if `ANTHROPIC_API_KEY` is set, otherwise `subscription` | `subscription` (key stripped) | `subscription` (login only) |
 | Startup overhead | None (in-process) | One `claude -p` spawn per session | One `claude` PTY warmup (~3.5s) per session |
+
+> The class is Chroxy's inference from the credential it finds. It is not an invoice, and the dollar figures Chroxy shows are local estimates from token counts, not billed charges. What a vendor actually charges, and whether a subscription login may be driven this way, is not verified here. `programmatic-credit` appears only when an operator sets `CHROXY_PROGRAMMATIC_CREDIT_ERA=1`.
 
 Pick by billing surface and required features:
 
-- **`claude-sdk` (default, #8266)** — the richest experience: fastest startup, live streaming, live model/mode switching, resume, thinking-level control, plan mode (#8153). A subscription login bills as the flat subscription today (the 2026-06-15 programmatic-credit change was paused, #7333); set an explicit `ANTHROPIC_API_KEY` for raw per-token billing instead.
-- **`claude-tui`** — drives the interactive `claude` TUI under a PTY and bills against the subscription's interactive allowance. It was the default from #5819 until #8266, as a hedge against the credit pool that never shipped. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
-- **`claude-cli`** — same plan-mode support as the SDK (#8153) and the same billing, but without in-process permissions (HTTP hook instead), no thinking-level control, and a live model switch that requires a process restart — see the feature table above. A `claude -p` subprocess per session instead of in-process. Pick this if the SDK itself is unavailable.
+- **`claude-sdk` (default, #8266)** — the richest experience: fastest startup, live streaming, live model/mode switching, resume, thinking-level control, plan mode (#8153). Chroxy classifies a subscription login as `subscription` and an explicit `ANTHROPIC_API_KEY` as `api-key` (the 2026-06-15 programmatic-credit change was paused, #7333).
+- **`claude-tui`** — drives the interactive `claude` TUI under a PTY, using your `claude` login (classified `subscription`). It was the default from #5819 until #8266. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
+- **`claude-cli`** — same plan-mode support as the SDK (#8153) and the same login route (it strips `ANTHROPIC_API_KEY`, so setting a key does not switch it to `api-key`), but without in-process permissions (HTTP hook instead), no thinking-level control, and a live model switch that requires a process restart — see the feature table above. A `claude -p` subprocess per session instead of in-process. Pick this if the SDK itself is unavailable.
 
 ### Effort on `claude-sdk` (#8700)
 
@@ -240,9 +242,9 @@ dictionary (then reload the agent).
 `claude-channel` is a fourth Claude-family backend, in **research preview**. It
 drives Claude through Anthropic's first-party **channels MCP protocol**
 (`claude --channels`) — a documented protocol — instead of scraping the
-interactive TUI (`claude-tui`). It bills the same way `claude-tui` does (against
-your Claude subscription's interactive allowance — best-effort, not guaranteed; see
-the `claude-tui` billing caveat above) but trades the fragile visual
+interactive TUI (`claude-tui`). Chroxy classifies it the same way as `claude-tui`
+(`subscription`; vendor metering is not verified here, see the `claude-tui`
+note above) but it trades the fragile visual
 contract for a structured MCP event stream, adds **live streaming**, and uses
 Anthropic's **first-party permission relay** (`claude/channel/permission`)
 instead of a sidecar hook script.
@@ -273,9 +275,9 @@ for the verified protocol contract.
   more robust subscription-billed path: a documented protocol rather than an
   ANSI scrape, plus live streaming and a first-party permission relay. Same
   billing.
-- **Over `claude-sdk` / `claude-cli`** — only when you want **subscription**
-  billing rather than the programmatic credit pool (the same reason you'd pick
-  `claude-tui`). The SDK is the default and has the most
+- **Over `claude-sdk` / `claude-cli`** — only when you specifically want the
+  interactive-session transport that `claude-tui` also uses; Chroxy classifies
+  it as `subscription`. The SDK is the default and has the most
   features (live model/mode switch, resume, thinking level, attachments, cost).
 
 It is **not a strict superset of `claude-tui`** — see [Known limits →
@@ -1212,8 +1214,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
   [`PACKAGING.md`](../packages/server/src/channels/PACKAGING.md) for the path
   that removes it.
 - **Subscription only** — `ANTHROPIC_API_KEY` is not accepted (subscription /
-  OAuth auth, same as `claude-tui`). Bills the same way as `claude-tui` — best-effort,
-  not guaranteed (see its billing caveat).
+  OAuth auth, same as `claude-tui`). Chroxy classifies it the same way as
+  `claude-tui` (`subscription`); vendor metering is not verified here.
 - **No live model switch, no permission-mode switch, no plan mode, no resume,
   no thinking-level control** — the channel surface does not expose these
   (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
