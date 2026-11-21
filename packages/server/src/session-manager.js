@@ -3031,7 +3031,11 @@ export class SessionManager extends EventEmitter {
    * restore hint). Sets `metadata.scheduledTaskId` (merged into any other metadata)
    * and clears the hint, which is what makes `getHandoffBlockers` report
    * `automation_owned`. The persisted value is the same before and after, so nothing
-   * needs flushing. Refuses a session linked to a different task or none.
+   * needs flushing. Refuses a session linked to a different task or none. Idempotent:
+   * for an already-owned session it just confirms ownership. An adopted session
+   * belongs to its task: deleting the task closes it and its worktree. An archive
+   * restore of a scheduled session comes back through restore, so it is re-adopted
+   * the same way.
    * @param {string} sessionId
    * @param {string} taskId
    * @returns {boolean} whether the session is now owned by `taskId`
@@ -3044,6 +3048,26 @@ export class SessionManager extends EventEmitter {
     if (entry.restoredScheduledTaskId !== taskId) return false
     entry.metadata = { ...(entry.metadata || {}), scheduledTaskId: taskId }
     delete entry.restoredScheduledTaskId
+    return true
+  }
+
+  /**
+   * #8571: a restore hint is valid only until a human uses the session. Without
+   * this, a duplicate the scheduler did not pick would keep its hint, be adopted
+   * later (when the chosen session is closed) and have scheduled prompts driven
+   * into the user's own conversation, and be destroyed with the task. Drops the
+   * unadopted hint and persists, so the next restart agrees. A no-op for an OWNED
+   * (adopted) session, which belongs to its task exactly as it does within one
+   * daemon run, and for a session with no hint.
+   * @param {string} sessionId
+   * @returns {boolean} whether a hint was released
+   */
+  releaseRestoreHint(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry.restoredScheduledTaskId === undefined) return false
+    if (isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)) return false
+    delete entry.restoredScheduledTaskId
+    this._schedulePersist()
     return true
   }
 
@@ -5799,6 +5823,10 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    */
   recordUserIntent(sessionId) {
+    // #8571: a person using a session ends any unadopted scheduled-task restore
+    // hint on it. Only the CLIENT input handlers call this (the scheduler's turn
+    // driver goes through `session.sendMessage` directly, never here).
+    this.releaseRestoreHint(sessionId)
     this._userStopped.delete(sessionId)
     // #8326: a person typing is also what ends a run of consecutive daemon wakes.
     this._daemonWakeCount.delete(sessionId)
