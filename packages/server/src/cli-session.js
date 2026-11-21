@@ -7,6 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { tmpdir } from 'os'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
+import { claudeSettingSourcesValue } from './claude-setting-sources.js'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
@@ -168,6 +169,7 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
     '--verbose',
     '--include-partial-messages',
   ]
+  args.push('--setting-sources', claudeSettingSourcesValue())
 
   if (model) {
     args.push('--model', model)

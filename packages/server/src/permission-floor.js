@@ -64,6 +64,9 @@ const SECRET_FILE_EXACT = new Set([
   '.npmrc', '.pgpass', '.netrc',                // credential dotfiles
   '.credentials.json',                          // claude's stored login, wherever its config dir is
 ])
+// Files that configure what a session loads and runs. Floored for WRITES only
+// (full floor); reading one is benign, like the other config files above.
+const PROTECTED_WRITE_FILE_NAMES = new Set(['.mcp.json'])
 const SECRET_FILE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx']
 // The env-file family: exactly `.env`, or `.env.` followed by anything. Named so
 // the #7978 glob analysis below builds its templates from the same two spellings
@@ -885,6 +888,7 @@ function _matchesProtectedSegments(segments, start, secretsOnly) {
     // Config DIRS (any file within them) are floored only under the full (write)
     // floor; a read of a NON-credential config file stays un-prompted.
     if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
+    if (PROTECTED_WRITE_FILE_NAMES.has(seg)) return true
     if (seg === '.config' && segments[i + 1] === 'git') return true
   }
   return false

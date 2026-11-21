@@ -96,6 +96,10 @@ Expected output includes:
 
 If `claude` is reported "Not found", ensure it's in one of the paths listed above. Under a GUI-launched server (e.g. the Tauri desktop app), `PATH` is minimal on macOS — Chroxy probes known install locations, but a Homebrew or npm-global install that's neither on `PATH` nor in the probe list will be missed.
 
+### Claude settings scope
+
+Sessions now load only user-scope Claude settings. Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned.
+
 ### Choose between SDK, CLI, and TUI
 
 | Feature | `claude-sdk` | `claude-cli` | `claude-tui` |

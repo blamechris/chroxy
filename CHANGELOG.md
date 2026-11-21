@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Sessions now load only user-scope Claude settings.** Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned.
+  - A write or edit of `.mcp.json` now prompts under the permission floor; reading it does not.
+
 ## [0.11.10] - 2026-11-11
 
 ### Changed
