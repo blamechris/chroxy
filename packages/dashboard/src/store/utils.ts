@@ -749,3 +749,17 @@ export function isSessionListed(
 ): boolean {
   return sessions.some((s) => s.sessionId === sessionId);
 }
+
+/**
+ * #5835 (PR2), #9262 — is `sessionId` a claude-tui session? Its terminal is the
+ * live PTY mirror, which already shows the real output, so no synthesized
+ * terminal line (the prompt and answer echoes, the stream and tool lines) may
+ * be written into it: it lands at the PTY cursor and corrupts the TUI redraw.
+ */
+export function isClaudeTuiSession(
+  sessions: readonly { sessionId: string; provider?: string }[],
+  sessionId: string | null,
+): boolean {
+  if (sessionId === null) return false;
+  return sessions.find((s) => s.sessionId === sessionId)?.provider === 'claude-tui';
+}

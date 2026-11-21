@@ -720,6 +720,82 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #9262 — a claude-tui session's terminal is the live PTY mirror, which
+  // already shows the real output. The synthesized lines must not be drawn
+  // into it: an injected line lands at the PTY cursor and corrupts the TUI's
+  // redraw (a `⏺ Bash` on top of its separator rule). Same rule as the
+  // prompt and answer echoes in connection.ts (#5835 PR2).
+  describe('synthesized terminal text for a claude-tui session (#9262)', () => {
+    const tuiState = (activeSessionId: string | null) => baseState({
+      activeSessionId,
+      sessions: [
+        { sessionId: 'tui', provider: 'claude-tui' },
+        { sessionId: 'sdk', provider: 'claude-sdk' },
+      ],
+      sessionStates: {
+        tui: createEmptySessionState(),
+        sdk: createEmptySessionState(),
+      },
+    } as any)
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+    const writes = () => (store.getState() as any)._terminalWrites as string[]
+    const send = (msg: Record<string, unknown>) => handleMessage(msg as any, ctx() as any)
+    const turn = (sessionId: string | undefined) => {
+      const sid = sessionId === undefined ? {} : { sessionId }
+      send({ type: 'stream_start', messageId: 'r1', ...sid })
+      send({ type: 'stream_delta', messageId: 'r1', delta: 'TUI-DELTA', ...sid })
+      send({ type: 'tool_start', messageId: 't1', toolUseId: 'toolu_tui', tool: 'Bash', input: {}, ...sid })
+      send({ type: 'tool_result', toolUseId: 'toolu_tui', result: 'TUI-RESULT', ...sid })
+      send({ type: 'stream_end', messageId: 'r1', ...sid })
+      vi.runAllTimers()
+    }
+
+    it('writes nothing to the terminal of the active claude-tui session for its own turn', () => {
+      store = createMockStore(tuiState('tui'))
+      setStore(store)
+      turn('tui')
+      expect(writes()).toEqual([])
+    })
+
+    it('still records the turn in the claude-tui session\'s messages', () => {
+      store = createMockStore(tuiState('tui'))
+      setStore(store)
+      turn('tui')
+      const msgs = (store.getState() as any).sessionStates.tui.messages
+      expect(msgs.some((m: any) => m.type === 'tool_use' && m.toolUseId === 'toolu_tui')).toBe(true)
+    })
+
+    it('an untagged frame resolves to the active claude-tui session and writes nothing', () => {
+      store = createMockStore(tuiState('tui'))
+      setStore(store)
+      turn(undefined)
+      expect(writes()).toEqual([])
+    })
+
+    it('with no session active, a frame tagged with a claude-tui session writes nothing', () => {
+      store = createMockStore(tuiState(null))
+      setStore(store)
+      send({ type: 'stream_delta', messageId: 'r1', delta: 'TUI-DELTA', sessionId: 'tui' })
+      vi.runAllTimers()
+      expect(writes()).toEqual([])
+    })
+
+    it('positive control: an active non-tui session\'s turn is still written', () => {
+      store = createMockStore(tuiState('sdk'))
+      setStore(store)
+      turn('sdk')
+      const all = writes().join('')
+      expect(all).toContain('TUI-DELTA')
+      expect(all).toContain('Bash')
+      expect(all).toContain('TUI-RESULT')
+    })
+  })
+
   describe('terminal_size dispatch (#5835 Phase 2)', () => {
     it('records the authoritative size for the active session', () => {
       store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
