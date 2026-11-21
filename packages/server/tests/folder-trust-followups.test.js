@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync, readFileSync, readdirSync, existsSync, realpathSync, utimesSync, linkSync,
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync, readFileSync, readdirSync, existsSync, realpathSync, utimesSync, linkSync, futimesSync, openSync,
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -25,6 +25,8 @@ import {
   setLockFenceHookForTest,
   setLockDiscriminatorForTest,
   setLockFallbackWriteForTest,
+  setLockOpenForTest,
+  setLockFutimesForTest,
   assertStoreLockHeld,
   isTransientLockError,
   setLockReadBackHookForTest,
@@ -77,6 +79,8 @@ afterEach(() => {
   setLockFenceHookForTest()
   setLockDiscriminatorForTest()
   setLockFallbackWriteForTest()
+  setLockOpenForTest()
+  setLockFutimesForTest()
   setReclaimHookForTest()
   setLockWaitForTest()
   for (const [k, v] of [['CHROXY_CONFIG_DIR', saved.c], ['CLAUDE_CONFIG_DIR', saved.k]]) {
@@ -782,7 +786,7 @@ describe('store lock: creation, lease, fencing', () => {
     assert.deepEqual(tmpFiles(), [])
   })
 
-  it('a link that fails with EPERM while a fresh foreign lock exists is contention: it waits, gives up, and touches nothing', async () => {
+  it('regression guard: a link that fails with EPERM while a fresh foreign lock exists is contention: it waits, gives up, and touches nothing', async () => {
     const foreign = bodyOf(process.ppid, 'foreign-holder', null, null)
     freshLock(foreign)
     setLockLinkForTest(() => { throw eperm() })
@@ -854,11 +858,37 @@ describe('store lock: creation, lease, fencing', () => {
     const t = new Date(Date.now() - 5000)
     utimesSync(lockPath(), t, t)
     const before = statLockIdentity(lockPath())
+    let viaFd = 0
+    setLockFutimesForTest((fd, a, m) => { viaFd += 1; futimesSync(fd, a, m) })
     for (let i = 0; i < 8; i += 1) mock.timers.tick(3750)
+    assert.ok(viaFd >= 1, 'the refresh goes through the descriptor')
     assert.deepEqual(statLockIdentity(lockPath()), before, 'the replacement was not refreshed')
     release()
     await holder
     assert.ok(readFileSync(lockPath(), 'utf8').includes('replacement'), 'and not removed')
+  })
+
+  it('a heartbeat whose descriptor could not be opened at acquire retries on the next beat and refreshes the lease', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+    let opens = 0
+    setLockOpenForTest((path, flags) => {
+      opens += 1
+      if (opens === 1) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' })
+      return openSync(path, flags)
+    })
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const holder = withInterprocessLock(folderTrustStorePath(), async () => { await gate })
+    await Promise.resolve()
+    const t = new Date(Date.now() - 5000)
+    utimesSync(lockPath(), t, t)
+    const before = statLockIdentity(lockPath())
+    mock.timers.tick(3750)
+    assert.equal(opens, 2, 'the next beat opened it')
+    assert.notEqual(statLockIdentity(lockPath()).mtimeNs, before.mtimeNs, 'and refreshed the lease')
+    release()
+    await holder
   })
 
   it('the fence also checks that the file written is the store the held lock protects', async () => {

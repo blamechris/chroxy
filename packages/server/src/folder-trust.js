@@ -770,7 +770,11 @@ const pidAlive = (pid) => {
   }
 }
 
-/** Expired: older than the lease, or dated in the future by more than a lease (a clock that moved, a bad mtime). */
+/**
+ * Expired: older than the lease, or dated in the future by more than one lease. The second case
+ * tolerates clock steps and skewed network file systems: such a lock is treated as expired, and a
+ * live holder recovers it at its next beat (the heartbeat sets the mtime to its own clock).
+ */
 function leaseExpired(path, leaseMs) {
   try {
     const age = Date.now() - statSync(path).mtimeMs
@@ -821,6 +825,17 @@ let linkImpl = linkSync
 /** Test seam: replaces the hard link that creates the lock. No argument restores. */
 export function setLockLinkForTest(fn) {
   linkImpl = fn ?? linkSync
+}
+
+let openImpl = openSync
+/** Test seam: replaces the open of the lock for the heartbeat's descriptor. No argument restores. */
+export function setLockOpenForTest(fn) {
+  openImpl = fn ?? openSync
+}
+let futimesImpl = futimesSync
+/** Test seam: replaces the descriptor-based mtime refresh of the heartbeat. No argument restores. */
+export function setLockFutimesForTest(fn) {
+  futimesImpl = fn ?? futimesSync
 }
 
 let createHook = null
@@ -1133,18 +1148,25 @@ async function acquireAndRun(lockPath, token, deadline, fn, storePath) {
   // The lease: refresh the lock's mtime while we hold it, so a live holder is never judged stale.
   // Through a descriptor opened on our own file, so a replacement at the path is never refreshed.
   let fd = null
-  try {
-    fd = openSync(lockPath, 'r+')
-    if (!isOurs(readFileSync(fd, 'utf8'))) { closeSync(fd); fd = null }
-  } catch {
-    if (fd !== null) { try { closeSync(fd) } catch { /* already closed */ } }
-    fd = null
+  let notOurs = false
+  // Keep a descriptor only for a file that is ours. A failed open or read (a scanner holding the
+  // file, say) is retried on the next beat; a file that is not ours is never refreshed or retried.
+  const openOwn = () => {
+    let opened = null
+    try {
+      opened = openImpl(lockPath, 'r+')
+      if (isOurs(readFileSync(opened, 'utf8'))) { fd = opened; return }
+      notOurs = true
+    } catch { /* retried at the next beat */ }
+    if (opened !== null) { try { closeSync(opened) } catch { /* already closed */ } }
   }
+  openOwn()
   const heartbeat = setInterval(() => {
     try {
+      if (fd === null && !notOurs) openOwn()
       if (fd !== null) {
         const t = new Date()
-        futimesSync(fd, t, t)
+        futimesImpl(fd, t, t)
       }
     } catch { /* the next beat tries again */ }
   }, LOCK_HEARTBEAT_MS)
