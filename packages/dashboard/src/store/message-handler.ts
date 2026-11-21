@@ -219,7 +219,7 @@ import {
   rejectInputDeliveryForConflict,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
-import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerRestoreArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerRestoreArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage, ServerFolderTrustStateMessage, ServerFolderTrustResultMessage } from '@chroxy/protocol'
 import { applyHistoryReply, pruneHistoryViews } from './history-views'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
@@ -4963,6 +4963,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           // exists, and a "Cancelling…" key can never be acked on a connection
           // that no longer knows the session.
           pendingServerSeed: {},
+          folderTrust: {},
+          folderTrustPending: {},
+          folderTrustError: {},
           cancellingActivityIds: new Set<string>(),
           // #7555 — the FLAT session mirror goes with the roster too, and for
           // the same mechanical reason one level over: those twelve fields hold
@@ -5381,6 +5384,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         // session destroyed before the composer is touched leaves its seed
         // here, and this block is what removes it.
         patch.pendingServerSeed = pruneSessionKeyedMap(get().pendingServerSeed, removedIds);
+        // Per-folder trust state, keyed by sessionId like the maps above.
+        patch.folderTrust = pruneSessionKeyedMap(get().folderTrust, removedIds);
+        patch.folderTrustPending = pruneSessionKeyedMap(get().folderTrustPending, removedIds);
+        patch.folderTrustError = pruneSessionKeyedMap(get().folderTrustError, removedIds);
         // #7483 — the in-flight cancel_activity keys (#5277). A DIFFERENT
         // shape: a `Set` keyed `${sessionId}:${activityId}`, because activity
         // ids are only unique within a session. `pruneSessionKeyedMap` cannot
@@ -7236,6 +7243,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
         patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
         patch.pendingServerSeed = pruneSessionKeyedMap(get().pendingServerSeed, removedIds);
+        // Per-folder trust state, keyed by sessionId like the maps above.
+        patch.folderTrust = pruneSessionKeyedMap(get().folderTrust, removedIds);
+        patch.folderTrustPending = pruneSessionKeyedMap(get().folderTrustPending, removedIds);
+        patch.folderTrustError = pruneSessionKeyedMap(get().folderTrustError, removedIds);
         patch.cancellingActivityIds = pruneSessionScopedKeySet(get().cancellingActivityIds, removedIds);
         // #7470 timeout-reset-end
         // If the timed-out session was active, switch to next and sync flat fields (#816)
@@ -7508,6 +7519,28 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       if (applied) get().requestArchivedSessions();
       break;
     }
+    case 'folder_trust_state': {
+      // Whether this session folder's project settings are loaded. The server is
+      // the authority; this is display state, replaced wholesale on every frame.
+      const frame = msg as unknown as ServerFolderTrustStateMessage;
+      if (typeof frame.sessionId !== 'string' || !frame.sessionId) break;
+      const { type: _type, sessionId: _sid, ...entry } = frame;
+      set({ folderTrust: { ...get().folderTrust, [frame.sessionId]: entry } });
+      break;
+    }
+    case 'folder_trust_result': {
+      // Settles the in-flight marker on EVERY reply (a failure included, or the
+      // button would stay disabled); a failure keeps its reason for the dialog.
+      const reply = msg as unknown as ServerFolderTrustResultMessage;
+      if (typeof reply.sessionId !== 'string' || !reply.sessionId) break;
+      const { [reply.sessionId]: _pending, ...pending } = get().folderTrustPending;
+      const { [reply.sessionId]: _error, ...errors } = get().folderTrustError;
+      set({
+        folderTrustPending: pending,
+        folderTrustError: reply.ok === true ? errors : { ...errors, [reply.sessionId]: reply.error || 'The trust change could not be applied' },
+      });
+      break;
+    }
     case 'retry_failed_restore_result': {
       // #7625. The roster is server truth, so rather than patch it locally we
       // re-ask; a successful retry ALSO triggers a session_list broadcast, and
@@ -7653,6 +7686,23 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // armMcpServerOpCallback should still flip this).
       if (errCode === 'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT') {
         set({ mcpConfigForbiddenNonPrimary: true });
+      }
+      // A trust change the daemon refused or could not apply arrives as an error
+      // envelope (no `folder_trust_result`). It names no session, so every
+      // in-flight marker settles and the reason shows on those sessions.
+      if (errReqId) {
+        // Any error tied to a trust request settles THAT request, whatever its code
+        // (a schema-level INVALID_MESSAGE included); it never lands on another session.
+        const pendingMap = get().folderTrustPending;
+        const errSession = Object.keys(pendingMap).find((id) => pendingMap[id] === errReqId)
+          ?? (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string' ? msg.sessionId : null);
+        if (errSession) {
+          const { [errSession]: _pending, ...pending } = pendingMap;
+          set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [errSession]: errMsg } });
+        }
+      } else if (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string') {
+        const { [msg.sessionId]: _pending, ...pending } = get().folderTrustPending;
+        set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [msg.sessionId]: errMsg } });
       }
       // #6871 review round 2 (BLOCKING 2): there is deliberately NO scheduler
       // handling of INVALID_MESSAGE here.

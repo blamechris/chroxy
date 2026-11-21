@@ -569,6 +569,17 @@ export declare const RemoveMcpServerSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const TrustFolderSchema: z.ZodObject<{
+    type: z.ZodLiteral<"trust_folder">;
+    sessionId: z.ZodString;
+    digest: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const UntrustFolderSchema: z.ZodObject<{
+    type: z.ZodLiteral<"untrust_folder">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ScheduledTasksRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"scheduled_tasks_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1717,6 +1728,15 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"trust_folder">;
+    sessionId: z.ZodString;
+    digest: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"untrust_folder">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"scheduled_tasks_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -2468,6 +2488,8 @@ export type SetMcpServerEnabledMessage = z.infer<typeof SetMcpServerEnabledSchem
 export type SubmitMcpAuthCodeMessage = z.infer<typeof SubmitMcpAuthCodeSchema>;
 export type AddMcpServerMessage = z.infer<typeof AddMcpServerSchema>;
 export type RemoveMcpServerMessage = z.infer<typeof RemoveMcpServerSchema>;
+export type TrustFolderMessage = z.infer<typeof TrustFolderSchema>;
+export type UntrustFolderMessage = z.infer<typeof UntrustFolderSchema>;
 export type ScheduledTasksRequestMessage = z.infer<typeof ScheduledTasksRequestSchema>;
 export type ScheduledTaskActionMessage = z.infer<typeof ScheduledTaskActionSchema>;
 export type ScheduledTaskInput = z.infer<typeof ScheduledTaskInputSchema>;

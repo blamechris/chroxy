@@ -14,6 +14,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { mkdirSync } from 'node:fs'
+import { trustReviewed } from './helpers/trust-folder.js'
+import { untrustFolder, invalidateFolderTrustCache } from '../src/folder-trust.js'
 
 import {
   parseStatusLineConfig,
@@ -63,12 +69,12 @@ test('parseStatusLineConfig floors a tiny refreshInterval', () => {
 // statusLineSettingsPaths — precedence order
 // ---------------------------------------------------------------------------
 
-test('statusLineSettingsPaths lists project > user project-settings > user, highest first', () => {
-  const paths = statusLineSettingsPaths('/proj', '/home/u/.claude')
+test('statusLineSettingsPaths lists user project-settings > user, highest first', () => {
+  // No cwd: no project file is consulted (a folder's own file needs the folder's trust decision).
+  const paths = statusLineSettingsPaths(undefined, '/home/u/.claude')
   assert.deepEqual(paths, [
-    '/proj/.claude/settings.json',
-    '/home/u/.claude/project-settings.json',
-    '/home/u/.claude/settings.json',
+    join('/home/u/.claude', 'project-settings.json'),
+    join('/home/u/.claude', 'settings.json'),
   ])
 })
 
@@ -335,14 +341,21 @@ function fakeReadFrom(fileMap) {
   }
 }
 
-test('resolveConfig: project .claude/settings.json overrides user settings', async () => {
-  const files = {
-    '/proj/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }),
-    '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }),
+test('resolveConfig: project .claude/settings.json is ignored in favour of user settings until the folder is trusted', async () => {
+  // A real folder with a command-bearing .mcp.json: untrusted, so its settings stay unread.
+  const proj = mkdtempSync(join(tmpdir(), 'statusline-untrusted-'))
+  try {
+    writeFileSync(join(proj, '.mcp.json'), JSON.stringify({ mcpServers: {} }))
+    const files = {
+      [join(proj, '.claude', 'settings.json')]: JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }),
+      '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }),
+    }
+    const mgr = new StatusLineManager({ homeDir: '/home', readFileFn: fakeReadFrom(files) })
+    const cfg = await mgr.resolveConfig(proj)
+    assert.equal(cfg.command, 'user.sh')
+  } finally {
+    rmSync(proj, { recursive: true, force: true })
   }
-  const mgr = new StatusLineManager({ homeDir: '/home', readFileFn: fakeReadFrom(files) })
-  const cfg = await mgr.resolveConfig('/proj')
-  assert.equal(cfg.command, 'project.sh')
 })
 
 test('resolveConfig: falls back to user settings when the project has none', async () => {
@@ -537,4 +550,102 @@ test('defaultBuildEnv strips an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECR
     if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
     else process.env.CHROXY_HOOK_SECRET = prevSecret
   }
+})
+
+
+// ---------------------------------------------------------------------------
+// The project statusLine EXECUTES only bytes the owner trusted. These go through
+// run() (the execution path), on one long-lived manager, never through a cache.
+// ---------------------------------------------------------------------------
+
+async function withProjectFolder(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'statusline-trust-'))
+  const saved = { c: process.env.CHROXY_CONFIG_DIR, k: process.env.CLAUDE_CONFIG_DIR }
+  process.env.CHROXY_CONFIG_DIR = join(root, 'chroxy')
+  process.env.CLAUDE_CONFIG_DIR = join(root, 'user-claude')
+  mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
+  invalidateFolderTrustCache()
+  const cwd = join(root, 'proj')
+  mkdirSync(join(cwd, '.claude'), { recursive: true })
+  const spawned = []
+  const mgr = new StatusLineManager({
+    claudeDir: process.env.CLAUDE_CONFIG_DIR,
+    spawnFn: (file, args) => {
+      spawned.push(args.join(' '))
+      const child = makeFakeChild()
+      process.nextTick(() => { child.exitCode = 0; child.emit('exit', 0, null) })
+      return child
+    },
+    buildEnv: () => ({}),
+  })
+  const setCommand = (command) => writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command } }))
+  try {
+    await fn({ cwd, mgr, spawned, setCommand })
+  } finally {
+    for (const [k, v] of [['CHROXY_CONFIG_DIR', saved.c], ['CLAUDE_CONFIG_DIR', saved.k]]) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    invalidateFolderTrustCache()
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('run: an empty folder (cached), then a statusLine added within 2 s, does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    rmSync(join(cwd, '.claude'), { recursive: true })
+    assert.equal((await mgr.run({ cwd })).active, false) // primes every cache
+    mkdirSync(join(cwd, '.claude'))
+    setCommand('evil.sh')
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.deepEqual(spawned, [])
+  })
+})
+
+test('run: trusted and unchanged runs the project command', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    const out = await mgr.run({ cwd })
+    assert.equal(out.active, true)
+    assert.equal(spawned.length, 1)
+    assert.ok(spawned[0].includes('proj.sh'))
+  })
+})
+
+test('run: trusted, then the command is edited, does not run the edited command', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    await mgr.run({ cwd })
+    setCommand('edited.sh')
+    const out = await mgr.run({ cwd })
+    assert.equal(out.active, false)
+    assert.equal(spawned.length, 1)
+    assert.equal(spawned.some((a) => a.includes('edited.sh')), false)
+  })
+})
+
+test('run: trusted, then untrusted on the same manager, does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    assert.equal((await mgr.run({ cwd })).active, true)
+    await untrustFolder(cwd)
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.equal(spawned.length, 1)
+  })
+})
+
+test('run: the settings file still matches its record, but the folder is no longer trusted overall: does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    assert.equal((await mgr.run({ cwd })).active, true)
+    // Another covered file appears: the folder's digest moves, the settings file is untouched.
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: {} }))
+    invalidateFolderTrustCache() // the folder-level scan may be up to 2 s old; this is the check itself
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.equal(spawned.length, 1)
+  })
 })

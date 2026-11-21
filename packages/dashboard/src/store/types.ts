@@ -18,7 +18,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerRestoreArchivedSessionResultMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerRestoreArchivedSessionResultMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage, ServerFolderTrustStateMessage } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -991,6 +991,9 @@ export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessag
 /** The archive retention policy as the daemon reports and accepts it. */
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
 
+/** One session's `folder_trust_state`, as the dashboard keeps it. */
+export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'digest' | 'appliesFrom' | 'launchedWithProject'>;
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -1940,6 +1943,17 @@ export interface ConnectionState {
   /** The last policy save's failure; cleared by the next save and on reset. */
   sessionArchivePolicyError: { code?: string; message?: string; refused?: boolean } | null;
 
+  /**
+   * Whether each session folder's project settings are loaded, from
+   * `folder_trust_state` (kept as the wire frame, minus its type/sessionId).
+   * Absent until the server has said. Display state: the server is the authority.
+   */
+  folderTrust: Record<string, FolderTrustEntry>;
+  /** Sessions with a `trust_folder` / `untrust_folder` in flight, mapped to that request's id. Socket-scoped. */
+  folderTrustPending: Record<string, string>;
+  /** The last trust change's failure per session; cleared by the next attempt. */
+  folderTrustError: Record<string, string>;
+
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
   pairingRefreshedCount: number;
@@ -2650,6 +2664,15 @@ export interface ConnectionState {
    * (nothing sent) when the socket is closed or a save is already in flight.
    */
   setSessionArchivePolicy: (policy: ArchivePolicy, opts?: { purge?: boolean }) => string | null;
+  /**
+   * Approve (`trust_folder`, with the digest of the state the owner reviewed) or stop
+   * trusting (`untrust_folder`) the folder of a session. The server resolves the
+   * folder from its own session record; only the primary token on an unbound
+   * connection is allowed. Returns false (nothing sent) when the socket is closed,
+   * a change for that session is in flight, or there is no reviewed digest. `digest` is the one of the reviewed snapshot; without it the latest state's is used.
+   */
+  trustFolder: (sessionId: string, digest?: string) => boolean;
+  untrustFolder: (sessionId: string) => boolean;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a
   // `host_prune_status_request`; the server replies with a single

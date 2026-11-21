@@ -118,6 +118,59 @@ export const ServerMcpServersSchema = z.object({
         scope: McpConfigScopeSchema.optional(),
     })),
 });
+/**
+ * Whether a session folder's project settings (`.mcp.json`, `.claude/settings.json`,
+ * project `CLAUDE.md`, skills, agents, commands) are loaded. Nothing loads without
+ * an owner decision: `untrusted` is the starting state of every folder, `trusted`
+ * means the owner approved the folder's current files. `summary` (display only;
+ * environment values are never included) says what would run: its
+ * `hasCommandBearingFiles` is false for a folder with nothing command-bearing, and
+ * `untrustable` is true when the folder could not be reviewed completely (it cannot
+ * be trusted). `digest` identifies the reviewed snapshot and is sent back by
+ * `trust_folder`; both are removed for a session-bound client. `appliesFrom` says when
+ * a change reaches the running session: `next_turn` (claude-sdk), `restart`
+ * (claude-cli, claude-tui and their docker variants) or `n/a` (a provider that does
+ * not run claude).
+ */
+export const FolderTrustSummarySchema = z.object({
+    files: z.array(z.object({ path: z.string(), linkTarget: z.string().optional() })),
+    mcpServers: z.array(z.object({
+        file: z.string(),
+        name: z.string(),
+        command: z.string().optional(),
+        args: z.array(z.string()).optional(),
+        url: z.string().optional(),
+        type: z.string().optional(),
+        envKeys: z.array(z.string()).optional(),
+    })),
+    hooks: z.array(z.object({ file: z.string(), event: z.string(), commands: z.array(z.string()) })),
+    statusLine: z.array(z.object({ file: z.string(), command: z.string() })),
+    enabledPlugins: z.array(z.object({ file: z.string(), plugin: z.string() })),
+    counts: z.object({ agents: z.number(), skills: z.number(), commands: z.number() }),
+    warnings: z.array(z.string()),
+    hasCommandBearingFiles: z.boolean(),
+    untrustable: z.boolean(),
+});
+export const ServerFolderTrustStateSchema = z.object({
+    type: z.literal('folder_trust_state'),
+    sessionId: z.string(),
+    status: z.enum(['trusted', 'untrusted']),
+    summary: FolderTrustSummarySchema.optional(),
+    digest: z.string().optional(),
+    appliesFrom: z.enum(['next_turn', 'restart', 'n/a']),
+    // claude-cli / claude-tui only: whether the RUNNING process was launched with project
+    // settings loaded. It keeps them until it restarts, whatever the status is now.
+    launchedWithProject: z.boolean().optional(),
+});
+/** Reply to `trust_folder` / `untrust_folder`. `error` is set when `ok` is false. */
+export const ServerFolderTrustResultSchema = z.object({
+    type: z.literal('folder_trust_result'),
+    sessionId: z.string(),
+    ok: z.boolean(),
+    status: z.enum(['trusted', 'untrusted']),
+    error: z.string().optional(),
+    requestId: z.string().optional(),
+});
 export const ServerPlanStartedSchema = z.object({
     type: z.literal('plan_started'),
 });

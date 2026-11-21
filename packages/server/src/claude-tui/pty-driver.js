@@ -330,7 +330,7 @@ export function ensureCwdTrusted(cwd, env = process.env) {
 // Legacy sessions write this once at start. Explicit native connections rewrite
 // it before every spawn/respawn so the SessionStart route marker carries a fresh
 // nonce. The file remains stable across turns within one PTY process.
-export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null, permissionHookScript = PERMISSION_HOOK_SCRIPT, thinkingSummaries = false }) {
+export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null, permissionHookScript = PERMISSION_HOOK_SCRIPT, thinkingSummaries = false, enableAllProjectMcpServers = false }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // Portable unique-id source for hook filenames — see the UUID note above.
@@ -369,6 +369,10 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
     // is for, and the --settings file outranks the user's own settings.json, so
     // chroxy's choice is the one that applies to a chroxy-owned TUI.
     ...(thinkingSummaries ? { showThinkingSummaries: true } : {}),
+    // Interactive claude asks for approval of each `.mcp.json` server and blocks
+    // the PTY on that dialog. The owner's folder-trust decision replaces it, so
+    // this is written ONLY when project settings are allowed for the folder.
+    ...(enableAllProjectMcpServers ? { enableAllProjectMcpServers: true } : {}),
     hooks: {
       ...(nativeRouteNonce ? {
         SessionStart: [

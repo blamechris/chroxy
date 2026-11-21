@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
 import { recordTimerArms } from './test-helpers.js'
+import { getFolderTrustState } from '../src/folder-trust.js'
 import { getLogLevel, setLogLevel } from '../src/logger.js'
 import { ServerSkillChangedSchema, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
@@ -14,6 +15,7 @@ function makeCtx(overrides = {}) {
       session: { model: 'claude-sonnet-4-6', permissionMode: 'approve' },
       name: 'Test Session',
       cwd: '/tmp/test',
+      provider: 'claude-sdk',
     }),
     ...overrides,
   }
@@ -24,6 +26,9 @@ describe('EventNormalizer', () => {
 
   beforeEach(() => {
     normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+    // `ready` answers the folder trust state only from a fresh cached scan (it never
+    // walks the folder itself), so warm the cache for the folders these tests use.
+    for (const cwd of ['/tmp/test']) getFolderTrustState(cwd, { cached: true })
   })
 
   afterEach(() => {
@@ -476,21 +481,41 @@ describe('EventNormalizer', () => {
   // ---- EVENT_MAP: ready ----
 
   describe('ready event', () => {
-    it('emits claude_ready + model_changed + permission_mode_changed in multi mode', () => {
+    it('emits claude_ready + model_changed + permission_mode_changed + folder_trust_state in multi mode', () => {
       const result = normalizer.normalize('ready', {}, makeCtx())
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
       assert.equal(result.messages[1].msg.type, 'model_changed')
       assert.equal(result.messages[1].msg.model, 'sonnet')
       assert.equal(result.messages[2].msg.type, 'permission_mode_changed')
       assert.equal(result.messages[2].msg.mode, 'approve')
+      // Every folder starts untrusted, one that does not exist included.
+      assert.equal(result.messages[3].msg.type, 'folder_trust_state')
+      assert.equal(result.messages[3].msg.sessionId, 'sess-1')
+      assert.equal(result.messages[3].msg.status, 'untrusted')
     })
 
-    it('emits claude_ready + model_changed + permission_mode_changed in legacy-cli mode', () => {
+    it('emits claude_ready + model_changed + permission_mode_changed + folder_trust_state in legacy-cli mode', () => {
       const ctx = makeCtx({ mode: 'legacy-cli' })
       const result = normalizer.normalize('ready', {}, ctx)
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
+    })
+
+    it('with a cold scan cache, ready neither walks the folder nor waits for it: no folder_trust_state', () => {
+      const ctx = makeCtx({ getSessionEntry: () => ({ session: { model: 'm', permissionMode: 'approve' }, cwd: '/tmp/cold-never-scanned', provider: 'claude-sdk' }) })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages.some((m) => m.msg.type === 'folder_trust_state'), false)
+    })
+
+    it('omits folder_trust_state for a provider that does not run claude', () => {
+      const ctx = makeCtx({ getSessionEntry: () => ({ session: { model: 'm', permissionMode: 'approve' }, cwd: '/tmp/test', provider: 'gemini' }) })
+      assert.equal(normalizer.normalize('ready', {}, ctx).messages.some((m) => m.msg.type === 'folder_trust_state'), false)
+    })
+
+    it('omits folder_trust_state when there is no canonical session id', () => {
+      const result = normalizer.normalize('ready', {}, makeCtx({ sessionId: null }))
+      assert.equal(result.messages.some((m) => m.msg.type === 'folder_trust_state'), false)
     })
 
     it('handles missing session entry gracefully', () => {
@@ -568,7 +593,8 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: null, bootedModel: null, permissionMode: 'approve' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
+          provider: 'claude-sdk',
         }),
       })
       const result = normalizer.normalize('ready', { model: 'claude-opus-4-8' }, ctx)
@@ -581,7 +607,7 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: 'claude-sonnet-4-6', bootedModel: null, permissionMode: 'approve' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
         }),
       })
       const result = normalizer.normalize('ready', { model: 'claude-opus-4-8' }, ctx)
@@ -593,7 +619,7 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: null, bootedModel: 'claude-opus-4-8', permissionMode: 'approve' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)
@@ -605,7 +631,7 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: 'claude-sonnet-4-6', bootedModel: null, permissionMode: 'approve' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)
@@ -623,7 +649,7 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: 'claude-opus-4-8', bootedModel: 'claude-sonnet-4-6', permissionMode: 'approve' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)
@@ -641,11 +667,13 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: 'claude-sonnet-4-6', permissionMode: 'approve', thinkingLevel: 'xhigh' },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
+          provider: 'claude-sdk',
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)
-      assert.equal(result.messages.length, 4)
+      // claude_ready, model, permission mode, thinking level, folder trust state
+      assert.equal(result.messages.length, 5)
       const msg = result.messages.find((m) => m.msg.type === 'thinking_level_changed')
       assert.ok(msg, 'expected a thinking_level_changed message in the ready burst')
       assert.equal(msg.msg.level, 'xhigh')
@@ -656,7 +684,7 @@ describe('EventNormalizer', () => {
       // property read is `undefined` — the BaseSession contract for "this
       // provider doesn't support thinking levels".
       const result = normalizer.normalize('ready', {}, makeCtx())
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4) // claude_ready, model, permission mode, folder trust state
       assert.equal(result.messages.some((m) => m.msg.type === 'thinking_level_changed'), false)
     })
 
@@ -665,7 +693,7 @@ describe('EventNormalizer', () => {
         getSessionEntry: () => ({
           session: { model: 'claude-sonnet-4-6', permissionMode: 'approve', thinkingLevel: null },
           name: 'Test',
-          cwd: '/tmp',
+          cwd: '/tmp/test',
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)

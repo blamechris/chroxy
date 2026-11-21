@@ -3988,3 +3988,55 @@ describe('ServerMcpServersSchema scope (#7028)', () => {
     }
   })
 })
+
+// Per-folder trust for project settings: trust_folder / untrust_folder carry only the
+// session id (the folder is the server's record of that session) and, for trust_folder,
+// the digest of the state the owner reviewed; the server answers with folder_trust_state
+// / folder_trust_result.
+describe('folder trust messages', () => {
+  const digest = 'a'.repeat(64)
+
+  it('trust_folder requires a session id AND the reviewed digest; untrust_folder only the session id', async () => {
+    const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+    assert.ok(ClientMessageSchema.safeParse({ type: 'trust_folder', sessionId: 's1', digest }).success)
+    assert.ok(ClientMessageSchema.safeParse({ type: 'trust_folder', sessionId: 's1', digest, requestId: 'r' }).success)
+    assert.ok(!ClientMessageSchema.safeParse({ type: 'trust_folder', sessionId: 's1' }).success, 'digest is required')
+    assert.ok(!ClientMessageSchema.safeParse({ type: 'trust_folder', sessionId: 's1', digest: 'nope' }).success, 'digest must be a sha256')
+    assert.ok(!ClientMessageSchema.safeParse({ type: 'trust_folder', digest }).success)
+    assert.ok(!ClientMessageSchema.safeParse({ type: 'trust_folder', sessionId: '', digest }).success)
+    assert.ok(ClientMessageSchema.safeParse({ type: 'untrust_folder', sessionId: 's1' }).success)
+    assert.ok(!ClientMessageSchema.safeParse({ type: 'untrust_folder' }).success)
+  })
+
+  it('folder_trust_state accepts each status and appliesFrom; summary and digest are optional; there is no "none"', async () => {
+    const { ServerFolderTrustStateSchema } = await import('../src/schemas/server/session.ts')
+    const summary = {
+      files: [{ path: '/p/.mcp.json' }, { path: '/p/.claude/agents/a.md', linkTarget: '/x/a.md' }],
+      mcpServers: [{ file: '/p/.mcp.json', name: 's', command: 'npx', args: ['-y', 'x'], envKeys: ['K'] }],
+      hooks: [{ file: '/p/.claude/settings.json', event: 'Stop', commands: ['echo'] }],
+      statusLine: [{ file: '/p/.claude/settings.json', command: 'sl.sh' }],
+      enabledPlugins: [{ file: '/p/.claude/settings.json', plugin: 'p@m' }],
+      counts: { agents: 1, skills: 0, commands: 2 },
+      warnings: [],
+      hasCommandBearingFiles: true,
+      untrustable: false,
+    }
+    for (const status of ['trusted', 'untrusted']) {
+      for (const appliesFrom of ['next_turn', 'restart', 'n/a']) {
+        assert.ok(ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status, appliesFrom }).success)
+      }
+    }
+    assert.ok(ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' }).success)
+    assert.ok(ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', launchedWithProject: true }).success)
+    assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', launchedWithProject: 'yes' }).success)
+    assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'none', appliesFrom: 'restart' }).success)
+    assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted' }).success, 'appliesFrom is required')
+  })
+
+  it('folder_trust_result carries ok, status and an optional error', async () => {
+    const { ServerFolderTrustResultSchema } = await import('../src/schemas/server/session.ts')
+    assert.ok(ServerFolderTrustResultSchema.safeParse({ type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted' }).success)
+    assert.ok(ServerFolderTrustResultSchema.safeParse({ type: 'folder_trust_result', sessionId: 's1', ok: false, status: 'untrusted', error: 'no', requestId: 'r' }).success)
+    assert.ok(!ServerFolderTrustResultSchema.safeParse({ type: 'folder_trust_result', sessionId: 's1', status: 'trusted' }).success)
+  })
+})

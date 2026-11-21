@@ -129,6 +129,8 @@ export const BOUND_DENIED_MESSAGE_TYPES = Object.freeze({
   set_prompt_evaluator_skip_pattern: 'a pattern the daemon runs on its own event loop for every input',
   add_mcp_server: 'host-wide server configuration',
   remove_mcp_server: 'host-wide server configuration',
+  trust_folder: 'lets a folder\'s project settings run on this machine',
+  untrust_folder: 'changes which folders run project settings on this machine',
   submit_mcp_auth_code: 'stores a credential shared by every session using the server',
   list_providers: 'host-wide configuration status',
   byok_get_credentials_status: 'host-wide credential status',

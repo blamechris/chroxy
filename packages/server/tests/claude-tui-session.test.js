@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
 import { chmodSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
@@ -11,6 +11,7 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { recordTimerArms, withParentClaudeSessionEnv, assertParentMarkersStripped } from './test-helpers.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
@@ -114,6 +115,20 @@ function makeSinkDir(prefix) {
 let unpinSinkBase
 beforeEach(() => { unpinSinkBase = pinTmpDaemonBase(ClaudeTuiSession, 'SINK_BASE') })
 afterEach(() => { if (unpinSinkBase) unpinSinkBase(); unpinSinkBase = null })
+
+// A folder whose .mcp.json makes it command-bearing: untrusted (user scope only)
+// until a test trusts it. Argv assertions use it instead of '/tmp', whose own
+// contents would otherwise decide the expected `--setting-sources`.
+const projectDirs = []
+function projectWithMcp() {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-tui-project-'))
+  writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { s: { command: 'x' } } }))
+  projectDirs.push(dir)
+  return dir
+}
+after(() => {
+  for (const d of projectDirs) rmSync(d, { recursive: true, force: true })
+})
 
 describe('ClaudeTuiSession', () => {
   let emptySkillsDir
@@ -735,7 +750,7 @@ describe('ClaudeTuiSession', () => {
     it('requires a fresh safe marker from the real TUI before native route readiness', async () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       const candidate = new ClaudeTuiSession({
-        cwd: '/tmp',
+        cwd: projectWithMcp(),
         skillsDir: emptySkillsDir,
         repoSkillsDir: null,
         connectionAuthRoute: 'native',
@@ -800,8 +815,9 @@ describe('ClaudeTuiSession', () => {
       }
       await origSpawnPty.call(candidate, false)
       assert.deepEqual(spawnedArgs.slice(2, 4), ['--settings', candidate._settingsPath])
-      assert.equal(spawnedArgs.includes('--setting-sources'), false,
-        'the real TUI keeps normal Claude Code instructions, skills, hooks, and plugins')
+      const ssIdx = spawnedArgs.indexOf('--setting-sources')
+      assert.ok(ssIdx >= 0, 'the TUI spawn passes --setting-sources')
+      assert.equal(spawnedArgs[ssIdx + 1], 'user', 'the TUI spawn of an untrusted folder loads only user-scope Claude settings')
       const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
       assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
       for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')
@@ -1431,7 +1447,7 @@ describe('ClaudeTuiSession', () => {
             it(`captures byte-identical real argv: ${label}`, async () => {
               const port = portCounter++
               session = new ClaudeTuiSession({
-                cwd: '/tmp',
+                cwd: projectWithMcp(),
                 port,
                 skillsDir: emptySkillsDir,
                 repoSkillsDir: null,
@@ -1465,7 +1481,7 @@ describe('ClaudeTuiSession', () => {
               const expected = resumed
                 ? ['--resume', SESSION_ID]
                 : ['--session-id', SESSION_ID]
-              expected.push('--settings', session._settingsPath, '--no-chrome')
+              expected.push('--settings', session._settingsPath, '--setting-sources', 'user', '--no-chrome')
               if (skipPermissions) expected.push('--dangerously-skip-permissions')
               if (withModel) expected.push('--model', MODEL_ID)
               if (withSkills) expected.push('--append-system-prompt', SKILLS_TEXT)
@@ -1476,6 +1492,58 @@ describe('ClaudeTuiSession', () => {
         }
       }
     }
+
+    it('spawns with --setting-sources user,project once the folder is trusted, and the settings file then enables .mcp.json servers', async () => {
+      const cwd = projectWithMcp()
+      await trustReviewed(cwd)
+      session = new ClaudeTuiSession({ cwd, port: portCounter++, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sessionId = SESSION_ID
+      session._conversationPersisted = () => true
+      session._sinkDir = fakeHome
+      session._settingsPath = session._writeHookSettings({ permissionsEnabled: false })
+      session._buildCombinedSkillsPrefix = () => ''
+      session.on('error', () => {})
+      let realArgs = null
+      session._ptyModOverride = { spawn: (_cmd, args) => { realArgs = args; throw new Error('captured-and-bail') } }
+      await session._spawnPty(true)
+      assert.ok(realArgs)
+      const i = realArgs.indexOf('--setting-sources')
+      assert.equal(realArgs[i + 1], 'user,project')
+      const settings = JSON.parse(readFileSync(session._settingsPath, 'utf8'))
+      assert.equal(settings.enableAllProjectMcpServers, true)
+      assert.equal(session.launchedWithProject, true, 'the running process was launched with project settings')
+    })
+
+    it('an untrusted spawn is user-only and its settings file has no enableAllProjectMcpServers, even after a trusted one wrote it', async () => {
+      const cwd = projectWithMcp()
+      await trustReviewed(cwd)
+      session = new ClaudeTuiSession({ cwd, port: portCounter++, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sessionId = SESSION_ID
+      session._conversationPersisted = () => true
+      session._sinkDir = fakeHome
+      session._buildCombinedSkillsPrefix = () => ''
+      session.on('error', () => {})
+      session._ptyModOverride = { spawn: () => { throw new Error('captured-and-bail') } }
+      session._settingsPath = session._writeHookSettings({ permissionsEnabled: false })
+      await session._spawnPty(false)
+      assert.equal(JSON.parse(readFileSync(session._settingsPath, 'utf8')).enableAllProjectMcpServers, true)
+      // The owner stops trusting; the next spawn decides again and both pieces follow it.
+      const { untrustFolder } = await import('../src/folder-trust.js')
+      await untrustFolder(cwd)
+      let realArgs = null
+      session._ptyModOverride = { spawn: (_cmd, args) => { realArgs = args; throw new Error('captured-and-bail') } }
+      await session._spawnPty(false)
+      assert.equal(realArgs[realArgs.indexOf('--setting-sources') + 1], 'user')
+      assert.equal('enableAllProjectMcpServers' in JSON.parse(readFileSync(session._settingsPath, 'utf8')), false)
+      assert.equal(session.launchedWithProject, false)
+    })
+
+    it('does not write enableAllProjectMcpServers for an untrusted folder', () => {
+      session = new ClaudeTuiSession({ cwd: projectWithMcp(), port: portCounter++, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sinkDir = fakeHome
+      const settings = JSON.parse(readFileSync(session._writeHookSettings({ permissionsEnabled: false }), 'utf8'))
+      assert.equal('enableAllProjectMcpServers' in settings, false)
+    })
   })
 
   describe('constructor', () => {

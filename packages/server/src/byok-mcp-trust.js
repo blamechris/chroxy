@@ -71,7 +71,7 @@
  * iteration can add expiry timestamps without breaking the file format.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { configPath } from './config-dir.js'
@@ -160,7 +160,7 @@ function sanitizeTrustUrl(url) {
   }
 }
 
-function sha256Hex(input) {
+export function sha256Hex(input) {
   return createHash('sha256').update(input, 'utf8').digest('hex')
 }
 
@@ -172,7 +172,7 @@ function sha256Hex(input) {
  * component value containing a separator, quote, NUL or newline cannot be made to
  * straddle a field boundary and collide with a different component split.
  */
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value !== null && typeof value === 'object') {
     return `{${Object.keys(value)
@@ -352,6 +352,34 @@ export function loadTrustStore(filePath = defaultTrustStorePath(), { log } = {})
 }
 
 /**
+ * Write `content` to `filePath` with mode 0600 via temp + rename, so a crash
+ * mid-write cannot leave a half-written trust file. Creates the parent dir
+ * (0700) when missing.
+ *
+ * #4463: when renameSync throws (cross-device link, FS quota, ACL) the temp file
+ * would otherwise be left behind. Unlink it on the failure path and re-throw the
+ * ORIGINAL rename error so the caller sees the real failure rather than a
+ * cleanup-side ENOENT. The cleanup unlink swallows its own errors (the temp may
+ * already be gone if the rename partially succeeded or the FS removed it).
+ */
+export function writeFileAtomic0600(filePath, content) {
+  const dir = dirname(filePath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // A unique temp name (pid + random) opened O_EXCL: a concurrent writer in another
+  // process cannot share or clobber it, and a planted file or symlink at the name is
+  // refused rather than followed.
+  const tmp = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    writeFileSync(tmp, content, { mode: 0o600, flag: 'wx' })
+    try { chmodSync(tmp, 0o600) } catch {}
+    renameSync(tmp, filePath)
+  } catch (err) {
+    try { unlinkSync(tmp) } catch {}
+    throw err
+  }
+}
+
+/**
  * Append a trust decision. Idempotent — re-recording an already-trusted
  * tuple is a no-op (no duplicate entries). Writes via temp + rename so a
  * crashed write cannot corrupt the file.
@@ -366,23 +394,7 @@ export function recordTrust(server, filePath = defaultTrustStorePath()) {
   // and of the raw url are written — no argv element, env value, header value or
   // url credential ever reaches disk.
   entries.push({ ...trustKeyComponents(server), key, trustedAt: new Date().toISOString() })
-  const dir = dirname(filePath)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${filePath}.tmp`
-  writeFileSync(tmp, JSON.stringify({ trustedTuples: entries }, null, 2), { mode: 0o600 })
-  try { chmodSync(tmp, 0o600) } catch {}
-  // #4463: when renameSync throws (cross-device link, FS quota, ACL) the
-  // temp file would otherwise be left behind. Unlink it on the failure
-  // path and re-throw the ORIGINAL rename error so the caller sees the
-  // real failure rather than a cleanup-side ENOENT. The cleanup unlink
-  // swallows its own errors (the temp may already be gone if the rename
-  // partially succeeded or the FS removed it).
-  try {
-    renameSync(tmp, filePath)
-  } catch (err) {
-    try { unlinkSync(tmp) } catch {}
-    throw err
-  }
+  writeFileAtomic0600(filePath, JSON.stringify({ trustedTuples: entries }, null, 2))
   return loadTrustStore(filePath)
 }
 

@@ -36,6 +36,7 @@ import { isPrincipalClient, refusePrincipalHandler, sendPrincipalRefusal } from 
 // their maps are composed into settingsHandlers below.
 import { credentialHandlers } from './credential-handlers.js'
 import { skillsHandlers } from './skills-handlers.js'
+import { folderTrustHandlers } from './folder-trust-handlers.js'
 import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
@@ -1629,6 +1630,8 @@ export const settingsHandlers = {
   // Skills + credential handlers split into sibling modules (audit P2-4).
   ...skillsHandlers,
   ...credentialHandlers,
+  // Per-folder trust for project settings (primary-only; see folder-trust-handlers.js).
+  ...folderTrustHandlers,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

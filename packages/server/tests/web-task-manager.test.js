@@ -882,7 +882,7 @@ describe('WebTaskManager', () => {
       // this class goes through (see the class docblock).
       assert.match(callSite, /bin\s*=\s*this\._verifyBinary\(\)/,
         '_spawnRemoteTask must resolve its binary through the verified gate')
-      assert.match(callSite, /execFile\(bin, buildRemoteTaskArgs\(task\.prompt\)/,
+      assert.match(callSite, /execFile\(bin, buildRemoteTaskArgs\(task\.prompt, task\.cwd\)/,
         '_spawnRemoteTask must delegate its argv to buildRemoteTaskArgs and spawn the GATED bin, not a literal')
       assert.ok(!/execFile\(\s*'claude'/.test(callSite),
         '_spawnRemoteTask must never pass the bare literal \'claude\' to execFile')
