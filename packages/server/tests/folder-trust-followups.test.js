@@ -17,6 +17,7 @@ import {
   getFolderTrustStateIfCached,
   withInterprocessLock,
   reclaimStale,
+  isTransientLockError,
   setReclaimHookForTest,
   setLockWaitForTest,
   folderTrustStorePath,
@@ -37,6 +38,8 @@ import { broadcastFolderTrustState } from '../src/folder-trust-wire.js'
  */
 
 const HANG_WORKER = new URL('./fixtures/folder-trust-hang-worker.mjs', import.meta.url)
+// A timeout only a hung folder can reach: a worker that is slow to start (a loaded CI runner) still answers.
+const hangOnly = (ms) => (cwd) => (cwd.includes('hang') ? ms : 30_000)
 const CONTENDER = new URL('./fixtures/folder-trust-lock-contender.mjs', import.meta.url).pathname
 
 let root
@@ -162,7 +165,7 @@ describe('display results that are incomplete are cached for the same window', (
 
 describe('per-scan worker timeout', () => {
   it('a hung display scan times out without blocking the main thread or running in-thread; another folder still answers', async () => {
-    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 150 })
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(150) })
     const hung = project('hang-folder')
     const other = project('other-folder')
     const inThreadBefore = scanCountForTest()
@@ -188,7 +191,7 @@ describe('per-scan worker timeout', () => {
   })
 
   it('the timed-out result is cached for the window: no new worker scan for the same folder', async () => {
-    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(100) })
     const hung = project('hang-cached')
     await getFolderTrustStateForDisplay(hung)
     const count = workerScanCountForTest()
@@ -200,7 +203,7 @@ describe('per-scan worker timeout', () => {
 
 describe('stale worker events and stale in-flight entries', () => {
   it('a late exit of a timed-out worker does not drop its replacement or reject its request', async () => {
-    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 120 })
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(120) })
     const hung = project('hang-a')
     const other = project('ok-b')
     const inThreadBefore = scanCountForTest()
@@ -214,7 +217,7 @@ describe('stale worker events and stale in-flight entries', () => {
   })
 
   it('a finished scan does not delete the in-flight entry of a newer scan of the same folder', async () => {
-    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 150 })
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(150) })
     const dir = project('hang-inflight')
     const base = workerScanCountForTest()
     const old = getFolderTrustStateForDisplay(dir)
@@ -249,6 +252,18 @@ describe('launch scan budget is deterministic', () => {
     const dir = project('bounded')
     for (let i = 0; i < 20; i++) writeFileSync(join(dir, `f${i}.txt`), 'x')
     assert.equal(scanFolderSettings(dir, { maxNestedEntries: 10 }).hardIncomplete, true)
+  })
+})
+
+describe('store lock: transient Windows errors', () => {
+  it('EEXIST is contention everywhere; EPERM, EACCES and EBUSY only on Windows; other codes are faults', () => {
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+      assert.equal(isTransientLockError({ code }, 'win32'), true, code)
+      assert.equal(isTransientLockError({ code }, 'linux'), false, code)
+    }
+    assert.equal(isTransientLockError({ code: 'EEXIST' }, 'linux'), true)
+    assert.equal(isTransientLockError({ code: 'ENOSPC' }, 'win32'), false)
+    assert.equal(isTransientLockError(null, 'win32'), false)
   })
 })
 
@@ -371,9 +386,12 @@ describe('store lock: never two holders', () => {
       writeFileSync(lockPath(), `2147483646\nstale-${round}\n0\n`) // a holder that is gone
       const run = (mode) => new Promise((resolve, reject) => {
         const child = fork(CONTENDER, [JSON.stringify({ storePath: folderTrustStorePath(), criticalFile: critical, logFile: log, iterations, mode })], {
-          env: { ...process.env }, stdio: 'inherit',
+          env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         })
-        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`contender exited ${code}`))))
+        let stderr = ''
+        child.stderr.on('data', (d) => { stderr += d })
+        child.stdout.resume()
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`contender exited ${code}: ${stderr}`))))
         child.on('error', reject)
       })
       // Three contenders, and a fourth that takes the lock and dies holding it.
@@ -416,7 +434,7 @@ describe('replies after a trust change do not scan in this thread', () => {
 
 describe('a display scan that times out is not a loss of trust', () => {
   it('the untrusted frame it produces is sent, but does not announce folder_trust_lost', async () => {
-    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(100) })
     const hung = project('hang-trusted')
     const sessionManager = new EventEmitter()
     sessionManager.listSessions = () => [{ sessionId: 's1', cwd: hung }]

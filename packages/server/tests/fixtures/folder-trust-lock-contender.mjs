@@ -14,6 +14,20 @@ import { withInterprocessLock } from '../../src/folder-trust.js'
 const { storePath, criticalFile, logFile, iterations, mode } = JSON.parse(process.argv[2])
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// On Windows a file another process has open or is deleting fails transiently (EPERM, EBUSY,
+// EACCES) rather than with EEXIST/ENOENT: retry those, and let anything else surface.
+const TRANSIENT = new Set(['EPERM', 'EBUSY', 'EACCES'])
+async function retrying(fn) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return fn()
+    } catch (err) {
+      if (!TRANSIENT.has(err?.code) || attempt >= 200) throw err
+      await pause(5)
+    }
+  }
+}
+
 if (mode === 'die') {
   await withInterprocessLock(storePath, async () => {
     await pause(5)
@@ -24,13 +38,14 @@ if (mode === 'die') {
 for (let i = 0; i < Number(iterations); i += 1) {
   await withInterprocessLock(storePath, async () => {
     try {
-      writeFileSync(criticalFile, String(process.pid), { flag: 'wx' })
-    } catch {
-      appendFileSync(logFile, `OVERLAP ${process.pid} iteration ${i}\n`)
+      await retrying(() => writeFileSync(criticalFile, String(process.pid), { flag: 'wx' }))
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err
+      await retrying(() => appendFileSync(logFile, `OVERLAP ${process.pid} iteration ${i}\n`))
       return
     }
     await pause(1 + Math.floor(Math.random() * 4))
-    unlinkSync(criticalFile)
-    appendFileSync(logFile, `DONE ${process.pid}\n`)
+    await retrying(() => unlinkSync(criticalFile))
+    await retrying(() => appendFileSync(logFile, `DONE ${process.pid}\n`))
   })
 }

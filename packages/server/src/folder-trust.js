@@ -714,6 +714,25 @@ function lockIsStale(lockPath, content) {
   }
 }
 
+/**
+ * Remove a lock-protocol file we own. On Windows a reader that has it open makes the
+ * unlink fail transiently, and leaving our own file behind would hold everyone else off
+ * for as long as this process lives, so retry briefly. Gone already is success.
+ */
+function unlinkOwned(path, platform = process.platform) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      unlinkSync(path)
+      return true
+    } catch (err) {
+      if (err?.code === 'ENOENT') return true
+      if (!isTransientLockError(err, platform) || err?.code === 'EEXIST') return false
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+    }
+  }
+  return false
+}
+
 /** An unparsable `.reclaim` guard (its holder died before writing it) is abandoned after this long. */
 const RECLAIM_GUARD_UNPARSABLE_MS = 60_000
 
@@ -777,9 +796,7 @@ export function reclaimStale(lockPath, judged) {
       } catch { /* already gone */ }
     }
   } finally {
-    if (readLock(guard) === guardBody) {
-      try { unlinkSync(guard) } catch { /* nothing to do */ }
-    }
+    if (readLock(guard) === guardBody) unlinkOwned(guard)
   }
   return removed
 }
@@ -789,6 +806,16 @@ export function reclaimStale(lockPath, judged) {
  * The file holds `pid`, then a token unique to this holder; after the claim the token
  * is read back, and release removes the file only if it still holds that token.
  */
+/**
+ * On Windows, creating a file that another process is deleting, or has open, fails with
+ * EPERM / EACCES / EBUSY instead of EEXIST. That is contention, not a fault: the caller
+ * waits and retries within its deadline. Elsewhere those codes are real errors.
+ */
+export function isTransientLockError(err, platform = process.platform) {
+  if (err?.code === 'EEXIST') return true
+  return platform === 'win32' && (err?.code === 'EPERM' || err?.code === 'EACCES' || err?.code === 'EBUSY')
+}
+
 export async function withInterprocessLock(storePath, fn) {
   const lockPath = `${storePath}.lock`
   const dir = dirname(lockPath)
@@ -803,7 +830,7 @@ export async function withInterprocessLock(storePath, fn) {
       if (isOurs(readLock(lockPath))) break
       // The file is not what was just written: it is not ours to run under or to remove.
     } catch (err) {
-      if (err?.code !== 'EEXIST') throw err
+      if (!isTransientLockError(err)) throw err
       const content = readLock(lockPath)
       if (lockIsStale(lockPath, content) && reclaimStale(lockPath, content)) {
         // Progress was made; go round again, but never past the deadline.
@@ -817,9 +844,7 @@ export async function withInterprocessLock(storePath, fn) {
   try {
     return await fn()
   } finally {
-    if (isOurs(readLock(lockPath))) {
-      try { unlinkSync(lockPath) } catch { /* already gone */ }
-    }
+    if (isOurs(readLock(lockPath))) unlinkOwned(lockPath)
   }
 }
 
@@ -869,7 +894,7 @@ export const WORKER_SCAN_TIMEOUT_MS = 5000
 let workerUrl = new URL('./folder-trust-worker.js', import.meta.url)
 let workerTimeoutMs = WORKER_SCAN_TIMEOUT_MS
 let workerFactory = null
-/** Test seam: the worker script, the per-scan timeout, and a factory standing in for `new Worker`. No argument restores. */
+/** Test seam: the worker script, the per-scan timeout (a number, or a function of the folder), and a factory standing in for `new Worker`. No argument restores. */
 export function setWorkerForTest({ url, timeoutMs, factory } = {}) {
   workerUrl = url ?? new URL('./folder-trust-worker.js', import.meta.url)
   workerTimeoutMs = timeoutMs ?? WORKER_SCAN_TIMEOUT_MS
@@ -954,11 +979,12 @@ function pump(lane) {
   workerScans += 1
   rec.active = req
   req.id = nextId++
+  const timeoutMs = typeof workerTimeoutMs === 'function' ? workerTimeoutMs(req.cwd) : workerTimeoutMs
   req.timer = setTimeout(() => {
     // Only this worker is stopped; whatever is queued behind runs on a fresh one.
     rec.w.terminate().catch(() => {})
     retire(lane, rec, workerError('WORKER_TIMEOUT', 'scan timed out'))
-  }, workerTimeoutMs)
+  }, timeoutMs)
   rec.w.ref() // a scan in flight keeps the process alive until it answers
   rec.w.postMessage({ id: req.id, cwd: req.cwd, limits: req.limits })
 }

@@ -62,6 +62,7 @@ function projectWithMcp(prefix) {
   return dir
 }
 
+const hangOnly = (ms) => (cwd) => (cwd.includes('hang') ? ms : 30_000)
 const CRASH_WORKER = new URL('./fixtures/folder-trust-crash-worker.mjs', import.meta.url)
 const HANG_WORKER = new URL('./fixtures/folder-trust-hang-worker.mjs', import.meta.url)
 
@@ -149,7 +150,7 @@ describe('claude-setting-sources helper', () => {
     const dir = projectWithMcp('setting-sources-hang-')
     await trustReviewed(dir)
     try {
-      setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+      setWorkerForTest({ url: HANG_WORKER, timeoutMs: hangOnly(100) })
       const inThread = scanCountForTest()
       assert.equal(await projectSettingsAllowedAsync(dir), false, 'timeout fails closed')
       assert.equal(scanCountForTest(), inThread, 'and no in-thread scan was run instead')
