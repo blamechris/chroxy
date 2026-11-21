@@ -1,7 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeConfig } from './model/config.js'
-import { itemIds, sessionKey } from './model/keys.js'
+import { checkTickKey, itemIds, sessionKey, tickId } from './model/keys.js'
+import { foldRecord } from './model/derive.js'
+import { append } from './model/ledger.js'
+import { checkStep, createMonitor } from './helpers/invariants.js'
 import { DEFAULT_POLICY } from './model/policy.js'
 import { planConfig, restoreModel, run } from './model/reconciler.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
@@ -172,6 +175,48 @@ describe('events from a host that numbers them per session', () => {
     const ev = h.records('activity').filter((r) => r.body.basis === 'open_turn_event_after_report')
     assert.deepEqual(ev.map((r) => r.session.native_id).sort(), ['a', 'b'])
     assert.equal(h.conflicts().length, 0)
+  })
+})
+
+describe('a key that already holds a different record', () => {
+  it('a host that reuses an event id within one session for a different event: recorded as a conflict, not dropped', () => {
+    const h = createHarness({ config: { per_source: { chroxy: 15 } } })
+    const c = session(h, 'chroxy', 'c')
+    W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
+    const w = h.world.sessions[c.sk]
+    w.events.push({ id: '7', basis: 'open_turn_event_after_report', activity_at: T0 + MIN, ref: null })
+    h.tick('chroxy', T0 + 15 * MIN)
+    assert.equal(h.conflicts().length, 0, 'the same event seen again is skipped')
+    h.tick('chroxy', T0 + 30 * MIN)
+    assert.equal(h.conflicts().length, 0)
+    w.events.push({ id: '7', basis: 'turn_ended_after_report', activity_at: T0 + 35 * MIN, ref: null })
+    h.tick('chroxy', T0 + 45 * MIN)
+    assert.equal(h.conflicts().length, 1, 'a different event under the same key reaches append()')
+  })
+
+  it('a record of another kind planted under a tick check\'s key: the read is made and the collision recorded', () => {
+    const h = createHarness({ config: { per_source: { codex: 15 } } })
+    const x = session(h, 'codex', 'x')
+    W.author(h.world, x.sk, T0, { state: 'running', next: 'a' })
+    const at = T0 + 15 * MIN
+    const key = checkTickKey(tickId(h.ctx.ledger.ledgerId, 'codex', h.slotFor('codex', at)), x.s)
+    const planted = append(h.ctx.ledger, { kind: 'report', id: key, session: x.s, body: { planted: true } }, T0)
+    foldRecord(h.ctx.state, planted.record)
+    h.tick('codex', at)
+    assert.equal(h.conflicts().length, 1, 'the planted record is not mistaken for the check')
+  })
+})
+
+describe('relayed declarations stamped ahead of the clock', () => {
+  it('a relayed write stamped beyond the skew limit is unknown (relayed), not error, and the monitor agrees', () => {
+    const h = createHarness({ config: { per_source: { chroxy: 15 } } })
+    const c = session(h, 'chroxy', 'c')
+    W.relayedWrite(h.world, c.sk, T0 + 30 * MIN, 'running')
+    const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 100, surfaceBound: 100 })
+    h.tick('chroxy', T0 + 15 * MIN)
+    checkStep(mon, h)
+    const b = tickChecks(h, c.sk)[0].body
+    assert.deepEqual([b.outcome, b.freshness, b.freshness_reason], ['ok', 'unknown', 'relayed_declaration'])
   })
 })
 

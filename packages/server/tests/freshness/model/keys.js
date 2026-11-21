@@ -47,14 +47,15 @@ export function checkEmitKey(emitId, session) {
 }
 
 /**
- * The read numbers of the reads inside one investigation. The key table names
- * three; the fourth is the model's.
+ * The read numbers of the reads inside one investigation: 1 the re-read, 2 its
+ * one retry, 3 the read that confirms a session is gone; 4, the separate
+ * activity read, is the model's addition (README, key table).
  */
 export const READ_NO = Object.freeze({
   REREAD: 1,
   RETRY: 2,
   CONFIRM_GONE: 3,
-  // DESIGN-GAP: rung I1 on a source whose tick read carries no native state
+  // DESIGN-GAP: the activity read on a source whose tick read carries no native state
   // needs a separate activity read, and a recheck "that needs a read of its
   // own" makes one too, but `read_no` defines only 1..3. The model gives the
   // activity read number 4.

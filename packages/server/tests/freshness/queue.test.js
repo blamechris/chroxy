@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { makeConfig } from './model/config.js'
 import { itemIds, surfaceOrdinal as surfaceOrdinalLiteral } from './model/keys.js'
 import { planConfig, run } from './model/reconciler.js'
+import { deriveState } from './model/derive.js'
+import { append, createLedger } from './model/ledger.js'
 import { DEFAULT_POLICY, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { literalPreempts } from './helpers/variants.js'
@@ -110,7 +112,7 @@ describe('the single slot', () => {
     ticks(h, 'chroxy', T0, 5)
     // The transition table sends an expired item to the back of its class
     // (it is exhausted only when it next reaches the slot, not at the time
-    // limit itself; README, gaps).
+    // limit itself; README, DESIGN-GAP choices, queue.js).
     assert.deepEqual(steps(h, ia), ['queued', 'shown', 'reminded', 'reminded', 'expired'])
     assert.deepEqual(sent(h, ib), ['shown1'], 'the next item is shown when the first expires')
     ticks(h, 'chroxy', T0 + 5 * 15 * MIN, 12)
@@ -509,6 +511,27 @@ describe('origins and their closing evidence', () => {
       assert.equal(h.item(id).episode, 1)
       assert.equal(h.sendsFor(id).filter((s) => s.step === 'shown').length, 1)
     }
+  })
+})
+
+describe('the preemption link', () => {
+  function surfaceRecords(steps) {
+    const l = createLedger({ ledgerId: 'L' })
+    const z = { presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 }
+    steps.forEach(([item, episode, step, extra = {}], i) => {
+      append(l, { kind: 'surface', id: `r${i}`, body: { item_id: item, item_kind: 'owner_block', origin: 'declared', episode, step, phase: 'none', ...z, opened_by: `ref-${item}-${episode}`, ...extra } }, T0 + i * 1000)
+    })
+    return deriveState(l.records, DEFAULT_POLICY)
+  }
+
+  it('is cleared when the preemptor closes without being shown', () => {
+    const st = surfaceRecords([['a', 1, 'queued'], ['b', 1, 'queued'], ['a', 1, 'preempted', { preempted_by: 'b' }], ['b', 1, 'withdrawn']])
+    assert.equal(st.items.get('a').preemptedBy, null)
+  })
+
+  it('is cleared when the preempted item opens a new episode', () => {
+    const st = surfaceRecords([['a', 1, 'queued'], ['b', 1, 'queued'], ['a', 1, 'preempted', { preempted_by: 'b' }], ['a', 1, 'resolved'], ['a', 2, 'queued']])
+    assert.equal(st.items.get('a').preemptedBy, null)
   })
 })
 

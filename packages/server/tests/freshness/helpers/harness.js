@@ -22,7 +22,7 @@ export class Crash extends Error {}
  * operations. The operations already executed stay executed: appended records
  * are in the ledger and sends have happened.
  */
-export function runWithCrash(ctx, gen, { deliver, crashAfter, onSend, dropAppend }) {
+export function runWithCrash(ctx, gen, { deliver, crashAfter, onSend, dropAppend, rewriteAppend }) {
   let n = 0
   let res = gen.next()
   while (!res.done) {
@@ -33,7 +33,9 @@ export function runWithCrash(ctx, gen, { deliver, crashAfter, onSend, dropAppend
       // Test-only fault: the planner believes the record was written.
       reply = { status: 'appended', record: null }
     } else if (op.op === 'append') {
-      reply = append(ctx.ledger, op.record, op.at)
+      // Test-only fault: the planner's draft replaced by another.
+      const draft = rewriteAppend ? rewriteAppend(op.record) : op.record
+      reply = append(ctx.ledger, draft, op.at)
       if (reply.record) foldRecord(ctx.state, reply.record)
     } else {
       onSend(op.effect)
@@ -59,6 +61,8 @@ export function createHarness({ config: overrides = {}, policy = DEFAULT_POLICY,
     deliver: () => 'delivered',
     // Test-only fault injection: a predicate over draft records to drop.
     dropAppend: null,
+    // Test-only fault injection: a function replacing a draft record.
+    rewriteAppend: null,
     onSend(effect) {
       h.sends.push(effect)
     },
@@ -71,7 +75,7 @@ export function createHarness({ config: overrides = {}, policy = DEFAULT_POLICY,
       h.now = Math.max(h.now, at)
       const world = reads ? reads(adapter(h.world)) : adapter(h.world)
       const gen = planTick(h.ctx, { source, slotStart: slotStart ?? h.slotFor(source, at), now: at, world })
-      return runWithCrash(h.ctx, gen, { deliver: h.deliver, crashAfter, onSend: (e) => h.onSend(e), dropAppend: h.dropAppend })
+      return runWithCrash(h.ctx, gen, { deliver: h.deliver, crashAfter, onSend: (e) => h.onSend(e), dropAppend: h.dropAppend, rewriteAppend: h.rewriteAppend })
     },
     owner(itemId, intent, ackRef, { at = h.now, until = null, crashAfter = Infinity } = {}) {
       h.now = Math.max(h.now, at)

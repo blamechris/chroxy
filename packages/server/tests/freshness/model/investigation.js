@@ -192,45 +192,45 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     let rungBlocked = false
     if (caps.native_in_read) {
       native = nativeEvidence(s, null)
-      rungs.push({ rung: 'I1', outcome: native ? 'tick_read' : 'none' })
+      rungs.push({ rung: 'activity_read', outcome: native ? 'tick_read' : 'none' })
     } else if (caps.activity_read) {
       const r = yield* investigationRead(ctx, { invId, readNo: READ_NO.ACTIVITY, session, readFn: () => world.activity(session, now), now, tickId, readKind: 'activity' })
       readFailed = r.body.outcome === 'error'
       rungBlocked = r.body.outcome === 'blocked'
       native = r.native ? nativeEvidence(s, r.native) : null
-      rungs.push({ rung: 'I1', outcome: r.body.outcome })
+      rungs.push({ rung: 'activity_read', outcome: r.body.outcome })
     }
     pendingSeen = Boolean(native?.pending)
     classification = P.classifyRecheck({ native, readFailed, rungBlocked })
   } else {
-    // I0: the same adapter read, once more; then one retry of a failed read.
+    // The re-read: the same adapter read, once more; then one retry of a failed read.
     const i0 = yield* investigationRead(ctx, { invId, readNo: READ_NO.REREAD, session, readFn: () => world.reread(session, now), now, tickId })
-    rungs.push({ rung: 'I0', outcome: i0.body.outcome })
+    rungs.push({ rung: 're_read', outcome: i0.body.outcome })
     let failed = i0.body.outcome === 'error'
     let rungBlocked = i0.body.outcome === 'blocked'
     if (failed) {
       const retry = yield* investigationRead(ctx, { invId, readNo: READ_NO.RETRY, session, readFn: () => world.reread(session, now), now, tickId })
-      rungs.push({ rung: 'I0', outcome: retry.body.outcome, retry: true })
+      rungs.push({ rung: 're_read', outcome: retry.body.outcome, retry: true })
       failed = retry.body.outcome === 'error'
     }
     let confirmListed = null
     if (cand.trigger === 'dropped_from_list' && !cand.sourceLevel) {
       const c = yield* investigationRead(ctx, { invId, readNo: READ_NO.CONFIRM_GONE, session, readFn: () => world.reread(session, now), now, tickId })
       confirmListed = c.body.listed !== false
-      rungs.push({ rung: 'I0', outcome: confirmListed ? 'listed' : 'not_listed', confirm: true })
+      rungs.push({ rung: 'confirm_gone', outcome: confirmListed ? 'listed' : 'not_listed' })
     }
     let native = null
     if (!cand.sourceLevel && cand.trigger !== 'dropped_from_list') {
       if (caps.native_in_read) {
         native = nativeEvidence(s, i0.native)
-        rungs.push({ rung: 'I1', outcome: native ? 'read' : 'none' })
+        rungs.push({ rung: 'activity_read', outcome: native ? 'read' : 'none' })
       } else if (caps.activity_read) {
         const a = yield* investigationRead(ctx, { invId, readNo: READ_NO.ACTIVITY, session, readFn: () => world.activity(session, now), now, tickId, readKind: 'activity' })
         if (a.body.outcome === 'blocked') rungBlocked = true
         native = a.native ? nativeEvidence(s, a.native) : null
-        rungs.push({ rung: 'I1', outcome: a.body.outcome })
+        rungs.push({ rung: 'activity_read', outcome: a.body.outcome })
       } else {
-        rungs.push({ rung: 'I1', outcome: 'unavailable' })
+        rungs.push({ rung: 'activity_read', outcome: 'unavailable' })
       }
     }
     const latestRead = st.sessions.get(s.sk)?.latestRead
@@ -254,7 +254,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     }
     pendingSeen = Boolean(native?.available && native.pending)
     classification = P.classify(ev, cfg)
-    rungs.push({ rung: 'I3', outcome: classification })
+    rungs.push({ rung: 'classify', outcome: classification })
   }
   const surface = P.surfaceFor(classification, cand.kind === 'recheck' ? null : cand.cycle, { reportAgeMs }, cfg)
   // DESIGN-GAP (added field): which owner the session waits on, so that a

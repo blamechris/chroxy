@@ -415,7 +415,7 @@ export const DEFAULT_POLICY = Object.freeze({
     return now - event.activity_at <= config.investigation.activity_window_minutes * MIN_MS
   },
 
-  // A recheck runs rungs I1 and I3 only.
+  // A recheck runs only the activity read and the classification.
   classifyRecheck(ev) {
     if (ev.rungBlocked || ev.readFailed) return 'no_longer_observed'
     const n = ev.native

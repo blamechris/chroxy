@@ -72,7 +72,7 @@ payload is ignored; with a different payload it appends one
 | report | H(session, report time, fields hash) |
 | tick | H(tick id, phase); tick id = H(ledger, source, slot start) |
 | check by a tick | H(tick id, session) |
-| check inside an investigation | H(investigation id, read number) |
+| check inside an investigation | H(investigation id, read number): 1 the re-read, 2 its retry, 3 the gone confirmation, 4 a separate activity read |
 | activity seen at a read | H(check id, basis, ref) |
 | activity event | H(session, 'event', host event id), else H(session, basis, time) |
 | investigation | H(investigation id, phase); id = H(session, report, trigger, onset, cycle), or per tick for a recheck |
@@ -137,6 +137,15 @@ One item holds the slot at a time. Order: owner blocks with a deadline
 (earliest first), other owner blocks (prompts first), outages, attention
 items, seeds.
 
+### Evidence classes
+
+Each report and activity record names the class of its evidence: **E1**
+native-observed (busy state, prompts and events the host itself records,
+timed by the host); **E2** authored and host-timed (a status line the
+session wrote, timed by the host's record); **E5** relayed (written by
+someone other than the session, such as an API or hook write). E2 is the
+only class graded by age; E5 decides no state.
+
 ### Investigation
 
 Five level triggers, evaluated at each tick check: `stale_report` (an old
@@ -154,6 +163,13 @@ counts against the cycles, and a recheck that finds nothing starts a new
 onset. At most one investigation per session per tick. The cycle budget per
 tick covers first cycles before second, oldest onset first; a recheck that
 needs its own read draws on a separate budget.
+
+An investigation runs **rungs**, recorded by name in its close record:
+`re_read` (the same adapter read once more, and one retry if it failed),
+`confirm_gone` (a read confirming a dropped session is really gone),
+`activity_read` (native activity: from the tick's own read where the source
+carries it, else a separate read) and `classify`. A recheck runs only
+`activity_read` and `classify`.
 
 Classifications and their effect: `working_unreported` and
 `waiting_on_background` are rechecked (the second is surfaced once the report
@@ -173,7 +189,8 @@ FRESHNESS_SOAK=1 node --import ./tests/_setup.mjs --test tests/freshness/generat
 ```
 
 The default run uses fixed seeds and takes a few seconds. The soak runs
-4,600 longer sequences and takes a few minutes.
+4,000 sequences of the default length and 600 of 600 steps, and takes a few
+minutes.
 
 ## Reading a failure
 
@@ -209,10 +226,17 @@ ledger and the simulated world for inspection.
 | I7f | A stale, unexplained report is surfaced within a bound |
 | I7g | No session is rechecked as working while nothing is there |
 | I7h | Every investigation that opens closes in the same tick |
+| I7i | An investigation is opened only for a trigger the monitor also sees holding |
 | I8 | Freshness never improves for one report under one configuration |
 | I8b | Graded freshness equals the monitor's own computation |
-| I9 | A stale owner block is not surfaced a second time as an attention item |
-| I10 | A pending prompt or an authored owner block always has an open item |
+| I9 | An owner-block report is not surfaced a second time as an attention item, except in the three cases listed under Open |
+| I10 | By the end of each tick, the latest prompt pending at a live read has an open prompt item, and an authored owner-block report has an open owner-block item, unless that item already used the same opening reference |
+
+**Limits of the monitor.** It uses the model's own `isOwnerBlock` (for
+declared resolutions in I4b, and in I9 and I10) and the model-computed
+`block_fingerprint` (I6), so a defect in the default owner-block rule or in
+the fingerprint is invisible to those checks. For the source-level outage
+investigation, I7a uses the model's onset.
 
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
@@ -250,8 +274,10 @@ An attention item raised by a recheck opens on the onset of the cycle that
 led to it, so a dismissal holds. The investigation's undefined `remainder`
 field is replaced by the decision it led to.
 
-**queue.js.** The prompt origin is evaluated only at reads that carried
-native state. A seed is unclosable by evidence when its naming session's
+**queue.js.** An item that expires with no counted show left goes to the
+back of its class like any other, and is exhausted only when it next reaches
+the slot, not at the time limit itself. The prompt origin is evaluated only
+at reads that carried native state. A seed is unclosable by evidence when its naming session's
 source gives no working directory; "done" then withdraws it. "Next tick" for
 verification is the item's own source's next tick. Owner actions on an item
 that is not active do nothing. The deferral time is stored on the record.
@@ -281,8 +307,17 @@ that is not active do nothing. The deferral time is stored on the record.
 - `finished_unreported` is never surfaced, because the model links no work;
   I7f exempts exactly those sessions.
 
-**Open, not fixed.** An attention item is identified by session and report,
-so one raised because a session's own reads keep failing and one raised
-because its report went stale share one identity; the first absorbs the
-second, and when the report is an owner block the read-failure item sits
-beside the owner-block item.
+**Open, not fixed: places where the owner hears twice about one session.**
+An attention item is identified by session and report, and each of these
+puts one beside the session's still-open owner-block item. They are exempt
+from I9 by name; merging them is a rule for the specification's owner to
+choose, not the model.
+
+- `repeated_error`: the session's own reads keep failing. The item shares
+  its identity with a stale-report attention item for the same report, so
+  one absorbs the other.
+- `dropped_from_list` on a source that cannot confirm `gone`: two
+  inconclusive cycles surface it as attention. (DESIGN-GAP)
+- `dropped_from_list` where every confirming read found the session listed
+  again (a list that intermittently omits it): also two inconclusive
+  cycles. (DESIGN-GAP)

@@ -338,7 +338,7 @@ function seedSetup(rng, base) {
 
 /**
  * opts.fault: test-only hooks for proving structural checks can fail:
- *   { dropAppend(draft) -> bool, afterStep(h, i) }
+ *   { dropAppend(draft) -> bool, rewriteAppend(draft) -> draft, afterStep(h, i) }
  */
 export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe = true, config: baseConfig = GEN_CONFIG, fault = null } = {}) {
   const rng = mulberry32(seed)
@@ -354,6 +354,7 @@ export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe 
     surfaceBound: 2 * (perSource + 1) + 2,
   })
   if (fault?.dropAppend) h.dropAppend = fault.dropAppend
+  if (fault?.rewriteAppend) h.rewriteAppend = fault.rewriteAppend
   const events = []
   let i = 0
   try {

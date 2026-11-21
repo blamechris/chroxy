@@ -37,7 +37,7 @@ export const LITERAL = {
   },
   // The key table: only a send is looked up before it is made; a resumed step re-reads.
   reReadOnResume: { expect: 'I3a', policy: withPolicy({ reuseRecorded: () => null }) },
-  // 8: a stale owner block matches no row but `inconclusive`.
+  // A stale owner block matches no classification row but `inconclusive`.
   staleOwnerBlockInconclusive: {
     expect: 'I9',
     policy: withPolicy({
@@ -55,7 +55,7 @@ export const LITERAL = {
       },
     }),
   },
-  // 8: the recheck trigger lists only working_unreported and waiting_on_background.
+  // The recheck trigger lists only working_unreported and waiting_on_background.
   noRecheckAfterOwnerWait: {
     expect: 'I7f',
     policy: withPolicy({
@@ -172,6 +172,8 @@ export const MUTANTS = {
   I10: withPolicy({ mayOpenEpisode: (item, ref, origin) => (origin === 'prompt' ? false : DEFAULT_POLICY.mayOpenEpisode(item, ref, origin)) }),
   // Any open-turn event after the report counts as working, however old.
   'I7f.window': withPolicy({ withinActivityWindow: () => true }),
+  // A disagreement read wider than the rule: `running` with a turn in flight.
+  I7i: withPolicy({ disagreementStates: new Set(['idle', 'done', 'running']) }),
   I9: withPolicy({
     classify(ev, config) {
       return DEFAULT_POLICY.classify({ ...ev, ownerBlock: false }, config)

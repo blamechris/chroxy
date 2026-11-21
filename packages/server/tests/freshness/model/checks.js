@@ -197,7 +197,7 @@ export function* planRead(ctx, opts) {
   }
 
   // DESIGN-GAP: one read becomes several records (report, check, activity)
-  // and the rules give no atomicity rule (README, gaps). Written check-first, a crash
+  // and the rules give no atomicity rule (README, DESIGN-GAP choices). Written check-first, a crash
   // between the check and its activity records leaves a partial observation
   // that a resumed tick either keeps (if it reuses the check, the remaining
   // observations are lost) or collides with (if it re-reads, the activity

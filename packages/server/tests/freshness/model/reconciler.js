@@ -64,7 +64,7 @@ export function run(ctx, gen, { deliver = () => 'delivered' } = {}) {
   return { sends, value: res.value }
 }
 
-/** Plan a configuration record. The full values are stored (see the gap note). */
+/** Plan a configuration record. The full values are stored (the DESIGN-GAP note below). */
 export function* planConfig(ctx, { config, now }) {
   const st = ctx.state
   const configHash = H(config)
@@ -110,7 +110,7 @@ function trackedSessions(ctx, source, world) {
  * world: the caller's reads, all pure data access:
  *   list(source)            -> [{ session, scope }] or null when the source is unreadable
  *   read(session, now)      -> ReportRead (the tick's one bounded read)
- *   reread(session, now)    -> ReportRead (investigation I0 and its retry)
+ *   reread(session, now)    -> ReportRead (an investigation's re-read, its retry, the gone confirmation)
  *   activity(session, now)  -> ActivityRead (a separate native read)
  */
 export function* planTick(ctx, { source, slotStart, now, world }) {

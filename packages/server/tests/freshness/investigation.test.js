@@ -124,7 +124,7 @@ describe('classification', () => {
     const inv = invs(h, c.sk)[0]
     assert.equal(inv.classification, 'inconclusive')
     const close = h.records('investigation').find((r) => r.body.phase === 'close')
-    assert.ok(close.body.rungs.some((r) => r.rung === 'I0' && r.outcome === 'blocked'))
+    assert.ok(close.body.rungs.some((r) => r.rung === 're_read' && r.outcome === 'blocked'))
   })
 
   it('idle declared with a turn in flight in the same roster read opens native_disagreement; never on a source without native state', () => {

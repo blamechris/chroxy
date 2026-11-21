@@ -342,8 +342,10 @@ function foldSurface(state, r) {
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
-  // Once the preemptor is shown, the items it preempted no longer wait on it.
-  if (b.step === 'shown' && (b.phase === 'attempt' || !state.policy.attemptUsesOrdinal)) {
+  // Once the preemptor is shown, or closes without being shown, the items it
+  // preempted no longer wait on it.
+  const shown = b.step === 'shown' && (b.phase === 'attempt' || !state.policy.attemptUsesOrdinal)
+  if (shown || b.step === 'resolved' || b.step === 'withdrawn') {
     for (const other of state.items.values()) if (other.preemptedBy === b.item_id) other.preemptedBy = null
   }
 }
@@ -375,6 +377,7 @@ function applyStep(it, b, at, seq) {
       it.closable = b.closable !== false
       it.deferrals = 0
       it.seed = b.seed ?? null
+      it.preemptedBy = null
       break
     case 'shown':
       it.state = 'active'

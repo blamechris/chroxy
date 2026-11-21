@@ -7,7 +7,7 @@
  * with this account, or as a bound the account says was crossed. Ground truth
  * about sessions comes from the simulated world.
  *
- * Each failure carries an invariant id (I1a .. I10) so a mutation proof can
+ * Each failure carries an invariant id (I1a .. I10, with I7i) so a mutation proof can
  * assert WHICH invariant went red. The full list is in ../README.md.
  *
  * What the monitor derives for itself rather than reading from the model:
@@ -16,6 +16,11 @@
  * every resolution and withdrawal (I4b). It still reads from the model the
  * parsed report fields and, for the source-level outage investigation only,
  * the model's own onset.
+ *
+ * Limits: the monitor uses the model's own `isOwnerBlock` (for declared
+ * resolutions in I4b, and in I9 and I10) and the model-computed
+ * `block_fingerprint` (I6). A defect in the default owner-block rule or in
+ * the fingerprint is therefore invisible to those checks.
  */
 
 import { isOwnerBlock } from '../model/policy.js'
@@ -89,6 +94,7 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     prevTickOutcome: new Map(),
     ownerDone: new Set(),
     onsetTrigger: new Map(),
+    onsetConfirms: new Map(),
     stats: { records: 0, sends: 0, shows: 0, reminders: 0, returns: 0, investigations: 0, rechecks: 0, episodes: 0, resolved: 0, withdrawn: 0, exhausted: 0, crashes: 0 },
   }
 }
@@ -104,10 +110,13 @@ function ownBand(mon, b) {
   if (!cfg) return null
   const skew = cfg.max_source_skew_seconds * 1000
   if (b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
-  if (b.last_report_at - b.checked_at > skew) return 'error'
   const rep = b.report_id ? mon.reports.get(b.report_id) : null
+  // A relayed declaration is never graded by its time, so it is `unknown`
+  // even when that time is beyond the skew limit (the same order as the
+  // model's grading: its time is not a report time, so it is not skew).
+  if (rep && rep.evidence_class !== 'E2') return 'unknown'
+  if (b.last_report_at - b.checked_at > skew) return 'error'
   if (!rep) return null
-  if (rep.evidence_class !== 'E2') return 'unknown'
   const row = cfg.freshness[rep.state]
   if (!row) return 'unknown'
   const age = Math.max(0, b.checked_at - rep.last_report_at)
@@ -318,15 +327,21 @@ function onRecord(mon, h, r) {
             mon.onsetCycles.set(ok, set)
             if (set.size > 2) fail('I7a', `${set.size} cycles for one source-level onset`)
           } else {
-            const runs = mon.runs.get(sk) ?? {}
-            const run = runs[b.trigger] ?? (runs[b.trigger] = { cycles: 0, reportId: b.report_id })
-            mon.runs.set(sk, runs)
+            // I7i: an investigation is opened only for a trigger that this
+            // monitor also sees holding at that tick.
+            const run = mon.runs.get(sk)?.[b.trigger]
+            if (!run) fail('I7i', `an investigation was opened for ${b.trigger}, which the monitor does not see holding`)
             run.cycles += 1
             if (run.cycles > 2) fail('I7a', `${run.cycles} cycles of ${b.trigger} in one unbroken run of the trigger`)
           }
         }
       } else if (b.phase === 'close') {
         mon.openInv.delete(b.investigation_id)
+        if (b.trigger === 'dropped_from_list' && b.onset) {
+          const list = mon.onsetConfirms.get(b.onset) ?? []
+          for (const rg of b.rungs ?? []) if (rg.rung === 'confirm_gone') list.push(rg.outcome)
+          mon.onsetConfirms.set(b.onset, list)
+        }
         if (b.trigger === 'recheck' && b.classification === 'no_longer_observed' && sk) {
           const run = mon.runs.get(sk)?.stale_report
           if (run) run.cycles = 0
@@ -578,15 +593,25 @@ export function checkStep(mon, h, { complete = true } = {}) {
     const m = h.ctx.state.items.get(it.id)
     if (it.open !== Boolean(m?.open)) fail('I4c', `item open=${it.open} in the ledger account but open=${Boolean(m?.open)} in the model`)
   }
-  // I9: a stale owner-block report is not surfaced a second time as an
-  // attention item beside its own owner-block item. (An attention item raised
-  // because the session's reads keep failing is a different signal and is
-  // allowed; see README for the identity problem that leaves.)
+  // I9: an owner-block report is not surfaced a second time as an attention
+  // item beside its own owner-block item. Two cases are exempt, both places
+  // where the owner hears twice about one session (README, open):
+  //  - the attention item came from `repeated_error`: the session's own reads
+  //    keep failing, a different signal from its old line;
+  //  - DESIGN-GAP: it came from `dropped_from_list` on a source that cannot
+  //    confirm `gone`, so two inconclusive cycles surface it as attention;
+  //  - DESIGN-GAP: it came from `dropped_from_list` where every confirming
+  //    read found the session listed again (a list that intermittently omits
+  //    it), which is also two inconclusive cycles.
   for (const it of h.ctx.state.items.values()) {
     if (!it.open || it.origin !== 'attention' || !it.session) continue
-    if (mon.onsetTrigger.get(it.openedBy) !== 'stale_report') continue
+    const trigger = mon.onsetTrigger.get(it.openedBy)
+    if (trigger === 'repeated_error') continue
+    if (trigger === 'dropped_from_list' && !sourceCaps(mon.config, it.source).can_confirm_gone) continue
+    const confirms = mon.onsetConfirms.get(it.openedBy) ?? []
+    if (trigger === 'dropped_from_list' && confirms.length > 0 && confirms.every((c) => c === 'listed')) continue
     const d = h.ctx.state.items.get(itemIds.declared(it.session))
     const rep = it.reportId ? mon.reports.get(it.reportId) : null
-    if (d?.open && rep && isOwnerBlock(rep, mon.config)) fail('I9', `a stale owner-block report holds both an owner-block item and an attention item`)
+    if (d?.open && rep && isOwnerBlock(rep, mon.config)) fail('I9', `an owner-block report holds both an owner-block item and an attention item (${trigger})`)
   }
 }
