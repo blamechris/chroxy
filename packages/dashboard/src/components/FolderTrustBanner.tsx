@@ -23,6 +23,10 @@ import { useEffect, useState, type CSSProperties } from 'react'
 import { Modal } from './Modal'
 import type { FolderTrustEntry } from '../store/types'
 
+// The summary can be long (absolute paths, many servers and hooks). It scrolls
+// inside the dialog so the title, warning and buttons always stay on screen.
+const SUMMARY_SCROLL_STYLE: CSSProperties = { maxHeight: 'min(50vh, 420px)', overflowY: 'auto', overflowWrap: 'anywhere' }
+
 export interface FolderTrustBannerProps {
   entry: FolderTrustEntry | undefined
   /** A trust change for this session is in flight. */
@@ -214,7 +218,9 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
               </button>
             </p>
           )}
-          <SummaryList entry={shown} />
+          <div data-testid="folder-trust-summary-scroll" style={SUMMARY_SCROLL_STYLE}>
+            <SummaryList entry={shown} />
+          </div>
           {canTrust && !changed && <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>}
           {!canTrust && <p data-testid="folder-trust-readonly">This folder's settings cannot be trusted from here.</p>}
           {appliesFromText(shown.appliesFrom) && <p data-testid="folder-trust-applies">{appliesFromText(shown.appliesFrom)}</p>}

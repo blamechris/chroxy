@@ -213,3 +213,16 @@ describe('<FolderTrustBanner> nothing to show', () => {
     expect(container).toBeEmptyDOMElement()
   })
 })
+
+describe('FolderTrustBanner dialog layout', () => {
+  it('scrolls the summary inside the dialog so the buttons stay reachable', () => {
+    render(<FolderTrustBanner {...props()} />)
+    fireEvent.click(screen.getByTestId('folder-trust-review'))
+    const scroll = screen.getByTestId('folder-trust-summary-scroll')
+    expect(scroll.style.overflowY).toBe('auto')
+    expect(scroll.style.maxHeight).not.toBe('')
+    // The buttons are outside the scrolling area.
+    expect(within(scroll).queryByTestId('folder-trust-confirm')).toBeNull()
+    expect(screen.getByTestId('folder-trust-confirm')).toBeInTheDocument()
+  })
+})
