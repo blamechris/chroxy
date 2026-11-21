@@ -12,7 +12,7 @@ import { useReplayInProgress } from '../hooks/useReplayInProgress'
 
 const msg = (id: string): ChatViewMessage => ({ id, type: 'user_input', content: id, timestamp: 1 })
 
-function Harness({ sid, messages, phase = 'connected' }: { sid: string; messages: ChatViewMessage[]; phase?: string }) {
+function Harness({ sid, messages, phase = 'connected', showEmptyHint = true }: { sid: string; messages: ChatViewMessage[]; phase?: string; showEmptyHint?: boolean }) {
   const replaying = useReplayInProgress(sid)
   return (
     <ChatView
@@ -20,6 +20,7 @@ function Harness({ sid, messages, phase = 'connected' }: { sid: string; messages
       isStreaming={false}
       loading={phase !== 'connected'}
       replaying={replaying}
+      showEmptyHint={showEmptyHint}
       settleKey={`${sid}|${phase}`}
     />
   )
@@ -32,6 +33,13 @@ beforeEach(() => { vi.useFakeTimers(); resetReplayReconcile({ clearCursors: true
 afterEach(() => { cleanup(); resetReplayReconcile({ clearCursors: true }); vi.useRealTimers() })
 
 describe('first-run hint gating (#8231)', () => {
+  it('never shows without the showEmptyHint opt-in (System pane, transcript viewer)', () => {
+    render(<Harness sid="s1" messages={[]} showEmptyHint={false} />)
+    settle()
+    act(() => { vi.advanceTimersByTime(EMPTY_HINT_SETTLE_MS * 4) })
+    expect(hint()).toBeNull()
+  })
+
   it('an empty session with no replay frames shows the hint only after the settle window', () => {
     render(<Harness sid="s1" messages={[]} />)
     expect(hint()).toBeNull()
@@ -99,7 +107,7 @@ describe('first-run hint gating (#8231)', () => {
       // Records what ChatView committed for this render pass via a layout-time DOM read.
       return (
         <div ref={(el) => { if (el) seen.push(el.querySelector('[data-testid="chat-empty-hint"]') !== null) }}>
-          <ChatView messages={[]} isStreaming={false} settleKey={k} />
+          <ChatView messages={[]} isStreaming={false} settleKey={k} showEmptyHint />
         </div>
       )
     }

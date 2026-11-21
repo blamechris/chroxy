@@ -3272,6 +3272,7 @@ export function App() {
                         isBusy={busyProps.isBusy}
                         loading={connectionPhase !== 'connected'}
                         replaying={activeReplayInProgress}
+                        showEmptyHint
                         settleKey={`${activeSessionId ?? ''}|${connectionPhase}`}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
@@ -3324,6 +3325,7 @@ export function App() {
                         isBusy={busyProps.isBusy}
                         loading={connectionPhase !== 'connected'}
                         replaying={activeReplayInProgress}
+                        showEmptyHint
                         settleKey={`${activeSessionId ?? ''}|${connectionPhase}`}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}

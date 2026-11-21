@@ -184,6 +184,12 @@ export interface ChatViewProps {
    */
   replaying?: boolean
   /**
+   * #8231 — opt-in for the first-run hint. Only the main chat (which has an
+   * input box below it) passes this; the System pane and the read-only
+   * transcript viewer mount ChatView too and must never show it.
+   */
+  showEmptyHint?: boolean
+  /**
    * #8231 — identity of the (session, connection phase) the transcript belongs
    * to. Whenever it changes the hint is held back for `EMPTY_HINT_SETTLE_MS`
    * again: an EMPTY session may receive no replay frames at all, so the absence
@@ -653,7 +659,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
 /** #8231 — how long after a session/phase change an empty list is believed. */
 export const EMPTY_HINT_SETTLE_MS = 500
 
-function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, settleKey, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, showEmptyHint, settleKey, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // #8231 — settle window for the first-run hint: restarts whenever the
@@ -1518,7 +1524,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, settl
           {/* #8231 — first-run hint: one calm, non-interactive line for a session
               with nothing in it yet. Hidden while history is loading and the
               moment any row, streaming bubble or working indicator exists. */}
-          {messages.length === 0 && !loading && !replaying && settled && !isStreaming && !isBusy && (
+          {showEmptyHint && messages.length === 0 && !loading && !replaying && settled && !isStreaming && !isBusy && (
             <p className="chat-empty-hint" data-testid="chat-empty-hint">
               Nothing here yet. Type a message below to start; / opens commands.
             </p>
