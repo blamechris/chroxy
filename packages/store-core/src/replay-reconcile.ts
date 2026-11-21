@@ -173,6 +173,37 @@ const _historyCursors = new Map<string, number>()
  */
 const _replayWindowOpen = new Map<string, ReplayWindow>()
 
+// #8231 — a REACTIVE reading of "is a replay window open for this session?".
+// The window map above is module state, so a UI that wants to hold back an
+// "empty session" hint while history is still arriving cannot read it during
+// render and be told when it changes. Subscribers are notified on every open,
+// close, abandon (`resetReplayReconcile`) and drop (`dropReplaySessionState`),
+// which is every place the map's membership changes.
+const _replayWindowListeners = new Set<() => void>()
+// Called LAST in each mutator, once every map is consistent, and each listener
+// is isolated: this module is shared with the mobile app, and a throwing UI
+// listener must neither skip a later listener nor abort the cleanup around it.
+function notifyReplayWindowChange(): void {
+  for (const listener of [..._replayWindowListeners]) {
+    try {
+      listener()
+    } catch (err) {
+      console.warn('[replay-reconcile] replay-window listener threw (#8231):', err)
+    }
+  }
+}
+
+/** Subscribe to replay-window open/close changes. Returns the unsubscribe. */
+export function subscribeReplayWindows(listener: () => void): () => void {
+  _replayWindowListeners.add(listener)
+  return () => { _replayWindowListeners.delete(listener) }
+}
+
+/** Is a `history_replay_start` for this session still awaiting its `history_replay_end`? */
+export function isReplayInProgress(sessionId: string | null | undefined): boolean {
+  return !!sessionId && _replayWindowOpen.has(sessionId)
+}
+
 /**
  * The open replay window for one session: the refcount, plus the BASELINE
  * captured when it OPENED — where the deferred swap will cut.
@@ -816,6 +847,7 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   _rebuildBaseline.clear()
   // #7420 — an open window and its live-arrival ids are per-connection state
   // like the baseline, never a cursor: a fresh auth must not inherit either.
+  const hadOpenWindow = _replayWindowOpen.size > 0
   _replayWindowOpen.clear()
   _liveDuringReplay.clear()
   _sweepableLedger = null
@@ -834,6 +866,7 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
     _historyCursors.clear()
     _openStreams.clear()
   }
+  if (hadOpenWindow) notifyReplayWindowChange()
 }
 
 /**
@@ -957,6 +990,7 @@ export function reconcileReplayStart(
     if (!_rebuildBaseline.has(sessionId)) {
       _rebuildBaseline.set(sessionId, replayWindow.baseline)
     }
+    if (isOutermost) notifyReplayWindowChange()
     return { rebuildInProgress: true }
   }
   // Delta replay: append-only, and it contributes no baseline of its own. It
@@ -966,7 +1000,10 @@ export function reconcileReplayStart(
   // Since #7492 that rebuild can be one a nested full start installed under a
   // delta-opened window, so this stays keyed on "did I open the window", not on
   // "was the outermost replay a full one".
-  if (isOutermost) _rebuildBaseline.delete(sessionId)
+  if (isOutermost) {
+    _rebuildBaseline.delete(sessionId)
+    notifyReplayWindowChange()
+  }
   // Reports the session's rebuild state, not this replay's kind — a delta
   // nested inside a live full rebuild is still inside a rebuild.
   return { rebuildInProgress: isRebuildInProgress(sessionId) }
@@ -1650,6 +1687,7 @@ function closeReplayWindow(sessionId: string): void {
   const ids = _liveDuringReplay.get(sessionId)
   _liveDuringReplay.delete(sessionId)
   _sweepableLedger = ids && ids.size > 0 ? { sessionId, ids } : null
+  notifyReplayWindowChange()
 }
 
 /**
@@ -1696,13 +1734,14 @@ export function getLiveReplayLedgerSessionIds(): string[] {
 export function dropReplaySessionState(sessionId: string | null | undefined): void {
   if (!sessionId) return
   _rebuildBaseline.delete(sessionId)
-  _replayWindowOpen.delete(sessionId)
+  const hadWindow = _replayWindowOpen.delete(sessionId)
   _liveDuringReplay.delete(sessionId)
   _historyCursors.delete(sessionId)
   _openStreams.delete(sessionId)
   if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
   // #6808 — a parked checkpoint-restore notice is per-session state too.
   dropPendingRestoreNotice(sessionId)
+  if (hadWindow) notifyReplayWindowChange()
 }
 
 /** Was this prompt recorded as a live arrival during the current window? */

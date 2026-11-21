@@ -127,6 +127,8 @@ export {
   reconcileReplayStart,
   reconcileReplayEnd,
   isRebuildInProgress,
+  isReplayInProgress,
+  subscribeReplayWindows,
   replayDedupCache,
   // #7420 — the `history_replay_end` unanswered-prompt sweep, and the
   // live-arrival ledger that keeps it off an AskUserQuestion which raced the

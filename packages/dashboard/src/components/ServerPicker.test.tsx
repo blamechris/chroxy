@@ -210,6 +210,13 @@ describe('ServerPicker', () => {
     expect(mockSwitchServer).toHaveBeenCalledWith('srv_1')
   })
 
+  it('the add button reads "Add server" as visible text, not a bare glyph (#8231)', () => {
+    render(<ServerPicker />)
+    const btn = screen.getByTestId('server-add-btn')
+    expect(btn.textContent).toContain('Add server')
+    expect(btn.getAttribute('aria-label')).toBe('Add server')
+  })
+
   it('shows add form when clicking + button', () => {
     render(<ServerPicker />)
     fireEvent.click(screen.getByTestId('server-add-btn'))

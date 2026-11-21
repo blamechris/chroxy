@@ -21,6 +21,8 @@ import {
   noteReplayMessagesUpdate,
   getReplayAppendProvenance,
   MAX_REPLAY_APPEND_PROVENANCE,
+  isReplayInProgress,
+  subscribeReplayWindows,
 } from './replay-reconcile'
 import { stashPendingRestoreNotice, settlePendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 
@@ -2003,5 +2005,64 @@ describe('live-arrival ledger lifetime (#7456)', () => {
     noteLivePromptDuringReplay('s1', 'q2')
     reconcileReplayEnd('s1', [])
     expect(warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('reactive replay-window reading (#8231)', () => {
+  beforeEach(() => resetReplayReconcile({ clearCursors: true }))
+
+  it('notifies on open, close, abandon and drop, and reports per-session state', () => {
+    const calls: boolean[] = []
+    const off = subscribeReplayWindows(() => calls.push(isReplayInProgress('s1')))
+    reconcileReplayStart('s1', true, [])
+    expect(isReplayInProgress('s1')).toBe(true)
+    expect(isReplayInProgress('s2')).toBe(false)
+    reconcileReplayEnd('s1', [])
+    expect(isReplayInProgress('s1')).toBe(false)
+    reconcileReplayStart('s1', true, [])
+    resetReplayReconcile()
+    reconcileReplayStart('s1', true, [])
+    dropReplaySessionState('s1')
+    expect(calls).toEqual([true, false, true, false, true, false])
+    off()
+    reconcileReplayStart('s1', true, [])
+    expect(calls.length).toBe(6)
+  })
+
+  it('a nested start does not close the window until the last end', () => {
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', false, [])
+    reconcileReplayEnd('s1', [])
+    expect(isReplayInProgress('s1')).toBe(true)
+    reconcileReplayEnd('s1', [])
+    expect(isReplayInProgress('s1')).toBe(false)
+  })
+
+  it('a throwing listener neither skips a later listener nor aborts reconcile cleanup', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const later = vi.fn()
+    const offA = subscribeReplayWindows(() => { throw new Error('boom') })
+    const offB = subscribeReplayWindows(later)
+    try {
+      noteLivePromptDuringReplay('s1', 'q1')
+      reconcileReplayStart('s1', true, [])
+      expect(later).toHaveBeenCalledTimes(1)
+      noteLivePromptDuringReplay('s1', 'q2')
+      reconcileReplayEnd('s1', [])
+      expect(later).toHaveBeenCalledTimes(2)
+      // cleanup completed: window closed, ledger released to the sweep slot, rebuild over
+      expect(isReplayInProgress('s1')).toBe(false)
+      expect(isRebuildInProgress('s1')).toBe(false)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+      expect(getLiveReplayLedgerSessionIds().includes('s1')).toBe(false)
+      // a subsequent replay behaves normally
+      reconcileReplayStart('s1', true, [])
+      expect(isRebuildInProgress('s1')).toBe(true)
+      reconcileReplayEnd('s1', [])
+      expect(isRebuildInProgress('s1')).toBe(false)
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      offA(); offB(); warn.mockRestore()
+    }
   })
 })

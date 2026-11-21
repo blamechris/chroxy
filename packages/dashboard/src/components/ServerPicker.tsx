@@ -548,7 +548,7 @@ export function ServerPicker() {
             data-testid="server-add-btn"
             aria-label="Add server"
           >
-            <span aria-hidden="true">+</span>
+            <span aria-hidden="true">+</span> Add server
           </button>
         </div>
       </div>

@@ -169,6 +169,34 @@ export interface ChatViewProps {
    *  for the presence rail when a tool is mid-flight, so the rail reflects WHICH
    *  tool is running. undefined → the rail keeps its activity-state colour. */
   inFlightToolColor?: string
+  /**
+   * #8231 — true while the connection is not settled (connecting, reconnecting,
+   * restarting, down). An empty list then means "history has not arrived", not
+   * "nothing was said". Session switches are NOT covered here: the parent shows
+   * a skeleton instead of ChatView for those, and the replay that follows the
+   * switch is covered by `replaying` + `settleKey`.
+   */
+  loading?: boolean
+  /**
+   * #8231 — true between a `history_replay_start` and its `history_replay_end`
+   * for the active session. Messages stay `[]` for that whole window, so the
+   * first-run hint must not show in it.
+   */
+  replaying?: boolean
+  /**
+   * #8231 — opt-in for the first-run hint. Only the main chat (which has an
+   * input box below it) passes this; the System pane and the read-only
+   * transcript viewer mount ChatView too and must never show it.
+   */
+  showEmptyHint?: boolean
+  /**
+   * #8231 — identity of the (session, connection phase) the transcript belongs
+   * to. Whenever it changes the hint is held back for `EMPTY_HINT_SETTLE_MS`
+   * again: an EMPTY session may receive no replay frames at all, so the absence
+   * of a replay alone can never prove "nothing here", and a pure delay fails
+   * for long histories — the two are combined.
+   */
+  settleKey?: string
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
   /**
@@ -628,8 +656,29 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
+/** #8231 — how long after a session/phase change an empty list is believed. */
+export const EMPTY_HINT_SETTLE_MS = 500
+
+function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, showEmptyHint, settleKey, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // #8231 — settle window for the first-run hint: restarts whenever the
+  // (session, phase) identity changes, and is torn down on change/unmount.
+  // DERIVED from the key the timer last fired for, not reset in an effect: an
+  // effect-reset would leave `settled` true for the one render in which the key
+  // changed, painting the hint for a commit.
+  // Boxed so an undefined `settleKey` (no prop) can still settle.
+  const [settledFor, setSettledFor] = useState<{ key: string | undefined } | null>(null)
+  const settled = settledFor !== null && settledFor.key === settleKey
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledFor({ key: settleKey }), EMPTY_HINT_SETTLE_MS)
+    // Clearing on cleanup (not just on mismatch) means a round trip A -> B -> A
+    // inside the window cannot resurrect A's old settled state.
+    return () => {
+      clearTimeout(timer)
+      setSettledFor(null)
+    }
+  }, [settleKey])
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
   // ordered `messages` (queuedIds is an unordered Set). Only built when 2+ are
@@ -1471,6 +1520,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
               data-testid="chat-window-bottom-spacer"
               style={{ flex: '0 0 auto', height: range.bottomSpacer }}
             />
+          )}
+          {/* #8231 — first-run hint: one calm, non-interactive line for a session
+              with nothing in it yet. Hidden while history is loading and the
+              moment any row, streaming bubble or working indicator exists. */}
+          {showEmptyHint && messages.length === 0 && !loading && !replaying && settled && !isStreaming && !isBusy && (
+            <p className="chat-empty-hint" data-testid="chat-empty-hint">
+              Nothing here yet. Type a message below to start; / opens commands.
+            </p>
           )}
           {(isStreaming || isBusy) && <WorkingIndicator label={workingLabel} />}
         </div>

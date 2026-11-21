@@ -19,7 +19,7 @@ import {
   type CodexSandboxMode,
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
-import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { PROVIDER_LABELS, getProviderInfo } from '../lib/provider-labels'
 import { resolveEffectiveProvider } from '../lib/effective-provider'
 import type { SessionDefaultsNotice } from '../store/session-defaults'
 import { isImeComposing } from '../utils/ime'
@@ -1064,7 +1064,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   // Mirror the live detail via title= so desktop hover
                   // tooltips still work for users who don't navigate to
                   // the option. Mobile/touch users see the panel instead.
-                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : optionLabel
+                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : getProviderInfo(p.name).tooltip
                   return (
                     <option
                       key={p.name}
@@ -1135,17 +1135,29 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               subscription-vs-credit-pool copy. Suppressed when the selected
               provider is unready — the fix-hint panel below replaces it so the
               user isn't reading billing copy for a provider they can't launch. */}
-          {selectedProviderUnready ? null : (() => {
+          {(() => {
             const live = availableProviders.find(p => p.name === provider)?.auth
-            const text = live?.detail || providerBillingFallback(provider)
-            if (!text) return null
+            const text = selectedProviderUnready ? null : (live?.detail || providerBillingFallback(provider))
+            if (text) {
+              return (
+                <span
+                  className="provider-billing-hint"
+                  data-testid="provider-billing-hint"
+                  data-source={live?.source ?? 'static'}
+                >
+                  {text}
+                </span>
+              )
+            }
+            // #8231: one line saying what the chosen provider is, shown ONLY when
+            // no billing hint is (the live auth detail is the better, current
+            // statement and the static tooltip would duplicate or contradict it).
+            // The same text the option title= carries, but visible without
+            // hovering — a native <select> has no per-option description on
+            // touch or keyboard.
             return (
-              <span
-                className="provider-billing-hint"
-                data-testid="provider-billing-hint"
-                data-source={live?.source ?? 'static'}
-              >
-                {text}
+              <span className="provider-description" data-testid="provider-description">
+                {getProviderInfo(provider).tooltip}
               </span>
             )
           })()}
