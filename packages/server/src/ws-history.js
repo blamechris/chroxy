@@ -1575,12 +1575,17 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
 
   // Whether the session folder's project settings are loaded, so the banner
   // shows on a switch or a fresh subscribe and not only after the next turn.
-  try {
-    const trustMsg = buildFolderTrustStateMessage(sessionId, entry)
-    if (trustMsg) send(ws, trustMsg)
-  } catch (err) {
-    log.debug?.(`folder trust state failed: ${err?.message}`)
-  }
+  // Sent after the rest of this burst: the folder scan reads the disk, and nothing
+  // else in the burst waits on it.
+  const trustCwd = entry
+  setImmediate(() => {
+    try {
+      const trustMsg = buildFolderTrustStateMessage(sessionId, trustCwd, { cached: true })
+      if (trustMsg) send(ws, trustMsg)
+    } catch (err) {
+      log.debug?.(`folder trust state failed: ${err?.message}`)
+    }
+  })
 
   // #5731 T5 / #5623 / #5613: re-sync the session's primary owner so the
   // presence badge ("Observing" / "Take over" / driver name) doesn't go

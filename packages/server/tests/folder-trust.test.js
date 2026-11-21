@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync, existsSync, readdirSync, symlinkSync, realpathSync, chmodSync, utimesSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -12,6 +13,7 @@ import {
   loadFolderTrustRecords,
   folderTrustStorePath,
   invalidateFolderTrustCache,
+  readTrustedProjectSettings,
   MAX_SCANNED_FILES,
 } from '../src/folder-trust.js'
 import { projectSettingsAllowed, claudeSettingSources } from '../src/claude-setting-sources.js'
@@ -46,6 +48,9 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
   invalidateFolderTrustCache()
 })
+
+// trustFolder as the dashboard does it: bound to the digest of the state it reviewed.
+const trust = (dir) => trustFolder(dir, scanFolderSettings(dir).digest)
 
 const write = (path, content) => {
   mkdirSync(join(path, '..'), { recursive: true })
@@ -118,18 +123,47 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(scanFolderSettings(cwd).digest, before.digest)
   })
 
-  it('hashes a symlinked file by its link text and does not follow a symlinked directory', () => {
+  it('follows a symlinked file: the TARGET bytes are hashed, so editing the target revokes trust', async () => {
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     write(join(root, 'target.md'), 'v1')
     symlinkSync(join(root, 'target.md'), join(cwd, '.claude', 'agents', 'link.md'))
-    mkdirSync(join(root, 'elsewhere'))
-    write(join(root, 'elsewhere', 'x.md'), 'x')
-    symlinkSync(join(root, 'elsewhere'), join(cwd, '.claude', 'agents', 'dirlink'))
     const before = scanFolderSettings(cwd)
-    assert.equal(before.files.length, 2)
-    assert.equal(before.files.some((f) => f.path.includes('elsewhere')), false)
+    assert.equal(before.files.length, 1)
+    assert.equal(before.hardIncomplete, false)
+    assert.equal(before.summary.files[0].linkTarget, join(root, 'target.md'))
+    await trust(cwd)
+    assert.equal(isFolderTrusted(cwd), true)
     write(join(root, 'target.md'), 'v2')
-    assert.equal(scanFolderSettings(cwd).digest, before.digest, 'the target is not read')
+    assert.notEqual(scanFolderSettings(cwd).digest, before.digest)
+    assert.equal(isFolderTrusted(cwd), false)
+  })
+
+  it('walks a symlinked directory and covers the files in it', () => {
+    write(join(root, 'shared', 's', 'SKILL.md'), 'skill')
+    mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true })
+    symlinkSync(join(root, 'shared'), join(cwd, '.claude', 'skills', 'linked'))
+    const scan = scanFolderSettings(cwd)
+    assert.equal(scan.hardIncomplete, false)
+    assert.ok(scan.files.some((f) => f.path.endsWith(join('linked', 's', 'SKILL.md'))))
+    const before = scan.digest
+    write(join(root, 'shared', 's', 'SKILL.md'), 'changed')
+    assert.notEqual(scanFolderSettings(cwd).digest, before)
+  })
+
+  it('a dangling link, a link cycle and a link to a non-regular file are HARD (untrusted and untrustable)', async () => {
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    symlinkSync(join(root, 'nowhere.md'), join(cwd, '.claude', 'agents', 'dangling.md'))
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+    rmSync(join(cwd, '.claude', 'agents', 'dangling.md'))
+    symlinkSync(join(cwd, '.claude', 'agents'), join(cwd, '.claude', 'agents', 'loop'))
+    const cycle = scanFolderSettings(cwd)
+    assert.equal(cycle.hardIncomplete, true)
+    assert.ok(cycle.summary.warnings.some((w) => w.includes('symlink cycle')))
+    rmSync(join(cwd, '.claude', 'agents', 'loop'))
+    symlinkSync('/dev/null', join(cwd, '.claude', 'agents', 'dev.md'))
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+    assert.equal((await trust(cwd)).ok, false)
+    assert.equal(isFolderTrusted(cwd), false)
   })
 
   it('never throws: invalid JSON warns and the file still counts by its bytes', () => {
@@ -146,12 +180,142 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(scan.hasCommandBearingFiles, false)
   })
 
-  it('bounds the number of files and refuses to treat an over-bound folder as trustable', async () => {
+  it('too many files is HARD: untrusted and untrustable', async () => {
     for (let i = 0; i < MAX_SCANNED_FILES + 5; i++) write(join(cwd, '.claude', 'commands', `c${i}.md`), 'x')
     const scan = scanFolderSettings(cwd)
-    assert.equal(scan.truncated, true)
-    const result = await trustFolder(cwd)
+    assert.equal(scan.hardIncomplete, true)
+    const result = await trust(cwd)
     assert.equal(result.ok, false)
+    assert.equal(result.code, 'FOLDER_TRUST_UNTRUSTABLE')
+    assert.equal(isFolderTrusted(cwd), false)
+    assert.equal(projectSettingsAllowed(cwd), false)
+  })
+
+  it('a file over the per-file limit is HARD and never hashed by size/mtime', async () => {
+    write(join(cwd, '.claude', 'agents', 'big.md'), 'x'.repeat(2000))
+    const scan = scanFolderSettings(cwd, { maxFileBytes: 1000 })
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.untrustable)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('too large')))
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, false, 'under the real limit it is fine')
+  })
+
+  it('the total byte budget is HARD', () => {
+    for (let i = 0; i < 5; i++) write(join(cwd, '.claude', 'agents', `a${i}.md`), 'x'.repeat(400))
+    assert.equal(scanFolderSettings(cwd, { maxTotalBytes: 1000 }).hardIncomplete, true)
+  })
+
+  it('every file is hashed by content: same size and mtime, different bytes, different digest', () => {
+    const f = join(cwd, '.claude', 'agents', 'a.md')
+    write(f, 'aaaa')
+    const t = statSync(f).mtime
+    const before = scanFolderSettings(cwd).digest
+    write(f, 'bbbb')
+    utimesSync(f, t, t)
+    assert.notEqual(scanFolderSettings(cwd).digest, before)
+  })
+
+  it('a FIFO is HARD and the scan returns promptly (no hang)', { skip: process.platform === 'win32' }, async () => {
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    execFileSync('mkfifo', [join(cwd, '.claude', 'agents', 'pipe.md')])
+    const t0 = Date.now()
+    const scan = scanFolderSettings(cwd)
+    assert.ok(Date.now() - t0 < 2000)
+    assert.equal(scan.hardIncomplete, true)
+    assert.equal((await trust(cwd)).ok, false)
+    assert.equal(isFolderTrusted(cwd), false)
+  })
+
+  it('an unreadable directory (EACCES) is HARD', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+    write(join(cwd, '.claude', 'agents', 'a.md'), 'x')
+    mkdirSync(join(cwd, 'sub', 'locked'), { recursive: true })
+    chmodSync(join(cwd, 'sub', 'locked'), 0o000)
+    try {
+      assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+    } finally {
+      chmodSync(join(cwd, 'sub', 'locked'), 0o755)
+    }
+    mkdirSync(join(cwd, '.claude', 'skills', 'locked'), { recursive: true })
+    chmodSync(join(cwd, '.claude', 'skills', 'locked'), 0o000)
+    try {
+      assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+    } finally {
+      chmodSync(join(cwd, '.claude', 'skills', 'locked'), 0o755)
+    }
+  })
+
+  it('only ENOENT and ENOTDIR mean absent: a file where a directory should be is absent, not an error', () => {
+    write(join(cwd, '.claude'), 'a file named .claude')
+    const scan = scanFolderSettings(cwd)
+    assert.equal(scan.hardIncomplete, false)
+    assert.equal(scan.hasCommandBearingFiles, false)
+  })
+
+  it('a skill, agent or command that exists only in an ANCESTOR is listed and untrusted', async () => {
+    write(join(root, 'home', '.claude', 'skills-ancestor-marker'), 'x') // not a content dir: ignored
+    write(join(root, '.claude', 'skills', 'up', 'SKILL.md'), 'ancestor skill')
+    write(join(root, 'home', '.claude', 'agents', 'unused.md'), 'x')
+    const scan = scanFolderSettings(cwd)
+    assert.ok(scan.files.some((f) => f.path === join(root, '.claude', 'skills', 'up', 'SKILL.md')))
+    assert.equal(scan.hasCommandBearingFiles, true)
+    assert.equal(isFolderTrusted(cwd), false)
+    assert.equal(projectSettingsAllowed(cwd), false)
+    // `home/.claude` is the user's own Claude dir here: its agents are not the project's.
+    assert.equal(scan.files.some((f) => f.path.includes(join('home', '.claude'))), false)
+  })
+
+  it('a nested .claude/skills below the folder is covered: changing it alters the digest', () => {
+    write(join(cwd, 'packages', 'a', '.claude', 'skills', 's', 'SKILL.md'), 'one')
+    const scan = scanFolderSettings(cwd)
+    assert.ok(scan.files.some((f) => f.path.includes(join('packages', 'a', '.claude'))))
+    write(join(cwd, 'packages', 'a', '.claude', 'skills', 's', 'SKILL.md'), 'two')
+    assert.notEqual(scanFolderSettings(cwd).digest, scan.digest)
+  })
+
+  it('the nested search skips .git and node_modules', () => {
+    write(join(cwd, 'node_modules', 'pkg', '.claude', 'skills', 's', 'SKILL.md'), 'x')
+    write(join(cwd, '.git', 'x', '.claude', 'skills', 's', 'SKILL.md'), 'x')
+    assert.equal(scanFolderSettings(cwd).hasCommandBearingFiles, false)
+  })
+
+  it('hitting the nested-walk cap is SOFT: still trustable, with a visible warning', async () => {
+    for (let i = 0; i < 6; i++) mkdirSync(join(cwd, `d${i}`), { recursive: true })
+    const scan = scanFolderSettings(cwd, { maxNestedDirs: 3 })
+    assert.equal(scan.hardIncomplete, false)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('Folder tree too large to scan fully: nested skills beyond 3 directories are not covered')))
+  })
+
+  it('the nested search also stops after too many directory entries (SOFT)', () => {
+    for (let i = 0; i < 20; i++) write(join(cwd, 'many', `f${i}.txt`), 'x')
+    const scan = scanFolderSettings(cwd, { maxNestedEntries: 10 })
+    assert.equal(scan.hardIncomplete, false)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('Folder tree too large to scan fully')))
+  })
+
+  it('in a linked git worktree the MAIN checkout skills are included', () => {
+    const main = join(root, 'main')
+    write(join(main, '.claude', 'skills', 'm', 'SKILL.md'), 'main skill')
+    mkdirSync(join(main, '.git', 'worktrees', 'wt'), { recursive: true })
+    const wt = join(root, 'wt')
+    mkdirSync(wt, { recursive: true })
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'wt')}\n`)
+    const scan = scanFolderSettings(wt)
+    assert.ok(scan.files.some((f) => f.path === join(main, '.claude', 'skills', 'm', 'SKILL.md')))
+    // a normal repository (".git" is a directory) does not reach for anything else
+    const plain = join(root, 'plain')
+    mkdirSync(join(plain, '.git'), { recursive: true })
+    assert.equal(scanFolderSettings(plain).hasCommandBearingFiles, false)
+  })
+
+})
+
+describe('trust does not survive an incomplete scan', () => {
+  it('trusted, then something unreadable appears that the digest cannot see: untrusted', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    await trust(cwd)
+    assert.equal(isFolderTrusted(cwd), true)
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    symlinkSync(join(root, 'nowhere.md'), join(cwd, '.claude', 'agents', 'dangling.md'))
     assert.equal(isFolderTrusted(cwd), false)
     assert.equal(projectSettingsAllowed(cwd), false)
   })
@@ -180,7 +344,8 @@ describe('scanFolderSettings: summary', () => {
     assert.deepEqual(summary.hooks.map((h) => [h.event, h.commands]), [['PreToolUse', ['echo hi']]])
     assert.equal(summary.statusLine[0].command, 'status.sh')
     assert.equal(summary.enabledPlugins[0].plugin, 'p@m')
-    assert.deepEqual(summary.files, [join(cwd, '.claude', 'settings.json'), join(cwd, '.mcp.json')])
+    assert.deepEqual(summary.files.map((f) => f.path), [join(cwd, '.claude', 'settings.json'), join(cwd, '.mcp.json')])
+    assert.equal(summary.hasCommandBearingFiles, true)
   })
 })
 
@@ -188,7 +353,7 @@ describe('trust store', () => {
   it('trusts the current digest and an edit makes the folder untrusted again', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: { a: { command: 'x' } } })
     assert.equal(isFolderTrusted(cwd), false)
-    const result = await trustFolder(cwd)
+    const result = await trust(cwd)
     assert.equal(result.ok, true)
     assert.equal(result.status, 'trusted')
     assert.equal(isFolderTrusted(cwd), true)
@@ -199,7 +364,7 @@ describe('trust store', () => {
 
   it('a record for another path or another digest does not match', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     const other = join(root, 'home', 'other')
     write(join(other, '.mcp.json'), { mcpServers: {} })
     assert.equal(isFolderTrusted(other), false)
@@ -210,25 +375,79 @@ describe('trust store', () => {
 
   it('writes the store with mode 0600 as atomic temp+rename (no temp left behind)', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     const path = folderTrustStorePath()
     assert.equal(statSync(path).mode & 0o777, 0o600)
-    assert.equal(existsSync(`${path}.tmp`), false)
+    assert.deepEqual(readdirSync(join(path, '..')).filter((n) => n.endsWith('.tmp') || n.endsWith('.lock')), [])
     const stored = JSON.parse(readFileSync(path, 'utf8'))
     assert.equal(stored.records.length, 1)
-    assert.equal(stored.records[0].v, 1)
+    assert.equal(stored.records[0].v, 2)
+    assert.deepEqual(stored.records[0].files.map((f) => f.path), [join(realpathSync(cwd), '.mcp.json')])
+    assert.match(stored.records[0].files[0].sha256, /^[0-9a-f]{64}$/)
     assert.equal(stored.records[0].path, realpathSync(cwd))
     assert.match(stored.records[0].digest, /^[0-9a-f]{64}$/)
     assert.ok(stored.records[0].trustedAt)
   })
 
-  it('drops records of an unknown version at load', async () => {
+  it('drops v1 and unknown-version records at load, and records whose digest does not match their files', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     const [record] = loadFolderTrustRecords()
-    writeFileSync(folderTrustStorePath(), JSON.stringify({ records: [{ ...record, v: 2 }] }))
-    assert.deepEqual(loadFolderTrustRecords(), [])
+    for (const bad of [{ ...record, v: 1 }, { ...record, v: 3 }, { ...record, digest: 'f'.repeat(64) }]) {
+      writeFileSync(folderTrustStorePath(), JSON.stringify({ records: [bad] }))
+      assert.deepEqual(loadFolderTrustRecords(), [])
+      assert.equal(isFolderTrusted(cwd), false)
+    }
+    const v1 = { v: 1, path: record.path, digest: record.digest, trustedAt: record.trustedAt }
+    writeFileSync(folderTrustStorePath(), JSON.stringify({ records: [v1] }))
+    assert.equal(isFolderTrusted(cwd), false, 'no shim: a v1 record does not grant trust')
+  })
+
+  it('trust is bound to the reviewed digest: a stale or missing digest is refused', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    const reviewed = scanFolderSettings(cwd).digest
+    write(join(cwd, '.mcp.json'), { mcpServers: { swapped: { command: 'x' } } })
+    const stale = await trustFolder(cwd, reviewed)
+    assert.equal(stale.ok, false)
+    assert.equal(stale.code, 'FOLDER_TRUST_CHANGED')
     assert.equal(isFolderTrusted(cwd), false)
+    assert.equal((await trustFolder(cwd, undefined)).ok, false)
+    assert.equal((await trustFolder(cwd, scanFolderSettings(cwd).digest)).ok, true)
+  })
+
+  it('writes with unique temp names, and a second process lock does not corrupt the store', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    const other = join(root, 'home', 'other')
+    write(join(other, '.mcp.json'), { mcpServers: {} })
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    // A lock left by a dead process is recovered.
+    writeFileSync(`${folderTrustStorePath()}.lock`, `2147483646\n${Date.now()}\n`)
+    await Promise.all([trust(cwd), trust(other)])
+    assert.equal(loadFolderTrustRecords().length, 2)
+    assert.equal(existsSync(`${folderTrustStorePath()}.lock`), false)
+  })
+
+  it('a live lock held by another process makes the writer wait', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const lock = `${folderTrustStorePath()}.lock`
+    writeFileSync(lock, `${process.pid}\n${Date.now()}\n`) // this process is alive
+    let done = false
+    const p = trust(cwd).then((r) => { done = true; return r })
+    await new Promise((r) => setTimeout(r, 150))
+    assert.equal(done, false, 'blocked while the lock is held')
+    rmSync(lock)
+    assert.equal((await p).ok, true)
+  })
+
+  it('a folder with nothing command-bearing can be trusted; adding any such file then untrusts it', async () => {
+    write(join(cwd, 'CLAUDE.md'), '# notes')
+    assert.equal(projectSettingsAllowed(cwd), false, 'untrusted until trusted')
+    const result = await trust(cwd)
+    assert.equal(result.ok, true)
+    assert.equal(projectSettingsAllowed(cwd), true)
+    write(join(cwd, '.claude', 'agents', 'new.md'), 'x')
+    assert.equal(projectSettingsAllowed(cwd), false)
   })
 
   it('a corrupt store reads as no trust', () => {
@@ -240,7 +459,7 @@ describe('trust store', () => {
 
   it('untrustFolder removes the record', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     const result = await untrustFolder(cwd)
     assert.equal(result.status, 'untrusted')
     assert.equal(isFolderTrusted(cwd), false)
@@ -251,7 +470,7 @@ describe('trust store', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     assert.equal(isFolderTrusted(cwd, { cached: true }), false) // primes the cache with the v1 digest
     write(join(cwd, '.mcp.json'), { mcpServers: { edited: { command: 'x' } } }) // the cached scan is now stale
-    await trustFolder(cwd) // records the CURRENT (v2) digest
+    await trust(cwd) // records the CURRENT (v2) digest
     assert.equal(isFolderTrusted(cwd, { cached: true }), true, 'a stale cached scan must not outlive the trust change')
     await untrustFolder(cwd)
     assert.equal(isFolderTrusted(cwd, { cached: true }), false)
@@ -259,7 +478,7 @@ describe('trust store', () => {
 
   it('the cache is only used when asked for', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     assert.equal(isFolderTrusted(cwd, { cached: true }), true)
     write(join(cwd, '.mcp.json'), { mcpServers: { x: { command: 'new' } } })
     assert.equal(isFolderTrusted(cwd), false, 'an uncached check sees the edit')
@@ -269,16 +488,17 @@ describe('trust store', () => {
     const other = join(root, 'home', 'other')
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     write(join(other, '.mcp.json'), { mcpServers: {} })
-    await Promise.all([trustFolder(cwd), trustFolder(other)])
+    await Promise.all([trust(cwd), trust(other)])
     assert.equal(loadFolderTrustRecords().length, 2)
   })
 })
 
 describe('projectSettingsAllowed', () => {
-  it('none: a folder with no command-bearing files loads project settings', () => {
+  it('no implicit loading: a folder with no command-bearing files is untrusted too', () => {
     write(join(cwd, 'CLAUDE.md'), '# hi')
-    assert.equal(projectSettingsAllowed(cwd), true)
-    assert.deepEqual(claudeSettingSources(cwd), ['user', 'project'])
+    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.deepEqual(claudeSettingSources(cwd), ['user'])
+    assert.equal(scanFolderSettings(cwd).summary.hasCommandBearingFiles, false)
   })
 
   it('untrusted: false, and only the user scope', () => {
@@ -289,7 +509,7 @@ describe('projectSettingsAllowed', () => {
 
   it('trusted: true and ["user","project"], never local', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     assert.equal(projectSettingsAllowed(cwd), true)
     assert.deepEqual(claudeSettingSources(cwd), ['user', 'project'])
     assert.equal(claudeSettingSources(cwd).includes('local'), false)
@@ -297,7 +517,7 @@ describe('projectSettingsAllowed', () => {
 
   it('a trusted folder whose .mcp.json changes is no longer allowed', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    await trustFolder(cwd)
+    await trust(cwd)
     write(join(cwd, '.mcp.json'), { mcpServers: { n: { command: 'new' } } })
     assert.equal(projectSettingsAllowed(cwd), false)
   })
@@ -306,5 +526,49 @@ describe('projectSettingsAllowed', () => {
     assert.equal(projectSettingsAllowed(undefined), false)
     assert.equal(projectSettingsAllowed(''), false)
     assert.deepEqual(claudeSettingSources(undefined), ['user'])
+  })
+})
+
+describe('summary bounds', () => {
+  it('says how many items are not shown and when long values were shortened', () => {
+    const servers = {}
+    for (let i = 0; i < 60; i++) servers[`s${i}`] = { command: 'x'.repeat(i === 0 ? 700 : 1) }
+    write(join(cwd, '.mcp.json'), { mcpServers: servers })
+    const { summary } = scanFolderSettings(cwd)
+    assert.equal(summary.mcpServers.length, 50)
+    assert.ok(summary.warnings.includes('10 more MCP servers not shown'))
+    assert.ok(summary.warnings.some((w) => w.includes('shortened')))
+  })
+
+  it('a config file too large to parse is still covered by the digest', () => {
+    write(join(cwd, '.mcp.json'), `{"mcpServers":{},"pad":"${'x'.repeat(300 * 1024)}"}`)
+    const scan = scanFolderSettings(cwd)
+    assert.equal(scan.hardIncomplete, false)
+    assert.equal(scan.files.length, 1)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('too large to summarize')))
+  })
+})
+
+describe('readTrustedProjectSettings', () => {
+  const settings = (command) => ({ statusLine: { type: 'command', command } })
+
+  it('returns the file only when trusted and the bytes match the record', async () => {
+    const f = join(cwd, '.claude', 'settings.json')
+    write(f, settings('a.sh'))
+    assert.equal(readTrustedProjectSettings(cwd), null, 'untrusted')
+    await trust(cwd)
+    assert.equal(JSON.parse(readTrustedProjectSettings(cwd)).statusLine.command, 'a.sh')
+    write(f, settings('b.sh'))
+    assert.equal(readTrustedProjectSettings(cwd), null, 'edited after trust')
+    await untrustFolder(cwd)
+    write(f, settings('a.sh'))
+    assert.equal(readTrustedProjectSettings(cwd), null, 'untrusted again')
+  })
+
+  it('returns null when the file was not part of what was trusted', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    await trust(cwd)
+    write(join(cwd, '.claude', 'settings.json'), settings('late.sh'))
+    assert.equal(readTrustedProjectSettings(cwd), null)
   })
 })

@@ -11,7 +11,7 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { recordTimerArms, withParentClaudeSessionEnv, assertParentMarkersStripped } from './test-helpers.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
-import { trustFolder } from '../src/folder-trust.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
@@ -1495,7 +1495,7 @@ describe('ClaudeTuiSession', () => {
 
     it('spawns with --setting-sources user,project once the folder is trusted, and the settings file then enables .mcp.json servers', async () => {
       const cwd = projectWithMcp()
-      await trustFolder(cwd)
+      await trustReviewed(cwd)
       session = new ClaudeTuiSession({ cwd, port: portCounter++, skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._sessionId = SESSION_ID
       session._conversationPersisted = () => true
@@ -1511,6 +1511,29 @@ describe('ClaudeTuiSession', () => {
       assert.equal(realArgs[i + 1], 'user,project')
       const settings = JSON.parse(readFileSync(session._settingsPath, 'utf8'))
       assert.equal(settings.enableAllProjectMcpServers, true)
+    })
+
+    it('an untrusted spawn is user-only and its settings file has no enableAllProjectMcpServers, even after a trusted one wrote it', async () => {
+      const cwd = projectWithMcp()
+      await trustReviewed(cwd)
+      session = new ClaudeTuiSession({ cwd, port: portCounter++, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sessionId = SESSION_ID
+      session._conversationPersisted = () => true
+      session._sinkDir = fakeHome
+      session._buildCombinedSkillsPrefix = () => ''
+      session.on('error', () => {})
+      session._ptyModOverride = { spawn: () => { throw new Error('captured-and-bail') } }
+      session._settingsPath = session._writeHookSettings({ permissionsEnabled: false })
+      await session._spawnPty(false)
+      assert.equal(JSON.parse(readFileSync(session._settingsPath, 'utf8')).enableAllProjectMcpServers, true)
+      // The owner stops trusting; the next spawn decides again and both pieces follow it.
+      const { untrustFolder } = await import('../src/folder-trust.js')
+      await untrustFolder(cwd)
+      let realArgs = null
+      session._ptyModOverride = { spawn: (_cmd, args) => { realArgs = args; throw new Error('captured-and-bail') } }
+      await session._spawnPty(false)
+      assert.equal(realArgs[realArgs.indexOf('--setting-sources') + 1], 'user')
+      assert.equal('enableAllProjectMcpServers' in JSON.parse(readFileSync(session._settingsPath, 'utf8')), false)
     })
 
     it('does not write enableAllProjectMcpServers for an untrusted folder', () => {

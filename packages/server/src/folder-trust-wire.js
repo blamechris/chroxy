@@ -37,12 +37,13 @@ export function folderTrustAppliesFrom(provider) {
 export function buildFolderTrustStateMessage(sessionId, entry, opts) {
   const cwd = entry?.cwd ?? entry?.session?.cwd
   if (typeof cwd !== 'string' || cwd === '') return null
-  const { status, summary } = getFolderTrustState(cwd, opts)
+  const { status, summary, digest } = getFolderTrustState(cwd, opts)
   return {
     type: 'folder_trust_state',
     sessionId,
     status,
-    ...(summary ? { summary } : {}),
+    summary,
+    digest,
     appliesFrom: folderTrustAppliesFrom(entry.provider),
   }
 }

@@ -16,7 +16,8 @@ import { defaultRunOneShot } from '../src/summarize-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { WebTaskManager, buildRemoteTaskArgs } from '../src/web-task-manager.js'
 import { StatusLineManager, statusLineSettingsPaths } from '../src/statusline.js'
-import { trustFolder, invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 import { writeHookSettings } from '../src/claude-tui-session.js'
 import { isFlooredTarget } from '../src/permission-floor.js'
 
@@ -73,7 +74,7 @@ describe('claude-setting-sources helper', () => {
 
   it('a trusted folder gets user and project, never local', async () => {
     const dir = projectWithMcp('setting-sources-helper-trusted-')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.deepEqual(claudeSettingSources(dir), ['user', 'project'])
     assert.deepEqual(claudeSettingSourcesArgs(dir), ['--setting-sources', 'user,project'])
   })
@@ -106,7 +107,7 @@ describe('SDK session options', () => {
 
   it('passes user and project for a trusted folder', async () => {
     const dir = projectWithMcp('setting-sources-sdk-trusted-')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.deepEqual(await settingSourcesFor(dir), ['user', 'project'])
   })
 })
@@ -126,7 +127,7 @@ describe('CLI session argv', () => {
 
   it('buildClaudeCliArgs carries user,project for a trusted folder', async () => {
     const dir = projectWithMcp('setting-sources-cli-trusted-')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.equal(sourcesOf(buildClaudeCliArgs({ ...base, cwd: dir })), 'user,project')
   })
 
@@ -147,7 +148,7 @@ describe('CLI session argv', () => {
   it('CliSession.start passes the session cwd: user for an untrusted folder, user,project for a trusted one', async () => {
     const dir = projectWithMcp('setting-sources-cli-start-')
     assert.equal(sourcesOf(await startedArgs(dir)), 'user')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.equal(sourcesOf(await startedArgs(dir)), 'user,project')
   })
 
@@ -178,7 +179,7 @@ describe('web task argv', () => {
 
   it('buildRemoteTaskArgs carries user,project for a trusted folder', async () => {
     const dir = projectWithMcp('setting-sources-web-trusted-')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.deepEqual(buildRemoteTaskArgs('do it', dir), ['--setting-sources', 'user,project', '--remote', '--', 'do it'])
   })
 
@@ -227,7 +228,7 @@ describe('web task argv', () => {
 
   it('teleport launch passes user,project once the folder is trusted', { skip }, async () => {
     const { shim, argvPath, dir } = recordingShim()
-    await trustFolder(dir)
+    await trustReviewed(dir)
     const manager = managerFor(shim, dir)
     try {
       manager._tasks.set('t1', { taskId: 't1', cwd: dir })
@@ -260,31 +261,13 @@ describe('status line settings sources', () => {
     ])
   })
 
-  it('statusLineSettingsPaths puts the project file first for a trusted folder', async () => {
+  it('statusLineSettingsPaths never lists the folder file: it goes through the verified reader', async () => {
     const dir = projectWithMcp('setting-sources-sl-trusted-')
-    await trustFolder(dir)
+    await trustReviewed(dir)
     assert.deepEqual(statusLineSettingsPaths(dir, '/home/u/.claude'), [
-      join(dir, '.claude', 'settings.json'),
       '/home/u/.claude/project-settings.json',
       '/home/u/.claude/settings.json',
     ])
-  })
-
-  it('statusLineSettingsPaths includes the project file when the folder has no command-bearing files', () => {
-    const dir = tmp('setting-sources-sl-none-')
-    assert.equal(statusLineSettingsPaths(dir, '/home/u/.claude')[0], join(dir, '.claude', 'settings.json'))
-  })
-
-  it('reads and runs the project statusLine once the folder is trusted', async () => {
-    const cwd = tmp('setting-sources-statusline-trusted-')
-    const claudeDir = tmp('setting-sources-statusline-trusted-home-')
-    mkdirSync(join(cwd, '.claude'))
-    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }))
-    const mgr = new StatusLineManager({ claudeDir })
-    assert.equal(await mgr.resolveConfig(cwd), null, 'untrusted: the project file is not read')
-    await trustFolder(cwd)
-    const fresh = new StatusLineManager({ claudeDir })
-    assert.equal((await fresh.resolveConfig(cwd)).command, 'project.sh')
   })
 
   it('does not read or run a statusLine from the session working directory', async () => {

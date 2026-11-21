@@ -71,7 +71,7 @@ import {
 } from './background-shells.js'
 import { normalizeClaudeTuiToolResponse } from './claude-tui-tool-response.js'
 import { scrubTerminalText } from './claude-tui/diagnostic-tail.js'
-import { claudeSettingSourcesValue, projectSettingsAllowed } from './claude-setting-sources.js'
+import { claudeSettingSourcesValueFor, projectSettingsAllowed } from './claude-setting-sources.js'
 // #5559 — PTY-write / paste-throttle layer + interactive-form driver carved out
 // into focused modules. The empirically-pinned helpers, constants and methods
 // are moved byte-identically; the *Mixin classes carry the write/form methods,
@@ -620,6 +620,8 @@ export class ClaudeTuiSession extends BaseSession {
     this._sinkBaseCompromiseWarnLoggedMs = 0  // throttle the compromised-base error log
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
+    // What the settings file at `_settingsPath` was written under (project settings allowed or not).
+    this._settingsProjectAllowed = false
     // #4013: sidecar file containing the current permission mode. The
     // hook script re-reads it on every tool call so setPermissionMode()
     // can take effect without restarting the PTY (which would lose the
@@ -3732,6 +3734,9 @@ export class ClaudeTuiSession extends BaseSession {
       this._beginNativeRouteVerification()
     }
     const cwdReal = realpathSync(this.cwd)
+    // The ONE project-settings decision for this spawn: it picks `--setting-sources`
+    // and whether the per-session settings file enables `.mcp.json` servers.
+    const projectAllowed = projectSettingsAllowed(cwdReal)
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary
     // #8038: the binary-gate step gets its OWN try, split out from the nonce /
@@ -3760,11 +3765,16 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
       if (nativeRouteNonce) {
-        this._settingsPath = this._writeHookSettings({ permissionsEnabled, nativeRouteNonce })
+        this._settingsPath = this._writeHookSettings({ permissionsEnabled, nativeRouteNonce, projectAllowed })
       }
     } catch (err) {
       this._blockNativeRouteVerification(err)
       throw err
+    }
+    // The settings file written at start (or by a previous spawn) carries the
+    // decision it was written under; rewrite it when this spawn decided otherwise.
+    if (this._settingsProjectAllowed !== projectAllowed && this._sinkDir && !nativeRouteNonce) {
+      this._settingsPath = this._writeHookSettings({ permissionsEnabled, projectAllowed })
     }
     try {
       await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
@@ -3914,7 +3924,7 @@ export class ClaudeTuiSession extends BaseSession {
       : ['--session-id', this._sessionId]
     args.push(
       '--settings', this._settingsPath,
-      '--setting-sources', claudeSettingSourcesValue(cwdReal),
+      '--setting-sources', claudeSettingSourcesValueFor(projectAllowed),
       // Claude Code 2.1.186 added a "Claude in Chrome extension detected"
       // first-run prompt that interactively blocks the TUI (1/2/Enter/Esc) when
       // the browser extension is installed. chroxy's PTY driver can't dismiss
@@ -6556,12 +6566,15 @@ export class ClaudeTuiSession extends BaseSession {
    * summaries from the API, which is what puts readable text in the transcript's
    * `thinking` blocks (without it the block carries only its signature).
    */
-  _writeHookSettings({ permissionsEnabled, nativeRouteNonce = null }) {
+  _writeHookSettings({ permissionsEnabled, nativeRouteNonce = null, projectAllowed = false }) {
+    // The spawn's ONE project-settings decision is passed in (see _spawnPty), so the
+    // settings file and `--setting-sources` can never disagree.
+    this._settingsProjectAllowed = projectAllowed
     return writeHookSettings(this._sinkDir, {
       permissionsEnabled,
       ...(nativeRouteNonce ? { nativeRouteNonce } : {}),
       thinkingSummaries: this._thinkingEnabled,
-      enableAllProjectMcpServers: projectSettingsAllowed(this.cwd),
+      enableAllProjectMcpServers: projectAllowed,
     })
   }
 

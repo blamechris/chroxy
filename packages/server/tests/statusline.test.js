@@ -17,6 +17,9 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { mkdirSync } from 'node:fs'
+import { trustReviewed } from './helpers/trust-folder.js'
+import { untrustFolder, invalidateFolderTrustCache } from '../src/folder-trust.js'
 
 import {
   parseStatusLineConfig,
@@ -547,4 +550,89 @@ test('defaultBuildEnv strips an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECR
     if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
     else process.env.CHROXY_HOOK_SECRET = prevSecret
   }
+})
+
+
+// ---------------------------------------------------------------------------
+// The project statusLine EXECUTES only bytes the owner trusted. These go through
+// run() (the execution path), on one long-lived manager, never through a cache.
+// ---------------------------------------------------------------------------
+
+async function withProjectFolder(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'statusline-trust-'))
+  const saved = { c: process.env.CHROXY_CONFIG_DIR, k: process.env.CLAUDE_CONFIG_DIR }
+  process.env.CHROXY_CONFIG_DIR = join(root, 'chroxy')
+  process.env.CLAUDE_CONFIG_DIR = join(root, 'user-claude')
+  mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
+  invalidateFolderTrustCache()
+  const cwd = join(root, 'proj')
+  mkdirSync(join(cwd, '.claude'), { recursive: true })
+  const spawned = []
+  const mgr = new StatusLineManager({
+    claudeDir: process.env.CLAUDE_CONFIG_DIR,
+    spawnFn: (file, args) => {
+      spawned.push(args.join(' '))
+      const child = makeFakeChild()
+      process.nextTick(() => { child.exitCode = 0; child.emit('exit', 0, null) })
+      return child
+    },
+    buildEnv: () => ({}),
+  })
+  const setCommand = (command) => writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command } }))
+  try {
+    await fn({ cwd, mgr, spawned, setCommand })
+  } finally {
+    for (const [k, v] of [['CHROXY_CONFIG_DIR', saved.c], ['CLAUDE_CONFIG_DIR', saved.k]]) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    invalidateFolderTrustCache()
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('run: an empty folder (cached), then a statusLine added within 2 s, does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    rmSync(join(cwd, '.claude'), { recursive: true })
+    assert.equal((await mgr.run({ cwd })).active, false) // primes every cache
+    mkdirSync(join(cwd, '.claude'))
+    setCommand('evil.sh')
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.deepEqual(spawned, [])
+  })
+})
+
+test('run: trusted and unchanged runs the project command', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    const out = await mgr.run({ cwd })
+    assert.equal(out.active, true)
+    assert.equal(spawned.length, 1)
+    assert.ok(spawned[0].includes('proj.sh'))
+  })
+})
+
+test('run: trusted, then the command is edited, does not run the edited command', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    await mgr.run({ cwd })
+    setCommand('edited.sh')
+    const out = await mgr.run({ cwd })
+    assert.equal(out.active, false)
+    assert.equal(spawned.length, 1)
+    assert.equal(spawned.some((a) => a.includes('edited.sh')), false)
+  })
+})
+
+test('run: trusted, then untrusted on the same manager, does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    assert.equal((await mgr.run({ cwd })).active, true)
+    await untrustFolder(cwd)
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.equal(spawned.length, 1)
+  })
 })

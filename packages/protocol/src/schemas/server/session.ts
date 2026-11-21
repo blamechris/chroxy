@@ -128,15 +128,20 @@ export const ServerMcpServersSchema = z.object({
 
 /**
  * Whether a session folder's project settings (`.mcp.json`, `.claude/settings.json`,
- * agents, skills, commands) are loaded. `none`: the folder has no command-bearing
- * files. `untrusted`: they exist and are not loaded. `trusted`: the owner approved
- * their current contents. `summary` (display only; environment values are never
- * included) accompanies `untrusted` and `trusted`. `appliesFrom` says when a change
- * reaches the running session: `next_turn` (claude-sdk), `restart` (claude-cli,
- * claude-tui and their docker variants) or `n/a` (a provider that does not run claude).
+ * project `CLAUDE.md`, skills, agents, commands) are loaded. Nothing loads without
+ * an owner decision: `untrusted` is the starting state of every folder, `trusted`
+ * means the owner approved the folder's current files. `summary` (display only;
+ * environment values are never included) says what would run: its
+ * `hasCommandBearingFiles` is false for a folder with nothing command-bearing, and
+ * `untrustable` is true when the folder could not be reviewed completely (it cannot
+ * be trusted). `digest` identifies the reviewed snapshot and is sent back by
+ * `trust_folder`; both are removed for a session-bound client. `appliesFrom` says when
+ * a change reaches the running session: `next_turn` (claude-sdk), `restart`
+ * (claude-cli, claude-tui and their docker variants) or `n/a` (a provider that does
+ * not run claude).
  */
 export const FolderTrustSummarySchema = z.object({
-  files: z.array(z.string()),
+  files: z.array(z.object({ path: z.string(), linkTarget: z.string().optional() })),
   mcpServers: z.array(z.object({
     file: z.string(),
     name: z.string(),
@@ -151,13 +156,16 @@ export const FolderTrustSummarySchema = z.object({
   enabledPlugins: z.array(z.object({ file: z.string(), plugin: z.string() })),
   counts: z.object({ agents: z.number(), skills: z.number(), commands: z.number() }),
   warnings: z.array(z.string()),
+  hasCommandBearingFiles: z.boolean(),
+  untrustable: z.boolean(),
 })
 
 export const ServerFolderTrustStateSchema = z.object({
   type: z.literal('folder_trust_state'),
   sessionId: z.string(),
-  status: z.enum(['trusted', 'untrusted', 'none']),
+  status: z.enum(['trusted', 'untrusted']),
   summary: FolderTrustSummarySchema.optional(),
+  digest: z.string().optional(),
   appliesFrom: z.enum(['next_turn', 'restart', 'n/a']),
 })
 
@@ -166,7 +174,7 @@ export const ServerFolderTrustResultSchema = z.object({
   type: z.literal('folder_trust_result'),
   sessionId: z.string(),
   ok: z.boolean(),
-  status: z.enum(['trusted', 'untrusted', 'none']),
+  status: z.enum(['trusted', 'untrusted']),
   error: z.string().optional(),
   requestId: z.string().optional(),
 })

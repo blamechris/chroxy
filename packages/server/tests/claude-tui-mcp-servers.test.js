@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
-import { trustFolder } from '../src/folder-trust.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 
 /**
  * #6820 — MCP visibility parity for the claude-tui provider.
@@ -79,7 +79,7 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
     session._emitConfiguredMcpServers()
     assert.deepEqual(events[0], { servers: [{ name: 'globalfs', status: 'configured' }] })
 
-    await trustFolder(cwd)
+    await trustReviewed(cwd)
     session._emitConfiguredMcpServers()
 
     // Trusted: the project file is loaded, so its server is listed (Project scope

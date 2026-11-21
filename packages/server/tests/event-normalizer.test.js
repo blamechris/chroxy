@@ -484,10 +484,10 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[1].msg.model, 'sonnet')
       assert.equal(result.messages[2].msg.type, 'permission_mode_changed')
       assert.equal(result.messages[2].msg.mode, 'approve')
-      // The folder does not exist, so it has no command-bearing files.
+      // Every folder starts untrusted, one that does not exist included.
       assert.equal(result.messages[3].msg.type, 'folder_trust_state')
       assert.equal(result.messages[3].msg.sessionId, 'sess-1')
-      assert.equal(result.messages[3].msg.status, 'none')
+      assert.equal(result.messages[3].msg.status, 'untrusted')
     })
 
     it('emits claude_ready + model_changed + permission_mode_changed + folder_trust_state in legacy-cli mode', () => {

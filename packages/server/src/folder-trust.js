@@ -1,30 +1,44 @@
 /**
  * Per-folder trust for project settings.
  *
- * A session folder may carry files that make a Claude process run commands:
- * `.mcp.json` (MCP servers), `.claude/settings.json` (hooks, status line,
- * plugins) and `.claude/{agents,skills,commands}/`. By default none of them is
- * loaded (claude-setting-sources.js). The owner can mark a folder trusted; the
- * decision is tied to the exact bytes of those files, so any change makes the
- * folder untrusted again until it is approved again.
+ * Project settings (`.mcp.json`, `.claude/settings.json`, project `CLAUDE.md`,
+ * skills, agents, commands) load ONLY after an explicit owner trust decision for
+ * the folder. Every folder starts untrusted, including one with no command-bearing
+ * files (trusting it loads its CLAUDE.md and other project settings).
  *
- * Files considered (absolute paths, all hashed):
- *   - `.mcp.json` and `.claude/settings.json` in the folder's real path and in
- *     every ancestor directory up to the filesystem root. An ancestor's
- *     `.claude/settings.json` is skipped when that `.claude` directory is the
- *     user's own Claude config directory (its settings are the user scope, not
- *     the project's).
- *   - every regular file under `.claude/agents`, `.claude/skills` and
- *     `.claude/commands` of the folder itself (bounded; symlinks are not
- *     followed and a symlink is hashed by its link text).
- *   - NEVER `.claude/settings.local.json`: the local scope is never loaded.
+ * Trusting a folder trusts that repository: while trusted, Claude Code loads the
+ * folder's project settings and picks up changes made to them during the session.
+ * chroxy re-checks the files listed below at each launch and when the status line
+ * runs, and asks again when they change. The digest is a change detector, not a
+ * containment boundary.
  *
- * Nothing here throws. An unreadable or invalid file becomes a warning and still
- * counts in the digest by its raw bytes (or by its error code when unreadable),
- * so it cannot hide a change.
+ * Files considered (absolute paths, hashed by full content):
+ *   - `.mcp.json` and `.claude/settings.json` in the folder's real path and in every
+ *     ancestor directory up to the filesystem root.
+ *   - `.claude/skills`, `.claude/agents` and `.claude/commands` in the folder and in
+ *     every ancestor (recursively, following symlinks with cycle detection).
+ *   - the same three directories in every nested `.claude` below the folder, found
+ *     by a bounded walk that skips `.git` and `node_modules`.
+ *   - in a linked git worktree, the main checkout's `.claude/skills`.
+ *   - the user's own Claude config directory is skipped wherever it appears, and
+ *     `.claude/settings.local.json` is never considered.
+ *
+ * Two kinds of incompleteness:
+ *   - HARD: any error other than "absent", a non-regular file, a file over the
+ *     per-file limit, or the total byte or file budget exceeded. The folder is
+ *     untrusted and cannot be trusted.
+ *   - SOFT: the nested walk hit its cap. The folder stays trustable and the summary
+ *     says what is not covered.
+ *
+ * Each file is read ONCE, with `O_NONBLOCK` and an `fstat` that rejects anything
+ * that is not a regular file; the digest and the summary come from the same bytes.
+ * Nothing here throws.
  */
 
-import { existsSync, lstatSync, openSync, closeSync, readSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
+import {
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readdirSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { configPath } from './config-dir.js'
@@ -35,147 +49,214 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('folder-trust')
 
-/** On-disk record version. Unknown versions are dropped at load. */
-export const FOLDER_TRUST_RECORD_VERSION = 1
+/** On-disk record version. Other versions are dropped at load. */
+export const FOLDER_TRUST_RECORD_VERSION = 2
 
-/** Most files hashed under agents/skills/commands before the scan reports `truncated`. */
+/** Most files hashed in content directories before the scan is HARD-incomplete. */
 export const MAX_SCANNED_FILES = 2000
-/** Largest file hashed by content; a larger one is hashed by size and mtime. */
-export const MAX_FILE_BYTES = 4 * 1024 * 1024
-/** Total bytes read across one scan before the rest is hashed by size and mtime. */
-export const MAX_TOTAL_BYTES = 64 * 1024 * 1024
-/** Deepest directory level walked under agents/skills/commands. */
+/** Largest single file; a larger one is HARD. */
+export const MAX_FILE_BYTES = 2 * 1024 * 1024
+/** Total bytes read across one scan; more is HARD. */
+export const MAX_TOTAL_BYTES = 32 * 1024 * 1024
+/** Deepest directory level inside a content directory (HARD beyond). */
 export const MAX_DEPTH = 16
-/** Cache lifetime of a scan, for callers that poll (the status line). */
+/** Directories visited by the nested `.claude` search before it stops (SOFT). */
+export const MAX_NESTED_DIRS = 5000
+/** Directory entries examined by the nested search before it stops (SOFT). */
+export const MAX_NESTED_ENTRIES = 50_000
+/** Deepest level of the nested search (SOFT beyond). */
+export const MAX_NESTED_DEPTH = 12
+/** Largest config file parsed for the summary; a larger one is still hashed. */
+export const MAX_PARSE_BYTES = 256 * 1024
+/** Cache lifetime of a scan, for display-only callers. */
 export const SCAN_CACHE_TTL_MS = 2000
 
 const CONTENT_DIRS = ['agents', 'skills', 'commands']
 const MAX_SUMMARY_ITEMS = 50
 const MAX_SUMMARY_STRING = 500
+const SKIP_NESTED = new Set(['.git', 'node_modules', '.claude'])
+const O_READ = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0)
 
 export function folderTrustStorePath() {
   return configPath('folder-trust.json')
 }
 
-function clip(value) {
-  const s = typeof value === 'string' ? value : String(value ?? '')
-  return s.length > MAX_SUMMARY_STRING ? `${s.slice(0, MAX_SUMMARY_STRING)}…` : s
-}
+const isAbsentCode = (err) => err?.code === 'ENOENT' || err?.code === 'ENOTDIR'
+const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
 
-function realPathOf(cwd) {
+function realPathOf(p) {
   try {
-    return realpathSync.native(cwd)
+    return realpathSync.native(p)
   } catch {
-    return resolve(cwd)
+    return resolve(p)
   }
 }
 
-function lstatOrNull(p) {
+/** Mutable state of one scan. */
+function newScan(limits = {}) {
+  return {
+    limits: {
+      maxFileBytes: limits.maxFileBytes ?? MAX_FILE_BYTES,
+      maxTotalBytes: limits.maxTotalBytes ?? MAX_TOTAL_BYTES,
+      maxFiles: limits.maxFiles ?? MAX_SCANNED_FILES,
+      maxNestedDirs: limits.maxNestedDirs ?? MAX_NESTED_DIRS,
+      maxNestedEntries: limits.maxNestedEntries ?? MAX_NESTED_ENTRIES,
+    },
+    bytes: 0,
+    files: 0,
+    hard: [],
+    soft: [],
+    entries: [],
+    config: [],
+    links: [],
+    counts: { agents: 0, skills: 0, commands: 0 },
+  }
+}
+
+const hard = (scan, path, why) => { scan.hard.push(`${path}: ${why}`) }
+
+/**
+ * Read one file, once. Returns null when absent, `{ hard: true }` when it could not
+ * be read faithfully (already recorded), else `{ buf, linkTarget }`. A symlink is
+ * followed: the bytes are the target's.
+ */
+function readRegular(path, scan) {
+  let lst
   try {
-    return lstatSync(p)
-  } catch {
-    return null
+    lst = lstatSync(path)
+  } catch (err) {
+    if (isAbsentCode(err)) return null
+    hard(scan, path, err?.code || 'unreadable')
+    return { hard: true }
   }
-}
-
-/** Hash a regular file's bytes in chunks, charging `budget`. */
-function hashFile(path, size, budget, mtimeMs) {
-  if (size > MAX_FILE_BYTES || budget.bytes + size > MAX_TOTAL_BYTES) {
-    return sha256Hex(`stat:${size}:${mtimeMs}`)
+  let linkTarget
+  if (lst.isSymbolicLink()) {
+    try { linkTarget = realpathSync.native(path) } catch { linkTarget = undefined }
   }
-  const hash = createHash('sha256')
-  const buf = Buffer.allocUnsafe(64 * 1024)
   let fd
   try {
-    fd = openSync(path, 'r')
+    fd = openSync(path, O_READ)
+  } catch (err) {
+    // The path exists (lstat saw it), so ENOENT here is a dangling link.
+    hard(scan, path, err?.code === 'ENOENT' ? 'dangling symlink' : (err?.code || 'unreadable'))
+    return { hard: true }
+  }
+  try {
+    const st = fstatSync(fd)
+    if (!st.isFile()) {
+      hard(scan, path, 'not a regular file')
+      return { hard: true }
+    }
+    if (st.size > scan.limits.maxFileBytes) {
+      hard(scan, path, 'file too large to review')
+      return { hard: true }
+    }
+    if (scan.bytes + st.size > scan.limits.maxTotalBytes) {
+      hard(scan, path, 'too many bytes to review')
+      return { hard: true }
+    }
+    const buf = Buffer.allocUnsafe(Math.min(st.size, scan.limits.maxFileBytes) + 1)
+    let n = 0
     for (;;) {
-      const n = readSync(fd, buf, 0, buf.length, null)
-      if (n === 0) break
-      hash.update(buf.subarray(0, n))
-      budget.bytes += n
+      const got = readSync(fd, buf, n, buf.length - n, null)
+      if (got === 0) break
+      n += got
+      if (n >= buf.length) break
     }
+    if (n > scan.limits.maxFileBytes || n > st.size) {
+      hard(scan, path, 'file changed while it was read')
+      return { hard: true }
+    }
+    scan.bytes += n
+    return { buf: buf.subarray(0, n), linkTarget }
   } catch (err) {
-    return sha256Hex(`error:${err?.code || 'unreadable'}`)
+    hard(scan, path, err?.code || 'unreadable')
+    return { hard: true }
   } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd) } catch { /* nothing to do */ }
-    }
+    try { closeSync(fd) } catch { /* nothing to do */ }
   }
-  return hash.digest('hex')
 }
 
-/** Entry for a settings-style file (`.mcp.json`, `settings.json`) or null when absent. */
-function configFileEntry(path, budget) {
-  const st = lstatOrNull(path)
-  if (!st) return null
-  if (st.isSymbolicLink()) {
-    // A symlinked config file is covered by its link text AND the bytes it
-    // currently points at, so retargeting the link or editing the target both
-    // change the digest.
-    let linkText = ''
-    try { linkText = readlinkSync(path) } catch { linkText = '' }
-    let targetHash = 'unreadable'
-    try {
-      const target = readFileSync(path)
-      targetHash = createHash('sha256').update(target).digest('hex')
-    } catch { /* dangling or unreadable: covered by the link text */ }
-    return { path, sha256: sha256Hex(`symlink:${linkText}\0${targetHash}`), kind: 'config' }
-  }
-  if (!st.isFile()) return { path, sha256: sha256Hex(`type:${st.mode & 0o170000}`), kind: 'config' }
-  return { path, sha256: hashFile(path, st.size, budget, st.mtimeMs), kind: 'config' }
+const sha256Buf = (buf) => createHash('sha256').update(buf).digest('hex')
+
+/** A settings-style file (`.mcp.json`, `settings.json`). */
+function addConfigFile(path, kind, scan) {
+  const r = readRegular(path, scan)
+  if (!r || r.hard) return
+  scan.entries.push({ path, sha256: sha256Buf(r.buf), ...(r.linkTarget ? { linkTarget: r.linkTarget } : {}) })
+  scan.config.push({ path, kind, buf: r.buf })
 }
 
-function readJsonFile(path, warnings) {
-  let raw
+/** Every file under one content directory. */
+function walkContent(dir, sub, scan, stack, visited, depth) {
+  let names
   try {
-    raw = readFileSync(path, 'utf8')
+    names = readdirSync(dir).sort()
   } catch (err) {
-    warnings.push(`${path}: unreadable (${err?.code || 'error'})`)
-    return null
+    if (!isAbsentCode(err)) hard(scan, dir, err?.code || 'unreadable')
+    return
   }
-  try {
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : null
-  } catch {
-    warnings.push(`${path}: not valid JSON`)
-    return null
-  }
-}
-
-/** Collect the files under `<dir>/.claude/<sub>` into `out`. Returns false when the bound was hit. */
-function walkContentDir(root, out, budget, state, depth = 0) {
-  let entries
-  try {
-    entries = readdirSync(root, { withFileTypes: true })
-  } catch {
-    return true
-  }
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  for (const dirent of entries) {
-    const full = join(root, dirent.name)
-    if (state.count >= MAX_SCANNED_FILES) {
-      state.truncated = true
-      return false
+  for (const name of names) {
+    const full = join(dir, name)
+    let lst
+    try {
+      lst = lstatSync(full)
+    } catch (err) {
+      if (!isAbsentCode(err)) hard(scan, full, err?.code || 'unreadable')
+      continue
     }
-    if (dirent.isSymbolicLink()) {
-      let text = ''
-      try { text = readlinkSync(full) } catch { text = '' }
-      state.count += 1
-      out.push({ path: full, sha256: sha256Hex(`symlink:${text}`), kind: 'content' })
-    } else if (dirent.isDirectory()) {
-      if (depth >= MAX_DEPTH) {
-        state.truncated = true
+    let isDir = lst.isDirectory()
+    let linkTarget
+    if (lst.isSymbolicLink()) {
+      let st
+      try {
+        st = statSync(full)
+      } catch (err) {
+        hard(scan, full, err?.code === 'ENOENT' ? 'dangling symlink' : (err?.code || 'unreadable'))
         continue
       }
-      if (!walkContentDir(full, out, budget, state, depth + 1)) return false
-    } else if (dirent.isFile()) {
-      const st = lstatOrNull(full)
-      if (!st) continue
-      state.count += 1
-      out.push({ path: full, sha256: hashFile(full, st.size, budget, st.mtimeMs), kind: 'content' })
+      isDir = st.isDirectory()
+      if (isDir) {
+        const real = realPathOf(full)
+        if (stack.has(real)) {
+          hard(scan, full, 'symlink cycle')
+          continue
+        }
+        if (visited.has(real)) continue
+        linkTarget = real
+        scan.entries.push({ path: full, sha256: sha256Hex(`dirlink:${real}`), linkTarget })
+      }
     }
+    if (isDir) {
+      if (depth >= MAX_DEPTH) {
+        hard(scan, full, 'directory nesting too deep')
+        continue
+      }
+      const real = realPathOf(full)
+      visited.add(real)
+      stack.add(real)
+      walkContent(full, sub, scan, stack, visited, depth + 1)
+      stack.delete(real)
+      continue
+    }
+    if (scan.files >= scan.limits.maxFiles) {
+      hard(scan, dir, 'too many files to review')
+      return
+    }
+    scan.files += 1
+    const r = readRegular(full, scan)
+    if (!r || r.hard) continue
+    scan.counts[sub] += 1
+    scan.entries.push({ path: full, sha256: sha256Buf(r.buf), ...(r.linkTarget ? { linkTarget: r.linkTarget } : {}) })
   }
-  return true
+}
+
+function scanContentLocation(dotClaude, scan) {
+  for (const sub of CONTENT_DIRS) {
+    const dir = join(dotClaude, sub)
+    const real = realPathOf(dir)
+    walkContent(dir, sub, scan, new Set([real]), new Set([real]), 0)
+  }
 }
 
 function ancestorsOf(realPath) {
@@ -190,155 +271,252 @@ function ancestorsOf(realPath) {
   return dirs
 }
 
-function isUserClaudeDir(dotClaude, userDir) {
-  if (!userDir) return false
-  return realPathOf(dotClaude) === userDir
-}
-
-function summarizeMcpServers(file, doc, summary) {
-  const servers = doc?.mcpServers
-  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return
-  for (const name of Object.keys(servers).slice(0, MAX_SUMMARY_ITEMS)) {
-    const s = servers[name]
-    if (!s || typeof s !== 'object') continue
-    const item = { file, name: clip(name) }
-    if (typeof s.command === 'string') item.command = clip(s.command)
-    if (Array.isArray(s.args)) item.args = s.args.slice(0, MAX_SUMMARY_ITEMS).map(clip)
-    if (typeof s.url === 'string') item.url = redactMcpUrl(s.url)
-    if (typeof s.type === 'string') item.type = clip(s.type)
-    // Environment VALUES routinely hold credentials: only the keys are listed.
-    if (s.env && typeof s.env === 'object' && !Array.isArray(s.env)) item.envKeys = Object.keys(s.env).slice(0, MAX_SUMMARY_ITEMS).map(clip)
-    summary.mcpServers.push(item)
+/** `<main>/.claude` when `realPath` sits in a linked git worktree, else null. */
+function mainCheckoutDotClaude(realPath, scan) {
+  for (const dir of ancestorsOf(realPath)) {
+    const git = join(dir, '.git')
+    let lst
+    try {
+      lst = lstatSync(git)
+    } catch (err) {
+      if (!isAbsentCode(err)) hard(scan, git, err?.code || 'unreadable')
+      continue
+    }
+    if (lst.isDirectory()) return null // the folder's own repository, not a linked worktree
+    const r = readRegular(git, scan)
+    if (!r || r.hard) return null
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(r.buf.toString('utf8'))
+    if (!m) return null
+    const gitdir = resolve(dir, m[1])
+    // <main>/.git/worktrees/<name>
+    const worktrees = dirname(gitdir)
+    const mainGit = dirname(worktrees)
+    if (worktrees.endsWith('worktrees') && mainGit.endsWith('.git')) return join(dirname(mainGit), '.claude')
+    return null
   }
+  return null
 }
 
-function summarizeSettings(file, doc, summary) {
-  if (doc.hooks && typeof doc.hooks === 'object' && !Array.isArray(doc.hooks)) {
-    for (const event of Object.keys(doc.hooks).slice(0, MAX_SUMMARY_ITEMS)) {
-      const commands = []
-      const groups = Array.isArray(doc.hooks[event]) ? doc.hooks[event] : []
-      for (const group of groups) {
-        const hooks = Array.isArray(group?.hooks) ? group.hooks : []
-        for (const hook of hooks) {
-          if (typeof hook?.command === 'string' && commands.length < MAX_SUMMARY_ITEMS) commands.push(clip(hook.command))
-        }
+/** Nested `.claude` directories below `root`, by a bounded walk. */
+function findNestedDotClaude(root, scan) {
+  const found = []
+  const queue = [[root, 0]]
+  let visited = 0
+  let entriesSeen = 0
+  let capped = false
+  while (queue.length > 0) {
+    const [dir, depth] = queue.shift()
+    if (visited >= scan.limits.maxNestedDirs) {
+      capped = true
+      break
+    }
+    visited += 1
+    let dirents
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true })
+    } catch (err) {
+      if (!isAbsentCode(err)) hard(scan, dir, err?.code || 'unreadable')
+      continue
+    }
+    entriesSeen += dirents.length
+    if (entriesSeen > scan.limits.maxNestedEntries) {
+      capped = true
+      break
+    }
+    dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const d of dirents) {
+      if (!d.isDirectory()) continue
+      if (d.name === '.claude') {
+        if (dir !== root) found.push(join(dir, '.claude'))
+        continue
       }
-      summary.hooks.push({ file, event: clip(event), commands })
+      if (SKIP_NESTED.has(d.name)) continue
+      if (depth + 1 > MAX_NESTED_DEPTH) {
+        capped = true
+        continue
+      }
+      queue.push([join(dir, d.name), depth + 1])
     }
   }
-  const sl = doc.statusLine
-  if (sl && typeof sl === 'object' && typeof sl.command === 'string') {
-    summary.statusLine.push({ file, command: clip(sl.command) })
+  if (capped) {
+    scan.soft.push(`Folder tree too large to scan fully: nested skills beyond ${scan.limits.maxNestedDirs} directories are not covered`)
   }
-  if (doc.enabledPlugins && typeof doc.enabledPlugins === 'object' && !Array.isArray(doc.enabledPlugins)) {
-    for (const key of Object.keys(doc.enabledPlugins).slice(0, MAX_SUMMARY_ITEMS)) {
-      summary.enabledPlugins.push({ file, plugin: clip(key) })
+  return found
+}
+
+const clip = (value) => {
+  const s = typeof value === 'string' ? value : String(value ?? '')
+  return s.length > MAX_SUMMARY_STRING ? `${s.slice(0, MAX_SUMMARY_STRING)}…` : s
+}
+
+/** Take at most MAX_SUMMARY_ITEMS of `items`, noting what was left out. */
+function capped(items, what, warnings) {
+  if (items.length > MAX_SUMMARY_ITEMS) {
+    warnings.push(`${items.length - MAX_SUMMARY_ITEMS} more ${what} not shown`)
+    return items.slice(0, MAX_SUMMARY_ITEMS)
+  }
+  return items
+}
+
+function summarizeConfig(config, summary) {
+  const { warnings } = summary
+  let clipped = false
+  const c = (v) => {
+    const s = clip(v)
+    if (s.length < String(v).length) clipped = true
+    return s
+  }
+  for (const { path, kind, buf } of config) {
+    if (buf.length > MAX_PARSE_BYTES) {
+      warnings.push(`${path}: too large to summarize; it is still covered by the trust check`)
+      continue
+    }
+    let doc
+    try {
+      doc = JSON.parse(buf.toString('utf8'))
+    } catch {
+      warnings.push(`${path}: not valid JSON`)
+      continue
+    }
+    if (!doc || typeof doc !== 'object') continue
+    if (kind === 'mcp') {
+      const servers = doc.mcpServers
+      if (!servers || typeof servers !== 'object' || Array.isArray(servers)) continue
+      for (const name of capped(Object.keys(servers), 'MCP servers', warnings)) {
+        const s = servers[name]
+        if (!s || typeof s !== 'object') continue
+        const item = { file: path, name: c(name) }
+        if (typeof s.command === 'string') item.command = c(s.command)
+        if (Array.isArray(s.args)) item.args = capped(s.args, 'arguments', warnings).map(c)
+        if (typeof s.url === 'string') item.url = redactMcpUrl(s.url)
+        if (typeof s.type === 'string') item.type = c(s.type)
+        // Environment VALUES routinely hold credentials: only the keys are listed.
+        if (s.env && typeof s.env === 'object' && !Array.isArray(s.env)) item.envKeys = capped(Object.keys(s.env), 'environment keys', warnings).map(c)
+        summary.mcpServers.push(item)
+      }
+      continue
+    }
+    if (doc.hooks && typeof doc.hooks === 'object' && !Array.isArray(doc.hooks)) {
+      for (const event of capped(Object.keys(doc.hooks), 'hook events', warnings)) {
+        const commands = []
+        for (const group of Array.isArray(doc.hooks[event]) ? doc.hooks[event] : []) {
+          for (const hook of Array.isArray(group?.hooks) ? group.hooks : []) {
+            if (typeof hook?.command === 'string') commands.push(hook.command)
+          }
+        }
+        summary.hooks.push({ file: path, event: c(event), commands: capped(commands, 'hook commands', warnings).map(c) })
+      }
+    }
+    const sl = doc.statusLine
+    if (sl && typeof sl === 'object' && typeof sl.command === 'string') summary.statusLine.push({ file: path, command: c(sl.command) })
+    if (doc.enabledPlugins && typeof doc.enabledPlugins === 'object' && !Array.isArray(doc.enabledPlugins)) {
+      for (const key of capped(Object.keys(doc.enabledPlugins), 'plugins', warnings)) summary.enabledPlugins.push({ file: path, plugin: c(key) })
     }
   }
+  if (clipped) warnings.push(`Some values longer than ${MAX_SUMMARY_STRING} characters were shortened`)
 }
 
 /**
  * Scan the command-bearing settings files that apply to `cwd`.
  *
  * @param {string} cwd
+ * @param {object} [limits] - test seam: maxFileBytes, maxTotalBytes, maxFiles, maxNestedDirs
  * @returns {{
  *   realPath: string,
  *   files: { path: string, sha256: string }[],
  *   digest: string,
  *   summary: object,
  *   hasCommandBearingFiles: boolean,
- *   truncated: boolean,
+ *   hardIncomplete: boolean,
  * }}
  */
-export function scanFolderSettings(cwd) {
-  const warnings = []
+export function scanFolderSettings(cwd, limits) {
+  const scan = newScan(limits)
   const summary = {
     files: [],
     mcpServers: [],
     hooks: [],
     statusLine: [],
     enabledPlugins: [],
-    counts: { agents: 0, skills: 0, commands: 0 },
-    warnings,
-  }
-  const empty = (realPath) => ({
-    realPath,
-    files: [],
-    digest: sha256Hex(canonicalJson([])),
-    summary,
+    counts: scan.counts,
+    warnings: [],
     hasCommandBearingFiles: false,
-    truncated: false,
-  })
-  if (typeof cwd !== 'string' || cwd === '') return empty('')
-
-  let realPath
-  const entries = []
-  const state = { count: 0, truncated: false }
-  try {
-    realPath = realPathOf(cwd)
-    const budget = { bytes: 0 }
-    let userDir = null
-    try { userDir = claudeConfigDir() } catch { userDir = null }
-
-    const parsed = []
-    for (const dir of ancestorsOf(realPath)) {
-      const mcp = configFileEntry(join(dir, '.mcp.json'), budget)
-      if (mcp) {
-        entries.push(mcp)
-        parsed.push({ entry: mcp, kind: 'mcp' })
+    untrustable: false,
+  }
+  let realPath = ''
+  if (typeof cwd === 'string' && cwd !== '') {
+    try {
+      realPath = realPathOf(cwd)
+      let userDir = null
+      try { userDir = claudeConfigDir() } catch { userDir = null }
+      const isUserDir = (dotClaude) => userDir !== null && realPathOf(dotClaude) === userDir
+      const seen = new Set()
+      const location = (dotClaude) => {
+        if (seen.has(dotClaude) || isUserDir(dotClaude)) return
+        seen.add(dotClaude)
+        scanContentLocation(dotClaude, scan)
       }
-      const dotClaude = join(dir, '.claude')
-      if (!isUserClaudeDir(dotClaude, userDir)) {
-        const settings = configFileEntry(join(dotClaude, 'settings.json'), budget)
-        if (settings) {
-          entries.push(settings)
-          parsed.push({ entry: settings, kind: 'settings' })
-        }
+
+      for (const dir of ancestorsOf(realPath)) {
+        addConfigFile(join(dir, '.mcp.json'), 'mcp', scan)
+        const dotClaude = join(dir, '.claude')
+        if (!isUserDir(dotClaude)) addConfigFile(join(dotClaude, 'settings.json'), 'settings', scan)
+        location(dotClaude)
       }
+      for (const nested of findNestedDotClaude(realPath, scan)) location(nested)
+      const main = mainCheckoutDotClaude(realPath, scan)
+      if (main && !seen.has(main) && !isUserDir(main)) {
+        seen.add(main)
+        walkContent(join(main, 'skills'), 'skills', scan, new Set([realPathOf(join(main, 'skills'))]), new Set([realPathOf(join(main, 'skills'))]), 0)
+      }
+    } catch (err) {
+      // The scan must never throw into a launch path; an unfinished scan cannot be approved.
+      hard(scan, realPath || String(cwd), err?.code || err?.message || 'scan failed')
     }
-    for (const sub of CONTENT_DIRS) {
-      const found = []
-      walkContentDir(join(realPath, '.claude', sub), found, budget, state)
-      summary.counts[sub] = found.length
-      entries.push(...found)
-    }
-    for (const { entry, kind } of parsed) {
-      const doc = readJsonFile(entry.path, warnings)
-      if (!doc) continue
-      if (kind === 'mcp') summarizeMcpServers(entry.path, doc, summary)
-      else summarizeSettings(entry.path, doc, summary)
-    }
-  } catch (err) {
-    // The scan must never throw into a launch path. Report what was learned and
-    // mark the result unusable for trust: an incomplete scan cannot be approved.
-    warnings.push(`scan failed: ${err?.code || err?.message || 'error'}`)
-    state.truncated = true
+  } else {
+    hard(scan, String(cwd), 'no folder')
   }
 
-  const files = entries.map(({ path, sha256 }) => ({ path, sha256 }))
-  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
-  summary.files = files.map((f) => f.path)
+  const files = scan.entries.map(({ path, sha256 }) => ({ path, sha256 })).sort(byPath)
+  summary.files = scan.entries.map(({ path, linkTarget }) => ({ path, ...(linkTarget ? { linkTarget } : {}) })).sort(byPath)
+  summary.hasCommandBearingFiles = files.length > 0
+  try {
+    summarizeConfig(scan.config.sort(byPath), summary)
+  } catch (err) {
+    summary.warnings.push(`summary incomplete: ${err?.message || 'error'}`)
+  }
+  for (const w of scan.soft) summary.warnings.push(w)
+  const hardIncomplete = scan.hard.length > 0
+  if (hardIncomplete) {
+    summary.untrustable = true
+    for (const h of scan.hard.slice(0, 10)) summary.warnings.push(`Cannot review this folder: ${h}`)
+    if (scan.hard.length > 10) summary.warnings.push(`${scan.hard.length - 10} more problems not shown`)
+  }
   return {
-    realPath: realPath ?? resolve(cwd),
+    realPath: realPath || resolve(String(cwd ?? '')),
     files,
     digest: sha256Hex(canonicalJson(files)),
     summary,
     hasCommandBearingFiles: files.length > 0,
-    truncated: state.truncated,
+    hardIncomplete,
   }
 }
 
 // ── Store ────────────────────────────────────────────────────────────────
 
+const HEX64 = /^[0-9a-f]{64}$/
+
 function isRecord(r) {
-  return r && typeof r === 'object'
-    && r.v === FOLDER_TRUST_RECORD_VERSION
-    && typeof r.path === 'string' && r.path !== ''
-    && typeof r.digest === 'string' && /^[0-9a-f]{64}$/.test(r.digest)
-    && typeof r.trustedAt === 'string'
+  if (!r || typeof r !== 'object' || r.v !== FOLDER_TRUST_RECORD_VERSION) return false
+  if (typeof r.path !== 'string' || r.path === '' || typeof r.trustedAt !== 'string') return false
+  if (typeof r.digest !== 'string' || !HEX64.test(r.digest) || !Array.isArray(r.files)) return false
+  if (!r.files.every((f) => f && typeof f.path === 'string' && typeof f.sha256 === 'string' && HEX64.test(f.sha256))) return false
+  // The digest is a function of the file list; a record that disagrees was edited.
+  const files = r.files.map(({ path, sha256 }) => ({ path, sha256 })).sort(byPath)
+  return sha256Hex(canonicalJson(files)) === r.digest
 }
 
-/** Read the store; a missing, corrupt or unknown-version file yields no records. */
+/** Read the store; a missing, corrupt or other-version file yields no records. */
 export function loadFolderTrustRecords(filePath = folderTrustStorePath()) {
   if (!existsSync(filePath)) return []
   try {
@@ -349,7 +527,13 @@ export function loadFolderTrustRecords(filePath = folderTrustStorePath()) {
     for (const r of list) {
       if (!isRecord(r) || seen.has(r.path)) continue
       seen.add(r.path)
-      records.push({ v: r.v, path: r.path, digest: r.digest, trustedAt: r.trustedAt })
+      records.push({
+        v: r.v,
+        path: r.path,
+        digest: r.digest,
+        files: r.files.map(({ path, sha256 }) => ({ path, sha256 })),
+        trustedAt: r.trustedAt,
+      })
     }
     return records
   } catch (err) {
@@ -362,7 +546,63 @@ function saveFolderTrustRecords(records, filePath = folderTrustStorePath()) {
   writeFileAtomic0600(filePath, JSON.stringify({ records }, null, 2))
 }
 
-// ── Cache (the status line polls) ────────────────────────────────────────
+// ── Cross-process lock ───────────────────────────────────────────────────
+
+const LOCK_STALE_MS = 30_000
+const LOCK_WAIT_MS = 10_000
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function lockIsStale(lockPath) {
+  try {
+    const st = statSync(lockPath)
+    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) return true
+    const pid = Number.parseInt(readFileSync(lockPath, 'utf8').split('\n')[0], 10)
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0)
+      } catch (err) {
+        return err?.code === 'ESRCH'
+      }
+    }
+    return false
+  } catch {
+    return false // absent or unreadable: let the next attempt decide
+  }
+}
+
+/** Hold an `O_EXCL` lock file for the store (other daemon processes share ~/.chroxy). */
+async function withInterprocessLock(storePath, fn) {
+  const lockPath = `${storePath}.lock`
+  const dir = dirname(lockPath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try {
+      writeFileSync(lockPath, `${process.pid}\n${Date.now()}\n`, { mode: 0o600, flag: 'wx' })
+      break
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err
+      if (lockIsStale(lockPath)) {
+        try { unlinkSync(lockPath) } catch { /* another process recovered it first */ }
+        continue
+      }
+      if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
+      await sleep(20)
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    try { unlinkSync(lockPath) } catch { /* already gone */ }
+  }
+}
+
+function withStoreLock(storePath, fn) {
+  return withTrustStoreLock(storePath, () => withInterprocessLock(storePath, fn))
+}
+
+// ── Cache (display only) ─────────────────────────────────────────────────
 
 const scanCache = new Map()
 
@@ -372,98 +612,112 @@ export function invalidateFolderTrustCache() {
 }
 
 function scanCached(cwd, useCache) {
-  const realPath = realPathOf(cwd)
   if (!useCache) return scanFolderSettings(cwd)
-  const hit = scanCache.get(realPath)
+  const key = realPathOf(cwd)
+  const hit = scanCache.get(key)
   const now = Date.now()
   if (hit && now - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
   const scan = scanFolderSettings(cwd)
-  scanCache.set(realPath, { at: now, scan })
+  scanCache.set(key, { at: now, scan })
   return scan
 }
 
-function stateFromScan(scan) {
-  // An incomplete scan (too many files, or a scan error) can never be approved,
-  // and never reads as "nothing to approve".
-  if (scan.truncated) return { status: 'untrusted', scan }
-  if (!scan.hasCommandBearingFiles) return { status: 'none', scan }
+function statusOf(scan) {
+  // An incomplete scan never reads as trusted.
+  if (scan.hardIncomplete) return 'untrusted'
   const record = loadFolderTrustRecords().find((r) => r.path === scan.realPath)
-  return { status: record && record.digest === scan.digest ? 'trusted' : 'untrusted', scan }
+  return record && record.digest === scan.digest ? 'trusted' : 'untrusted'
 }
 
 /**
- * The trust state of `cwd`: `none` (no command-bearing files), `trusted` (a
- * record matches the real path AND the current digest) or `untrusted`.
+ * The trust state of `cwd`: `trusted` (a record matches the real path AND the
+ * current digest) or `untrusted`. Nothing loads without `trusted`.
  *
  * @param {string} cwd
- * @param {{ cached?: boolean }} [opts] - `cached` reuses a scan up to 2 s old
- * @returns {{ status: 'none'|'trusted'|'untrusted', realPath: string, summary?: object }}
+ * @param {{ cached?: boolean }} [opts] - `cached` reuses a scan up to 2 s old (display only)
+ * @returns {{ status: 'trusted'|'untrusted', realPath: string, digest: string, summary: object }}
  */
 export function getFolderTrustState(cwd, { cached = false } = {}) {
-  const { status, scan } = stateFromScan(scanCached(cwd, cached))
-  return {
-    status,
-    realPath: scan.realPath,
-    ...(status === 'none' ? {} : { summary: scan.summary }),
-  }
+  const scan = scanCached(cwd, cached)
+  return { status: statusOf(scan), realPath: scan.realPath, digest: scan.digest, summary: scan.summary }
 }
 
-/**
- * True only when a record matches the current real path and digest.
- * @param {string} cwd
- * @param {{ cached?: boolean }} [opts]
- */
-export function isFolderTrusted(cwd, { cached = false } = {}) {
+/** True only when a record matches the current real path and digest. */
+export function isFolderTrusted(cwd, opts) {
   if (typeof cwd !== 'string' || cwd === '') return false
-  return stateFromScan(scanCached(cwd, cached)).status === 'trusted'
+  return getFolderTrustState(cwd, opts).status === 'trusted'
 }
 
 /**
- * Record trust for the folder's CURRENT settings. Returns the new state, or
- * `{ ok: false, error }` when there is nothing to approve or the scan was
- * incomplete.
+ * Record trust for the folder's CURRENT settings, but only if they are still the
+ * ones the owner reviewed (`expectedDigest`). Returns the new state, or
+ * `{ ok: false, code, error }`.
  *
  * @param {string} cwd
- * @returns {Promise<{ ok: boolean, status: string, realPath?: string, summary?: object, error?: string }>}
+ * @param {string} expectedDigest - the digest of the summary the owner saw
  */
-export async function trustFolder(cwd) {
-  if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'none', error: 'no folder' }
-  const path = folderTrustStorePath()
-  return withTrustStoreLock(path, async () => {
+export async function trustFolder(cwd, expectedDigest) {
+  if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'untrusted', code: 'FOLDER_TRUST_NOT_APPLIED', error: 'no folder' }
+  return withStoreLock(folderTrustStorePath(), async () => {
     const scan = scanFolderSettings(cwd)
-    if (scan.truncated) {
-      return { ok: false, status: 'untrusted', realPath: scan.realPath, summary: scan.summary, error: 'This folder could not be fully reviewed (too many files)' }
+    const base = { realPath: scan.realPath, digest: scan.digest, summary: scan.summary }
+    if (scan.hardIncomplete) {
+      return { ok: false, status: 'untrusted', ...base, code: 'FOLDER_TRUST_UNTRUSTABLE', error: 'This folder could not be fully reviewed' }
     }
-    if (!scan.hasCommandBearingFiles) return { ok: true, status: 'none', realPath: scan.realPath }
-    const records = loadFolderTrustRecords(path).filter((r) => r.path !== scan.realPath)
-    records.push({ v: FOLDER_TRUST_RECORD_VERSION, path: scan.realPath, digest: scan.digest, trustedAt: new Date().toISOString() })
+    if (typeof expectedDigest !== 'string' || expectedDigest !== scan.digest) {
+      return { ok: false, status: statusOf(scan), ...base, code: 'FOLDER_TRUST_CHANGED', error: 'The folder changed since it was reviewed' }
+    }
+    const records = loadFolderTrustRecords().filter((r) => r.path !== scan.realPath)
+    records.push({
+      v: FOLDER_TRUST_RECORD_VERSION,
+      path: scan.realPath,
+      digest: scan.digest,
+      files: scan.files,
+      trustedAt: new Date().toISOString(),
+    })
     try {
-      saveFolderTrustRecords(records, path)
+      saveFolderTrustRecords(records)
     } finally {
       invalidateFolderTrustCache()
     }
-    return { ok: true, status: 'trusted', realPath: scan.realPath, summary: scan.summary }
+    return { ok: true, status: 'trusted', ...base }
+  })
+}
+
+/** Remove any trust record for the folder. */
+export async function untrustFolder(cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'untrusted', code: 'FOLDER_TRUST_NOT_APPLIED', error: 'no folder' }
+  return withStoreLock(folderTrustStorePath(), async () => {
+    const realPath = realPathOf(cwd)
+    const before = loadFolderTrustRecords()
+    const after = before.filter((r) => r.path !== realPath)
+    try {
+      if (after.length !== before.length) saveFolderTrustRecords(after)
+    } finally {
+      invalidateFolderTrustCache()
+    }
+    const state = getFolderTrustState(cwd)
+    return { ok: true, status: state.status, realPath, digest: state.digest, summary: state.summary }
   })
 }
 
 /**
- * Remove any trust record for the folder.
+ * The text of `<folder>/.claude/settings.json` if, and only if, the folder is
+ * trusted and this file's content is exactly what the trust record holds. Read
+ * once; the caller parses and acts on these same bytes. Never cached.
+ *
  * @param {string} cwd
- * @returns {Promise<{ ok: boolean, status: string, realPath?: string, summary?: object, error?: string }>}
+ * @returns {string|null}
  */
-export async function untrustFolder(cwd) {
-  if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'none', error: 'no folder' }
-  const path = folderTrustStorePath()
-  return withTrustStoreLock(path, async () => {
-    const realPath = realPathOf(cwd)
-    const before = loadFolderTrustRecords(path)
-    const after = before.filter((r) => r.path !== realPath)
-    try {
-      if (after.length !== before.length) saveFolderTrustRecords(after, path)
-    } finally {
-      invalidateFolderTrustCache()
-    }
-    const { status, summary } = getFolderTrustState(cwd)
-    return { ok: true, status, realPath, ...(summary ? { summary } : {}) }
-  })
+export function readTrustedProjectSettings(cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return null
+  const realPath = realPathOf(cwd)
+  const record = loadFolderTrustRecords().find((r) => r.path === realPath)
+  if (!record) return null
+  const target = join(realPath, '.claude', 'settings.json')
+  const want = record.files.find((f) => f.path === target)?.sha256
+  if (!want) return null
+  const r = readRegular(target, newScan())
+  if (!r || r.hard) return null
+  return sha256Buf(r.buf) === want ? r.buf.toString('utf8') : null
 }

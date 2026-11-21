@@ -71,7 +71,7 @@
  * iteration can add expiry timestamps without breaking the file format.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { configPath } from './config-dir.js'
@@ -365,10 +365,13 @@ export function loadTrustStore(filePath = defaultTrustStorePath(), { log } = {})
 export function writeFileAtomic0600(filePath, content) {
   const dir = dirname(filePath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${filePath}.tmp`
-  writeFileSync(tmp, content, { mode: 0o600 })
-  try { chmodSync(tmp, 0o600) } catch {}
+  // A unique temp name (pid + random) opened O_EXCL: a concurrent writer in another
+  // process cannot share or clobber it, and a planted file or symlink at the name is
+  // refused rather than followed.
+  const tmp = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   try {
+    writeFileSync(tmp, content, { mode: 0o600, flag: 'wx' })
+    try { chmodSync(tmp, 0o600) } catch {}
     renameSync(tmp, filePath)
   } catch (err) {
     try { unlinkSync(tmp) } catch {}

@@ -572,6 +572,7 @@ export declare const RemoveMcpServerSchema: z.ZodObject<{
 export declare const TrustFolderSchema: z.ZodObject<{
     type: z.ZodLiteral<"trust_folder">;
     sessionId: z.ZodString;
+    digest: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const UntrustFolderSchema: z.ZodObject<{
@@ -1729,6 +1730,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"trust_folder">;
     sessionId: z.ZodString;
+    digest: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"untrust_folder">;

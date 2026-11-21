@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'nod
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildFolderTrustStateMessage, folderTrustAppliesFrom } from '../src/folder-trust-wire.js'
-import { trustFolder, invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { sendSessionInfo } from '../src/ws-history.js'
 import { frameForBoundClient } from '../src/outgoing-policy.js'
@@ -37,9 +38,12 @@ function project(name, withMcp = true) {
 }
 
 describe('buildFolderTrustStateMessage', () => {
-  it('none: no summary', () => {
+  it('a folder with nothing command-bearing is untrusted too (no implicit loading), and says so', () => {
     const msg = buildFolderTrustStateMessage('s1', { cwd: project('n', false), provider: 'claude-sdk' })
-    assert.deepEqual(msg, { type: 'folder_trust_state', sessionId: 's1', status: 'none', appliesFrom: 'next_turn' })
+    assert.equal(msg.status, 'untrusted')
+    assert.equal(msg.summary.hasCommandBearingFiles, false)
+    assert.match(msg.digest, /^[0-9a-f]{64}$/)
+    ServerFolderTrustStateSchema.parse(msg)
   })
 
   it('untrusted then trusted, both with a summary that validates against the schema', async () => {
@@ -50,9 +54,10 @@ describe('buildFolderTrustStateMessage', () => {
     assert.equal(before.appliesFrom, 'restart')
     assert.deepEqual(before.summary.mcpServers[0].envKeys, ['K'])
     ServerFolderTrustStateSchema.parse(before)
-    await trustFolder(cwd)
+    await trustReviewed(cwd)
     const after = buildFolderTrustStateMessage('s1', entry)
     assert.equal(after.status, 'trusted')
+    assert.equal(after.digest, before.digest)
     ServerFolderTrustStateSchema.parse(after)
   })
 
@@ -83,7 +88,7 @@ describe('when the state is sent', () => {
     }
   })
 
-  it('a client that switches to or subscribes to a session is sent it', () => {
+  it('a client that switches to or subscribes to a session is sent it', async () => {
     const cwd = project('p')
     const sent = []
     const session = { isReady: false, getMcpServersSnapshot: () => null }
@@ -93,6 +98,7 @@ describe('when the state is sent', () => {
       clients: new Map(),
     }
     sendSessionInfo(ctx, {}, 's1', { skipModels: true })
+    await new Promise((resolve) => setImmediate(resolve)) // sent after the rest of the burst
     const msg = sent.find((m) => m.type === 'folder_trust_state')
     assert.equal(msg.status, 'untrusted')
     assert.equal(msg.appliesFrom, 'restart')
@@ -100,11 +106,12 @@ describe('when the state is sent', () => {
 })
 
 describe('a session-bound client', () => {
-  it('receives the status but not the summary', () => {
-    const frame = { type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', summary: { files: ['/x/.mcp.json'] } }
+  it('receives the status but not the summary or digest', () => {
+    const frame = { type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', summary: { files: [{ path: '/x/.mcp.json' }] }, digest: 'a'.repeat(64) }
     const out = frameForBoundClient(frame)
     assert.equal(out.status, 'untrusted')
     assert.equal('summary' in out, false)
+    assert.equal('digest' in out, false)
   })
 
   it('never receives folder_trust_result', () => {

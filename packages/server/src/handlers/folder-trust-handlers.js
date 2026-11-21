@@ -14,7 +14,7 @@
 import { sendError } from '../handler-utils.js'
 import { isBoundClient } from '../environments/authority.js'
 import { sessionLogger } from '../logger.js'
-import { trustFolder, untrustFolder } from '../folder-trust.js'
+import { trustFolder, untrustFolder, getFolderTrustState } from '../folder-trust.js'
 import { broadcastFolderTrustState } from '../folder-trust-wire.js'
 
 /** @returns {boolean} true when the caller was refused (the handler must return). */
@@ -28,11 +28,13 @@ export function rejectFolderTrustUnlessPrimary(ws, client, msg, ctx, op) {
     msg?.requestId,
     'FOLDER_TRUST_FORBIDDEN',
     'Only the primary API token, on a connection not bound to a session, can change which folders are trusted.',
-    undefined,
+    sessionTag(msg),
     ctx,
   )
   return true
 }
+
+const sessionTag = (msg) => (typeof msg?.sessionId === 'string' && msg.sessionId.length <= 256 ? { sessionId: msg.sessionId } : undefined)
 
 function makeHandler(op, apply, logVerb) {
   return async function handleFolderTrust(ws, client, msg, ctx) {
@@ -42,41 +44,47 @@ function makeHandler(op, apply, logVerb) {
     const entry = sessionId ? ctx.sessions?.sessionManager?.getSession(sessionId) : null
     const cwd = entry?.cwd ?? entry?.session?.cwd
     if (!entry || typeof cwd !== 'string' || cwd === '') {
-      sendError(ws, requestId, 'FOLDER_TRUST_NOT_APPLIED', `${op} needs a known session`, undefined, ctx)
+      sendError(ws, requestId, 'FOLDER_TRUST_NOT_APPLIED', `${op} needs a known session`, sessionTag(msg), ctx)
       return
     }
     let result
     try {
-      result = await apply(cwd)
+      result = await apply(cwd, msg)
     } catch (err) {
       sessionLogger(sessionId).warn(`${op} failed for ${cwd}: ${err?.message || err}`)
+      // Report the state the folder is really in now, and tell every session of it.
+      const current = getFolderTrustState(cwd)
       ctx.transport.send(ws, {
         type: 'folder_trust_result',
         sessionId,
         ok: false,
-        status: 'untrusted',
+        status: current.status,
         error: 'The trust change could not be saved',
         ...(requestId ? { requestId } : {}),
       })
+      broadcastFolderTrustState(ctx, current.realPath)
       return
     }
     if (result.ok) {
       // The path is logged; the summary (commands, args) is not.
       sessionLogger(sessionId).info(`Folder ${result.realPath} ${logVerb} by ${client.id} (session ${sessionId})`)
+      ctx.transport.send(ws, {
+        type: 'folder_trust_result',
+        sessionId,
+        ok: true,
+        status: result.status,
+        ...(requestId ? { requestId } : {}),
+      })
+    } else {
+      sessionLogger(sessionId).warn(`${op} refused for ${result.realPath ?? cwd}: ${result.code}`)
+      sendError(ws, requestId, result.code || 'FOLDER_TRUST_NOT_APPLIED', result.error || 'The trust change was not applied', { sessionId }, ctx)
     }
-    ctx.transport.send(ws, {
-      type: 'folder_trust_result',
-      sessionId,
-      ok: result.ok,
-      status: result.status,
-      ...(result.error ? { error: result.error } : {}),
-      ...(requestId ? { requestId } : {}),
-    })
     if (result.realPath) broadcastFolderTrustState(ctx, result.realPath)
   }
 }
 
 export const folderTrustHandlers = {
-  trust_folder: makeHandler('trust_folder', trustFolder, 'trusted'),
-  untrust_folder: makeHandler('untrust_folder', untrustFolder, 'no longer trusted'),
+  // The digest is the one the owner reviewed: trustFolder rescans and refuses if it moved.
+  trust_folder: makeHandler('trust_folder', (cwd, msg) => trustFolder(cwd, msg?.digest), 'trusted'),
+  untrust_folder: makeHandler('untrust_folder', (cwd) => untrustFolder(cwd), 'no longer trusted'),
 }

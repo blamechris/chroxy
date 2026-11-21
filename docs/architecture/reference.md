@@ -206,7 +206,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `restore_checkpoint` | Restore from a checkpoint (creates new session) |
 | `resume_budget` | Resume a paused session after budget exceeded |
 | `remove_mcp_server` | Permanently remove a configured MCP server from the user's MCP config (BYOK lane; strict-primary gated) |
-| `trust_folder` | Trust the folder of a session so its project settings load (`.mcp.json`, `.claude/settings.json`, agents, skills, commands); tied to the exact content of those files (primary token, not session-bound; `folder_trust_result`, then `folder_trust_state`) |
+| `trust_folder` | Trust the folder of a session so its project settings load, bound to the digest the owner reviewed; tied to the exact content of those files (primary token, not session-bound; `folder_trust_result`, then `folder_trust_state`) |
 | `untrust_folder` | Stop trusting the folder of a session (same gate and reply) |
 | `resume_conversation` | Resume a past conversation by creating a new session |
 | `search_conversations` | Search conversation history by query |
@@ -269,7 +269,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `history_replay_start` | Beginning of session history replay |
 | `key_exchange_ok` | Server X25519 public key for encryption |
 | `mcp_servers` | Connected MCP servers list |
-| `folder_trust_state` | Whether a session folder's project settings load: `trusted`, `untrusted` or `none`, with a summary of what would run and when a change applies |
+| `folder_trust_state` | Whether a session folder's project settings load: `trusted` or `untrusted`, with a summary of what would run, the digest of that snapshot and when a change applies |
 | `folder_trust_result` | Reply to `trust_folder` / `untrust_folder` |
 | `message` | Parsed chat message (user/response/tool_use) |
 | `model_changed` | Active model updated by user |

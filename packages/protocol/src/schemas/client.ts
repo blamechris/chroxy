@@ -518,11 +518,14 @@ export const RemoveMcpServerSchema = z.object({
 
 // Per-folder trust for project settings. The folder is ALWAYS the one in the
 // server's record of `sessionId`: the message carries no path, and any extra
-// `cwd`/`path` field is ignored. Both are PRIMARY-ONLY and refused for a
+// `cwd`/`path` field is ignored. `trust_folder` carries the `digest` of the
+// `folder_trust_state` the owner reviewed; the daemon rescans and refuses
+// (`FOLDER_TRUST_CHANGED`) when the folder no longer matches it. Both are PRIMARY-ONLY and refused for a
 // session-bound client or an agent principal. The reply is `folder_trust_result`.
 export const TrustFolderSchema = z.object({
   type: z.literal('trust_folder'),
   sessionId: z.string().min(1).max(256),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
   requestId: z.string().max(256).optional(),
 })
 

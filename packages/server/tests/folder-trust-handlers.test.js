@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync,
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
-import { folderTrustStorePath, isFolderTrusted, invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { folderTrustStorePath, isFolderTrusted, invalidateFolderTrustCache, scanFolderSettings } from '../src/folder-trust.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { nsCtx } from './test-helpers.js'
 import { principalClient } from './principal-test-helpers.js'
@@ -68,6 +68,9 @@ function makeCtx(sessions) {
   return { ctx, getSession, send, broadcastToSession }
 }
 
+// A trust_folder message carrying the digest of what the owner reviewed.
+const reviewed = (sessionId, cwd, over = {}) => ({ type: 'trust_folder', sessionId, digest: scanFolderSettings(cwd).digest, ...over })
+
 const primary = (over = {}) => ({ id: 'c1', isPrimaryToken: true, boundSessionId: null, ...over })
 
 async function captureLogs(fn) {
@@ -108,7 +111,7 @@ describe('trust_folder / untrust_folder', () => {
   it('a primary client trusts the session folder and gets a folder_trust_result', async () => {
     const cwd = folder('p')
     const { ctx, send } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
-    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1', requestId: 'r1' }, ctx)
+    await trust(WS, primary(), reviewed('s1', cwd, { requestId: 'r1' }), ctx)
     assert.equal(isFolderTrusted(cwd), true)
     const result = send.mock.calls.map((c) => c.arguments[1]).find((m) => m.type === 'folder_trust_result')
     assert.deepEqual(result, { type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted', requestId: 'r1' })
@@ -118,7 +121,7 @@ describe('trust_folder / untrust_folder', () => {
     const cwd = folder('real')
     const decoy = folder('decoy')
     const { ctx } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
-    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1', cwd: decoy, path: decoy, folder: decoy }, ctx)
+    await trust(WS, primary(), reviewed('s1', cwd, { cwd: decoy, path: decoy, folder: decoy }), ctx)
     assert.equal(isFolderTrusted(cwd), true)
     assert.equal(isFolderTrusted(decoy), false)
   })
@@ -142,7 +145,7 @@ describe('trust_folder / untrust_folder', () => {
       c: { cwd: other, provider: 'claude-sdk' },
       d: { cwd, provider: 'gemini' },
     })
-    await trust(WS, primary(), { type: 'trust_folder', sessionId: 'a' }, ctx)
+    await trust(WS, primary(), reviewed('a', cwd), ctx)
     const sent = Object.fromEntries(broadcastToSession.mock.calls.map((c) => [c.arguments[0], c.arguments[1]]))
     assert.deepEqual(Object.keys(sent).sort(), ['a', 'b', 'd'])
     assert.equal(sent.a.type, 'folder_trust_state')
@@ -152,12 +155,48 @@ describe('trust_folder / untrust_folder', () => {
     assert.equal(sent.d.appliesFrom, 'n/a')
     assert.equal(sent.a.sessionId, 'a')
     assert.ok(sent.a.summary.files.length > 0)
+    assert.match(sent.a.digest, /^[0-9a-f]{64}$/)
+  })
+
+  it('refuses a digest that no longer matches (the folder changed after review) and broadcasts the fresh state', async () => {
+    const cwd = folder('p')
+    const stale = scanFolderSettings(cwd).digest
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { swapped: { command: 'other' } } }))
+    const { ctx, send, broadcastToSession } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
+    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1', digest: stale, requestId: 'r1' }, ctx)
+    const frames = send.mock.calls.map((c) => c.arguments[1])
+    assert.equal(frames[0].type, 'error')
+    assert.equal(frames[0].code, 'FOLDER_TRUST_CHANGED')
+    assert.equal(frames[0].sessionId, 's1')
+    assert.equal(isFolderTrusted(cwd), false)
+    const fresh = broadcastToSession.mock.calls.at(-1).arguments[1]
+    assert.equal(fresh.status, 'untrusted')
+    assert.equal(fresh.digest, scanFolderSettings(cwd).digest)
+    assert.notEqual(fresh.digest, stale)
+  })
+
+  it('a missing digest is refused', async () => {
+    const cwd = folder('p')
+    const { ctx, send } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
+    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1' }, ctx)
+    assert.equal(send.mock.calls[0].arguments[1].code, 'FOLDER_TRUST_CHANGED')
+    assert.equal(isFolderTrusted(cwd), false)
+  })
+
+  it('a folder that cannot be fully reviewed is refused as untrustable', async () => {
+    const cwd = folder('p')
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    symlinkSync(join(root, 'nowhere'), join(cwd, '.claude', 'agents', 'dangling.md'))
+    const { ctx, send } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
+    await trust(WS, primary(), reviewed('s1', cwd), ctx)
+    assert.equal(send.mock.calls[0].arguments[1].code, 'FOLDER_TRUST_UNTRUSTABLE')
+    assert.equal(isFolderTrusted(cwd), false)
   })
 
   it('untrust_folder removes trust and broadcasts the untrusted state', async () => {
     const cwd = folder('p')
     const { ctx, broadcastToSession, send } = makeCtx({ s1: { cwd, provider: 'claude-cli' } })
-    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1' }, ctx)
+    await trust(WS, primary(), reviewed('s1', cwd), ctx)
     await untrust(WS, primary(), { type: 'untrust_folder', sessionId: 's1', requestId: 'r2' }, ctx)
     assert.equal(isFolderTrusted(cwd), false)
     const last = broadcastToSession.mock.calls.at(-1).arguments[1]
@@ -170,7 +209,7 @@ describe('trust_folder / untrust_folder', () => {
   it('logs the folder path and not the summary', async () => {
     const cwd = folder('logged', 'secret-command-name')
     const { ctx } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
-    const entries = await captureLogs(() => trust(WS, primary(), { type: 'trust_folder', sessionId: 's1' }, ctx))
+    const entries = await captureLogs(() => trust(WS, primary(), reviewed('s1', cwd), ctx))
     const text = entries.map((e) => e.message).join('\n')
     assert.ok(text.includes(cwd), 'the folder path is in the log')
     assert.equal(text.includes('secret-command-name'), false, 'the summary is not')
@@ -181,9 +220,10 @@ describe('trust_folder / untrust_folder', () => {
     // A directory where the store file should go makes the atomic rename fail.
     mkdirSync(folderTrustStorePath(), { recursive: true })
     const { ctx, send } = makeCtx({ s1: { cwd, provider: 'claude-sdk' } })
-    await trust(WS, primary(), { type: 'trust_folder', sessionId: 's1', requestId: 'r1' }, ctx)
+    await trust(WS, primary(), reviewed('s1', cwd, { requestId: 'r1' }), ctx)
     const result = send.mock.calls.map((c) => c.arguments[1]).find((m) => m.type === 'folder_trust_result')
     assert.equal(result.ok, false)
+    assert.equal(result.status, 'untrusted', 'the real current status')
     assert.equal(isFolderTrusted(cwd), false)
   })
 })

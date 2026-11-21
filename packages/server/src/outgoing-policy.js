@@ -158,7 +158,7 @@ export function frameForBoundClient(message) {
     if (type === 'folder_trust_state') {
       // The summary lists the commands a folder's settings would run: the
       // owner's to review, not this connection's. The status alone passes.
-      const { summary: _s, ...rest } = message
+      const { summary: _s, digest: _d, ...rest } = message
       return rest
     }
     if (type === 'cost_update') {
