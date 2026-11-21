@@ -41,7 +41,7 @@ const EXPECTED = {
 const ALLOWED_MENTIONS = {
   'agent-control/client.js': { count: 4, reason: 'the MCP adapter READS the frame (a buffered-type set and comparisons)' },
   'agent-control/events.js': { count: 1, reason: 'the event-log allowlist of forwarded broadcast types' },
-  'base-session.js': { count: 1, reason: 'the list of events a session forwards upward' },
+  'base-session.js': { count: 2, reason: 'the list of events a session forwards upward, and the quiet list of events that are not assistant output (#9241)' },
   'byok-session.js': { count: 1, reason: 'a comparison on a relayed child event type' },
   'event-normalizer.js': { count: 3, reason: 'the nested-payload type test, the agent_event registration compare, and the EVENT_MAP key' },
   'outgoing-policy.js': { count: 1, reason: 'the bound-client delivery roster' },
