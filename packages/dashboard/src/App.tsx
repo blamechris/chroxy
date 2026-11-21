@@ -69,6 +69,7 @@ import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { ContainerLostBanner } from './components/ContainerLostBanner'
+import { FolderTrustBanner } from './components/FolderTrustBanner'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ExposureWarningBanner } from './components/ExposureWarningBanner'
@@ -761,6 +762,12 @@ export function App() {
       : null,
   )
   const dismissContainerLost = useConnectionStore(s => s.dismissContainerLost)
+  // Per-folder trust for the active session's project settings.
+  const activeFolderTrust = useConnectionStore(s => (s.activeSessionId ? s.folderTrust?.[s.activeSessionId] : undefined))
+  const activeFolderTrustPending = useConnectionStore(s => (s.activeSessionId ? s.folderTrustPending?.[s.activeSessionId] === true : false))
+  const activeFolderTrustError = useConnectionStore(s => (s.activeSessionId ? (s.folderTrustError?.[s.activeSessionId] ?? null) : null))
+  const trustFolder = useConnectionStore(s => s.trustFolder)
+  const untrustFolder = useConnectionStore(s => s.untrustFolder)
   // #7603 — content of the most recent user turn, for the banner's Retry.
   // Same "resend the last user message" contract StreamStallChip already uses
   // (#4476): a fresh turn either succeeds — which clears the banner via the
@@ -3241,6 +3248,13 @@ export function App() {
                     }}
                   />
                 )}
+                <FolderTrustBanner
+                  entry={activeFolderTrust}
+                  pending={activeFolderTrustPending}
+                  error={activeFolderTrustError}
+                  onTrust={() => { if (activeSessionId) trustFolder(activeSessionId) }}
+                  onUntrust={() => { if (activeSessionId) untrustFolder(activeSessionId) }}
+                />
                 {connectionPhase === 'connecting' ? (
                   <SessionLoadingSkeleton label="Connecting..." />
                 ) : isSwitchingSession ? (

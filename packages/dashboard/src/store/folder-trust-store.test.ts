@@ -1,0 +1,119 @@
+/**
+ * Per-folder trust: the store actions and the two server frames, driven through
+ * the REAL store and message handler.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+const lsStore: Record<string, string> = {}
+const localStorageMock = {
+  getItem: vi.fn((key: string) => lsStore[key] ?? null),
+  setItem: vi.fn((key: string, value: string) => { lsStore[key] = value }),
+  removeItem: vi.fn((key: string) => { delete lsStore[key] }),
+  clear: vi.fn(() => { for (const k of Object.keys(lsStore)) delete lsStore[k] }),
+  get length() { return Object.keys(lsStore).length },
+  key: vi.fn((i: number) => Object.keys(lsStore)[i] ?? null),
+}
+Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
+
+vi.mock('../utils/auth', () => ({ getAuthToken: () => 'local-token' }))
+
+const { useConnectionStore } = await import('./connection')
+const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags } =
+  await import('./message-handler')
+
+type State = ReturnType<typeof useConnectionStore.getState>
+
+const get = () => useConnectionStore.getState()
+const ctx = () => ({ url: 'wss://t', token: 'tok', socket: null, isReconnect: false, silent: false })
+const receive = (msg: Record<string, unknown>) => handleMessage(msg as never, ctx() as never)
+let sent: Array<Record<string, unknown>>
+
+const summary = {
+  files: ['/p/.mcp.json'], mcpServers: [], hooks: [], statusLine: [], enabledPlugins: [],
+  counts: { agents: 0, skills: 0, commands: 0 }, warnings: [],
+}
+
+function resetSlice(socket: unknown = null) {
+  useConnectionStore.setState({
+    folderTrust: {},
+    folderTrustPending: {},
+    folderTrustError: {},
+    sessions: [],
+    activeSessionId: null,
+    sessionStates: {},
+    connectionPhase: 'connected',
+    socket,
+  } as unknown as Partial<State>)
+}
+
+beforeEach(() => {
+  clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
+  sent = []
+  resetSlice({ readyState: WebSocket.OPEN, send: (d: string) => { sent.push(JSON.parse(d)) }, close: vi.fn() })
+})
+afterEach(() => { stopHeartbeat(); resetSlice() })
+
+describe('folder_trust_state', () => {
+  it('is kept per session, replaced wholesale, and without its type or sessionId', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, appliesFrom: 'restart' })
+    expect(get().folderTrust.s1).toEqual({ status: 'untrusted', summary, appliesFrom: 'restart' })
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'trusted', summary, appliesFrom: 'restart' })
+    expect(get().folderTrust.s1!.status).toBe('trusted')
+    receive({ type: 'folder_trust_state', sessionId: 's2', status: 'none', appliesFrom: 'next_turn' })
+    expect(get().folderTrust.s2).toEqual({ status: 'none', appliesFrom: 'next_turn' })
+    expect(get().folderTrust.s1!.status).toBe('trusted')
+  })
+
+  it('a frame without a session id changes nothing', () => {
+    receive({ type: 'folder_trust_state', status: 'trusted', appliesFrom: 'restart' })
+    expect(get().folderTrust).toEqual({})
+  })
+})
+
+describe('trustFolder / untrustFolder', () => {
+  it('send the session id only, with a requestId, and mark the session pending', () => {
+    expect(get().trustFolder('s1')).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ type: 'trust_folder', sessionId: 's1' })
+    expect(Object.keys(sent[0]!).sort()).toEqual(['requestId', 'sessionId', 'type'])
+    expect(get().folderTrustPending.s1).toBe(true)
+  })
+
+  it('untrust sends untrust_folder', () => {
+    expect(get().untrustFolder('s1')).toBe(true)
+    expect(sent[0]).toMatchObject({ type: 'untrust_folder', sessionId: 's1' })
+  })
+
+  it('refuses a second change for the same session while one is in flight, and does nothing without a socket', () => {
+    get().trustFolder('s1')
+    expect(get().trustFolder('s1')).toBe(false)
+    expect(sent).toHaveLength(1)
+    resetSlice(null)
+    expect(get().trustFolder('s1')).toBe(false)
+  })
+})
+
+describe('folder_trust_result', () => {
+  it('settles the pending marker and clears the error on success', () => {
+    get().trustFolder('s1')
+    receive({ type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted' })
+    expect(get().folderTrustPending.s1).toBeUndefined()
+    expect(get().folderTrustError.s1).toBeUndefined()
+  })
+
+  it('settles the marker on a failure and keeps the reason; the next attempt clears it', () => {
+    get().trustFolder('s1')
+    receive({ type: 'folder_trust_result', sessionId: 's1', ok: false, status: 'untrusted', error: 'could not be saved' })
+    expect(get().folderTrustPending.s1).toBeUndefined()
+    expect(get().folderTrustError.s1).toBe('could not be saved')
+    get().trustFolder('s1')
+    expect(get().folderTrustError.s1).toBeUndefined()
+  })
+
+  it('an error envelope from the gate settles the marker and shows its reason', () => {
+    get().trustFolder('s1')
+    receive({ type: 'error', code: 'FOLDER_TRUST_FORBIDDEN', message: 'Only the primary API token can do this', requestId: 'x' })
+    expect(get().folderTrustPending.s1).toBeUndefined()
+    expect(get().folderTrustError.s1).toBe('Only the primary API token can do this')
+  })
+})

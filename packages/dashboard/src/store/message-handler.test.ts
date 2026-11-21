@@ -153,6 +153,9 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     // pruneSessionScopedKeySet, which reads `.size` and would throw the same
     // way on an absent fixture.
     pendingServerSeed: {},
+    folderTrust: {},
+    folderTrustPending: {},
+    folderTrustError: {},
     cancellingActivityIds: new Set<string>(),
     // #7495 — same intolerance, one field over: `session_timeout` now calls
     // `clearSessionActivity` alongside the seven prunes (it is the fifth "the
