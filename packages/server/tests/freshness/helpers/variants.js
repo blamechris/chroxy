@@ -11,6 +11,7 @@
  * fail" rule).
  */
 
+import { itemIds } from '../model/keys.js'
 import { DEFAULT_POLICY, isOwnerBlock, nextReminderAt, withPolicy } from '../model/policy.js'
 
 // Any new report is a content change, keeping the model's forward-only rule
@@ -38,8 +39,11 @@ export const LITERAL = {
   // The key table: only a send is looked up before it is made; a resumed step re-reads.
   reReadOnResume: { expect: 'I3a', policy: withPolicy({ reuseRecorded: () => null }) },
   // The earlier rule: an attention item is raised beside the session's open
-  // owner-block item, and one already open stays open beside a new one.
+  // owner item, and one already open stays open beside a new one.
   raiseBesideOwnerBlock: { expect: 'I9', policy: withPolicy({ attentionBesideOwnerBlock: 'raise' }) },
+  // The earlier identity: a declared block and a pending prompt on one
+  // session are two separate owner items.
+  twoOwnerItems: { expect: 'I9', policy: withPolicy({ ownerItemOf: (session, kind) => itemIds.ownerAsk(session, kind) }) },
   // The prompt origin: resolved only by an answer to the item's own (latest seen) prompt.
   onlyOwnPromptAnswer: {
     expect: 'I4a',
@@ -125,6 +129,8 @@ export const MUTANTS = {
     },
   }),
   I5: withPolicy({ mayOpenEpisode: (item) => !item || !item.open }),
+  // An ask added on a reference an earlier ask of the item already used.
+  'I5.ask': withPolicy({ mayAddAsk: () => true }),
   I6: withPolicy({ contentChanged: anyNewRef }),
   I7a: withPolicy({ maxCycles: 3, secondCycleAfter: new Set(['inconclusive', 'running_claim_unverified', 'blocked_unresolved', 'waiting_on_owner', 'finished_unreported', 'gone', 'source_unreachable']) }),
   I7b: withPolicy({
@@ -163,25 +169,31 @@ export const MUTANTS = {
   // A model that starts a new onset at every tick: its own onset ids keep
   // every cycle count at one, so only the monitor's own onsets can see it.
   'I7a.onset': withPolicy({ startsNewOnset: () => true }),
-  // Withdraw a prompt item as lapsed while a prompt is still pending.
+  // End a prompt ask as lapsed while a prompt is still pending.
   'I4b.lapsed': withPolicy({
     promptLapsed(item, current, latestReport) {
       return Boolean(latestReport && latestReport.last_report_at > (current?.raised_at ?? -Infinity))
     },
   }),
-  // Never open a prompt item.
-  I10: withPolicy({ mayOpenEpisode: (item, ref, origin) => (origin === 'prompt' ? false : DEFAULT_POLICY.mayOpenEpisode(item, ref, origin)) }),
+  // Never add a prompt ask.
+  I10: withPolicy({ mayAddAsk: (item, ref, kind) => (kind === 'prompt' ? false : DEFAULT_POLICY.mayAddAsk(item, ref, kind)) }),
   // Any open-turn event after the report counts as working, however old.
   'I7f.window': withPolicy({ withinActivityWindow: () => true }),
   // A disagreement read wider than the rule: `running` with a turn in flight.
   I7i: withPolicy({ disagreementStates: new Set(['idle', 'done', 'running']) }),
   // The reverse order left alone: an attention item already open stays open
-  // when its session gets an owner-block item.
+  // when its session gets an owner item.
   I9: withPolicy({ mergeOpenAttention: false }),
-  // A condition beside an open owner-block item is neither raised nor merged.
+  // A condition beside an open owner item is neither raised nor merged.
   I11: withPolicy({ attentionBesideOwnerBlock: 'drop' }),
-  // A condition still carried when its owner-block item closes is not handed on.
+  // A condition still carried when its owner item closes is not handed on.
   'I11.handover': withPolicy({ handOverOnClose: false }),
   // A condition handed back starts its attention episode with fresh counters.
   I12: withPolicy({ inheritCountersOnHandover: false }),
+  // An ask that joins an open owner item only changes its content.
+  I13: withPolicy({ newAskShows: () => false }),
+  // An ask that joins is shown even with the item's counted shows used.
+  'I13.none': withPolicy({ newAskShows: () => true }),
+  // The owner item closes when its first ask ends, though another is live.
+  'I10.close': withPolicy({ closesOnAskEnd: () => true }),
 }

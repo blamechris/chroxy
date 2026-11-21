@@ -12,7 +12,7 @@
 
 import { reportAgeMs } from './grade.js'
 import { H } from './hash.js'
-import { surfaceOrdinal } from './keys.js'
+import { itemIds, surfaceOrdinal } from './keys.js'
 
 const MIN_MS = 60_000
 
@@ -83,7 +83,7 @@ export function nextReminderAt(item, config) {
   return reminderAt(item, k, config)
 }
 
-const CLASS_INDEX = { prompt: 1, declared: 1, outage: 2, attention: 3, gone: 3, seed: 4, issue: 5 }
+const CLASS_INDEX = { owner: 1, outage: 2, attention: 3, gone: 3, seed: 4, issue: 5 }
 
 /**
  * The surfacing order, as a sort key (lower first). `position` is set by
@@ -104,7 +104,8 @@ export function orderKey(item, now) {
   // class the model keeps deadline order and ignores front and back.
   const posRank = hasDeadline ? 1 : (item.position?.rank ?? 1)
   const posSeq = hasDeadline ? 0 : (item.position?.seq ?? 0)
-  const sub = item.origin === 'prompt' ? 0 : 1
+  // Among owner items, one with a live prompt ask comes first.
+  const sub = item.promptLive ? 0 : 1
   const natural = hasDeadline ? item.deadline : (item.orderTime ?? 0)
   return [cls, posRank, posRank === 1 ? 0 : posSeq, cls === 1 ? sub : 0, natural, item.itemId]
 }
@@ -153,7 +154,7 @@ export const DEFAULT_POLICY = Object.freeze({
   // content change, while the prose says the fingerprint decides. Read as
   // any new report, an exhausted item would be queued again
   // each time a session re-authored the identical line. The model uses the
-  // fingerprint; a new prompt id is a change for a prompt item.
+  // fingerprint; a new prompt id is a change for a prompt ask.
   //
   // DESIGN-GAP: `updated` is keyed by the id of the report or prompt that
   // carried the change, so content that moves BACK to an earlier report or
@@ -224,18 +225,18 @@ export const DEFAULT_POLICY = Object.freeze({
   },
 
   // ── one session, one item ──
-  // When a session already has an open owner-block item, an attention item
+  // When a session already has an open owner item, an attention item
   // about that session is not raised beside it: its condition is merged into
   // the open item as an `updated` step that names it ('merge'). 'raise' is
   // the earlier behaviour (both items); 'drop' loses the condition (a
   // mutant, for the liveness proof).
   attentionBesideOwnerBlock: 'merge',
   // The reverse order: an attention item already open when the session gets
-  // an owner-block item is withdrawn as merged and its condition carried.
+  // an owner item is withdrawn as merged and its condition carried.
   mergeOpenAttention: true,
-  // A carried condition still holding when its owner-block item closes is
-  // handed on: to the session's other open owner-block item, else raised as
-  // its own attention item.
+  // A carried condition still holding when its owner item closes is raised as
+  // its own attention item (or, if the item opened its next episode in the
+  // same tick, carried on into it).
   handOverOnClose: true,
   // DESIGN-GAP: a condition's send history belongs to the condition, not to
   // the attention episode. A condition handed back to its own attention item
@@ -244,11 +245,33 @@ export const DEFAULT_POLICY = Object.freeze({
   // of merges and handovers it gets at most the show limit, two reminders
   // and one return. A condition that was never shown starts from zero.
   inheritCountersOnHandover: true,
-  // DESIGN-GAP: a session can hold a declared block and a pending prompt at
-  // once, and the decision names one open owner-block item. A condition is
-  // merged into the declared item when it is open, else into the prompt item.
-  mergeTarget(items) {
-    return items.find((i) => i.origin === 'declared') ?? items.find((i) => i.origin === 'prompt') ?? null
+
+  // ── the owner item ──
+  // A session's declared block and its pending prompt are one owner item,
+  // whose content lists each ask that is live. This rule gives the item an
+  // ask belongs to.
+  ownerItemOf(session, _kind) {
+    return itemIds.owner(session)
+  },
+  // DESIGN-GAP: the episode rule (never on a used reference) is per item,
+  // and one item now has several asks. An ask is added to an owner item
+  // (opening its episode, or joining it) only on a reference that no earlier
+  // ask of that item used, in any episode, so a line or prompt that already
+  // had its ask (a session rewound to it) never brings it back, and an ask
+  // that leaves and comes back does so on a new reference.
+  mayAddAsk(item, ref, _kind) {
+    return !item || !item.usedRefs.has(ref)
+  },
+  // An ask that joins an open owner item is a reason to show it again: a
+  // counted show from the item's own limit, made at once if the item holds
+  // the slot, else when it next reaches the slot. With the limit used, the
+  // new ask only changes the content.
+  newAskShows(item, config) {
+    return item.counters.shows_counted < config.surface.max_presentations
+  },
+  // The item closes only when its last ask ends.
+  closesOnAskEnd(item, kind) {
+    return [...item.asks.keys()].every((k) => k === kind)
   },
 
   orderKey,
@@ -418,9 +441,9 @@ export const DEFAULT_POLICY = Object.freeze({
     const live = n != null && n.available
     if (live && n.pending) return 'waiting_on_owner'
     // DESIGN-GAP: a stale owner block (4 h at the starting thresholds) matches
-    // no row but `inconclusive`, so two cycles later its own owner-block item
+    // no row but `inconclusive`, so two cycles later its own owner item
     // would carry a stale condition about the wait it already shows. The
-    // model classifies it `waiting_on_owner`: the owner-block item is enough.
+    // model classifies it `waiting_on_owner`: the owner item is enough.
     if (ev.ownerBlock) return 'waiting_on_owner'
     if (live && n.answering_now && n.turn_in_flight) return 'working_unreported'
     const after = ev.events.filter((e) => e.activity_at != null && e.activity_at > ev.reportAt)

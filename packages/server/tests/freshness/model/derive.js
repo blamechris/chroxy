@@ -35,7 +35,7 @@ export function createState(policy) {
     // Opening references of attention items whose condition an owner-block
     // item has carried: attention item id -> Set of opening references.
     carriedRefs: new Map(),
-    // Conditions an owner-block item still carried when it closed, to be
+    // Conditions an owner item still carried when it closed, to be
     // handed on by the tick that closed it: "item|episode" -> handover.
     handovers: new Map(),
     attempts: new Map(),
@@ -328,11 +328,37 @@ function newItem(r) {
     carried: [],
     carriedEver: new Set(),
     carryRef: null,
+    // An owner item's live asks by kind ('declared', 'prompt'), from its
+    // latest content; whether one that joined is owed a show at once.
+    asks: new Map(),
+    promptLive: false,
+    showDue: false,
     history: [],
   }
 }
 
-const OWNER_BLOCK_ORIGINS = new Set(['declared', 'prompt'])
+const OWNER_BLOCK_ORIGINS = new Set(['owner'])
+
+/**
+ * An owner item's ordering fields follow its live asks: the earliest
+ * deadline, a live prompt first.
+ *
+ * DESIGN-GAP: "otherwise the existing order" orders owner items by their
+ * report or prompt time, and a two-ask item has two. The model uses the
+ * earliest of its live asks, so an item does not lose its place when a
+ * second ask joins.
+ */
+function setAsks(it, asks) {
+  it.asks = new Map((asks ?? []).map((a) => [a.kind, a]))
+  if (it.asks.size === 0) return
+  const deadlines = [...it.asks.values()].map((a) => a.deadline).filter((d) => d != null)
+  it.deadline = deadlines.length ? Math.min(...deadlines) : null
+  it.orderTime = Math.min(...[...it.asks.values()].map((a) => a.order_time ?? Infinity))
+  it.promptLive = it.asks.has('prompt')
+  const declared = it.asks.get('declared')
+  it.fingerprint = declared?.fingerprint ?? null
+  if (declared?.report_id) it.reportId = declared.report_id
+}
 
 function foldSurface(state, r) {
   const b = r.body
@@ -409,8 +435,12 @@ function applyStep(it, b, at, seq) {
       it.carried = []
       it.carriedEver = new Set()
       it.carryRef = null
+      it.showDue = false
+      it.promptLive = false
+      if (b.asks) setAsks(it, b.asks)
       break
     case 'shown':
+      it.showDue = false
       it.state = 'active'
       it.preemptedBy = null
       it.lastShowAt = at
@@ -451,6 +481,15 @@ function applyStep(it, b, at, seq) {
         it.carried = b.carried
         it.carryRef = b.n
         if (b.carry.op === 'carry') it.carriedEver.add(`${b.carry.attention_item}|${b.carry.opened_by}`)
+      }
+      if (b.ask) {
+        setAsks(it, b.asks)
+        if (b.ask.op === 'join') {
+          it.usedRefs.add(b.ask.opened_by)
+          it.showDue = Boolean(b.show_now)
+          // The show a new ask is owed is a counted one, whatever deferral came before.
+          if (b.counted_next) it.afterDeferral = false
+        }
       }
       if (b.requeue) {
         it.state = 'queued'

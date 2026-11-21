@@ -20,7 +20,7 @@ import { SENDING_STEPS, itemIds, ownerAckKey, sessionKey, surfaceKey, systemKey 
 
 const ZERO = Object.freeze({ presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 })
 const DISMISSABLE = new Set(['seed', 'issue', 'attention', 'gone'])
-const OWNER_BLOCK_ORIGINS = new Set(['declared', 'prompt'])
+const OWNER_BLOCK_ORIGINS = new Set(['owner'])
 
 function envOf(item) {
   return item.session ? { source: item.session.source, native_id: item.session.native_id, incarnation: item.session.incarnation ?? null } : null
@@ -47,6 +47,11 @@ function body(item, step, phase, n, c, extra) {
     channel_ref: null,
     resolution_evidence: null,
     source: item.source ?? null,
+    // DESIGN-GAP (added field): an owner item's records all carry its live
+    // asks, so each states the content it was made with; without it two
+    // records of one step at one presentation could differ only in content
+    // the record does not show.
+    ...(item.asks?.size ? { asks: [...item.asks.values()] } : {}),
     ...extra,
   }
 }
@@ -83,7 +88,7 @@ export function* sweepUnknownDeliveries(ctx, now) {
   }
 }
 
-function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, condition, handoverOf, counters = ZERO, now }) {
+function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, condition, handoverOf, counters = ZERO, asks, ask, now }) {
   const st = ctx.state
   const existing = st.items.get(itemId)
   if (!ctx.policy.mayOpenEpisode(existing, ref, origin)) return false
@@ -111,45 +116,35 @@ function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, 
       seed,
       ...(condition ? { condition } : {}),
       ...(handoverOf ? { handover_of: handoverOf } : {}),
+      ...(asks ? { asks, ask } : {}),
     },
   })
   return true
 }
 
-function* resolve(ctx, item, { now, evidence }) {
+function* resolve(ctx, item, { now, evidence, closingAsk }) {
   yield* clearCarried(ctx, item, now)
   if (item.state === 'acknowledged' && item.ack) {
     const vk = ownerAckKey(item.itemId, item.episode, item.ack.ackRef, 'verify')
     yield put({ kind: 'owner_ack', id: vk, session: envOf(item), body: { item_id: item.itemId, episode: item.episode, ack_ref: item.ack.ackRef, phase: 'verify', intent: 'done', basis: 'owner_direct', verified: true } }, now)
   }
-  yield* step(ctx, item, 'resolved', { now, extra: { resolution_evidence: evidence ?? null } })
+  yield* step(ctx, item, 'resolved', { now, extra: { resolution_evidence: evidence ?? null, ...(closingAsk ? { closing_ask: closingAsk } : {}) } })
 }
 
-function* withdraw(ctx, item, { now, reason }) {
+function* withdraw(ctx, item, { now, reason, closingAsk }) {
   yield* clearCarried(ctx, item, now)
-  yield* step(ctx, item, 'withdrawn', { now, extra: { reason } })
-}
-
-function* update(ctx, item, { now, changeRef, changeAt = null, fingerprint, reportId, deadline }) {
-  const cfg = ctx.state.config
-  const requeue = item.state === 'exhausted' && ctx.policy.requeueFromExhausted(item, cfg)
-  const next = { ...item, fingerprint, reportId: reportId ?? item.reportId }
-  yield* step(ctx, next, 'updated', {
-    now,
-    ordCtx: { changeRef },
-    extra: { content_ref: changeRef, content_at: changeAt, requeue, ...(deadline !== undefined ? { deadline } : {}) },
-  })
+  yield* step(ctx, item, 'withdrawn', { now, extra: { reason, ...(closingAsk ? { closing_ask: closingAsk } : {}) } })
 }
 
 function reportBody(st, id) {
   return id ? (st.reports.get(id)?.body ?? null) : null
 }
 
-// ── conditions carried by an owner-block item ─────────────────────────────
+// ── conditions carried by an owner item ─────────────────────────────
 //
 // A condition is what an attention item would have said: the attention item
 // it would be (session and report), the reference that would open it, the
-// trigger and the time the condition began. An owner-block item carries a
+// trigger and the time the condition began. An owner item carries a
 // list of them as part of its content; each change is one `updated` step.
 
 function openOwnerBlocks(st, sk) {
@@ -192,7 +187,7 @@ function conditionResolved(st, sk, cond) {
 }
 
 /**
- * One change to the conditions an owner-block item carries: `carry` adds
+ * One change to the conditions an owner item carries: `carry` adds
  * one, `clear` drops one. It is the `updated` row of the transition table:
  * it sends nothing, and from exhausted it queues the item again only if a
  * counted show is left.
@@ -213,7 +208,7 @@ function* carryStep(ctx, item, { now, op, cond, path, from = null }) {
 
 /**
  * DESIGN-GAP: what becomes of a carried condition whose own closing evidence
- * arrives while the owner-block item is still open. The model drops it from
+ * arrives while the owner item is still open. The model drops it from
  * the content with another `updated` step, so the item names only what still
  * holds; the dropped condition stays in the item's history.
  */
@@ -225,7 +220,7 @@ function* clearCarried(ctx, item, now, { reason = 'resolved', all = false } = {}
 }
 
 /**
- * An attention signal for a session. With no open owner-block item it raises
+ * An attention signal for a session. With no open owner item it raises
  * the attention item, as it always did. With one, the condition is merged
  * into that item instead, if the attention item would have been raised: it
  * is not open, its opening reference is unused and was never carried, and
@@ -262,19 +257,19 @@ function* attentionSignal(ctx, sig, now) {
   if (carries(obs, attentionId)) return
   const cond = conditionOf(st, { attentionId, ref: sig.onset, reportId: sig.reportId, sk: sig.sk, ...condition, now })
   if (conditionResolved(st, sig.sk, cond)) return
-  yield* carryStep(ctx, P.mergeTarget(obs), { now, op: 'carry', cond, path: 'signal' })
+  yield* carryStep(ctx, obs[0], { now, op: 'carry', cond, path: 'signal' })
 }
 
 /**
- * A condition that an owner-block item still carried when it closed: merged
- * into the session's other open owner-block item, or else raised as its own
- * attention item, as for a session with no open item. Runs in the tick that
- * closed the item (a crash re-runs it there).
+ * A condition that an owner item still carried when it closed: raised as its
+ * own attention item, as for a session with no open item, or carried on into
+ * the item's next episode if an ask opened one in the same tick. Runs in the
+ * tick that closed the item (a crash re-runs it there).
  *
  * DESIGN-GAP: an attention item withdrawn as merged has used its opening
  * reference, and a new episode never opens on a used reference. Its
  * condition is raised again under a reference derived from that one and the
- * owner-block episode that carried it, which no other episode can use.
+ * owner episode that carried it, which no other episode can use.
  */
 function* handOver(ctx, ho, cond, now) {
   const st = ctx.state
@@ -285,7 +280,7 @@ function* handOver(ctx, ho, cond, now) {
   const obs = openOwnerBlocks(st, ho.sk)
   if (obs.length > 0) {
     if (carries(obs, attentionId)) return
-    const target = P.mergeTarget(obs)
+    const target = obs[0]
     if (target.carriedEver.has(`${attentionId}|${cond.opened_by}`)) return
     yield* carryStep(ctx, target, { now, op: 'carry', cond, path: 'handover', from: ho.key })
     return
@@ -316,7 +311,7 @@ function* handOver(ctx, ho, cond, now) {
   })
 }
 
-/** Per session of the source with an open owner-block item: drop what has ended; merge what is open beside it. */
+/** Per session of the source with an open owner item: drop what has ended; merge what is open beside it. */
 function* reconcileOwnerBlocks(ctx, source, now) {
   const st = ctx.state
   const P = ctx.policy
@@ -326,15 +321,15 @@ function* reconcileOwnerBlocks(ctx, source, now) {
     for (const ob of obs) yield* clearCarried(ctx, ob, now)
     if (P.attentionBesideOwnerBlock === 'raise' || !P.mergeOpenAttention) continue
     // DESIGN-GAP (reverse order): an attention item already open when its
-    // session gets an owner-block item is withdrawn, reason `merged`, after
-    // its condition is carried on the owner-block item (carried first, so a
+    // session gets an owner item is withdrawn, reason `merged`, after
+    // its condition is carried on the owner item (carried first, so a
     // crash between the two loses nothing).
     for (const a of [...st.items.values()]) {
       if (!a.open || a.origin !== 'attention' || a.sk !== s.sk) continue
       const current = openOwnerBlocks(st, s.sk)
       if (!carries(current, a.itemId)) {
         const cond = conditionOf(st, { attentionId: a.itemId, ref: a.openedBy, root: a.root, reportId: a.reportId, sk: s.sk, trigger: a.condition?.trigger, since: a.condition?.since, now })
-        yield* carryStep(ctx, P.mergeTarget(current), { now, op: 'carry', cond, path: 'open_attention' })
+        yield* carryStep(ctx, current[0], { now, op: 'carry', cond, path: 'open_attention' })
       }
       yield* withdraw(ctx, a, { now, reason: 'merged' })
     }
@@ -343,88 +338,178 @@ function* reconcileOwnerBlocks(ctx, source, now) {
 
 // ── origins ────────────────────────────────────────────────────────────────
 
-function* declaredBlocks(ctx, source, now) {
+// ── the owner item and its asks ────────────────────────────────────────────
+//
+// One owner item per session. Its content lists each ask that is live: the
+// declared block (an authored owner-block report) and the pending prompt.
+// Each ask opens on its own reference and ends on its own evidence; the item
+// opens with its first ask and closes with its last.
+
+/** An ask as the per-origin rules see it (content change, prompt answer and lapse). */
+function askView(ask) {
+  return { origin: ask.kind, contentAt: ask.content_at ?? null, contentRef: ask.content_ref ?? ask.report_id ?? null, fingerprint: ask.fingerprint ?? null }
+}
+
+/** The open owner item carrying a live ask of this kind for the session, if any. */
+function ownerWith(ctx, session, kind) {
+  const it = ctx.state.items.get(ctx.policy.ownerItemOf(session, kind))
+  return it?.open && it.asks.has(kind) ? it : null
+}
+
+function* askChange(ctx, item, { now, op, ask, asks, extra = {} }) {
+  // Each ask has its own opening reference, never reused on the item, so
+  // these change references never repeat when an ask leaves and another of
+  // its kind joins later.
+  const changeRef = H('ask', op, ask.kind, ask.opened_by, op === 'content' ? (ask.content_ref ?? ask.report_id) : null)
+  yield* step(ctx, item, 'updated', { now, ordCtx: { changeRef }, extra: { content_ref: changeRef, ask: { op, ...ask }, asks, ...extra } })
+}
+
+/**
+ * An ask arriving: it opens the item's episode, or joins the open item.
+ *
+ * DESIGN-GAP: what a new ask does in each state of the item. With a counted
+ * show left: an item holding the slot (active, or acknowledged and waiting
+ * for its verification) is shown again at once, and an acknowledgment
+ * pending then applies to the earlier content and is not verified; a queued
+ * item (behind another, preempted, or back from expiry) keeps its place and
+ * its next show is a counted one; a deferred or exhausted item is queued
+ * again, so the new ask cancels a deferral. With no counted show left the
+ * ask only changes the content: nothing is sent and an exhausted item stays
+ * exhausted.
+ */
+function* addAsk(ctx, session, ask, now) {
+  const st = ctx.state
+  const P = ctx.policy
+  const cfg = st.config
+  const id = P.ownerItemOf(session, ask.kind)
+  const it = st.items.get(id)
+  if (!P.mayAddAsk(it, ask.opened_by, ask.kind)) return
+  if (!it?.open) {
+    yield* raise(ctx, {
+      itemId: id,
+      kind: 'owner_block',
+      origin: 'owner',
+      session,
+      source: session.source,
+      ref: ask.opened_by,
+      contentRef: ask.opened_by,
+      contentAt: ask.content_at ?? null,
+      deadline: ask.deadline ?? null,
+      orderTime: ask.order_time,
+      reportId: ask.report_id ?? null,
+      asks: [ask],
+      ask: { op: 'open', ...ask },
+      now,
+    })
+    return
+  }
+  const show = P.newAskShows(it, cfg)
+  const holder = P.slotHolderStates.has(it.state)
+  yield* askChange(ctx, it, {
+    now,
+    op: 'join',
+    ask,
+    asks: [...it.asks.values(), ask],
+    extra: { show_now: show && holder, counted_next: show, requeue: show && (it.state === 'exhausted' || it.state === 'deferred') },
+  })
+}
+
+/** An ask ending: removed from the content (nothing sent), or, as the last ask, the item's closing step. */
+function* endAsk(ctx, item, kind, { now, how, evidence = null }) {
+  const P = ctx.policy
+  if (P.closesOnAskEnd(item, kind)) {
+    if (how === 'lapsed') yield* withdraw(ctx, item, { now, reason: 'lapsed', closingAsk: kind })
+    else yield* resolve(ctx, item, { now, evidence, closingAsk: kind })
+    return
+  }
+  // DESIGN-GAP: an ask ending while another is live is a content change by
+  // removal. It does not queue an exhausted item again: there is less for
+  // the owner to do, not more.
+  const ask = item.asks.get(kind)
+  yield* askChange(ctx, item, { now, op: 'end', ask: { ...ask, how, evidence }, asks: [...item.asks.values()].filter((a) => a.kind !== kind), extra: { requeue: false } })
+}
+
+/** New content within a live ask (a new owner-block wording; a newer prompt): the `updated` row. */
+function* changeAsk(ctx, item, ask, now) {
+  const requeue = item.state === 'exhausted' && ctx.policy.requeueFromExhausted(item, ctx.state.config)
+  yield* askChange(ctx, item, { now, op: 'content', ask, asks: [...item.asks.values()].map((a) => (a.kind === ask.kind ? ask : a)), extra: { requeue } })
+}
+
+/**
+ * The asks of each session of the source, in three passes: asks that end,
+ * then new content within live asks, then asks that arrive.
+ *
+ * DESIGN-GAP: when one tick both ends an item's last ask and brings a new
+ * one, the ending is taken first, so the new ask opens a new episode rather
+ * than keeping the old one open.
+ */
+function* ownerAsks(ctx, source, now) {
   const st = ctx.state
   const P = ctx.policy
   const cfg = st.config
   for (const s of sessionsOf(st, source)) {
     const latest = reportBody(st, s.latestAuthored)
-    const id = itemIds.declared(s.session)
-    const it = st.items.get(id)
     const ob = latest ? P.isOwnerBlock(latest, cfg) : false
-    if (it?.open) {
-      if (P.declaredResolvedBy(latest, reportBody(st, it.openedBy), cfg)) {
-        yield* resolve(ctx, it, { now, evidence: s.latestAuthored })
-        continue
+    // DESIGN-GAP: whether a prompt is pending can only be read from a check
+    // that carried native state; an errored read says nothing either way.
+    // The model evaluates prompt asks only on such a check, so a source with
+    // no native state never has one.
+    const live = Boolean(s.cur && s.cur.nativeAvailable)
+    const pending = live ? [...s.cur.pending].map((ref) => s.prompts.get(ref)).filter((p) => p && p.status === 'pending') : []
+    pending.sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1))
+    const lp = pending[pending.length - 1]
+
+    // Asks that end, each on its own evidence.
+    const d = ownerWith(ctx, s.session, 'declared')
+    if (d && P.declaredResolvedBy(latest, reportBody(st, d.asks.get('declared').opened_by), cfg)) {
+      yield* endAsk(ctx, d, 'declared', { now, how: 'resolved', evidence: s.latestAuthored })
+    }
+    const p = ownerWith(ctx, s.session, 'prompt')
+    if (p) {
+      const view = askView(p.asks.get('prompt'))
+      const cur = s.prompts.get(view.contentRef)
+      const answered = P.promptAnswered(view, cur, s.prompts, { livePending: live ? pending.length : null })
+      if (answered) yield* endAsk(ctx, p, 'prompt', { now, how: 'answered', evidence: answered })
+      else if (live && P.promptLapsed(view, cur, latest, { livePending: pending.length })) yield* endAsk(ctx, p, 'prompt', { now, how: 'lapsed' })
+    }
+
+    // New content within a live ask.
+    const d2 = ownerWith(ctx, s.session, 'declared')
+    if (d2 && ob) {
+      const ask = d2.asks.get('declared')
+      const fp = P.blockFingerprint(latest)
+      if (P.contentChanged(askView(ask), { fingerprint: fp, ref: s.latestAuthored, at: latest.last_report_at })) {
+        yield* changeAsk(ctx, d2, { ...ask, report_id: s.latestAuthored, fingerprint: fp, content_at: latest.last_report_at }, now)
       }
-      if (ob) {
-        const fp = P.blockFingerprint(latest)
-        if (P.contentChanged(it, { fingerprint: fp, ref: s.latestAuthored, at: latest.last_report_at })) {
-          yield* update(ctx, it, { now, changeRef: s.latestAuthored, changeAt: latest.last_report_at, fingerprint: fp, reportId: s.latestAuthored })
-        }
+    }
+    const p2 = ownerWith(ctx, s.session, 'prompt')
+    if (p2 && live && lp) {
+      const ask = p2.asks.get('prompt')
+      if (P.contentChanged(askView(ask), { ref: lp.ref, at: lp.raised_at })) {
+        yield* changeAsk(ctx, p2, { ...ask, content_ref: lp.ref, content_at: lp.raised_at ?? null, deadline: lp.deadline ?? null }, now)
       }
-    } else if (ob) {
-      yield* raise(ctx, {
-        itemId: id,
-        kind: 'owner_block',
-        origin: 'declared',
-        session: s.session,
-        source: s.session.source,
-        ref: s.latestAuthored,
-        fingerprint: P.blockFingerprint(latest),
-        reportId: s.latestAuthored,
-        contentAt: latest.last_report_at,
-        orderTime: latest.last_report_at,
-        now,
-      })
+    }
+
+    // Asks that arrive.
+    if (ob && !ownerWith(ctx, s.session, 'declared')) {
+      yield* addAsk(ctx, s.session, { kind: 'declared', opened_by: s.latestAuthored, report_id: s.latestAuthored, fingerprint: P.blockFingerprint(latest), content_at: latest.last_report_at, order_time: latest.last_report_at }, now)
+    }
+    if (lp && !ownerWith(ctx, s.session, 'prompt')) {
+      yield* addAsk(ctx, s.session, { kind: 'prompt', opened_by: lp.ref, content_ref: lp.ref, content_at: lp.raised_at ?? null, deadline: lp.deadline ?? null, order_time: lp.raised_at ?? now }, now)
     }
   }
 }
 
-function* prompts(ctx, source, now) {
+/** An owner item that a new ask found holding the slot is shown again at once (a counted show). */
+function* showNewAsks(ctx, now) {
   const st = ctx.state
   const P = ctx.policy
-  for (const s of sessionsOf(st, source)) {
-    const id = itemIds.prompt(s.session)
-    // DESIGN-GAP: whether a prompt is pending can only be read from a check
-    // that carried native state; an errored read says nothing either way.
-    // The model evaluates the prompt origin only on such a check.
-    const live = Boolean(s.cur && s.cur.nativeAvailable)
-    const pending = live ? [...s.cur.pending].map((ref) => s.prompts.get(ref)).filter((p) => p && p.status === 'pending') : []
-    pending.sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1))
-    const latest = pending[pending.length - 1]
-    const it = st.items.get(id)
-    if (it?.open) {
-      const cur = s.prompts.get(it.contentRef)
-      const answered = P.promptAnswered(it, cur, s.prompts, { livePending: live ? pending.length : null })
-      if (answered) {
-        yield* resolve(ctx, it, { now, evidence: answered })
-      } else if (live) {
-        const rep = reportBody(st, s.latestAuthored)
-        if (P.promptLapsed(it, cur, rep, { livePending: pending.length })) {
-          yield* withdraw(ctx, it, { now, reason: 'lapsed' })
-        } else if (latest && P.contentChanged(it, { ref: latest.ref, at: latest.raised_at })) {
-          yield* update(ctx, it, { now, changeRef: latest.ref, changeAt: latest.raised_at, fingerprint: it.fingerprint, deadline: latest.deadline ?? null })
-        }
-      }
-    }
-    // An item closed just now can open its next episode in the same tick.
-    if (!st.items.get(id)?.open && latest) {
-      yield* raise(ctx, {
-        itemId: id,
-        kind: 'owner_block',
-        origin: 'prompt',
-        session: s.session,
-        source: s.session.source,
-        ref: latest.ref,
-        contentRef: latest.ref,
-        contentAt: latest.raised_at ?? null,
-        deadline: latest.deadline ?? null,
-        orderTime: latest.raised_at ?? now,
-        reportId: s.latestAuthored,
-        now,
-      })
-    }
+  const cfg = st.config
+  for (const it of openItems(st)) {
+    if (!it.showDue || !P.slotHolderStates.has(it.state)) continue
+    if (!P.newAskShows(it, cfg)) continue
+    const c = { ...it.counters, presentation: it.counters.presentation + 1, shows_counted: it.counters.shows_counted + 1 }
+    yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted: true, new_ask: true } })
   }
 }
 
@@ -615,11 +700,11 @@ function* fillSlot(ctx, now) {
 
 /** Plan the owner-queue part of one tick. */
 export function* planQueue(ctx, { source, tickId, now, signals, tickOpenSeq }) {
-  yield* declaredBlocks(ctx, source, now)
-  yield* prompts(ctx, source, now)
+  yield* ownerAsks(ctx, source, now)
   yield* attention(ctx, source, now, signals)
   yield* outages(ctx, source, now, signals, tickId)
   yield* seeds(ctx, now)
+  yield* showNewAsks(ctx, now)
   yield* verifyAcknowledged(ctx, { source, now, tickOpenSeq })
   yield* activeTiming(ctx, now)
   yield* fillSlot(ctx, now)

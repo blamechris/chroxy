@@ -22,10 +22,10 @@ import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const SEEDS = {
-  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, I2c: 2093, 'I2c.front': 2093, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 4, I6: 271,
-  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4,
-  I11: 7, 'I11.handover': 65, I12: 119,
-  ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 325, reReadOnResume: 4, raiseBesideOwnerBlock: 7,
+  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, I2c: 31233, 'I2c.front': 3681, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, I6: 271,
+  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6,
+  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 18,
+  ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 70, reReadOnResume: 4, raiseBesideOwnerBlock: 7, twoOwnerItems: 6,
   onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
 }
 const SEARCH = 300
@@ -99,7 +99,7 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     assert.ok(runSequence(f.seed).ok)
   })
 
-  it('I4b (fault): an attention item withdrawn as merged with no owner-block item carrying it is caught', () => {
+  it('I4b (fault): an attention item withdrawn as merged with no owner item carrying it is caught', () => {
     const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'attention' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'merged' } } : d)
     const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
     assert.ok(f)
@@ -113,11 +113,35 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     assert.ok(runSequence(f.seed).ok)
   })
 
-  it('I11 (fault): an owner-block item whose recorded list does not match its own changes is caught', () => {
+  it('I11 (fault): an owner item whose recorded list does not match its own changes is caught', () => {
     const rewriteAppend = (d) => (d.kind === 'surface' && d.body.carry?.op === 'carry' ? { ...d, body: { ...d.body, carried: [] } } : d)
     const f = firstFailure('I11', 1, { fault: { rewriteAppend } })
     assert.ok(f)
     assert.match(f.r.error.message, /content names 0 conditions where its changes add up to 1/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I10 (fault): an owner item whose recorded asks do not match its own ask changes is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.ask?.op === 'join' ? { ...d, body: { ...d.body, asks: d.body.asks.filter((a) => a.kind !== d.body.ask.kind) } } : d)
+    const f = firstFailure('I10', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /content lists asks/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I10 (fault): a declared ask whose ending is never written stays on the item after the newer report, and is caught', () => {
+    const dropAppend = (d) => d.kind === 'surface' && d.body.ask?.op === 'end' && d.body.ask.kind === 'declared'
+    const f = firstFailure('I10', 1, { fault: { dropAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /still carries a declared ask/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I4b (fault): an ask recorded as ended without its evidence is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.ask?.op === 'content' && d.body.ask.kind === 'declared' ? { ...d, body: { ...d.body, ask: { ...d.body.ask, op: 'end', how: 'resolved' }, asks: d.body.asks.filter((a) => a.kind !== 'declared') } } : d)
+    const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /ask was ended/)
     assert.ok(runSequence(f.seed).ok)
   })
 
