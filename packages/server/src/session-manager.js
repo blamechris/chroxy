@@ -40,7 +40,7 @@ import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { PermissionRuleStore } from './permission-rule-store.js'
 import { permissionDecisionToken } from './permission-scope.js'
-import { ScheduledTaskStore, defaultScheduledTasksPath } from './scheduled-task-store.js'
+import { ScheduledTaskStore, defaultScheduledTasksPath, isScheduledTaskIdShape } from './scheduled-task-store.js'
 import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
@@ -2040,7 +2040,10 @@ export class SessionManager extends EventEmitter {
    *   `{ orchestrationRunId, orchestrationRole }`, surfaced as optional session-list badge
    *   fields). NOT settable over the wire (the create_session handler whitelists its
    *   fields), and NOT persisted — in-memory only in v1; restart-reconcile re-establishes
-   *   it (#6743).
+   *   it (#6743). The ONE exception is `scheduledTaskId` (#8571), which is persisted as
+   *   a restore HINT (see `_serializeSessionEntry`): after a restart it is held inert on
+   *   the entry, never in `metadata`, until the scheduler adopts the session
+   *   (`adoptScheduledTask`). Every other key is dropped across a restart.
    * @returns {string} sessionId
    */
   createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false, modelSource, nameIdempotencyKey, successorOf } = {}) {
@@ -3005,6 +3008,70 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8571: live, non-destroying sessions linked to a scheduled task, for the
+   * scheduler's adoption pass. `owned` is true when `metadata.scheduledTaskId` is set
+   * (the scheduler adopted it, or created it); false when the link is only a restore
+   * HINT carried over from the state file, which is inert until adopted.
+   * @returns {Array<{ sessionId: string, taskId: string, owned: boolean, lastActivityAt: number }>}
+   */
+  listScheduledTaskSessions() {
+    const out = []
+    for (const [sessionId, entry] of this._sessions) {
+      if (entry._destroying) continue
+      const owned = isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)
+      const taskId = owned ? entry.metadata.scheduledTaskId : entry.restoredScheduledTaskId
+      if (!isScheduledTaskIdShape(taskId)) continue
+      out.push({ sessionId, taskId, owned, lastActivityAt: this.getLastActivityAt(sessionId) || 0 })
+    }
+    return out
+  }
+
+  /**
+   * #8571: the scheduler takes ownership of a session linked to `taskId` (owned, or a
+   * restore hint). Sets `metadata.scheduledTaskId` (merged into any other metadata)
+   * and clears the hint, which is what makes `getHandoffBlockers` report
+   * `automation_owned`. The persisted value is the same before and after, so nothing
+   * needs flushing. Refuses a session linked to a different task or none. Idempotent:
+   * for an already-owned session it just confirms ownership. An adopted session
+   * belongs to its task: deleting the task closes it and its worktree. An archive
+   * restore of a scheduled session comes back through restore, so it is re-adopted
+   * the same way.
+   * @param {string} sessionId
+   * @param {string} taskId
+   * @returns {boolean} whether the session is now owned by `taskId`
+   */
+  adoptScheduledTask(sessionId, taskId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying || !isScheduledTaskIdShape(taskId)) return false
+    const current = entry.metadata?.scheduledTaskId
+    if (current !== undefined && current !== null) return current === taskId
+    if (entry.restoredScheduledTaskId !== taskId) return false
+    entry.metadata = { ...(entry.metadata || {}), scheduledTaskId: taskId }
+    delete entry.restoredScheduledTaskId
+    return true
+  }
+
+  /**
+   * #8571: a restore hint is valid only until a human uses the session. Without
+   * this, a duplicate the scheduler did not pick would keep its hint, be adopted
+   * later (when the chosen session is closed) and have scheduled prompts driven
+   * into the user's own conversation, and be destroyed with the task. Drops the
+   * unadopted hint and persists, so the next restart agrees. A no-op for an OWNED
+   * (adopted) session, which belongs to its task exactly as it does within one
+   * daemon run, and for a session with no hint.
+   * @param {string} sessionId
+   * @returns {boolean} whether a hint was released
+   */
+  releaseRestoreHint(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry.restoredScheduledTaskId === undefined) return false
+    if (isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)) return false
+    delete entry.restoredScheduledTaskId
+    this._schedulePersist()
+    return true
+  }
+
+  /**
    * List all sessions with summary info.
    * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
@@ -3748,6 +3815,19 @@ export class SessionManager extends EventEmitter {
         ...(typeof entry.session.conversationPersisted === 'boolean'
           ? { conversationPersisted: entry.session.conversationPersisted }
           : {}),
+        // #8571: the scheduler's task->session link is the ONE metadata key that
+        // survives a restart, written as a RESTORE HINT so the engine can re-adopt
+        // its session instead of minting another. Ownership (`metadata`) wins; else
+        // a hint carried from the state file is written back unchanged, so a link
+        // nobody adopted (scheduler disabled, store failed to load, task gone,
+        // duplicate) is never lost. Orchestration keys stay in-memory (#6743).
+        // Omitted unless valid; an older build reading it ignores the unknown key.
+        ...(() => {
+          const taskId = isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)
+            ? entry.metadata.scheduledTaskId
+            : entry.restoredScheduledTaskId
+          return isScheduledTaskIdShape(taskId) ? { scheduledTaskId: taskId } : {}
+        })(),
         cwd: entry.cwd,
         model: entry.session.model,
         // Persist the model the underlying CLI actually booted with (#3700b).
@@ -4161,6 +4241,15 @@ export class SessionManager extends EventEmitter {
       // restored history + worktree instead of destroying them.
       isRestore: true,
     })
+    // #8571: a persisted scheduled-task link comes back as an inert HINT on the
+    // entry, NOT as `metadata`: ownership (and the `automation_owned` handoff
+    // blocker) begins only when the scheduler adopts the session
+    // (`adoptScheduledTask`). Only a well-formed task id is trusted; the hint is
+    // written back by `_serializeSessionEntry`, so an unadopted link survives.
+    if (isScheduledTaskIdShape(saved.scheduledTaskId)) {
+      const restored = this._sessions.get(sessionId)
+      if (restored) restored.restoredScheduledTaskId = saved.scheduledTaskId
+    }
     try {
       // #4089 / #4124: restore the per-session running totals + the
       // threshold-notified latch onto the freshly-created entry. We do
@@ -5734,6 +5823,10 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    */
   recordUserIntent(sessionId) {
+    // #8571: a person using a session ends any unadopted scheduled-task restore
+    // hint on it. Only the CLIENT input handlers call this (the scheduler's turn
+    // driver goes through `session.sendMessage` directly, never here).
+    this.releaseRestoreHint(sessionId)
     this._userStopped.delete(sessionId)
     // #8326: a person typing is also what ends a run of consecutive daemon wakes.
     this._daemonWakeCount.delete(sessionId)
@@ -5767,7 +5860,10 @@ export class SessionManager extends EventEmitter {
    *                          createSession (`scheduledTaskId` /
    *                          `orchestrationRunId`). Metadata is not persisted, so
    *                          it is absent for a session restored after a restart,
-   *                          exactly as the engines' own session maps are.
+   *                          exactly as the engines' own session maps are. The
+   *                          persisted `scheduledTaskId` is only a restore hint
+   *                          (#8571): it adds this blocker once the scheduler has
+   *                          adopted the session (`adoptScheduledTask`), not before.
    *   - `evaluator_pending`  the caller says the prompt evaluator holds a draft
    *
    * One input lives outside the SessionManager and must be passed in by the

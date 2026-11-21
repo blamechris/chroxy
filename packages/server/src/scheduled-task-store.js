@@ -98,6 +98,18 @@ function requireIdWithinWireCap(id) {
 }
 
 /**
+ * #8571 — whether `value` has the shape of a task id this store would accept:
+ * a non-empty string, already trimmed (`add` trims before storing) and within the
+ * wire cap. Shape only; it does not say the task exists. Used to vet a task id read
+ * back from persisted session state before it is trusted as a link.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isScheduledTaskIdShape(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_WIRE_ID_LENGTH && value === value.trim()
+}
+
+/**
  * The largest absolute epoch-ms a JS `Date` can represent (±8.64e15, i.e. ±100M
  * days around the epoch — year ±275760). Beyond it `new Date(ms)` is an Invalid
  * Date and `.toISOString()` THROWS `RangeError`.

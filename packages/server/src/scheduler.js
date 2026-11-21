@@ -463,6 +463,7 @@ export class SchedulerEngine extends EventEmitter {
     }
     this._started = true
     this._log.info('Scheduled execution ENABLED — arming headless scheduler')
+    this._adoptLinkedSessions()
     this._armNextTick()
     return true
   }
@@ -518,6 +519,7 @@ export class SchedulerEngine extends EventEmitter {
     this._clearArmedTimer()
     // Every registry change and every settled run funnels through here, so this
     // is the one place that notices a task has gone away (#7006).
+    this._adoptLinkedSessions()
     this._releaseSessions()
     const now = this._now()
     let earliest = null
@@ -558,8 +560,11 @@ export class SchedulerEngine extends EventEmitter {
    * the session still holds what the last run did. If such a task is deleted
    * later, the pass above destroys its session.
    *
-   * The mapping is in-memory only, so a restart forgets every task->session link
-   * without destroying anything. Never throws: a failing destroy must not take
+   * The mapping itself is in-memory, but the session's `scheduledTaskId` is
+   * persisted as a restore hint, so a restart re-adopts it (_adoptLinkedSessions,
+   * #8571) and a task deleted afterwards is released here like any other. Only an
+   * ADOPTED (mapped) session is closed; a task deleted while the daemon was down
+   * leaves its session as an ordinary one. Never throws: a failing destroy must not take
    * the scheduling tick down.
    */
   _releaseSessions() {
@@ -568,6 +573,73 @@ export class SchedulerEngine extends EventEmitter {
       if (this._running.has(taskId)) continue
       this._sessionByTask.delete(taskId)
       this._destroyTaskSession(taskId, sessionId)
+    }
+  }
+
+  /**
+   * @private (#8571) — adopt restored sessions into the task->session map. The
+   * persisted `scheduledTaskId` is only a restore HINT: the SessionManager holds it
+   * inert until this pass takes ownership of the session (which is what makes it
+   * `automation_owned`). For every task in the store with no LIVE mapped session, the
+   * most recently active live session linked to it (owned or hinted; ties: highest
+   * session id) is adopted and mapped. Run on start, on every re-arm (so a session
+   * that came back late — retryFailedRestore, an archive restore — is picked up)
+   * and before a fire creates a session. Idempotent and cheap; never throws.
+   *
+   * It NEVER unlinks or destroys. A task absent from the store is not evidence of a
+   * deletion (the store loads EMPTY when its file is unreadable), so sessions linked
+   * to an absent task, and non-chosen duplicates, keep their inert hint. A task
+   * deleted while the daemon was down therefore leaves its session as an ordinary
+   * one; only a session adopted in this process is closed on deletion
+   * (_releaseSessions): an adopted session belongs to its task, so deleting the task
+   * closes it and its worktree. A person typing into a session that still carries only
+   * a hint releases the hint (SessionManager.releaseRestoreHint), so a duplicate the
+   * user took over is never adopted later. An archive restore of a scheduled session
+   * comes back through restore and is re-adopted the same way.
+   * Sessions dropped by restore's staleness filter cannot be
+   * re-adopted, so a long-cadence task may still get a fresh session.
+   *
+   * @param {string} [onlyTaskId] - restrict the pass to one task
+   */
+  _adoptLinkedSessions(onlyTaskId) {
+    try {
+      if (typeof this._sm?.listScheduledTaskSessions !== 'function') return
+      const linked = this._sm.listScheduledTaskSessions()
+      const tasks = onlyTaskId !== undefined
+        ? [this._store.get(onlyTaskId)].filter(Boolean)
+        : this._store.list()
+      for (const task of tasks) {
+        const mapped = this._sessionByTask.get(task.id)
+        if (mapped) {
+          if (this._sm.getSession?.(mapped)?.session) {
+            // Live. Reassert OWNERSHIP: a session retried after a start failure comes
+            // back on the same id carrying only the hint, and the map alone would
+            // leave it driven without the `automation_owned` blocker. A session that
+            // is neither owned nor hinted any more (a person used it) cannot be
+            // reasserted, so it is dropped rather than driven.
+            if (typeof this._sm.adoptScheduledTask !== 'function' || this._sm.adoptScheduledTask(mapped, task.id)) continue
+          }
+          this._sessionByTask.delete(task.id)
+        }
+        // Owned beats hinted, then most recent activity, then highest id.
+        let best = null
+        for (const s of linked) {
+          if (s.taskId !== task.id) continue
+          if (!best
+            || (s.owned !== best.owned ? s.owned
+              : s.lastActivityAt !== best.lastActivityAt ? s.lastActivityAt > best.lastActivityAt
+                : s.sessionId > best.sessionId)) {
+            best = s
+          }
+        }
+        if (!best) continue
+        if (this._sm.adoptScheduledTask?.(best.sessionId, task.id)) {
+          this._sessionByTask.set(task.id, best.sessionId)
+          this._log.info(`Adopted session ${best.sessionId} as the session of scheduled task ${task.id}`)
+        }
+      }
+    } catch (err) {
+      this._log.warn(`Could not adopt restored scheduled sessions: ${err?.message || err}`)
     }
   }
 
@@ -926,6 +998,10 @@ export class SchedulerEngine extends EventEmitter {
    * verified. A session that cannot be brought to the clamped mode is refused.
    */
   _resolveSession(task, ctx) {
+    // Adopt (or reassert ownership of) a linked session before minting a fresh one:
+    // it may have been restored late, or come back on its id after a start failure.
+    // Idempotent; drops a dead or no-longer-owned mapping (#8571).
+    this._adoptLinkedSessions(task.id)
     const existing = this._sessionByTask.get(task.id)
     if (existing) {
       const entry = this._sm.getSession?.(existing)
