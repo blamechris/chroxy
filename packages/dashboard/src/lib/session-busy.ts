@@ -168,8 +168,17 @@ export interface AwaitingFirstOutputState extends SessionBusyState {
  * (permission request / question card: the model asked for something) and an
  * `error` (a provider error: the turn has already answered). NOT output: the
  * client-side `'thinking'` spinner placeholder (`filterThinking`'s target),
- * `system` lines, and user bubbles that are still queued (they are follow-ups
+ * `system` lines, an EMPTY `response` (the slot a `stream_start` opens before
+ * its first delta; claude-tui, the default provider, emits it as the turn
+ * begins), and user bubbles that are still queued (they are follow-ups
  * behind the running turn, not the turn's own prompt).
+ *
+ * Known edges, documented not fixed: a queued bubble missing from
+ * `queuedMessages` (for example mid-replay) reads as the latest user message
+ * and so fails toward confirming; a server-initiated turn with an older
+ * no-output `user_input` at the tail could gate; and if the first token lands
+ * while the dialog is open, Confirm still stops the turn, which is the user's
+ * explicit choice.
  *
  * Deliberately derived from the transcript and NOT from
  * `streamingMessageId === 'pending'`: `sendMessage`'s 5 s stall safety net
@@ -192,6 +201,10 @@ export function isAwaitingFirstOutput(s: AwaitingFirstOutputState): boolean {
     }
     if (m.type === 'thinking' && m.id === 'thinking') continue
     if (m.type === 'system') continue
+    // A `response` is output only once it holds text. claude-tui emits
+    // `stream_start` as the turn begins (#4010) and the dashboard appends an
+    // EMPTY response slot for it, so the slot alone must not close the window.
+    if (m.type === 'response' && (m.content ?? '').trim() === '') continue
     return false
   }
   return sawUser

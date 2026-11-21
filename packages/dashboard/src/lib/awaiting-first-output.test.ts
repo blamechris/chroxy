@@ -31,8 +31,17 @@ describe('isAwaitingFirstOutput (#8703)', () => {
 
   it('is false once a response stream has started', () => {
     expect(
-      isAwaitingFirstOutput({ ...busy, streamingMessageId: 'r1', messages: [user(), msg('r1', 'response')] }),
+      isAwaitingFirstOutput({ ...busy, streamingMessageId: 'r1', messages: [user(), msg('r1', 'response', { content: 'hi' })] }),
     ).toBe(false)
+  })
+
+  it('an EMPTY response slot (claude-tui stream_start) is not output, with or without being the streaming id', () => {
+    expect(isAwaitingFirstOutput({ ...busy, streamingMessageId: 'r1', messages: [user(), msg('r1', 'response', { content: '' })] })).toBe(true)
+    expect(isAwaitingFirstOutput({ ...busy, streamingMessageId: null, messages: [user(), msg('r1', 'response', { content: '  \n' })] })).toBe(true)
+  })
+
+  it('the same slot with its first delta is output', () => {
+    expect(isAwaitingFirstOutput({ ...busy, streamingMessageId: 'r1', messages: [user(), msg('r1', 'response', { content: 'He' })] })).toBe(false)
   })
 
   it('is false for a tool use with no text', () => {
@@ -67,7 +76,7 @@ describe('isAwaitingFirstOutput (#8703)', () => {
     expect(
       isAwaitingFirstOutput({
         ...busy,
-        messages: [user('u1'), msg('r1', 'response'), user('u2'), placeholder()],
+        messages: [user('u1'), msg('r1', 'response', { content: 'hi' }), user('u2'), placeholder()],
       }),
     ).toBe(true)
   })
@@ -82,7 +91,7 @@ describe('isAwaitingFirstOutput (#8703)', () => {
         ...busy,
         streamingMessageId: 'r1',
         queuedMessages: [{ clientMessageId: 'q1', text: 'more', queuedAt: 1, status: 'pending' }],
-        messages: [user('u1'), msg('r1', 'response'), user('q1')],
+        messages: [user('u1'), msg('r1', 'response', { content: 'hi' }), user('q1')],
       }),
     ).toBe(false)
   })
