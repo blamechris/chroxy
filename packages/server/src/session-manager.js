@@ -5582,6 +5582,20 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #9245: public wrapper over `_awaitStartSettled` for callers outside the
+   * manager (the scheduler) that must not send into a session whose provider
+   * `start()` is still in flight. Same contract: never rejects; call it
+   * synchronously after the session was created or looked up.
+   *
+   * @param {string} sessionId
+   * @param {number} timeoutMs
+   * @returns {Promise<{ok: true} | {ok: false, error: any} | {ok: true, pending: true}>}
+   */
+  awaitSessionStart(sessionId, timeoutMs) {
+    return this._awaitStartSettled(sessionId, timeoutMs)
+  }
+
+  /**
    * Check if all sessions are idle (not busy).
    * Used by drain protocol to wait for in-flight work.
    * @returns {boolean}

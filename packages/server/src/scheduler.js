@@ -934,6 +934,15 @@ export class SchedulerEngine extends EventEmitter {
     }
     if (!sessionId) return { status: 'error', error: 'session create failed (no sessionId)' }
 
+    // #9245: a session whose provider start() is still in flight (a fresh one, or
+    // a restored one) is not ready for input yet — BYOK's sendMessage rejects
+    // 'Session not ready' until start() resolves (it sets _processReady and emits
+    // 'ready' before resolving, byok-session.js start()). Take the settle handle
+    // SYNCHRONOUSLY, before any await (the manager drops a failed start from
+    // _sessions), and await it below. A settled or sync-start session resolves
+    // immediately, so a reused session is never delayed.
+    const startWait = this._sm.awaitSessionStart?.(sessionId, ctx.runTimeoutMs)
+
     // Register as an OWNED run before the turn starts, so the permission answerer
     // is armed for the very first tool call.
     const runState = { taskId: task.id, blocked: null }
@@ -941,6 +950,19 @@ export class SchedulerEngine extends EventEmitter {
     this._attachPermissionListener()
 
     try {
+      if (startWait) {
+        // Bound: runTimeoutMs, the run's own budget. The manager already fails a
+        // start at its provider deadline (60s default, START_TIMEOUT), so this
+        // bound only matters for providers that declare no start deadline; it
+        // is never longer than the run is allowed to take.
+        const started = await startWait
+        if (!started.ok) {
+          return { status: 'error', sessionId, error: `session ${sessionId} did not finish starting: ${started.error?.message || started.error || 'start failed'}` }
+        }
+        if (started.pending) {
+          return { status: 'error', sessionId, error: `session ${sessionId} did not finish starting within ${ctx.runTimeoutMs}ms` }
+        }
+      }
       const driver = this._ensureTurnDriver()
       await driver.driveTurn(sessionId, task.prompt, {
         label: `scheduled:${task.id}`,
