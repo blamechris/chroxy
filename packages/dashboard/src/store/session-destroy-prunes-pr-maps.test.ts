@@ -253,7 +253,7 @@ function baseState(): Partial<ConnectionState> {
       [DEAD]: { status: 'untrusted', appliesFrom: 'restart' },
       [LIVE]: { status: 'trusted', appliesFrom: 'restart' },
     },
-    folderTrustPending: { [DEAD]: true, [LIVE]: true },
+    folderTrustPending: { [DEAD]: 'r-dead', [LIVE]: 'r-live' },
     folderTrustError: { [DEAD]: 'dead error', [LIVE]: 'live error' },
   }
 }

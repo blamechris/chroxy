@@ -764,7 +764,7 @@ export function App() {
   const dismissContainerLost = useConnectionStore(s => s.dismissContainerLost)
   // Per-folder trust for the active session's project settings.
   const activeFolderTrust = useConnectionStore(s => (s.activeSessionId ? s.folderTrust?.[s.activeSessionId] : undefined))
-  const activeFolderTrustPending = useConnectionStore(s => (s.activeSessionId ? s.folderTrustPending?.[s.activeSessionId] === true : false))
+  const activeFolderTrustPending = useConnectionStore(s => (s.activeSessionId ? Boolean(s.folderTrustPending?.[s.activeSessionId]) : false))
   const activeFolderTrustError = useConnectionStore(s => (s.activeSessionId ? (s.folderTrustError?.[s.activeSessionId] ?? null) : null))
   const trustFolder = useConnectionStore(s => s.trustFolder)
   const untrustFolder = useConnectionStore(s => s.untrustFolder)
@@ -3252,7 +3252,7 @@ export function App() {
                   entry={activeFolderTrust}
                   pending={activeFolderTrustPending}
                   error={activeFolderTrustError}
-                  onTrust={() => { if (activeSessionId) trustFolder(activeSessionId) }}
+                  onTrust={(digest) => { if (activeSessionId) trustFolder(activeSessionId, digest) }}
                   onUntrust={() => { if (activeSessionId) untrustFolder(activeSessionId) }}
                 />
                 {connectionPhase === 'connecting' ? (

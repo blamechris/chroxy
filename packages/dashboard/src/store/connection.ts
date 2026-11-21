@@ -975,20 +975,22 @@ function sendFolderTrust(
   set: (patch: Partial<ConnectionState>) => void,
   type: 'trust_folder' | 'untrust_folder',
   sessionId: string,
+  reviewedDigest?: string,
 ): boolean {
   const { socket, folderTrustPending, folderTrustError, folderTrust } = get();
   if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) return false;
   if (folderTrustPending[sessionId]) return false;
-  const msg: Record<string, unknown> = { type, sessionId, requestId: `folder-trust-${nextMessageId()}` };
+  const requestId = `folder-trust-${nextMessageId()}`;
+  const msg: Record<string, unknown> = { type, sessionId, requestId };
   if (type === 'trust_folder') {
     // Approval is bound to the snapshot the owner reviewed.
-    const digest = folderTrust[sessionId]?.digest;
+    const digest = reviewedDigest ?? folderTrust[sessionId]?.digest;
     if (!digest) return false;
     msg.digest = digest;
   }
   if (!wsSend(socket, msg)) return false;
   const { [sessionId]: _cleared, ...errors } = folderTrustError;
-  set({ folderTrustPending: { ...folderTrustPending, [sessionId]: true }, folderTrustError: errors });
+  set({ folderTrustPending: { ...folderTrustPending, [sessionId]: requestId }, folderTrustError: errors });
   return true;
 }
 
@@ -2289,7 +2291,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Per-folder trust for project settings. The message names only the session:
   // the daemon resolves the folder from its own record and answers with
   // `folder_trust_result` (and a fresh `folder_trust_state`).
-  trustFolder: (sessionId: string): boolean => sendFolderTrust(get, set, 'trust_folder', sessionId),
+  trustFolder: (sessionId: string, digest?: string): boolean => sendFolderTrust(get, set, 'trust_folder', sessionId, digest),
   untrustFolder: (sessionId: string): boolean => sendFolderTrust(get, set, 'untrust_folder', sessionId),
 
   requestByokPoolStatus: (): boolean => {

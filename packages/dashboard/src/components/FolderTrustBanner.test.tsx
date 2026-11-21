@@ -73,6 +73,7 @@ describe('<FolderTrustBanner> untrusted', () => {
     fireEvent.click(screen.getByTestId('folder-trust-review'))
     fireEvent.click(screen.getByTestId('folder-trust-confirm'))
     expect(onTrust).toHaveBeenCalledTimes(1)
+    expect(onTrust).toHaveBeenCalledWith(digest)
   })
 
   it('disables Trust while a change is in flight and shows a failure reason', () => {
@@ -93,6 +94,59 @@ describe('<FolderTrustBanner> untrusted', () => {
   it('the controls meet the 44px tap-target floor', () => {
     render(<FolderTrustBanner {...props()} />)
     expect(screen.getByTestId('folder-trust-review')).toHaveStyle({ minHeight: '44px', minWidth: '44px' })
+  })
+})
+
+describe('<FolderTrustBanner> snapshot', () => {
+  const newer: FolderTrustEntry = { ...untrusted, digest: 'd'.repeat(64), summary: { ...summary, files: [{ path: '/p/.mcp.json' }, { path: '/p/NEW.md' }] } }
+
+  it('renders from the snapshot taken at Review and sends THAT digest', () => {
+    const onTrust = vi.fn()
+    const { rerender } = render(<FolderTrustBanner {...props({ onTrust })} />)
+    fireEvent.click(screen.getByTestId('folder-trust-review'))
+    rerender(<FolderTrustBanner {...props({ onTrust, entry: newer })} />)
+    expect(screen.getAllByTestId('folder-trust-file').map((n) => n.querySelector('code')?.textContent)).toEqual(summary.files.map((f) => f.path))
+    expect(screen.getByTestId('folder-trust-changed')).toHaveTextContent('This folder changed since you opened it. Review again.')
+    expect(screen.getByTestId('folder-trust-confirm')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('folder-trust-confirm'))
+    expect(onTrust).not.toHaveBeenCalled()
+  })
+
+  it('Reload takes a new snapshot, re-enables Trust, and sends the new digest', () => {
+    const onTrust = vi.fn()
+    const { rerender } = render(<FolderTrustBanner {...props({ onTrust })} />)
+    fireEvent.click(screen.getByTestId('folder-trust-review'))
+    rerender(<FolderTrustBanner {...props({ onTrust, entry: newer })} />)
+    fireEvent.click(screen.getByTestId('folder-trust-reload'))
+    expect(screen.queryByTestId('folder-trust-changed')).toBeNull()
+    expect(screen.getAllByTestId('folder-trust-file')).toHaveLength(2)
+    fireEvent.click(screen.getByTestId('folder-trust-confirm'))
+    expect(onTrust).toHaveBeenCalledWith(newer.digest)
+  })
+
+  it('a state with the SAME digest arriving while the dialog is open is not a change', () => {
+    const { rerender } = render(<FolderTrustBanner {...props()} />)
+    fireEvent.click(screen.getByTestId('folder-trust-review'))
+    rerender(<FolderTrustBanner {...props({ entry: { ...untrusted } })} />)
+    expect(screen.queryByTestId('folder-trust-changed')).toBeNull()
+    expect(screen.getByTestId('folder-trust-confirm')).not.toBeDisabled()
+  })
+})
+
+describe('<FolderTrustBanner> running sessions', () => {
+  it('says project settings stay loaded in a running session that launched with them, when not trusted', () => {
+    render(<FolderTrustBanner {...props({ entry: { ...untrusted, launchedWithProject: true } })} />)
+    expect(screen.getByTestId('folder-trust-still-loaded')).toHaveTextContent('Project settings stay loaded in this running session until it restarts')
+  })
+
+  it.each([[false], [undefined]])('says nothing of the kind when launchedWithProject is %s', (launchedWithProject) => {
+    render(<FolderTrustBanner {...props({ entry: { ...untrusted, launchedWithProject } })} />)
+    expect(screen.queryByTestId('folder-trust-still-loaded')).toBeNull()
+  })
+
+  it('does not show it for a trusted folder', () => {
+    render(<FolderTrustBanner {...props({ entry: { ...trusted, launchedWithProject: true } })} />)
+    expect(screen.queryByTestId('folder-trust-still-loaded')).toBeNull()
   })
 })
 
@@ -127,6 +181,12 @@ describe('<FolderTrustBanner> what can be trusted', () => {
     open({ ...untrusted, summary: { ...summary, untrustable: true, warnings: ['Cannot review this folder: /p/x: not a regular file'] } })
     expect(screen.queryByTestId('folder-trust-confirm')).toBeNull()
     expect(screen.getByTestId('folder-trust-warnings')).toHaveTextContent('not a regular file')
+  })
+
+  it('a folder too large to review says so', () => {
+    open({ ...untrusted, summary: { ...summary, untrustable: true, warnings: ['This folder is too large to review (more than 20000 directories)'] } })
+    expect(screen.getByTestId('folder-trust-warnings')).toHaveTextContent('This folder is too large to review (more than 20000 directories)')
+    expect(screen.queryByTestId('folder-trust-confirm')).toBeNull()
   })
 
   it('a folder with nothing command-bearing says so, and can still be trusted', () => {

@@ -80,7 +80,7 @@ describe('trustFolder / untrustFolder', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ type: 'trust_folder', sessionId: 's1', digest })
     expect(Object.keys(sent[0]!).sort()).toEqual(['digest', 'requestId', 'sessionId', 'type'])
-    expect(get().folderTrustPending.s1).toBe(true)
+    expect(get().folderTrustPending.s1).toBe(sent[0]!.requestId)
   })
 
   it('trust is not sent without a reviewed digest (a bound client never saw one)', () => {
@@ -107,7 +107,9 @@ describe('trustFolder / untrustFolder', () => {
 
 describe('folder_trust_result', () => {
   it('settles the pending marker and clears the error on success', () => {
-    get().trustFolder('s1')
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    expect(get().trustFolder('s1')).toBe(true)
+    expect(get().folderTrustPending.s1, 'a pending state really exists before the reply').toBeTruthy()
     receive({ type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted' })
     expect(get().folderTrustPending.s1).toBeUndefined()
     expect(get().folderTrustError.s1).toBeUndefined()
@@ -123,6 +125,28 @@ describe('folder_trust_result', () => {
     expect(get().folderTrustError.s1).toBeUndefined()
   })
 
+  it('trust sends the digest it was GIVEN (the reviewed snapshot), not the latest state\'s', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest: 'c'.repeat(64), appliesFrom: 'restart' })
+    expect(get().trustFolder('s1', digest)).toBe(true)
+    expect(sent[0]).toMatchObject({ type: 'trust_folder', digest })
+  })
+
+  it('any error tied to the request (INVALID_MESSAGE included) settles it, by requestId', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    get().trustFolder('s1')
+    const requestId = sent[0]!.requestId as string
+    receive({ type: 'error', code: 'INVALID_MESSAGE', message: 'bad frame', requestId })
+    expect(get().folderTrustPending.s1).toBeUndefined()
+    expect(get().folderTrustError.s1).toBe('bad frame')
+  })
+
+  it('an error for another request does not touch a pending one', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    get().trustFolder('s1')
+    receive({ type: 'error', code: 'INVALID_MESSAGE', message: 'other', requestId: 'someone-else' })
+    expect(get().folderTrustPending.s1).toBeTruthy()
+  })
+
   it('an error envelope attaches to the session it names, and only that session', () => {
     receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
     receive({ type: 'folder_trust_state', sessionId: 's2', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
@@ -131,7 +155,7 @@ describe('folder_trust_result', () => {
     receive({ type: 'error', code: 'FOLDER_TRUST_CHANGED', message: 'The folder changed since it was reviewed', sessionId: 's1', requestId: 'x' })
     expect(get().folderTrustPending.s1).toBeUndefined()
     expect(get().folderTrustError.s1).toBe('The folder changed since it was reviewed')
-    expect(get().folderTrustPending.s2).toBe(true)
+    expect(get().folderTrustPending.s2).toBeTruthy()
     expect(get().folderTrustError.s2).toBeUndefined()
   })
 })

@@ -29,7 +29,8 @@ export interface FolderTrustBannerProps {
   pending?: boolean
   /** Why the last trust change failed, or null. */
   error?: string | null
-  onTrust: () => void
+  /** Called with the digest of the SNAPSHOT the owner reviewed, never the latest one. */
+  onTrust: (digest: string) => void
   onUntrust: () => void
 }
 
@@ -143,17 +144,15 @@ function SummaryList({ entry }: { entry: FolderTrustEntry }) {
 }
 
 export function FolderTrustBanner({ entry, pending = false, error = null, onTrust, onUntrust }: FolderTrustBannerProps) {
-  const [reviewing, setReviewing] = useState(false)
+  // What the owner is looking at: the state when Review was clicked. The dialog renders
+  // from it, and Trust sends ITS digest, whatever newer state has arrived since.
+  const [snapshot, setSnapshot] = useState<FolderTrustEntry | null>(null)
   const status = entry?.status
   const applies = entry ? appliesFromText(entry.appliesFrom) : null
 
-  // The owner approves what they reviewed: needs the summary and its digest, and a
-  // folder that could be reviewed completely.
-  const canTrust = Boolean(entry?.summary && entry.digest && !entry.summary.untrustable)
-
   // Approving moves the state to trusted: the dialog has done its job.
   useEffect(() => {
-    if (status !== 'untrusted') setReviewing(false)
+    if (status !== 'untrusted') setSnapshot(null)
   }, [status])
 
   if (!entry || entry.appliesFrom === 'n/a') return null
@@ -180,13 +179,24 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
 
   if (status !== 'untrusted') return null
 
+  // The owner approves what they reviewed: needs the summary and its digest, and a
+  // folder that could be reviewed completely.
+  const shown = snapshot ?? entry
+  const canTrust = Boolean(shown.summary && shown.digest && !shown.summary.untrustable)
+  const changed = snapshot !== null && entry.digest !== snapshot.digest
+
   return (
     <>
       <div className="stream-stall-chip" data-testid="folder-trust-banner" role="status">
         <span className="stream-stall-chip-text">This folder's project settings are not loaded.</span>
+        {entry.launchedWithProject === true && (
+          <span data-testid="folder-trust-still-loaded" style={{ display: 'block', fontSize: '0.8em', opacity: 0.85 }}>
+            Project settings stay loaded in this running session until it restarts.
+          </span>
+        )}
         <button
           type="button"
-          onClick={() => setReviewing(true)}
+          onClick={() => setSnapshot(entry)}
           data-testid="folder-trust-review"
           aria-label="Review this folder's project settings"
           style={BUTTON_STYLE}
@@ -194,19 +204,27 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
           Review
         </button>
       </div>
-      <Modal open={reviewing} onClose={() => setReviewing(false)} title="Trust this folder's project settings?">
+      <Modal open={snapshot !== null} onClose={() => setSnapshot(null)} title="Trust this folder's project settings?">
         <div data-testid="folder-trust-dialog">
-          <SummaryList entry={entry} />
-          {canTrust && <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>}
+          {changed && (
+            <p data-testid="folder-trust-changed" role="alert">
+              This folder changed since you opened it. Review again.{' '}
+              <button type="button" onClick={() => setSnapshot(entry)} data-testid="folder-trust-reload" style={BUTTON_STYLE}>
+                Reload
+              </button>
+            </p>
+          )}
+          <SummaryList entry={shown} />
+          {canTrust && !changed && <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>}
           {!canTrust && <p data-testid="folder-trust-readonly">This folder's settings cannot be trusted from here.</p>}
-          {applies && <p data-testid="folder-trust-applies">{applies}</p>}
+          {appliesFromText(shown.appliesFrom) && <p data-testid="folder-trust-applies">{appliesFromText(shown.appliesFrom)}</p>}
           {error && <p data-testid="folder-trust-error" role="alert">{error}</p>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button type="button" onClick={() => setReviewing(false)} data-testid="folder-trust-cancel" style={BUTTON_STYLE}>
+            <button type="button" onClick={() => setSnapshot(null)} data-testid="folder-trust-cancel" style={BUTTON_STYLE}>
               Cancel
             </button>
             {canTrust && (
-              <button type="button" onClick={onTrust} disabled={pending} data-testid="folder-trust-confirm" style={BUTTON_STYLE}>
+              <button type="button" onClick={() => onTrust(shown.digest as string)} disabled={pending || changed} data-testid="folder-trust-confirm" style={BUTTON_STYLE}>
                 Trust this folder
               </button>
             )}

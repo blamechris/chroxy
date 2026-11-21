@@ -992,7 +992,7 @@ export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessag
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
 
 /** One session's `folder_trust_state`, as the dashboard keeps it. */
-export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'digest' | 'appliesFrom'>;
+export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'digest' | 'appliesFrom' | 'launchedWithProject'>;
 
 export interface ConnectionState {
   // Connection
@@ -1949,8 +1949,8 @@ export interface ConnectionState {
    * Absent until the server has said. Display state: the server is the authority.
    */
   folderTrust: Record<string, FolderTrustEntry>;
-  /** Sessions with a `trust_folder` / `untrust_folder` in flight. Socket-scoped. */
-  folderTrustPending: Record<string, boolean>;
+  /** Sessions with a `trust_folder` / `untrust_folder` in flight, mapped to that request's id. Socket-scoped. */
+  folderTrustPending: Record<string, string>;
   /** The last trust change's failure per session; cleared by the next attempt. */
   folderTrustError: Record<string, string>;
 
@@ -2669,9 +2669,9 @@ export interface ConnectionState {
    * trusting (`untrust_folder`) the folder of a session. The server resolves the
    * folder from its own session record; only the primary token on an unbound
    * connection is allowed. Returns false (nothing sent) when the socket is closed,
-   * a change for that session is in flight, or there is no reviewed digest.
+   * a change for that session is in flight, or there is no reviewed digest. `digest` is the one of the reviewed snapshot; without it the latest state's is used.
    */
-  trustFolder: (sessionId: string) => boolean;
+  trustFolder: (sessionId: string, digest?: string) => boolean;
   untrustFolder: (sessionId: string) => boolean;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a

@@ -7690,13 +7690,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // A trust change the daemon refused or could not apply arrives as an error
       // envelope (no `folder_trust_result`). It names no session, so every
       // in-flight marker settles and the reason shows on those sessions.
-      if (errCode.startsWith('FOLDER_TRUST_')) {
-        // The error names the session it is for; it never lands on another one.
-        const errSession = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      if (errReqId) {
+        // Any error tied to a trust request settles THAT request, whatever its code
+        // (a schema-level INVALID_MESSAGE included); it never lands on another session.
+        const pendingMap = get().folderTrustPending;
+        const errSession = Object.keys(pendingMap).find((id) => pendingMap[id] === errReqId)
+          ?? (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string' ? msg.sessionId : null);
         if (errSession) {
-          const { [errSession]: _pending, ...pending } = get().folderTrustPending;
+          const { [errSession]: _pending, ...pending } = pendingMap;
           set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [errSession]: errMsg } });
         }
+      } else if (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string') {
+        const { [msg.sessionId]: _pending, ...pending } = get().folderTrustPending;
+        set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [msg.sessionId]: errMsg } });
       }
       // #6871 review round 2 (BLOCKING 2): there is deliberately NO scheduler
       // handling of INVALID_MESSAGE here.
