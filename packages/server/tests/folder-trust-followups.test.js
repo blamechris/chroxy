@@ -24,6 +24,8 @@ import {
   setLockCreateHookForTest,
   setLockFenceHookForTest,
   setLockDiscriminatorForTest,
+  setLockFallbackWriteForTest,
+  assertStoreLockHeld,
   isTransientLockError,
   setLockReadBackHookForTest,
   setLockUnlinkForTest,
@@ -74,6 +76,7 @@ afterEach(() => {
   setLockCreateHookForTest()
   setLockFenceHookForTest()
   setLockDiscriminatorForTest()
+  setLockFallbackWriteForTest()
   setReclaimHookForTest()
   setLockWaitForTest()
   for (const [k, v] of [['CHROXY_CONFIG_DIR', saved.c], ['CLAUDE_CONFIG_DIR', saved.k]]) {
@@ -759,19 +762,111 @@ describe('store lock: creation, lease, fencing', () => {
     assert.ok(readFileSync(lockPath(), 'utf8').includes('other'))
   })
 
-  it('where linking is unsupported the lock is created in place and confirmed', async () => {
+  it('where linking is unsupported the lock is created in place and its ownership is confirmed before the work starts', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     let links = 0
+    let confirmations = 0
     setLockLinkForTest(() => { links += 1; throw Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP' }) })
+    setLockReadBackHookForTest((path, read) => { if (path === lockPath()) confirmations += 1; return read(path) })
     let ran = 0
+    let confirmedBeforeWork = 0
     await withInterprocessLock(folderTrustStorePath(), async () => {
       ran += 1
+      confirmedBeforeWork = confirmations
       assert.match(readFileSync(lockPath(), 'utf8'), /^\d+\n\S+\n\d+\n[0-9a-f]+\n/)
     })
     assert.equal(links, 1)
     assert.equal(ran, 1)
+    assert.ok(confirmedBeforeWork >= 1, 'the file was read back before the critical section')
     assert.equal(existsSync(lockPath()), false)
     assert.deepEqual(tmpFiles(), [])
+  })
+
+  it('a link that fails with EPERM while a fresh foreign lock exists is contention: it waits, gives up, and touches nothing', async () => {
+    const foreign = bodyOf(process.ppid, 'foreign-holder', null, null)
+    freshLock(foreign)
+    setLockLinkForTest(() => { throw eperm() })
+    setLockWaitForTest(150)
+    await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+    assert.deepEqual(tmpFiles(), [])
+    assert.equal(readFileSync(lockPath(), 'utf8'), foreign, 'the foreign lock is untouched')
+  })
+
+  it('on the fallback, a write that fails after the file was created removes the file: it is ours and empty', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    forceFallback()
+    setLockFallbackWriteForTest(() => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }) })
+    await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /ENOSPC/)
+    assert.equal(existsSync(lockPath()), false, 'no empty lock is left behind')
+    setLockFallbackWriteForTest()
+    let ran = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { ran += 1 })
+    assert.equal(ran, 1)
+  })
+
+  it('a lease dated in the future counts as expired, for a lock and for a guard', async () => {
+    const future = (path) => { const t = new Date(Date.now() + 600_000); utimesSync(path, t, t) }
+    freshLock(bodyOf(process.ppid, 'foreign-holder', null, null))
+    assert.equal(lockIsStale(lockPath(), readFileSync(lockPath(), 'utf8')), false, 'a current mtime is live')
+    future(lockPath())
+    assert.equal(lockIsStale(lockPath(), readFileSync(lockPath(), 'utf8')), true)
+    let runs = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    assert.equal(runs, 1, 'and it is reclaimed')
+    // A guard whose mtime is in the future is stepped over.
+    const judged = bodyOf(DEAD, 'T1', null, null)
+    freshLock(judged)
+    age(lockPath())
+    const identity = statLockIdentity(lockPath())
+    const guard = `${lockPath()}.reclaim-T1`
+    writeFileSync(guard, `${process.ppid}\nother\n`)
+    assert.equal(reclaimStale(lockPath(), judged, identity), false, 'a current guard is respected')
+    future(guard)
+    assert.equal(reclaimStale(lockPath(), judged, identity), true)
+  })
+
+  it('an unreadable lock is reclaimed once its lease has expired, and never while it is current', async () => {
+    freshLock(bodyOf(process.ppid, 'foreign-holder', null, null))
+    // Every read of the foreign lock fails; ours read normally.
+    setLockReadBackHookForTest((path, read) => {
+      const c = read(path)
+      return typeof c === 'string' && c.includes('foreign-holder') ? undefined : c
+    })
+    setLockWaitForTest(150)
+    await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+    assert.ok(readFileSync(lockPath(), 'utf8').includes('foreign-holder'), 'within its lease: not reclaimed')
+    age(lockPath())
+    let runs = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    assert.equal(runs, 1, 'past its lease: reclaimed')
+  })
+
+  it('the heartbeat refreshes our own file only: a replacement at the path keeps its mtime', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const holder = withInterprocessLock(folderTrustStorePath(), async () => { await gate })
+    await Promise.resolve()
+    // Our lock is replaced by another holder's, whose lease is some way along.
+    rmSync(lockPath())
+    writeFileSync(lockPath(), bodyOf(process.ppid, 'replacement', null, null))
+    const t = new Date(Date.now() - 5000)
+    utimesSync(lockPath(), t, t)
+    const before = statLockIdentity(lockPath())
+    for (let i = 0; i < 8; i += 1) mock.timers.tick(3750)
+    assert.deepEqual(statLockIdentity(lockPath()), before, 'the replacement was not refreshed')
+    release()
+    await holder
+    assert.ok(readFileSync(lockPath(), 'utf8').includes('replacement'), 'and not removed')
+  })
+
+  it('the fence also checks that the file written is the store the held lock protects', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    await withInterprocessLock(folderTrustStorePath(), async () => {
+      assert.doesNotThrow(() => assertStoreLockHeld(folderTrustStorePath()))
+      assert.throws(() => assertStoreLockHeld(join(root, 'another-store.json')), /does not protect/)
+    })
   })
 
   it('temp files left by a creator that died are collected by age; a recent one is kept', async () => {

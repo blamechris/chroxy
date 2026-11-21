@@ -37,11 +37,13 @@
  * Each file is read ONCE, with `O_NONBLOCK` and an `fstat` that rejects anything
  * that is not a regular file; the digest and the summary come from the same bytes.
  * Nothing here throws.
+ *
+ * The store lock's guarantees and their limit are described above `LOCK_LEASE_MS`.
  */
 
 import {
-  closeSync, constants as fsConstants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync,
-  readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, utimesSync, writeFileSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, futimesSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync,
+  readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { hostname } from 'node:os'
@@ -673,7 +675,7 @@ export function loadFolderTrustRecords(filePath = folderTrustStorePath()) {
 
 function saveFolderTrustRecords(records, filePath = folderTrustStorePath()) {
   // Fenced: the lock must still be ours at the last moment before the rename.
-  writeFileAtomic0600(filePath, JSON.stringify({ records }, null, 2), assertStoreLockHeld)
+  writeFileAtomic0600(filePath, JSON.stringify({ records }, null, 2), () => assertStoreLockHeld(filePath))
 }
 
 // ── Cross-process lock ───────────────────────────────────────────────────
@@ -686,10 +688,12 @@ function saveFolderTrustRecords(records, filePath = folderTrustStorePath()) {
  * hostname (and, on Linux, PID namespace) as this process, as soon as its holder is known to be
  * gone. A lock that is neither is live and is never reclaimed.
  *
- * A process paused for longer than the lease while it holds, or is reclaiming, a lock can
- * overlap with another holder. The writes the lock protects are fenced: each re-reads the lock
- * just before its final rename and aborts unless it is still ours (`assertStoreLockHeld`). What
- * remains is the time between that check and the rename.
+ * Accepted limit: a process suspended for longer than the lease while holding, reclaiming or
+ * creating the lock can overlap with another holder. Writes re-check ownership before the rename
+ * (`assertStoreLockHeld`), which narrows but does not remove this. Specifically: a holder suspended
+ * between that check and the rename; a reclaimer suspended between its guarded checks and the
+ * unlink after its guard's lease expired; a creator suspended between creating and writing the lock
+ * on the `O_EXCL` fallback path. A file lock without operating-system primitives cannot close them.
  */
 const LOCK_LEASE_MS = 15_000
 const LOCK_HEARTBEAT_MS = LOCK_LEASE_MS / 4
@@ -766,9 +770,11 @@ const pidAlive = (pid) => {
   }
 }
 
+/** Expired: older than the lease, or dated in the future by more than a lease (a clock that moved, a bad mtime). */
 function leaseExpired(path, leaseMs) {
   try {
-    return Date.now() - statSync(path).mtimeMs > leaseMs
+    const age = Date.now() - statSync(path).mtimeMs
+    return age > leaseMs || age < -leaseMs
   } catch {
     return false
   }
@@ -877,9 +883,10 @@ const tokenOf = (content) => (hasToken(content) ? content.split('\n')[1] : `u${s
  * What a guard is named for: the token of a lock that has one. A lock without a token
  * (the previous format's residue) is named by its content hash, mtime and size.
  */
-const lockKey = (content, identity) => (
-  hasToken(content) || !identity ? tokenOf(content) : `${tokenOf(content)}m${identity.mtimeNs}s${identity.size}`
-)
+const lockKey = (content, identity) => {
+  if (typeof content !== 'string') return identity ? `unreadablem${identity.mtimeNs}s${identity.size}` : 'unreadable'
+  return hasToken(content) || !identity ? tokenOf(content) : `${tokenOf(content)}m${identity.mtimeNs}s${identity.size}`
+}
 
 /** Test seam: called while a reclaim holds its guard, before it re-reads the lock. */
 let reclaimHook = null
@@ -934,7 +941,8 @@ function collectTempFiles(lockPath) {
  * Leftover guards for a lock that is no longer current are collected once their lease has expired,
  * and only after a successful read of the current lock.
  * @param {string} lockPath
- * @param {string} judged the content that was judged stale
+ * @param {string|undefined} judged the content that was judged stale; undefined when the file could not
+ *   be read but its lease had expired (it is then removed only if it still cannot be read, and is still the judged file)
  * @param {{ mtimeNs: bigint, size: bigint }} identity the file's `statLockIdentity` when it was judged
  * @returns {boolean} true when this call removed the lock
  */
@@ -977,7 +985,12 @@ export function reclaimStale(lockPath, judged, identity) {
   return removed
 }
 
-/** How many abandoned guards one reclaim will step over before giving up and waiting. */
+/**
+ * How many abandoned guards one reclaim will step over before giving up and waiting. It bounds the
+ * walk down an escalation chain (one file operation per step), so a reclaim always ends; past it the
+ * caller waits and retries within its own deadline, and each guard in the chain is only ever passed
+ * over once its lease expired or its holder is known to be gone.
+ */
 const RECLAIM_MAX_DEPTH = 4
 
 /**
@@ -997,9 +1010,10 @@ const lockContext = new AsyncLocalStorage()
  * Throws unless the store lock the running call took is still ours. The writes the lock protects
  * call it immediately before their final rename (see the note above `LOCK_LEASE_MS`).
  */
-export function assertStoreLockHeld() {
+export function assertStoreLockHeld(storePath) {
   const ctx = lockContext.getStore()
   if (!ctx) throw new Error('folder trust store lock is not held')
+  if (resolve(storePath) !== resolve(ctx.storePath)) throw new Error('folder trust store lock does not protect this file')
   if (fenceHook) fenceHook(ctx.lockPath)
   const back = readLockForOwnership(ctx.lockPath)
   if (typeof back !== 'string' || !back.includes(`\n${ctx.token}\n`)) throw new Error('folder trust store lock was lost')
@@ -1030,8 +1044,23 @@ function createLock(lockPath, body, token) {
     try { unlinkSync(tmp) } catch { /* never created, or collected by age */ }
   }
   if (linked) return 'linked'
-  writeFileSync(lockPath, body, { mode: 0o600, flag: 'wx' })
+  const fd = openSync(lockPath, 'wx', 0o600)
+  try {
+    fallbackWriteImpl(fd, body)
+  } catch (err) {
+    // The file is ours (we just created it) and is empty or partial: take it away before failing.
+    try { closeSync(fd) } catch { /* closed below if not */ }
+    try { unlinkSync(lockPath) } catch { /* gone */ }
+    throw err
+  }
+  closeSync(fd)
   return 'written'
+}
+
+let fallbackWriteImpl = (fd, body) => { writeSync(fd, body) }
+/** Test seam: replaces the write of the lock body on the `O_EXCL` fallback. No argument restores. */
+export function setLockFallbackWriteForTest(fn) {
+  fallbackWriteImpl = fn ?? ((fd, body) => { writeSync(fd, body) })
 }
 
 export async function withInterprocessLock(storePath, fn) {
@@ -1042,13 +1071,13 @@ export async function withInterprocessLock(storePath, fn) {
   const token = `${process.pid}.${randomBytes(8).toString('hex')}`
   liveTokens.add(token)
   try {
-    return await acquireAndRun(lockPath, token, deadline, fn)
+    return await acquireAndRun(lockPath, token, deadline, fn, storePath)
   } finally {
     liveTokens.delete(token)
   }
 }
 
-async function acquireAndRun(lockPath, token, deadline, fn) {
+async function acquireAndRun(lockPath, token, deadline, fn, storePath) {
   const body = `${process.pid}\n${token}\n${Date.now()}\n${PROCESS_NONCE}\n${localDiscriminator ?? ''}\n`
   const isOurs = (content) => typeof content === 'string' && content.includes(`\n${token}\n`)
   let wrote = false
@@ -1085,12 +1114,14 @@ async function acquireAndRun(lockPath, token, deadline, fn) {
       if (!isTransientLockError(err)) throw err
       // Stat before reading: a file replaced in between then fails the identity comparison under the guard.
       const identity = statLockIdentity(lockPath)
-      const content = ownershipRead(lockPath) ?? null
+      const content = ownershipRead(lockPath)
       if (isOurs(content)) {
         // Our own file from an earlier pass whose read-back failed: ours to run under.
         break
       }
-      if (identity && lockIsStale(lockPath, content) && reclaimStale(lockPath, content, identity)) {
+      // An unreadable lock is judged by its lease alone.
+      const stale = content === undefined ? leaseExpired(lockPath, LOCK_LEASE_MS) : lockIsStale(lockPath, content)
+      if (identity && stale && reclaimStale(lockPath, content, identity)) {
         // Progress was made; go round again, but never past the deadline.
         if (Date.now() > deadline) throw timedOut()
         continue
@@ -1100,19 +1131,30 @@ async function acquireAndRun(lockPath, token, deadline, fn) {
     await sleep(20)
   }
   // The lease: refresh the lock's mtime while we hold it, so a live holder is never judged stale.
+  // Through a descriptor opened on our own file, so a replacement at the path is never refreshed.
+  let fd = null
+  try {
+    fd = openSync(lockPath, 'r+')
+    if (!isOurs(readFileSync(fd, 'utf8'))) { closeSync(fd); fd = null }
+  } catch {
+    if (fd !== null) { try { closeSync(fd) } catch { /* already closed */ } }
+    fd = null
+  }
   const heartbeat = setInterval(() => {
     try {
-      if (isOurs(readLockForOwnership(lockPath))) {
+      if (fd !== null) {
         const t = new Date()
-        utimesSync(lockPath, t, t)
+        futimesSync(fd, t, t)
       }
     } catch { /* the next beat tries again */ }
   }, LOCK_HEARTBEAT_MS)
   heartbeat.unref?.()
   try {
-    return await lockContext.run({ lockPath, token }, fn)
+    return await lockContext.run({ lockPath, token, storePath }, fn)
   } finally {
     clearInterval(heartbeat)
+    // Closed before the unlink: an open descriptor can make the unlink fail on Windows.
+    if (fd !== null) { try { closeSync(fd) } catch { /* nothing to release */ } }
     const back = ownershipRead(lockPath)
     if (back === undefined) releaseInBackground(lockPath, isOurs)
     else if (isOurs(back) && !unlinkOwned(lockPath)) releaseInBackground(lockPath, isOurs)
