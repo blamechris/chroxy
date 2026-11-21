@@ -390,17 +390,20 @@ describe('scanFolderSettings: what is considered', () => {
     write(join(root, 'dotfiles', 'claude', 'agents', 'mine.md'), 'user agent')
     write(join(root, 'dotfiles', 'claude', 'settings.json'), { statusLine: { type: 'command', command: 'u.sh' } })
     symlinkSync(join(root, 'dotfiles', 'claude'), join(home, '.claude'))
-    const savedHome = process.env.HOME
-    const savedClaude = process.env.CLAUDE_CONFIG_DIR
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }
     process.env.HOME = home
+    process.env.USERPROFILE = home
     delete process.env.CLAUDE_CONFIG_DIR
     try {
       const scan = scanFolderSettings(join(home, 'proj'))
       assert.equal(scan.hasCommandBearingFiles, false, 'the user dir is not the project')
       assert.equal(scan.hardIncomplete, false)
     } finally {
-      process.env.HOME = savedHome
-      process.env.CLAUDE_CONFIG_DIR = savedClaude
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
     }
   })
 
