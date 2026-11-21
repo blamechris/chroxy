@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { buildFolderTrustStateMessage, folderTrustAppliesFrom } from '../src/folder-trust-wire.js'
-import { invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { buildFolderTrustStateMessage, buildFolderTrustStateMessageForDisplay, folderTrustAppliesFrom } from '../src/folder-trust-wire.js'
+import { invalidateFolderTrustCache, getFolderTrustState } from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { sendSessionInfo } from '../src/ws-history.js'
@@ -14,7 +14,7 @@ import { ServerFolderTrustStateSchema } from '@chroxy/protocol'
 let root
 let saved
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'folder-trust-wire-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'folder-trust-wire-')))
   saved = { c: process.env.CHROXY_CONFIG_DIR, k: process.env.CLAUDE_CONFIG_DIR }
   process.env.CHROXY_CONFIG_DIR = join(root, 'chroxy')
   process.env.CLAUDE_CONFIG_DIR = join(root, 'claude')
@@ -61,6 +61,20 @@ describe('buildFolderTrustStateMessage', () => {
     ServerFolderTrustStateSchema.parse(after)
   })
 
+  it('a provider that does not run claude gets no frame and no scan', () => {
+    assert.equal(buildFolderTrustStateMessage('s1', { cwd: project('g'), provider: 'gemini' }), null)
+    assert.equal(buildFolderTrustStateMessage('s1', { cwd: join(root, 'missing-and-unscanned'), provider: 'codex' }), null)
+  })
+
+  it('launchedWithProject reports what a running claude-cli/claude-tui process started with', () => {
+    const cwd = project('p')
+    const session = { launchedWithProject: true }
+    assert.equal(buildFolderTrustStateMessage('s1', { cwd, provider: 'claude-tui', session }).launchedWithProject, true)
+    assert.equal(buildFolderTrustStateMessage('s1', { cwd, provider: 'claude-cli', session: { launchedWithProject: false } }).launchedWithProject, false)
+    assert.equal('launchedWithProject' in buildFolderTrustStateMessage('s1', { cwd, provider: 'claude-tui', session: {} }), false, 'unknown until launched')
+    assert.equal('launchedWithProject' in buildFolderTrustStateMessage('s1', { cwd, provider: 'claude-sdk', session }), false, 'claude-sdk re-reads each turn')
+  })
+
   it('appliesFrom by provider', () => {
     assert.equal(folderTrustAppliesFrom('claude-sdk'), 'next_turn')
     assert.equal(folderTrustAppliesFrom('docker-sdk'), 'next_turn')
@@ -77,6 +91,7 @@ describe('when the state is sent', () => {
   it('a session becoming ready carries folder_trust_state', () => {
     const cwd = project('p')
     const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+    getFolderTrustState(cwd, { cached: true }) // `ready` answers only from a warm cache
     try {
       const entry = { cwd, provider: 'claude-sdk', session: { model: 'm', permissionMode: 'approve' } }
       const out = normalizer.normalize('ready', {}, { sessionId: 's1', mode: 'multi', getSessionEntry: () => entry })
@@ -98,7 +113,9 @@ describe('when the state is sent', () => {
       clients: new Map(),
     }
     sendSessionInfo(ctx, {}, 's1', { skipModels: true })
-    await new Promise((resolve) => setImmediate(resolve)) // sent after the rest of the burst
+    assert.equal(sent.some((m) => m.type === 'folder_trust_state'), false, 'never inline: the scan is off-thread and the frame goes last')
+    for (let i = 0; i < 200 && !sent.some((m) => m.type === 'folder_trust_state'); i++) await new Promise((r) => setTimeout(r, 10))
+    assert.equal(sent.at(-1).type, 'folder_trust_state', 'strictly after the frames that precede it')
     const msg = sent.find((m) => m.type === 'folder_trust_state')
     assert.equal(msg.status, 'untrusted')
     assert.equal(msg.appliesFrom, 'restart')
@@ -116,5 +133,23 @@ describe('a session-bound client', () => {
 
   it('never receives folder_trust_result', () => {
     assert.equal(frameForBoundClient({ type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted' }), null)
+  })
+})
+
+describe('off-thread display scan', () => {
+  it('buildFolderTrustStateMessageForDisplay returns the same frame the in-thread builder does', async () => {
+    const cwd = project('p')
+    const entry = { cwd, provider: 'claude-tui', session: { launchedWithProject: false } }
+    const off = await buildFolderTrustStateMessageForDisplay('s1', entry)
+    assert.deepEqual(off, buildFolderTrustStateMessage('s1', entry))
+    assert.equal(await buildFolderTrustStateMessageForDisplay('s1', { cwd, provider: 'gemini' }), null)
+  })
+
+  it('a trust change is seen by the next display scan (no stale cached scan)', async () => {
+    const cwd = project('p')
+    const entry = { cwd, provider: 'claude-sdk' }
+    assert.equal((await buildFolderTrustStateMessageForDisplay('s1', entry)).status, 'untrusted')
+    await trustReviewed(cwd)
+    assert.equal((await buildFolderTrustStateMessageForDisplay('s1', entry)).status, 'trusted')
   })
 })

@@ -303,7 +303,7 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'cli-session.js',
-    match: 'claudeSettingSourcesValue(cwd)',
+    match: 'claudeSettingSourcesValueFor(allowed)',
     reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {

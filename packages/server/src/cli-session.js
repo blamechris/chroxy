@@ -7,7 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { tmpdir } from 'os'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { claudeSettingSourcesValue } from './claude-setting-sources.js'
+import { claudeSettingSourcesValueFor, projectSettingsAllowed } from './claude-setting-sources.js'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
@@ -162,7 +162,7 @@ export function stderrIndicatesUnknownResumeCompacted(lines, windowLines = 10) {
  * @param {string} [opts.cwd] - session working directory; decides whether project settings load (claude-setting-sources.js)
  * @returns {string[]}
  */
-export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId, cwd } = {}) {
+export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId, cwd, projectAllowed } = {}) {
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -170,7 +170,8 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
     '--verbose',
     '--include-partial-messages',
   ]
-  args.push('--setting-sources', claudeSettingSourcesValue(cwd))
+  const allowed = typeof projectAllowed === 'boolean' ? projectAllowed : projectSettingsAllowed(cwd)
+  args.push('--setting-sources', claudeSettingSourcesValueFor(allowed))
 
   if (model) {
     args.push('--model', model)
@@ -589,6 +590,10 @@ export class CliSession extends BaseSession {
     // would otherwise lose every prior turn in the model's context window and
     // the user would see the dashboard transcript replay correctly while the
     // model itself starts cold mid-conversation.
+    // One project-settings decision per launch: it picks the argv and is what is
+    // reported as loaded in this running process.
+    const projectAllowed = projectSettingsAllowed(this.cwd)
+    this._launchedWithProject = projectAllowed
     const args = buildClaudeCliArgs({
       model: this.model,
       permissionMode: this.permissionMode,
@@ -596,6 +601,7 @@ export class CliSession extends BaseSession {
       skillsText,
       resumeSessionId: this._sessionId,
       cwd: this.cwd,
+      projectAllowed,
     })
 
     const resumeNote = this._sessionId ? ` (resume ${this._sessionId})` : ''

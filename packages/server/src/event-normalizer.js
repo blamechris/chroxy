@@ -8,7 +8,7 @@ import { turnOutcomeField } from './turn-outcome.js'
 import { permissionScope } from './permission-scope.js'
 import { resolvedByField } from './permission-resolved-by.js'
 import { buildThinkingLevelChanged } from './thinking-level-wire.js'
-import { buildFolderTrustStateMessage } from './folder-trust-wire.js'
+import { buildFolderTrustStateMessageIfCached } from './folder-trust-wire.js'
 
 const log = createLogger('event-normalizer')
 
@@ -145,10 +145,12 @@ Object.assign(EVENT_MAP, {
       if (thinkingLevelMsg) messages.push({ msg: thinkingLevelMsg })
       // Whether this session's folder settings are loaded: re-sent on every ready
       // so a client that missed the last change (or a file edit that revoked
-      // trust) converges. Display only; a failure never costs the ready frame.
+      // trust) converges. Answered only from a fresh cached scan, never by walking
+      // the folder here (a cold cache starts an off-thread scan; the subscribe/switch
+      // burst delivers the frame). Display only; a failure never costs the ready frame.
       try {
         const trustMsg = typeof ctx.sessionId === 'string' && ctx.sessionId
-          ? buildFolderTrustStateMessage(ctx.sessionId, entry, { cached: true })
+          ? buildFolderTrustStateMessageIfCached(ctx.sessionId, entry)
           : null
         if (trustMsg) messages.push({ msg: trustMsg })
       } catch (err) {

@@ -4027,6 +4027,8 @@ describe('folder trust messages', () => {
       }
     }
     assert.ok(ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' }).success)
+    assert.ok(ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', launchedWithProject: true }).success)
+    assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart', launchedWithProject: 'yes' }).success)
     assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'none', appliesFrom: 'restart' }).success)
     assert.ok(!ServerFolderTrustStateSchema.safeParse({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted' }).success, 'appliesFrom is required')
   })

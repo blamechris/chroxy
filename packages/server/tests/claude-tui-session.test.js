@@ -1511,6 +1511,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(realArgs[i + 1], 'user,project')
       const settings = JSON.parse(readFileSync(session._settingsPath, 'utf8'))
       assert.equal(settings.enableAllProjectMcpServers, true)
+      assert.equal(session.launchedWithProject, true, 'the running process was launched with project settings')
     })
 
     it('an untrusted spawn is user-only and its settings file has no enableAllProjectMcpServers, even after a trusted one wrote it', async () => {
@@ -1534,6 +1535,7 @@ describe('ClaudeTuiSession', () => {
       await session._spawnPty(false)
       assert.equal(realArgs[realArgs.indexOf('--setting-sources') + 1], 'user')
       assert.equal('enableAllProjectMcpServers' in JSON.parse(readFileSync(session._settingsPath, 'utf8')), false)
+      assert.equal(session.launchedWithProject, false)
     })
 
     it('does not write enableAllProjectMcpServers for an untrusted folder', () => {

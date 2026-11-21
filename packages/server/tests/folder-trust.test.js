@@ -1,7 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync, existsSync, readdirSync, symlinkSync, realpathSync, chmodSync, utimesSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { canonicalJson } from '../src/byok-mcp-trust.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -29,7 +32,7 @@ let savedChroxy
 let savedClaude
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'folder-trust-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'folder-trust-')))
   savedChroxy = process.env.CHROXY_CONFIG_DIR
   savedClaude = process.env.CLAUDE_CONFIG_DIR
   process.env.CHROXY_CONFIG_DIR = join(root, 'chroxy')
@@ -123,7 +126,7 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(scanFolderSettings(cwd).digest, before.digest)
   })
 
-  it('follows a symlinked file: the TARGET bytes are hashed, so editing the target revokes trust', async () => {
+  it('follows a symlinked file: the TARGET bytes are hashed, so editing the target revokes trust', { skip: SKIP_NO_SYMLINK }, async () => {
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     write(join(root, 'target.md'), 'v1')
     symlinkSync(join(root, 'target.md'), join(cwd, '.claude', 'agents', 'link.md'))
@@ -138,7 +141,7 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(isFolderTrusted(cwd), false)
   })
 
-  it('walks a symlinked directory and covers the files in it', () => {
+  it('walks a symlinked directory and covers the files in it', { skip: SKIP_NO_SYMLINK }, () => {
     write(join(root, 'shared', 's', 'SKILL.md'), 'skill')
     mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true })
     symlinkSync(join(root, 'shared'), join(cwd, '.claude', 'skills', 'linked'))
@@ -150,7 +153,7 @@ describe('scanFolderSettings: what is considered', () => {
     assert.notEqual(scanFolderSettings(cwd).digest, before)
   })
 
-  it('a dangling link, a link cycle and a link to a non-regular file are HARD (untrusted and untrustable)', async () => {
+  it('a dangling link, a link cycle and a link to a non-regular file are HARD (untrusted and untrustable)', { skip: SKIP_NO_SYMLINK }, async () => {
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     symlinkSync(join(root, 'nowhere.md'), join(cwd, '.claude', 'agents', 'dangling.md'))
     assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
@@ -244,6 +247,18 @@ describe('scanFolderSettings: what is considered', () => {
     }
   })
 
+  it('a real-path error other than ENOENT (an unreadable ancestor) is HARD, not a silent fallback', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+    mkdirSync(join(root, 'locked', 'child'), { recursive: true })
+    chmodSync(join(root, 'locked'), 0o000)
+    try {
+      const scan = scanFolderSettings(join(root, 'locked', 'child'))
+      assert.equal(scan.hardIncomplete, true)
+      assert.equal(isFolderTrusted(join(root, 'locked', 'child')), false)
+    } finally {
+      chmodSync(join(root, 'locked'), 0o755)
+    }
+  })
+
   it('only ENOENT and ENOTDIR mean absent: a file where a directory should be is absent, not an error', () => {
     write(join(cwd, '.claude'), 'a file named .claude')
     const scan = scanFolderSettings(cwd)
@@ -278,18 +293,148 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(scanFolderSettings(cwd).hasCommandBearingFiles, false)
   })
 
-  it('hitting the nested-walk cap is SOFT: still trustable, with a visible warning', async () => {
+  it('hitting the nested-search directory cap is HARD: untrustable, with the size message', () => {
     for (let i = 0; i < 6; i++) mkdirSync(join(cwd, `d${i}`), { recursive: true })
     const scan = scanFolderSettings(cwd, { maxNestedDirs: 3 })
-    assert.equal(scan.hardIncomplete, false)
-    assert.ok(scan.summary.warnings.some((w) => w.includes('Folder tree too large to scan fully: nested skills beyond 3 directories are not covered')))
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.untrustable)
+    assert.ok(scan.summary.warnings.includes('This folder is too large to review (more than 3 directories)'))
   })
 
-  it('the nested search also stops after too many directory entries (SOFT)', () => {
+  it('the nested search also stops, HARD, after too many directory entries', () => {
     for (let i = 0; i < 20; i++) write(join(cwd, 'many', `f${i}.txt`), 'x')
     const scan = scanFolderSettings(cwd, { maxNestedEntries: 10 })
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('more than 10 entries')))
+  })
+
+  it('the nested search has a wall-clock budget: exceeding it is HARD', () => {
+    for (let i = 0; i < 5; i++) mkdirSync(join(cwd, `d${i}`), { recursive: true })
+    const scan = scanFolderSettings(cwd, { nestedBudgetMs: -1 })
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('took too long')))
+  })
+
+  it('a large synthetic tree hits the cap, is HARD, and returns within the budget', () => {
+    // 600 directories x 20 files: well past the caps passed here, quick to create.
+    for (let i = 0; i < 300; i++) {
+      mkdirSync(join(cwd, 'big', `d${i}`), { recursive: true })
+      for (let j = 0; j < 5; j++) writeFileSync(join(cwd, 'big', `d${i}`, `f${j}`), '')
+    }
+    const t0 = Date.now()
+    const scan = scanFolderSettings(cwd, { maxNestedDirs: 100 })
+    assert.ok(Date.now() - t0 < 1500 + 500)
+    assert.equal(scan.hardIncomplete, true)
+  })
+
+  it('enumeration stops AT the entry cap: later entries are never read (counted as read, not after listing)', () => {
+    for (let i = 0; i < 2000; i++) writeFileSync(join(cwd, `e${i}`), '')
+    // Instrument: only the entries counter matters, so read the budget through the scan result.
+    const scan = scanFolderSettings(cwd, { maxNestedEntries: 50 })
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('more than 50 entries')))
+  })
+
+  it('the content traversal has its own directory budget (HARD)', () => {
+    for (let i = 0; i < 8; i++) write(join(cwd, '.claude', 'skills', `s${i}`, 'SKILL.md'), 'x')
+    const scan = scanFolderSettings(cwd, { maxContentDirs: 4 })
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('more than 4 directories')))
+    assert.equal(scanFolderSettings(cwd, { maxContentEntries: 3 }).hardIncomplete, true)
+  })
+
+  it('a symlinked directory in the nested walk is followed: a .claude behind it is covered', { skip: SKIP_NO_SYMLINK }, () => {
+    write(join(root, 'elsewhere', '.claude', 'skills', 's', 'SKILL.md'), 'via link')
+    symlinkSync(join(root, 'elsewhere'), join(cwd, 'linked'))
+    const scan = scanFolderSettings(cwd)
     assert.equal(scan.hardIncomplete, false)
-    assert.ok(scan.summary.warnings.some((w) => w.includes('Folder tree too large to scan fully')))
+    assert.ok(scan.files.some((f) => f.path === join(cwd, 'linked', '.claude', 'skills', 's', 'SKILL.md')))
+  })
+
+  it('a symlink cycle or a dangling link in the nested walk is HARD', { skip: SKIP_NO_SYMLINK }, () => {
+    symlinkSync(cwd, join(cwd, 'loop'))
+    const cycle = scanFolderSettings(cwd)
+    assert.equal(cycle.hardIncomplete, true)
+    assert.ok(cycle.summary.warnings.some((w) => w.includes('symlink cycle')))
+    rmSync(join(cwd, 'loop'))
+    symlinkSync(join(root, 'nope'), join(cwd, 'dangling'))
+    assert.ok(scanFolderSettings(cwd).summary.warnings.some((w) => w.includes('dangling symlink')))
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+  })
+
+  it('a dangling content root is HARD, not absent', { skip: SKIP_NO_SYMLINK }, async () => {
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    for (const sub of ['skills', 'agents', 'commands']) {
+      symlinkSync(join(root, 'nowhere'), join(cwd, '.claude', sub))
+      assert.equal(scanFolderSettings(cwd).hardIncomplete, true, sub)
+      rmSync(join(cwd, '.claude', sub))
+    }
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, false)
+    // a dangling config file is HARD too
+    symlinkSync(join(root, 'nowhere.json'), join(cwd, '.mcp.json'))
+    assert.equal(scanFolderSettings(cwd).hardIncomplete, true)
+  })
+
+  it('an unparsable .git file (worktree pointer) is HARD', () => {
+    const wt = join(root, 'wt-bad')
+    mkdirSync(wt, { recursive: true })
+    writeFileSync(join(wt, '.git'), 'this is not a pointer\n')
+    const scan = scanFolderSettings(wt)
+    assert.equal(scan.hardIncomplete, true)
+    assert.ok(scan.summary.warnings.some((w) => w.includes('unparsable .git file')))
+  })
+
+  it('the user config dir is recognised through a dotfile symlink (default ~/.claude -> elsewhere)', { skip: SKIP_NO_SYMLINK }, () => {
+    const home = join(root, 'h2')
+    mkdirSync(join(home, 'proj'), { recursive: true })
+    write(join(root, 'dotfiles', 'claude', 'agents', 'mine.md'), 'user agent')
+    write(join(root, 'dotfiles', 'claude', 'settings.json'), { statusLine: { type: 'command', command: 'u.sh' } })
+    symlinkSync(join(root, 'dotfiles', 'claude'), join(home, '.claude'))
+    const savedHome = process.env.HOME
+    const savedClaude = process.env.CLAUDE_CONFIG_DIR
+    process.env.HOME = home
+    delete process.env.CLAUDE_CONFIG_DIR
+    try {
+      const scan = scanFolderSettings(join(home, 'proj'))
+      assert.equal(scan.hasCommandBearingFiles, false, 'the user dir is not the project')
+      assert.equal(scan.hardIncomplete, false)
+    } finally {
+      process.env.HOME = savedHome
+      process.env.CLAUDE_CONFIG_DIR = savedClaude
+    }
+  })
+
+  it('a symlinked CLAUDE_CONFIG_DIR is resolved before comparing', { skip: SKIP_NO_SYMLINK }, () => {
+    const real = join(root, 'realclaude')
+    write(join(real, 'agents', 'mine.md'), 'x')
+    mkdirSync(join(root, 'h3', 'proj'), { recursive: true })
+    symlinkSync(real, join(root, 'h3', '.claude'))
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'h3', '.claude')
+    assert.equal(scanFolderSettings(join(root, 'h3', 'proj')).hasCommandBearingFiles, false)
+    process.env.CLAUDE_CONFIG_DIR = real
+    assert.equal(scanFolderSettings(join(root, 'h3', 'proj')).hasCommandBearingFiles, false)
+  })
+
+  it('a symlinked cwd is scanned and trusted by its REAL path and real ancestors', { skip: SKIP_NO_SYMLINK }, async () => {
+    write(join(root, 'real', '.mcp.json'), { mcpServers: {} })
+    mkdirSync(join(root, 'real', 'proj'), { recursive: true })
+    mkdirSync(join(root, 'rawparent'), { recursive: true })
+    symlinkSync(join(root, 'real', 'proj'), join(root, 'rawparent', 'link'))
+    write(join(root, 'rawparent', '.mcp.json'), { mcpServers: { raw: { command: 'x' } } })
+    const scan = scanFolderSettings(join(root, 'rawparent', 'link'))
+    assert.equal(scan.realPath, join(root, 'real', 'proj'))
+    assert.ok(scan.files.some((f) => f.path === join(root, 'real', '.mcp.json')), 'real ancestor')
+    assert.equal(scan.files.some((f) => f.path === join(root, 'rawparent', '.mcp.json')), false, 'raw ancestor is not the real tree')
+    await trust(join(root, 'rawparent', 'link'))
+    assert.equal(isFolderTrusted(join(root, 'real', 'proj')), true, 'keyed by real path')
+  })
+
+  it('a .claude reached through a nested symlink is covered', { skip: SKIP_NO_SYMLINK }, () => {
+    write(join(root, 'store', 'skills', 's', 'SKILL.md'), 'linked .claude')
+    mkdirSync(join(cwd, 'pkg'), { recursive: true })
+    symlinkSync(join(root, 'store'), join(cwd, 'pkg', '.claude'))
+    const scan = scanFolderSettings(cwd)
+    assert.ok(scan.files.some((f) => f.path === join(cwd, 'pkg', '.claude', 'skills', 's', 'SKILL.md')))
   })
 
   it('in a linked git worktree the MAIN checkout skills are included', () => {
@@ -310,7 +455,7 @@ describe('scanFolderSettings: what is considered', () => {
 })
 
 describe('trust does not survive an incomplete scan', () => {
-  it('trusted, then something unreadable appears that the digest cannot see: untrusted', async () => {
+  it('trusted, then something unreadable appears that the digest cannot see: untrusted', { skip: SKIP_NO_SYMLINK }, async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     await trust(cwd)
     assert.equal(isFolderTrusted(cwd), true)
@@ -377,14 +522,14 @@ describe('trust store', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     await trust(cwd)
     const path = folderTrustStorePath()
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600) // no POSIX mode bits on Windows; atomicity below still runs
     assert.deepEqual(readdirSync(join(path, '..')).filter((n) => n.endsWith('.tmp') || n.endsWith('.lock')), [])
     const stored = JSON.parse(readFileSync(path, 'utf8'))
     assert.equal(stored.records.length, 1)
     assert.equal(stored.records[0].v, 2)
-    assert.deepEqual(stored.records[0].files.map((f) => f.path), [join(realpathSync(cwd), '.mcp.json')])
+    assert.deepEqual(stored.records[0].files.map((f) => f.path), [join(realpathSync.native(cwd), '.mcp.json')])
     assert.match(stored.records[0].files[0].sha256, /^[0-9a-f]{64}$/)
-    assert.equal(stored.records[0].path, realpathSync(cwd))
+    assert.equal(stored.records[0].path, realpathSync.native(cwd))
     assert.match(stored.records[0].digest, /^[0-9a-f]{64}$/)
     assert.ok(stored.records[0].trustedAt)
   })
@@ -570,5 +715,122 @@ describe('readTrustedProjectSettings', () => {
     await trust(cwd)
     write(join(cwd, '.claude', 'settings.json'), settings('late.sh'))
     assert.equal(readTrustedProjectSettings(cwd), null)
+  })
+})
+
+describe('cross-process store lock', () => {
+  const MODULE = new URL('../src/folder-trust.js', import.meta.url).href
+  const holder = (storePath) => `
+    import { withInterprocessLock } from ${JSON.stringify(MODULE)}
+    await withInterprocessLock(${JSON.stringify(storePath)}, async () => {
+      console.log('LOCKED')
+      await new Promise((resolve) => process.stdin.once('data', resolve))
+    })
+    console.log('RELEASED')
+    process.exit(0)
+  `
+
+  it('a REAL child process holds the lock: the parent waits, then proceeds when the child releases', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const child = spawn(process.execPath, ['--input-type=module', '-e', holder(folderTrustStorePath())], {
+      env: { ...process.env }, stdio: ['pipe', 'pipe', 'inherit'],
+    })
+    let out = ''
+    const locked = new Promise((resolve) => child.stdout.on('data', (d) => { out += d; if (out.includes('LOCKED')) resolve() }))
+    const exited = new Promise((resolve) => child.on('exit', resolve))
+    try {
+      await locked
+      let done = false
+      const p = trust(cwd).then((r) => { done = true; return r })
+      await new Promise((r) => setTimeout(r, 300))
+      assert.equal(done, false, 'the parent waits while another process holds the lock')
+      child.stdin.write('go\n')
+      await exited
+      assert.equal((await p).ok, true)
+      assert.equal(existsSync(`${folderTrustStorePath()}.lock`), false)
+    } finally {
+      child.kill()
+    }
+  })
+
+  it('a stale lock (holder pid dead) is reclaimed by exactly one claimant', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const dead = spawn(process.execPath, ['-e', ''])
+    await new Promise((resolve) => dead.on('exit', resolve))
+    writeFileSync(`${folderTrustStorePath()}.lock`, `${dead.pid}\nold-token\n${Date.now()}\n`)
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    const other = join(root, 'home', 'other')
+    write(join(other, '.mcp.json'), { mcpServers: {} })
+    const results = await Promise.all([trust(cwd), trust(other)])
+    assert.deepEqual(results.map((r) => r.ok), [true, true])
+    assert.equal(loadFolderTrustRecords().length, 2)
+    assert.deepEqual(readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.stale.') || n.endsWith('.lock')), [])
+  })
+
+  it('a live pid is never robbed because its lock is old', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const lock = `${folderTrustStorePath()}.lock`
+    writeFileSync(lock, `${process.pid}\nlive-token\n${Date.now()}\n`)
+    const old = new Date(Date.now() - 3600_000)
+    utimesSync(lock, old, old)
+    let done = false
+    const p = trust(cwd).then((r) => { done = true; return r })
+    await new Promise((r) => setTimeout(r, 200))
+    assert.equal(done, false)
+    rmSync(lock)
+    assert.equal((await p).ok, true)
+  })
+
+  it('release removes only a lock that still holds its own token', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const lock = `${folderTrustStorePath()}.lock`
+    const { withInterprocessLock } = await import('../src/folder-trust.js')
+    await withInterprocessLock(folderTrustStorePath(), async () => {
+      // someone else took over the file while we were working
+      rmSync(lock)
+      writeFileSync(lock, `${process.pid}\nsomeone-elses-token\n${Date.now()}\n`)
+    })
+    assert.equal(existsSync(lock), true, 'not ours: left alone')
+    assert.ok(readFileSync(lock, 'utf8').includes('someone-elses-token'))
+  })
+})
+
+describe('readTrustedProjectSettings also needs the folder trusted', () => {
+  it('a file whose hash matches is NOT returned once the folder is no longer trusted overall (another file changed)', async () => {
+    write(join(cwd, '.claude', 'settings.json'), { statusLine: { type: 'command', command: 'a.sh' } })
+    await trust(cwd)
+    assert.ok(readTrustedProjectSettings(cwd))
+    // Another covered file appears: the folder's digest changes, the settings file is untouched.
+    write(join(cwd, '.claude', 'agents', 'new.md'), 'x')
+    invalidateFolderTrustCache() // the cache window is up to 2 s; the check itself is what is tested
+    assert.equal(readTrustedProjectSettings(cwd), null)
+  })
+
+  it('a record whose digest no longer matches the folder is not enough even with a matching file hash', async () => {
+    write(join(cwd, '.claude', 'settings.json'), { statusLine: { type: 'command', command: 'a.sh' } })
+    await trust(cwd)
+    const [rec] = loadFolderTrustRecords()
+    // hand-edit the record's digest and files consistently, dropping the digest match with the folder
+    const files = [...rec.files, { path: join(cwd, 'phantom'), sha256: 'e'.repeat(64) }]
+    const digest = createHash('sha256').update(canonicalJson(files.sort((a, b) => (a.path < b.path ? -1 : 1)))).digest('hex')
+    writeFileSync(folderTrustStorePath(), JSON.stringify({ records: [{ ...rec, files, digest }] }))
+    invalidateFolderTrustCache()
+    assert.equal(readTrustedProjectSettings(cwd), null)
+  })
+})
+
+describe('caching', () => {
+  it('a launch-time scan feeds the cache for display callers, but never reads it', async () => {
+    write(join(cwd, '.mcp.json'), { mcpServers: {} })
+    isFolderTrusted(cwd) // launch decision: uncached
+    write(join(cwd, '.mcp.json'), { mcpServers: { x: { command: 'y' } } })
+    // a cached display call sees the scan the launch made (stale by one edit)...
+    const cached = getFolderTrustState(cwd, { cached: true })
+    // ...while a launch decision sees the edit
+    const fresh = getFolderTrustState(cwd)
+    assert.notEqual(cached.digest, fresh.digest)
   })
 })

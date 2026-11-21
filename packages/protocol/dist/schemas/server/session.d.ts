@@ -163,6 +163,7 @@ export declare const ServerFolderTrustStateSchema: z.ZodObject<{
         next_turn: "next_turn";
         "n/a": "n/a";
     }>;
+    launchedWithProject: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 /** Reply to `trust_folder` / `untrust_folder`. `error` is set when `ok` is false. */
 export declare const ServerFolderTrustResultSchema: z.ZodObject<{

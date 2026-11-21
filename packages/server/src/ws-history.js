@@ -7,7 +7,7 @@
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
 import { buildThinkingLevelChanged } from './thinking-level-wire.js'
-import { buildFolderTrustStateMessage } from './folder-trust-wire.js'
+import { buildFolderTrustStateMessageForDisplay } from './folder-trust-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { isBoundClient } from './environments/authority.js'
@@ -1575,17 +1575,11 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
 
   // Whether the session folder's project settings are loaded, so the banner
   // shows on a switch or a fresh subscribe and not only after the next turn.
-  // Sent after the rest of this burst: the folder scan reads the disk, and nothing
-  // else in the burst waits on it.
-  const trustCwd = entry
-  setImmediate(() => {
-    try {
-      const trustMsg = buildFolderTrustStateMessage(sessionId, trustCwd, { cached: true })
-      if (trustMsg) send(ws, trustMsg)
-    } catch (err) {
-      log.debug?.(`folder trust state failed: ${err?.message}`)
-    }
-  })
+  // The scan runs on a worker thread, so it neither delays nor reorders any frame
+  // above or below; the frame itself is sent strictly after them.
+  buildFolderTrustStateMessageForDisplay(sessionId, entry)
+    .then((trustMsg) => { if (trustMsg) send(ws, trustMsg) })
+    .catch((err) => { log.debug?.(`folder trust state failed: ${err?.message}`) })
 
   // #5731 T5 / #5623 / #5613: re-sync the session's primary owner so the
   // presence badge ("Observing" / "Take over" / driver name) doesn't go

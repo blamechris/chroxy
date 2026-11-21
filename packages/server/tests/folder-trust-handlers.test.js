@@ -9,6 +9,7 @@
  */
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -27,7 +28,7 @@ let savedChroxy
 let savedClaude
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'folder-trust-handlers-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'folder-trust-handlers-')))
   savedChroxy = process.env.CHROXY_CONFIG_DIR
   savedClaude = process.env.CLAUDE_CONFIG_DIR
   process.env.CHROXY_CONFIG_DIR = join(root, 'chroxy')
@@ -134,7 +135,7 @@ describe('trust_folder / untrust_folder', () => {
     assert.equal(existsSync(folderTrustStorePath()), false)
   })
 
-  it('broadcasts folder_trust_state to every session in the same folder (by real path), and only those', async () => {
+  it('broadcasts folder_trust_state to every session in the same folder (by real path), and only those', { skip: SKIP_NO_SYMLINK }, async () => {
     const cwd = folder('shared')
     const alias = join(root, 'alias')
     symlinkSync(cwd, alias)
@@ -147,15 +148,24 @@ describe('trust_folder / untrust_folder', () => {
     })
     await trust(WS, primary(), reviewed('a', cwd), ctx)
     const sent = Object.fromEntries(broadcastToSession.mock.calls.map((c) => [c.arguments[0], c.arguments[1]]))
-    assert.deepEqual(Object.keys(sent).sort(), ['a', 'b', 'd'])
+    assert.deepEqual(Object.keys(sent).sort(), ['a', 'b'], 'a provider that does not run claude gets no frame')
     assert.equal(sent.a.type, 'folder_trust_state')
     assert.equal(sent.a.status, 'trusted')
     assert.equal(sent.a.appliesFrom, 'next_turn')
     assert.equal(sent.b.appliesFrom, 'restart')
-    assert.equal(sent.d.appliesFrom, 'n/a')
     assert.equal(sent.a.sessionId, 'a')
     assert.ok(sent.a.summary.files.length > 0)
     assert.match(sent.a.digest, /^[0-9a-f]{64}$/)
+  })
+
+  it('scans the folder once for all sessions of it', async () => {
+    const cwd = folder('shared')
+    const { ctx } = makeCtx({ a: { cwd, provider: 'claude-sdk' }, b: { cwd, provider: 'claude-tui' }, c: { cwd, provider: 'claude-cli' } })
+    const { broadcastFolderTrustState } = await import('../src/folder-trust-wire.js')
+    const mod = await import('../src/folder-trust.js')
+    const before = mod.workerScanCountForTest()
+    await broadcastFolderTrustState(ctx, realpathSync.native(cwd))
+    assert.equal((mod.workerScanCountForTest()) - before, 1)
   })
 
   it('refuses a digest that no longer matches (the folder changed after review) and broadcasts the fresh state', async () => {
@@ -183,7 +193,7 @@ describe('trust_folder / untrust_folder', () => {
     assert.equal(isFolderTrusted(cwd), false)
   })
 
-  it('a folder that cannot be fully reviewed is refused as untrustable', async () => {
+  it('a folder that cannot be fully reviewed is refused as untrustable', { skip: SKIP_NO_SYMLINK }, async () => {
     const cwd = folder('p')
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     symlinkSync(join(root, 'nowhere'), join(cwd, '.claude', 'agents', 'dangling.md'))

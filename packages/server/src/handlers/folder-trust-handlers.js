@@ -62,7 +62,7 @@ function makeHandler(op, apply, logVerb) {
         error: 'The trust change could not be saved',
         ...(requestId ? { requestId } : {}),
       })
-      broadcastFolderTrustState(ctx, current.realPath)
+      await broadcastFolderTrustState(ctx, current.realPath)
       return
     }
     if (result.ok) {
@@ -79,7 +79,7 @@ function makeHandler(op, apply, logVerb) {
       sessionLogger(sessionId).warn(`${op} refused for ${result.realPath ?? cwd}: ${result.code}`)
       sendError(ws, requestId, result.code || 'FOLDER_TRUST_NOT_APPLIED', result.error || 'The trust change was not applied', { sessionId }, ctx)
     }
-    if (result.realPath) broadcastFolderTrustState(ctx, result.realPath)
+    if (result.realPath) await broadcastFolderTrustState(ctx, result.realPath)
   }
 }
 

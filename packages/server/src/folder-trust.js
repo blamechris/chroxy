@@ -18,17 +18,18 @@
  *   - `.claude/skills`, `.claude/agents` and `.claude/commands` in the folder and in
  *     every ancestor (recursively, following symlinks with cycle detection).
  *   - the same three directories in every nested `.claude` below the folder, found
- *     by a bounded walk that skips `.git` and `node_modules`.
+ *     by a bounded walk (symlinked directories followed, cycles refused) that skips
+ *     `.git` and `node_modules`.
  *   - in a linked git worktree, the main checkout's `.claude/skills`.
  *   - the user's own Claude config directory is skipped wherever it appears, and
  *     `.claude/settings.local.json` is never considered.
  *
- * Two kinds of incompleteness:
- *   - HARD: any error other than "absent", a non-regular file, a file over the
- *     per-file limit, or the total byte or file budget exceeded. The folder is
- *     untrusted and cannot be trusted.
- *   - SOFT: the nested walk hit its cap. The folder stays trustable and the summary
- *     says what is not covered.
+ * Incompleteness is always HARD and fails closed: any error other than "absent",
+ * a non-regular file, a dangling or circular link, a file over the per-file limit,
+ * or any budget exceeded (bytes, files, directories, entries, depth, or the
+ * wall-clock budget of the nested search). The folder is untrusted and cannot be
+ * trusted. What is NOT covered by the digest: files that settings merely refer to
+ * (hook scripts, for example), `CLAUDE.md` and rules. Trusting a folder trusts its code.
  *
  * Each file is read ONCE, with `O_NONBLOCK` and an `fstat` that rejects anything
  * that is not a regular file; the digest and the summary come from the same bytes.
@@ -36,11 +37,12 @@
  */
 
 import {
-  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
-  readdirSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync,
+  readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { createHash } from 'node:crypto'
+import { dirname, join, resolve, sep } from 'node:path'
+import { createHash, randomBytes } from 'node:crypto'
+import { Worker, SHARE_ENV } from 'node:worker_threads'
 import { configPath } from './config-dir.js'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
 import { canonicalJson, sha256Hex, withTrustStoreLock, writeFileAtomic0600 } from './byok-mcp-trust.js'
@@ -48,7 +50,6 @@ import { redactMcpUrl } from './byok-mcp-config.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('folder-trust')
-
 /** On-disk record version. Other versions are dropped at load. */
 export const FOLDER_TRUST_RECORD_VERSION = 2
 
@@ -60,21 +61,26 @@ export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const MAX_TOTAL_BYTES = 32 * 1024 * 1024
 /** Deepest directory level inside a content directory (HARD beyond). */
 export const MAX_DEPTH = 16
-/** Directories visited by the nested `.claude` search before it stops (SOFT). */
-export const MAX_NESTED_DIRS = 5000
-/** Directory entries examined by the nested search before it stops (SOFT). */
-export const MAX_NESTED_ENTRIES = 50_000
-/** Deepest level of the nested search (SOFT beyond). */
-export const MAX_NESTED_DEPTH = 12
+/** Directories and entries read by all content traversals of one scan (HARD beyond). */
+export const MAX_CONTENT_DIRS = 2000
+export const MAX_CONTENT_ENTRIES = 20_000
+/** Directories visited by the nested `.claude` search (HARD beyond). */
+export const MAX_NESTED_DIRS = 20_000
+/** Directory entries read by the nested search (HARD beyond). */
+export const MAX_NESTED_ENTRIES = 200_000
+/** Deepest level of the nested search (HARD beyond). */
+export const MAX_NESTED_DEPTH = 32
+/** Wall-clock budget of the nested search (HARD beyond). */
+export const NESTED_BUDGET_MS = 1500
 /** Largest config file parsed for the summary; a larger one is still hashed. */
 export const MAX_PARSE_BYTES = 256 * 1024
-/** Cache lifetime of a scan, for display-only callers. */
+/** Cache lifetime of a scan, for display and for the status line's folder-level check. */
 export const SCAN_CACHE_TTL_MS = 2000
 
 const CONTENT_DIRS = ['agents', 'skills', 'commands']
 const MAX_SUMMARY_ITEMS = 50
 const MAX_SUMMARY_STRING = 500
-const SKIP_NESTED = new Set(['.git', 'node_modules', '.claude'])
+const SKIP_NESTED = new Set(['.git', 'node_modules'])
 const O_READ = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0)
 
 export function folderTrustStorePath() {
@@ -84,11 +90,17 @@ export function folderTrustStorePath() {
 const isAbsentCode = (err) => err?.code === 'ENOENT' || err?.code === 'ENOTDIR'
 const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
 
-function realPathOf(p) {
+/**
+ * Real path of `p`. Only ENOENT falls back to the raw (resolved) path; any other
+ * error is reported as `error` so the caller can refuse instead of guessing.
+ * @returns {{ path: string, error?: string }}
+ */
+export function resolveRealPath(p) {
   try {
-    return realpathSync.native(p)
-  } catch {
-    return resolve(p)
+    return { path: realpathSync.native(p) }
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { path: resolve(p) }
+    return { path: resolve(p), error: err?.code || 'error' }
   }
 }
 
@@ -99,21 +111,71 @@ function newScan(limits = {}) {
       maxFileBytes: limits.maxFileBytes ?? MAX_FILE_BYTES,
       maxTotalBytes: limits.maxTotalBytes ?? MAX_TOTAL_BYTES,
       maxFiles: limits.maxFiles ?? MAX_SCANNED_FILES,
-      maxNestedDirs: limits.maxNestedDirs ?? MAX_NESTED_DIRS,
-      maxNestedEntries: limits.maxNestedEntries ?? MAX_NESTED_ENTRIES,
+      nestedBudgetMs: limits.nestedBudgetMs ?? NESTED_BUDGET_MS,
     },
+    // Directory-enumeration budgets: every directory and entry is counted as it is read.
+    content: { dirs: 0, entries: 0, maxDirs: limits.maxContentDirs ?? MAX_CONTENT_DIRS, maxEntries: limits.maxContentEntries ?? MAX_CONTENT_ENTRIES },
+    nested: { dirs: 0, entries: 0, maxDirs: limits.maxNestedDirs ?? MAX_NESTED_DIRS, maxEntries: limits.maxNestedEntries ?? MAX_NESTED_ENTRIES },
     bytes: 0,
     files: 0,
     hard: [],
-    soft: [],
     entries: [],
     config: [],
-    links: [],
     counts: { agents: 0, skills: 0, commands: 0 },
   }
 }
 
 const hard = (scan, path, why) => { scan.hard.push(`${path}: ${why}`) }
+/** A whole-scan refusal whose text stands alone. */
+const hardNote = (scan, text) => { scan.hard.push(text) }
+
+/** Real path inside a scan: any error but ENOENT is HARD. */
+function realOf(p, scan) {
+  const r = resolveRealPath(p)
+  if (r.error) hard(scan, p, r.error)
+  return r.path
+}
+
+/**
+ * List one directory incrementally (`opendir`), counting each entry as it is read
+ * and stopping at the budget BEFORE anything more is allocated.
+ * @returns {{ absent: true } | { hard: string } | { entries: import('node:fs').Dirent[] }}
+ */
+function listDir(path, counter, deadline) {
+  let dir
+  try {
+    dir = opendirSync(path)
+  } catch (err) {
+    return isAbsentCode(err) ? { absent: true } : { hard: err?.code || 'unreadable' }
+  }
+  const out = []
+  try {
+    counter.dirs += 1
+    if (counter.dirs > counter.maxDirs) return { hard: `This folder is too large to review (more than ${counter.maxDirs} directories)` }
+    for (;;) {
+      const d = dir.readSync()
+      if (!d) break
+      counter.entries += 1
+      if (counter.entries > counter.maxEntries) return { hard: `This folder is too large to review (more than ${counter.maxEntries} entries)` }
+      if (deadline !== undefined && (counter.entries & 255) === 0 && Date.now() > deadline) {
+        return { hard: 'This folder is too large to review (the search took too long)' }
+      }
+      out.push(d)
+    }
+  } catch (err) {
+    return { hard: err?.code || 'unreadable' }
+  } finally {
+    try { dir.closeSync() } catch { /* nothing to do */ }
+  }
+  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  return { entries: out }
+}
+
+/** Record a listDir refusal: budget notes stand alone, errors carry the path. */
+function listingHard(scan, path, listing) {
+  if (listing.hard.startsWith('This folder is too large')) hardNote(scan, listing.hard)
+  else hard(scan, path, listing.hard)
+}
 
 /**
  * Read one file, once. Returns null when absent, `{ hard: true }` when it could not
@@ -189,15 +251,14 @@ function addConfigFile(path, kind, scan) {
 
 /** Every file under one content directory. */
 function walkContent(dir, sub, scan, stack, visited, depth) {
-  let names
-  try {
-    names = readdirSync(dir).sort()
-  } catch (err) {
-    if (!isAbsentCode(err)) hard(scan, dir, err?.code || 'unreadable')
+  const listing = listDir(dir, scan.content)
+  if (listing.absent) return
+  if (listing.hard) {
+    listingHard(scan, dir, listing)
     return
   }
-  for (const name of names) {
-    const full = join(dir, name)
+  for (const dirent of listing.entries) {
+    const full = join(dir, dirent.name)
     let lst
     try {
       lst = lstatSync(full)
@@ -217,7 +278,7 @@ function walkContent(dir, sub, scan, stack, visited, depth) {
       }
       isDir = st.isDirectory()
       if (isDir) {
-        const real = realPathOf(full)
+        const real = realOf(full, scan)
         if (stack.has(real)) {
           hard(scan, full, 'symlink cycle')
           continue
@@ -232,7 +293,7 @@ function walkContent(dir, sub, scan, stack, visited, depth) {
         hard(scan, full, 'directory nesting too deep')
         continue
       }
-      const real = realPathOf(full)
+      const real = realOf(full, scan)
       visited.add(real)
       stack.add(real)
       walkContent(full, sub, scan, stack, visited, depth + 1)
@@ -251,12 +312,33 @@ function walkContent(dir, sub, scan, stack, visited, depth) {
   }
 }
 
-function scanContentLocation(dotClaude, scan) {
-  for (const sub of CONTENT_DIRS) {
-    const dir = join(dotClaude, sub)
-    const real = realPathOf(dir)
-    walkContent(dir, sub, scan, new Set([real]), new Set([real]), 0)
+/** One content root (`.claude/skills|agents|commands`): lstat it first, so a link to nowhere is HARD, not "absent". */
+function scanContentRoot(dir, sub, scan) {
+  let lst
+  try {
+    lst = lstatSync(dir)
+  } catch (err) {
+    if (!isAbsentCode(err)) hard(scan, dir, err?.code || 'unreadable')
+    return
   }
+  if (lst.isSymbolicLink()) {
+    let st
+    try {
+      st = statSync(dir)
+    } catch (err) {
+      hard(scan, dir, err?.code === 'ENOENT' ? 'dangling symlink' : (err?.code || 'unreadable'))
+      return
+    }
+    if (!st.isDirectory()) return
+  } else if (!lst.isDirectory()) {
+    return
+  }
+  const real = realOf(dir, scan)
+  walkContent(dir, sub, scan, new Set([real]), new Set([real]), 0)
+}
+
+function scanContentLocation(dotClaude, scan) {
+  for (const sub of CONTENT_DIRS) scanContentRoot(join(dotClaude, sub), sub, scan)
 }
 
 function ancestorsOf(realPath) {
@@ -286,7 +368,10 @@ function mainCheckoutDotClaude(realPath, scan) {
     const r = readRegular(git, scan)
     if (!r || r.hard) return null
     const m = /^gitdir:\s*(.+?)\s*$/m.exec(r.buf.toString('utf8'))
-    if (!m) return null
+    if (!m) {
+      hard(scan, git, 'unparsable .git file')
+      return null
+    }
     const gitdir = resolve(dir, m[1])
     // <main>/.git/worktrees/<name>
     const worktrees = dirname(gitdir)
@@ -297,49 +382,63 @@ function mainCheckoutDotClaude(realPath, scan) {
   return null
 }
 
-/** Nested `.claude` directories below `root`, by a bounded walk. */
-function findNestedDotClaude(root, scan) {
+/**
+ * Nested `.claude` directories below `root`, by a bounded breadth-first walk.
+ * Symlinked directories are followed, with realpath cycle detection. Any budget
+ * (directories, entries, depth, wall clock) running out is HARD.
+ */
+function findNestedDotClaude(root, rootReal, scan) {
   const found = []
-  const queue = [[root, 0]]
-  let visited = 0
-  let entriesSeen = 0
-  let capped = false
-  while (queue.length > 0) {
-    const [dir, depth] = queue.shift()
-    if (visited >= scan.limits.maxNestedDirs) {
-      capped = true
-      break
+  const queue = [[root, rootReal, 0]]
+  const visited = new Set([rootReal])
+  const deadline = Date.now() + scan.limits.nestedBudgetMs
+  for (let head = 0; head < queue.length; head += 1) {
+    const [dir, real, depth] = queue[head]
+    if (Date.now() > deadline) {
+      hardNote(scan, 'This folder is too large to review (the search took too long)')
+      return found
     }
-    visited += 1
-    let dirents
-    try {
-      dirents = readdirSync(dir, { withFileTypes: true })
-    } catch (err) {
-      if (!isAbsentCode(err)) hard(scan, dir, err?.code || 'unreadable')
+    const listing = listDir(dir, scan.nested, deadline)
+    if (listing.absent) continue
+    if (listing.hard) {
+      listingHard(scan, dir, listing)
+      if (listing.hard.startsWith('This folder is too large')) return found
       continue
     }
-    entriesSeen += dirents.length
-    if (entriesSeen > scan.limits.maxNestedEntries) {
-      capped = true
-      break
-    }
-    dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    for (const d of dirents) {
-      if (!d.isDirectory()) continue
+    for (const d of listing.entries) {
+      const child = join(dir, d.name)
+      let isDir = d.isDirectory()
+      let childReal = join(real, d.name)
+      if (d.isSymbolicLink()) {
+        let st
+        try {
+          st = statSync(child)
+        } catch (err) {
+          hard(scan, child, err?.code === 'ENOENT' ? 'dangling symlink' : (err?.code || 'unreadable'))
+          continue
+        }
+        isDir = st.isDirectory()
+        if (!isDir) continue
+        childReal = realOf(child, scan)
+        if (real === childReal || real.startsWith(childReal.endsWith(sep) ? childReal : childReal + sep)) {
+          hard(scan, child, 'symlink cycle')
+          continue
+        }
+      }
+      if (!isDir) continue
       if (d.name === '.claude') {
-        if (dir !== root) found.push(join(dir, '.claude'))
+        if (dir !== root) found.push(child)
         continue
       }
       if (SKIP_NESTED.has(d.name)) continue
+      if (visited.has(childReal)) continue
+      visited.add(childReal)
       if (depth + 1 > MAX_NESTED_DEPTH) {
-        capped = true
-        continue
+        hardNote(scan, `This folder is too large to review (more than ${MAX_NESTED_DEPTH} levels deep)`)
+        return found
       }
-      queue.push([join(dir, d.name), depth + 1])
+      queue.push([child, childReal, depth + 1])
     }
-  }
-  if (capped) {
-    scan.soft.push(`Folder tree too large to scan fully: nested skills beyond ${scan.limits.maxNestedDirs} directories are not covered`)
   }
   return found
 }
@@ -430,7 +529,14 @@ function summarizeConfig(config, summary) {
  *   hardIncomplete: boolean,
  * }}
  */
+let scanCount = 0
+/** Test seam: how many scans have run in this process. */
+export function scanCountForTest() {
+  return scanCount
+}
+
 export function scanFolderSettings(cwd, limits) {
+  scanCount += 1
   const scan = newScan(limits)
   const summary = {
     files: [],
@@ -446,10 +552,26 @@ export function scanFolderSettings(cwd, limits) {
   let realPath = ''
   if (typeof cwd === 'string' && cwd !== '') {
     try {
-      realPath = realPathOf(cwd)
+      const root = resolveRealPath(cwd)
+      realPath = root.path
+      if (root.error) hard(scan, realPath, root.error)
+      // The user's own Claude dir, resolved once through any dotfile symlinks, so it
+      // compares equal to the real path of a `.claude` found anywhere below.
       let userDir = null
-      try { userDir = claudeConfigDir() } catch { userDir = null }
-      const isUserDir = (dotClaude) => userDir !== null && realPathOf(dotClaude) === userDir
+      try {
+        const u = resolveRealPath(claudeConfigDir())
+        userDir = u.error ? null : u.path
+        if (u.error) hard(scan, claudeConfigDir(), u.error)
+      } catch { userDir = null }
+      const isUserDir = (dotClaude) => {
+        if (userDir === null) return false
+        const r = resolveRealPath(dotClaude)
+        if (r.error) {
+          hard(scan, dotClaude, r.error)
+          return false
+        }
+        return r.path === userDir
+      }
       const seen = new Set()
       const location = (dotClaude) => {
         if (seen.has(dotClaude) || isUserDir(dotClaude)) return
@@ -463,11 +585,11 @@ export function scanFolderSettings(cwd, limits) {
         if (!isUserDir(dotClaude)) addConfigFile(join(dotClaude, 'settings.json'), 'settings', scan)
         location(dotClaude)
       }
-      for (const nested of findNestedDotClaude(realPath, scan)) location(nested)
+      for (const nested of findNestedDotClaude(realPath, realPath, scan)) location(nested)
       const main = mainCheckoutDotClaude(realPath, scan)
       if (main && !seen.has(main) && !isUserDir(main)) {
         seen.add(main)
-        walkContent(join(main, 'skills'), 'skills', scan, new Set([realPathOf(join(main, 'skills'))]), new Set([realPathOf(join(main, 'skills'))]), 0)
+        scanContentRoot(join(main, 'skills'), 'skills', scan)
       }
     } catch (err) {
       // The scan must never throw into a launch path; an unfinished scan cannot be approved.
@@ -485,11 +607,10 @@ export function scanFolderSettings(cwd, limits) {
   } catch (err) {
     summary.warnings.push(`summary incomplete: ${err?.message || 'error'}`)
   }
-  for (const w of scan.soft) summary.warnings.push(w)
   const hardIncomplete = scan.hard.length > 0
   if (hardIncomplete) {
     summary.untrustable = true
-    for (const h of scan.hard.slice(0, 10)) summary.warnings.push(`Cannot review this folder: ${h}`)
+    for (const h of scan.hard.slice(0, 10)) summary.warnings.push(h.startsWith('This folder is too large') ? h : `Cannot review this folder: ${h}`)
     if (scan.hard.length > 10) summary.warnings.push(`${scan.hard.length - 10} more problems not shown`)
   }
   return {
@@ -553,38 +674,79 @@ const LOCK_WAIT_MS = 10_000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-function lockIsStale(lockPath) {
+const readLock = (lockPath) => {
   try {
-    const st = statSync(lockPath)
-    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) return true
-    const pid = Number.parseInt(readFileSync(lockPath, 'utf8').split('\n')[0], 10)
-    if (Number.isInteger(pid) && pid > 0) {
-      try {
-        process.kill(pid, 0)
-      } catch (err) {
-        return err?.code === 'ESRCH'
-      }
-    }
-    return false
+    return readFileSync(lockPath, 'utf8')
   } catch {
-    return false // absent or unreadable: let the next attempt decide
+    return null
   }
 }
 
-/** Hold an `O_EXCL` lock file for the store (other daemon processes share ~/.chroxy). */
-async function withInterprocessLock(storePath, fn) {
+/**
+ * A lock is stale only when its holder is gone: the recorded pid is not alive. A
+ * live pid is never robbed because the lock is old. A lock whose holder cannot be
+ * read (it died between creating the file and writing it) goes stale by age.
+ */
+function lockIsStale(lockPath, content) {
+  if (content === null) return false
+  const pid = Number.parseInt(content.split('\n')[0], 10)
+  if (Number.isInteger(pid) && pid > 0) {
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch (err) {
+      return err?.code === 'ESRCH'
+    }
+  }
+  try {
+    return Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Claim a stale lock: rename it away to a name only this claimant has, then check
+ * that what was moved is the stale lock that was judged (not a fresh one a faster
+ * claimant created in between; that one is put back).
+ */
+function reclaimStale(lockPath, judged) {
+  const moved = `${lockPath}.stale.${process.pid}.${randomBytes(6).toString('hex')}`
+  try {
+    renameSync(lockPath, moved)
+  } catch {
+    return // someone else reclaimed it first
+  }
+  try {
+    if (readLock(moved) !== judged) {
+      try { linkSync(moved, lockPath) } catch { /* a newer lock already exists */ }
+    }
+  } finally {
+    try { unlinkSync(moved) } catch { /* nothing to do */ }
+  }
+}
+
+/**
+ * Hold an `O_EXCL` lock file for the store (other daemon processes share ~/.chroxy).
+ * The file holds `pid`, then a token unique to this holder; release removes it only
+ * if it still holds that token.
+ */
+export async function withInterprocessLock(storePath, fn) {
   const lockPath = `${storePath}.lock`
   const dir = dirname(lockPath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   const deadline = Date.now() + LOCK_WAIT_MS
+  const token = `${process.pid}.${randomBytes(8).toString('hex')}`
+  const body = `${process.pid}\n${token}\n${Date.now()}\n`
   for (;;) {
     try {
-      writeFileSync(lockPath, `${process.pid}\n${Date.now()}\n`, { mode: 0o600, flag: 'wx' })
+      writeFileSync(lockPath, body, { mode: 0o600, flag: 'wx' })
       break
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err
-      if (lockIsStale(lockPath)) {
-        try { unlinkSync(lockPath) } catch { /* another process recovered it first */ }
+      const content = readLock(lockPath)
+      if (lockIsStale(lockPath, content)) {
+        reclaimStale(lockPath, content)
         continue
       }
       if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
@@ -594,7 +756,10 @@ async function withInterprocessLock(storePath, fn) {
   try {
     return await fn()
   } finally {
-    try { unlinkSync(lockPath) } catch { /* already gone */ }
+    const held = readLock(lockPath)
+    if (held !== null && held.includes(`\n${token}\n`)) {
+      try { unlinkSync(lockPath) } catch { /* already gone */ }
+    }
   }
 }
 
@@ -605,21 +770,114 @@ function withStoreLock(storePath, fn) {
 // ── Cache (display only) ─────────────────────────────────────────────────
 
 const scanCache = new Map()
+let cacheGeneration = 0
 
 /** Drop every cached scan. Called on any trust change so it takes effect at once. */
 export function invalidateFolderTrustCache() {
+  cacheGeneration += 1
+  inflight.clear()
   scanCache.clear()
 }
 
 function scanCached(cwd, useCache) {
-  if (!useCache) return scanFolderSettings(cwd)
-  const key = realPathOf(cwd)
-  const hit = scanCache.get(key)
   const now = Date.now()
-  if (hit && now - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
+  if (useCache) {
+    const r = resolveRealPath(cwd)
+    const hit = r.error ? null : scanCache.get(r.path)
+    if (hit && now - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
+  }
+  // A launch decision never reads the cache; its scan does feed it for display callers.
   const scan = scanFolderSettings(cwd)
-  scanCache.set(key, { at: now, scan })
+  if (!scan.hardIncomplete) scanCache.set(scan.realPath, { at: Date.now(), scan })
   return scan
+}
+
+// ── Off-thread scans (display only) ─────────────────────────────────────
+
+let worker = null
+let nextId = 1
+const pending = new Map()
+const inflight = new Map()
+
+function dropWorker(err) {
+  worker = null
+  for (const { reject } of pending.values()) reject(err)
+  pending.clear()
+}
+
+let workerScans = 0
+/** Test seam: how many scans have been handed to the worker. */
+export function workerScanCountForTest() {
+  return workerScans
+}
+
+function scanInWorker(cwd) {
+  workerScans += 1
+  if (!worker) {
+    const w = new Worker(new URL('./folder-trust-worker.js', import.meta.url), { env: SHARE_ENV })
+    w.on('message', ({ id, scan }) => {
+      const p = pending.get(id)
+      pending.delete(id)
+      if (pending.size === 0) w.unref() // idle: never keeps the process alive
+      if (p) (scan ? p.resolve(scan) : p.reject(new Error('scan failed')))
+    })
+    w.on('error', (err) => dropWorker(err))
+    w.on('exit', () => dropWorker(new Error('scan worker exited')))
+    // After the listeners: adding a 'message' listener would otherwise re-ref the worker's port.
+    w.unref()
+    worker = w
+  }
+  return new Promise((resolve, reject) => {
+    const id = nextId++
+    pending.set(id, { resolve, reject })
+    worker.ref() // a scan in flight keeps the process alive until it answers
+    worker.postMessage({ id, cwd })
+  })
+}
+
+/**
+ * Scan for DISPLAY without blocking the main thread: a fresh cached scan, else one
+ * run in a worker thread (the in-thread scan only if the worker is unavailable).
+ * Concurrent requests for one folder share one scan. Never used for a launch decision.
+ */
+async function scanForDisplay(cwd) {
+  const r = resolveRealPath(cwd)
+  const hit = r.error ? null : scanCache.get(r.path)
+  if (hit && Date.now() - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
+  let pendingScan = inflight.get(r.path)
+  if (!pendingScan) {
+    const generation = cacheGeneration
+    pendingScan = scanInWorker(cwd)
+      .catch(() => scanFolderSettings(cwd))
+      .then((scan) => {
+        // A trust change while this ran invalidated the cache: do not store a stale scan.
+        if (generation === cacheGeneration && !scan.hardIncomplete) scanCache.set(scan.realPath, { at: Date.now(), scan })
+        return scan
+      })
+      .finally(() => { inflight.delete(r.path) })
+    inflight.set(r.path, pendingScan)
+  }
+  return pendingScan
+}
+
+/** The trust state of `cwd` for display, computed off-thread. Same shape as getFolderTrustState. */
+export async function getFolderTrustStateForDisplay(cwd) {
+  const scan = await scanForDisplay(cwd)
+  return { status: statusOf(scan), realPath: scan.realPath, digest: scan.digest, summary: scan.summary }
+}
+
+/**
+ * The state if a fresh scan is cached, else null (and a worker scan is started to
+ * warm the cache). For emitters that must answer synchronously.
+ */
+export function getFolderTrustStateIfCached(cwd) {
+  const r = resolveRealPath(cwd)
+  const hit = r.error ? null : scanCache.get(r.path)
+  if (hit && Date.now() - hit.at <= SCAN_CACHE_TTL_MS) {
+    return { status: statusOf(hit.scan), realPath: hit.scan.realPath, digest: hit.scan.digest, summary: hit.scan.summary }
+  }
+  scanForDisplay(cwd).catch(() => {})
+  return null
 }
 
 function statusOf(scan) {
@@ -688,7 +946,9 @@ export async function trustFolder(cwd, expectedDigest) {
 export async function untrustFolder(cwd) {
   if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'untrusted', code: 'FOLDER_TRUST_NOT_APPLIED', error: 'no folder' }
   return withStoreLock(folderTrustStorePath(), async () => {
-    const realPath = realPathOf(cwd)
+    const rp = resolveRealPath(cwd)
+    if (rp.error) return { ok: false, status: 'untrusted', code: 'FOLDER_TRUST_NOT_APPLIED', error: 'The folder could not be resolved' }
+    const realPath = rp.path
     const before = loadFolderTrustRecords()
     const after = before.filter((r) => r.path !== realPath)
     try {
@@ -702,19 +962,28 @@ export async function untrustFolder(cwd) {
 }
 
 /**
- * The text of `<folder>/.claude/settings.json` if, and only if, the folder is
- * trusted and this file's content is exactly what the trust record holds. Read
- * once; the caller parses and acts on these same bytes. Never cached.
+ * The text of `<folder>/.claude/settings.json` if, and only if, (1) the folder is
+ * currently trusted (a record matches its real path and its CURRENT full digest, and
+ * the scan is complete) and (2) this file's bytes hash to exactly what the record
+ * holds. Read once; the caller parses and acts on these same bytes.
+ *
+ * The folder-level part (1) uses the scan cache, so after the owner stops trusting
+ * a folder, or a file elsewhere in it changes, the status line can keep running a
+ * file that still matches its record for up to SCAN_CACHE_TTL_MS (2 s). Trust and
+ * untrust invalidate the cache at once. The file hash (2) is never cached.
  *
  * @param {string} cwd
  * @returns {string|null}
  */
 export function readTrustedProjectSettings(cwd) {
   if (typeof cwd !== 'string' || cwd === '') return null
-  const realPath = realPathOf(cwd)
-  const record = loadFolderTrustRecords().find((r) => r.path === realPath)
+  const rp = resolveRealPath(cwd)
+  if (rp.error) return null
+  const state = getFolderTrustState(cwd, { cached: true })
+  if (state.status !== 'trusted') return null
+  const record = loadFolderTrustRecords().find((r) => r.path === rp.path)
   if (!record) return null
-  const target = join(realPath, '.claude', 'settings.json')
+  const target = join(rp.path, '.claude', 'settings.json')
   const want = record.files.find((f) => f.path === target)?.sha256
   if (!want) return null
   const r = readRegular(target, newScan())

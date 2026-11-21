@@ -342,6 +342,14 @@ function normalizeResultDuration(payload) {
 
 export class BaseSession extends EventEmitter {
   /** Binary version observed by this live runtime, or `unknown`. */
+  /**
+   * Whether the RUNNING process was launched with project settings loaded (claude-cli
+   * and claude-tui set this at each launch). `undefined` for a provider that does not
+   * record it.
+   * @returns {boolean|undefined}
+   */
+  get launchedWithProject() { return this._launchedWithProject }
+
   get providerBinaryVersion() {
     return 'unknown'
   }

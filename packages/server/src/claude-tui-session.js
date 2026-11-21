@@ -3737,6 +3737,7 @@ export class ClaudeTuiSession extends BaseSession {
     // The ONE project-settings decision for this spawn: it picks `--setting-sources`
     // and whether the per-session settings file enables `.mcp.json` servers.
     const projectAllowed = projectSettingsAllowed(cwdReal)
+    this._launchedWithProject = projectAllowed
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary
     // #8038: the binary-gate step gets its OWN try, split out from the nonce /

@@ -167,6 +167,9 @@ export const ServerFolderTrustStateSchema = z.object({
   summary: FolderTrustSummarySchema.optional(),
   digest: z.string().optional(),
   appliesFrom: z.enum(['next_turn', 'restart', 'n/a']),
+  // claude-cli / claude-tui only: whether the RUNNING process was launched with project
+  // settings loaded. It keeps them until it restarts, whatever the status is now.
+  launchedWithProject: z.boolean().optional(),
 })
 
 /** Reply to `trust_folder` / `untrust_folder`. `error` is set when `ok` is false. */

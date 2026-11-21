@@ -73,8 +73,8 @@ test('statusLineSettingsPaths lists user project-settings > user, highest first'
   // No cwd: no project file is consulted (a folder's own file needs the folder's trust decision).
   const paths = statusLineSettingsPaths(undefined, '/home/u/.claude')
   assert.deepEqual(paths, [
-    '/home/u/.claude/project-settings.json',
-    '/home/u/.claude/settings.json',
+    join('/home/u/.claude', 'project-settings.json'),
+    join('/home/u/.claude', 'settings.json'),
   ])
 })
 
@@ -632,6 +632,19 @@ test('run: trusted, then untrusted on the same manager, does not run', async () 
     await trustReviewed(cwd)
     assert.equal((await mgr.run({ cwd })).active, true)
     await untrustFolder(cwd)
+    assert.equal((await mgr.run({ cwd })).active, false)
+    assert.equal(spawned.length, 1)
+  })
+})
+
+test('run: the settings file still matches its record, but the folder is no longer trusted overall: does not run', async () => {
+  await withProjectFolder(async ({ cwd, mgr, spawned, setCommand }) => {
+    setCommand('proj.sh')
+    await trustReviewed(cwd)
+    assert.equal((await mgr.run({ cwd })).active, true)
+    // Another covered file appears: the folder's digest moves, the settings file is untouched.
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: {} }))
+    invalidateFolderTrustCache() // the folder-level scan may be up to 2 s old; this is the check itself
     assert.equal((await mgr.run({ cwd })).active, false)
     assert.equal(spawned.length, 1)
   })

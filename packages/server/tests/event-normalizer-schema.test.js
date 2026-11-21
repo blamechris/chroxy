@@ -47,6 +47,10 @@ import {
   ServerFolderTrustStateSchema,
 } from '@chroxy/protocol'
 import { FORWARDED_CLI_EVENTS } from '../src/ws-forwarding.js'
+import { getFolderTrustState } from '../src/folder-trust.js'
+
+// `ready` answers the folder trust state only from a fresh cached scan.
+getFolderTrustState('/tmp/test', { cached: true })
 
 // ─────────────────────────────────────────────────────────────────────────────
 // #6841 — event-normalizer serialization-boundary drift guard.
@@ -144,7 +148,7 @@ function makeCtx(overrides = {}) {
     getSessionEntry: () => ({
       session: { model: 'claude-sonnet-4-6', permissionMode: 'approve' },
       name: 'Test Session',
-      cwd: '/tmp/test',
+      cwd: '/tmp/test', provider: 'claude-sdk',
     }),
     ...overrides,
   }
@@ -190,7 +194,7 @@ const FIXTURES = [
       getSessionEntry: () => ({
         session: { model: 'gpt-5.1-codex', permissionMode: 'approve', thinkingLevel: 'xhigh' },
         name: 'Codex Session',
-        cwd: '/tmp/test',
+        cwd: '/tmp/test', provider: 'claude-sdk',
       }),
     }),
     'ready (provider with a thinkingLevel)',
@@ -202,18 +206,18 @@ const FIXTURES = [
   [
     'ready',
     {},
-    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test' }) }),
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test', provider: 'claude-sdk' }) }),
     'ready (provider reporting its effective level)',
   ],
   [
     'thinking_level_changed',
     { reason: 'reported by Claude Code when the turn started' },
-    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test' }) }),
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession('medium'), name: 'SDK Session', cwd: '/tmp/test', provider: 'claude-sdk' }) }),
   ],
   [
     'thinking_level_changed',
     { reason: 'the model changed' },
-    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession(null), name: 'SDK Session', cwd: '/tmp/test' }) }),
+    makeCtx({ getSessionEntry: () => ({ session: effortReportingSession(null), name: 'SDK Session', cwd: '/tmp/test', provider: 'claude-sdk' }) }),
     'thinking_level_changed (effective not reported yet)',
   ],
   ['background_tasks_changed', { backgroundTasks: [backgroundTask], scheduledWakeup: { at: 1781068600000, reason: 'watching CI' } }, makeCtx()],

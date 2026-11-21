@@ -152,6 +152,24 @@ describe('CLI session argv', () => {
     assert.equal(sourcesOf(await startedArgs(dir)), 'user,project')
   })
 
+  it('a started CliSession records what its process was launched with (launchedWithProject)', async () => {
+    const dir = projectWithMcp('setting-sources-cli-launched-')
+    const launch = async () => {
+      const session = new CliSession({ cwd: dir, stateFilePath: join(tmp('setting-sources-cli-state-'), 'state.json') })
+      session._spawnPersistentProcess = () => {}
+      try {
+        assert.equal(session.launchedWithProject, undefined, 'unknown before launch')
+        session.start()
+        return session.launchedWithProject
+      } finally {
+        session.destroy()
+      }
+    }
+    assert.equal(await launch(), false)
+    await trustReviewed(dir)
+    assert.equal(await launch(), true)
+  })
+
   it('buildClaudeCliArgs without a cwd is untrusted', () => {
     assert.equal(sourcesOf(buildClaudeCliArgs(base)), 'user')
   })
@@ -265,8 +283,8 @@ describe('status line settings sources', () => {
     const dir = projectWithMcp('setting-sources-sl-trusted-')
     await trustReviewed(dir)
     assert.deepEqual(statusLineSettingsPaths(dir, '/home/u/.claude'), [
-      '/home/u/.claude/project-settings.json',
-      '/home/u/.claude/settings.json',
+      join('/home/u/.claude', 'project-settings.json'),
+      join('/home/u/.claude', 'settings.json'),
     ])
   })
 
