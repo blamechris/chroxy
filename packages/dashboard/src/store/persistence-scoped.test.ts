@@ -10,12 +10,10 @@ import {
   persistActiveSession,
   persistSessionMessages,
   persistSessionList,
-  persistTerminalBuffer,
   loadPersistedState,
   loadSessionMessages,
   loadSessionList,
   clearPersistedState,
-  clearPersistedTerminalBuffer,
   flushPendingWrites,
   persistViewMode,
   _resetForTesting,
@@ -131,26 +129,6 @@ describe('server-scoped persistence (#1647)', () => {
 })
 
 describe('debounce race condition (#1689)', () => {
-  it('debounced terminal buffer writes land in the correct scope', () => {
-    setServerScope('srv_A')
-    persistTerminalBuffer('buffer-for-A')
-
-    // Switch scope before debounce fires — setServerScope flushes pending writes
-    setServerScope('srv_B')
-    persistTerminalBuffer('buffer-for-B')
-    flushPendingWrites()
-
-    // Server A should have its buffer
-    setServerScope('srv_A')
-    const stateA = loadPersistedState()
-    expect(stateA.terminalBuffer).toBe('buffer-for-A')
-
-    // Server B should have its buffer
-    setServerScope('srv_B')
-    const stateB = loadPersistedState()
-    expect(stateB.terminalBuffer).toBe('buffer-for-B')
-  })
-
   it('debounced session list writes land in the correct scope', () => {
     setServerScope('srv_A')
     persistSessionList([{ id: 's1', name: 'List A' } as never])
@@ -195,56 +173,25 @@ describe('debounce race condition (#1689)', () => {
 describe('setServerScope flushes pending writes (#1689)', () => {
   it('flushing on scope change writes immediately', () => {
     setServerScope('srv_A')
-    persistTerminalBuffer('pending-data')
+    persistSessionList([{ id: 's1', name: 'pending-list' } as never])
 
     // Scope change should flush — data written immediately
     setServerScope('srv_B')
 
     // Verify the data landed in server A's scope
-    const key = 'chroxy_persist_srv_A_terminal_buffer'
-    expect(localStorage.getItem(key)).toBe('pending-data')
-  })
-})
-
-describe('clearPersistedTerminalBuffer (#1689)', () => {
-  it('clears server-scoped terminal buffer', () => {
-    setServerScope('srv_A')
-    persistTerminalBuffer('some-data')
-    flushPendingWrites()
-
-    expect(loadPersistedState().terminalBuffer).toBe('some-data')
-
-    clearPersistedTerminalBuffer()
-    expect(loadPersistedState().terminalBuffer).toBeNull()
-  })
-
-  it('does not clear other server scoped terminal buffer', () => {
-    setServerScope('srv_A')
-    persistTerminalBuffer('data-A')
-    flushPendingWrites()
-
-    setServerScope('srv_B')
-    persistTerminalBuffer('data-B')
-    flushPendingWrites()
-
-    // Clear only server B
-    clearPersistedTerminalBuffer()
-
-    setServerScope('srv_A')
-    expect(loadPersistedState().terminalBuffer).toBe('data-A')
+    const key = 'chroxy_persist_srv_A_session_list'
+    expect(localStorage.getItem(key)).toContain('pending-list')
   })
 })
 
 describe('flushPendingWrites (#1689)', () => {
   it('flushes all pending debounced writes synchronously', () => {
     setServerScope('srv_A')
-    persistTerminalBuffer('flush-me')
     persistSessionList([{ id: 's1', name: 'flush-list' } as never])
 
     // Flush without waiting for timers
     flushPendingWrites()
 
-    expect(loadPersistedState().terminalBuffer).toBe('flush-me')
     expect(loadSessionList()).toHaveLength(1)
   })
 })

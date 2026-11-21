@@ -1075,20 +1075,22 @@ describe('#7570 connectToServer to a DIFFERENT daemon runs the switch teardown',
       expect(loadPersistedState().activeSessionId, "B's key was removed by the reset").toBe('sess-b-persisted')
     })
 
-    it("a persisted terminal buffer under A survives the switch (the scope moves before the reset) (#8206 S3)", () => {
-      // The reset empties `terminalBuffer`, and the persistence subscriber answers
-      // by clearing the persisted terminal key under WHATEVER scope is current.
-      // Scope-then-reset aims that clear at B; reset-then-scope would aim it at
-      // A and destroy the cache the teardown exists to leave alone.
+    it("a terminal buffer change persists no terminal_buffer key (the buffer has no reader) (#8208)", () => {
+      // The dashboard used to write the buffer to localStorage and nothing ever
+      // read it back into a view. The subscriber no longer persists it. Control:
+      // the same subscriber pass still writes another persisted field, so a
+      // silent "subscriber did not run" cannot satisfy the absence below.
       setServerScope(aId)
-      useConnectionStore.setState({ terminalBuffer: 'A-terminal' } as unknown as Partial<State>)
+      useConnectionStore.setState({
+        terminalBuffer: 'A-terminal',
+        activeSessionId: 'sess-a-active',
+      } as unknown as Partial<State>)
       flushPendingWrites()
       setServerScope(aId)
-      expect(loadPersistedState().terminalBuffer, 'control: A-terminal is on disk first').toBe('A-terminal')
-      run()
-      flushPendingWrites()
-      setServerScope(aId)
-      expect(loadPersistedState().terminalBuffer).toBe('A-terminal')
+      expect(loadPersistedState().activeSessionId, 'control: the subscriber ran and persisted').toBe('sess-a-active')
+      const keys: string[] = []
+      for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i) ?? '')
+      expect(keys.filter((k) => k.includes('terminal_buffer')), 'terminal_buffer key written').toEqual([])
     })
 
     it("B's persisted session list is kept by the teardown (a switch keeps each server's cache) (#8206 S3)", () => {

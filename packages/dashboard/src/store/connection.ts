@@ -239,12 +239,10 @@ import {
   persistSessionMessages,
   persistViewMode,
   persistActiveSession,
-  persistTerminalBuffer,
   persistSessionList,
   persistActiveServer,
   loadPersistedActiveServer,
   clearPersistedState,
-  clearPersistedTerminalBuffer,
   setServerScope,
 } from './persistence';
 
@@ -2921,14 +2919,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } catch {
       // Storage not available or corrupt — use defaults
     }
-    // Load persisted session state (view mode, active session, terminal buffer, session list)
+    // Load persisted session state (view mode, active session, session list)
     try {
       const persisted = loadPersistedState();
       const cachedSessions = loadSessionList();
       const updates: Partial<ReturnType<typeof get>> = {};
       if (persisted.viewMode) updates.viewMode = persisted.viewMode;
       if (persisted.activeSessionId) updates.activeSessionId = persisted.activeSessionId;
-      if (persisted.terminalBuffer) updates.terminalBuffer = persisted.terminalBuffer;
       if (cachedSessions.length > 0) updates.sessions = cachedSessions;
       if (Object.keys(updates).length > 0) set(updates);
 
@@ -6643,7 +6640,6 @@ useConnectionStore.subscribe((state) => {
 // Persist session messages, active session, session list when they change
 let _prevActiveSessionId: string | null = null;
 const _prevMessageCounts: Record<string, number> = {};
-let _prevTerminalBufferLen = 0;
 let _prevSessions: SessionInfo[] = [];
 useConnectionStore.subscribe((state) => {
   // Persist active session ID changes
@@ -6674,17 +6670,6 @@ useConnectionStore.subscribe((state) => {
     _prevSessions = state.sessions;
     if (state.sessions.length > 0) {
       persistSessionList(state.sessions);
-    }
-  }
-
-  // Persist terminal buffer changes (debounced internally, only when changed)
-  if (state.terminalBuffer.length !== _prevTerminalBufferLen) {
-    _prevTerminalBufferLen = state.terminalBuffer.length;
-    if (state.terminalBuffer) {
-      persistTerminalBuffer(state.terminalBuffer);
-    } else {
-      // Clear persisted terminal buffer when buffer is emptied
-      clearPersistedTerminalBuffer();
     }
   }
 });

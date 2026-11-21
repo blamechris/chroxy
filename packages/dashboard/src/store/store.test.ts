@@ -201,7 +201,6 @@ describe('persistence', () => {
     const state = loadPersistedState();
     expect(state.viewMode).toBeNull();
     expect(state.activeSessionId).toBeNull();
-    expect(state.terminalBuffer).toBeNull();
   });
 
   // #4303 — pluggable sidebar panel slot
