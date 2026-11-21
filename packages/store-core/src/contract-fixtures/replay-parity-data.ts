@@ -1679,7 +1679,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
     },
     {
       "name": "turn-outcomes",
-      "description": "How a turn ended: a reply cut off by a limit, a refusal with no text at all, a stopped turn, and a normal one. Each non-clean turn ends in a marker chip; the clean one does not.",
+      "description": "How a turn ended: a reply cut off by a limit, a refusal with no text at all, a stopped turn, a turn the user stopped before any reply, and a normal one. Each non-clean turn ends in a marker chip; the clean one does not.",
       "providers": [
         "claude-sdk"
       ],
@@ -1759,6 +1759,16 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             },
             "turnOutcome": "stopped",
             "timestamp": 1700000003000
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": null,
+            "duration": null,
+            "usage": null,
+            "turnOutcome": "stopped_before_output",
+            "timestamp": 1700000003500
           }
         ],
         [
@@ -1883,6 +1893,19 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "sessionId": "s1"
         },
         {
+          "type": "result",
+          "cost": null,
+          "duration": null,
+          "usage": null,
+          "sessionId": "s1",
+          "turnOutcome": "stopped_before_output",
+          "timestamp": 1700000003500
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
           "type": "stream_start",
           "messageId": "o4",
           "sessionId": "s1"
@@ -1992,13 +2015,28 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "sessionId": "s1"
         },
         {
+          "type": "result",
+          "cost": null,
+          "duration": null,
+          "usage": null,
+          "turnOutcome": "stopped_before_output",
+          "timestamp": 1700000003500,
+          "sessionId": "s1",
+          "historySeq": 6,
+          "replayed": true
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
           "type": "message",
           "messageType": "response",
           "content": "A normal, finished reply.",
           "messageId": "o4",
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 6
+          "historySeq": 7
         },
         {
           "type": "result",
@@ -2011,7 +2049,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "turnOutcome": "completed",
           "timestamp": 1700000000000,
           "sessionId": "s1",
-          "historySeq": 7,
+          "historySeq": 8,
           "replayed": true
         },
         {

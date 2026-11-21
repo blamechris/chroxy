@@ -449,10 +449,14 @@ export function withRetainedPermissionOutcomes(transcript, ring, truncated) {
   let outcomes = []
   for (const entry of ring) {
     // #8259: an interrupted turn's marker is daemon-written too (the provider's own
-    // transcript never saw the turn end), so it is retained the same way.
-    const isInterrupted = !!entry && entry.type === 'result' && entry.turnOutcome === 'interrupted'
-    if (!entry || (entry.type !== 'permission_outcome' && !isInterrupted)) continue
-    const key = isInterrupted ? `interrupted:${entry.timestamp}` : entry.requestId
+    // transcript never saw the turn end), so it is retained the same way. #9241: so
+    // is the marker for a turn the user stopped before any reply.
+    const markerOutcome = !!entry && entry.type === 'result'
+      && (entry.turnOutcome === 'interrupted' || entry.turnOutcome === 'stopped_before_output')
+      ? entry.turnOutcome
+      : null
+    if (!entry || (entry.type !== 'permission_outcome' && !markerOutcome)) continue
+    const key = markerOutcome ? `${markerOutcome}:${entry.timestamp}` : entry.requestId
     if (seen.has(key)) continue
     seen.add(key)
     const { _seq: _ringSeq, ...copy } = entry
