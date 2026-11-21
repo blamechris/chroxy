@@ -829,14 +829,19 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
  * Never throws: each read is guarded and failures accumulate as warnings, so a
  * corrupt config can't take down session start.
  *
+ * `includeProjectFile: false` leaves out `<cwd>/.mcp.json`, for a session
+ * that does not load project-scope settings (claude-setting-sources.js), so
+ * the list shows only servers that session can actually load.
+ *
  * @param {string} cwd — the session's working directory
- * @param {{ configPath?: string }} [opts]
+ * @param {{ configPath?: string, includeProjectFile?: boolean }} [opts]
  * @returns {{ servers: Array<{ name: string }>, warnings: string[] }}
  */
-export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
+export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath(), includeProjectFile = true } = {}) {
   const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
   const byName = new Map()
-  for (const { mcpServers, source } of sources) {
+  for (const { mcpServers, source, sourceKind } of sources) {
+    if (!includeProjectFile && sourceKind === MCP_SERVER_SOURCE.PROJECT_MCP_JSON) continue
     for (const name of collectConfiguredNames(mcpServers, { warnings, source })) {
       if (!byName.has(name)) byName.set(name, { name })
     }

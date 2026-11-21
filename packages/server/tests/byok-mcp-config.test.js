@@ -270,6 +270,15 @@ describe('discoverConfiguredMcpServers (#6820)', () => {
     rmSync(cwd, { recursive: true, force: true })
   })
 
+  it('leaves out <cwd>/.mcp.json when includeProjectFile is false', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { userfs: { command: 'npx' } } }))
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { repo: { command: 'node' } } }))
+    const withProject = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(withProject.servers.map((s) => s.name).sort(), ['repo', 'userfs'])
+    const without = discoverConfiguredMcpServers(cwd, { configPath, includeProjectFile: false })
+    assert.deepEqual(without.servers, [{ name: 'userfs' }])
+  })
+
   it('returns empty (no warnings) when nothing is configured', () => {
     const res = discoverConfiguredMcpServers(cwd, { configPath })
     assert.deepEqual(res.servers, [])

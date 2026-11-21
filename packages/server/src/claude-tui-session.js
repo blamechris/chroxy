@@ -71,7 +71,7 @@ import {
 } from './background-shells.js'
 import { normalizeClaudeTuiToolResponse } from './claude-tui-tool-response.js'
 import { scrubTerminalText } from './claude-tui/diagnostic-tail.js'
-import { claudeSettingSourcesValue } from './claude-setting-sources.js'
+import { claudeSettingSourcesValue, projectSettingsAllowed } from './claude-setting-sources.js'
 // #5559 — PTY-write / paste-throttle layer + interactive-form driver carved out
 // into focused modules. The empirically-pinned helpers, constants and methods
 // are moved byte-identically; the *Mixin classes carry the write/form methods,
@@ -2887,7 +2887,9 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _emitConfiguredMcpServers() {
     try {
-      const { servers, warnings } = discoverConfiguredMcpServers(this.cwd)
+      const { servers, warnings } = discoverConfiguredMcpServers(this.cwd, {
+        includeProjectFile: projectSettingsAllowed(this.cwd),
+      })
       for (const warning of warnings) {
         ;(this._log || log).warn(`MCP config: ${warning}`)
       }
