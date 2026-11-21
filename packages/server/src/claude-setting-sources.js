@@ -15,7 +15,7 @@
  * With no `cwd` the answer is "not allowed".
  */
 
-import { getFolderTrustState } from './folder-trust.js'
+import { getFolderTrustState, loadFolderTrustRecords, resolveRealPath } from './folder-trust.js'
 
 /**
  * Setting-source names for a project-settings decision already taken.
@@ -73,5 +73,10 @@ export function claudeSettingSourcesArgs(cwd) {
  */
 export function projectSettingsAllowed(cwd, opts) {
   if (typeof cwd !== 'string' || cwd === '') return false
+  // A folder with no trust record is untrusted whatever a scan would find, so
+  // the common case answers without walking the folder.
+  const real = resolveRealPath(cwd)
+  if (real.error) return false
+  if (!loadFolderTrustRecords().some((r) => r.path === real.path)) return false
   return getFolderTrustState(cwd, opts).status === 'trusted'
 }

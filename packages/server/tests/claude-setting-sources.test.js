@@ -16,7 +16,7 @@ import { defaultRunOneShot } from '../src/summarize-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { WebTaskManager, buildRemoteTaskArgs } from '../src/web-task-manager.js'
 import { StatusLineManager, statusLineSettingsPaths } from '../src/statusline.js'
-import { invalidateFolderTrustCache } from '../src/folder-trust.js'
+import { invalidateFolderTrustCache, scanCountForTest } from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
 import { writeHookSettings } from '../src/claude-tui-session.js'
 import { isFlooredTarget } from '../src/permission-floor.js'
@@ -65,6 +65,24 @@ after(() => {
 })
 
 describe('claude-setting-sources helper', () => {
+  it('decides an untrusted folder without scanning it', () => {
+    const dir = projectWithMcp('setting-sources-noscan-')
+    const before = scanCountForTest()
+    assert.equal(projectSettingsAllowed(dir), false)
+    assert.deepEqual(claudeSettingSources(dir), ['user'])
+    assert.equal(scanCountForTest(), before, 'no record for the folder, so no scan')
+  })
+
+  it('still scans a folder that has a record, and a changed folder is untrusted', async () => {
+    const dir = projectWithMcp('setting-sources-scan-')
+    await trustReviewed(dir)
+    const before = scanCountForTest()
+    assert.equal(projectSettingsAllowed(dir), true)
+    assert.ok(scanCountForTest() > before, 'a recorded folder is verified by a scan')
+    writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { s: { command: 'y' } } }))
+    assert.equal(projectSettingsAllowed(dir), false)
+  })
+
   it('an untrusted folder gets only the user scope', () => {
     const dir = projectWithMcp('setting-sources-helper-')
     assert.deepEqual(claudeSettingSources(dir), ['user'])
