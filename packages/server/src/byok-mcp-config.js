@@ -722,7 +722,7 @@ export function mcpSourceToWriteScope(source) {
  * @param {string} configPath — resolved `~/.claude.json` path (or override)
  * @returns {{ sources: Array<{ mcpServers: unknown, source: string }>, warnings: string[] }}
  */
-function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
+function readMcpSourcesInPrecedenceOrder(cwd, configPath, { includeProjectFile = true } = {}) {
   const warnings = []
   const sources = []
 
@@ -784,7 +784,7 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
   // 2 — "Project" scope: <cwd>/.mcp.json, checked into the repo. cwd may not
   // exist (removed tmp dir, stale worktree) — join+existsSync just reports
   // false rather than throwing.
-  if (cwd) {
+  if (cwd && includeProjectFile) {
     const mcpJsonPath = join(cwd, '.mcp.json')
     if (existsSync(mcpJsonPath)) {
       const raw = readJson(mcpJsonPath, 'project .mcp.json')
@@ -829,12 +829,16 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
  * Never throws: each read is guarded and failures accumulate as warnings, so a
  * corrupt config can't take down session start.
  *
+ * `includeProjectFile: false` leaves out `<cwd>/.mcp.json`, for a session
+ * that does not load project-scope settings (claude-setting-sources.js), so
+ * the list shows only servers that session can actually load.
+ *
  * @param {string} cwd — the session's working directory
- * @param {{ configPath?: string }} [opts]
+ * @param {{ configPath?: string, includeProjectFile?: boolean }} [opts]
  * @returns {{ servers: Array<{ name: string }>, warnings: string[] }}
  */
-export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
-  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
+export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath(), includeProjectFile = true } = {}) {
+  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath, { includeProjectFile })
   const byName = new Map()
   for (const { mcpServers, source } of sources) {
     for (const name of collectConfiguredNames(mcpServers, { warnings, source })) {

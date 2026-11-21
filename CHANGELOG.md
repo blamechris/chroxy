@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) now load only user-scope Claude settings.** Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned. BYOK sessions are unchanged: each MCP server they start still needs an approval first.
+  - A `Write` or `Edit` tool call on `.mcp.json` now prompts under the permission floor; reading it does not.
+
 ## [0.11.10] - 2026-11-11
 
 ### Changed

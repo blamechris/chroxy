@@ -64,7 +64,7 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
     })
   })
 
-  it('merges project-local .mcp.json into the emitted list', () => {
+  it('leaves out <cwd>/.mcp.json while project-scope settings are not loaded', () => {
     writeFileSync(configPath, JSON.stringify({ mcpServers: { globalfs: { command: 'npx' } } }))
     writeFileSync(
       join(cwd, '.mcp.json'),
@@ -76,14 +76,11 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
 
     session._emitConfiguredMcpServers()
 
-    // #7112 review: discoverConfiguredMcpServers now shares one precedence
-    // ordering with the BYOK spawn path's discoverMcpServerSpecs (Local >
-    // Project/.mcp.json > User) instead of the old, independently-hand-rolled
-    // user-first order — so .mcp.json ("Project" scope) is visited before
-    // the user-root config ("User" scope).
+    // The session does not load project-scope settings
+    // (claude-setting-sources.js), so a server defined only in <cwd>/.mcp.json
+    // is not one it can load and is not listed.
     assert.deepEqual(events[0], {
       servers: [
-        { name: 'repotool', status: 'configured' },
         { name: 'globalfs', status: 'configured' },
       ],
     })

@@ -63,10 +63,9 @@ test('parseStatusLineConfig floors a tiny refreshInterval', () => {
 // statusLineSettingsPaths — precedence order
 // ---------------------------------------------------------------------------
 
-test('statusLineSettingsPaths lists project > user project-settings > user, highest first', () => {
+test('statusLineSettingsPaths lists user project-settings > user, highest first', () => {
   const paths = statusLineSettingsPaths('/proj', '/home/u/.claude')
   assert.deepEqual(paths, [
-    '/proj/.claude/settings.json',
     '/home/u/.claude/project-settings.json',
     '/home/u/.claude/settings.json',
   ])
@@ -335,14 +334,14 @@ function fakeReadFrom(fileMap) {
   }
 }
 
-test('resolveConfig: project .claude/settings.json overrides user settings', async () => {
+test('resolveConfig: project .claude/settings.json is ignored in favour of user settings', async () => {
   const files = {
     '/proj/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }),
     '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }),
   }
   const mgr = new StatusLineManager({ homeDir: '/home', readFileFn: fakeReadFrom(files) })
   const cfg = await mgr.resolveConfig('/proj')
-  assert.equal(cfg.command, 'project.sh')
+  assert.equal(cfg.command, 'user.sh')
 })
 
 test('resolveConfig: falls back to user settings when the project has none', async () => {

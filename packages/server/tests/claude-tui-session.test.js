@@ -800,8 +800,9 @@ describe('ClaudeTuiSession', () => {
       }
       await origSpawnPty.call(candidate, false)
       assert.deepEqual(spawnedArgs.slice(2, 4), ['--settings', candidate._settingsPath])
-      assert.equal(spawnedArgs.includes('--setting-sources'), false,
-        'the real TUI keeps normal Claude Code instructions, skills, hooks, and plugins')
+      const ssIdx = spawnedArgs.indexOf('--setting-sources')
+      assert.ok(ssIdx >= 0, 'the TUI spawn passes --setting-sources')
+      assert.equal(spawnedArgs[ssIdx + 1], 'user', 'the TUI spawn loads only user-scope Claude settings')
       const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
       assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
       for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')
@@ -1465,7 +1466,7 @@ describe('ClaudeTuiSession', () => {
               const expected = resumed
                 ? ['--resume', SESSION_ID]
                 : ['--session-id', SESSION_ID]
-              expected.push('--settings', session._settingsPath, '--no-chrome')
+              expected.push('--settings', session._settingsPath, '--setting-sources', 'user', '--no-chrome')
               if (skipPermissions) expected.push('--dangerously-skip-permissions')
               if (withModel) expected.push('--model', MODEL_ID)
               if (withSkills) expected.push('--append-system-prompt', SKILLS_TEXT)

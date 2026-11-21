@@ -1,21 +1,22 @@
 /**
- * statusLine — read the user's Claude Code `statusLine` command from their own
- * settings.json, execute it the way Claude Code does, and surface its stdout.
+ * statusLine — read the user's Claude Code `statusLine` command from their
+ * user-level settings, execute it the way Claude Code does, and surface its stdout.
  *
  * Feature #6791. A user who has configured a `statusLine` script (git branch,
  * model, a cost tracker, …) sees none of it in Chroxy today; this module reads
  * the effective config and runs it so its output can be broadcast to clients.
  *
- * ── Trust + security model (this EXECUTES a shell command) ────────────────────
- * The command is ONLY ever the one in the user's OWN settings.json — the same
- * trust boundary Claude Code itself honours when it runs the script. There is
- * NO client-supplied command and NO client-supplied path: the settings files
+ * ── Which command runs (this EXECUTES a shell command) ───────────────────────
+ * The command is ONLY ever the one in the user's own user-level settings. There
+ * is NO client-supplied command and NO client-supplied path: the settings files
  * are read from fixed, server-chosen locations only
- *   - <sessionCwd>/.claude/settings.json         (project — highest precedence)
  *   - ~/.claude/project-settings.json            (user project-settings)
  *   - ~/.claude/settings.json                    (user — lowest precedence)
- * (mirrors Claude Code's precedence — see docs.claude.com "statusline").
- * `sessionCwd` comes from the server's session record, never from the wire.
+ * (`CLAUDE_CONFIG_DIR` replaces `~/.claude`). The session's working directory
+ * is consulted for `<sessionCwd>/.claude/settings.json` only when
+ * `projectSettingsAllowed(cwd)` (claude-setting-sources.js) says so; today it
+ * never does. `sessionCwd` comes from the server's session record, never from
+ * the wire.
  *
  * Robustness hardening, none of which Claude Code documents but all of which a
  * long-lived daemon needs so a slow/hostile script can't wedge it:
@@ -31,6 +32,7 @@
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
+import { projectSettingsAllowed } from './claude-setting-sources.js'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
@@ -64,7 +66,7 @@ export const STATUSLINE_CONFIG_CACHE_TTL_MS = 5_000
  */
 export function statusLineSettingsPaths(cwd, claudeDir) {
   const paths = []
-  if (cwd) paths.push(join(cwd, '.claude', 'settings.json'))
+  if (cwd && projectSettingsAllowed(cwd)) paths.push(join(cwd, '.claude', 'settings.json'))
   if (claudeDir) {
     paths.push(join(claudeDir, 'project-settings.json'))
     paths.push(join(claudeDir, 'settings.json'))

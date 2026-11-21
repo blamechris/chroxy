@@ -228,6 +228,8 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     includePartialMessages: false,
+    // A one-shot summary needs no settings files.
+    settingSources: [],
     maxTurns: 1,
     // #7986 / #8030: the desktop bundle does not ship the Agent SDK's platform
     // binary, and query() throws if pathToClaudeCodeExecutable is unset and

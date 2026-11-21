@@ -261,6 +261,11 @@ export const AUDITED_SINKS = [
   // ── claude-tui-session.js ──
   {
     file: 'claude-tui-session.js',
+    match: 'claudeSettingSourcesValue(cwdReal)',
+    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: a fixed server-side string ('user'), built from no client input.",
+  },
+  {
+    file: 'claude-tui-session.js',
     // The full call text is 200+ chars, so this is the exact 200-char PREFIX
     // the lint's own truncation (`.slice(0, 200)`, lint-argv-sinks.mjs) would
     // produce for this call site — not a hand-picked shorter distinguishing
@@ -295,6 +300,11 @@ export const AUDITED_SINKS = [
     file: 'cli-session.js',
     match: "spawn(spawnSpec.command, spawnSpec.args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: this._buildChildEnv(), ...spawnSpec.options, })",
     reason: '_spawnPersistentProcess(args) has one caller (start()), which passes args = buildClaudeCliArgs({...}) — audited below, at buildClaudeCliArgs itself.',
+  },
+  {
+    file: 'cli-session.js',
+    match: 'claudeSettingSourcesValue()',
+    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: a fixed server-side string ('user'), built from no client input.",
   },
   {
     file: 'cli-session.js',
@@ -677,6 +687,11 @@ export const AUDITED_SINKS = [
   },
 
   // ── web-task-manager.js ──
+  {
+    file: 'web-task-manager.js',
+    match: 'claudeSettingSourcesValue(cwd)',
+    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: a fixed server-side string ('user'), built from no client input.",
+  },
   {
     file: 'web-task-manager.js',
     match: "execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => { if (err) return reject(err) resolve(stdout) })",

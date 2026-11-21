@@ -24,6 +24,7 @@ providers in #7004.
 | `*.pem`, `*.key`, `*.p12`, `*.pfx` | floored | floored |
 | `.git/config`, `.git/credentials`, `.config/git/{config,credentials}`, `.claude/settings*.json` | floored (credential-dense) | floored |
 | Anything else inside `.git/`, `.claude/`, `.vscode/`, `.config/git/` | **not** floored — reading a config file is benign | floored |
+| `.mcp.json` (any depth) | **not** floored | floored |
 | Ordinary files inside one of Claude Code's own worktrees, `<cwd>/.claude/worktrees/<name>/…` | not floored | **not** floored — the worktree is a workspace root (#8741, below) |
 | `<claude config dir>/sessions/*.key` (the `*.key` rule above, in the configured directory), and a `Grep` / `Glob` rooted at that `sessions/` directory itself | floored | floored |
 | Anything at or below `/tmp/cc-socks` or `/private/tmp/cc-socks` (Claude Code's inbox sockets), in any letter case | floored | floored |
