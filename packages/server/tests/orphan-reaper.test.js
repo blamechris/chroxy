@@ -594,4 +594,47 @@ describe('lsof resolution wired into the sweep (#8083)', () => {
     assert.equal(log._info.length, 2)
     assert.ok(/3 sweep\(s\)/.test(log._info[1]), log._info[1])
   })
+
+  it('lsof missing over candidate/empty/candidate/empty/candidate: one warn, no "resumed", no "ok" claim (#8232)', () => {
+    const log = makeLogger()
+    let rows = true
+    const deps = sweepDeps(() => { throw Object.assign(new Error('lsof not found'), { code: 'LSOF_NOT_FOUND' }) }, {
+      listProcesses: () => (rows ? table([[11839, 1, UID, '02:00:00', 'node --test']]) : table([[5, 2, UID, '02:00:00', 'x']])),
+    })
+    for (const r of [true, false, true, false, true]) { rows = r; maybeReapOrphans({}, log, deps) }
+    assert.equal(skippedOf(log).length, 1, JSON.stringify(log._warn.map((m) => m.slice(0, 100))))
+    assert.equal(resumedOf(log).length, 0)
+    assert.equal(okOf(log).length, 0, JSON.stringify(log._info.map((m) => m.slice(0, 120))))
+    assert.ok(log._info.some((m) => /NOT fully ok .*cwd check still unavailable/.test(m)), JSON.stringify(log._info.map((m) => m.slice(0, 120))))
+  })
+
+  it('a listing failure followed by an empty sweep logs one "resumed" (the listing ran) (#8232)', () => {
+    const log = makeLogger()
+    let fail = true
+    const deps = sweepDeps(ok, { listProcesses: () => { if (fail) throw new Error('spawnSync ps ENOENT'); return table([[5, 2, UID, '02:00:00', 'x']]) } })
+    maybeReapOrphans({}, log, deps)
+    fail = false
+    maybeReapOrphans({}, log, deps)
+    assert.equal(resumedOf(log).length, 1, JSON.stringify(log._info.map((m) => m.slice(0, 100))))
+  })
+
+  it('a healthy host with zero candidates still gets "sweep ok" and the hourly summary (#8232)', () => {
+    const log = makeLogger()
+    let t = 5_000
+    const deps = sweepDeps(ok, { now: () => t, listProcesses: () => table([[5, 2, UID, '02:00:00', 'x']]) })
+    maybeReapOrphans({}, log, deps)
+    t += 61 * 60_000
+    maybeReapOrphans({}, log, deps)
+    assert.equal(okOf(log).length, 1)
+    assert.equal(log._info.filter((m) => /sweep\(s\) ok since last summary/.test(m)).length, 1, JSON.stringify(log._info.map((m) => m.slice(0, 120))))
+    assert.ok(/0 candidate/.test(log._info[0]))
+  })
+
+  it('two different messages sharing one error code each warn once (#8232)', () => {
+    const log = makeLogger()
+    let which = 'a'
+    const deps = sweepDeps(() => { throw Object.assign(new Error(which === 'a' ? 'spawn /x/ps ENOENT' : 'spawn /y/lsof ENOENT'), { code: 'ENOENT' }) })
+    for (const w of ['a', 'a', 'b', 'b']) { which = w; maybeReapOrphans({}, log, deps) }
+    assert.equal(skippedOf(log).length, 2, JSON.stringify(log._warn.map((m) => m.slice(0, 100))))
+  })
 })
