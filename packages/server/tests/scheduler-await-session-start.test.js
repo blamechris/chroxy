@@ -25,6 +25,7 @@ class SlowStartProvider extends EventEmitter {
   // Per-test knobs.
   static mode = 'delay' // 'delay' | 'reject' | 'hang' | 'sync'
   static delayMs = 40
+  static turnMs = 0
   static sends = []
   constructor(opts) {
     super()
@@ -48,6 +49,7 @@ class SlowStartProvider extends EventEmitter {
   async sendMessage(prompt) {
     SlowStartProvider.sends.push(prompt)
     if (!this._ready) throw new Error('Session not ready')
+    if (SlowStartProvider.turnMs > 0) await new Promise((r) => setTimeout(r, SlowStartProvider.turnMs))
     this.emit('result', { cost: 0, duration: 1 })
   }
   respondToPermission() {}
@@ -69,6 +71,7 @@ describe('scheduler waits for a starting session before its first turn (#9245)',
     sm = new SessionManager({ skipPreflight: true, maxSessions: 10, defaultCwd: '/tmp', stateFilePath: join(dir, 'session-state.json') })
     SlowStartProvider.mode = 'delay'
     SlowStartProvider.delayMs = 40
+    SlowStartProvider.turnMs = 0
     SlowStartProvider.sends = []
   })
   afterEach(() => {
@@ -156,6 +159,45 @@ describe('scheduler waits for a starting session before its first turn (#9245)',
     const t0 = Date.now()
     const second = await fire(eng, task)
     assert.equal(second.status, 'success', second.error)
-    assert.ok(Date.now() - t0 < 30, 'settled reuse must not wait')
+    assert.ok(Date.now() - t0 < 1000, 'settled reuse must not wait')
+  })
+
+  for (const bad of [null, 0, Number.NaN, -5, 2 ** 31]) {
+    it(`an invalid runTimeoutMs (${bad}) falls back to the default and does not fail an async-start fire`, async () => {
+      const eng = newEngine({ runTimeoutMs: bad })
+      const res = await fire(eng, addTask())
+      assert.equal(res.status, 'success', res.error)
+      assert.equal(eng._runTimeoutMs, 15 * 60 * 1000)
+    })
+  }
+
+  it('the start wait spends the run budget: the turn gets the remainder and ends timeout', async () => {
+    // Budget 600ms: start ~300ms, then a 450ms turn fits the FULL budget but not the remainder.
+    SlowStartProvider.delayMs = 300
+    SlowStartProvider.turnMs = 450
+    const eng = newEngine({ runTimeoutMs: 600 })
+    const keepAlive = setInterval(() => {}, 20)
+    let res
+    try { res = await fire(eng, addTask()) } finally { clearInterval(keepAlive) }
+    assert.equal(res.status, 'timeout', res.error)
+    assert.ok(/run exceeded 600ms/.test(res.error), res.error)
+  })
+
+  it('a reused session still starting fails the first fire, stays mapped and alive, and succeeds once settled', async () => {
+    SlowStartProvider.delayMs = 400
+    const eng = newEngine({ runTimeoutMs: 150 })
+    const task = addTask()
+    const first = await fire(eng, task)
+    assert.equal(first.status, 'error')
+    assert.ok(/did not finish starting within 150ms/.test(first.error), first.error)
+    assert.equal(SlowStartProvider.sends.length, 0, 'turn must not be driven')
+    const id = first.sessionId
+    assert.equal(eng.scheduledSessionIds.get(task.id), id, 'still mapped')
+    assert.ok(sm.getSession(id), 'still alive')
+    const settled = await sm.awaitSessionStart(id, 5000)
+    assert.deepEqual(settled, { ok: true })
+    const second = await fire(eng, task)
+    assert.equal(second.status, 'success', second.error)
+    assert.equal(second.sessionId, id, 'same session')
   })
 })

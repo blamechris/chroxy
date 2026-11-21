@@ -124,6 +124,7 @@ export const MAX_SLEEP_MS = 60 * 1000
  * concurrency slot (and thus every other task) forever.
  */
 export const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
+const MAX_TIMER_MS = 2 ** 31 - 1
 
 /**
  * How late an overdue task may still be fired. A daemon that was down (laptop
@@ -387,7 +388,13 @@ export class SchedulerEngine extends EventEmitter {
     this._setTimer = setTimer
     this._clearTimer = clearTimer
     this._maxConcurrentRuns = Math.max(1, Math.floor(maxConcurrentRuns) || 1)
-    this._runTimeoutMs = runTimeoutMs
+    // Normalised: the value reaches setTimeout (the start wait, and TurnDriver's
+    // turn timer). null / 0 / NaN / negative would fire at once (TurnDriver treats
+    // a non-finite value as ITS default, never as "no timeout", and 0 as an
+    // immediate timeout), and > 2^31-1 overflows to ~0ms. Fall back to the default.
+    this._runTimeoutMs = (Number.isFinite(runTimeoutMs) && runTimeoutMs > 0 && runTimeoutMs <= MAX_TIMER_MS)
+      ? runTimeoutMs
+      : DEFAULT_RUN_TIMEOUT_MS
     this._overdueGraceMs = overdueGraceMs
     this._maxSleepMs = Math.max(1, Math.floor(maxSleepMs) || MAX_SLEEP_MS)
     this._log = logger
@@ -941,6 +948,7 @@ export class SchedulerEngine extends EventEmitter {
     // SYNCHRONOUSLY, before any await (the manager drops a failed start from
     // _sessions), and await it below. A settled or sync-start session resolves
     // immediately, so a reused session is never delayed.
+    const waitStartedAt = Date.now()
     const startWait = this._sm.awaitSessionStart?.(sessionId, ctx.runTimeoutMs)
 
     // Register as an OWNED run before the turn starts, so the permission answerer
@@ -964,9 +972,12 @@ export class SchedulerEngine extends EventEmitter {
         }
       }
       const driver = this._ensureTurnDriver()
+      // The start wait spends part of the run budget: the turn gets the REMAINDER,
+      // so `timeout` keeps meaning total run time (floored so it stays a valid timer).
+      const remainingMs = Math.max(1, ctx.runTimeoutMs - (Date.now() - waitStartedAt))
       await driver.driveTurn(sessionId, task.prompt, {
         label: `scheduled:${task.id}`,
-        timeoutMs: ctx.runTimeoutMs,
+        timeoutMs: remainingMs,
       })
       // `success` is the NARROWEST outcome, asserted positively: the turn
       // completed AND no permission prompt was ever raised on this run. Any
