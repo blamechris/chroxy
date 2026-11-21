@@ -992,7 +992,7 @@ export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessag
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
 
 /** One session's `folder_trust_state`, as the dashboard keeps it. */
-export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'appliesFrom'>;
+export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'digest' | 'appliesFrom'>;
 
 export interface ConnectionState {
   // Connection
@@ -2665,10 +2665,11 @@ export interface ConnectionState {
    */
   setSessionArchivePolicy: (policy: ArchivePolicy, opts?: { purge?: boolean }) => string | null;
   /**
-   * Approve (`trust_folder`) or stop trusting (`untrust_folder`) the folder of a
-   * session. The server resolves the folder from its own session record; only the
-   * primary token on an unbound connection is allowed. Returns false (nothing
-   * sent) when the socket is closed or a change for that session is in flight.
+   * Approve (`trust_folder`, with the digest of the state the owner reviewed) or stop
+   * trusting (`untrust_folder`) the folder of a session. The server resolves the
+   * folder from its own session record; only the primary token on an unbound
+   * connection is allowed. Returns false (nothing sent) when the socket is closed,
+   * a change for that session is in flight, or there is no reviewed digest.
    */
   trustFolder: (sessionId: string) => boolean;
   untrustFolder: (sessionId: string) => boolean;

@@ -9,7 +9,12 @@
  *   - `untrusted` → a banner with Review, which opens a dialog that lists what
  *     would run and offers "Trust this folder".
  *   - `trusted`   → a small indicator with "Stop trusting".
- *   - `none` (or no state yet, or a provider that does not run claude) → nothing.
+ *   - no state yet, or a provider that does not run claude → nothing.
+ *
+ * Every folder starts untrusted, including one with nothing command-bearing (trusting
+ * it loads its CLAUDE.md and other project settings). Trust is offered only for a
+ * reviewable snapshot: with no summary and digest (a session-bound client) or an
+ * incomplete scan, the dialog is read-only.
  *
  * The component only displays and forwards the two actions; the daemon decides
  * (primary token on an unbound connection) and says so in `error`.
@@ -56,6 +61,11 @@ function SummaryList({ entry }: { entry: FolderTrustEntry }) {
   const { mcpServers, hooks, statusLine, enabledPlugins, counts, files, warnings } = summary
   return (
     <div data-testid="folder-trust-summary">
+      {!summary.hasCommandBearingFiles && (
+        <p data-testid="folder-trust-no-commands">
+          No commands found; trusting loads this folder&apos;s CLAUDE.md, rules and other project settings.
+        </p>
+      )}
       {mcpServers.length > 0 && (
         <section>
           <h4>MCP servers</h4>
@@ -107,16 +117,23 @@ function SummaryList({ entry }: { entry: FolderTrustEntry }) {
           </p>
         </section>
       )}
-      <section>
-        <h4>Settings files</h4>
-        <ul style={LIST_STYLE}>
-          {files.map((f) => <li key={f} data-testid="folder-trust-file"><code style={CODE_STYLE}>{f}</code></li>)}
-        </ul>
-      </section>
+      {files.length > 0 && (
+        <section>
+          <h4>Settings files</h4>
+          <ul style={LIST_STYLE}>
+            {files.map((f) => (
+              <li key={f.path} data-testid="folder-trust-file">
+                <code style={CODE_STYLE}>{f.path}</code>
+                {f.linkTarget && <> <span data-testid="folder-trust-link">→ <code style={CODE_STYLE}>{f.linkTarget}</code></span></>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {warnings.length > 0 && (
         <section>
           <h4>Notes</h4>
-          <ul style={LIST_STYLE}>
+          <ul style={LIST_STYLE} data-testid="folder-trust-warnings">
             {warnings.map((w, i) => <li key={i}>{w}</li>)}
           </ul>
         </section>
@@ -129,6 +146,10 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
   const [reviewing, setReviewing] = useState(false)
   const status = entry?.status
   const applies = entry ? appliesFromText(entry.appliesFrom) : null
+
+  // The owner approves what they reviewed: needs the summary and its digest, and a
+  // folder that could be reviewed completely.
+  const canTrust = Boolean(entry?.summary && entry.digest && !entry.summary.untrustable)
 
   // Approving moves the state to trusted: the dialog has done its job.
   useEffect(() => {
@@ -176,16 +197,19 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
       <Modal open={reviewing} onClose={() => setReviewing(false)} title="Trust this folder's project settings?">
         <div data-testid="folder-trust-dialog">
           <SummaryList entry={entry} />
-          <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>
+          {canTrust && <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>}
+          {!canTrust && <p data-testid="folder-trust-readonly">This folder's settings cannot be trusted from here.</p>}
           {applies && <p data-testid="folder-trust-applies">{applies}</p>}
           {error && <p data-testid="folder-trust-error" role="alert">{error}</p>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button type="button" onClick={() => setReviewing(false)} data-testid="folder-trust-cancel" style={BUTTON_STYLE}>
               Cancel
             </button>
-            <button type="button" onClick={onTrust} disabled={pending} data-testid="folder-trust-confirm" style={BUTTON_STYLE}>
-              Trust this folder
-            </button>
+            {canTrust && (
+              <button type="button" onClick={onTrust} disabled={pending} data-testid="folder-trust-confirm" style={BUTTON_STYLE}>
+                Trust this folder
+              </button>
+            )}
           </div>
         </div>
       </Modal>

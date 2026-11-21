@@ -976,10 +976,17 @@ function sendFolderTrust(
   type: 'trust_folder' | 'untrust_folder',
   sessionId: string,
 ): boolean {
-  const { socket, folderTrustPending, folderTrustError } = get();
+  const { socket, folderTrustPending, folderTrustError, folderTrust } = get();
   if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) return false;
   if (folderTrustPending[sessionId]) return false;
-  if (!wsSend(socket, { type, sessionId, requestId: `folder-trust-${nextMessageId()}` })) return false;
+  const msg: Record<string, unknown> = { type, sessionId, requestId: `folder-trust-${nextMessageId()}` };
+  if (type === 'trust_folder') {
+    // Approval is bound to the snapshot the owner reviewed.
+    const digest = folderTrust[sessionId]?.digest;
+    if (!digest) return false;
+    msg.digest = digest;
+  }
+  if (!wsSend(socket, msg)) return false;
   const { [sessionId]: _cleared, ...errors } = folderTrustError;
   set({ folderTrustPending: { ...folderTrustPending, [sessionId]: true }, folderTrustError: errors });
   return true;

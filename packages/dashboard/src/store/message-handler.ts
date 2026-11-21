@@ -7690,12 +7690,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // A trust change the daemon refused or could not apply arrives as an error
       // envelope (no `folder_trust_result`). It names no session, so every
       // in-flight marker settles and the reason shows on those sessions.
-      if (errCode === 'FOLDER_TRUST_FORBIDDEN' || errCode === 'FOLDER_TRUST_NOT_APPLIED') {
-        const waiting = Object.keys(get().folderTrustPending);
-        set({
-          folderTrustPending: {},
-          folderTrustError: { ...get().folderTrustError, ...Object.fromEntries(waiting.map((id) => [id, errMsg])) },
-        });
+      if (errCode.startsWith('FOLDER_TRUST_')) {
+        // The error names the session it is for; it never lands on another one.
+        const errSession = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+        if (errSession) {
+          const { [errSession]: _pending, ...pending } = get().folderTrustPending;
+          set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [errSession]: errMsg } });
+        }
       }
       // #6871 review round 2 (BLOCKING 2): there is deliberately NO scheduler
       // handling of INVALID_MESSAGE here.

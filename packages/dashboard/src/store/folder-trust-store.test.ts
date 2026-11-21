@@ -29,9 +29,10 @@ const receive = (msg: Record<string, unknown>) => handleMessage(msg as never, ct
 let sent: Array<Record<string, unknown>>
 
 const summary = {
-  files: ['/p/.mcp.json'], mcpServers: [], hooks: [], statusLine: [], enabledPlugins: [],
-  counts: { agents: 0, skills: 0, commands: 0 }, warnings: [],
+  files: [{ path: '/p/.mcp.json' }], mcpServers: [], hooks: [], statusLine: [], enabledPlugins: [],
+  counts: { agents: 0, skills: 0, commands: 0 }, warnings: [], hasCommandBearingFiles: true, untrustable: false,
 }
+const digest = 'b'.repeat(64)
 
 function resetSlice(socket: unknown = null) {
   useConnectionStore.setState({
@@ -55,12 +56,12 @@ afterEach(() => { stopHeartbeat(); resetSlice() })
 
 describe('folder_trust_state', () => {
   it('is kept per session, replaced wholesale, and without its type or sessionId', () => {
-    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, appliesFrom: 'restart' })
-    expect(get().folderTrust.s1).toEqual({ status: 'untrusted', summary, appliesFrom: 'restart' })
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    expect(get().folderTrust.s1).toEqual({ status: 'untrusted', summary, digest, appliesFrom: 'restart' })
     receive({ type: 'folder_trust_state', sessionId: 's1', status: 'trusted', summary, appliesFrom: 'restart' })
     expect(get().folderTrust.s1!.status).toBe('trusted')
-    receive({ type: 'folder_trust_state', sessionId: 's2', status: 'none', appliesFrom: 'next_turn' })
-    expect(get().folderTrust.s2).toEqual({ status: 'none', appliesFrom: 'next_turn' })
+    receive({ type: 'folder_trust_state', sessionId: 's2', status: 'untrusted', appliesFrom: 'next_turn' })
+    expect(get().folderTrust.s2).toEqual({ status: 'untrusted', appliesFrom: 'next_turn' })
     expect(get().folderTrust.s1!.status).toBe('trusted')
   })
 
@@ -71,20 +72,31 @@ describe('folder_trust_state', () => {
 })
 
 describe('trustFolder / untrustFolder', () => {
-  it('send the session id only, with a requestId, and mark the session pending', () => {
+  const reviewed = () => receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+
+  it('trust sends the session id and the REVIEWED digest, with a requestId, and marks the session pending', () => {
+    reviewed()
     expect(get().trustFolder('s1')).toBe(true)
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ type: 'trust_folder', sessionId: 's1' })
-    expect(Object.keys(sent[0]!).sort()).toEqual(['requestId', 'sessionId', 'type'])
+    expect(sent[0]).toMatchObject({ type: 'trust_folder', sessionId: 's1', digest })
+    expect(Object.keys(sent[0]!).sort()).toEqual(['digest', 'requestId', 'sessionId', 'type'])
     expect(get().folderTrustPending.s1).toBe(true)
   })
 
-  it('untrust sends untrust_folder', () => {
+  it('trust is not sent without a reviewed digest (a bound client never saw one)', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', appliesFrom: 'restart' })
+    expect(get().trustFolder('s1')).toBe(false)
+    expect(get().trustFolder('unknown')).toBe(false)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('untrust sends untrust_folder (no digest needed)', () => {
     expect(get().untrustFolder('s1')).toBe(true)
     expect(sent[0]).toMatchObject({ type: 'untrust_folder', sessionId: 's1' })
   })
 
   it('refuses a second change for the same session while one is in flight, and does nothing without a socket', () => {
+    reviewed()
     get().trustFolder('s1')
     expect(get().trustFolder('s1')).toBe(false)
     expect(sent).toHaveLength(1)
@@ -102,6 +114,7 @@ describe('folder_trust_result', () => {
   })
 
   it('settles the marker on a failure and keeps the reason; the next attempt clears it', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
     get().trustFolder('s1')
     receive({ type: 'folder_trust_result', sessionId: 's1', ok: false, status: 'untrusted', error: 'could not be saved' })
     expect(get().folderTrustPending.s1).toBeUndefined()
@@ -110,10 +123,15 @@ describe('folder_trust_result', () => {
     expect(get().folderTrustError.s1).toBeUndefined()
   })
 
-  it('an error envelope from the gate settles the marker and shows its reason', () => {
+  it('an error envelope attaches to the session it names, and only that session', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    receive({ type: 'folder_trust_state', sessionId: 's2', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
     get().trustFolder('s1')
-    receive({ type: 'error', code: 'FOLDER_TRUST_FORBIDDEN', message: 'Only the primary API token can do this', requestId: 'x' })
+    get().trustFolder('s2')
+    receive({ type: 'error', code: 'FOLDER_TRUST_CHANGED', message: 'The folder changed since it was reviewed', sessionId: 's1', requestId: 'x' })
     expect(get().folderTrustPending.s1).toBeUndefined()
-    expect(get().folderTrustError.s1).toBe('Only the primary API token can do this')
+    expect(get().folderTrustError.s1).toBe('The folder changed since it was reviewed')
+    expect(get().folderTrustPending.s2).toBe(true)
+    expect(get().folderTrustError.s2).toBeUndefined()
   })
 })

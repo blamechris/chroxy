@@ -10,16 +10,19 @@ import type { FolderTrustEntry } from '../store/types'
 afterEach(() => { cleanup() })
 
 const summary: NonNullable<FolderTrustEntry['summary']> = {
-  files: ['/p/.mcp.json', '/p/.claude/settings.json'],
+  files: [{ path: '/p/.mcp.json' }, { path: '/p/.claude/settings.json' }, { path: '/p/.claude/agents/a.md', linkTarget: '/shared/a.md' }],
   mcpServers: [{ file: '/p/.mcp.json', name: 'github', command: 'npx', args: ['-y', 'server-github'], envKeys: ['GITHUB_TOKEN'] }],
   hooks: [{ file: '/p/.claude/settings.json', event: 'PreToolUse', commands: ['echo checking'] }],
   statusLine: [{ file: '/p/.claude/settings.json', command: 'status.sh' }],
   enabledPlugins: [{ file: '/p/.claude/settings.json', plugin: 'tools@market' }],
   counts: { agents: 2, skills: 1, commands: 0 },
   warnings: [],
+  hasCommandBearingFiles: true,
+  untrustable: false,
 }
-const untrusted: FolderTrustEntry = { status: 'untrusted', summary, appliesFrom: 'restart' }
-const trusted: FolderTrustEntry = { status: 'trusted', summary, appliesFrom: 'next_turn' }
+const digest = 'a'.repeat(64)
+const untrusted: FolderTrustEntry = { status: 'untrusted', summary, digest, appliesFrom: 'restart' }
+const trusted: FolderTrustEntry = { status: 'trusted', summary, digest, appliesFrom: 'next_turn' }
 
 const props = (over = {}) => ({ entry: untrusted, onTrust: vi.fn(), onUntrust: vi.fn(), ...over })
 
@@ -43,7 +46,8 @@ describe('<FolderTrustBanner> untrusted', () => {
     expect(within(dialog).getByTestId('folder-trust-status-line')).toHaveTextContent('status.sh')
     expect(within(dialog).getByTestId('folder-trust-plugin')).toHaveTextContent('tools@market')
     expect(within(dialog).getByTestId('folder-trust-counts')).toHaveTextContent('2 agent files, 1 skill file, 0 command files')
-    expect(within(dialog).getAllByTestId('folder-trust-file').map((n) => n.textContent)).toEqual(summary.files)
+    expect(within(dialog).getAllByTestId('folder-trust-file').map((n) => n.querySelector('code')?.textContent)).toEqual(summary.files.map((f) => f.path))
+    expect(within(dialog).getByTestId('folder-trust-link')).toHaveTextContent('→ /shared/a.md')
   })
 
   it('the dialog carries the warning line and when the change applies', () => {
@@ -103,9 +107,45 @@ describe('<FolderTrustBanner> trusted', () => {
   })
 })
 
+describe('<FolderTrustBanner> what can be trusted', () => {
+  const open = (entry: FolderTrustEntry) => {
+    render(<FolderTrustBanner {...props({ entry })} />)
+    fireEvent.click(screen.getByTestId('folder-trust-review'))
+  }
+
+  it('hides Trust this folder when there is no summary or no digest (a session-bound client)', () => {
+    open({ status: 'untrusted', appliesFrom: 'restart' })
+    expect(screen.queryByTestId('folder-trust-confirm')).toBeNull()
+    expect(screen.queryByTestId('folder-trust-warning')).toBeNull()
+    expect(screen.getByTestId('folder-trust-readonly')).toBeInTheDocument()
+    cleanup()
+    open({ status: 'untrusted', summary, appliesFrom: 'restart' })
+    expect(screen.queryByTestId('folder-trust-confirm')).toBeNull()
+  })
+
+  it('hides Trust this folder for a folder that could not be reviewed completely, and shows why', () => {
+    open({ ...untrusted, summary: { ...summary, untrustable: true, warnings: ['Cannot review this folder: /p/x: not a regular file'] } })
+    expect(screen.queryByTestId('folder-trust-confirm')).toBeNull()
+    expect(screen.getByTestId('folder-trust-warnings')).toHaveTextContent('not a regular file')
+  })
+
+  it('a folder with nothing command-bearing says so, and can still be trusted', () => {
+    open({ ...untrusted, summary: { ...summary, files: [], mcpServers: [], hooks: [], statusLine: [], enabledPlugins: [], counts: { agents: 0, skills: 0, commands: 0 }, hasCommandBearingFiles: false } })
+    expect(screen.getByTestId('folder-trust-no-commands')).toHaveTextContent("No commands found; trusting loads this folder's CLAUDE.md, rules and other project settings.")
+    expect(screen.getByTestId('folder-trust-confirm')).toBeInTheDocument()
+  })
+
+  it('surfaces the "N more not shown" and size warnings in the dialog', () => {
+    open({ ...untrusted, summary: { ...summary, warnings: ['10 more MCP servers not shown', 'Folder tree too large to scan fully: nested skills beyond 5000 directories are not covered'] } })
+    const warnings = screen.getByTestId('folder-trust-warnings')
+    expect(warnings).toHaveTextContent('10 more MCP servers not shown')
+    expect(warnings).toHaveTextContent('nested skills beyond 5000 directories')
+    expect(screen.getByTestId('folder-trust-confirm')).toBeInTheDocument()
+  })
+})
+
 describe('<FolderTrustBanner> nothing to show', () => {
   it.each([
-    ['none', { status: 'none', appliesFrom: 'next_turn' } as FolderTrustEntry],
     ['no state yet', undefined],
     ['a provider that does not run claude', { ...untrusted, appliesFrom: 'n/a' } as FolderTrustEntry],
   ])('renders nothing for %s', (_label, entry) => {
