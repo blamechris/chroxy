@@ -16,9 +16,12 @@ implement one contract instead of negotiating it in review.
 
 **Status: designed, not yet implemented.** No dispatch mechanism exists in code. Where this
 document says a mechanism exists on main it names the symbol and file, read at commit
-`7442b39ff`; everything else is *proposed*. Where it depends on a mechanism that
-[`agent-principals.md`](agent-principals.md) itself marks proposed (`auditOrRefuse`, leases,
-the delivery fence, `turn_started`), it depends on that child landing and adds nothing to it.
+`7442b39ff`; everything else is *proposed*. The amended acknowledgment-channel text (in §6.6
+and §6.7, and the entries that cite them) was read at `2373ec835` and rests on the spike
+described in §6.7; everything else remains as read at `7442b39ff`. Where it depends on a
+mechanism that [`agent-principals.md`](agent-principals.md) itself marks proposed
+(`auditOrRefuse`, leases, the delivery fence, `turn_started`), it depends on that child
+landing and adds nothing to it.
 This document **extends agent-principals by reference and never loosens it**: every gate,
 refusal and invariant there applies to every message here; the few places it proposes an
 amendment to P say so. Every guard must be proven to fail
@@ -26,9 +29,9 @@ amendment to P say so. Every guard must be proven to fail
 common test rules, and each guard below names its test, mutation and positive control.
 
 Conventions: "P §n" is a section of [`agent-principals.md`](agent-principals.md); S-numbers
-are the children of #9112 listed in P §12; D-numbers (D1 to D8) are this document's slices
-(§12.4). "Owner" and "operator" denote the same person, as in agent-principals. Companions:
-P, [`bearer-token-authority.md`](bearer-token-authority.md),
+are the children of #9112 listed in P §12; D-numbers (D1 to D8; D4 has parts D4a and D4b)
+are this document's slices (§12.4). "Owner" and "operator" denote the same person, as in
+agent-principals. Companions: P, [`bearer-token-authority.md`](bearer-token-authority.md),
 [`permission-floor.md`](permission-floor.md), [`discord-return-path.md`](discord-return-path.md)
 and [`../guides/declared-session-status.md`](../guides/declared-session-status.md).
 
@@ -65,7 +68,7 @@ Three asymmetries control the design:
 ```
 [operator] ──primary, loopback──▶ [daemon] ◀──principal token, loopback── [coordinator]
                                    │   ▲  └──read-only──▶ [GitHub]              ▲
-              wake text (input     │   │ ACK part 2 (per-session secret)        │ hint only:
+              wake text (input     │   │ ACK part 2 (own channel, §6.7)         │ hint only:
               contract, §6.5)      ▼   │                                        │ id, code, ref
                                [worker session]                  [notification channel]
 ```
@@ -73,7 +76,7 @@ Three asymmetries control the design:
 | Zone | Trust | Holds |
 |---|---|---|
 | Coordinator agent | **Untrusted for content, semi-trusted for identity**, as P §2. Its identity is the principal grant and the coordinator-of-record record, never its label in text. | one principal token |
-| Worker session | **Untrusted for content.** Its output, declarations and anything it sends are data. Its identity is assigned by the daemon (the session the daemon spawned), never asserted by the caller. | its own per-session secret (§6.7) |
+| Worker session | **Untrusted for content.** Its output, declarations and anything it sends are data. Its identity is assigned by the daemon (the session the daemon spawned), never asserted by the caller. | on claude-sdk, nothing: its acknowledgment tool is bound to it by the daemon (§6.7); on the deferred hook-secret route, its own per-session secret |
 | Reviewer | A separate identity from the worker and the coordinator. A review record is evidence, never authority. | no channel in v1 |
 | Notification channel | **Untrusted, outbound only** (§8). | nothing of chroxy's beyond the hint |
 | GitHub | A data source read with the read time recorded. Issue state and labels are trusted only as of that read; titles, bodies and comments are untrusted text. | — |
@@ -81,8 +84,9 @@ Three asymmetries control the design:
 
 **The same-user limit applies unchanged** (P §2). Dispatch adds attribution, guardrails and
 a durable record for a cooperative but fallible agent; it is **not a sandbox** against a
-hostile local process, and inside the worker anything in its process tree can present the
-worker's per-session secret (§6.7).
+hostile local process. On claude-sdk anything that can steer the session's agent loop can
+make its acknowledgment call; on the deferred hook-secret route anything in the worker's
+process tree can present the worker's per-session secret (§6.7).
 
 **Untrusted content.** Issue text, comments, worker output, review text and channel input
 are data, never wake text, an instruction, a verdict or an authority. **No broker, no
@@ -494,20 +498,22 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 - **Part 1, daemon-observed**: the provider accepted the turn that carried the send (§6.5).
 - **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when the single
   send is created; the `sending` record carries its **hash**, and the plaintext exists only in
-  memory while the wake text is built. The worker returns the nonce through the route of
-  §6.7. In one synchronous step the daemon checks that the credential resolves to exactly one
-  session, the delivery's target (`wrong_session`), at the **current successor**
+  memory while the wake text is built. The worker returns the nonce through its
+  acknowledgment channel (§6.7), which the daemon resolves to exactly one session without
+  reading a session from the message. In one synchronous step the daemon checks that this
+  session is the delivery's target (`wrong_session`), at the **current successor**
   (`ack_stale_successor`); the delivery is `sending`, `delivered` or `uncertain`
   (`delivery_not_open`); the attempt is open (`attempt_closed`); and the nonce matches the
   stored hash, constant-time (`nonce_mismatch`). Part 2 is recorded durably **once**; a repeat
   is acknowledged without a new record. Against `uncertain` it is evidence and reconciles
-  toward `delivered` (§6.8). The nonce binds the ACK to the delivery and the credential to the
-  session; the nonce is not a secret and confers nothing alone.
+  toward `delivered` (§6.8). The nonce binds the ACK to the delivery and the channel binds it
+  to the session; the nonce is not a secret and confers nothing alone.
 - A **verified durable ACK** is both parts on disk under the same work key and `deliveryId`.
   Each part records its own `bootGen`. Either part alone is shown as what it is.
 - **Work start** is a third, observed fact, **never declared**: the first tool event
-  (`tool_start`) after part 1 **in the turn the delivery caused**. Attribution needs S14's
-  `turn_started { causedBy }`; until then it is an **unattributed start**
+  (`tool_start`) after part 1 **in the turn the delivery caused**, other than the
+  acknowledgment tool's own call (§6.7), which is part 2 and never a start. Attribution needs
+  S14's `turn_started { causedBy }`; until then it is an **unattributed start**
   (`start_unattributed`), which cannot pass the live dispatch acceptance.
 - **Starts are counted per attempt and delivery.** The acceptance quantity is "observed starts
   attributable to the delivery": **0, 1, more than 1, or unknown**; a journal gap yields
@@ -518,32 +524,113 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 Test: part 2 before part 1 is part 2 only; against `uncertain` it moves to `delivered`; a
 repeat adds no record; a declared start with no tool event is no start; a gap reads
-`unknown`. Mutation: accept a declared start; drop the successor check; count a gap as 0.
-Positive control: both parts and one attributed tool event yield a verified ACK and a count
-of 1.
+`unknown`; an acknowledgment call alone is no start. Mutation: accept a declared start; drop
+the successor check; count a gap as 0; count the acknowledgment call as a start. Positive
+control: both parts and one attributed tool event yield a verified ACK and a count of 1.
 
-### 6.7 The worker acknowledgment credential (§15 decision 1)
+### 6.7 The worker acknowledgment channel (§15 decision 1)
 
 **The declared-status channel cannot carry part 2.** Its `hook` source (`POST /api/events`,
 `event-ingest.js`) lets the caller **name** the session; its `api` source
 (`POST /api/sessions/:id/status`, `http-routes.js`) accepts a primary token for **any** session
 named in the path and a pairing token only for its bound session; and its schema
 (`DeclaredStatusInputSchema`, `packages/protocol/src/schemas/declared-status.ts`) is
-`.strict()` with no field for a delivery id or a nonce. Part 2 needs **its own small message**,
-authenticated by a class already bound to exactly one session, so the daemon, not the caller,
-decides which session is speaking. The classes of
-[`bearer-token-authority.md` §2](bearer-token-authority.md#2-the-four-token-classes):
+`.strict()` with no field for a delivery id or a nonce. Part 2 needs **its own small message**
+on a channel already bound to exactly one session, so the daemon, not the caller, decides
+which session is speaking. The candidates are a daemon-defined in-process tool and the classes
+of [`bearer-token-authority.md` §2](bearer-token-authority.md#2-the-four-token-classes):
 
 | Class | Bound to one session? | What else it can do | Verdict |
 |---|---|---|---|
+| **Daemon-defined in-process tool** (claude-sdk) | **yes, by construction**: one tool instance per session object, the daemon session id from the manager's wiring; no credential | nothing (below) | **recommend for claude-sdk** |
 | Primary token | no | everything | refuse |
 | Pairing-bound session token | yes (`generateBoundPairing`, `pairing.js`) | input, permission answers and declared-status writes **for that session** | refuse: a worker holding it could answer its own permission prompts |
-| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and, only when a port is configured, `ClaudeTuiSession` (`claude-tui-session.js`); in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **recommend** |
+| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and, only when a port is configured, `ClaudeTuiSession` (`claude-tui-session.js`); in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **retained for claude-cli, deferred** |
 | Daemon-level ingest secret | no: daemon-wide; the caller names the session | notifications, declared status, mailbox wakeups | refuse |
 | Agent principal | no; a worker is not a principal | its tier | refuse |
 | Discord-return secret | not built; channel-scoped | — | refuse |
 
-**Recommendation:** the per-session hook secret, extended by **one** hook route
+**On main.** claude-sdk already produces part 1: `SdkSession` (`sdk-session.js`) declares
+`capabilities.daemonTurnInput: true` and reports `{ status: 'accepted', delivery:
+'dispatch_started' }` through `reportInputAdmission`. `SdkSession.sendMessage` builds a fresh
+options object and calls `query()` once per turn; permission enters the daemon in-process at
+exactly two places, `options.canUseTool` → `_handlePermission` (every mode but auto) and
+`options.hooks.PreToolUse` → `_handleAutoPreToolUse` (auto, where the SDK runs
+`bypassPermissions`), both reaching `PermissionManager.handlePermission`; no `mcpServers`
+option is passed. The session object does not hold the daemon's session id;
+`SessionManager._wireSessionEvents(sessionId, session)` (`session-manager.js`) closes over it.
+`DockerSdkSession` (`docker-sdk-session.js`) extends `SdkSession` with its own process spawn.
+The Agent SDK exports `createSdkMcpServer` and `tool` (in-process tools).
+
+**Recommendation for claude-sdk: a daemon-defined in-process acknowledgment tool.** Built per
+turn inside the session: server `chroxy`, tool `task_ack`, model-visible name
+`mcp__chroxy__task_ack` (names proposed); input exactly `{ deliveryId, nonce }`, strict, ≤ 512
+bytes; the §6.6 checks and the §7.2 audit-only reasons. It uses **no token class**: the session
+is the one whose session object owns the tool instance, and the daemon session id comes from
+the manager's wiring, never from the tool input and never from the session object. It
+therefore needs no `bearer-token-authority.md` delta. Requirements:
+
+- **The handler is the only authority.** Every §6.6 check runs in the tool's handler, in one
+  synchronous step. The permission entry point is **not a gate** for this tool (an
+  `allowedTools` entry skips `canUseTool` entirely, spike item 5); its only job is that no
+  human prompt is created for the call. That treatment is not a permission answer by any
+  principal or relay, creates no pending request, and changes the treatment of no other tool.
+- **No prompt, narrowly, and behind the floor.** The treatment is an ordinary short-circuit
+  placed **after the floor check**, as `permission-floor.md` §2 requires of every
+  short-circuit: the call reaches `PermissionManager.handlePermission` through the same two
+  entry points as any tool, the floor is evaluated first, and only then is the one reserved
+  name settled. The spike settled it ahead of `PermissionManager`, in the same call chain;
+  D4a must not. An `allowedTools` entry is not an acceptable mechanism: it skips the entry
+  point and with it the floor check. The match is **exact**, on the one reserved name, and
+  applies only while the daemon's own instance is the registered server of that name. A session whose configuration (user, project or local, the
+  `settingSources` `SdkSession` passes) defines a server with the reserved name **fails
+  closed**: the tool is not registered, nothing is pre-settled, and the session is
+  `target_unsupported` (which instance would win is unverified; hence a required test).
+  `_trackPermissionDecision` bookkeeping is kept. The tool takes no path, command or content,
+  so the floor has nothing to floor; it is still checked first. **Its `permission-floor.md`
+  delta** (with D4a, at HIGH): a row in that document's §2 table and the in-process diagram
+  of its §3. As the **first tool settled without a prompt by name**, the row must be argued
+  there, not assumed, to leave §2's precedence as written.
+- **Narrow registration.** The tool is registered only on turns of a session that is the target
+  of an open dispatched attempt (a delivery in `sending`, `delivered` or `uncertain`); every
+  other session and turn sees no new tool and no change. The daemon-built wake text names the
+  tool exactly (§7.3); nothing from the wire becomes wake text.
+- **Reply and rate.** A per-session rate limit (§15 decision 13). The reply to the model is
+  `{ ok: true }` or **one uniform refusal**; the audit records the specific reason and, when
+  the entry point saw an `agentID`, records it as audit detail only.
+
+**Honest limits of the tool.** Part 2 is evidence that the **session's own agent loop** made
+the call with the nonce, not evidence of intent. A **subagent** of the session can make it,
+and v1 accepts that: the handler cannot tell. The acknowledgment **can be lost** if the turn
+ends first (spike item 7); a delivery then lacks part 2, which §6.6 and §6.8 already treat
+safely, never by resending. The tool is **visible** to the model and in the transcript (spike
+item 8), and the model may need a lookup step first (spike item 9). Narrower than the hook
+secret in one respect: no process in the worker's tree can present anything; the call can
+only arrive over the SDK's own channel for that turn.
+
+**Evidence.** Spiked 2026-11-21 on a throwaway daemon built from `2373ec835` with an unmerged
+patch, Agent SDK 0.2.141, small model only; the evidence is held by the owner. (1) A tool built
+per turn inside the session was called by the model, and the entry point saw the call (exact
+name, input keys) **before** the handler ran: approve mode via `canUseTool`, auto via
+`PreToolUse`. (2) With that one tool settled by the entry point, no `permission_request` frame
+reached any client in either mode; an ordinary file write in the same approve session still
+prompted. (3) The handler ran in the daemon; a listener in `_wireSessionEvents` recorded the
+right daemon session id (3 of 3); two concurrent turns each got only their own call. (4) On
+an entry-point deny the handler never ran. (5) A tool pre-allowed by `allowedTools` ran with
+`canUseTool` never consulted (standalone SDK probe only). (6) A subagent could call it; the
+`canUseTool` options carried an `agentID`, the handler's arguments nothing distinguishing.
+(7) A subagent call after the turn's input stream closed at its result failed with an abort,
+once; a call before the result succeeded; "after the result, input held open" is unproven.
+(8) The call is an ordinary tool row (`tool_start`, `tool_result`), the server in the
+`mcp_servers` frame. (9) In 10 of 11 turns the model first loaded the deferred tool through
+the CLI's tool search; `tool()`'s `alwaysLoad` extra was not tried. **Not tested:** resume
+across turns; a configured server of the same name; `DockerSdkSession`; interrupt or stop
+mid-call; a throwing handler; the sandbox option; plan mode; other models; claude-cli,
+claude-tui, Codex and ACP (no in-process seam; nothing applies).
+
+**Retained, deferred: the per-session hook secret and `POST /task-ack`.** Not part of v1; the
+mechanism for a provider with a hook secret and no in-process seam (claude-cli), with its own
+slice (D4b). The per-session hook secret is extended by **one** hook route
 (`POST /task-ack`, proposed; §15 decision 1), body exactly `{ deliveryId, nonce }`, ≤ 512
 bytes. Requirements: **loopback only** (`isLoopbackPeer`, `connection-locality.js`, before the
 token check, per bearer-token-authority §9 step 3); the session resolved by constant-time
@@ -552,25 +639,38 @@ comparison to a **non-null session id**, with **no fallback** to any other class
 per-session rate limit (§15 decision 13); the route on the P §4.5 HTTP roster. The reply is
 `{ ok: true }` or **one uniform refusal**, a deliberate departure from bearer-token-authority
 §9 step 2: the caller's tools are untrusted, and a specific reason would make the route an
-oracle for other sessions' deliveries; the audit records the specific reason.
+oracle for other sessions' deliveries; the audit records the specific reason. **Its
+bearer-token-authority delta** (with D4b, at HIGH): §1, §5, the §7 table, the §9 step 1 list,
+`tests/http-routes-scoped-token.test.js`. As the **first hook-secret route that writes durable
+state**, it needs §5's "strictly less" argument (made for `POST /permission-floor`) re-argued
+there, not assumed. **Its honest limit:** anything in the worker's process tree can read the
+secret (the `cli-session.js` comment says so): part 2 is evidence of receipt **from inside
+that tree**, not of intent.
 
-**What it must not be able to do:** answer, create or extend any permission request; send
+**What neither channel may do:** answer, create or extend any permission request; send
 input; interrupt; read any session data, roster, journal or ledger; write declared status;
 acknowledge for another session or an older successor; register a successor; change any
-ledger state other than recording part 2. **Its bearer-token-authority delta** (with D4, at
-HIGH): §1, §5, the §7 table, the §9 step 1 list, `tests/http-routes-scoped-token.test.js`. As
-the **first hook-secret route that writes durable state**, it needs §5's "strictly less"
-argument (made for `POST /permission-floor`) re-argued there, not assumed.
+ledger state other than recording part 2. Codex and ACP have neither a hook secret nor an
+in-process seam, claude-tui cannot yet produce part 1 (§6.5), and the route is deferred; hence
+§15 decision 2.
 
-**Honest limits.** Anything in the worker's process tree can read the secret (the
-`cli-session.js` comment says so): part 2 is evidence of receipt **from inside that tree**, not
-of intent. claude-sdk, Codex and ACP mint no hook secret, and claude-tui cannot yet produce
-part 1 (§6.5); hence §15 decision 2.
-
-Test: an ACK with each refused class, from a non-loopback peer, with another session's or an
-older successor's secret, or a wrong nonce is refused uniformly and audited specifically;
-mutation: take the session from the body, or drop the nonce check; positive control: the
-target session's secret and nonce record part 2.
+Test (tool, D4a): two sessions with open attempts each call their own tool with the other's
+`deliveryId` and nonce: refused uniformly, audited `wrong_session` (another session's tool
+instance cannot record this session's part 2, by construction); a wrong nonce, an older
+successor and a closed attempt are refused, also with the entry point skipped by an
+`allowedTools` entry; a session with no open attempt lists no such tool; an ordinary file
+write in the same approve session still prompts; a configured server of the reserved name
+leaves the session `target_unsupported` with nothing pre-settled; the floor check runs for
+the acknowledgment call before it is settled. Mutation: take the session id from the tool
+input; pre-settle by prefix rather than exact name; settle ahead of the floor check; register
+the tool for a session with no open attempt; run a §6.6 check in the entry point instead of
+the handler.
+Positive control: the target session's call with the right nonce records part 2 with no
+`permission_request` frame, in approve and in auto mode. Test (route, D4b): an ACK with each
+refused class, from a non-loopback peer, with another session's or an older successor's
+secret, or a wrong nonce is refused uniformly and audited specifically; mutation: take the
+session from the body, or drop the nonce check; positive control: the target session's secret
+and nonce record part 2.
 
 ### 6.8 Uncertainty, attempt close and no blind redispatch
 
@@ -660,7 +760,8 @@ roster** (an amendment D1 owns): they are strict-primary and loopback-only, and 
 | `principal_admin_task_resolve` | operator | `type, requestId, workKey, action, attemptCap?` | direct reply |
 | `principal_admin_successor_register` | operator | `type, requestId, workKey, sessionId, handoffRef` | direct reply |
 | `principal_admin_decision_answer` | operator | `type, requestId, decisionId, answer` | direct reply |
-| `POST /task-ack` (proposed; §15 decision 1) | worker, per-session hook secret | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
+| `mcp__chroxy__task_ack` (proposed; §15 decision 1) | worker on claude-sdk, the session's own in-process tool (§6.7) | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
+| `POST /task-ack` (proposed, deferred; §15 decision 1) | worker, per-session hook secret | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
 
 Every coordinator command is rate-limited (§15 decision 13). **No free-text field exists on
 any coordinator command.** `scopeRef` and the decision `*Ref` fields are references
@@ -674,10 +775,10 @@ keeps one meaning.
 
 | Channel | Codes |
 |---|---|
-| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `attempt_closed` (shared with the worker ACK route), `cursor_unavailable` |
+| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `attempt_closed` (shared with the worker ACK channels), `cursor_unavailable` |
 | P §6.7 codes reused (fences and queue) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`, `human_queue_nonempty`, `agent_queue_full` |
 | Command result | `accepted` (a repeat carries `replayed: true` and the current state); cancel outcomes `cancel_requested`, `cancel_not_applicable`, `cancel_not_applied` |
-| Worker ACK route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
+| Worker ACK channels, tool and route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
 | Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`, `closed`, `held`), `uncertain` |
 | Attempt close outcomes | `dropped`, `cancelled`, `closed`, `superseded` |
 | Observed state detail | `awaiting_input`, `queued`, `quota`, `budget_pause`, `hold`, `owner_decision:<id>`, `gate_failed`, `reason_unknown` |
@@ -695,7 +796,8 @@ non-granted session. Positive control: the coordinator of record sees
 ### 7.3 The wake text is built by the daemon
 
 The model-visible text is **composed by the daemon from ledger fields it validated**: the work
-key, the issue reference, the `scopeRef` and the nonce, framed `[agent:<label>]` with the
+key, the issue reference, the `scopeRef`, the nonce and, on claude-sdk, the acknowledgment
+tool's exact name (a daemon constant, §6.7), framed `[agent:<label>]` with the
 coordinator's operator-authored label (P §6.3), sanitized by the agent profile (P §6.4 step 7)
 and bounded by `MAX_WAKE_TEXT_CHARS` (500, `session-wake.js`). **Nothing from the wire becomes
 wake text, and issue titles, bodies and comments never do**: the worker reads the issue
@@ -844,7 +946,7 @@ supersede, events and every external channel, the general deadline timer (D7), G
 fixture row), UI, anything on a long-running daemon. Cases, each with its mutation: happy
 path; duplicate; changed payload; second dispatch; pool full; append failing (latched); torn
 tail across two boots; each drop cause; the drop-versus-send race; restart at `pending` and at
-`sending` (attributed starts 0 or 1, never 2); wrong nonce; another session's secret; no ACK
+`sending` (attributed starts 0 or 1, never 2); wrong nonce; another session's channel; no ACK
 by `ackBy`; a gap; a stale view. **Proves** the ledger logic, nothing about a real provider.
 
 ### 12.2 Live wake acceptance
@@ -876,10 +978,12 @@ Proposed: S11 (the audit writer and kill switch) and S2 (dispatch roster) before
 D1 (ledger, reducer, work key, generation, the P §3 roster amendment) before every other
 D-slice; D2 (reservation, capacity, idempotency) and D3 (delivery and its `ackBy` and
 `firstActivityBy` clocks, through S8 leases, S9 fence, queue and `via` marker, S10 dedup)
-next; D4 (worker ACK route, with its bearer-token-authority delta) and D5 (source-owned
-state, permission endings, reconciliation, on S3 to S5) before the live dispatch acceptance;
-D6 (events) before the live wake acceptance; D7 (the general deadline timer); D8
-(completion, fencing, attributed starts on S14, the hook-routed timeout signal) last.
+next; D4a (the in-process acknowledgment tool for claude-sdk, with its `permission-floor.md`
+delta) and D5 (source-owned state, permission endings, reconciliation, on S3 to S5) before
+the live dispatch acceptance; D6 (events) before the live wake acceptance; D7 (the general
+deadline timer); D8 (completion, fencing, attributed starts on S14, the hook-routed timeout
+signal) last. D4b (the hook-secret route, with its bearer-token-authority delta) is deferred
+until claude-cli is targeted and is not required for the live dispatch acceptance.
 
 A **dependent task** (the next task that depends on this one) becomes eligible only on
 **independently proven completion**: a review record by someone other than the worker, bound
@@ -892,7 +996,9 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 - **No change to any P invariant** (deny-only answers, no agent-initiated lease request, the
   never table, the permission floor, `skipPermissions: false`, the auto-mode gates, every
   bound-client and strict-primary refusal). Proposed amendments to P: the `via: 'dispatch'`
-  marker (§6.5), the admin roster (§7), the event-ACK own-cursor exception (§8).
+  marker (§6.5), the admin roster (§7), the event-ACK own-cursor exception (§8). Proposed
+  amendment outside P: the `permission-floor.md` delta of §6.7 (D4a), which changes no
+  floored target and keeps the floor ahead of the new short-circuit.
 - **Policy stays with its owners.** Eligibility, scheduling and capacity **policy** remain owned
   by #7823 and #6691; this document specifies only the admission checks a dispatch must pass,
   and its timers apply only to a dispatched attempt.
@@ -900,8 +1006,10 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   Untouched: mailbox delivery (#7437), `session-wake.js` and its gates (dispatch never calls
   `wakeSession` or `wakeViaTurnInput`, §6.5), `POST /api/events`, the declared-status routes.
 - **A second send within one attempt** (an operator or automatic resend) is out of this
-  design. It, a coordinator supersede, a coordinator-registered successor, and a new class
-  reaching the ACK route each widen authority: reviewed at HIGH tier, left for the owner.
+  design. It, a coordinator supersede, a coordinator-registered successor, a new class
+  reaching the ACK route, any other tool settled without a prompt, and the acknowledgment
+  tool gaining a field or an effect each widen authority: reviewed at HIGH tier, left for the
+  owner.
 
 ## 14. Residual Risks
 
@@ -913,6 +1021,10 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   attempt; it is fenced, and the operator should cancel first or wait for the turn to end.
 - **`rejected:not_dispatched` is known unsent** only as far as the provider's `zero_effect`
   verdict is truthful, a trusted input defined by the P §6.9 write boundary.
+- **A lost or subagent acknowledgment.** On claude-sdk part 2 is lost when the turn ends
+  before the call lands; the delivery then lacks part 2 (`ack_overdue`), handled by §6.6 and
+  §6.8 and never by a resend. A subagent of the session can make the call, and v1 accepts it
+  as the session's own (§6.7).
 - Pointers: completed attempts hold capacity until closed (§5.2); same-user containment (§2);
   part 2 proves receipt only (§6.7); unattributed starts before S14 (§6.6); the event ACK is an
   assertion (§8); `uncertain` costs operator attention (§6.8); hook-routed timeouts read
@@ -923,8 +1035,8 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 
 | # | Decision | Recommendation | Default until decided |
 |---|---|---|---|
-| 1 | Credential for the worker ACK (§6.7) | Per-session hook secret plus `POST /task-ack` | No part 2; the live dispatch acceptance cannot pass |
-| 2 | v1 target providers | Those with both an acceptance signal and a hook secret: claude-cli (`CliSession`) today; others `target_unsupported` | As recommended |
+| 1 | Channel for the worker ACK (§6.7) | claude-sdk: daemon-defined in-process tool, no credential (§6.7). Hook secret plus `POST /task-ack` retained for claude-cli, deferred | No part 2; the live dispatch acceptance cannot pass |
+| 2 | v1 target providers | Those with both an acceptance signal and an acknowledgment channel: claude-sdk (`SdkSession` itself; `DockerSdkSession` and any other subclass `target_unsupported` until tested) today; claude-cli (`CliSession`) when its route slice (D4b) lands; others `target_unsupported` | As recommended |
 | 3 | Tier required to dispatch | drive, with a live lease on the target | drive |
 | 4 | Who registers a successor session | Operator only in v1 | Operator only |
 | 5 | Where the eligibility read runs and with what credential | Daemon-side, read-only, under the operator's existing local configuration; the fixture slice uses a fixture row | No live dispatch |
@@ -935,5 +1047,5 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 | 10 | Dispatch event stream wire shape | Sibling `principal_dispatch_*` types with the P §7.2 shapes, leaving the session-journal handlers unchanged | Sibling types |
 | 11 | Eligibility read staleness limit | 10 minutes | 10 minutes |
 | 12 | Observation freshness window | 120 seconds | 120 seconds |
-| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK route: 10 per session per minute. Attempts per task: 3 (`attempt_cap_reached`; raised only by the operator's `raise_cap`). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
+| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK: 10 per session per minute, across either channel (tool or route). Attempts per task: 3 (`attempt_cap_reached`; raised only by the operator's `raise_cap`). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
 | 14 | Event-ACK tier | Accept the own-cursor observe exception (§8) as an amendment to P §4 and §11 | Require drive tier for `principal_event_ack` |
