@@ -23,8 +23,9 @@ import * as W from './helpers/world.js'
 
 const SEEDS = {
   I1a: 1, I1b: 1, I1c: 1, I1d: 1, I2: 1, I2b: 1, I2c: 2093, 'I2c.front': 782, I3a: 1, I3b: 14, I4a: 3, I4b: 8, 'I4b.lapsed': 1, I5: 11, I6: 158,
-  I7a: 1, 'I7a.onset': 1, I7i: 2, I7b: 1, I7c: 2, I7d: 14, I7f: 30, 'I7f.window': 875, I7g: 7, I8: 2, I8b: 1, I9: 11, I10: 1,
-  ackFreesSlot: 1, anyNewReportIsContent: 158, contentMayMoveBack: 12, reReadOnResume: 1, staleOwnerBlockInconclusive: 11,
+  I7a: 1, 'I7a.onset': 1, I7i: 2, I7b: 1, I7c: 2, I7d: 14, I7f: 30, 'I7f.window': 875, I7g: 7, I8: 2, I8b: 1, I9: 9, I10: 1,
+  I11: 7, 'I11.handover': 116,
+  ackFreesSlot: 1, anyNewReportIsContent: 158, contentMayMoveBack: 12, reReadOnResume: 1, raiseBesideOwnerBlock: 7,
   onlyOwnPromptAnswer: 232, noRecheckAfterOwnerWait: 151,
 }
 const SEARCH = 300
@@ -94,6 +95,20 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
   it('I4b (fault): a seed item withdrawn as owner-stated with no owner "done" is caught', () => {
     const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'seed' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'owner_stated_unverified' } } : d)
     const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I4b (fault): an attention item withdrawn as merged with no owner-block item carrying it is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'attention' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'merged' } } : d)
+    const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I11 (fault): a carried condition whose clearing is never written stays named after it ended, and is caught', () => {
+    const dropAppend = (d) => d.kind === 'surface' && d.body.step === 'updated' && d.body.carry?.op === 'clear'
+    const f = firstFailure('I11', 1, { fault: { dropAppend } })
     assert.ok(f)
     assert.ok(runSequence(f.seed).ok)
   })

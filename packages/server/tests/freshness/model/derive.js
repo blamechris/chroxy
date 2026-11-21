@@ -32,6 +32,12 @@ export function createState(policy) {
     investigations: new Map(),
     onsets: new Map(),
     items: new Map(),
+    // Opening references of attention items whose condition an owner-block
+    // item has carried: attention item id -> Set of opening references.
+    carriedRefs: new Map(),
+    // Conditions an owner-block item still carried when it closed, to be
+    // handed on by the tick that closed it: "item|episode" -> handover.
+    handovers: new Map(),
     attempts: new Map(),
     index: new Map(),
     lastSeq: 0,
@@ -316,9 +322,15 @@ function newItem(r) {
     closable: true,
     deferrals: 0,
     seed: null,
+    condition: null,
+    carried: [],
+    carriedEver: new Set(),
+    carryRef: null,
     history: [],
   }
 }
+
+const OWNER_BLOCK_ORIGINS = new Set(['declared', 'prompt'])
 
 function foldSurface(state, r) {
   const b = r.body
@@ -342,6 +354,15 @@ function foldSurface(state, r) {
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
+  if (b.step === 'updated' && b.carry && b.carry.op === 'carry') {
+    const refs = state.carriedRefs.get(b.carry.attention_item) ?? new Set()
+    refs.add(b.carry.opened_by)
+    state.carriedRefs.set(b.carry.attention_item, refs)
+  }
+  if ((b.step === 'resolved' || b.step === 'withdrawn') && OWNER_BLOCK_ORIGINS.has(it.origin) && it.carried.length > 0) {
+    const key = `${it.itemId}|${it.episode}`
+    state.handovers.set(key, { key, itemId: it.itemId, episode: it.episode, session: it.session, sk: it.sk, source: it.source, carried: it.carried.slice() })
+  }
   // Once the preemptor is shown, or closes without being shown, the items it
   // preempted no longer wait on it.
   const shown = b.step === 'shown' && (b.phase === 'attempt' || !state.policy.attemptUsesOrdinal)
@@ -378,6 +399,10 @@ function applyStep(it, b, at, seq) {
       it.deferrals = 0
       it.seed = b.seed ?? null
       it.preemptedBy = null
+      it.condition = b.condition ?? null
+      it.carried = []
+      it.carriedEver = new Set()
+      it.carryRef = null
       break
     case 'shown':
       it.state = 'active'
@@ -416,6 +441,11 @@ function applyStep(it, b, at, seq) {
       if (b.content_at != null) it.contentAt = b.content_at
       if (b.report_id) it.reportId = b.report_id
       if (b.deadline !== undefined) it.deadline = b.deadline
+      if (b.carry) {
+        it.carried = b.carried
+        it.carryRef = b.n
+        if (b.carry.op === 'carry') it.carriedEver.add(`${b.carry.attention_item}|${b.carry.opened_by}`)
+      }
       if (b.requeue) {
         it.state = 'queued'
         it.position = { rank: 1, seq: 0 }
@@ -453,6 +483,9 @@ function foldTick(state, r) {
     t.closed = true
     state.lastClosedTick.set(b.source, { slot: b.slot_start, id: b.tick_id })
     state.sourceTrigger.set(b.source, { held: Boolean(b.source_all_failed), onset: b.source_onset ?? null })
+    // A handover belongs to the tick that closed the item: by this record it
+    // has been made, or found to have nothing left to do.
+    for (const [key, ho] of state.handovers) if (ho.source === b.source) state.handovers.delete(key)
   }
 }
 

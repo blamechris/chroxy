@@ -26,9 +26,13 @@ const PLANS = SOAK
 const CLASSIFICATIONS = ['working_unreported', 'waiting_on_background', 'no_longer_observed', 'waiting_on_owner', 'blocked_unresolved', 'running_claim_unverified', 'finished_unreported', 'gone', 'source_unreachable', 'inconclusive']
 const TRIGGERS = ['stale_report', 'native_disagreement', 'dropped_from_list', 'repeated_error', 'recheck']
 const STEPS = ['queued', 'shown', 'reminded', 'returned', 'updated', 'deferred', 'resolved', 'withdrawn', 'expired', 'exhausted', 'preempted']
+// One session, one item: a condition merged on its signal, an open attention
+// item merged when an owner-block item arrives (the reverse order), a carried
+// condition dropped when it ends, and one handed on when its item closes.
+const MERGES = ['carry:signal', 'carry:open_attention', 'clear', 'withdrawn:merged', 'raised:handover']
 
 function runPlan({ seeds, steps, from }) {
-  const seen = { cls: new Set(), trig: new Set(), steps: new Set(), crashes: 0, records: 0, events: 0, sends: 0 }
+  const seen = { cls: new Set(), trig: new Set(), steps: new Set(), merges: new Set(), crashes: 0, records: 0, events: 0, sends: 0 }
   for (let seed = from; seed < from + seeds; seed++) {
     const r = runSequence(seed, { steps })
     if (!r.ok) {
@@ -44,7 +48,13 @@ function runPlan({ seeds, steps, from }) {
         seen.cls.add(x.body.classification)
         seen.trig.add(x.body.trigger)
       }
-      if (x.kind === 'surface') seen.steps.add(x.body.step)
+      if (x.kind === 'surface') {
+        const b = x.body
+        seen.steps.add(b.step)
+        if (b.step === 'updated' && b.carry) seen.merges.add(b.carry.op === 'carry' ? `carry:${b.carry.path}` : 'clear')
+        if (b.step === 'withdrawn' && b.reason === 'merged') seen.merges.add('withdrawn:merged')
+        if (b.step === 'queued' && b.handover_of) seen.merges.add('raised:handover')
+      }
     }
   }
   return seen
@@ -59,6 +69,7 @@ describe('generated sequences', () => {
       for (const c of CLASSIFICATIONS) assert.ok(seen.cls.has(c), `no sequence reached classification ${c}`)
       for (const t of TRIGGERS) assert.ok(seen.trig.has(t), `no sequence reached trigger ${t}`)
       for (const s of STEPS) assert.ok(seen.steps.has(s), `no sequence reached step ${s}`)
+      for (const m of MERGES) assert.ok(seen.merges.has(m), `no sequence reached the merged path ${m}`)
       assert.ok(seen.crashes >= plan.seeds / 2, `only ${seen.crashes} crashes were exercised`)
       assert.ok(seen.sends > 0)
       console.log(`# freshness generated: ${plan.seeds} seeds x ${plan.steps} steps, ${seen.events} events, ${seen.records} records, ${seen.crashes} crashes, ${seen.sends} sends`)
