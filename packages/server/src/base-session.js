@@ -123,6 +123,11 @@ export const TURN_QUIET_EVENTS = Object.freeze([
   'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
   'inactivity_warning', 'stdin_dropped_totals', 'setup_log', 'respawn_exhausted',
   'thinking_level_changed',
+  // claude-tui's raw PTY mirror (prompt echo, redraws, a resize) is the SCREEN, not the
+  // reply: see ClaudeTuiSession's hook drain for the signal that is (#9241)
+  'terminal_output', 'terminal_resize',
+  // the embedded user shell is not the model
+  'shell_spawned', 'shell_exited',
 ])
 const TURN_QUIET_EVENT_SET = new Set(TURN_QUIET_EVENTS)
 
@@ -665,14 +670,16 @@ export class BaseSession extends EventEmitter {
     this._stoppedSinceStopRequest = false
     this._stopAckedByResult = false
     // #9241: per TURN (reset on the busy false->true edge, NOT in `_clearMessageState`,
-    // which claude-cli runs BEFORE its terminal `result`/`stopped`): the USER pressed
-    // Stop (`markUserStopRequested`; `_stopRequestedThisTurn` also covers the
-    // scheduler and orchestration), the model produced output (set by the emit()
-    // override), and the stop-before-reply marker went out or the turn's terminal
-    // event consumed the chance.
-    this._userStopRequested = false
+    // which claude-cli runs BEFORE its terminal `result`/`stopped`): a Stop came in
+    // through the `interrupt` message (`markStopRequested`; `_stopRequestedThisTurn`
+    // also covers the scheduler and orchestration, which never arm this), the model
+    // produced output (set by the emit() override and `_noteTurnOutput`), the marker
+    // went out (`_stopMarkerEmitted`), or the turn's terminal event settled the
+    // question (`_stopMarkerMinted`).
+    this._stopMarkerArmed = false
     this._turnOutputSeen = false
     this._stopMarkerMinted = false
+    this._stopMarkerEmitted = false
     // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
     // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
     // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
@@ -1065,9 +1072,10 @@ export class BaseSession extends EventEmitter {
     this._busyFlag = next
     if (next) {
       // #9241: a new turn starts with a clean slate for the stop-before-reply marker.
-      this._userStopRequested = false
+      this._stopMarkerArmed = false
       this._turnOutputSeen = false
       this._stopMarkerMinted = false
+      this._stopMarkerEmitted = false
     }
     this.emit('turn_state', { active: next })
   }
@@ -1860,27 +1868,41 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #9241: the USER pressed Stop on the turn running now. Separate from
-   * `markUserStopInFlight` (permission labelling) and `_noteTurnStopRequested`
-   * (anyone's `interrupt()`) on purpose: the marker is for a Stop the user asked
-   * for, and the other two mean something else. Called by the `interrupt` message
-   * handler only. A no-op when idle, so a Stop between turns cannot leak into the
-   * next one; idempotent for a double Stop. A prompt still open counts as output:
-   * hook-routed permissions (cli / tui) may not pass through `emit`.
+   * #9241: a Stop came in through the `interrupt` message (the dashboard, the app, or
+   * an agent-control client: the marker's wording is neutral, so who pressed it does
+   * not matter). Separate from `markUserStopInFlight` (permission labelling) and
+   * `_noteTurnStopRequested` (anyone's `interrupt()`, including the scheduler's and
+   * orchestration's, which must never leave a marker). Called by the `interrupt`
+   * message handler only. A no-op when idle, so a Stop between turns cannot leak into
+   * the next one; idempotent for a double Stop. A prompt still open counts as output
+   * too (hook-routed ones are also latched when they are registered).
    */
-  markUserStopRequested() {
+  markStopRequested() {
     if (!this._isBusy) return
-    this._userStopRequested = true
+    this._stopMarkerArmed = true
     if (this.getPendingPermissionCount() > 0) this._turnOutputSeen = true
   }
 
   /**
+   * #9241: a provider's own evidence that the model began answering, for output that
+   * does not reach `emit` as a classified event (claude-tui's structured events lag
+   * its screen, see ClaudeTuiSession's hook drain).
+   */
+  _noteTurnOutput() {
+    this._turnOutputSeen = true
+  }
+
+  /**
    * #9241: should the terminal event now being emitted for this turn carry the
-   * stop-before-reply marker? True once per turn, only for a user Stop that came
-   * before any output, never while the session is being torn down.
+   * stop-before-reply marker? True once per turn, only for a Stop that came in
+   * through `interrupt` before any output, never while the session is being torn
+   * down. The CALLER also needs the provider's explicit word that the turn ended
+   * BECAUSE of the requested stop (`stopRequested` on its stop-path event, or its own
+   * `turnOutcome: 'stopped'`): a stall watchdog, a timeout or an error after the Stop
+   * ends the turn too, and is not a Stop.
    */
   _shouldMintStopBeforeReply() {
-    return this._userStopRequested && !this._turnOutputSeen && !this._stopMarkerMinted && !this._destroying
+    return this._stopMarkerArmed && !this._turnOutputSeen && !this._stopMarkerMinted && !this._destroying
   }
 
   /**
@@ -2523,10 +2545,18 @@ export class BaseSession extends EventEmitter {
         this._stopAckedByResult = false
         return false
       }
-      // #9241: a user Stop that ends the turn with no `result` (SDK abort, claude-cli
-      // child exit, codex, ACP) leaves nothing in history. Mint the marker first, so
-      // the client idles on it and `stopped` follows.
-      if (this._shouldMintStopBeforeReply()) this._emitStopBeforeReplyResult()
+      // #9241: a Stop that ends the turn with no `result` (SDK abort, claude-cli child
+      // exit, ACP, jsonl subprocess) leaves nothing in history. When the provider says
+      // this `stopped` IS the requested stop (`stopRequested`, set on its stop path
+      // only: not on a watchdog, a timeout or an error that was converted to
+      // `stopped`), mint the marker first, so the client idles on it and `stopped`
+      // follows.
+      const explicit = args[0] && typeof args[0] === 'object' && args[0].stopRequested === true
+      if (args[0] && typeof args[0] === 'object' && 'stopRequested' in args[0]) {
+        const { stopRequested: _signal, ...rest } = args[0]
+        args[0] = rest // internal: never on the wire
+      }
+      if (explicit && this._shouldMintStopBeforeReply()) this._emitStopBeforeReplyResult()
       this._stoppedSinceStopRequest = true
     }
     let ackStop = false
@@ -2569,18 +2599,27 @@ export class BaseSession extends EventEmitter {
         const { turnOutcome: _userStop, ...rest } = payload
         payload = rest
         ackStop = !this._stoppedSinceStopRequest
-        // #9241: the chip is dropped for a Stop that was asked for, but a USER Stop
+        // #9241: the chip is dropped for a Stop that was asked for, but a Stop
         // before any output gets the quiet marker in its place.
         if (this._shouldMintStopBeforeReply()) payload = { ...payload, turnOutcome: 'stopped_before_output' }
-      } else if (payload && typeof payload === 'object' && payload.interrupted === true && payload.turnOutcome === undefined
-        && this._shouldMintStopBeforeReply()) {
+      } else if (payload && typeof payload === 'object' && payload.stopRequested === true
+        && payload.turnOutcome === undefined && this._shouldMintStopBeforeReply()) {
         // claude-cli's synthetic result for a Stop (child exit / 5 s safety timer): it
-        // clears message state first and carries `interrupted` with no outcome.
+        // clears message state first and carries `interrupted` with no outcome, and
+        // says by `stopRequested` that the Stop is why (its stall watchdogs use the
+        // same shape and do not).
         payload = { ...payload, turnOutcome: 'stopped_before_output' }
+      }
+      if (payload && typeof payload === 'object' && 'stopRequested' in payload) {
+        const { stopRequested: _signal, ...rest } = payload
+        payload = rest // internal: never on the wire
+      }
+      if (payload && typeof payload === 'object' && payload.turnOutcome === 'stopped_before_output') {
+        this._stopMarkerEmitted = true
       }
       // #9241: the turn's terminal `result` settles the marker, minted or not, so a
       // `stopped` that follows it never mints a second one.
-      if (this._userStopRequested) this._stopMarkerMinted = true
+      if (this._stopMarkerArmed) this._stopMarkerMinted = true
       // #7326: a marked outcome (anything but `completed`) becomes a chip in the
       // transcript, and the chip needs an identity that the live `result` frame
       // and the history entry replayed later AGREE on -- a `result` has no id, and
@@ -2695,6 +2734,9 @@ export class BaseSession extends EventEmitter {
   notifyPermissionPending(requestId) {
     if (!requestId || this._pendingPermissionIds.has(requestId)) return
     this._pendingPermissionIds.add(requestId)
+    // #9241: a prompt the model raised is output, and a hook-routed one never passes
+    // through emit(): latch it here, so one answered before the Stop still counts.
+    this._turnOutputSeen = true
     if (this._pendingPermissionIds.size === 1) this._onFirstPermissionPending()
   }
 

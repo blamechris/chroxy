@@ -36,6 +36,21 @@ describe('turn-output classification roster (#9241)', () => {
     assert.deepEqual(bad, [], 'add each to TURN_QUIET_EVENTS or TURN_OUTPUT_EVENTS (base-session.js), exactly one')
   })
 
+  it('every event a session class emits through `this.emit` is classified too (claude-tui\'s terminal_output was missing)', () => {
+    // The forwarded rosters above miss events the session manager wires one by one
+    // (terminal_output, terminal_resize), so the emitting side is read as well.
+    const classified = new Set([...TURN_QUIET_EVENTS, ...TURN_OUTPUT_EVENTS])
+    const emittedBySessions = new Set()
+    for (const f of readdirSync(srcDir)) {
+      if (!f.endsWith('.js')) continue
+      const text = readFileSync(join(srcDir, f), 'utf8')
+      if (f !== 'base-session.js' && !/class\s+\w+\s+extends\s+\w*Session\b/.test(text)) continue
+      for (const m of text.matchAll(/\bthis\.emit\(\s*['"]([a-z_]+)['"]/g)) emittedBySessions.add(m[1])
+    }
+    assert.ok(emittedBySessions.size > 20, 'the scan found nothing: it is not looking')
+    assert.deepEqual([...emittedBySessions].filter((ev) => !classified.has(ev)).sort(), [])
+  })
+
   it('the two lists are disjoint', () => {
     assert.deepEqual(TURN_QUIET_EVENTS.filter((ev) => TURN_OUTPUT_EVENTS.includes(ev)), [])
   })

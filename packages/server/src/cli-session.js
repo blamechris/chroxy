@@ -2452,7 +2452,9 @@ export class CliSession extends BaseSession {
     }
     this._clearMessageState({ terminatedReason })
     // #7072: terminal but not a completed turn (internal; not on the wire).
-    this.emit('result', { cost: null, duration, usage: null, sessionId, interrupted: true })
+    // #9241: `stopRequested` only for the Stop's own terminal result. The stall and
+    // hard-timeout watchdogs share this shape and are failures, not a Stop.
+    this.emit('result', { cost: null, duration, usage: null, sessionId, interrupted: true, ...(terminatedReason === 'user_stop' ? { stopRequested: true } : {}) })
   }
 
   _handleChildClose(code) {
@@ -2522,7 +2524,7 @@ export class CliSession extends BaseSession {
       // _restartAfterStop). Stop halts the turn; it must not end the session's
       // ability to answer the follow-up.
       this._stoppedByUser = true
-      this.emit('stopped', { code })
+      this.emit('stopped', { code, stopRequested: true }) // #9241
       return
     }
 

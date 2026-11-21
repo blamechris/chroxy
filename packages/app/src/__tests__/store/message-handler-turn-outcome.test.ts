@@ -99,7 +99,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
       ['truncated', 'Reply cut off'],
       ['refused', 'The model declined'],
       ['stopped', 'Stopped'],
-      ['stopped_before_output', 'Stopped by you before a reply'],
+      ['stopped_before_output', 'Stopped before a reply'],
     ]);
     // The completed turn is the last reply, with nothing after it.
     const all = read();

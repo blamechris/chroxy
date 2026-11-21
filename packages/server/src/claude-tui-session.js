@@ -5346,6 +5346,15 @@ export class ClaudeTuiSession extends BaseSession {
       // `_consumedFiles.size` (which no longer grows — files are unlinked +
       // pruned), otherwise the disarm/re-arm would stop firing on progress.
       if (drainedThisPass > 0 && this._isBusy) {
+        // #9241: a consumed hook file is the earliest structured proof that claude
+        // began working on this turn (the PreToolUse / Stop hook fires as it happens),
+        // so it is what a Stop is judged against. The PTY mirror (`terminal_output`,
+        // `terminal_resize`: prompt echo, redraws) is the screen and does not count,
+        // and claude's transcript lags both (see the KNOWN LIMIT above). KNOWN LIMIT:
+        // a Stop that lands before this poller drains a hook file that was already
+        // written (the loop checks `aborted` first) sees no output yet, so a tool the
+        // user watched start can still be marked "stopped before a reply".
+        this._noteTurnOutput()
         // #4732: a consumed hook file = first output observed for this
         // turn. Disarm the pre-first-output watchdog BEFORE the
         // re-arm below — `_armResultTimeout` would otherwise re-arm

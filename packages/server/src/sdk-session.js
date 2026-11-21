@@ -1123,7 +1123,7 @@ export class SdkSession extends BaseSession {
         // Stopped before the query started: the turn does not run.
         this._isBusy = false
         this._permissions.clearUserStopInFlight()
-        this.emit('stopped', {})
+        this.emit('stopped', { stopRequested: true }) // #9241
         // A send that arrived during the verification was queued: deliver it now, as the
         // end of a stopped turn does.
         if (this._outgoingQueue.length) this.dequeueNextOutgoing()
@@ -2381,7 +2381,9 @@ export class SdkSession extends BaseSession {
           // with CliSession. No `code` because SDK runs in-process — there
           // is no child-process exit status to carry.
           ;(this._log || log).info('Query aborted after user stop')
-          emitTurnEvent('stopped', {})
+          // #9241: `stopRequested` only for the abort the Stop caused, not any other
+          // error that happened to land after it.
+          emitTurnEvent('stopped', isQueryCloseError(err) ? { stopRequested: true } : {})
         } else if (spawnRefused) {
           // #8030: the turn was refused BEFORE query() was ever called — by the
           // per-spawn binary gate (a block-mode hash mismatch, quarantine, a

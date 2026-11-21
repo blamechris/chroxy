@@ -38,7 +38,7 @@ describe('TurnOutcomeMarker (#7326)', () => {
     it('renders the label and the time, quietly, with the sentence as its tooltip', () => {
       render(<TurnOutcomeMarker outcome="stopped_before_output" timestamp={ts} />)
       const chip = screen.getByTestId('turn-outcome-marker')
-      expect(chip).toHaveTextContent(`Stopped by you before a reply \u00b7 ${hhmm}`)
+      expect(chip).toHaveTextContent(`Stopped before a reply \u00b7 ${hhmm}`)
       expect(chip).toHaveAttribute('data-outcome', 'stopped_before_output')
       expect(chip.className).toContain('turn-outcome-marker-stopped_before_output')
       expect(chip.getAttribute('title')).toContain('before the model produced any output')

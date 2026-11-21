@@ -93,7 +93,7 @@ describe('ChatView turn-outcome chip (#7326)', () => {
     const user = { id: 'u1', type: 'user_input', content: 'go', timestamp: 1 } as ChatMessage;
     const quiet = appendTurnOutcomeMarker([user], { outcome: 'stopped_before_output', timestamp: ts });
     const tree = renderFeed(selectChatMessages(quiet, { chatFilterCompact: false, isHiddenInCompactMode }));
-    expect(labels(tree)).toEqual([`Stopped by you before a reply \u00b7 ${hhmm}`]);
+    expect(labels(tree)).toEqual([`Stopped before a reply \u00b7 ${hhmm}`]);
     act(() => tree.unmount());
 
     const plain = appendTurnOutcomeMarker([reply('r1', 'x')], { outcome: 'stopped', timestamp: ts });

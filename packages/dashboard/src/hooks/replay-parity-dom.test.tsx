@@ -172,7 +172,7 @@ describe('live vs replayed transcript -- rendered DOM (dashboard, #6630)', () =>
       expect(html).toContain('Reply cut off')
       expect(html).toContain('The model declined')
       expect(html).toContain('>Stopped<')
-      expect(html).toMatch(/>Stopped by you before a reply \u00b7 \d\d:\d\d</)
+      expect(html).toMatch(/>Stopped before a reply \u00b7 \d\d:\d\d</)
       // The turn that finished normally is the last reply and has nothing after it.
       expect(html.indexOf('A normal, finished reply.')).toBeGreaterThan(html.lastIndexOf('data-outcome="stopped_before_output"'))
       expect(html.slice(html.indexOf('A normal, finished reply.'))).not.toContain('turn-outcome-marker')

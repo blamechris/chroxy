@@ -152,7 +152,7 @@ describe('the stop-before-reply marker (#9241)', () => {
     expect(out).toHaveLength(2)
     expect(out[1]).toMatchObject({
       type: 'system',
-      content: 'Stopped by you before a reply',
+      content: 'Stopped before a reply',
       turnOutcome: 'stopped_before_output',
       timestamp: 777,
     })
@@ -183,15 +183,15 @@ describe('turnOutcomeMarkerText (#9241)', () => {
   const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 
   it('adds the local HH:MM to the stopped-before-reply label only', () => {
-    expect(turnOutcomeMarkerText('stopped_before_output', ts)).toBe(`Stopped by you before a reply \u00b7 ${hhmm}`)
+    expect(turnOutcomeMarkerText('stopped_before_output', ts)).toBe(`Stopped before a reply \u00b7 ${hhmm}`)
     for (const outcome of ['truncated', 'refused', 'stopped', 'interrupted'] as const) {
       expect(turnOutcomeMarkerText(outcome, ts)).not.toContain('\u00b7')
     }
   })
 
   it('falls back to the bare label for a missing or non-finite timestamp', () => {
-    expect(turnOutcomeMarkerText('stopped_before_output')).toBe('Stopped by you before a reply')
-    expect(turnOutcomeMarkerText('stopped_before_output', null)).toBe('Stopped by you before a reply')
-    expect(turnOutcomeMarkerText('stopped_before_output', Number.NaN)).toBe('Stopped by you before a reply')
+    expect(turnOutcomeMarkerText('stopped_before_output')).toBe('Stopped before a reply')
+    expect(turnOutcomeMarkerText('stopped_before_output', null)).toBe('Stopped before a reply')
+    expect(turnOutcomeMarkerText('stopped_before_output', Number.NaN)).toBe('Stopped before a reply')
   })
 })

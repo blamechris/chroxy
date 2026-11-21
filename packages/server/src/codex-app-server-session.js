@@ -1980,14 +1980,13 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
-  // #7072 -- UNVERIFIED against a live binary: a turn the operator stopped may
-  // arrive HERE. `interrupt()` sends `turn/interrupt`; if the binary answers it
-  // with `turn/completed` (the protocol's TurnStatus enum has an `interrupted`
-  // value, which this method never reads) rather than an `error` notification, the
-  // cut-off turn is reported below as a NORMAL result with no `interrupted` mark, and
-  // an orchestration TurnDriver settles it as a success. Do not infer the binary's
-  // behaviour from tests: #6606's C1 test only MODELS turn/completed-after-interrupt.
-  // Pin it with a live probe before changing this.
+  // #7072 / #9241: a turn the operator stopped arrives HERE. `interrupt()` sends
+  // `turn/interrupt`, and codex documents the answer as `turn/completed` with
+  // `status: 'interrupted'` (app-server docs, "Interrupt a turn"), not an `error`
+  // notification. It is reported as a `stopped` result (BaseSession marks it
+  // `interrupted`, so an orchestration TurnDriver no longer settles it as a success),
+  // and the requested-Stop handling there applies: no chip, the quiet `stopped`, and
+  // the stop-before-reply marker when nothing had been produced.
   _finishTurn(turn, turnId = null) {
     if (!this._activeTurn) return
     const t = this._activeTurn
@@ -2013,6 +2012,11 @@ export class CodexAppServerSession extends BaseSession {
         // default codex session's per-model usage split was silently dropped.
         modelUsage: synthesizeModelUsage(this._effectiveModelId(), this._lastUsage),
         sessionId: this._threadId,
+        // #9241: codex answers `turn/interrupt` with `turn/completed {status:'interrupted'}`
+        // (TurnStatus), not an error. That is a cancelled turn, which BaseSession then treats
+        // like every other provider's Stop (no chip for a requested one, the marker when
+        // nothing had been produced).
+        ...(turn?.status === 'interrupted' ? { turnOutcome: 'stopped' } : {}),
         // #7794 — occupancy snapshot, or the field omitted entirely when codex
         // sent no usable one (clients then keep their previous snapshot / the
         // honest dash). Wire name is contextOccupancy, NOT contextUsage: the
@@ -2552,6 +2556,7 @@ export class CodexAppServerSession extends BaseSession {
   async interrupt() {
     this.clearOutgoingQueue()
     this.markIntentionalStop()
+    this._noteTurnStopRequested() // #9241: so a `turn/completed{interrupted}` takes the Stop path
     // Stop must not wait on a prompt: abort this turn's approval scope so a
     // pending permission_request resolves (deny → decline) immediately, instead
     // of leaving the turn wedged until the 5-min timeout (#6611 review).

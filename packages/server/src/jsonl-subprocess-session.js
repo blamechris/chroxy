@@ -492,7 +492,10 @@ export class JsonlSubprocessSession extends BaseSession {
         // N" error surface and emit the quiet `stopped` event for parity
         // with CliSession (#4868). SIGINT typically exits with 130 or null
         // depending on the CLI; both are user-initiated and not crashes.
-        this.emit('stopped', { code })
+        this.emit('stopped', { code, stopRequested: true }) // #9241
+        // #9241: BaseSession answered a Stop before any output with the marker, which IS
+        // this turn's one terminal result; the fallback below would be a second.
+        if (this._stopMarkerEmitted) ctx.didEmitResult = true
       } else if (code !== 0 && code !== null) {
         // Prefer high-signal stderr; fall back to raw so the user always
         // sees *some* explanation when the child died.

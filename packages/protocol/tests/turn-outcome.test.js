@@ -59,7 +59,7 @@ describe('turn outcome vocabulary (#7326)', () => {
     assert.equal(describeTurnOutcome('refused').label, 'The model declined')
     assert.equal(describeTurnOutcome('stopped').label, 'Stopped')
     assert.equal(describeTurnOutcome('interrupted').label, 'Interrupted: connection lost')
-    assert.equal(describeTurnOutcome('stopped_before_output').label, 'Stopped by you before a reply')
+    assert.equal(describeTurnOutcome('stopped_before_output').label, 'Stopped before a reply')
     for (const marked of ['truncated', 'refused', 'stopped', 'stopped_before_output']) {
       assert.ok(describeTurnOutcome(marked).detail.length > 0, `${marked}: a sentence for the tooltip`)
     }
