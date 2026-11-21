@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync, readFileSync, readdirSync, existsSync, realpathSync, utimesSync,
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync, readFileSync, readdirSync, existsSync, realpathSync, utimesSync, linkSync,
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -20,6 +20,10 @@ import {
   reclaimStale,
   lockIsStale,
   statLockIdentity,
+  setLockLinkForTest,
+  setLockCreateHookForTest,
+  setLockFenceHookForTest,
+  setLockDiscriminatorForTest,
   isTransientLockError,
   setLockReadBackHookForTest,
   setLockUnlinkForTest,
@@ -64,6 +68,14 @@ beforeEach(() => {
 afterEach(() => {
   mock.timers.reset()
   setWorkerForTest()
+  setLockReadBackHookForTest()
+  setLockUnlinkForTest()
+  setLockLinkForTest()
+  setLockCreateHookForTest()
+  setLockFenceHookForTest()
+  setLockDiscriminatorForTest()
+  setReclaimHookForTest()
+  setLockWaitForTest()
   for (const [k, v] of [['CHROXY_CONFIG_DIR', saved.c], ['CLAUDE_CONFIG_DIR', saved.k]]) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
@@ -278,88 +290,101 @@ describe('store lock: transient Windows errors', () => {
 
 describe('store lock: never two holders', () => {
   const lockPath = () => `${folderTrustStorePath()}.lock`
-  const stale = '2147483646\noldtoken\n0\n' // a holder that is gone
+  const stale = '2147483646\noldtoken\n0\n' // an old-format lock whose holder is gone
   const guardFor = (token, ...chain) => [`${lockPath()}.reclaim-${token}`, ...chain].join('-')
   const DEAD = '2147483646'
   const leftovers = () => readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.reclaim-'))
+  const age = (path, ms = 600_000) => { const t = new Date(Date.now() - ms); utimesSync(path, t, t) }
+  // An old-format lock judged by its lease: written, aged, and its identity taken as the judge would.
+  const placeJudged = (content = stale) => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), content)
+    age(lockPath())
+    return statLockIdentity(lockPath())
+  }
 
   it('reclaim removes only the lock it judged: a lock created since is left alone', () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     writeFileSync(lockPath(), `${process.pid}\nlive-token\n1\n`)
-    assert.equal(reclaimStale(lockPath(), stale), false)
+    assert.equal(reclaimStale(lockPath(), stale, { mtimeNs: 1n, size: BigInt(stale.length) }), false)
     assert.ok(readFileSync(lockPath(), 'utf8').includes('live-token'), 'the live lock was not vacated')
     assert.deepEqual(leftovers(), [], 'the guard is released')
   })
 
-  it('reclaim removes the judged lock and releases its guard', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), stale)
-    assert.equal(reclaimStale(lockPath(), stale), true)
+  it('reclaim removes the judged lock and releases its guard; without an identity it removes nothing', () => {
+    const identity = placeJudged()
+    assert.equal(reclaimStale(lockPath(), stale), false)
+    assert.equal(existsSync(lockPath()), true)
+    assert.equal(reclaimStale(lockPath(), stale, identity), true)
     assert.equal(existsSync(lockPath()), false)
     assert.deepEqual(leftovers(), [])
   })
 
-  it('reclaim yields to a guard whose holder is alive however old it is', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+  it('reclaim yields to a guard whose lease is current; one whose lease expired is stepped over, never deleted', () => {
+    const identity = placeJudged()
     const guard = guardFor('oldtoken')
-    writeFileSync(lockPath(), stale)
     writeFileSync(guard, `${process.ppid}\nother-token\n`)
-    const old = new Date(Date.now() - 600_000)
-    utimesSync(guard, old, old)
-    assert.equal(reclaimStale(lockPath(), stale), false)
-    assert.equal(existsSync(guard), true)
+    assert.equal(reclaimStale(lockPath(), stale, identity), false)
     assert.equal(existsSync(lockPath()), true)
+    age(guard)
+    assert.equal(reclaimStale(lockPath(), stale, identity), true)
+    assert.equal(existsSync(guard), true, 'the expired guard was left alone')
   })
 
-  it('a dead guard is never deleted: the reclaim steps over it to a guard named for its token', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+  it('a guard whose holder is known to be gone (same discriminator, dead pid) is stepped over at once, never deleted', () => {
+    setLockDiscriminatorForTest('testhost')
+    const identity = placeJudged()
     const dead = guardFor('oldtoken')
-    writeFileSync(lockPath(), stale)
-    writeFileSync(dead, `${DEAD}\ndeadguard\n`)
-    assert.equal(reclaimStale(lockPath(), stale), true)
+    writeFileSync(dead, `${DEAD}\ndeadguard\nabcd\ntesthost\n`)
+    assert.equal(reclaimStale(lockPath(), stale, identity), true)
     assert.equal(existsSync(lockPath()), false)
     assert.equal(existsSync(dead), true, 'the dead guard was left alone')
-    assert.deepEqual(leftovers(), [`${basename(dead)}`], 'only the dead guard remains; the escalated one was released')
+    assert.deepEqual(leftovers(), [basename(dead)], 'only the dead guard remains; the escalated one was released')
   })
 
-  it('stepping over dead guards is bounded', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), stale)
+  it('a guard of another host with a dead-looking pid is judged by its lease alone', () => {
+    setLockDiscriminatorForTest('testhost')
+    const identity = placeJudged()
+    writeFileSync(guardFor('oldtoken'), `${DEAD}\ndeadguard\nabcd\nelsewhere\n`)
+    assert.equal(reclaimStale(lockPath(), stale, identity), false)
+  })
+
+  it('stepping over abandoned guards is bounded', () => {
+    const identity = placeJudged()
     let name = guardFor('oldtoken')
     for (let i = 0; i < 6; i++) {
       writeFileSync(name, `${DEAD}\ng${i}\n`)
+      age(name)
       name = `${name}-g${i}`
     }
-    assert.equal(reclaimStale(lockPath(), stale), false, 'gives up and leaves the lock for the deadline')
+    assert.equal(reclaimStale(lockPath(), stale, identity), false, 'gives up and leaves the lock for the deadline')
     assert.equal(existsSync(lockPath()), true)
   })
 
-  it('an unparsable guard is abandoned only after a long time', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+  it('an unparsable guard is abandoned only when its lease has expired', () => {
+    const identity = placeJudged()
     const guard = guardFor('oldtoken')
-    writeFileSync(lockPath(), stale)
     writeFileSync(guard, '')
-    assert.equal(reclaimStale(lockPath(), stale), false)
-    const old = new Date(Date.now() - 120_000)
-    utimesSync(guard, old, old)
-    assert.equal(reclaimStale(lockPath(), stale), true)
+    assert.equal(reclaimStale(lockPath(), stale, identity), false)
+    age(guard)
+    assert.equal(reclaimStale(lockPath(), stale, identity), true)
   })
 
   it('two abandoners that both judge a dead guard cannot both proceed, and a live replacement is never vacated', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), stale)
-    writeFileSync(guardFor('oldtoken'), `${DEAD}\ndeadguard\n`)
+    setLockDiscriminatorForTest('testhost')
+    const identity = placeJudged()
+    writeFileSync(guardFor('oldtoken'), `${DEAD}\ndeadguard\nabcd\ntesthost\n`)
     let second = null
     try {
       // A holds the escalated guard and is paused; B arrives, judges the same dead guard,
-      // and finds A's guard (alive) in its way; then a live holder replaces the stale lock.
+      // and finds A's guard (held) in its way; then a live holder replaces the stale lock.
       setReclaimHookForTest(() => {
         setReclaimHookForTest()
-        second = reclaimStale(lockPath(), stale)
+        second = reclaimStale(lockPath(), stale, identity)
         rmSync(lockPath())
         writeFileSync(lockPath(), `${process.pid}\nlive-holder\n1\n`)
       })
-      assert.equal(reclaimStale(lockPath(), stale), false, 'A re-reads under its guard and finds a different lock')
+      assert.equal(reclaimStale(lockPath(), stale, identity), false, 'A re-reads under its guard and finds a different lock')
     } finally {
       setReclaimHookForTest()
     }
@@ -368,16 +393,15 @@ describe('store lock: never two holders', () => {
   })
 
   it('a reclaimer that pauses cannot vacate a lock created since: it re-reads under its guard', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), stale)
+    const identity = placeJudged()
     try {
       setReclaimHookForTest(() => {
         setReclaimHookForTest()
-        assert.equal(reclaimStale(lockPath(), stale), false, 'the second reclaimer yields')
+        assert.equal(reclaimStale(lockPath(), stale, identity), false, 'the second reclaimer yields')
         rmSync(lockPath())
         writeFileSync(lockPath(), `${process.pid}\nlive-holder\n1\n`)
       })
-      assert.equal(reclaimStale(lockPath(), stale), false)
+      assert.equal(reclaimStale(lockPath(), stale, identity), false)
     } finally {
       setReclaimHookForTest()
     }
@@ -385,37 +409,81 @@ describe('store lock: never two holders', () => {
     assert.deepEqual(leftovers(), [])
   })
 
+  it('a reclaimer that pauses cannot vacate a new lock with the same content: its mtime differs from the judged file\'s', () => {
+    const identity = placeJudged()
+    try {
+      setReclaimHookForTest(() => {
+        setReclaimHookForTest()
+        rmSync(lockPath())
+        writeFileSync(lockPath(), stale) // a new holder's lock, byte for byte the judged one
+      })
+      assert.equal(reclaimStale(lockPath(), stale, identity), false)
+    } finally {
+      setReclaimHookForTest()
+    }
+    assert.equal(readFileSync(lockPath(), 'utf8'), stale)
+    assert.deepEqual(leftovers(), [])
+  })
+
   it('a reclaimer releases only a guard that still holds its own token', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const identity = placeJudged()
     const guard = guardFor('oldtoken')
-    writeFileSync(lockPath(), stale)
     try {
       setReclaimHookForTest(() => { writeFileSync(guard, `${process.pid}\nsomeone-elses-token\n`) })
-      reclaimStale(lockPath(), stale)
+      reclaimStale(lockPath(), stale, identity)
     } finally {
       setReclaimHookForTest()
     }
     assert.ok(readFileSync(guard, 'utf8').includes('someone-elses-token'), 'not ours: left alone')
   })
 
-  it('guards left for a lock that is no longer current are collected by age; recent ones and the current lock\'s are kept', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+  it('guards left for a lock that is no longer current are collected once their lease expired; recent ones and the current lock\'s are kept', () => {
+    const current = '2147483646\ncurrenttoken\n0\n'
+    const identity = placeJudged(current)
     const oldGuard = guardFor('gone1')
     const youngGuard = guardFor('gone2')
     const currentChain = guardFor('currenttoken', 'g1')
-    writeFileSync(lockPath(), '2147483646\ncurrenttoken\n0\n')
     for (const g of [oldGuard, youngGuard, currentChain]) writeFileSync(g, `${DEAD}\nx\n`)
-    const old = new Date(Date.now() - 600_000)
-    for (const g of [oldGuard, currentChain]) utimesSync(g, old, old)
-    reclaimStale(lockPath(), '2147483646\ncurrenttoken\n0\n')
+    for (const g of [oldGuard, currentChain]) age(g)
+    reclaimStale(lockPath(), current, identity)
     assert.equal(existsSync(oldGuard), false, 'old guard for another lock: collected')
     assert.equal(existsSync(youngGuard), true, 'recent: kept')
     assert.equal(existsSync(currentChain), true, 'the current lock\'s own chain is not collected')
   })
 
+  it('guard collection is skipped when the current lock cannot be read', () => {
+    const identity = placeJudged('2147483646\ncurrenttoken\n0\n')
+    const otherGuard = guardFor('gone1')
+    writeFileSync(otherGuard, `${process.ppid}\nactive-reclaimer\n`)
+    age(otherGuard) // lease expired as far as a reader can tell, but its holder may be paused
+    setLockReadBackHookForTest((path, read) => (path === lockPath() ? undefined : read(path)))
+    try {
+      reclaimStale(lockPath(), stale, identity)
+    } finally {
+      setLockReadBackHookForTest()
+    }
+    assert.equal(existsSync(otherGuard), true, 'a failed read of the lock is not a reason to delete a guard')
+    reclaimStale(lockPath(), stale, identity) // the lock reads fine now
+    assert.equal(existsSync(otherGuard), false, 'collected once the read succeeds')
+  })
+
+  it('a guard that cannot be read at release is removed in the background, not stranded', async () => {
+    const identity = placeJudged()
+    setLockReadBackHookForTest((path, read) => (path.includes('.reclaim-') && inGuard ? undefined : read(path)))
+    let inGuard = false
+    setReclaimHookForTest(() => { inGuard = true })
+    try {
+      assert.equal(reclaimStale(lockPath(), stale, identity), true)
+    } finally {
+      setReclaimHookForTest()
+      setLockReadBackHookForTest()
+    }
+    assert.equal(leftovers().length, 1, 'the guard is still there when the reclaim returns')
+    assert.equal(await until(() => leftovers().length === 0, 10_000), true, 'the background release removed it')
+  })
+
   it('a stale lock that cannot be reclaimed does not freeze the event loop: it waits, ticks, and fails at the deadline', async () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), '2147483646\nstalelock\n0\n')
+    placeJudged('2147483646\nstalelock\n0\n')
     writeFileSync(guardFor('stalelock'), `${process.ppid}\nholder\n`) // a live reclaimer
     setLockWaitForTest(300)
     let ticks = 0
@@ -430,8 +498,7 @@ describe('store lock: never two holders', () => {
   })
 
   it('a stale lock is taken over and the critical section runs once, with the lock removed afterwards', async () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), `2147483646\nold-token\n0\n`) // a pid that is not alive
+    placeJudged()
     let runs = 0
     await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
     assert.equal(runs, 1)
@@ -446,6 +513,7 @@ describe('store lock: never two holders', () => {
     const rounds = 5
     for (let round = 0; round < rounds; round++) {
       writeFileSync(lockPath(), `2147483646\nstale-${round}\n0\n`) // a holder that is gone
+      age(lockPath())
       const run = (mode) => new Promise((resolve, reject) => {
         const child = fork(CONTENDER, [JSON.stringify({ storePath: folderTrustStorePath(), criticalFile: critical, logFile: log, iterations, mode })], {
           env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -552,9 +620,12 @@ describe('the launch decision never scans an unrecorded folder', () => {
   })
 })
 
-describe('a failed read-back of the lock just written', () => {
+const forceFallback = () => setLockLinkForTest(() => { throw Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP' }) })
+
+describe('a failed read-back of the lock just written (the fallback create)', () => {
   it('does not orphan the lock: ownership is retried, then our own file is removed, and the lock is taken on the next pass', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    forceFallback()
     let failures = 5 // the whole first read-back fails
     setLockReadBackHookForTest((path, read) => (failures-- > 0 ? undefined : read(path)))
     let runs = 0
@@ -580,27 +651,45 @@ describe('a release that fails does not strand our own lock', () => {
     // 20 times in place; elsewhere it gives up at once), fewer than the background retries allow.
     let failures = (process.platform === 'win32' ? 20 : 1) + 2
     setLockUnlinkForTest((path) => { if (failures-- > 0) throw eperm(); unlinkSync(path) })
+    await withInterprocessLock(folderTrustStorePath(), async () => {})
+    assert.equal(existsSync(lockPath()), true, 'the first release failed; the caller is not blocked')
+    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'the background retry removed it')
+  })
+
+  it('the background release does not give up after any fixed time: it removes the lock once the unlink works again', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+    let working = false
+    setLockUnlinkForTest((path) => { if (!working) throw eperm(); unlinkSync(path) })
+    await withInterprocessLock(folderTrustStorePath(), async () => {})
+    for (let i = 0; i < 24; i += 1) mock.timers.tick(5000) // two minutes
+    assert.equal(existsSync(lockPath()), true, 'still failing: still there')
+    working = true
+    for (let i = 0; i < 3 && existsSync(lockPath()); i += 1) mock.timers.tick(5000)
+    assert.equal(existsSync(lockPath()), false, 'removed by the retry that was still running')
+  })
+
+  it('a lock that cannot be read at release is removed in the background, not stranded', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     try {
-      await withInterprocessLock(folderTrustStorePath(), async () => {})
-      assert.equal(existsSync(lockPath()), true, 'the first release failed; the caller is not blocked')
-      assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'the background retry removed it')
+      await withInterprocessLock(folderTrustStorePath(), async () => {
+        setLockReadBackHookForTest(() => undefined) // the release cannot read the file
+      })
     } finally {
-      setLockUnlinkForTest()
+      setLockReadBackHookForTest()
     }
+    assert.equal(existsSync(lockPath()), true, 'ownership could not be checked, so nothing was unlinked yet')
+    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'the background release removed it')
   })
 
   it('while it still cannot be removed, our own unowned lock is reclaimable: a later call proceeds', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     setLockUnlinkForTest(() => { throw eperm() })
-    try {
-      await withInterprocessLock(folderTrustStorePath(), async () => {})
-      assert.equal(existsSync(lockPath()), true)
-      let ran = 0
-      await withInterprocessLock(folderTrustStorePath(), async () => { ran += 1 })
-      assert.equal(ran, 1)
-    } finally {
-      setLockUnlinkForTest()
-    }
+    await withInterprocessLock(folderTrustStorePath(), async () => {})
+    assert.equal(existsSync(lockPath()), true)
+    let ran = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { ran += 1 })
+    assert.equal(ran, 1)
   })
 
   it('two in-process callers are still never inside together: a lock a live call owns is not an orphan', async () => {
@@ -618,10 +707,12 @@ describe('a release that fails does not strand our own lock', () => {
   })
 })
 
-describe('store lock: lock identity, nonce and own-process guards', () => {
+describe('store lock: creation, lease, fencing', () => {
   const lockPath = () => `${folderTrustStorePath()}.lock`
   const eperm = () => Object.assign(new Error('EPERM'), { code: 'EPERM' })
-  const leftovers = () => readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.reclaim-'))
+  const age = (path, ms = 600_000) => { const t = new Date(Date.now() - ms); utimesSync(path, t, t) }
+  const tmpFiles = () => readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.lock.tmp-'))
+  const DEAD = '2147483646'
   // The nonce this process writes into its locks, read from a lock it writes.
   const ownNonce = async () => {
     let nonce = null
@@ -629,102 +720,201 @@ describe('store lock: lock identity, nonce and own-process guards', () => {
     assert.match(nonce, /^[0-9a-f]+$/)
     return nonce
   }
-  const old = (path) => { const t = new Date(Date.now() - 600_000); utimesSync(path, t, t) }
-
-  it('a lock with no token is reclaimed only as the file that was judged: a new holder\'s still-empty lock is left alone', () => {
+  const bodyOf = (pid, token, nonce, disc) => `${pid}\n${token}\n1\n${nonce ?? ''}\n${disc ?? ''}\n`
+  const freshLock = (content) => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), '')
-    old(lockPath())
-    const identity = statLockIdentity(lockPath())
-    try {
-      // The reclaimer has judged the empty lock and stalls; its holder's lock is replaced by a new holder's, not yet written.
-      setReclaimHookForTest(() => {
-        setReclaimHookForTest()
-        rmSync(lockPath())
-        writeFileSync(lockPath(), '')
-      })
-      assert.equal(reclaimStale(lockPath(), '', identity), false)
-    } finally {
-      setReclaimHookForTest()
-    }
-    assert.equal(existsSync(lockPath()), true, 'the new holder\'s lock was not removed')
-    assert.deepEqual(leftovers(), [])
+    writeFileSync(lockPath(), content)
+  }
+
+  it('the lock is created whole: it is never observed empty, and no temp file is left', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const seen = { beforeLink: null, tmpBody: null, afterLink: null, links: 0 }
+    setLockCreateHookForTest((lock, tmp) => {
+      seen.beforeLink = existsSync(lock) // a contender looking now finds no lock, not an empty one
+      seen.tmpBody = readFileSync(tmp, 'utf8')
+    })
+    setLockLinkForTest((from, to) => {
+      seen.links += 1
+      linkSync(from, to)
+      seen.afterLink = readFileSync(to, 'utf8') // the first moment the lock exists
+    })
+    await withInterprocessLock(folderTrustStorePath(), async () => {})
+    assert.equal(seen.links, 1, 'created by link')
+    assert.equal(seen.beforeLink, false)
+    assert.match(seen.tmpBody, /^\d+\n\S+\n\d+\n[0-9a-f]+\n/)
+    assert.equal(seen.afterLink, seen.tmpBody, 'the lock appears complete')
+    assert.deepEqual(tmpFiles(), [])
+    assert.equal(existsSync(lockPath()), false)
   })
 
-  it('a lock with no token is reclaimed when it is still the judged file, and not without an identity', () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), '')
-    old(lockPath())
-    assert.equal(reclaimStale(lockPath(), ''), false, 'no identity: not reclaimed')
-    assert.equal(reclaimStale(lockPath(), '', { ino: 0n, mtimeNs: 1n, size: 0n }), false, 'an unreliable identity: not reclaimed')
-    assert.equal(existsSync(lockPath()), true)
-    const identity = statLockIdentity(lockPath())
-    // Where the file system reports no usable inode the safe answer is to leave the lock.
-    assert.equal(reclaimStale(lockPath(), '', identity), identity.ino !== 0n)
-  })
-
-  it('a stale empty lock is still taken over by a waiting caller', async () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    writeFileSync(lockPath(), '')
-    old(lockPath())
-    setLockWaitForTest(1000)
-    let runs = 0
-    try {
-      await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
-      assert.equal(runs, 1)
-    } catch (err) {
-      // Only a file system without usable inodes may refuse, and then it must leave the lock.
-      assert.match(err.message, /locked by another process/)
-      assert.equal(statLockIdentity(lockPath()).ino, 0n)
-    } finally {
-      setLockWaitForTest()
-    }
-  })
-
-  it('a lock with our pid and another nonce is judged by liveness (live); with our nonce it is a leftover; the old format has no nonce', async () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    const nonce = await ownNonce()
-    const other = nonce === 'abcd1234' ? 'dcba4321' : 'abcd1234'
-    const bodyWith = (n) => `${process.pid}\nnotinflight\n1\n${n}\n`
-    assert.equal(lockIsStale(lockPath(), bodyWith(other)), false, 'another process with our pid: live')
-    assert.equal(lockIsStale(lockPath(), `${process.pid}\nnotinflight\n1\n`), false, 'previous format: judged by liveness')
-    assert.equal(lockIsStale(lockPath(), bodyWith(nonce)), true, 'ours, no call owns it: a leftover')
-    // A previous-format lock of a dead holder is still reclaimed.
-    assert.equal(lockIsStale(lockPath(), '2147483646\noldtoken\n0\n'), true)
-
-    writeFileSync(lockPath(), bodyWith(other))
-    setLockWaitForTest(200)
+  it('a lock that exists is contention, not an error, and leaves no temp file', async () => {
+    freshLock(bodyOf(process.ppid, 'other', null, null))
+    setLockWaitForTest(150)
     try {
       await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
     } finally {
       setLockWaitForTest()
     }
-    assert.equal(readFileSync(lockPath(), 'utf8'), bodyWith(other), 'the live holder\'s lock was not removed')
-    writeFileSync(lockPath(), bodyWith(nonce))
-    let runs = 0
-    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
-    assert.equal(runs, 1, 'our own leftover is taken over')
+    assert.deepEqual(tmpFiles(), [])
+    assert.ok(readFileSync(lockPath(), 'utf8').includes('other'))
   })
 
-  it('a guard with our pid and nonce is a leftover (stepped over); with our pid and another nonce it is judged by liveness', async () => {
+  it('where linking is unsupported the lock is created in place and confirmed', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    let links = 0
+    setLockLinkForTest(() => { links += 1; throw Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP' }) })
+    let ran = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => {
+      ran += 1
+      assert.match(readFileSync(lockPath(), 'utf8'), /^\d+\n\S+\n\d+\n[0-9a-f]+\n/)
+    })
+    assert.equal(links, 1)
+    assert.equal(ran, 1)
+    assert.equal(existsSync(lockPath()), false)
+    assert.deepEqual(tmpFiles(), [])
+  })
+
+  it('temp files left by a creator that died are collected by age; a recent one is kept', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const oldTmp = `${lockPath()}.tmp-1.aaaa`
+    const youngTmp = `${lockPath()}.tmp-2.bbbb`
+    writeFileSync(oldTmp, 'x')
+    writeFileSync(youngTmp, 'x')
+    age(oldTmp)
+    await withInterprocessLock(folderTrustStorePath(), async () => {})
+    assert.equal(existsSync(oldTmp), false)
+    assert.equal(existsSync(youngTmp), true)
+  })
+
+  it('a lock with a live foreign pid but an expired lease is reclaimed', async () => {
+    freshLock(bodyOf(process.ppid, 'old-holder', 'abcd', 'elsewhere'))
+    setLockWaitForTest(150)
+    let runs = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 }).catch(() => {})
+    assert.equal(runs, 0, 'a current lease is live whatever the pid')
+    age(lockPath())
+    setLockWaitForTest()
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    assert.equal(runs, 1)
+  })
+
+  it('a lock with an expired lease and no usable pid (empty, unparsable) is reclaimed too', async () => {
+    for (const content of ['', 'garbage']) {
+      freshLock(content)
+      age(lockPath())
+      let runs = 0
+      await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+      assert.equal(runs, 1)
+    }
+  })
+
+  it('a live holder that heartbeats is never judged stale, however many leases pass', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    let content = null
+    const holder = withInterprocessLock(folderTrustStorePath(), async () => { await gate })
+    await Promise.resolve()
+    content = readFileSync(lockPath(), 'utf8')
+    for (let i = 0; i < 24; i += 1) mock.timers.tick(3750) // 90 s: six leases
+    assert.equal(lockIsStale(lockPath(), content), false, 'its lease was kept current')
+    mock.timers.tick(3750 * 8)
+    assert.equal(lockIsStale(lockPath(), content), false)
+    release()
+    await holder
+    assert.equal(existsSync(lockPath()), false)
+  })
+
+  it('a leftover of an earlier process with our pid is reclaimed at once when written on this host; another host\'s by lease only', async () => {
+    setLockDiscriminatorForTest('testhost')
     const nonce = await ownNonce()
     const other = nonce === 'abcd1234' ? 'dcba4321' : 'abcd1234'
-    const stale = '2147483646\noldtoken\n0\n'
-    const guard = `${lockPath()}.reclaim-oldtoken`
-    writeFileSync(lockPath(), stale)
-    writeFileSync(guard, `${process.pid}\nleftover\n${other}\n`)
-    assert.equal(reclaimStale(lockPath(), stale), false, 'another process\'s guard (same pid) is live')
-    assert.equal(existsSync(lockPath()), true)
-    rmSync(guard)
-    writeFileSync(guard, `${process.pid}\nleftover\n${nonce}\n`)
-    assert.equal(reclaimStale(lockPath(), stale), true, 'our own leftover guard is stepped over')
-    assert.equal(existsSync(lockPath()), false)
-    assert.equal(existsSync(guard), true, 'the leftover guard itself is not deleted')
+    const L = () => lockPath()
+    freshLock(bodyOf(process.pid, 'prev', other, 'testhost'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), true, 'our pid, an earlier nonce, same host')
+    freshLock(bodyOf(process.pid, 'prev', other, 'elsewhere'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), false, 'another host: our pid means nothing')
+    freshLock(bodyOf(process.pid, 'prev', nonce, 'testhost'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), true, 'ours, but no call owns it')
+    freshLock(bodyOf(DEAD, 'gone', other, 'testhost'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), true, 'dead pid, same host')
+    freshLock(bodyOf(DEAD, 'gone', other, 'elsewhere'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), false, 'dead-looking pid of another host: lease only')
+    age(L())
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), true, '...and the lease expired')
+    freshLock(bodyOf(process.ppid, 'live', other, 'testhost'))
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), false, 'a live pid on this host')
+    freshLock(`${DEAD}\nold-format\n0\n`)
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), false, 'old format: lease only')
+    age(L())
+    assert.equal(lockIsStale(L(), readFileSync(L(), 'utf8')), true)
+    // And through the real path: a restart that reused our pid finds the earlier run's lock.
+    freshLock(bodyOf(process.pid, 'prev', other, 'testhost'))
+    let runs = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    assert.equal(runs, 1)
+  })
+
+  it('a reclaimer that stalls after judging cannot remove a lock a new holder created since, even one with the same bytes', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const judged = bodyOf(DEAD, 'T1', null, null)
+    writeFileSync(lockPath(), judged)
+    age(lockPath())
+    const identity = statLockIdentity(lockPath())
+    setReclaimHookForTest(() => {
+      setReclaimHookForTest()
+      // The new holder creates its lock whole, at the same path, while the reclaimer is paused.
+      rmSync(lockPath())
+      const tmp = `${lockPath()}.tmp-x`
+      writeFileSync(tmp, judged)
+      linkSync(tmp, lockPath())
+      rmSync(tmp)
+    })
+    assert.equal(reclaimStale(lockPath(), judged, identity), false)
+    assert.equal(readFileSync(lockPath(), 'utf8'), judged, 'the new holder\'s lock is still there')
+  })
+
+  it('a holder whose lock was replaced aborts its write and does not overwrite the records', async () => {
+    const dir = project('fenced')
+    const digest = scanFolderSettings(dir).digest
+    setLockFenceHookForTest((lock) => {
+      rmSync(lock)
+      writeFileSync(lock, `${process.ppid}\nsomeone-else\n1\n`) // reclaimed and re-taken while we worked
+    })
+    await assert.rejects(trustFolder(dir, digest), /lock was lost/)
+    setLockFenceHookForTest()
+    assert.equal(existsSync(folderTrustStorePath()), false, 'the records were not written')
+    assert.deepEqual(readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.endsWith('.tmp')), [], 'no temp file left')
+    assert.ok(readFileSync(lockPath(), 'utf8').includes('someone-else'), 'the other holder\'s lock is not ours to remove')
+    rmSync(lockPath())
+    assert.equal((await trustFolder(dir, digest)).ok, true, 'with the lock ours, the write goes through')
+  })
+
+  it('a lock that cannot be read after it was written is not unlinked blind: only an absent or our own file is removed', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    forceFallback()
+    const unlinks = []
+    setLockUnlinkForTest((path) => { unlinks.push(path); throw eperm() })
+    setLockReadBackHookForTest(() => undefined)
+    setLockWaitForTest(100)
+    let atGiveUp = null
+    try {
+      // Read in the rejection's own microtask: no background retry can have run yet.
+      await withInterprocessLock(folderTrustStorePath(), async () => {}).catch((err) => { atGiveUp = { err, unlinks: unlinks.length } })
+    } finally {
+      setLockReadBackHookForTest()
+      setLockWaitForTest()
+    }
+    assert.match(atGiveUp.err.message, /locked by another process/)
+    assert.equal(atGiveUp.unlinks, 0, 'nothing was unlinked while ownership could not be read')
+    setLockUnlinkForTest()
+    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'and the background release removed it')
   })
 
   it('a failed read-back, release and later reads leave no file behind: the give-up schedules the background release', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    forceFallback()
     setLockReadBackHookForTest(() => undefined) // every ownership read fails
     setLockUnlinkForTest(() => { throw eperm() })
     setLockWaitForTest(150)
@@ -742,31 +932,14 @@ describe('store lock: lock identity, nonce and own-process guards', () => {
     assert.equal(ran, 1)
   })
 
-  it('a lock that cannot be read after it was written is not unlinked blind: only an absent or our own file is removed', async () => {
+  it('our token is registered before the lock file exists and removed after it is unlinked', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    let unlinks = 0
-    setLockUnlinkForTest((path) => { unlinks += 1; unlinkSync(path) })
-    setLockReadBackHookForTest(() => undefined)
-    setLockWaitForTest(100)
-    try {
-      await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
-      assert.equal(unlinks, 0, 'nothing was unlinked while ownership could not be read')
-    } finally {
-      setLockReadBackHookForTest()
-      setLockWaitForTest()
-    }
-    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true)
-    setLockUnlinkForTest()
-  })
-
-  it('our token is registered before the lock file is written and removed after it is unlinked', async () => {
-    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    const seen = { written: null, unlinking: null }
-    // After the write: a lock of ours that no in-flight call owns would be judged stale, so a registered token reads as live.
-    setLockReadBackHookForTest((path, read) => {
-      const content = read(path)
-      if (seen.written === null) seen.written = lockIsStale(path, content)
-      return content
+    const seen = { created: null, unlinking: null }
+    // The moment the lock exists (the link): a lock of ours that no in-flight call owns would be
+    // judged stale, so a registered token reads as live.
+    setLockLinkForTest((from, to) => {
+      linkSync(from, to)
+      seen.created = lockIsStale(to, readFileSync(to, 'utf8'))
     })
     // During the release unlink: still registered, so still live.
     setLockUnlinkForTest((path) => {
@@ -774,13 +947,8 @@ describe('store lock: lock identity, nonce and own-process guards', () => {
       unlinkSync(path)
     })
     let body = null
-    try {
-      await withInterprocessLock(folderTrustStorePath(), async () => { body = readFileSync(lockPath(), 'utf8') })
-    } finally {
-      setLockReadBackHookForTest()
-      setLockUnlinkForTest()
-    }
-    assert.equal(seen.written, false, 'registered before the write')
+    await withInterprocessLock(folderTrustStorePath(), async () => { body = readFileSync(lockPath(), 'utf8') })
+    assert.equal(seen.created, false, 'registered before the lock exists')
     assert.equal(seen.unlinking, false, 'still registered while the file is being unlinked')
     assert.equal(lockIsStale(lockPath(), body), true, 'removed from the registry once the call is over')
   })

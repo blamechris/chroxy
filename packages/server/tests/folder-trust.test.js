@@ -761,7 +761,10 @@ describe('cross-process store lock', () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const dead = spawn(process.execPath, ['-e', ''])
     await new Promise((resolve) => dead.on('exit', resolve))
-    writeFileSync(`${folderTrustStorePath()}.lock`, `${dead.pid}\nold-token\n${Date.now()}\n`)
+    const lock = `${folderTrustStorePath()}.lock`
+    writeFileSync(lock, `${dead.pid}\nold-token\n${Date.now()}\n`)
+    const old = new Date(Date.now() - 3600_000)
+    utimesSync(lock, old, old) // an old-format lock is judged by its lease
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     const other = join(root, 'home', 'other')
     write(join(other, '.mcp.json'), { mcpServers: {} })
@@ -771,13 +774,11 @@ describe('cross-process store lock', () => {
     assert.deepEqual(readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.stale.') || n.endsWith('.lock')), [])
   })
 
-  it('a live pid is never robbed because its lock is old', async () => {
+  it('a live holder is never robbed while its lease is current', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const lock = `${folderTrustStorePath()}.lock`
     writeFileSync(lock, `${process.ppid}\nlive-token\n${Date.now()}\n`)
-    const old = new Date(Date.now() - 3600_000)
-    utimesSync(lock, old, old)
     let done = false
     const p = trust(cwd).then((r) => { done = true; return r })
     await new Promise((r) => setTimeout(r, 200))
