@@ -92,4 +92,27 @@ describe('first-run hint gating (#8231)', () => {
     rerender(<Harness sid="s1" messages={[msg('a')]} />)
     expect(hint()).toBeNull()
   })
+
+  it('a key change shows no hint in the very render it happens (no stale settled frame)', () => {
+    const seen: boolean[] = []
+    function Probe({ k }: { k: string }) {
+      // Records what ChatView committed for this render pass via a layout-time DOM read.
+      return (
+        <div ref={(el) => { if (el) seen.push(el.querySelector('[data-testid="chat-empty-hint"]') !== null) }}>
+          <ChatView messages={[]} isStreaming={false} settleKey={k} />
+        </div>
+      )
+    }
+    const { rerender } = render(<Probe k="A" />)
+    settle()
+    expect(hint()).not.toBeNull()
+    seen.length = 0
+    // Not wrapped in act's effect flush: rerender is, but the ref callback sees
+    // the FIRST committed DOM of the new key before effects run.
+    rerender(<Probe k="B" />)
+    expect(seen[0]).toBe(false)
+    expect(hint()).toBeNull()
+    settle()
+    expect(hint()).not.toBeNull()
+  })
 })

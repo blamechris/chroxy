@@ -658,10 +658,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, settl
 
   // #8231 — settle window for the first-run hint: restarts whenever the
   // (session, phase) identity changes, and is torn down on change/unmount.
-  const [settled, setSettled] = useState(false)
+  // DERIVED from the key the timer last fired for, not reset in an effect: an
+  // effect-reset would leave `settled` true for the one render in which the key
+  // changed, painting the hint for a commit.
+  // Boxed so an undefined `settleKey` (no prop) can still settle.
+  const [settledFor, setSettledFor] = useState<{ key: string | undefined } | null>(null)
+  const settled = settledFor !== null && settledFor.key === settleKey
   useEffect(() => {
-    setSettled(false)
-    const timer = setTimeout(() => setSettled(true), EMPTY_HINT_SETTLE_MS)
+    const timer = setTimeout(() => setSettledFor({ key: settleKey }), EMPTY_HINT_SETTLE_MS)
     return () => clearTimeout(timer)
   }, [settleKey])
 

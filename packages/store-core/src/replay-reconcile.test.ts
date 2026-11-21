@@ -2037,4 +2037,32 @@ describe('reactive replay-window reading (#8231)', () => {
     reconcileReplayEnd('s1', [])
     expect(isReplayInProgress('s1')).toBe(false)
   })
+
+  it('a throwing listener neither skips a later listener nor aborts reconcile cleanup', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const later = vi.fn()
+    const offA = subscribeReplayWindows(() => { throw new Error('boom') })
+    const offB = subscribeReplayWindows(later)
+    try {
+      noteLivePromptDuringReplay('s1', 'q1')
+      reconcileReplayStart('s1', true, [])
+      expect(later).toHaveBeenCalledTimes(1)
+      noteLivePromptDuringReplay('s1', 'q2')
+      reconcileReplayEnd('s1', [])
+      expect(later).toHaveBeenCalledTimes(2)
+      // cleanup completed: window closed, ledger released to the sweep slot, rebuild over
+      expect(isReplayInProgress('s1')).toBe(false)
+      expect(isRebuildInProgress('s1')).toBe(false)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+      expect(getLiveReplayLedgerSessionIds().includes('s1')).toBe(false)
+      // a subsequent replay behaves normally
+      reconcileReplayStart('s1', true, [])
+      expect(isRebuildInProgress('s1')).toBe(true)
+      reconcileReplayEnd('s1', [])
+      expect(isRebuildInProgress('s1')).toBe(false)
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      offA(); offB(); warn.mockRestore()
+    }
+  })
 })

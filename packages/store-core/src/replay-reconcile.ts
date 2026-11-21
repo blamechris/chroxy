@@ -180,8 +180,17 @@ const _replayWindowOpen = new Map<string, ReplayWindow>()
 // close, abandon (`resetReplayReconcile`) and drop (`dropReplaySessionState`),
 // which is every place the map's membership changes.
 const _replayWindowListeners = new Set<() => void>()
+// Called LAST in each mutator, once every map is consistent, and each listener
+// is isolated: this module is shared with the mobile app, and a throwing UI
+// listener must neither skip a later listener nor abort the cleanup around it.
 function notifyReplayWindowChange(): void {
-  for (const listener of [..._replayWindowListeners]) listener()
+  for (const listener of [..._replayWindowListeners]) {
+    try {
+      listener()
+    } catch (err) {
+      console.warn('[replay-reconcile] replay-window listener threw (#8231):', err)
+    }
+  }
 }
 
 /** Subscribe to replay-window open/close changes. Returns the unsubscribe. */
@@ -840,7 +849,6 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   // like the baseline, never a cursor: a fresh auth must not inherit either.
   const hadOpenWindow = _replayWindowOpen.size > 0
   _replayWindowOpen.clear()
-  if (hadOpenWindow) notifyReplayWindowChange()
   _liveDuringReplay.clear()
   _sweepableLedger = null
   // #7519 — the frame scope is per-connection state too. `endReplayFrame`'s
@@ -858,6 +866,7 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
     _historyCursors.clear()
     _openStreams.clear()
   }
+  if (hadOpenWindow) notifyReplayWindowChange()
 }
 
 /**
@@ -950,7 +959,6 @@ export function reconcileReplayStart(
     // nowhere else, so the captured prefix is the OUTERMOST start's by
     // construction.
     _replayWindowOpen.set(sessionId, replayWindow)
-    notifyReplayWindowChange()
     // Drop the previous window's live-arrival ids: every prompt already on
     // screen pre-dates this replay, so nothing about it is vouched for by this
     // window. A NESTED start must NOT do this — the outer window is still open
@@ -982,6 +990,7 @@ export function reconcileReplayStart(
     if (!_rebuildBaseline.has(sessionId)) {
       _rebuildBaseline.set(sessionId, replayWindow.baseline)
     }
+    if (isOutermost) notifyReplayWindowChange()
     return { rebuildInProgress: true }
   }
   // Delta replay: append-only, and it contributes no baseline of its own. It
@@ -991,7 +1000,10 @@ export function reconcileReplayStart(
   // Since #7492 that rebuild can be one a nested full start installed under a
   // delta-opened window, so this stays keyed on "did I open the window", not on
   // "was the outermost replay a full one".
-  if (isOutermost) _rebuildBaseline.delete(sessionId)
+  if (isOutermost) {
+    _rebuildBaseline.delete(sessionId)
+    notifyReplayWindowChange()
+  }
   // Reports the session's rebuild state, not this replay's kind — a delta
   // nested inside a live full rebuild is still inside a rebuild.
   return { rebuildInProgress: isRebuildInProgress(sessionId) }
@@ -1664,7 +1676,6 @@ function closeReplayWindow(sessionId: string): void {
   // Last (or unmatched) end — the whole record goes, its baseline with it
   // (#7492; the baseline carries `openLen` AND `prefixIds` since #7524).
   _replayWindowOpen.delete(sessionId)
-  notifyReplayWindowChange()
   const streams = _openStreams.get(sessionId)
   if (streams) {
     // A live turn end that landed inside the window: apply it now (S-1).
@@ -1676,6 +1687,7 @@ function closeReplayWindow(sessionId: string): void {
   const ids = _liveDuringReplay.get(sessionId)
   _liveDuringReplay.delete(sessionId)
   _sweepableLedger = ids && ids.size > 0 ? { sessionId, ids } : null
+  notifyReplayWindowChange()
 }
 
 /**
@@ -1722,13 +1734,14 @@ export function getLiveReplayLedgerSessionIds(): string[] {
 export function dropReplaySessionState(sessionId: string | null | undefined): void {
   if (!sessionId) return
   _rebuildBaseline.delete(sessionId)
-  if (_replayWindowOpen.delete(sessionId)) notifyReplayWindowChange()
+  const hadWindow = _replayWindowOpen.delete(sessionId)
   _liveDuringReplay.delete(sessionId)
   _historyCursors.delete(sessionId)
   _openStreams.delete(sessionId)
   if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
   // #6808 — a parked checkpoint-restore notice is per-session state too.
   dropPendingRestoreNotice(sessionId)
+  if (hadWindow) notifyReplayWindowChange()
 }
 
 /** Was this prompt recorded as a live arrival during the current window? */
