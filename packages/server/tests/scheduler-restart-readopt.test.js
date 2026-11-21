@@ -377,6 +377,7 @@ describe('scheduler adopts its restored sessions after a restart (#8571)', () =>
       })
       await handleSessionMessage({}, { id: 'c1', activeSessionId: a, clientCapabilities: new Set() }, { type: 'input', data: 'my own work', clientMessageId: 'u1' }, ctx)
       assert.equal(second.listScheduledTaskSessions().some((x) => x.sessionId === a), false, 'the hint was released')
+      await waitFor(() => linkOnDisk(a) === undefined, 'the release to reach the state file before anything else wrote it')
 
       await second.destroySessionLocked(b)
       engine.refresh()
@@ -385,9 +386,18 @@ describe('scheduler adopts its restored sessions after a restart (#8571)', () =>
       engine.refresh()
       await settleMs(50)
       assert.ok(second.getSession(a), 'the user\'s session survived the task')
-      await waitFor(() => linkOnDisk(a) === undefined, 'the release to reach the state file')
       const third = restart(second)
       assert.deepEqual(third.listScheduledTaskSessions(), [], 'a restart agrees')
+    })
+
+    it('releaseRestoreHint reaches the state file on its own (nothing else touches the manager)', async () => {
+      const task = addTask()
+      const first = newMgr()
+      const a = linked(first, task.id)
+      const second = restart(first, { persistDebounceMs: 10 })
+      assert.equal(linkOnDisk(a), task.id, 'control: the hint is on disk after the restore')
+      assert.equal(second.releaseRestoreHint(a), true)
+      await waitFor(() => linkOnDisk(a) === undefined, 'the debounced write to drop the key')
     })
 
     it('releaseRestoreHint is a no-op for an owned session and for one with no hint', () => {
@@ -427,6 +437,30 @@ describe('scheduler adopts its restored sessions after a restart (#8571)', () =>
       store.remove(task.id)
       engine.refresh()
       await waitFor(() => second.getSession(a) == null, 'the session to be closed with its task')
+    })
+
+    it('a live mapped session that is neither owned nor hinted is dropped, not driven', async () => {
+      const task = addTask()
+      const first = newMgr()
+      const a = linked(first, task.id)
+      first.serializeState()
+      first.destroyAll()
+      NoopProvider.failStart = true
+      const second = newMgr()
+      second.restoreState()
+      const engine = newEngine(second)
+      engine.start()
+      await waitFor(() => second.getFailedRestores().length === 1, 'the start failure to park A')
+      NoopProvider.failStart = false
+      assert.ok((await second.retryFailedRestore(a)).ok)
+      assert.equal(engine.scheduledSessionIds.get(task.id), a, 'control: still mapped, back with only the hint')
+      assert.equal(second.releaseRestoreHint(a), true, 'a person took it over')
+      engine.refresh()
+      assert.equal(engine.scheduledSessionIds.has(task.id), false, 'the mapping was dropped')
+      const fired = engine._resolveSession(task, { permissionMode: 'approve' })
+      assert.notEqual(fired, a, 'the person\'s session is not driven')
+      assert.ok(second.getSession(a), 'and it was not destroyed')
+      assert.deepEqual(codes(second, a), [])
     })
 
     it('a fire reasserts ownership before reusing a live mapped session', async () => {
