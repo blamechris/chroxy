@@ -828,7 +828,6 @@ describe('claude-byok: only an abort is the Stop (#9241)', () => {
             session.markStopRequested()
             session.interrupt()
             throw failWith()
-            // eslint-disable-next-line no-unreachable
             yield undefined
           },
           async finalMessage() { throw failWith() },
