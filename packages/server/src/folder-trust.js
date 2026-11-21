@@ -707,17 +707,50 @@ const readLock = (lockPath) => {
   }
 }
 
+/** The read-back seam also covers the ownership reads of the acquire path, so a test can make every one of them fail. */
+const ownershipRead = (lockPath) => (lockReadBackHook ? lockReadBackHook(lockPath, readLockForOwnership) : readLockForOwnership(lockPath))
+
+/**
+ * Random per process, written into every lock and guard this process creates. A pid alone does
+ * not identify this process: another daemon sharing the directory from a different PID namespace,
+ * or an earlier run that had the same pid, can carry it too.
+ */
+const PROCESS_NONCE = randomBytes(8).toString('hex')
+
+/** The nonce in a lock body (its fourth line) or a guard body (its third), or null for the previous format. */
+const nonceOf = (content, line) => {
+  const n = content.split('\n')[line]
+  return n && /^[0-9a-f]+$/.test(n) ? n : null
+}
+
+/**
+ * The file identity of a lock-protocol file: inode, mtime (ns) and size. Used to tell a lock
+ * that has no token apart from a later one with the same (empty) content.
+ */
+export function statLockIdentity(path) {
+  try {
+    const st = statSync(path, { bigint: true })
+    return { ino: st.ino, mtimeNs: st.mtimeNs, size: st.size }
+  } catch {
+    return null
+  }
+}
+/** A zero inode is what some Windows file systems report for every file: it identifies nothing. */
+const identityReliable = (id) => id !== null && id !== undefined && id.ino !== 0n
+const sameIdentity = (a, b) => identityReliable(a) && identityReliable(b) && a.ino === b.ino && a.mtimeNs === b.mtimeNs && a.size === b.size
+
 /**
  * A lock is stale only when its holder is gone: the recorded pid is not alive. A
  * live pid is never robbed because the lock is old. A lock whose holder cannot be
  * read (it died between creating the file and writing it) goes stale by age.
  */
-function lockIsStale(lockPath, content) {
+export function lockIsStale(lockPath, content) {
   if (content === null) return false
   const pid = Number.parseInt(content.split('\n')[0], 10)
   if (Number.isInteger(pid) && pid > 0) {
     // This process's own lock that none of its in-flight calls owns: a release that failed.
-    if (pid === process.pid) return !liveTokens.has(content.split('\n')[1])
+    // Only when the nonce is ours too; a lock with our pid and another (or no) nonce is judged by liveness.
+    if (pid === process.pid && nonceOf(content, 3) === PROCESS_NONCE) return !liveTokens.has(content.split('\n')[1])
     try {
       process.kill(pid, 0)
       return false
@@ -768,8 +801,13 @@ const RELEASE_RETRY_MAX_MS = 30_000
  */
 function releaseInBackground(lockPath, token, startedAt = Date.now(), delayMs = 50) {
   const timer = setTimeout(() => {
-    const held = readLock(lockPath)
-    if (held === null || !held.includes(`\n${token}\n`)) return
+    const held = readLockForOwnership(lockPath)
+    if (held === null) return
+    if (held === undefined || !held.includes(`\n${token}\n`)) {
+      // Unreadable now: ownership is unknown, so try again later. Anything readable that is not ours is not ours to remove.
+      if (held === undefined && Date.now() - startedAt < RELEASE_RETRY_MAX_MS) releaseInBackground(lockPath, token, startedAt, Math.min(delayMs * 2, 2000))
+      return
+    }
     let removed = false
     try { unlinkImpl(lockPath); removed = true } catch (err) { removed = err?.code === 'ENOENT' }
     if (!removed && Date.now() - startedAt < RELEASE_RETRY_MAX_MS) {
@@ -795,11 +833,19 @@ const pidAlive = (pid) => {
   }
 }
 
+/** Tokens of the guards this process's reclaims hold right now. */
+const heldGuardTokens = new Set()
+
 /** A guard is abandoned only when its holder is gone, as for the lock; age decides only an unparsable one. */
 function guardIsAbandoned(guard, content) {
   if (content === null) return false
   const pid = Number.parseInt(content.split('\n')[0], 10)
-  if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid)
+  if (Number.isInteger(pid) && pid > 0) {
+    // Reclaiming is synchronous, so a guard of this process (pid and nonce) that no reclaim in
+    // progress holds is a leftover of an earlier call. Another nonce, or none, is judged by liveness.
+    if (pid === process.pid && nonceOf(content, 2) === PROCESS_NONCE) return !heldGuardTokens.has(content.split('\n')[1])
+    return !pidAlive(pid)
+  }
   try {
     return Date.now() - statSync(guard).mtimeMs > RECLAIM_GUARD_UNPARSABLE_MS
   } catch {
@@ -808,9 +854,18 @@ function guardIsAbandoned(guard, content) {
 }
 
 /** The holder's token in a lock or guard body (its second line), or a stand-in derived from the content. */
-const tokenOf = (content) => {
+const hasToken = (content) => {
   const t = content.split('\n')[1]
-  return t && /^[\w.-]+$/.test(t) && !t.includes('-') ? t : `u${sha256Hex(content).slice(0, 16)}`
+  return Boolean(t) && /^[\w.-]+$/.test(t) && !t.includes('-')
+}
+const tokenOf = (content) => (hasToken(content) ? content.split('\n')[1] : `u${sha256Hex(content).slice(0, 16)}`)
+/**
+ * What a guard is named for: the token of a lock that has one. A lock without a token (empty or
+ * unparsable) shares its content hash with every other such lock, so its file identity is part of the name.
+ */
+const lockKey = (content, identity) => {
+  if (hasToken(content)) return tokenOf(content)
+  return identityReliable(identity) ? `${tokenOf(content)}i${identity.ino}m${identity.mtimeNs}s${identity.size}` : tokenOf(content)
 }
 
 /** Test seam: called while a reclaim holds its guard, before it re-reads the lock. */
@@ -846,16 +901,23 @@ function collectGuards(lockPath, currentToken) {
  * is only ever created once and removed by its own holder; the judged lock's holder is dead,
  * so nothing else can replace that lock between the re-read and the unlink. Leftover guards
  * for a lock that is no longer current are collected by age.
+ *
+ * A lock without a token is identified by its file identity as well (see `statLockIdentity`),
+ * captured when it was judged and compared again under the guard. Without a reliable identity
+ * such a lock is not reclaimed.
  * @returns {boolean} true when this call removed the lock
  */
-export function reclaimStale(lockPath, judged) {
-  const lockToken = tokenOf(judged)
-  collectGuards(lockPath, tokenOf(readLock(lockPath) ?? ''))
-  let guard = `${lockPath}.reclaim-${lockToken}`
-  const guardBody = `${process.pid}\n${process.pid}.${randomBytes(8).toString('hex')}\n`
+export function reclaimStale(lockPath, judged, identity = null) {
+  const tokenless = !hasToken(judged)
+  if (tokenless && !identityReliable(identity)) return false
+  collectGuards(lockPath, lockKey(readLock(lockPath) ?? '', statLockIdentity(lockPath)))
+  let guard = `${lockPath}.reclaim-${lockKey(judged, identity)}`
+  const guardToken = `${process.pid}.${randomBytes(8).toString('hex')}`
+  const guardBody = `${process.pid}\n${guardToken}\n${PROCESS_NONCE}\n`
   for (let depth = 0; ; depth += 1) {
     try {
       writeFileSync(guard, guardBody, { mode: 0o600, flag: 'wx' })
+      heldGuardTokens.add(guardToken)
       break
     } catch (err) {
       if (err?.code !== 'EEXIST' || depth >= RECLAIM_MAX_DEPTH) return false
@@ -867,7 +929,7 @@ export function reclaimStale(lockPath, judged) {
   let removed = false
   try {
     if (reclaimHook) reclaimHook()
-    if (readLock(lockPath) === judged) {
+    if (readLock(lockPath) === judged && (!tokenless || sameIdentity(statLockIdentity(lockPath), identity))) {
       try {
         unlinkSync(lockPath)
         removed = true
@@ -875,6 +937,7 @@ export function reclaimStale(lockPath, judged) {
     }
   } finally {
     if (readLock(guard) === guardBody) unlinkOwned(guard)
+    heldGuardTokens.delete(guardToken)
   }
   return removed
 }
@@ -904,38 +967,52 @@ export async function withInterprocessLock(storePath, fn) {
 }
 
 async function acquireAndRun(lockPath, token, deadline, fn) {
-  const body = `${process.pid}\n${token}\n${Date.now()}\n`
-  const isOurs = (content) => content !== null && content.includes(`\n${token}\n`)
+  const body = `${process.pid}\n${token}\n${Date.now()}\n${PROCESS_NONCE}\n`
+  const isOurs = (content) => typeof content === 'string' && content.includes(`\n${token}\n`)
+  let wrote = false
+  // Giving up: our file may still be on disk (a failed release, reads that kept failing), so keep
+  // trying to remove it in the background rather than leave it to block everyone else.
+  const timedOut = () => {
+    if (wrote) releaseInBackground(lockPath, token)
+    return new Error('folder trust store is locked by another process')
+  }
   for (;;) {
     try {
       writeFileSync(lockPath, body, { mode: 0o600, flag: 'wx' })
+      wrote = true
       // Read back what was written. A read that fails (a transient Windows error, a scanner
       // holding the file) is retried; if ownership still cannot be confirmed, our own
       // just-written file is removed (its token is known) rather than left to block us.
       let confirmed = false
       for (let attempt = 0; attempt < 5 && !confirmed; attempt += 1) {
-        const back = lockReadBackHook ? lockReadBackHook(lockPath, readLockForOwnership) : readLockForOwnership(lockPath)
+        const back = ownershipRead(lockPath)
+        // A bounded (10 ms, at most 5 times) synchronous pause: this retry sits between two
+        // synchronous steps of the protocol and must not yield, and the bound keeps the event loop
+        // from being held for more than about 50 ms.
         if (back === undefined) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); continue }
         if (isOurs(back)) confirmed = true
         break
       }
       if (confirmed) break
-      const now = readLock(lockPath)
+      // Only an absent or our own file is removed; an unreadable one is not known to be ours.
+      const now = ownershipRead(lockPath)
       if (now === null || isOurs(now)) unlinkOwned(lockPath)
     } catch (err) {
       if (!isTransientLockError(err)) throw err
-      const content = readLock(lockPath)
+      // Stat before reading: a file replaced in between then fails the identity comparison under the guard.
+      const identity = statLockIdentity(lockPath)
+      const content = ownershipRead(lockPath) ?? null
       if (isOurs(content)) {
         // Our own file from an earlier pass whose read-back failed: ours to run under.
         break
       }
-      if (lockIsStale(lockPath, content) && reclaimStale(lockPath, content)) {
+      if (lockIsStale(lockPath, content) && reclaimStale(lockPath, content, identity)) {
         // Progress was made; go round again, but never past the deadline.
-        if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
+        if (Date.now() > deadline) throw timedOut()
         continue
       }
     }
-    if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
+    if (Date.now() > deadline) throw timedOut()
     await sleep(20)
   }
   try {

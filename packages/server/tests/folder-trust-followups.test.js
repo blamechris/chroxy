@@ -18,6 +18,8 @@ import {
   getFolderTrustStateIfCached,
   withInterprocessLock,
   reclaimStale,
+  lockIsStale,
+  statLockIdentity,
   isTransientLockError,
   setLockReadBackHookForTest,
   setLockUnlinkForTest,
@@ -613,5 +615,173 @@ describe('a release that fails does not strand our own lock', () => {
     })
     await Promise.all([run(), run(), run()])
     assert.equal(overlap, false)
+  })
+})
+
+describe('store lock: lock identity, nonce and own-process guards', () => {
+  const lockPath = () => `${folderTrustStorePath()}.lock`
+  const eperm = () => Object.assign(new Error('EPERM'), { code: 'EPERM' })
+  const leftovers = () => readdirSync(process.env.CHROXY_CONFIG_DIR).filter((n) => n.includes('.reclaim-'))
+  // The nonce this process writes into its locks, read from a lock it writes.
+  const ownNonce = async () => {
+    let nonce = null
+    await withInterprocessLock(folderTrustStorePath(), async () => { nonce = readFileSync(lockPath(), 'utf8').split('\n')[3] })
+    assert.match(nonce, /^[0-9a-f]+$/)
+    return nonce
+  }
+  const old = (path) => { const t = new Date(Date.now() - 600_000); utimesSync(path, t, t) }
+
+  it('a lock with no token is reclaimed only as the file that was judged: a new holder\'s still-empty lock is left alone', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), '')
+    old(lockPath())
+    const identity = statLockIdentity(lockPath())
+    try {
+      // The reclaimer has judged the empty lock and stalls; its holder's lock is replaced by a new holder's, not yet written.
+      setReclaimHookForTest(() => {
+        setReclaimHookForTest()
+        rmSync(lockPath())
+        writeFileSync(lockPath(), '')
+      })
+      assert.equal(reclaimStale(lockPath(), '', identity), false)
+    } finally {
+      setReclaimHookForTest()
+    }
+    assert.equal(existsSync(lockPath()), true, 'the new holder\'s lock was not removed')
+    assert.deepEqual(leftovers(), [])
+  })
+
+  it('a lock with no token is reclaimed when it is still the judged file, and not without an identity', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), '')
+    old(lockPath())
+    assert.equal(reclaimStale(lockPath(), ''), false, 'no identity: not reclaimed')
+    assert.equal(reclaimStale(lockPath(), '', { ino: 0n, mtimeNs: 1n, size: 0n }), false, 'an unreliable identity: not reclaimed')
+    assert.equal(existsSync(lockPath()), true)
+    const identity = statLockIdentity(lockPath())
+    // Where the file system reports no usable inode the safe answer is to leave the lock.
+    assert.equal(reclaimStale(lockPath(), '', identity), identity.ino !== 0n)
+  })
+
+  it('a stale empty lock is still taken over by a waiting caller', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), '')
+    old(lockPath())
+    setLockWaitForTest(1000)
+    let runs = 0
+    try {
+      await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+      assert.equal(runs, 1)
+    } catch (err) {
+      // Only a file system without usable inodes may refuse, and then it must leave the lock.
+      assert.match(err.message, /locked by another process/)
+      assert.equal(statLockIdentity(lockPath()).ino, 0n)
+    } finally {
+      setLockWaitForTest()
+    }
+  })
+
+  it('a lock with our pid and another nonce is judged by liveness (live); with our nonce it is a leftover; the old format has no nonce', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const nonce = await ownNonce()
+    const other = nonce === 'abcd1234' ? 'dcba4321' : 'abcd1234'
+    const bodyWith = (n) => `${process.pid}\nnotinflight\n1\n${n}\n`
+    assert.equal(lockIsStale(lockPath(), bodyWith(other)), false, 'another process with our pid: live')
+    assert.equal(lockIsStale(lockPath(), `${process.pid}\nnotinflight\n1\n`), false, 'previous format: judged by liveness')
+    assert.equal(lockIsStale(lockPath(), bodyWith(nonce)), true, 'ours, no call owns it: a leftover')
+    // A previous-format lock of a dead holder is still reclaimed.
+    assert.equal(lockIsStale(lockPath(), '2147483646\noldtoken\n0\n'), true)
+
+    writeFileSync(lockPath(), bodyWith(other))
+    setLockWaitForTest(200)
+    try {
+      await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+    } finally {
+      setLockWaitForTest()
+    }
+    assert.equal(readFileSync(lockPath(), 'utf8'), bodyWith(other), 'the live holder\'s lock was not removed')
+    writeFileSync(lockPath(), bodyWith(nonce))
+    let runs = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    assert.equal(runs, 1, 'our own leftover is taken over')
+  })
+
+  it('a guard with our pid and nonce is a leftover (stepped over); with our pid and another nonce it is judged by liveness', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const nonce = await ownNonce()
+    const other = nonce === 'abcd1234' ? 'dcba4321' : 'abcd1234'
+    const stale = '2147483646\noldtoken\n0\n'
+    const guard = `${lockPath()}.reclaim-oldtoken`
+    writeFileSync(lockPath(), stale)
+    writeFileSync(guard, `${process.pid}\nleftover\n${other}\n`)
+    assert.equal(reclaimStale(lockPath(), stale), false, 'another process\'s guard (same pid) is live')
+    assert.equal(existsSync(lockPath()), true)
+    rmSync(guard)
+    writeFileSync(guard, `${process.pid}\nleftover\n${nonce}\n`)
+    assert.equal(reclaimStale(lockPath(), stale), true, 'our own leftover guard is stepped over')
+    assert.equal(existsSync(lockPath()), false)
+    assert.equal(existsSync(guard), true, 'the leftover guard itself is not deleted')
+  })
+
+  it('a failed read-back, release and later reads leave no file behind: the give-up schedules the background release', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    setLockReadBackHookForTest(() => undefined) // every ownership read fails
+    setLockUnlinkForTest(() => { throw eperm() })
+    setLockWaitForTest(150)
+    try {
+      await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+    } finally {
+      setLockReadBackHookForTest()
+      setLockWaitForTest()
+    }
+    assert.equal(existsSync(lockPath()), true, 'our file is still there when the call gives up')
+    setLockUnlinkForTest() // the unlink works again
+    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'the background release removed it')
+    let ran = 0
+    await withInterprocessLock(folderTrustStorePath(), async () => { ran += 1 })
+    assert.equal(ran, 1)
+  })
+
+  it('a lock that cannot be read after it was written is not unlinked blind: only an absent or our own file is removed', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    let unlinks = 0
+    setLockUnlinkForTest((path) => { unlinks += 1; unlinkSync(path) })
+    setLockReadBackHookForTest(() => undefined)
+    setLockWaitForTest(100)
+    try {
+      await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+      assert.equal(unlinks, 0, 'nothing was unlinked while ownership could not be read')
+    } finally {
+      setLockReadBackHookForTest()
+      setLockWaitForTest()
+    }
+    assert.equal(await until(() => !existsSync(lockPath()), 10_000), true)
+    setLockUnlinkForTest()
+  })
+
+  it('our token is registered before the lock file is written and removed after it is unlinked', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const seen = { written: null, unlinking: null }
+    // After the write: a lock of ours that no in-flight call owns would be judged stale, so a registered token reads as live.
+    setLockReadBackHookForTest((path, read) => {
+      const content = read(path)
+      if (seen.written === null) seen.written = lockIsStale(path, content)
+      return content
+    })
+    // During the release unlink: still registered, so still live.
+    setLockUnlinkForTest((path) => {
+      seen.unlinking = lockIsStale(path, readFileSync(path, 'utf8'))
+      unlinkSync(path)
+    })
+    let body = null
+    try {
+      await withInterprocessLock(folderTrustStorePath(), async () => { body = readFileSync(lockPath(), 'utf8') })
+    } finally {
+      setLockReadBackHookForTest()
+      setLockUnlinkForTest()
+    }
+    assert.equal(seen.written, false, 'registered before the write')
+    assert.equal(seen.unlinking, false, 'still registered while the file is being unlinked')
+    assert.equal(lockIsStale(lockPath(), body), true, 'removed from the registry once the call is over')
   })
 })
