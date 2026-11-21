@@ -156,6 +156,8 @@ const DASHBOARD_ONLY = new Set<string>([
   'delete_archived_session_result', // delete ack for an archive record — rides with the roster above
   'restore_archived_session_result', // ack for continuing an archived session (#8866) — rides with the roster above
   'session_archive_policy_result', // ack for the dashboard's archive-retention setter (#8869) — rides with the roster above
+  'folder_trust_state',         // per-folder trust for project settings — the banner and review dialog are dashboard-only for now; mobile parity is not planned yet
+  'folder_trust_result',        // reply to the dashboard's trust_folder / untrust_folder — rides with folder_trust_state above
   'git_create_pr_result',       // #6876 in-app PR creation reply — GitPanel "Create PR" flow is dashboard-only for v1; mobile PR-creation UI is a tracked follow-up
   'session_pr_threads',         // #7430 unresolved review-thread count for the CI prefill line — dashboard-only because its only consumer (the CI chip's prefill action) is; mobile parity rides with #7425
   'shell_pending_approval',     // #6277 host-local user-shell approval — "waiting for host approval" banner; dashboard-only for v1, mobile parity deferred
