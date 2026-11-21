@@ -234,7 +234,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { filterThinking, nextMessageId, createEmptySessionPanels } from './utils';
+import { filterThinking, nextMessageId, createEmptySessionPanels, isClaudeTuiSession } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
@@ -2035,11 +2035,17 @@ type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: Con
 // there is no session terminal to bleed into, so the flat-state write is kept.
 // Same intent as terminal_output (dispatchTerminalOutput) and the `user_input`
 // echo.
+// #9262 — the frame's session (its sessionId, else the active one) is also
+// dropped when it is claude-tui: its terminal is the live PTY mirror, and an
+// injected line corrupts the TUI redraw. Same rule as the prompt and answer
+// echoes in connection.ts.
 function appendTerminalDataForSession(get: MsgGet, msg: Record<string, unknown>, data: string): void {
   const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null;
-  const activeId = get().activeSessionId;
+  const state = get();
+  const activeId = state.activeSessionId;
   if (sessionId !== null && activeId !== null && sessionId !== activeId) return;
-  get().appendTerminalData(data);
+  if (isClaudeTuiSession(state.sessions, sessionId ?? activeId)) return;
+  state.appendTerminalData(data);
 }
 
 // --- Extracted handler functions ---
@@ -6224,7 +6230,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // writes to the ACTIVE session's buffer whatever session the input belongs
       // to, so a turn for a background session (a wake, or another client typing
       // there) must not put "> ..." into the session being looked at.
-      if (userInput.content && userInput.sessionId === get().activeSessionId) {
+      // #9262: nor into a claude-tui session's live PTY mirror.
+      if (userInput.content && userInput.sessionId === get().activeSessionId
+        && !isClaudeTuiSession(get().sessions, userInput.sessionId)) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
       // #3188: a remote client just answered (or otherwise sent a fresh

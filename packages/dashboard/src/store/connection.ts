@@ -86,7 +86,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptySessionPanels, createEmptyConnectionReadings, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptySessionPanels, createEmptyConnectionReadings, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed, isClaudeTuiSession } from './utils';
 import { isSessionStarting } from '@chroxy/store-core';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
@@ -713,7 +713,7 @@ if (_initialServerId) setServerScope(_initialServerId);
 // suppressed (they'd inject a line at the altscreen cursor and corrupt the redraw).
 function activeSessionIsClaudeTui(get: () => ConnectionState): boolean {
   const s = get();
-  return s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider === 'claude-tui';
+  return isClaudeTuiSession(s.sessions, s.activeSessionId);
 }
 
 // #6939 — client-side timeout for the git one-shot request/reply callbacks
