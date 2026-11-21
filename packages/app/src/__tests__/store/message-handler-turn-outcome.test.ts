@@ -87,7 +87,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
   it('has the scenario it drives', () => {
     expect(fixture).toBeDefined();
     expect(fixture.live.filter((f) => f.type === 'result').map((f) => f.turnOutcome)).toEqual([
-      'truncated', 'refused', 'stopped', 'completed',
+      'truncated', 'refused', 'stopped', 'stopped_before_output', 'completed',
     ]);
   });
 
@@ -99,6 +99,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
       ['truncated', 'Reply cut off'],
       ['refused', 'The model declined'],
       ['stopped', 'Stopped'],
+      ['stopped_before_output', 'Stopped by you before a reply'],
     ]);
     // The completed turn is the last reply, with nothing after it.
     const all = read();
@@ -114,7 +115,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
   it('survives a session switch: a full-rebuild replay builds the same markers from history', () => {
     const { read, send } = boot([{ id: 'stale', type: 'response', content: 'old', timestamp: 1 } as ChatMessage]);
     replayAll(send, fixture.replay, true);
-    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped']);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped', 'stopped_before_output']);
     expect(read().some((m) => m.id === 'stale')).toBe(false);
   });
 
@@ -123,7 +124,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
     for (const f of fixture.live) send(f);
     const before = read().length;
     replayAll(send, fixture.replay, false);
-    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped']);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped', 'stopped_before_output']);
     expect(read().length).toBe(before);
   });
 

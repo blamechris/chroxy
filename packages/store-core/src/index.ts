@@ -1234,6 +1234,7 @@ export {
   isTurnOutcomeMarker,
   isSystemTabMessage,
   TURN_OUTCOME_MARKER_TESTID,
+  turnOutcomeMarkerText,
 } from './turn-outcome-marker'
 export type { TurnOutcomeEvent } from './turn-outcome-marker'
 

@@ -27,6 +27,36 @@ describe('TurnOutcomeMarker (#7326)', () => {
     })
   }
 
+  describe('stopped before a reply (#9241)', () => {
+    // 2023-11-14T22:13:20Z; asserted against the local clock the component formats with
+    const ts = 1700000000000
+    const hhmm = (() => {
+      const d = new Date(ts)
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    })()
+
+    it('renders the label and the time, quietly, with the sentence as its tooltip', () => {
+      render(<TurnOutcomeMarker outcome="stopped_before_output" timestamp={ts} />)
+      const chip = screen.getByTestId('turn-outcome-marker')
+      expect(chip).toHaveTextContent(`Stopped by you before a reply \u00b7 ${hhmm}`)
+      expect(chip).toHaveAttribute('data-outcome', 'stopped_before_output')
+      expect(chip.className).toContain('turn-outcome-marker-stopped_before_output')
+      expect(chip.getAttribute('title')).toContain('before the model produced any output')
+    })
+
+    it('shows the bare label when there is no timestamp', () => {
+      render(<TurnOutcomeMarker outcome="stopped_before_output" />)
+      expect(screen.getByTestId('turn-outcome-marker').textContent).not.toContain('\u00b7')
+    })
+
+    it('CONTROL: a plain Stopped chip never shows a time, whatever timestamp it is handed', () => {
+      render(<TurnOutcomeMarker outcome="stopped" timestamp={ts} />)
+      const chip = screen.getByTestId('turn-outcome-marker')
+      expect(chip).toHaveTextContent('Stopped')
+      expect(chip.textContent).not.toContain(hhmm)
+    })
+  })
+
   it('is a status line, not a control (so the 44px tap floor does not apply)', () => {
     render(<TurnOutcomeMarker outcome="truncated" />)
     expect(screen.queryByRole('button')).toBeNull()

@@ -14,12 +14,14 @@
  * apply.
  */
 import { StyleSheet, Text, View } from 'react-native';
-import { describeTurnOutcome, TURN_OUTCOME_MARKER_TESTID } from '@chroxy/store-core';
+import { describeTurnOutcome, turnOutcomeMarkerText, TURN_OUTCOME_MARKER_TESTID } from '@chroxy/store-core';
 import type { MarkedTurnOutcome } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface TurnOutcomeMarkerProps {
   outcome: MarkedTurnOutcome;
+  /** The marker row's timestamp; shown as HH:MM for `stopped_before_output` only (#9241). */
+  timestamp?: number | null;
 }
 
 const ICON: Record<MarkedTurnOutcome, string> = {
@@ -27,11 +29,13 @@ const ICON: Record<MarkedTurnOutcome, string> = {
   refused: '⊘',
   stopped: '■',
   interrupted: '⚡',
+  stopped_before_output: '■',
 };
 
-export function TurnOutcomeMarker({ outcome }: TurnOutcomeMarkerProps) {
+export function TurnOutcomeMarker({ outcome, timestamp }: TurnOutcomeMarkerProps) {
   const description = describeTurnOutcome(outcome);
   if (!description) return null;
+  const text = turnOutcomeMarkerText(outcome, timestamp) ?? description.label;
   const tone = outcome === 'truncated' || outcome === 'interrupted' ? styles.truncated : outcome === 'refused' ? styles.refused : styles.stopped;
   return (
     <View
@@ -44,7 +48,7 @@ export function TurnOutcomeMarker({ outcome }: TurnOutcomeMarkerProps) {
         {ICON[outcome]}
       </Text>
       <Text testID={`${TURN_OUTCOME_MARKER_TESTID}-label`} style={styles.text}>
-        {description.label}
+        {text}
       </Text>
     </View>
   );

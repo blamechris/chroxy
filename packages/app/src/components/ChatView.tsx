@@ -605,7 +605,7 @@ function ChatViewForSession({
             mountTime={mountTimeRef.current}
             reduceMotion={reduceMotion}
           >
-            <TurnOutcomeMarker outcome={msg.turnOutcome} />
+            <TurnOutcomeMarker outcome={msg.turnOutcome} timestamp={msg.timestamp} />
           </AnimatedMessage>
         );
       }

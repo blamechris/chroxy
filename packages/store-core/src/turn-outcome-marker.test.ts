@@ -4,6 +4,7 @@ import {
   readResultTurnOutcome,
   isTurnOutcomeMarker,
   isSystemTabMessage,
+  turnOutcomeMarkerText,
   TURN_OUTCOME_MARKER_TESTID,
 } from './turn-outcome-marker'
 import { handleResultUsage } from './handlers/stream'
@@ -135,5 +136,62 @@ describe('isSystemTabMessage (#8461)', () => {
     expect(isSystemTabMessage(chip!)).toBe(false)
     expect(isSystemTabMessage(msg({ id: 's', type: 'system', content: 'Connected' }))).toBe(true)
     expect(isSystemTabMessage(msg({ id: 'r', type: 'response', content: 'x' }))).toBe(false)
+  })
+})
+
+describe('the stop-before-reply marker (#9241)', () => {
+  const user = msg({ id: 'u1', type: 'user_input', content: 'do the thing' })
+  const frame = { type: 'result', turnOutcome: 'stopped_before_output', timestamp: 777 }
+
+  it('reads as a marked outcome with the frame timestamp as its identity', () => {
+    expect(readResultTurnOutcome(frame)).toEqual({ outcome: 'stopped_before_output', timestamp: 777 })
+  })
+
+  it('appends one labelled system row after the prompt, stamped with the frame timestamp', () => {
+    const out = appendTurnOutcomeMarker([user], readResultTurnOutcome(frame))
+    expect(out).toHaveLength(2)
+    expect(out[1]).toMatchObject({
+      type: 'system',
+      content: 'Stopped by you before a reply',
+      turnOutcome: 'stopped_before_output',
+      timestamp: 777,
+    })
+  })
+
+  it('dedupes by (outcome, timestamp): a live frame then the replayed history entry shows one row', () => {
+    const live = appendTurnOutcomeMarker([user], readResultTurnOutcome(frame))
+    const replayed = appendTurnOutcomeMarker(live, readResultTurnOutcome({ ...frame, replayed: true, historySeq: 4 }))
+    expect(replayed).toBe(live)
+    expect(replayed.filter(isTurnOutcomeMarker)).toHaveLength(1)
+  })
+
+  it('a LATER stopped-before-reply turn is its own marker', () => {
+    const live = appendTurnOutcomeMarker([user], readResultTurnOutcome(frame))
+    const next = appendTurnOutcomeMarker(live, readResultTurnOutcome({ ...frame, timestamp: 900 }))
+    expect(next.filter(isTurnOutcomeMarker)).toHaveLength(2)
+  })
+
+  it('an outcome a build does not know is still no marker (null, never a made-up label)', () => {
+    expect(readResultTurnOutcome({ type: 'result', turnOutcome: 'stopped_before_output_v2' })).toBeNull()
+    expect(appendTurnOutcomeMarker([user], readResultTurnOutcome({ turnOutcome: 'stopped_before_output_v2' }))).toEqual([user])
+  })
+})
+
+describe('turnOutcomeMarkerText (#9241)', () => {
+  const ts = 1700000000000
+  const d = new Date(ts)
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+
+  it('adds the local HH:MM to the stopped-before-reply label only', () => {
+    expect(turnOutcomeMarkerText('stopped_before_output', ts)).toBe(`Stopped by you before a reply \u00b7 ${hhmm}`)
+    for (const outcome of ['truncated', 'refused', 'stopped', 'interrupted'] as const) {
+      expect(turnOutcomeMarkerText(outcome, ts)).not.toContain('\u00b7')
+    }
+  })
+
+  it('falls back to the bare label for a missing or non-finite timestamp', () => {
+    expect(turnOutcomeMarkerText('stopped_before_output')).toBe('Stopped by you before a reply')
+    expect(turnOutcomeMarkerText('stopped_before_output', null)).toBe('Stopped by you before a reply')
+    expect(turnOutcomeMarkerText('stopped_before_output', Number.NaN)).toBe('Stopped by you before a reply')
   })
 })

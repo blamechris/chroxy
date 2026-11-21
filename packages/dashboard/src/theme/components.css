@@ -12697,6 +12697,13 @@ button.sidebar-token-view-session-row:hover {
   background: color-mix(in srgb, var(--accent-orange) 12%, transparent);
 }
 
+/* #9241 — the user stopped the turn before any reply: quieter than the others, no
+   tint, a dashed outline, because nothing went wrong. */
+.turn-outcome-marker-stopped_before_output {
+  background: transparent;
+  border-style: dashed;
+}
+
 .turn-outcome-marker-refused {
   color: var(--accent-red);
   border-color: color-mix(in srgb, var(--accent-red) 40%, transparent);
