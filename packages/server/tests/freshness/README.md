@@ -125,11 +125,18 @@ An **episode** is one stretch of an item being open. A new episode opens only
 when none is open and its opening reference was never used before. On an
 owner item every reference an ask stood on is used: its opening reference,
 whether it opened the episode or joined it, and, for a declared block, every
-report its content moved to. No ask is added, opening an episode or joining
-one, on a used reference, so a session rewound to a line an ask already
-covered never brings that ask back. A prompt the ask's content moved away
-from is not used: it may still be pending, unanswered, when the ask ends, and
-then it opens an ask of its own.
+authored owner-block report of its session that it covered while it was live,
+whatever its fingerprint (a reworded line, the same block with another next
+step, an identical line re-authored). No ask is added, opening an episode or
+joining one, on a used reference, so a session rewound to a line a declared
+ask already covered never brings that ask back.
+
+The two kinds differ on purpose. For a prompt ask only its opening reference
+is used, not the prompts its content moved through. A prompt the ask moved
+away from can still be pending, unanswered, when the ask ends (its newer
+prompt was answered); the session is still waiting on the owner for it, so it
+must have an owner item and opens an ask of its own. Here keeping every
+pending prompt in front of the owner comes before never asking twice.
 
 Four counters are stored on every surface record: `presentation`,
 `shows_counted`, `reminders_used`, `returns_used`. The transition table:
@@ -351,7 +358,7 @@ ledger and the simulated world for inspection.
 | I4a | Every open item closes when its origin's evidence is supplied |
 | I4b | Every resolution and withdrawal is backed by its evidence |
 | I4c | The model's open items equal the monitor's own account of the ledger |
-| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including a report a declared ask's content moved to as the monitor itself follows it |
+| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it |
 | I6 | An exhausted item sends nothing unless its content changed while a counted show remained |
 | I7a | At most two cycles per onset, onsets derived by the monitor itself |
 | I7b | At most one investigation per session per tick |
@@ -470,9 +477,11 @@ attention item's `queued`.
 - A declared block and a pending prompt are one owner item. (W)
 - An ask is added to an owner item, opening its episode or joining it, only
   on a reference no earlier ask of that item stood on in any episode: its
-  opening reference and, for a declared block, every report its content
-  moved to. A prompt the content moved away from stays free, because it may
-  still be pending when the ask ends.
+  opening reference and, for a declared block, every authored owner-block
+  report it covered while live, whatever the fingerprint. The covered
+  reports are derived in the fold from the tick checks already in the
+  ledger, so no record is written for them. A prompt the content moved away
+  from stays free, because it may still be pending when the ask ends.
 - A two-ask item's natural order is the earliest of its live asks.
 - The reverse order (an attention item already open when its session gets
   an owner item) is merged too. (W)

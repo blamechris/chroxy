@@ -259,10 +259,11 @@ export const DEFAULT_POLICY = Object.freeze({
   // and one item now has several asks. An ask is added to an owner item
   // (opening its episode, or joining it) only on a reference that no earlier
   // ask of that item stood on, in any episode: its opening reference, and,
-  // for a declared ask, every report its content moved to (see
-  // `contentRefsUsed`). So a line an ask already covered (a session rewound
-  // to it) never brings it back, and an ask that leaves and comes back does
-  // so on a new reference.
+  // for a declared ask, every authored owner-block report of its session it
+  // covered while it was live, whatever the fingerprint (see
+  // `coveredReportsUsed`). So a line an ask already covered (a session
+  // rewound to it, re-authored identically or reworded) never brings it
+  // back, and an ask that leaves and comes back does so on a new reference.
   //
   // DESIGN-GAP: a prompt the ask's content moved away from can still be
   // pending when the ask ends (its newer prompt was answered). Treating it as
@@ -355,9 +356,9 @@ export const DEFAULT_POLICY = Object.freeze({
   // An attempt record uses up its ordinal (and its step) whether
   // or not the send is ever confirmed. Read by the fold in derive.js.
   attemptUsesOrdinal: true,
-  // The report a declared ask's content moved to is used, as its opening
-  // reference is. Read by the fold in derive.js.
-  contentRefsUsed: true,
+  // Every authored owner-block report a declared ask covered while it was
+  // live is used, as its opening reference is. Read by the fold in derive.js.
+  coveredReportsUsed: true,
   // Before writing an attempt, look for its key; if present,
   // send nothing.
   attemptAlreadyRecorded(ledger, key) {

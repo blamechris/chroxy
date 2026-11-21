@@ -131,9 +131,9 @@ export const MUTANTS = {
   I5: withPolicy({ mayOpenEpisode: (item) => !item || !item.open }),
   // An ask added on a reference an earlier ask of the item already used.
   'I5.ask': withPolicy({ mayAddAsk: () => true }),
-  // Only a declared ask's opening reference is used, not the reports its
-  // content moved to.
-  'I5.content': withPolicy({ contentRefsUsed: false }),
+  // Only a declared ask's opening reference is used, not the other reports
+  // it covered (reworded or re-authored identically).
+  'I5.content': withPolicy({ coveredReportsUsed: false }),
   I6: withPolicy({ contentChanged: anyNewRef }),
   I7a: withPolicy({ maxCycles: 3, secondCycleAfter: new Set(['inconclusive', 'running_claim_unverified', 'blocked_unresolved', 'waiting_on_owner', 'finished_unreported', 'gone', 'source_unreachable']) }),
   I7b: withPolicy({

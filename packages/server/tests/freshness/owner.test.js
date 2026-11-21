@@ -202,6 +202,76 @@ describe('references an ask stood on', () => {
   })
 })
 
+describe('reports a declared ask covered without a content change', () => {
+  // The fingerprint leaves out the next step, so on a source that stamps a
+  // declaration only when it changes, the same block with another next step
+  // is a new report with no content change. A prompt keeps the item open, so
+  // a rewind to that report would be a join.
+  function sameBlockNewReport(policy) {
+    const { h, mon, sk, id } = setup({}, policy)
+    const step = (m) => {
+      h.tick('chroxy', at(m))
+      checkStep(mon, h)
+    }
+    W.author(h.world, sk, T0, { ...ownerBlock(), next: 'a' })
+    W.raisePrompt(h.world, sk, at(1), 7200)
+    step(15)
+    W.author(h.world, sk, at(16), { ...ownerBlock(), next: 'b' })
+    step(30)
+    W.author(h.world, sk, at(31), { state: 'running', next: 'go' })
+    step(45)
+    const shows = () => h.sendsFor(id).filter((x) => x.step === 'shown').length
+    const before = shows()
+    W.rewind(h.world, sk, 1)
+    step(60)
+    return { h, id, before, shows }
+  }
+
+  // On a source that stamps every message, an identical re-authored line is
+  // a new report too. With no prompt, the declared ask's ending closes the
+  // item, so a rewind to that report would open a new episode.
+  function identicalLine(policy) {
+    const { h, mon } = setup({}, policy)
+    const x = W.addSession(h.world, { source: 'codex', native_id: 'x', scope: 'repo' })
+    const id = itemIds.owner(h.world.sessions[x].session)
+    const step = (m) => {
+      h.tick('codex', at(m))
+      checkStep(mon, h)
+    }
+    W.author(h.world, x, T0, ownerBlock())
+    step(15)
+    W.author(h.world, x, at(16), ownerBlock())
+    step(30)
+    W.author(h.world, x, at(31), { state: 'running', next: 'go' })
+    step(45)
+    const shows = () => h.sendsFor(id).filter((y) => y.step === 'shown').length
+    const before = shows()
+    W.rewind(h.world, x, 1)
+    step(60)
+    return { h, id, before, shows }
+  }
+
+  it('the same block with another next step, rewound to while a prompt keeps the item open: no join, no show', () => {
+    const { h, id, before, shows } = sameBlockNewReport()
+    assert.deepEqual(steps(h, id).filter((r) => r.body.ask?.kind === 'declared').map((r) => r.body.ask.op), ['open', 'end'], 'no content change, and no join')
+    assert.deepEqual(asks(h, id), ['prompt'])
+    assert.equal(shows(), before)
+  })
+
+  it('an identical re-authored line on a source that stamps every message, rewound to after the item closed: no new episode, no show', () => {
+    const { h, id, before, shows } = identicalLine()
+    assert.equal(h.item(id).state, 'closed')
+    assert.equal(h.item(id).episode, 1)
+    assert.equal(shows(), before)
+  })
+
+  it('mutation: with only opening references used, both rewinds bring the declared ask back and I5 goes red', () => {
+    for (const run of [sameBlockNewReport, identicalLine]) {
+      assert.throws(() => run(MUTANTS['I5.content']), (e) => e instanceof InvariantError && e.id === 'I5')
+    }
+  })
+})
+
 describe('the class of a two-ask item', () => {
   it('a two-ask item sorts by its earliest live ask: when the earlier ask ends, it sorts by the one left', () => {
     const { h, sk, id, tick } = setup()

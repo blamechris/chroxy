@@ -171,7 +171,28 @@ function setCurrent(state, s, r) {
   if (rep && b.outcome === 'ok' && rep.body.evidence_class === 'E2' && b.freshness_reason !== 'time_untrusted') {
     s.latestAuthored = b.report_id
   }
+  coverReport(state, s)
   refreshFlags(state, s)
+}
+
+/**
+ * Every authored owner-block report a declared ask covered while it was
+ * live is used, whatever its fingerprint: the ask stood on it. Derived from
+ * the tick checks and the item's asks already in the ledger, so it writes
+ * nothing.
+ *
+ * DESIGN-GAP: the reports an ask covered are recorded nowhere, and writing
+ * one on every repeat read would cost a record per tick. The fold derives
+ * them instead: a report is covered when a tick check makes it the
+ * session's latest authored report while the item carries a live declared
+ * ask.
+ */
+function coverReport(state, s) {
+  if (!state.policy.coveredReportsUsed || !s.latestAuthored || !state.config) return
+  const it = state.items.get(state.policy.ownerItemOf(s.session, 'declared'))
+  if (!it?.open || !it.asks.has('declared')) return
+  const rep = state.reports.get(s.latestAuthored)
+  if (rep && state.policy.isOwnerBlock(rep.body, state.config)) it.usedRefs.add(s.latestAuthored)
 }
 
 function foldActivity(state, r) {
@@ -382,11 +403,6 @@ function foldSurface(state, r) {
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
-  // Every reference a declared ask stood on is used: its opening reference
-  // (above) and each report its content moved to.
-  if (b.step === 'updated' && b.ask?.op === 'content' && b.ask.kind === 'declared' && state.policy.contentRefsUsed) {
-    it.usedRefs.add(b.ask.report_id)
-  }
   if (b.step === 'updated' && b.carry && b.carry.op === 'carry') {
     const refs = state.carriedRefs.get(b.carry.attention_item) ?? new Set()
     refs.add(b.carry.opened_by)

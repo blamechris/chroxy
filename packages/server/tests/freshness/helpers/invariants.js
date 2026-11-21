@@ -206,29 +206,19 @@ function askEnded(mon, sk, kind, ask, how) {
 /** The kinds the record says the item carries equal this monitor's own fold of its ask changes. */
 /**
  * One ask as this monitor follows it: the references it stood on (its
- * opening reference, then, for a declared ask, each report its content moves
- * to, as this monitor sees the reports), and where its content is now. A
- * prompt the content moved away from stays free to open an ask of its own
- * (it may still be pending, unanswered).
+ * opening reference and, for a declared ask, every authored owner-block
+ * report it covered while live, as this monitor sees the reports). A prompt
+ * the content moved away from stays free to open an ask of its own (it may
+ * still be pending, unanswered).
  */
-function newAsk(mon, _sk, a) {
-  const ask = { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
-  if (a.kind === 'declared') {
-    const rep = mon.reports.get(a.opened_by)
-    ask.seenFp = rep?.block_fingerprint ?? null
-    ask.seenAt = rep?.last_report_at ?? null
-  }
-  return ask
+function newAsk(_mon, _sk, a) {
+  return { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
 }
 
-/** At a tick's end: a declared ask's content moved to this report (a later one, with another fingerprint). */
-function follow(x, ask, ref, at, fp) {
-  const later = at == null || ask.seenAt == null || at > ask.seenAt
-  if (!later || fp === ask.seenFp) return
+/** At a tick's end: a live declared ask covers the session's latest authored owner-block report, whatever its fingerprint. */
+function follow(x, ask, ref) {
   ask.stood.add(ref)
   x.stood.add(ref)
-  ask.seenAt = at
-  ask.seenFp = fp
 }
 
 function checkAsks(it, b) {
@@ -753,7 +743,7 @@ function onTickClosed(mon, h, r) {
     for (const x of owners) {
       if (!x.open) continue
       const d = x.asks.get('declared')
-      if (d && ob) follow(x, d, la, lrep.last_report_at, lrep.block_fingerprint)
+      if (d && ob) follow(x, d, la)
     }
     if (latest && !carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
     if (ob && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
