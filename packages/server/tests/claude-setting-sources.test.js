@@ -236,13 +236,18 @@ describe('Agent SDK call sites choose setting sources explicitly', () => {
     }
   })
 
+  // A coarse sweep: per file, every settingSources value must come from the
+  // helper or be [], and there must be at least one per query() call. It does
+  // not tie each value to its own call's options object.
   it('each call site sets settingSources from the helper or to []', () => {
     for (const p of files) {
       const text = readFileSync(p, 'utf8')
       if (!callsQuery(text)) continue
       const code = text.split('\n').filter((l) => !/^\s*(\*|\/\/)/.test(l))
       const lines = code.filter((l) => /\bsettingSources\s*:/.test(l))
+      const calls = code.filter((l) => /\b(query|queryFn|sdkQuery)\(/.test(l) && !/\bfunction\b/.test(l))
       assert.ok(lines.length > 0, `${p} calls query() without setting settingSources`)
+      assert.ok(lines.length >= calls.length, `${p} has ${calls.length} query() calls but ${lines.length} settingSources values`)
       for (const l of lines) {
         assert.match(l, /settingSources\s*:\s*(claudeSettingSources\(|\[\])/, `${p}: ${l.trim()}`)
       }

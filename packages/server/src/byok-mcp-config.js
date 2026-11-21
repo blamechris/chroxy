@@ -722,7 +722,7 @@ export function mcpSourceToWriteScope(source) {
  * @param {string} configPath — resolved `~/.claude.json` path (or override)
  * @returns {{ sources: Array<{ mcpServers: unknown, source: string }>, warnings: string[] }}
  */
-function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
+function readMcpSourcesInPrecedenceOrder(cwd, configPath, { includeProjectFile = true } = {}) {
   const warnings = []
   const sources = []
 
@@ -784,7 +784,7 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
   // 2 — "Project" scope: <cwd>/.mcp.json, checked into the repo. cwd may not
   // exist (removed tmp dir, stale worktree) — join+existsSync just reports
   // false rather than throwing.
-  if (cwd) {
+  if (cwd && includeProjectFile) {
     const mcpJsonPath = join(cwd, '.mcp.json')
     if (existsSync(mcpJsonPath)) {
       const raw = readJson(mcpJsonPath, 'project .mcp.json')
@@ -838,10 +838,9 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
  * @returns {{ servers: Array<{ name: string }>, warnings: string[] }}
  */
 export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath(), includeProjectFile = true } = {}) {
-  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
+  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath, { includeProjectFile })
   const byName = new Map()
-  for (const { mcpServers, source, sourceKind } of sources) {
-    if (!includeProjectFile && sourceKind === MCP_SERVER_SOURCE.PROJECT_MCP_JSON) continue
+  for (const { mcpServers, source } of sources) {
     for (const name of collectConfiguredNames(mcpServers, { warnings, source })) {
       if (!byName.has(name)) byName.set(name, { name })
     }

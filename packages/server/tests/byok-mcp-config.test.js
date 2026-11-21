@@ -277,6 +277,10 @@ describe('discoverConfiguredMcpServers (#6820)', () => {
     assert.deepEqual(withProject.servers.map((s) => s.name).sort(), ['repo', 'userfs'])
     const without = discoverConfiguredMcpServers(cwd, { configPath, includeProjectFile: false })
     assert.deepEqual(without.servers, [{ name: 'userfs' }])
+    // The project file is not even read: an unparseable one produces no warning.
+    writeFileSync(join(cwd, '.mcp.json'), '{ not json')
+    assert.deepEqual(discoverConfiguredMcpServers(cwd, { configPath, includeProjectFile: false }).warnings, [])
+    assert.ok(discoverConfiguredMcpServers(cwd, { configPath }).warnings.length > 0)
   })
 
   it('returns empty (no warnings) when nothing is configured', () => {
