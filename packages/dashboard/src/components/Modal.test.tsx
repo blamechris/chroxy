@@ -120,6 +120,16 @@ describe('Modal', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('a repeat Escape does not close, a fresh press does (#9243)', () => {
+    const onClose = vi.fn()
+    render(<Modal open onClose={onClose} title="T"><div>c</div></Modal>)
+    const t0 = performance.now(); while (performance.now() - t0 < 5) { /* spin */ }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true }))
+    expect(onClose).not.toHaveBeenCalled()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('a new onClose identity does not re-stamp the open time (#8703)', () => {
     const first = vi.fn()
     const second = vi.fn()

@@ -143,14 +143,30 @@ describe('sendInterrupt gate (#8703)', () => {
   })
 })
 
-describe('every Stop path inherits the gate (#8703)', () => {
-  function composer() {
-    // App.handleInterrupt is `() => sendInterrupt()`.
-    return render(
-      <InputBar onSend={vi.fn()} onInterrupt={() => { useConnectionStore.getState().sendInterrupt() }} isBusy isStreaming={false} />,
-    )
-  }
+function composer() {
+  // App.handleInterrupt is `() => sendInterrupt()`.
+  return render(
+    <InputBar onSend={vi.fn()} onInterrupt={() => { useConnectionStore.getState().sendInterrupt() }} isBusy isStreaming={false} />,
+  )
+}
 
+function shortcut() {
+  const props: ShortcutDispatchProps = {
+    shortcutRegistry: createShortcutRegistry([
+      { id: 'session.interrupt', defaultBinding: 'cmd+.', description: 'Interrupt', category: 'session', scope: 'global' },
+    ]),
+    sessions: [], activeSessionId: 's1', viewMode: 'chat',
+    setViewMode: vi.fn(), setSplitMode: vi.fn(), setPaletteOpen: vi.fn(), setSidebarOpen: vi.fn(),
+    setSettingsOpen: vi.fn(), setShowCreateSession: vi.fn(), setShortcutHelpOpen: vi.fn(),
+    handleSwitchSession: vi.fn(), handleCloseSession: vi.fn(), handleCopyTranscript: vi.fn(),
+    sendInterrupt: () => { useConnectionStore.getState().sendInterrupt() },
+    setPermissionMode: vi.fn(), appendImageAttachments: vi.fn(),
+  }
+  renderHook(() => useShortcutDispatch(props))
+}
+const cmdDot = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: '.', metaKey: true, bubbles: true, cancelable: true }))
+
+describe('every Stop path inherits the gate (#8703)', () => {
   it('Escape in the composer', () => {
     seed(awaiting())
     composer()
@@ -181,22 +197,6 @@ describe('every Stop path inherits the gate (#8703)', () => {
     expect(interrupts()).toHaveLength(1)
   })
 
-  function shortcut() {
-    const props: ShortcutDispatchProps = {
-      shortcutRegistry: createShortcutRegistry([
-        { id: 'session.interrupt', defaultBinding: 'cmd+.', description: 'Interrupt', category: 'session', scope: 'global' },
-      ]),
-      sessions: [], activeSessionId: 's1', viewMode: 'chat',
-      setViewMode: vi.fn(), setSplitMode: vi.fn(), setPaletteOpen: vi.fn(), setSidebarOpen: vi.fn(),
-      setSettingsOpen: vi.fn(), setShowCreateSession: vi.fn(), setShortcutHelpOpen: vi.fn(),
-      handleSwitchSession: vi.fn(), handleCloseSession: vi.fn(), handleCopyTranscript: vi.fn(),
-      sendInterrupt: () => { useConnectionStore.getState().sendInterrupt() },
-      setPermissionMode: vi.fn(), appendImageAttachments: vi.fn(),
-    }
-    renderHook(() => useShortcutDispatch(props))
-  }
-  const cmdDot = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: '.', metaKey: true, bubbles: true, cancelable: true }))
-
   it('Cmd+.', () => {
     seed(awaiting())
     shortcut()
@@ -225,5 +225,57 @@ describe('every Stop path inherits the gate (#8703)', () => {
     const { result } = renderHook(() => useCommands())
     result.current.find((c) => c.id === 'interrupt')!.action()
     expect(interrupts()).toHaveLength(1)
+  })
+})
+
+describe('a held Stop key acts once (#9243)', () => {
+  const textbox = () => screen.getByRole('textbox')
+  const cmdDotRepeat = () => {
+    const ev = new KeyboardEvent('keydown', { key: '.', metaKey: true, repeat: true, bubbles: true, cancelable: true })
+    window.dispatchEvent(ev)
+    return ev
+  }
+
+  it('a held Escape in the composer sends one frame', () => {
+    seed(streaming())
+    composer()
+    fireEvent.keyDown(textbox(), { key: 'Escape' })
+    fireEvent.keyDown(textbox(), { key: 'Escape', repeat: true })
+    fireEvent.keyDown(textbox(), { key: 'Escape', repeat: true })
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('a repeat Escape in the composer is still preventDefaulted', () => {
+    seed(streaming())
+    composer()
+    fireEvent.keyDown(textbox(), { key: 'Escape' })
+    expect(fireEvent.keyDown(textbox(), { key: 'Escape', repeat: true })).toBe(false)
+  })
+
+  it('a held Cmd+. sends one frame and the repeats are preventDefaulted', () => {
+    seed(streaming())
+    shortcut()
+    cmdDot()
+    const r1 = cmdDotRepeat()
+    const r2 = cmdDotRepeat()
+    expect(interrupts()).toHaveLength(1)
+    expect(r1.defaultPrevented).toBe(true)
+    expect(r2.defaultPrevented).toBe(true)
+  })
+
+  it('two separate Escape presses send two frames', () => {
+    seed(streaming())
+    composer()
+    fireEvent.keyDown(textbox(), { key: 'Escape' })
+    fireEvent.keyDown(textbox(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(2)
+  })
+
+  it('two separate Cmd+. presses send two frames', () => {
+    seed(streaming())
+    shortcut()
+    cmdDot()
+    cmdDot()
+    expect(interrupts()).toHaveLength(2)
   })
 })
