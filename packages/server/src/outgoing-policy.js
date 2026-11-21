@@ -72,7 +72,7 @@ export const BOUND_OUTGOING_ALLOWED = Object.freeze([
   'session_updated', 'session_usage', 'session_warning', 'skill_activated', 'skill_changed',
   'skill_deactivated', 'skills_list', 'stdin_dropped_totals', 'stream_delta', 'stream_end',
   'stream_start', 'summarize_session_result', 'symbol_location', 'symbols_snapshot',
-  'terminal_output', 'terminal_size', 'thinking_level_changed', 'tool_input_delta', 'tool_result',
+  'terminal_output', 'terminal_size', 'thinking_level_changed', 'tool_input_backfill', 'tool_input_delta', 'tool_result',
   'tool_start', 'tunnel_url_changed', 'user_question', 'write_file_result',
 ])
 

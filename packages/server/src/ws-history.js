@@ -349,6 +349,21 @@ export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_supersed
 export const CAPABILITY_HISTORY_INFLIGHT_REPLY = 'history_inflight_reply_v1'
 
 /**
+ * #8415: the client capability that says "I can apply a `tool_input_backfill` frame". A
+ * delta replay starts after the client's cursor, so the input the server learned for a
+ * tool card the client already holds (recorded without it) never reached it. A client
+ * that advertises this is sent that input as a reconcile-only frame; an older build does
+ * not know the frame and is sent nothing.
+ */
+export const CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL = 'history_tool_input_backfill_v1'
+
+// #8415: private tag on a replay-slice item that is a `tool_input_backfill` frame, not
+// a history entry. It lets the frames ride the same chunked, backpressure-aware,
+// abort-guarded loop as the entries without passing through `sendHistoryEntry`
+// (which would stamp `historySeq` on them).
+const TOOL_INPUT_BACKFILL_FRAME = Symbol('toolInputBackfillFrame')
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -1993,11 +2008,24 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const pending = client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_INFLIGHT_REPLY)
     ? pendingStreamEntries(sessionManager, sessionId)
     : []
-  const replayEntries = pending.length > 0
-    ? spliceInPendingStreams(history.slice(startOffset), pending)
+  // #8415 -- DELTA replays only: a full replay's `tool_start` entries carry their
+  // input. The frames lead the slice (after `history_replay_start`, before the end).
+  // The typeof guard tolerates stub/test managers. The frames carry the stored input,
+  // already capped by sanitizeToolInput, so there is no second cap here.
+  const backfills = !fullHistory && typeof lastSeq === 'number'
+    && typeof sessionManager.getToolInputBackfills === 'function'
+    && client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_TOOL_INPUT_BACKFILL)
+    ? sessionManager.getToolInputBackfills(sessionId, lastSeq).map((b) => ({
+      [TOOL_INPUT_BACKFILL_FRAME]: { ...b, type: 'tool_input_backfill', sessionId },
+    }))
+    : []
+  const replayEntries = pending.length > 0 || backfills.length > 0
+    ? [...backfills, ...(pending.length > 0
+      ? spliceInPendingStreams(history.slice(startOffset), pending)
+      : history.slice(startOffset))]
     : history
   sendChunkedWithBackpressure(ws, replayEntries, {
-    startOffset: pending.length > 0 ? 0 : startOffset,
+    startOffset: pending.length > 0 || backfills.length > 0 ? 0 : startOffset,
     // #9015: a throwing entry ABORTS the replay and never claims completion (no
     // `history_replay_end` carrying `latestSeq` — the client would commit a
     // partial transcript and its cursor). Permission recovery is independent of
@@ -2006,7 +2034,8 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     // stops and `finishReplay` never runs) and then rethrows, as before.
     emit: (entry) => {
       try {
-        sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy)
+        if (entry[TOOL_INPUT_BACKFILL_FRAME]) send(ws, entry[TOOL_INPUT_BACKFILL_FRAME])
+        else sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBusy)
       } catch (err) {
         try {
           resendPendingPermissionsForSession(ctx, ws, sessionId)

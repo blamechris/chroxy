@@ -175,7 +175,7 @@ import {
 } from './handlers'
 // #6449 slice 1 — shared raw-output parse for the terminal-mirror cases. The
 // './handlers' barrel doesn't re-export stream.ts, so import it directly.
-import { handleRawOutput } from './handlers/stream'
+import { handleRawOutput, handleToolInputBackfill } from './handlers/stream'
 // #7420 — the replay window / live-arrival ledger the `user_question` case
 // writes into and `history_replay_end`'s sweep reads.
 // #7457/#7508 — `replayDedupCache` bounds the re-delivery supersede to the view
@@ -763,6 +763,14 @@ export interface DispatchMessageMap {
     type: 'conversation_id'
     sessionId?: string
     conversationId?: string
+  }
+  // #8415: reconcile-only -- fills the input of a held tool card (ServerToolInputBackfillSchema).
+  tool_input_backfill: {
+    type: 'tool_input_backfill'
+    sessionId: string
+    messageId: string
+    toolUseId?: string
+    input: Record<string, unknown>
   }
   permission_rules_updated: {
     type: 'permission_rules_updated'
@@ -1559,6 +1567,21 @@ function dispatchConversationId<S extends DispatchSessionBase>(
   if (sessionId && adapter.hasSession(sessionId)) {
     adapter.updateSession(sessionId, () => ({ conversationId } as Partial<S>))
   }
+}
+
+/**
+ * `tool_input_backfill` (#8415) -- give a held tool card the input a delta replay
+ * could not carry. The patch is computed INSIDE the updater, against the live
+ * session object, so the identity match in the reconcile holds. No card, no
+ * running tool and no terminal line is ever produced.
+ */
+function dispatchToolInputBackfill<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['tool_input_backfill'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const sessionId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!sessionId || !adapter.hasSession(sessionId)) return
+  adapter.updateSession(sessionId, (ss) => handleToolInputBackfill(msg as Record<string, unknown>, ss) as Partial<S>)
 }
 
 function dispatchProviderRuntimeInfo<S extends DispatchSessionBase>(
@@ -2753,6 +2776,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
+    tool_input_backfill: dispatchToolInputBackfill,
     provider_runtime_info: dispatchProviderRuntimeInfo,
     permission_rules_updated: dispatchPermissionRulesUpdated,
     confirm_permission_mode: dispatchConfirmPermissionMode,
@@ -2896,6 +2920,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',
+  'tool_input_backfill',
   'provider_runtime_info',
   'permission_rules_updated',
   'confirm_permission_mode',

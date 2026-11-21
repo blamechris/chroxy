@@ -827,7 +827,7 @@ export const PRINCIPAL_OUTGOING_DENIED = Object.freeze([
   'slash_commands', 'status', 'statusline_output', 'stdin_dropped_totals', 'stream_delta', 'stream_end',
   'stream_start', 'subscriptions_updated', 'summarize_session_result', 'symbol_location',
   'symbols_snapshot', 'terminal_output', 'terminal_size', 'thinking_level_changed', 'token_rotated',
-  'tool_input_delta', 'tool_result', 'tool_start', 'tunnel_url_changed', 'user_input', 'user_question',
+  'tool_input_backfill', 'tool_input_delta', 'tool_result', 'tool_start', 'tunnel_url_changed', 'user_input', 'user_question',
   'web_feature_status', 'web_task_created', 'web_task_error', 'web_task_list', 'web_task_updated',
   'write_file_result', 'wsl_action_ack', 'wsl_status_snapshot',
 ])

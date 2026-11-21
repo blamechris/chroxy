@@ -832,7 +832,7 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
     'ws-file-ops/memory.js': [2, 'memory frames with an optional requestId merged in (denied)'],
     'ws-file-ops/reader.js': [2, 'file frames with an optional requestId merged in (denied)'],
     'ws-forwarding.js': [10, 'relays of provider events normalized elsewhere and tagged with a session (all denied session broadcasts)'],
-    'ws-history.js': [5, 'replayed history entries and snapshots (denied for a principal, which is sent no replay)'],
+    'ws-history.js': [6, 'replayed history entries and snapshots, and the tool_input_backfill frames replayHistory sends from the backfill list (all denied for a principal, which is sent no replay)'],
     'ws-message-handlers.js': [1, 'the adapter relays a frame its handler built'],
     'ws-permissions.js': [4, 'permission_request frames built by buildPermissionRequestMessage (denied)'],
     'ws-server.js': [16, 'relays of frames built by their producers, which are classified where they are built'],

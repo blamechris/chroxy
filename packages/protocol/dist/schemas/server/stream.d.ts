@@ -156,6 +156,13 @@ export declare const ServerToolInputDeltaSchema: z.ZodObject<{
     toolUseId: z.ZodString;
     partialJson: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerToolInputBackfillSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tool_input_backfill">;
+    sessionId: z.ZodString;
+    messageId: z.ZodString;
+    toolUseId: z.ZodOptional<z.ZodString>;
+    input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+}, z.core.$strip>;
 /**
  * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
  * conversation currently occupies in the model's context window.

@@ -5559,6 +5559,16 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8415 -- tool inputs a client at `cursor` holds a card for without the input.
+   * @param {string} sessionId
+   * @param {number} cursor
+   * @returns {Array<{messageId: string, toolUseId?: string, input: object}>}
+   */
+  getToolInputBackfills(sessionId, cursor) {
+    return this._history.getToolInputBackfills(sessionId, cursor)
+  }
+
+  /**
    * Get the conversation ID (SDK session ID) for a session.
    * @returns {string|null}
    */

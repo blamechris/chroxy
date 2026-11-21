@@ -61,8 +61,13 @@ export const CLIENT_CAPABILITIES = {
   // and shows the text twice.
   // `paired_credential_confirmation_v1`: accept newly paired credentials
   // from the completed transport's auth_bootstrap frame.
-  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1'] as const,
-  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1'] as const,
+  // `history_tool_input_backfill_v1` (#8415): the client applies a `tool_input_backfill`
+  // frame to a tool card it already holds without its input, and does nothing else (no
+  // card, no running tool, no terminal line). A delta replay sends one for a card the
+  // client received before the server learned the input. A client without it is sent
+  // none, so its card stays without the input until a full replay, as before.
+  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
+  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
 } as const
 
 /**
