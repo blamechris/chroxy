@@ -579,7 +579,7 @@ describe('trust store', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const lock = `${folderTrustStorePath()}.lock`
-    writeFileSync(lock, `${process.pid}\n${Date.now()}\n`) // this process is alive
+    writeFileSync(lock, `${process.ppid}\n${Date.now()}\n`) // another process, alive
     let done = false
     const p = trust(cwd).then((r) => { done = true; return r })
     await new Promise((r) => setTimeout(r, 150))
@@ -775,7 +775,7 @@ describe('cross-process store lock', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const lock = `${folderTrustStorePath()}.lock`
-    writeFileSync(lock, `${process.pid}\nlive-token\n${Date.now()}\n`)
+    writeFileSync(lock, `${process.ppid}\nlive-token\n${Date.now()}\n`)
     const old = new Date(Date.now() - 3600_000)
     utimesSync(lock, old, old)
     let done = false
