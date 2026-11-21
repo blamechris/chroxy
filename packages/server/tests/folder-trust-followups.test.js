@@ -574,12 +574,14 @@ describe('a release that fails does not strand our own lock', () => {
 
   it('the release keeps retrying in the background and the lock is removed once the unlink works', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
-    let failures = 3 // fewer than the background retries need, more than the first release attempt
+    // More failures than the first release absorbs (on Windows it retries EPERM up to
+    // 20 times in place; elsewhere it gives up at once), fewer than the background retries allow.
+    let failures = (process.platform === 'win32' ? 20 : 1) + 2
     setLockUnlinkForTest((path) => { if (failures-- > 0) throw eperm(); unlinkSync(path) })
     try {
       await withInterprocessLock(folderTrustStorePath(), async () => {})
       assert.equal(existsSync(lockPath()), true, 'the first release failed; the caller is not blocked')
-      assert.equal(await until(() => !existsSync(lockPath()), 3000), true, 'the background retry removed it')
+      assert.equal(await until(() => !existsSync(lockPath()), 10_000), true, 'the background retry removed it')
     } finally {
       setLockUnlinkForTest()
     }
