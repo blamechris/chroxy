@@ -136,9 +136,6 @@ const PLATFORM_SPECIFIC = {
   restore_archived_session_result: 'dashboard',
   // Dashboard Settings → Session archive (#8869): the set_session_archive_policy ack.
   session_archive_policy_result: 'dashboard',
-  // Per-folder trust for project settings: the banner and review dialog are dashboard-only.
-  folder_trust_state: 'dashboard',
-  folder_trust_result: 'dashboard',
   // Mobile app only
   // (pair_fail is now handled by BOTH platforms — the dashboard gained
   //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)

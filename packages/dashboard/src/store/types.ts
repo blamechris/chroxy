@@ -18,7 +18,8 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerRestoreArchivedSessionResultMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage, ServerFolderTrustStateMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerFailedRestoreHistoryEntry, ServerArchivedSessionsListMessage, ServerRestoreArchivedSessionResultMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
+import type { FolderTrustEntry } from '@chroxy/store-core'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -992,7 +993,7 @@ export type ArchiveRestoreResult = Pick<ServerRestoreArchivedSessionResultMessag
 export type ArchivePolicy = ServerArchivedSessionsListMessage['policy'];
 
 /** One session's `folder_trust_state`, as the dashboard keeps it. */
-export type FolderTrustEntry = Pick<ServerFolderTrustStateMessage, 'status' | 'summary' | 'digest' | 'appliesFrom' | 'launchedWithProject'>;
+export type { FolderTrustEntry };
 
 export interface ConnectionState {
   // Connection

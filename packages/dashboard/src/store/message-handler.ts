@@ -217,6 +217,11 @@ import {
   mergePermissionModesByProvider,
   // #9035 — a refused input resolves its delivery record so the composer restores it.
   rejectInputDeliveryForConflict,
+  // Per-folder trust: shared with the mobile app.
+  folderTrustEntryFromFrame,
+  findFolderTrustReplySession,
+  findFolderTrustErrorSession,
+  FOLDER_TRUST_FALLBACK_ERROR,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage, ServerFailedRestoreHistoryMessage, ServerArchivedSessionsListMessage, ServerArchivedSessionHistoryMessage, ServerDeleteArchivedSessionResultMessage, ServerRestoreArchivedSessionResultMessage, ServerSessionArchivePolicyResultMessage, ServerFolderTrustStateMessage, ServerFolderTrustResultMessage } from '@chroxy/protocol'
@@ -7547,10 +7552,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     case 'folder_trust_state': {
       // Whether this session folder's project settings are loaded. The server is
       // the authority; this is display state, replaced wholesale on every frame.
-      const frame = msg as unknown as ServerFolderTrustStateMessage;
-      if (typeof frame.sessionId !== 'string' || !frame.sessionId) break;
-      const { type: _type, sessionId: _sid, ...entry } = frame;
-      set({ folderTrust: { ...get().folderTrust, [frame.sessionId]: entry } });
+      const parsed = folderTrustEntryFromFrame(msg as unknown as ServerFolderTrustStateMessage);
+      if (!parsed) break;
+      set({ folderTrust: { ...get().folderTrust, [parsed.sessionId]: parsed.entry } });
       break;
     }
     case 'folder_trust_result': {
@@ -7561,15 +7565,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // session it names.
       const reply = msg as unknown as ServerFolderTrustResultMessage;
       const pendingMap = get().folderTrustPending;
-      const settled = typeof reply.requestId === 'string' && reply.requestId
-        ? Object.keys(pendingMap).find((id) => pendingMap[id] === reply.requestId)
-        : (typeof reply.sessionId === 'string' && reply.sessionId ? reply.sessionId : undefined);
+      const settled = findFolderTrustReplySession(pendingMap, reply);
       if (!settled) break;
       const { [settled]: _pending, ...pending } = pendingMap;
       const { [settled]: _error, ...errors } = get().folderTrustError;
       set({
         folderTrustPending: pending,
-        folderTrustError: reply.ok === true ? errors : { ...errors, [settled]: reply.error || 'The trust change could not be applied' },
+        folderTrustError: reply.ok === true ? errors : { ...errors, [settled]: reply.error || FOLDER_TRUST_FALLBACK_ERROR },
       });
       break;
     }
@@ -7722,19 +7724,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // A trust change the daemon refused or could not apply arrives as an error
       // envelope (no `folder_trust_result`). It names no session, so every
       // in-flight marker settles and the reason shows on those sessions.
-      if (errReqId) {
-        // Any error tied to a trust request settles THAT request, whatever its code
-        // (a schema-level INVALID_MESSAGE included); it never lands on another session.
-        const pendingMap = get().folderTrustPending;
-        const errSession = Object.keys(pendingMap).find((id) => pendingMap[id] === errReqId)
-          ?? (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string' ? msg.sessionId : null);
-        if (errSession) {
-          const { [errSession]: _pending, ...pending } = pendingMap;
-          set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [errSession]: errMsg } });
-        }
-      } else if (errCode.startsWith('FOLDER_TRUST_') && typeof msg.sessionId === 'string') {
-        const { [msg.sessionId]: _pending, ...pending } = get().folderTrustPending;
-        set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [msg.sessionId]: errMsg } });
+      const trustErrSession = findFolderTrustErrorSession(get().folderTrustPending, {
+        requestId: errReqId || undefined,
+        code: errCode,
+        sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : undefined,
+      });
+      if (trustErrSession) {
+        const { [trustErrSession]: _pending, ...pending } = get().folderTrustPending;
+        set({ folderTrustPending: pending, folderTrustError: { ...get().folderTrustError, [trustErrSession]: errMsg } });
       }
       // #6871 review round 2 (BLOCKING 2): there is deliberately NO scheduler
       // handling of INVALID_MESSAGE here.

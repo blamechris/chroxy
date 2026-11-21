@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The status line runs a folder's `.claude/settings.json` only while the folder is trusted and that file matches what was approved (the folder-level check can be up to 2 seconds old). A trusted claude-tui session starts with `.mcp.json` servers enabled, so the TUI does not stop on its own approval dialog.
   - BYOK sessions are unchanged: each MCP server they start still needs an approval first.
   - A `Write` or `Edit` tool call on `.mcp.json` prompts under the permission floor; reading it does not.
+  - The mobile app shows the same strip for the active session: whether its folder's project settings are trusted, with a **Review** dialog that lists what would run, **Trust this folder**, and **Stop trusting**, as the dashboard does. It is read-only unless the connection is the primary token and not bound to a session.
+
+### Fixed
+
+- **The dashboard's Trust and Stop trusting buttons no longer stay disabled after a silent reconnect.** A trust change in flight is now cleared when the connection drops, like the other requests that wait on a reply.
 
 ## [0.11.10] - 2026-11-11
 

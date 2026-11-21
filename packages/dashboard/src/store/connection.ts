@@ -87,7 +87,7 @@ import {
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptySessionPanels, createEmptyConnectionReadings, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed, isClaudeTuiSession } from './utils';
-import { isSessionStarting } from '@chroxy/store-core';
+import { isSessionStarting, buildFolderTrustRequest } from '@chroxy/store-core';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -981,13 +981,10 @@ function sendFolderTrust(
   if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) return false;
   if (folderTrustPending[sessionId]) return false;
   const requestId = `folder-trust-${nextMessageId()}`;
-  const msg: Record<string, unknown> = { type, sessionId, requestId };
-  if (type === 'trust_folder') {
-    // Approval is bound to the snapshot the owner reviewed.
-    const digest = reviewedDigest ?? folderTrust[sessionId]?.digest;
-    if (!digest) return false;
-    msg.digest = digest;
-  }
+  // Approval is bound to the snapshot the owner reviewed.
+  const digest = type === 'trust_folder' ? (reviewedDigest ?? folderTrust[sessionId]?.digest) : undefined;
+  const msg = buildFolderTrustRequest(type, sessionId, requestId, digest);
+  if (!msg) return false;
   if (!wsSend(socket, msg)) return false;
   const { [sessionId]: _cleared, ...errors } = folderTrustError;
   set({ folderTrustPending: { ...folderTrustPending, [sessionId]: requestId }, folderTrustError: errors });

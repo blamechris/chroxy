@@ -1284,3 +1284,18 @@ export type { SettledCredential } from './credential-settlement'
 
 export { captureConnectionIdentity, reconnectConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity } from './connection-identity'
 export type { ConnectionIdentityTarget } from './connection-identity'
+
+// Per-folder trust of project settings: the pure logic both clients share.
+export {
+  FOLDER_TRUST_FALLBACK_ERROR,
+  folderTrustEntryFromFrame,
+  findFolderTrustReplySession,
+  findFolderTrustErrorSession,
+  buildFolderTrustRequest,
+  folderTrustAppliesFromText,
+  folderTrustMcpCommandLine,
+  folderTrustCountsText,
+  folderTrustHasFileCounts,
+  canTrustFolderSnapshot,
+} from './folder-trust'
+export type { FolderTrustEntry, FolderTrustRequest } from './folder-trust'

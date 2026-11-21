@@ -156,6 +156,11 @@ name: All E2E flows
 # asserting the "Context compacted" headline + token delta + trigger.
 - runFlow: compaction-marker.yaml
 
+# Flow 24b: Folder trust banner + review dialog + trust / stop-trusting round trip
+# (mobile parity for the dashboard FolderTrustBanner) — mock-server
+# 'show-folder-trust' trigger; trust_folder / untrust_folder answered by the mock.
+- runFlow: folder-trust.yaml
+
 # Flow 25: Composer stays above the keyboard (#8236) — expands the settings
 # bar (mock-server 'show-settings-bar' trigger), raises the keyboard and
 # asserts Send is reachable. Run again at an accessibility text size for the

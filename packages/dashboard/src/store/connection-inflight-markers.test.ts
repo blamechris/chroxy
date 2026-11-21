@@ -104,6 +104,8 @@ const ROSTER_EXPECTED = [
   // Session archive: the list spinner and the delete-in-flight markers.
   'archivedSessionsLoading', 'deletingArchiveIds', 'deletingAllArchives', 'restoringArchiveIds', 'sessionArchivePolicySaving',
   'sessionPrStatusLoading', 'sessionPrThreadsLoading', 'sessionPrStatusRequestedAt',
+  // A trust change in flight is answered on the socket that carried it.
+  'folderTrustPending',
   'orchestrationRunDetailLoading', 'orchestrationPendingActions',
   'cancellingActivityIds', 'retryingRestoreIds', 'symbolsLoading',
   // #8378: seven spinners `disconnect()` cleared as hand-written literals and a
@@ -263,6 +265,21 @@ describe('#7586 the repro: container action → user Disconnect → Connect', ()
     expect(useConnectionStore.getState().reindexingRepoPaths.has('/repo/a')).toBe(true)
     useConnectionStore.getState().disconnect()
     expect(useConnectionStore.getState().reindexingRepoPaths.size).toBe(0)
+  })
+})
+
+describe('a pending folder trust change does not outlive its socket', () => {
+  it('a transport drop settles a trust request sent on the dropped socket', async () => {
+    const ws = await openConnected()
+    useConnectionStore.setState({ folderTrust: { s1: { status: 'untrusted', appliesFrom: 'next_turn', digest: 'a'.repeat(64) } } })
+    expect(useConnectionStore.getState().trustFolder('s1', 'a'.repeat(64)), 'the real sender must accept the open socket').toBe(true)
+    expect(Object.keys(useConnectionStore.getState().folderTrustPending), 'control: the request is pending').toEqual(['s1'])
+    ws.onclose?.({ code: 1006 })
+    expect(useConnectionStore.getState().folderTrustPending).toEqual({})
+    // The buttons are usable again once a new socket is open.
+    const ws2 = await openConnected()
+    expect(ws2).not.toBe(ws)
+    expect(useConnectionStore.getState().untrustFolder('s1')).toBe(true)
   })
 })
 

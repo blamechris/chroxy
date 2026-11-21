@@ -56,6 +56,7 @@ import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
 import { CostThresholdBanner } from '../components/CostThresholdBanner';
 import { ObserverBanner } from '../components/ObserverBanner';
+import { FolderTrustBanner } from '../components/FolderTrustBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -480,6 +481,22 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].primaryClientId : null;
   });
   const claimPrimary = useConnectionStore((s) => s.claimPrimary);
+  // Per-folder trust of the active session's project settings (the daemon's
+  // `folder_trust_state`), plus the in-flight / failure state of a change.
+  const folderTrust = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].folderTrust : null;
+  });
+  const folderTrustPending = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].folderTrustPendingRequestId !== null : false;
+  });
+  const folderTrustError = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].folderTrustError : null;
+  });
+  const trustFolder = useConnectionStore((s) => s.trustFolder);
+  const untrustFolder = useConnectionStore((s) => s.untrustFolder);
   // #4764 — chroxy-side intervention ring for the active session. Drives the
   // session-header counter badge and the tap-to-expand recent-interventions
   // sheet (mirrors the dashboard's FooterBar surface from #4758).
@@ -1895,6 +1912,18 @@ export function SessionScreen() {
           }
           onTakeOver={(sid) => claimPrimary(sid, { force: true })}
         />
+
+        {/* Per-folder trust: whether the active session folder's project settings
+            are loaded, with Review / Trust / Stop trusting for the owner. */}
+        {activeSessionId && (
+          <FolderTrustBanner
+            entry={folderTrust}
+            pending={folderTrustPending}
+            error={folderTrustError}
+            onTrust={(digest) => trustFolder(activeSessionId, digest)}
+            onUntrust={() => untrustFolder(activeSessionId)}
+          />
+        )}
 
         {/* #4075: cost-threshold soft warning banner. Server fires once per
             session via `session_cost_threshold_crossed`; user dismissal
