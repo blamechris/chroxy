@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { fork } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync, readFileSync, readdirSync, existsSync, realpathSync, utimesSync,
 } from 'node:fs'
@@ -46,7 +47,7 @@ import { broadcastFolderTrustState } from '../src/folder-trust-wire.js'
 const HANG_WORKER = new URL('./fixtures/folder-trust-hang-worker.mjs', import.meta.url)
 // A timeout only a hung folder can reach: a worker that is slow to start (a loaded CI runner) still answers.
 const hangOnly = (ms) => (cwd) => (cwd.includes('hang') ? ms : 30_000)
-const CONTENDER = new URL('./fixtures/folder-trust-lock-contender.mjs', import.meta.url).pathname
+const CONTENDER = fileURLToPath(new URL('./fixtures/folder-trust-lock-contender.mjs', import.meta.url))
 
 let root
 let saved
