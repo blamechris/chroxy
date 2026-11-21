@@ -15,9 +15,9 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({
   loadPersistedState: vi.fn(() => null), loadSessionList: vi.fn(() => []),
   loadAllSessionMessages: vi.fn(() => ({})), persistSessionMessages: vi.fn(),
-  persistViewMode: vi.fn(), persistActiveSession: vi.fn(), persistTerminalBuffer: vi.fn(),
+  persistViewMode: vi.fn(), persistActiveSession: vi.fn(),
   persistSessionList: vi.fn(), persistActiveServer: vi.fn(), loadPersistedActiveServer: vi.fn(() => null),
-  clearPersistedState: vi.fn(), clearPersistedTerminalBuffer: vi.fn(), setServerScope: vi.fn(),
+  clearPersistedState: vi.fn(), setServerScope: vi.fn(),
   clearPersistedSession: vi.fn(),
 }))
 

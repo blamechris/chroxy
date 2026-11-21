@@ -14,7 +14,6 @@ import { isPersistableThumbnailUri } from '../utils/image-utils';
 const KEY_PREFIX = 'chroxy_persist_';
 const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
 const KEY_ACTIVE_SESSION = `${KEY_PREFIX}active_session_id`;
-const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
 const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
@@ -72,7 +71,6 @@ export function flushPendingWrites(): void {
   for (const persister of Object.values(_messagePersisters)) {
     persister.flush();
   }
-  _terminalPersister.flush();
   _sessionListPersister.flush();
 }
 
@@ -110,9 +108,6 @@ function scopedRead(baseKey: string): string | null {
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
-
-/** Max terminal buffer size to persist (characters, ~50 KB for ASCII) */
-const MAX_TERMINAL_SIZE = 50_000;
 
 /** Valid view modes — used to validate persisted values.
  * #5204 — 'control-room' removed: it's a top-level tab now, not a view mode.
@@ -178,7 +173,6 @@ function createDebouncedPersist(delayMs: number): DebouncedPersister {
 
 // Separate debounce instances per data stream — prevents cross-clobbering
 const _messagePersisters: Record<string, DebouncedPersister> = {};
-const _terminalPersister = createDebouncedPersist(1000);
 const _sessionListPersister = createDebouncedPersist(500);
 
 /** Get or create a per-session message debouncer */
@@ -228,22 +222,6 @@ export function persistActiveSession(sessionId: string | null): void {
   } catch {
     // Storage not available
   }
-}
-
-/** Persist terminal buffer (debounced, server-scoped) */
-export function persistTerminalBuffer(buffer: string): void {
-  // Capture scoped key at schedule-time to avoid race with scope changes
-  const key = scopedKey(KEY_TERMINAL_BUFFER);
-  _terminalPersister.schedule(() => {
-    const trimmed = buffer.length > MAX_TERMINAL_SIZE
-      ? buffer.slice(-MAX_TERMINAL_SIZE)
-      : buffer;
-    try {
-      localStorage.setItem(key, trimmed);
-    } catch {
-      // localStorage quota exceeded
-    }
-  });
 }
 
 /** Persist sidebar width */
@@ -696,7 +674,6 @@ export function persistSessionList(sessions: SessionInfo[]): void {
 export interface PersistedState {
   viewMode: ViewMode | null;
   activeSessionId: string | null;
-  terminalBuffer: string | null;
 }
 
 /** Load all persisted state (server-scoped for session data, global for view mode) */
@@ -706,7 +683,6 @@ export function loadPersistedState(): PersistedState {
     const rawViewMode = localStorage.getItem(KEY_VIEW_MODE);
     // Session data is server-scoped (with legacy migration fallback)
     const activeSessionId = scopedRead(KEY_ACTIVE_SESSION);
-    const terminalBuffer = scopedRead(KEY_TERMINAL_BUFFER);
 
     const validatedViewMode: ViewMode | null =
       rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
@@ -716,10 +692,9 @@ export function loadPersistedState(): PersistedState {
     return {
       viewMode: validatedViewMode,
       activeSessionId: activeSessionId || null,
-      terminalBuffer: terminalBuffer || null,
     };
   } catch {
-    return { viewMode: null, activeSessionId: null, terminalBuffer: null };
+    return { viewMode: null, activeSessionId: null };
   }
 }
 
@@ -776,15 +751,6 @@ export function loadAllSessionMessages(
 export function clearPersistedSession(sessionId: string): void {
   try {
     localStorage.removeItem(sessionMessagesKey(sessionId));
-  } catch {
-    // Storage not available
-  }
-}
-
-/** Clear the persisted terminal buffer (server-scoped) */
-export function clearPersistedTerminalBuffer(): void {
-  try {
-    localStorage.removeItem(scopedKey(KEY_TERMINAL_BUFFER));
   } catch {
     // Storage not available
   }
@@ -870,7 +836,6 @@ export function _resetForTesting(): void {
   for (const key of Object.keys(_messagePersisters)) {
     delete _messagePersisters[key];
   }
-  _terminalPersister.cancel();
   _sessionListPersister.cancel();
   _serverScope = null;
 }
