@@ -40,7 +40,7 @@ import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { PermissionRuleStore } from './permission-rule-store.js'
 import { permissionDecisionToken } from './permission-scope.js'
-import { ScheduledTaskStore, defaultScheduledTasksPath } from './scheduled-task-store.js'
+import { ScheduledTaskStore, defaultScheduledTasksPath, isScheduledTaskIdShape } from './scheduled-task-store.js'
 import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
@@ -2040,7 +2040,9 @@ export class SessionManager extends EventEmitter {
    *   `{ orchestrationRunId, orchestrationRole }`, surfaced as optional session-list badge
    *   fields). NOT settable over the wire (the create_session handler whitelists its
    *   fields), and NOT persisted — in-memory only in v1; restart-reconcile re-establishes
-   *   it (#6743).
+   *   it (#6743). The ONE exception is `scheduledTaskId` (#8571): it is persisted and
+   *   restored (when it has a valid task-id shape) so the scheduler can re-adopt its
+   *   session after a restart. Every other key is dropped across a restart.
    * @returns {string} sessionId
    */
   createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false, modelSource, nameIdempotencyKey, successorOf } = {}) {
@@ -3005,6 +3007,39 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8571: ids of the sessions currently linked to a scheduled task, with the
+   * activity timestamp the scheduler uses to pick which one to re-adopt.
+   * @returns {Array<{ sessionId: string, taskId: string, lastActivityAt: number }>}
+   */
+  listScheduledTaskSessions() {
+    const out = []
+    for (const [sessionId, entry] of this._sessions) {
+      if (entry._destroying) continue
+      const taskId = entry.metadata?.scheduledTaskId
+      if (!taskId) continue
+      out.push({ sessionId, taskId, lastActivityAt: this.getLastActivityAt(sessionId) || 0 })
+    }
+    return out
+  }
+
+  /**
+   * #8571: drop a session's scheduled-task link so it becomes an ordinary session
+   * (no `automation_owned` handoff blocker). Removes only `metadata.scheduledTaskId`;
+   * other keys are kept, and `metadata` becomes null if nothing remains. Never
+   * destroys. Persists the change so the next restart agrees.
+   * @param {string} sessionId
+   * @returns {boolean} whether a link was removed
+   */
+  unlinkScheduledTask(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || !entry.metadata || !('scheduledTaskId' in entry.metadata)) return false
+    const { scheduledTaskId: _dropped, ...rest } = entry.metadata
+    entry.metadata = Object.keys(rest).length > 0 ? rest : null
+    this._schedulePersist()
+    return true
+  }
+
+  /**
    * List all sessions with summary info.
    * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
@@ -3748,6 +3783,13 @@ export class SessionManager extends EventEmitter {
         ...(typeof entry.session.conversationPersisted === 'boolean'
           ? { conversationPersisted: entry.session.conversationPersisted }
           : {}),
+        // #8571: the scheduler's task->session link is the ONE metadata key that
+        // survives a restart, so the engine can re-adopt its session instead of
+        // minting another. Orchestration keys stay in-memory (#6743). Omitted
+        // unless valid; an older build reading it ignores the unknown key.
+        ...(isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)
+          ? { scheduledTaskId: entry.metadata.scheduledTaskId }
+          : {}),
         cwd: entry.cwd,
         model: entry.session.model,
         // Persist the model the underlying CLI actually booted with (#3700b).
@@ -4082,6 +4124,8 @@ export class SessionManager extends EventEmitter {
       // #8418: only a literal `true` counts; a hand-edited or older file restores
       // as "unknown", exactly as before this field existed.
       conversationPersisted: saved.conversationPersisted === true ? true : undefined,
+      // #8571: only a well-formed task id is trusted as the scheduler's link.
+      ...(isScheduledTaskIdShape(saved.scheduledTaskId) ? { metadata: { scheduledTaskId: saved.scheduledTaskId } } : {}),
       provider: saved.provider || undefined,
       connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
         ? saved.agentConnection.id
@@ -5765,9 +5809,11 @@ export class SessionManager extends EventEmitter {
    *                          by an orchestration run, read from the in-memory
    *                          `entry.metadata` those engines already stamp at
    *                          createSession (`scheduledTaskId` /
-   *                          `orchestrationRunId`). Metadata is not persisted, so
-   *                          it is absent for a session restored after a restart,
-   *                          exactly as the engines' own session maps are.
+   *                          `orchestrationRunId`). Only `scheduledTaskId` is
+   *                          persisted (#8571), so a restored scheduled session
+   *                          keeps the blocker until the scheduler re-adopts or
+   *                          unlinks it; `orchestrationRunId` is absent after a
+   *                          restart, exactly as that engine's own map is.
    *   - `evaluator_pending`  the caller says the prompt evaluator holds a draft
    *
    * One input lives outside the SessionManager and must be passed in by the

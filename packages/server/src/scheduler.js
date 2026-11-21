@@ -463,6 +463,7 @@ export class SchedulerEngine extends EventEmitter {
     }
     this._started = true
     this._log.info('Scheduled execution ENABLED — arming headless scheduler')
+    this._readoptRestoredSessions()
     this._armNextTick()
     return true
   }
@@ -558,8 +559,9 @@ export class SchedulerEngine extends EventEmitter {
    * the session still holds what the last run did. If such a task is deleted
    * later, the pass above destroys its session.
    *
-   * The mapping is in-memory only, so a restart forgets every task->session link
-   * without destroying anything. Never throws: a failing destroy must not take
+   * The mapping itself is in-memory, but the session's `scheduledTaskId` is
+   * persisted, so start() re-adopts it after a restart (_readoptRestoredSessions,
+   * #8571) and a task deleted afterwards is released here like any other. Never throws: a failing destroy must not take
    * the scheduling tick down.
    */
   _releaseSessions() {
@@ -568,6 +570,40 @@ export class SchedulerEngine extends EventEmitter {
       if (this._running.has(taskId)) continue
       this._sessionByTask.delete(taskId)
       this._destroyTaskSession(taskId, sessionId)
+    }
+  }
+
+  /**
+   * @private (#8571) — after a restart, rebuild the task->session map from the
+   * restored sessions' persisted `scheduledTaskId`. For each task in the store the
+   * most recently active linked session is adopted (ties: highest session id). Every
+   * other linked session — a duplicate, or one whose task is gone — is UNLINKED, never
+   * destroyed, so it becomes an ordinary session. Idempotent; never throws.
+   */
+  _readoptRestoredSessions() {
+    try {
+      if (typeof this._sm?.listScheduledTaskSessions !== 'function') return
+      const best = new Map()
+      const linked = this._sm.listScheduledTaskSessions()
+      for (const s of linked) {
+        if (!this._store.get(s.taskId)) continue
+        const cur = best.get(s.taskId)
+        if (!cur || s.lastActivityAt > cur.lastActivityAt
+          || (s.lastActivityAt === cur.lastActivityAt && s.sessionId > cur.sessionId)) {
+          best.set(s.taskId, s)
+        }
+      }
+      for (const [taskId, s] of best) {
+        if (!this._sessionByTask.has(taskId)) this._sessionByTask.set(taskId, s.sessionId)
+      }
+      for (const s of linked) {
+        if (this._sessionByTask.get(s.taskId) === s.sessionId) continue
+        if (this._sm.unlinkScheduledTask?.(s.sessionId)) {
+          this._log.info(`Unlinked session ${s.sessionId} from scheduled task ${s.taskId}: ${this._store.get(s.taskId) ? 'another session of the task was re-adopted' : 'the task no longer exists'}`)
+        }
+      }
+    } catch (err) {
+      this._log.warn(`Could not re-adopt restored scheduled sessions: ${err?.message || err}`)
     }
   }
 

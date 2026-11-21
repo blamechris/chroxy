@@ -88,7 +88,7 @@ describe('session-list orchestration badges (#6691 E-4)', () => {
     }
   })
 
-  it('metadata is NOT persisted: a serialize→restore round-trip yields no badges', () => {
+  it('orchestration metadata is NOT persisted: a serialize→restore round-trip yields no badges', () => {
     const mgr = makeMgr()
     const stateFile = join(mgr._tmpDir, 'state.json')
     try {
@@ -97,8 +97,9 @@ describe('session-list orchestration badges (#6691 E-4)', () => {
         metadata: { orchestrationRunId: 'run_abc', orchestrationRole: 'worker.audit' },
       })
       mgr.serializeState()
-      // the persisted state carries NO metadata (engine ownership is in-memory;
-      // restart-reconcile re-establishes it — #6743)
+      // the persisted state carries NO orchestration metadata (engine ownership is
+      // in-memory; restart-reconcile re-establishes it — #6743). Only the scheduler's
+      // `scheduledTaskId` is persisted (#8571).
       const raw = JSON.parse(readFileSync(stateFile, 'utf8'))
       assert.ok(!JSON.stringify(raw).includes('orchestrationRunId'), 'metadata absent from persisted state')
       // a fresh manager restoring that state lists the session WITHOUT badges

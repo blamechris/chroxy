@@ -87,6 +87,18 @@ const MAX_WIRE_ID_LENGTH = 256
  * — the split that made #7051 reachable through the file after add() was fixed.
  * @param {string} id - an already-trimmed, non-empty id
  */
+/**
+ * #8571 — whether `value` has the shape of a task id this store would accept:
+ * a non-empty string, already trimmed (`add` trims before storing) and within the
+ * wire cap. Shape only; it does not say the task exists. Used to vet a task id read
+ * back from persisted session state before it is trusted as a link.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isScheduledTaskIdShape(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_WIRE_ID_LENGTH && value === value.trim()
+}
+
 function requireIdWithinWireCap(id) {
   if (id.length > MAX_WIRE_ID_LENGTH) {
     throw new ScheduledTaskValidationError(
