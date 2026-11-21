@@ -500,8 +500,9 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 - **Part 1, daemon-observed**: the provider accepted the turn that carried the send (§6.5).
 - **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when the single
-  send is created; the `sending` record carries its **hash**, and the plaintext exists only in
-  memory while the wake text is built. The worker returns the nonce through its
+  send is created; the `sending` record carries its **hash**, and the plaintext is never
+  written to the ledger. It lives on only in the wake text, which a queued delivery shows to
+  the owner's clients (`message_queued`) and the session holds until its turn starts. The worker returns the nonce through its
   acknowledgment channel (§6.7), which the daemon resolves to exactly one session without
   reading a session from the message. In one synchronous step the daemon checks that this
   session is the delivery's target (`wrong_session`), at the **current successor**
@@ -636,8 +637,9 @@ frame. The **uniform refusal** is one fixed tool result, byte-identical whatever
      the `canUseTool` options, `agent_id` in the `PreToolUse` hook input);
   3. `isFlooredTarget` is false for the call.
 
-  So a floored call still prompts in every mode, and in every mode but auto a `deny` rule
-  still denies (part 2 is then lost, safely). In auto mode the existing auto short-circuit
+  So a floored call still prompts in every mode, and a `deny` rule still denies wherever the
+  rule check is reached: always outside auto, and in auto only for a floored call (part 2 is
+  then lost, safely). In auto mode the existing auto short-circuit
   decides first, as it does for every tool it may delegate: the call is allowed unless
   floored and no rule is consulted, so the new branch adds no unprompted path there. No rule
   can name a fresh suffix beforehand. The order relative to the `acceptEdits` branch is
@@ -679,7 +681,9 @@ frame. The **uniform refusal** is one fixed tool result, byte-identical whatever
   session carries the tool, a person's turn included; a call there can still only record
   part 2 for this session's own delivery, under the handler's checks. The full name changes
   each turn and nothing in the transcript names the current one, so a late acknowledgment
-  depends on the model finding the tool again. Every other session, and the target
+  depends on the model finding the tool again. A foreign tool that shares only the bare name
+  `task_ack` is never exempted and cannot record part 2; if the model calls it, the nonce
+  reaches that tool, which gains nothing by it. Every other session, and the target
   once part 2 is recorded or the attempt closes, sees no tool and no change; a session that
   is not the ledger's target has no tool, so a conversation forked or shared into it cannot
   record part 2. The handler's own checks stay authoritative: a call after `ackBy` is
@@ -688,7 +692,7 @@ frame. The **uniform refusal** is one fixed tool result, byte-identical whatever
   becomes wake text.
 - **Reply, rate and audit.** The reply to the model is `{ ok: true }` or the uniform refusal.
   Each refusal is a `denial` record with actor class `worker` (§11), carrying the specific
-  reason and, when an entry point saw an agent id, that as detail only. A per-session rate
+  reason. A per-session rate
   limit (§15 decision 13) counts every call that does not record part 2, repeats included;
   past the limit a call is refused `rate_limited` without reaching the ledger, and its audit
   coalesces as §11 coalesces denials, which does not change the count.
@@ -795,14 +799,13 @@ Tests (tool, D4a). Each row names what must fail when its guard is removed.
 | Durable before `ok` | An append made to fail, an append left unconfirmed and an audit writer made unavailable each return the uniform refusal, record nothing and latch (§6.1); the append is attempted exactly once | Return `{ ok: true }` before the record is confirmed; swallow a failed append; skip the latch; retry in-process |
 | Uniform refusal | The tool result is byte-identical across every refusal reason, the rate limit included | Return the specific reason |
 | Rate limit | Ten refused calls, then a valid call in the same minute is refused `rate_limited` and records nothing; another session's valid call in that minute records; after the window a valid call records; a repeat after a recorded part 2 consumes budget; coalesced audit lines leave the count unchanged | Do not count refused calls; exclude repeats; count audit lines instead of calls; count per daemon instead of per session |
-| Audit detail | An agent id seen by an entry point appears in the audit record as detail, and the handler's verdict is the same with and without it | Decide in the handler on the agent id |
-| Name freshness | The suffix is drawn from the system's cryptographic random source and encodes at least 64 bits; it is created at turn build, so a queued delivery's `message_queued` text and the wake text contain no suffix; two turns never share one | Use a counter or a timestamp; create the suffix with the send; put it in the wake text; reuse a suffix |
-| Exemption: name | In an approve session a tool on a second test server named with another suffix (`mcp__chroxy_ack_<other>__task_ack`) and a second tool on the turn's own server each prompt | Match a prefix or the bare tool name |
+| Name freshness | With the random source injected into the session: it is asked for at least 8 bytes per turn and the suffix is an encoding of exactly those bytes; with a delivery queued behind a busy fake session it is not called between send creation and turn build; the wake text and the `message_queued` text contain no suffix; two turns never share one | Use a counter or a timestamp; create the suffix with the send; put it in the wake text; reuse a suffix |
+| Exemption: name | In an approve session a tool on a second test server named with another suffix (`mcp__chroxy_ack_<other>__task_ack`), a foreign tool sharing only the bare name (`mcp__other__task_ack`) and a second tool on the turn's own server each prompt, and none records part 2 | Match a prefix or the bare tool name |
 | Exemption: main loop | In an approve session a subagent's call to the turn's tool prompts | Drop the agent-id condition |
-| Exemption: hook entry point | After a mid-turn switch from auto to approve, a main-loop call and a subagent's call to the turn's tool through `PreToolUse` each prompt | Exempt through the hook entry point before `agent_id` is verified |
+| Exemption: hook entry point | Until `agent_id` is verified (§6.7): after a mid-turn switch from auto to approve, a main-loop call and a subagent's call to the turn's tool through `PreToolUse` each prompt | Exempt through the hook entry point before `agent_id` is verified |
 | Exemption: floor | With the floor forced on for the call through a test seam, it prompts | Exempt without the floor test |
 | Exemption: placement | In an approve session a session `deny` rule installed for the turn's name, once it is known, denies the call | Place the branch before the rule check |
-| Exemption: context | A call through `handlePermission` with no turn context, as BYOK and Codex make it, is never exempted even when its tool input carries fields named like the context (the tool's name, an agent id); a context with an empty or non-string name exempts nothing; with a real context a different name in the tool input changes nothing | Derive the context from tool input, or default it |
+| Exemption: context | A call through `handlePermission` with no turn context, as BYOK and Codex make it, is never exempted even when its tool input carries fields named like the context (the tool's name, an agent id); a context with an empty or non-string name exempts nothing, tested with the call's tool name equal to that value; with a real context a different name in the tool input changes nothing | Derive the context from tool input, or default it |
 | No request, no frames | In an approve session the target's main-loop call produces no `permission_request` and no `permission_resolved` frame | Implement the exemption by creating a request and answering it |
 | Narrow registration | The tool is listed on the turn that carries the delivery, on a person's later turn of the target while the attempt is open, and on a restored session whose delivery is `uncertain`; it is absent with no open attempt, a closed attempt, a `pending` delivery or part 2 recorded, and in any other session while the target's attempt is open; a call after close is refused and raises `late_report_refused` | Register for every claude-sdk turn; register on the delivery turn only; keep registering after part 2 |
 | Mid-turn server | Two probes: a server added to the project MCP configuration under the turn's name after the turn starts, and a subagent-defined server of that name. Observables: the servers the SDK reports as connected during the turn, whether a main-loop call to the foreign tool prompts, and which instance the CLI keeps when two share the name | Findings, not mutations: they decide the fallback |
