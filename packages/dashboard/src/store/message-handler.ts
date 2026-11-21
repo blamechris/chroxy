@@ -2025,6 +2025,23 @@ type MsgGet = () => ConnectionState;
 type MsgSet = (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void;
 type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: ConnectionContext) => void;
 
+// #9259 — `appendTerminalData` writes to the ACTIVE session's terminal whatever
+// session the text belongs to, so the synthesized terminal text (stream deltas,
+// the stream-end newline, the tool_start line, the tool_result preview) goes
+// through here and is dropped when a session is on screen and the frame names
+// a different one. A frame without a sessionId (or with an empty or non-string
+// one) keeps its pre-multi-session meaning, the active session, exactly as the
+// chat-side routing of the same frames resolves it. With no session active
+// there is no session terminal to bleed into, so the flat-state write is kept.
+// Same intent as terminal_output (dispatchTerminalOutput) and the `user_input`
+// echo.
+function appendTerminalDataForSession(get: MsgGet, msg: Record<string, unknown>, data: string): void {
+  const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null;
+  const activeId = get().activeSessionId;
+  if (sessionId !== null && activeId !== null && sessionId !== activeId) return;
+  get().appendTerminalData(data);
+}
+
 // --- Extracted handler functions ---
 
 function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
@@ -2749,7 +2766,7 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     // Forward delta text to terminal view (synthesize raw output in CLI mode).
     // The shared fn already gates on `typeof msg.delta === 'string' && length`.
     appendTerminalDelta: (delta) => {
-      get().appendTerminalData(delta);
+      appendTerminalDataForSession(get, msg, delta);
     },
 
     // #4297 — TUI fires stream_start at turn-start (#4010), creating an empty
@@ -2844,7 +2861,7 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   // Flush any buffered deltas immediately before clearing streaming state
   deltaFlusher.flushNow();
   // Add newline separator after response ends for Output view readability
-  get().appendTerminalData('\r\n');
+  appendTerminalDataForSession(get, msg, '\r\n');
   const out = sharedStreamEnd(msg, get().activeSessionId);
   // Clean up permission boundary split tracking. messageId is null for
   // malformed payloads (non-string msg.messageId) — skip cleanup in that case.
@@ -2873,7 +2890,7 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   // throw on a non-serialisable msg.input (circular ref) cannot suppress the
   // terminal preview write — matches the prior inline ordering.
   const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
-  get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  appendTerminalDataForSession(get, msg, `\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
   const toolStartTargetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
   const cached = (() => {
     const targetState = toolStartTargetId ? get().sessionStates[toolStartTargetId] : null;
@@ -2975,7 +2992,7 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
     const preview = text.length > 500
       ? text.slice(0, 500) + '...'
       : text;
-    get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
+    appendTerminalDataForSession(get, msg, `\x1b[2m${preview}\x1b[0m\r\n`);
   }
   const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {
