@@ -382,6 +382,11 @@ function foldSurface(state, r) {
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
+  // Every reference a declared ask stood on is used: its opening reference
+  // (above) and each report its content moved to.
+  if (b.step === 'updated' && b.ask?.op === 'content' && b.ask.kind === 'declared' && state.policy.contentRefsUsed) {
+    it.usedRefs.add(b.ask.report_id)
+  }
   if (b.step === 'updated' && b.carry && b.carry.op === 'carry') {
     const refs = state.carriedRefs.get(b.carry.attention_item) ?? new Set()
     refs.add(b.carry.opened_by)

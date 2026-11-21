@@ -164,7 +164,67 @@ describe('asks end one at a time', () => {
   })
 })
 
+describe('references an ask stood on', () => {
+  // A declared block on R1 with a prompt live; the line reworded to R2 (new
+  // content); a newer line R3 that is no owner block ends the declared ask;
+  // the session rewound to R2.
+  function rewound(policy) {
+    const { h, mon, sk, id } = setup({}, policy)
+    const step = (m) => {
+      h.tick('chroxy', at(m))
+      checkStep(mon, h)
+    }
+    W.author(h.world, sk, T0, ownerBlock('approve the merge'))
+    W.raisePrompt(h.world, sk, at(1), 7200)
+    step(15)
+    W.author(h.world, sk, at(16), ownerBlock('approve the other merge'))
+    step(30)
+    W.author(h.world, sk, at(31), { state: 'running', next: 'go' })
+    step(45)
+    const shows = () => h.sendsFor(id).filter((x) => x.step === 'shown').length
+    const before = shows()
+    W.rewind(h.world, sk, 1)
+    step(60)
+    step(75)
+    return { h, id, before, shows }
+  }
+
+  it('a declared block rewound to a line its content had moved to does not come back: no join, no extra show', () => {
+    const { h, id, before, shows } = rewound()
+    const declared = steps(h, id).filter((r) => r.body.ask?.kind === 'declared').map((r) => r.body.ask.op)
+    assert.deepEqual(declared, ['open', 'content', 'end'], 'R2 was its content; it is never an opening again')
+    assert.deepEqual(asks(h, id), ['prompt'])
+    assert.equal(shows(), before, 'no extra show')
+  })
+
+  it('mutation: with only opening references used, the rewound line joins again and I5 goes red', () => {
+    assert.throws(() => rewound(MUTANTS['I5.content']), (e) => e instanceof InvariantError && e.id === 'I5')
+  })
+})
+
 describe('the class of a two-ask item', () => {
+  it('a two-ask item sorts by its earliest live ask: when the earlier ask ends, it sorts by the one left', () => {
+    const { h, sk, id, tick } = setup()
+    const o = W.addSession(h.world, { source: 'chroxy', native_id: 'o', scope: 'repo' })
+    W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+    const ref = W.raisePrompt(h.world, sk, at(1), 7200)
+    W.author(h.world, o, at(10), ownerBlock('another'))
+    tick(15)
+    W.author(h.world, sk, at(16), ownerBlock())
+    tick(30)
+    assert.deepEqual(asks(h, id), ['declared', 'prompt'])
+    assert.equal(h.item(id).orderTime, at(1), 'the earlier of its two asks')
+    W.answerPrompt(h.world, sk, ref, at(31))
+    tick(45)
+    assert.deepEqual(asks(h, id), ['declared'])
+    assert.equal(h.item(id).orderTime, at(16), 'the ask that is left')
+    // Both are declared-only owner items now: the other one, authored at +10,
+    // goes first.
+    const other = h.item(itemIds.owner(h.world.sessions[o].session))
+    assert.equal(compareKeys(h.ctx.policy.orderKey(other, at(45)), h.ctx.policy.orderKey(h.item(id), at(45))), -1)
+  })
+
+
   it('a prompt with a deadline puts the item in the deadline class with that deadline; when the prompt ends it returns to the owner class', () => {
     const { h, sk, id, tick } = setup()
     W.author(h.world, sk, T0, ownerBlock())
@@ -274,7 +334,7 @@ describe('a new ask in each state of the item', () => {
 })
 
 describe('one send history: a standing declared block through five prompt rounds', () => {
-  it('gets at most the show limit in counted shows: later prompts update the content and send nothing', () => {
+  it('after the show limit, later prompts send nothing: shows 1 to 3 and reminder 1, then only updates', () => {
     const { h, sk, id, tick } = setup()
     W.author(h.world, sk, T0, ownerBlock())
     tick(15)
@@ -339,6 +399,68 @@ describe('crash and replay in a tick in which an ask joins', () => {
         const showAttempts = steps(h, id).filter((r) => r.body.step === 'shown' && r.body.phase === 'attempt')
         assert.equal(showAttempts.length, 2, `two shows recorded: op ${op}`)
         assert.deepEqual(asks(h, id), ['declared', 'prompt'])
+        if (!crashed) break
+        points += 1
+      }
+      assert.ok(points > 5, `${points} crash points exercised`)
+    })
+  }
+})
+
+describe('crash and replay in a tick in which one ask ends and another arrives', () => {
+  for (const [name, build, closes] of [
+    [
+      'the prompt answered while a newer prompt is pending (the item stays open)',
+      (h, sk) => {
+        W.author(h.world, sk, T0, ownerBlock())
+        const p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+        return () => {
+          W.answerPrompt(h.world, sk, p1, at(16))
+          W.raisePrompt(h.world, sk, at(17), 7200)
+        }
+      },
+      false,
+    ],
+    [
+      'the last ask ending as a declared block arrives (a new episode)',
+      (h, sk) => {
+        W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+        const p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+        return () => {
+          W.answerPrompt(h.world, sk, p1, at(16))
+          W.author(h.world, sk, at(17), ownerBlock())
+        }
+      },
+      true,
+    ],
+  ]) {
+    it(`${name}: killed at every operation and replayed, exactly one show; no conflict, no second send`, () => {
+      let points = 0
+      for (let op = 0; ; op++) {
+        const { h, mon, sk, id } = setup()
+        const next = build(h, sk)
+        h.tick('chroxy', at(15))
+        checkStep(mon, h)
+        const shows = () => h.surface(id).filter((r) => r.body.step === 'shown' && r.body.phase === 'attempt').length
+        const before = shows()
+        next()
+        let crashed = false
+        try {
+          h.tick('chroxy', at(30), { crashAfter: op })
+        } catch (e) {
+          if (!(e instanceof Crash)) throw e
+          crashed = true
+          checkStep(mon, h, { complete: false })
+          h.restart()
+          h.tick('chroxy', at(33), { slotStart: h.slotFor('chroxy', at(30)) })
+        }
+        checkStep(mon, h)
+        assert.equal(h.conflicts().length, 0, `crash at op ${op}`)
+        const ids = h.sends.map((x) => x.attempt_id)
+        assert.equal(new Set(ids).size, ids.length, `no second send: op ${op}`)
+        assert.equal(shows() - before, 1, `exactly one show: op ${op}`)
+        assert.equal(h.item(id).episode, closes ? 2 : 1)
+        assert.deepEqual(asks(h, id), closes ? ['declared'] : ['declared', 'prompt'])
         if (!crashed) break
         points += 1
       }

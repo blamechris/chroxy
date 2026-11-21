@@ -162,10 +162,12 @@ export const DEFAULT_POLICY = Object.freeze({
   // session rewound to an earlier line) repeats a key with a different
   // payload: an idempotency_conflict. The model only moves an item's content
   // forward in time.
-  contentChanged(item, next) {
-    if (next.at != null && item.contentAt != null && next.at <= item.contentAt) return false
-    if (item.origin === 'prompt') return next.ref !== item.contentRef
-    return next.fingerprint !== item.fingerprint
+  // `ask` is one ask of an owner item: its kind, content time, content
+  // reference (a prompt id) and fingerprint (a declared block's).
+  contentChanged(ask, next) {
+    if (next.at != null && ask.contentAt != null && next.at <= ask.contentAt) return false
+    if (ask.askKind === 'prompt') return next.ref !== ask.contentRef
+    return next.fingerprint !== ask.fingerprint
   },
 
   // A new episode opens only when none is open and the opening
@@ -256,9 +258,17 @@ export const DEFAULT_POLICY = Object.freeze({
   // DESIGN-GAP: the episode rule (never on a used reference) is per item,
   // and one item now has several asks. An ask is added to an owner item
   // (opening its episode, or joining it) only on a reference that no earlier
-  // ask of that item used, in any episode, so a line or prompt that already
-  // had its ask (a session rewound to it) never brings it back, and an ask
-  // that leaves and comes back does so on a new reference.
+  // ask of that item stood on, in any episode: its opening reference, and,
+  // for a declared ask, every report its content moved to (see
+  // `contentRefsUsed`). So a line an ask already covered (a session rewound
+  // to it) never brings it back, and an ask that leaves and comes back does
+  // so on a new reference.
+  //
+  // DESIGN-GAP: a prompt the ask's content moved away from can still be
+  // pending when the ask ends (its newer prompt was answered). Treating it as
+  // used would leave a prompt the owner never answered with no item, so for a
+  // prompt ask only the opening reference is used, and such a prompt opens
+  // an ask of its own.
   mayAddAsk(item, ref, _kind) {
     return !item || !item.usedRefs.has(ref)
   },
@@ -345,6 +355,9 @@ export const DEFAULT_POLICY = Object.freeze({
   // An attempt record uses up its ordinal (and its step) whether
   // or not the send is ever confirmed. Read by the fold in derive.js.
   attemptUsesOrdinal: true,
+  // The report a declared ask's content moved to is used, as its opening
+  // reference is. Read by the fold in derive.js.
+  contentRefsUsed: true,
   // Before writing an attempt, look for its key; if present,
   // send nothing.
   attemptAlreadyRecorded(ledger, key) {

@@ -16,9 +16,9 @@ import { DEFAULT_POLICY, isOwnerBlock, nextReminderAt, withPolicy } from '../mod
 
 // Any new report is a content change, keeping the model's forward-only rule
 // so that only the one reading differs.
-function anyNewRef(item, next) {
-  if (next.at != null && item.contentAt != null && next.at <= item.contentAt) return false
-  return next.ref !== item.contentRef
+function anyNewRef(ask, next) {
+  if (next.at != null && ask.contentAt != null && next.at <= ask.contentAt) return false
+  return next.ref !== ask.contentRef
 }
 
 export const LITERAL = {
@@ -30,9 +30,9 @@ export const LITERAL = {
   contentMayMoveBack: {
     expect: 'I3a',
     policy: withPolicy({
-      contentChanged(item, next) {
-        if (item.origin === 'prompt') return next.ref !== item.contentRef
-        return next.fingerprint !== item.fingerprint
+      contentChanged(ask, next) {
+        if (ask.askKind === 'prompt') return next.ref !== ask.contentRef
+        return next.fingerprint !== ask.fingerprint
       },
     }),
   },
@@ -131,6 +131,9 @@ export const MUTANTS = {
   I5: withPolicy({ mayOpenEpisode: (item) => !item || !item.open }),
   // An ask added on a reference an earlier ask of the item already used.
   'I5.ask': withPolicy({ mayAddAsk: () => true }),
+  // Only a declared ask's opening reference is used, not the reports its
+  // content moved to.
+  'I5.content': withPolicy({ contentRefsUsed: false }),
   I6: withPolicy({ contentChanged: anyNewRef }),
   I7a: withPolicy({ maxCycles: 3, secondCycleAfter: new Set(['inconclusive', 'running_claim_unverified', 'blocked_unresolved', 'waiting_on_owner', 'finished_unreported', 'gone', 'source_unreachable']) }),
   I7b: withPolicy({

@@ -347,7 +347,7 @@ function* reconcileOwnerBlocks(ctx, source, now) {
 
 /** An ask as the per-origin rules see it (content change, prompt answer and lapse). */
 function askView(ask) {
-  return { origin: ask.kind, contentAt: ask.content_at ?? null, contentRef: ask.content_ref ?? ask.report_id ?? null, fingerprint: ask.fingerprint ?? null }
+  return { askKind: ask.kind, contentAt: ask.content_at ?? null, contentRef: ask.content_ref ?? ask.report_id ?? null, fingerprint: ask.fingerprint ?? null }
 }
 
 /** The open owner item carrying a live ask of this kind for the session, if any. */

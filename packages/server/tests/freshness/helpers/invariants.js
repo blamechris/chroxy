@@ -166,7 +166,7 @@ function advanceRuns(mon, sk, b, own) {
 function spec(mon, id, origin) {
   let it = mon.items.get(id)
   if (!it) {
-    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), owed: false, noShow: false }
+    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false }
     mon.items.set(id, it)
   }
   return it
@@ -204,6 +204,33 @@ function askEnded(mon, sk, kind, ask, how) {
 }
 
 /** The kinds the record says the item carries equal this monitor's own fold of its ask changes. */
+/**
+ * One ask as this monitor follows it: the references it stood on (its
+ * opening reference, then, for a declared ask, each report its content moves
+ * to, as this monitor sees the reports), and where its content is now. A
+ * prompt the content moved away from stays free to open an ask of its own
+ * (it may still be pending, unanswered).
+ */
+function newAsk(mon, _sk, a) {
+  const ask = { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
+  if (a.kind === 'declared') {
+    const rep = mon.reports.get(a.opened_by)
+    ask.seenFp = rep?.block_fingerprint ?? null
+    ask.seenAt = rep?.last_report_at ?? null
+  }
+  return ask
+}
+
+/** At a tick's end: a declared ask's content moved to this report (a later one, with another fingerprint). */
+function follow(x, ask, ref, at, fp) {
+  const later = at == null || ask.seenAt == null || at > ask.seenAt
+  if (!later || fp === ask.seenFp) return
+  ask.stood.add(ref)
+  x.stood.add(ref)
+  ask.seenAt = at
+  ask.seenFp = fp
+}
+
 function checkAsks(it, b) {
   const named = (b.asks ?? []).map((a) => a.kind).sort()
   const mine = [...it.asks.keys()].sort()
@@ -279,7 +306,7 @@ function closeOwner(it, b) {
 function endClosingAsk(it, b) {
   if (it.origin !== 'owner') return
   const ask = it.asks.get(b.closing_ask)
-  if (ask) it.endedRefs.add(ask.opened_by)
+  if (ask) for (const ref of ask.stood) it.endedRefs.add(ref)
   it.asks = new Map()
 }
 
@@ -426,7 +453,10 @@ function onRecord(mon, h, r) {
         Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map() })
         it.usedRefs.add(b.opened_by)
         if (b.ask) {
-          it.asks = new Map([[b.ask.kind, { opened_by: b.ask.opened_by, content_ref: b.ask.content_ref ?? null, fp: b.ask.fingerprint ?? null }]])
+          // I5: an ask opens only on a reference no earlier ask of the item stood on.
+          if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${b.ask.kind} ask opened an owner item on a reference an earlier ask stood on`)
+          it.asks = new Map([[b.ask.kind, newAsk(mon, sk, b.ask)]])
+          it.stood.add(b.ask.opened_by)
           checkAsks(it, b)
         }
         // A condition's root, from this monitor's own account: the opening
@@ -502,9 +532,11 @@ function onRecord(mon, h, r) {
             if (b.ask.op === 'join') {
               // I5: an ask joins only on a reference no earlier ask of the item used.
               if (it.usedRefs.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference already used`)
+              if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference an earlier ask stood on`)
               if (it.asks.has(kind)) fail('I10', `a second ${kind} ask joined one owner item`)
               it.usedRefs.add(b.ask.opened_by)
-              it.asks.set(kind, { opened_by: b.ask.opened_by, content_ref: b.ask.content_ref ?? null, fp: b.ask.fingerprint ?? null })
+              it.asks.set(kind, newAsk(mon, sk, b.ask))
+              it.stood.add(b.ask.opened_by)
               // I13: a new ask with a counted show left is owed one; with none
               // left it may change only the content.
               if (it.counted < max) it.owed = mon.lastTickOf.get(b.source) ?? true
@@ -515,7 +547,7 @@ function onRecord(mon, h, r) {
               if (!mine) fail('I10', `an owner item ended a ${kind} ask it does not carry`)
               if (!askEnded(mon, sk, kind, mine, b.ask.how)) fail('I4b', `a ${kind} ask was ended (${b.ask.how}) without its evidence`)
               it.asks.delete(kind)
-              it.endedRefs.add(mine.opened_by)
+              for (const ref of mine.stood) it.endedRefs.add(ref)
               changed = false
             } else {
               const mine = it.asks.get(kind)
@@ -565,19 +597,8 @@ function onRecord(mon, h, r) {
             }
             break
           }
-          let changed
-          if (it.origin === 'prompt') changed = b.content_ref !== it.contentRef
-          else {
-            const rep = mon.reports.get(b.content_ref)
-            changed = rep ? rep.block_fingerprint !== it.fp : true
-            if (rep) it.fp = rep.block_fingerprint
-          }
-          it.contentRef = b.content_ref
-          if (b.report_id) it.reportId = b.report_id
-          if (b.requeue) {
-            if (it.exhausted && changed && it.counted < max) it.exhausted = false
-            it.state = 'queued'
-          }
+          // Only owner items have an `updated` step, and each is an ask change
+          // or a carried-condition change.
           break
         }
         case 'resolved':
@@ -713,22 +734,29 @@ function onTickClosed(mon, h, r) {
     // I10: every live ask is on the session's open owner item, by the end of
     // the tick, as this monitor sees the asks: the latest prompt pending at a
     // live read, and an authored report that is an owner block. The only
-    // exception is a line or prompt whose own ask already ended (a session
-    // rewound to it), which never brings its ask back. And no owner item
+    // exception is a line or prompt that an ask already stood on and that ask
+    // has ended (a session rewound to it), which never brings it back. And no owner item
     // still carries a declared ask that a newer, non-owner-block report ended.
     const owners = [...mon.items.values()].filter((x) => x.sk === sk && OWNER_BLOCK_ORIGINS.has(x.origin))
     const carrying = (kind) => owners.some((x) => x.open && x.asks.has(kind))
     const askGone = (ref) => owners.some((x) => x.endedRefs.has(ref))
-    if (c.native_available) {
-      const pend = mon.checkAct.get(c.check_id)?.pending ?? []
-      if (pend.length) {
-        const latest = pend.slice().sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1)).pop()
-        if (!carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
-      }
-    }
     const la = mon.latestAuthored.get(sk)
     const lrep = la ? mon.reports.get(la) : null
-    if (lrep && isOwnerBlock(lrep, mon.config) && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
+    const ob = Boolean(lrep && isOwnerBlock(lrep, mon.config))
+    let latest = null
+    if (c.native_available) {
+      const pend = mon.checkAct.get(c.check_id)?.pending ?? []
+      if (pend.length) latest = pend.slice().sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1)).pop()
+    }
+    // The references each live ask stood on, as this monitor sees its
+    // content move (I5 uses them).
+    for (const x of owners) {
+      if (!x.open) continue
+      const d = x.asks.get('declared')
+      if (d && ob) follow(x, d, la, lrep.last_report_at, lrep.block_fingerprint)
+    }
+    if (latest && !carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
+    if (ob && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
     for (const x of owners) {
       const d = x.open ? x.asks.get('declared') : null
       if (d && askEnded(mon, sk, 'declared', d, 'resolved')) fail('I10', 'an owner item still carries a declared ask that a newer report ended')
