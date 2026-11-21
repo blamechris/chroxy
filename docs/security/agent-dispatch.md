@@ -16,9 +16,13 @@ implement one contract instead of negotiating it in review.
 
 **Status: designed, not yet implemented.** No dispatch mechanism exists in code. Where this
 document says a mechanism exists on main it names the symbol and file, read at commit
-`7442b39ff`; everything else is *proposed*. Where it depends on a mechanism that
-[`agent-principals.md`](agent-principals.md) itself marks proposed (`auditOrRefuse`, leases,
-the delivery fence, `turn_started`), it depends on that child landing and adds nothing to it.
+`7442b39ff`; everything else is *proposed*. The amended acknowledgment-channel text (in §6.6
+and §6.7, and the entries that cite them) was read at `2373ec835` and is informed by a small
+spike (§6.7) that exercised few of its requirements; everything else remains as read at
+`7442b39ff`. Where it depends on a
+mechanism that [`agent-principals.md`](agent-principals.md) itself marks proposed
+(`auditOrRefuse`, leases, the delivery fence, `turn_started`), it depends on that child
+landing and adds nothing to it.
 This document **extends agent-principals by reference and never loosens it**: every gate,
 refusal and invariant there applies to every message here; the few places it proposes an
 amendment to P say so. Every guard must be proven to fail
@@ -26,9 +30,9 @@ amendment to P say so. Every guard must be proven to fail
 common test rules, and each guard below names its test, mutation and positive control.
 
 Conventions: "P §n" is a section of [`agent-principals.md`](agent-principals.md); S-numbers
-are the children of #9112 listed in P §12; D-numbers (D1 to D8) are this document's slices
-(§12.4). "Owner" and "operator" denote the same person, as in agent-principals. Companions:
-P, [`bearer-token-authority.md`](bearer-token-authority.md),
+are the children of #9112 listed in P §12; D-numbers (D1 to D8; D4 has parts D4a and D4b)
+are this document's slices (§12.4). "Owner" and "operator" denote the same person, as in
+agent-principals. Companions: P, [`bearer-token-authority.md`](bearer-token-authority.md),
 [`permission-floor.md`](permission-floor.md), [`discord-return-path.md`](discord-return-path.md)
 and [`../guides/declared-session-status.md`](../guides/declared-session-status.md).
 
@@ -65,7 +69,7 @@ Three asymmetries control the design:
 ```
 [operator] ──primary, loopback──▶ [daemon] ◀──principal token, loopback── [coordinator]
                                    │   ▲  └──read-only──▶ [GitHub]              ▲
-              wake text (input     │   │ ACK part 2 (per-session secret)        │ hint only:
+              wake text (input     │   │ ACK part 2 (own channel, §6.7)         │ hint only:
               contract, §6.5)      ▼   │                                        │ id, code, ref
                                [worker session]                  [notification channel]
 ```
@@ -73,7 +77,7 @@ Three asymmetries control the design:
 | Zone | Trust | Holds |
 |---|---|---|
 | Coordinator agent | **Untrusted for content, semi-trusted for identity**, as P §2. Its identity is the principal grant and the coordinator-of-record record, never its label in text. | one principal token |
-| Worker session | **Untrusted for content.** Its output, declarations and anything it sends are data. Its identity is assigned by the daemon (the session the daemon spawned), never asserted by the caller. | its own per-session secret (§6.7) |
+| Worker session | **Untrusted for content.** Its output, declarations and anything it sends are data. Its identity is assigned by the daemon (the session the daemon spawned), never asserted by the caller. | on claude-sdk, nothing: its acknowledgment tool is bound to it by the daemon (§6.7); on the deferred hook-secret route, its own per-session secret |
 | Reviewer | A separate identity from the worker and the coordinator. A review record is evidence, never authority. | no channel in v1 |
 | Notification channel | **Untrusted, outbound only** (§8). | nothing of chroxy's beyond the hint |
 | GitHub | A data source read with the read time recorded. Issue state and labels are trusted only as of that read; titles, bodies and comments are untrusted text. | — |
@@ -81,8 +85,10 @@ Three asymmetries control the design:
 
 **The same-user limit applies unchanged** (P §2). Dispatch adds attribution, guardrails and
 a durable record for a cooperative but fallible agent; it is **not a sandbox** against a
-hostile local process, and inside the worker anything in its process tree can present the
-worker's per-session secret (§6.7).
+hostile local process. On claude-sdk anything that can steer the session's agent loop, or
+drive its child's control channel, can make its acknowledgment call; on the deferred
+hook-secret route anything in the worker's process tree can present the worker's per-session
+secret (§6.7).
 
 **Untrusted content.** Issue text, comments, worker output, review text and channel input
 are data, never wake text, an instruction, a verdict or an authority. **No broker, no
@@ -336,7 +342,8 @@ Gates 1 to 7 follow P §6.4, so **no task state is revealed before session autho
 12. **Eligibility** — `backlog_stale` when the issue read is older than the staleness limit
     (§15 decision 11); `issue_not_eligible`; `issue_held`.
 13. **Attempt** — `attempt_open`; `attempt_uncertain`; `attempt_cap_reached`.
-14. **Target fitness** — a supported provider (`target_unsupported`, §6.7); no **hard**
+14. **Target fitness** — a supported session class (`target_unsupported`; §6.7, §15
+    decision 2); no **hard**
     handoff blockers from `getHandoffBlockers` (`background_shells` is soft, per
     `SOFT_HANDOFF_BLOCKER_CODES` in `base-session.js`) (`target_blocked:<code>`); no human
     activity by the P §6.4 admission predicates (`target_human_active`); the target
@@ -493,21 +500,29 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 - **Part 1, daemon-observed**: the provider accepted the turn that carried the send (§6.5).
 - **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when the single
-  send is created; the `sending` record carries its **hash**, and the plaintext exists only in
-  memory while the wake text is built. The worker returns the nonce through the route of
-  §6.7. In one synchronous step the daemon checks that the credential resolves to exactly one
-  session, the delivery's target (`wrong_session`), at the **current successor**
+  send is created; the `sending` record carries its **hash**, and the plaintext is never
+  written to the ledger. It lives on only in the wake text, which a queued delivery shows to
+  the owner's clients (`message_queued`) and the session holds until its turn starts. The
+  worker returns the nonce through its
+  acknowledgment channel (§6.7), which the daemon resolves to exactly one session without
+  reading a session from the message. In one synchronous step the daemon checks that this
+  session is the delivery's target (`wrong_session`), at the **current successor**
   (`ack_stale_successor`); the delivery is `sending`, `delivered` or `uncertain`
   (`delivery_not_open`); the attempt is open (`attempt_closed`); and the nonce matches the
   stored hash, constant-time (`nonce_mismatch`). Part 2 is recorded durably **once**; a repeat
   is acknowledged without a new record. Against `uncertain` it is evidence and reconciles
-  toward `delivered` (§6.8). The nonce binds the ACK to the delivery and the credential to the
-  session; the nonce is not a secret and confers nothing alone.
+  toward `delivered` (§6.8). The nonce binds the ACK to the delivery and the channel binds it
+  to the session; the nonce is not a secret and confers nothing alone.
 - A **verified durable ACK** is both parts on disk under the same work key and `deliveryId`.
   Each part records its own `bootGen`. Either part alone is shown as what it is.
 - **Work start** is a third, observed fact, **never declared**: the first tool event
-  (`tool_start`) after part 1 **in the turn the delivery caused**. Attribution needs S14's
-  `turn_started { causedBy }`; until then it is an **unattributed start**
+  (`tool_start`) after part 1 **in the turn the delivery caused**, other than the
+  acknowledgment tool's own call (§6.7), which is part 2 and is matched by the turn's exact
+  tool name, and a deferred-tool lookup (the CLI's `ToolSearch`, matched by exact name as a
+  daemon constant); neither is ever a start, and the next other tool event counts. If the CLI
+  renames its lookup tool a lookup counts as a start, so the slice pins that name with a test
+  against the CLI version it runs. Attribution needs S14's `turn_started { causedBy }`;
+  until then it is an **unattributed start**
   (`start_unattributed`), which cannot pass the live dispatch acceptance.
 - **Starts are counted per attempt and delivery.** The acceptance quantity is "observed starts
   attributable to the delivery": **0, 1, more than 1, or unknown**; a journal gap yields
@@ -518,32 +533,236 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 
 Test: part 2 before part 1 is part 2 only; against `uncertain` it moves to `delivered`; a
 repeat adds no record; a declared start with no tool event is no start; a gap reads
-`unknown`. Mutation: accept a declared start; drop the successor check; count a gap as 0.
-Positive control: both parts and one attributed tool event yield a verified ACK and a count
-of 1.
+`unknown`; a lookup followed by the acknowledgment call, with no other tool event, is no
+start, while a tool whose name only contains either name is one; the lookup tool name the
+CLI reports equals the daemon constant. Mutation: accept a declared start; drop the
+successor check; count a gap as 0; count the acknowledgment call or the lookup as a start;
+match either exclusion by prefix or substring; change the constant. Positive control: both
+parts and one attributed tool event yield a verified ACK and a count of 1.
 
-### 6.7 The worker acknowledgment credential (§15 decision 1)
+### 6.7 The worker acknowledgment channel (§15 decision 1)
 
 **The declared-status channel cannot carry part 2.** Its `hook` source (`POST /api/events`,
 `event-ingest.js`) lets the caller **name** the session; its `api` source
 (`POST /api/sessions/:id/status`, `http-routes.js`) accepts a primary token for **any** session
 named in the path and a pairing token only for its bound session; and its schema
 (`DeclaredStatusInputSchema`, `packages/protocol/src/schemas/declared-status.ts`) is
-`.strict()` with no field for a delivery id or a nonce. Part 2 needs **its own small message**,
-authenticated by a class already bound to exactly one session, so the daemon, not the caller,
-decides which session is speaking. The classes of
-[`bearer-token-authority.md` §2](bearer-token-authority.md#2-the-four-token-classes):
+`.strict()` with no field for a delivery id or a nonce. Part 2 needs **its own small message**
+on a channel already bound to exactly one session, so the daemon, not the caller, decides
+which session is speaking. The candidates are a daemon-defined in-process tool and the classes
+of [`bearer-token-authority.md` §2](bearer-token-authority.md#2-the-four-token-classes):
 
 | Class | Bound to one session? | What else it can do | Verdict |
 |---|---|---|---|
+| **Daemon-defined in-process tool** (claude-sdk) | **yes, by construction**: one tool instance per turn of one session, bound to the daemon session id by the manager's wiring; no credential | nothing (below) | **recommend for claude-sdk** |
 | Primary token | no | everything | refuse |
 | Pairing-bound session token | yes (`generateBoundPairing`, `pairing.js`) | input, permission answers and declared-status writes **for that session** | refuse: a worker holding it could answer its own permission prompts |
-| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and, only when a port is configured, `ClaudeTuiSession` (`claude-tui-session.js`); in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **recommend** |
+| **Per-session hook secret** | **yes**: minted per session by `CliSession` (`cli-session.js`) and, only when a port is configured, `ClaudeTuiSession` (`claude-tui-session.js`); in memory only, never persisted, not accepted for WebSocket auth; **exported to the child only when a port is configured** (and, for claude-tui, permissions are enabled); `_findSessionByHookSecret` (`ws-server.js`) resolves the owner session from the secret | today only `POST /permission` and `POST /permission-floor`, which create a prompt for that session or read | **retained for claude-cli, deferred** |
 | Daemon-level ingest secret | no: daemon-wide; the caller names the session | notifications, declared status, mailbox wakeups | refuse |
 | Agent principal | no; a worker is not a principal | its tier | refuse |
 | Discord-return secret | not built; channel-scoped | — | refuse |
 
-**Recommendation:** the per-session hook secret, extended by **one** hook route
+**On main.** claude-sdk already produces part 1: `SdkSession` (`sdk-session.js`) declares
+`capabilities.daemonTurnInput: true` and reports `{ status: 'accepted', delivery:
+'dispatch_started' }` through `reportInputAdmission`. `SdkSession.sendMessage` builds a fresh
+options object and calls `query()` once per turn; permission enters the daemon in-process at
+exactly two places, `options.canUseTool` → `_handlePermission` (every mode but auto) and
+`options.hooks.PreToolUse` → `_handleAutoPreToolUse` (auto, where the SDK runs
+`bypassPermissions`), both reaching `PermissionManager.handlePermission`; no `mcpServers`
+option is passed. The session object does not hold the daemon's session id;
+`SessionManager._wireSessionEvents(sessionId, session)` (`session-manager.js`) closes over it.
+`DockerSdkSession` (`docker-sdk-session.js`) extends `SdkSession` with its own process spawn.
+The Agent SDK exports `createSdkMcpServer` and `tool` (in-process tools).
+
+**Recommendation for claude-sdk: a daemon-defined in-process acknowledgment tool.** Built per
+turn inside the session with `createSdkMcpServer`: one server holding one tool, `task_ack`.
+**The server name is fresh for every turn**: `chroxy_ack_<suffix>`, the suffix at least 64
+bits from the system's cryptographic random source, so the model-visible name is
+`mcp__chroxy_ack_<suffix>__task_ack` (shape proposed). The session generates the suffix
+**when it builds that turn's options and never earlier**, and none is reused: the name
+exists nowhere before the turn's CLI process is spawned. It is not created with the send,
+because a delivery queued behind a busy session has its text visible (`message_queued`)
+before its turn starts. The wake text therefore never carries it: it names the tool only by
+its constant bare name `task_ack` (§7.3), and the model finds the turn's tool in its tool
+list, on the delivery turn and on any later turn alike. No server configured before the
+turn's CLI process is spawned can hold that turn's name, so the daemon neither reserves a
+name nor reads any configuration to look for a conflict. Input `{ deliveryId, nonce }`; the
+§6.6 checks and the
+§7.2 audit-only reasons. It uses **no token class**: the session is the one whose turn built
+the tool instance, and the handler reaches the ledger through a function the session manager
+binds when it wires the session (as `_wireSessionEvents` closes over the daemon session id
+today), so the id comes from the manager, never from the tool input and never from the
+session object. That binding and the `mcpServers` option are new seams. It needs no
+`bearer-token-authority.md` delta.
+
+Terms used below. The **entry points** are `options.canUseTool` and
+`options.hooks.PreToolUse` with their wrappers `_handlePermission` and
+`_handleAutoPreToolUse`, and nothing they call. A call is **exempted** when a new
+short-circuit in `PermissionManager.handlePermission` allows it: no pending request and no
+frame. The **uniform refusal** is one fixed tool result, byte-identical whatever the reason.
+"Item n" refers to the evidence table below. Requirements:
+
+- **The handler is the only authority for part 2.** Every §6.6 check runs in the tool's
+  handler, in one synchronous step with no `await` between the checks and the append; the
+  manager-bound function is synchronous and returns the verdict, and events are for audit
+  only. Permission is a separate question the handler does not answer: no entry point and no
+  exemption is a **gate** for part 2 (an `allowedTools` entry skips `canUseTool` entirely,
+  item 5). The exemption exists only so that no human prompt is created for the daemon's own
+  call. It is not a permission answer by any principal or relay: it creates no pending
+  request, emits no `permission_request` and no `permission_resolved` frame (so P §9's
+  `resolvedBy` is not engaged), and changes the treatment of no other tool.
+- **No schema refusal before the handler, and nothing escapes it.** The registered shape
+  declares the two fields without constraining them, and shape, strictness and the 512-byte
+  bound are enforced **in the handler** (`invalid_input`), so a malformed call is counted,
+  audited and answered like any other. Whether the SDK strips unknown keys or rejects a call
+  before the handler is unverified (`tool()` takes a schema shape); D4a must test it, and
+  what the SDK removes before the handler cannot be checked there. The handler body is
+  wrapped: any throw returns the uniform refusal and is audited. Part 2 is a ledger
+  transition (§6.1): `{ ok: true }` is returned only after the record is confirmed durable; a
+  failed or unconfirmed append, or an unavailable audit writer, returns the uniform refusal,
+  records nothing, latches as §6.1 and is audited where it can be (`ledger_unavailable`,
+  `audit_unavailable`). The append is attempted once; nothing is retried in-process. A throw
+  after a durable append leaves part 2 recorded although the model saw a refusal; a repeat is
+  then acknowledged. A daemon restart between the call and the record is a lost
+  acknowledgment, never a resend.
+- **Exempted narrowly, behind the floor and the rules.** On main `handlePermission`
+  (`permission-manager.js`) runs, in order: two name-keyed branches (`dev_preview`, a deny,
+  and `AskUserQuestion`, a routing; neither allows without a person); `isFlooredTarget`; the
+  auto short-circuit; the rule check (session rules, then persisted project rules, matched
+  by exact tool name); the `acceptEdits` branch; then it creates the prompt. Each lenient
+  branch tests the floor result itself. The new short-circuit goes
+  **after the rule check and the `acceptEdits` branch, immediately before the prompt is
+  created**, and exempts a call only if **all** of these hold:
+  1. the tool name equals, **exactly**, the name the session generated for **this turn**;
+  2. the call comes from the session's main loop: the SDK's agent id is absent (`agentID` in
+     the `canUseTool` options, `agent_id` in the `PreToolUse` hook input);
+  3. `isFlooredTarget` is false for the call.
+
+  So a floored call still prompts in every mode, and a `deny` rule still denies wherever the
+  rule check is reached: always outside auto, and in auto only for a floored call (part 2 is
+  then lost, safely). In auto mode the existing auto short-circuit
+  decides first, as it does for every tool it may delegate: the call is allowed unless
+  floored and no rule is consulted, so the new branch adds no unprompted path there. No rule
+  can name a fresh suffix beforehand. The order relative to the `acceptEdits` branch is
+  structural: this tool is not in `ACCEPT_EDITS_TOOLS`, so no test can observe it, and the
+  `deny`-rule test is the guard for placement. A call that is not exempted takes the ordinary
+  path of its mode, and if it
+  is allowed the handler judges it like any other. The spike allowed the call in the entry
+  points, ahead of `PermissionManager`; D4a must not. An `allowedTools` entry is not an
+  acceptable mechanism: it skips the entry point and with it the floor.
+- **The entry points pass a turn context.** `handlePermission` cannot see conditions 1 and 2
+  today: the `canUseTool` wrapper drops `agentID`, `_handleAutoPreToolUse` does not read
+  `agent_id`, and nothing carries the turn's tool name. D4a changes both entry points to pass
+  an optional, session-built context (this turn's tool name, the SDK's agent id) into
+  `handlePermission`; `_trackPermissionDecision` still wraps the call. The context is closed
+  over by the turn's options, not stored on the session, so a draining earlier turn's call
+  carries its own turn's name. It is never derived from tool input, and a missing or
+  malformed context (no name, an empty or non-string name) exempts nothing, so every other
+  caller of `handlePermission` (the BYOK and Codex sessions among them) is unaffected. That the hook
+  input carries `agent_id` for a subagent's call is declared in the SDK's types and
+  unverified; until D4a shows it, nothing is exempted through the `PreToolUse` entry point.
+  That matters only after a mid-turn switch out of auto, since in auto the existing
+  short-circuit decides.
+- **What the per-turn name leaves open.** Once the turn runs, the model and its tools know
+  the turn's name. A foreign tool can carry it only if a server of that name is connected
+  **after** the turn's CLI process has started. A subagent-defined server is called by that
+  subagent, so its call carries an agent id and condition 2 withholds the exemption (seen
+  for `canUseTool` only, item 6). The SDK's own calls that change a running query's servers
+  (`setMcpServers`, `reconnectMcpServer`, `toggleMcpServer`) are made by the daemon, never
+  by the model; this design makes none, and D4a must not. Whether the CLI can otherwise
+  connect a server mid-turn, and which instance it keeps when two share a name, are
+  unverified, and D4a must test both. If a foreign server can take the name unseen by the
+  daemon, nothing is exempted in a prompting mode (fail closed) and the owner revisits §15
+  decision 1; the tool then still works wherever the mode allows the call without a prompt.
+- **Narrow registration.** Decided at turn build from ledger state: the session is the target
+  of an **open** attempt whose delivery is `sending`, `delivered` or `uncertain` **and has no
+  part 2 recorded**. The `sending` record is durable before the turn's options are built
+  (§6.5), so the tool is present on the turn that carries the delivery; a session restored
+  after a restart registers by the same rule. While that holds, every turn of the target
+  session carries the tool, a person's turn included; a call there can still only record
+  part 2 for this session's own delivery, under the handler's checks. The full name changes
+  each turn and nothing in the transcript names the current one, so a late acknowledgment
+  depends on the model finding the tool again. A foreign tool that shares only the bare name
+  `task_ack` is never exempted and cannot record part 2; if the model calls it, the nonce
+  reaches that tool, which gains nothing by it. Every other session, and the target
+  once part 2 is recorded or the attempt closes, sees no tool and no change; a session that
+  is not the ledger's target has no tool, so a conversation forked or shared into it cannot
+  record part 2. The handler's own checks stay authoritative: a call after `ackBy` is
+  recorded while the attempt is open; a call after the attempt closed is refused
+  (`attempt_closed`) and raised as `late_report_refused` (§6.8). Nothing from the wire
+  becomes wake text.
+- **Reply, rate and audit.** The reply to the model is `{ ok: true }` or the uniform refusal.
+  Each refusal is a `denial` record with actor class `worker` (§11), carrying the specific
+  reason. A per-session rate
+  limit (§15 decision 13) counts every call that does not record part 2, repeats included;
+  past the limit a call is refused `rate_limited` without reaching the ledger, and its audit
+  coalesces as §11 coalesces denials, which does not change the count.
+- **Its `permission-floor.md` delta** (with D4a, at HIGH): a row in that document's §2 table;
+  its §3, both the in-process diagram and the "ONE implementation" framing, with a statement
+  that this exemption exists on the in-process pipeline only (the hook-routed pipeline gets
+  none in v1); its §4 rule 3, where the parity matrix (`tests/permission-hook-floor.test.js`)
+  must declare that one intended difference; and its paragraph on answering prompts without
+  a person, which must say that this call creates no request and so carries no `floored`. As
+  the **first allow in `handlePermission` keyed on one tool name**, the row must be argued
+  there, not assumed, to leave §2's precedence as written.
+
+**Honest limits of the tool.** Except where an item is cited, this paragraph is design
+reasoning, not observation. Part 2 is evidence that the **session's own agent loop** made the
+call with the nonce, not evidence of intent. The handler's arguments carry nothing that
+distinguishes a **subagent** (item 6), so it records part 2 for either; a subagent's call is
+only never *exempted*, so in a prompting mode it raises an ordinary prompt, and in auto it is
+allowed like any tool. The
+acknowledgment **can be lost**: a subagent's call was lost once when the turn's input had
+closed at its result (item 7), and whether the main loop's own call can be lost the same way
+is unproven; a `deny` rule (outside auto), an interrupt, an exhausted rate limit or a restart
+would lose it too. The delivery then lacks part 2 and runs to `ack_overdue` with the attempt
+open, its capacity held and a reconcile; a later call can still record part 2 while the
+attempt is open; §6.6 and §6.8 never resend. The call is an ordinary tool row (item 8a); the
+tool's name, its server and the nonce are expected to be readable by the model and by anyone
+who can read the session, and none is a secret. The model usually took a lookup step first
+(item 9). Calls that record nothing count against the rate limit, so injected content or a
+subagent can exhaust it and cost the real acknowledgment; that loses part 2 and widens
+nothing. In **plan mode** the call may be unavailable or refused by the CLI; `acceptEdits`
+shares the approve entry point; the sandbox option is not expected to touch the in-process
+channel; all three are untested. **No credential exists** for a process in the worker's tree
+to read; the same-user limit (§2) still applies to a process that can drive the child's
+control channel, which is not a sandbox boundary.
+
+**Evidence, and what it does not show.** Spiked 2026-11-21, results not published: (a) a
+throwaway daemon built from `2373ec835` with an unmerged patch, three sessions (two approve,
+one auto); (b) a standalone SDK probe mirroring the session's per-turn options, no daemon.
+Agent SDK 0.2.141, CLI 2.1.322, small model only. **The spike had no ledger**: its handler
+recorded only that it was called and with what nonce, and its tool had one fixed name.
+
+| Item | Where | Observed |
+|---|---|---|
+| 1 | daemon and probe | The model called a tool built per turn inside the session, and the entry point saw the call **before** the handler ran: approve via `canUseTool`, auto via `PreToolUse` |
+| 2 | daemon | With the tool allowed by the entry point itself, ahead of `PermissionManager`, an approve session produced no `permission_request` for it, while an ordinary file write right after it did. The auto session produced none either, which shows nothing: auto prompts for neither |
+| 3 | daemon; probe for concurrency | The handler ran in the daemon process, and a listener in `_wireSessionEvents` recorded the right daemon session id in 3 of 3 sessions. Two concurrent turns each got only their own call (probe) |
+| 4 | probe | When the entry point denied, the handler never ran |
+| 5 | probe | A tool pre-allowed by `allowedTools` ran with `canUseTool` never consulted |
+| 6 | probe | A subagent could call the tool; the `canUseTool` options carried an `agentID` for that call and none for main-loop calls; the handler's arguments carried nothing distinguishing |
+| 7 | probe | One subagent call made after the turn's input stream had closed at its result failed with an abort; in a second run the call landed before the result and succeeded. "After the result, input held open" is unproven |
+| 8a | daemon | The call appeared as an ordinary tool row (`tool_start`, `tool_result`), and the daemon emitted an `mcp_servers` frame whose content was not inspected |
+| 8b | probe | The SDK's init message listed the server as connected |
+| 9 | daemon and probe | In 10 of 11 counted turns the model called the CLI's `ToolSearch` before the tool. `tool()`'s `alwaysLoad` extra was not tried |
+
+**The spike supports only** that such a call reaches the daemon's entry points before the
+handler, that the handler runs in the daemon and the manager's wiring knows the session, that
+an allow at the approve entry point yields no prompt, and the probe items as marked. **Not
+tested, so design requirements only:** every §6.6 check and anything about the ledger; the
+manager-bound synchronous function; per-turn names; the exemption inside `PermissionManager`
+and its three conditions; the turn context, and `agent_id` in the hook input; the auto
+short-circuit path for this call; narrow registration; handler-side validation, wrapping and
+what `tool()` does with unknown keys; the rate limit; the uniform refusal; the start
+exclusions of §6.6; a server connecting mid-turn; resume across turns; `DockerSdkSession`;
+interrupt or stop mid-call; plan mode, `acceptEdits` and the sandbox option; other models;
+claude-cli, claude-tui, Codex and ACP (by code reading at `2373ec835` they have no
+in-process tool-registration seam of this kind, so nothing here applies).
+
+**Retained, deferred: the per-session hook secret and `POST /task-ack`.** Not part of v1; the
+mechanism for a provider with a hook secret and no in-process seam (claude-cli), with its own
+slice (D4b). The per-session hook secret is extended by **one** hook route
 (`POST /task-ack`, proposed; §15 decision 1), body exactly `{ deliveryId, nonce }`, ≤ 512
 bytes. Requirements: **loopback only** (`isLoopbackPeer`, `connection-locality.js`, before the
 token check, per bearer-token-authority §9 step 3); the session resolved by constant-time
@@ -552,25 +771,57 @@ comparison to a **non-null session id**, with **no fallback** to any other class
 per-session rate limit (§15 decision 13); the route on the P §4.5 HTTP roster. The reply is
 `{ ok: true }` or **one uniform refusal**, a deliberate departure from bearer-token-authority
 §9 step 2: the caller's tools are untrusted, and a specific reason would make the route an
-oracle for other sessions' deliveries; the audit records the specific reason.
+oracle for other sessions' deliveries; the audit records the specific reason. **Its
+bearer-token-authority delta** (with D4b, at HIGH): §1, the hook-secret row of the §2 table,
+§5, the §7 table, the §9 step 1 list,
+`tests/http-routes-scoped-token.test.js`. As the **first hook-secret route that writes durable
+state**, it needs §5's "strictly less" argument (made for `POST /permission-floor`) re-argued
+there, not assumed. **Its honest limit:** anything in the worker's process tree can read the
+secret (the `cli-session.js` comment says so): part 2 is evidence of receipt **from inside
+that tree**, not of intent.
 
-**What it must not be able to do:** answer, create or extend any permission request; send
+**What neither channel may do:** answer, create or extend any permission request; send
 input; interrupt; read any session data, roster, journal or ledger; write declared status;
 acknowledge for another session or an older successor; register a successor; change any
-ledger state other than recording part 2. **Its bearer-token-authority delta** (with D4, at
-HIGH): §1, §5, the §7 table, the §9 step 1 list, `tests/http-routes-scoped-token.test.js`. As
-the **first hook-secret route that writes durable state**, it needs §5's "strictly less"
-argument (made for `POST /permission-floor`) re-argued there, not assumed.
+ledger state other than recording part 2. Codex and ACP have neither a hook secret nor an
+in-process tool-registration seam of this kind, claude-tui cannot yet produce part 1 (§6.5),
+and the route is deferred; hence §15 decision 2.
 
-**Honest limits.** Anything in the worker's process tree can read the secret (the
-`cli-session.js` comment says so): part 2 is evidence of receipt **from inside that tree**, not
-of intent. claude-sdk, Codex and ACP mint no hook secret, and claude-tui cannot yet produce
-part 1 (§6.5); hence §15 decision 2.
+Tests (tool, D4a). Each row names what must fail when its guard is removed.
 
-Test: an ACK with each refused class, from a non-loopback peer, with another session's or an
-older successor's secret, or a wrong nonce is refused uniformly and audited specifically;
-mutation: take the session from the body, or drop the nonce check; positive control: the
-target session's secret and nonce record part 2.
+| Guard | Test and observable | Mutation it kills |
+|---|---|---|
+| Session binding | Two sessions with open attempts each call their own tool with the other's `deliveryId` and nonce: uniform refusal, audit `wrong_session`, no record | Take the session id from the tool input |
+| §6.6 checks in the handler | A wrong nonce, an older successor and a closed attempt are refused, also when an `allowedTools` entry skips the entry point | Run a §6.6 check in an entry point or in the exemption instead of the handler |
+| One synchronous step | A ledger fake with an asynchronous seam and two interleaved valid calls yields exactly one record | Insert an `await` between the checks and the append |
+| Handler-side validation | The handler invoked directly with a missing field, a non-string field, an extra field and a 600-byte input refuses each `invalid_input`, audited and counted; through the SDK the same inputs yield the uniform refusal, or the D4a finding records what the SDK removes first | Drop a handler check; constrain the registered shape so the SDK rejects first |
+| Wrapping | A handler made to throw returns the uniform refusal and leaves an audit record | Let a throw escape |
+| Throw after a durable append | A ledger fake whose append succeeds and whose next step throws: the uniform refusal is returned, exactly one record exists, and a repeat is acknowledged with no second record | Roll the record back, or record twice |
+| Durable before `ok` | An append made to fail, an append left unconfirmed and an audit writer made unavailable each return the uniform refusal, record nothing and latch (§6.1); the append is attempted exactly once | Return `{ ok: true }` before the record is confirmed; swallow a failed append; skip the latch; retry in-process |
+| Uniform refusal | The tool result is byte-identical across every refusal reason, the rate limit included | Return the specific reason |
+| Rate limit | Ten refused calls, then a valid call in the same minute is refused `rate_limited` and records nothing; another session's valid call in that minute records; after the window a valid call records; a repeat after a recorded part 2 consumes budget; coalesced audit lines leave the count unchanged | Do not count refused calls; exclude repeats; count audit lines instead of calls; count per daemon instead of per session |
+| Name freshness | With the random source injected into the session: it is asked for at least 8 bytes per turn and the suffix is an encoding of exactly those bytes; with a delivery queued behind a busy fake session it is not called between send creation and turn build; the wake text and the `message_queued` text contain no suffix; two turns never share one | Use a counter or a timestamp; create the suffix with the send; put it in the wake text; reuse a suffix |
+| Exemption: name | In an approve session a tool on a second test server named with another suffix (`mcp__chroxy_ack_<other>__task_ack`), a foreign tool sharing only the bare name (`mcp__other__task_ack`) and a second tool on the turn's own server each prompt, and none records part 2 | Match a prefix or the bare tool name |
+| Exemption: main loop | In an approve session a subagent's call to the turn's tool prompts | Drop the agent-id condition |
+| Exemption: hook entry point | Until `agent_id` is verified (§6.7): after a mid-turn switch from auto to approve, a main-loop call and a subagent's call to the turn's tool through `PreToolUse` each prompt | Exempt through the hook entry point before `agent_id` is verified |
+| Exemption: floor | With the floor forced on for the call through a test seam, it prompts | Exempt without the floor test |
+| Exemption: placement | In an approve session a session `deny` rule installed for the turn's name, once it is known, denies the call | Place the branch before the rule check |
+| Exemption: context | A call through `handlePermission` with no turn context, as BYOK and Codex make it, is never exempted even when its tool input carries fields named like the context (the tool's name, an agent id); a context with an empty or non-string name exempts nothing, tested with the call's tool name equal to that value; with a real context a different name in the tool input changes nothing | Derive the context from tool input, or default it |
+| No request, no frames | In an approve session the target's main-loop call produces no `permission_request` and no `permission_resolved` frame | Implement the exemption by creating a request and answering it |
+| Narrow registration | The tool is listed on the turn that carries the delivery, on a person's later turn of the target while the attempt is open, and on a restored session whose delivery is `uncertain`; it is absent with no open attempt, a closed attempt, a `pending` delivery or part 2 recorded, and in any other session while the target's attempt is open; a call after close is refused and raises `late_report_refused` | Register for every claude-sdk turn; register on the delivery turn only; keep registering after part 2 |
+| Mid-turn server | Two probes: a server added to the project MCP configuration under the turn's name after the turn starts, and a subagent-defined server of that name. Observables: the servers the SDK reports as connected during the turn, whether a main-loop call to the foreign tool prompts, and which instance the CLI keeps when two share the name | Findings, not mutations: they decide the fallback |
+
+Positive control: in an approve session the target session's main-loop call, through
+`canUseTool`, with the right nonce records part 2, returns `{ ok: true }` and produces no
+prompt, and it consumes no rate budget. In auto mode the same call records part 2 through the
+existing auto short-circuit,
+which the test asserts is the branch taken, since auto exercises none of the new code.
+
+Test (route, D4b): an ACK with each
+refused class, from a non-loopback peer, with another session's or an older successor's
+secret, or a wrong nonce is refused uniformly and audited specifically; mutation: take the
+session from the body, or drop the nonce check; positive control: the target session's secret
+and nonce record part 2.
 
 ### 6.8 Uncertainty, attempt close and no blind redispatch
 
@@ -642,7 +893,9 @@ guard of P §4.2 checks them in both directions. Every reply passes `frameForPri
 whitelists, and every row it carries passes `principalMaySee(client, sessionId, 'observe')`
 (`PRINCIPAL_BROADCAST_ALLOWED` stays empty). The new admin types **amend P §3's management
 roster** (an amendment D1 owns): they are strict-primary and loopback-only, and sit in
-`BOUND_DENIED_MESSAGE_TYPES` and `PRINCIPAL_DENIED_MESSAGE_TYPES`.
+`BOUND_DENIED_MESSAGE_TYPES` and `PRINCIPAL_DENIED_MESSAGE_TYPES`. The two worker ACK rows of
+§7.1 are not WebSocket message types and are outside that roster guard: the deferred route
+goes on the P §4.5 HTTP roster, and the tool is on neither roster.
 
 ### 7.1 Message types (closed field sets)
 
@@ -660,7 +913,8 @@ roster** (an amendment D1 owns): they are strict-primary and loopback-only, and 
 | `principal_admin_task_resolve` | operator | `type, requestId, workKey, action, attemptCap?` | direct reply |
 | `principal_admin_successor_register` | operator | `type, requestId, workKey, sessionId, handoffRef` | direct reply |
 | `principal_admin_decision_answer` | operator | `type, requestId, decisionId, answer` | direct reply |
-| `POST /task-ack` (proposed; §15 decision 1) | worker, per-session hook secret | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
+| `mcp__chroxy_ack_<suffix>__task_ack` (proposed; §15 decision 1) | worker on claude-sdk, the session's own in-process tool, named per turn (§6.7) | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
+| `POST /task-ack` (proposed, deferred; §15 decision 1) | worker, per-session hook secret | `deliveryId, nonce` | `{ ok: true }` or the uniform refusal |
 
 Every coordinator command is rate-limited (§15 decision 13). **No free-text field exists on
 any coordinator command.** `scopeRef` and the decision `*Ref` fields are references
@@ -674,10 +928,10 @@ keeps one meaning.
 
 | Channel | Codes |
 |---|---|
-| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `attempt_closed` (shared with the worker ACK route), `cursor_unavailable` |
+| Command refusals | `scope_denied`, `agents_off`, `lease_required`, `lease_stale`, `lease_suspended`, `not_coordinator_of_record`, `invalid_input`, `payload_mismatch`, `dispatch_capacity`, `rate_limited`, `stale_generation`, `stale_view`, `stale_successor`, `backlog_stale`, `issue_not_eligible`, `issue_held`, `attempt_open`, `attempt_uncertain`, `attempt_cap_reached`, `target_unsupported`, `target_blocked:<code>`, `target_human_active`, `target_repo_mismatch`, `capacity_unavailable`, `audit_unavailable`, `ledger_unavailable`, `delivery_not_uncertain`, `delivery_not_sending`, `delivery_sending`, `attempt_closed`, `cursor_unavailable` |
 | P §6.7 codes reused (fences and queue) | `fenced_pending_permission`, `fenced_human_active`, `fenced_pty_dirty`, `fenced_busy`, `human_queue_nonempty`, `agent_queue_full` |
 | Command result | `accepted` (a repeat carries `replayed: true` and the current state); cancel outcomes `cancel_requested`, `cancel_not_applicable`, `cancel_not_applied` |
-| Worker ACK route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed` |
+| Worker ACK channels, tool and route (audit only; one uniform refusal on the wire) | `nonce_mismatch`, `wrong_session`, `ack_stale_successor`, `delivery_not_open`, `attempt_closed`, `invalid_input`, `rate_limited`, `ledger_unavailable`, `audit_unavailable` (the last five shared with command refusals, same meaning) |
 | Delivery states | `pending`, `sending`, `delivered`, `rejected:not_dispatched`, `dropped:<reason>` (`session_end`, `restart`, `lease_expired`, `lease_stale`, `lease_suspended`, `lease_released`, `revoked`, `killed`, `agents_off`, `expired`, `cancelled`, `coordinator_changed`, `closed`, `held`), `uncertain` |
 | Attempt close outcomes | `dropped`, `cancelled`, `closed`, `superseded` |
 | Observed state detail | `awaiting_input`, `queued`, `quota`, `budget_pause`, `hold`, `owner_decision:<id>`, `gate_failed`, `reason_unknown` |
@@ -695,7 +949,9 @@ non-granted session. Positive control: the coordinator of record sees
 ### 7.3 The wake text is built by the daemon
 
 The model-visible text is **composed by the daemon from ledger fields it validated**: the work
-key, the issue reference, the `scopeRef` and the nonce, framed `[agent:<label>]` with the
+key, the issue reference, the `scopeRef`, the nonce and, on claude-sdk, the acknowledgment
+tool's constant bare name `task_ack` (never its per-turn name, §6.7), framed
+`[agent:<label>]` with the
 coordinator's operator-authored label (P §6.3), sanitized by the agent profile (P §6.4 step 7)
 and bounded by `MAX_WAKE_TEXT_CHARS` (500, `session-wake.js`). **Nothing from the wire becomes
 wake text, and issue titles, bodies and comments never do**: the worker reads the issue
@@ -844,7 +1100,7 @@ supersede, events and every external channel, the general deadline timer (D7), G
 fixture row), UI, anything on a long-running daemon. Cases, each with its mutation: happy
 path; duplicate; changed payload; second dispatch; pool full; append failing (latched); torn
 tail across two boots; each drop cause; the drop-versus-send race; restart at `pending` and at
-`sending` (attributed starts 0 or 1, never 2); wrong nonce; another session's secret; no ACK
+`sending` (attributed starts 0 or 1, never 2); wrong nonce; another session's channel; no ACK
 by `ackBy`; a gap; a stale view. **Proves** the ledger logic, nothing about a real provider.
 
 ### 12.2 Live wake acceptance
@@ -867,6 +1123,8 @@ reservation, a replay, count 1); a restart between `sending` and the ACK (`uncer
 nothing resent, count ≤ 1); a wrong nonce and another session's ACK (refused, audited); a
 dispatch against an open attempt; an operator `close` from `uncertain` followed by a late ACK
 (refused as fenced, raised as an event).
+On claude-sdk the run depends on the model making the call (usually a lookup, then the
+call); a missed acknowledgment is a failed run, never a pass.
 **Proves** one delivered, acknowledged, started task. **Neither acceptance proves**
 completion, quality, behaviour while the host sleeps, or latency.
 
@@ -876,10 +1134,12 @@ Proposed: S11 (the audit writer and kill switch) and S2 (dispatch roster) before
 D1 (ledger, reducer, work key, generation, the P §3 roster amendment) before every other
 D-slice; D2 (reservation, capacity, idempotency) and D3 (delivery and its `ackBy` and
 `firstActivityBy` clocks, through S8 leases, S9 fence, queue and `via` marker, S10 dedup)
-next; D4 (worker ACK route, with its bearer-token-authority delta) and D5 (source-owned
-state, permission endings, reconciliation, on S3 to S5) before the live dispatch acceptance;
-D6 (events) before the live wake acceptance; D7 (the general deadline timer); D8
-(completion, fencing, attributed starts on S14, the hook-routed timeout signal) last.
+next; D4a (the in-process acknowledgment tool for claude-sdk, with its `permission-floor.md`
+delta) and D5 (source-owned state, permission endings, reconciliation, on S3 to S5) before
+the live dispatch acceptance; D6 (events) before the live wake acceptance; D7 (the general
+deadline timer); D8 (completion, fencing, attributed starts on S14, the hook-routed timeout
+signal) last. D4b (the hook-secret route, with its bearer-token-authority delta) is deferred
+until claude-cli is targeted and is not required for the live dispatch acceptance.
 
 A **dependent task** (the next task that depends on this one) becomes eligible only on
 **independently proven completion**: a review record by someone other than the worker, bound
@@ -892,7 +1152,11 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 - **No change to any P invariant** (deny-only answers, no agent-initiated lease request, the
   never table, the permission floor, `skipPermissions: false`, the auto-mode gates, every
   bound-client and strict-primary refusal). Proposed amendments to P: the `via: 'dispatch'`
-  marker (§6.5), the admin roster (§7), the event-ACK own-cursor exception (§8).
+  marker (§6.5), the admin roster (§7), the event-ACK own-cursor exception (§8). Proposed
+  amendments outside P: the `permission-floor.md` delta of §6.7 (D4a), which changes no
+  floored target and keeps the floor and, outside auto, the `deny` rules ahead of the new
+  exemption;
+  and, deferred with D4b, the `bearer-token-authority.md` delta of §6.7.
 - **Policy stays with its owners.** Eligibility, scheduling and capacity **policy** remain owned
   by #7823 and #6691; this document specifies only the admission checks a dispatch must pass,
   and its timers apply only to a dispatched attempt.
@@ -900,8 +1164,10 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   Untouched: mailbox delivery (#7437), `session-wake.js` and its gates (dispatch never calls
   `wakeSession` or `wakeViaTurnInput`, §6.5), `POST /api/events`, the declared-status routes.
 - **A second send within one attempt** (an operator or automatic resend) is out of this
-  design. It, a coordinator supersede, a coordinator-registered successor, and a new class
-  reaching the ACK route each widen authority: reviewed at HIGH tier, left for the owner.
+  design. It, a coordinator supersede, a coordinator-registered successor, a new class
+  reaching an ACK channel, any other tool exempted from its prompt, and the acknowledgment
+  tool gaining a field or an effect each widen authority: reviewed at HIGH tier, left for the
+  owner.
 
 ## 14. Residual Risks
 
@@ -913,6 +1179,14 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
   attempt; it is fenced, and the operator should cancel first or wait for the turn to end.
 - **`rejected:not_dispatched` is known unsent** only as far as the provider's `zero_effect`
   verdict is truthful, a trusted input defined by the P §6.9 write boundary.
+- **A server taking the turn's tool name mid-turn** is unverified and fails closed: nothing
+  is exempted in a prompting mode, and the owner revisits §15 decision 1 (§6.7).
+- **A lost or subagent acknowledgment.** On claude-sdk part 2 can be lost (the turn ends
+  first, a `deny` rule, an interrupt, an exhausted rate limit, a restart, or a later turn on
+  which the model does not find the renamed tool); the delivery then lacks part 2
+  (`ack_overdue`), handled by §6.6 and §6.8 and never by a resend. A subagent of the session
+  can make the call: the handler records it as the session's own, and it is never exempted,
+  so in a prompting mode it raises an ordinary prompt (§6.7).
 - Pointers: completed attempts hold capacity until closed (§5.2); same-user containment (§2);
   part 2 proves receipt only (§6.7); unattributed starts before S14 (§6.6); the event ACK is an
   assertion (§8); `uncertain` costs operator attention (§6.8); hook-routed timeouts read
@@ -923,8 +1197,8 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 
 | # | Decision | Recommendation | Default until decided |
 |---|---|---|---|
-| 1 | Credential for the worker ACK (§6.7) | Per-session hook secret plus `POST /task-ack` | No part 2; the live dispatch acceptance cannot pass |
-| 2 | v1 target providers | Those with both an acceptance signal and a hook secret: claude-cli (`CliSession`) today; others `target_unsupported` | As recommended |
+| 1 | Channel for the worker ACK (§6.7) | claude-sdk: daemon-defined in-process tool, no credential (§6.7). Hook secret plus `POST /task-ack` retained for claude-cli, deferred | No part 2; the live dispatch acceptance cannot pass |
+| 2 | v1 target providers | Those with both an acceptance signal and an acknowledgment channel: claude-sdk (`SdkSession` itself; `DockerSdkSession` and any other subclass `target_unsupported` until tested) when D4a lands; claude-cli (`CliSession`) when its route slice (D4b) lands; others `target_unsupported` | As recommended |
 | 3 | Tier required to dispatch | drive, with a live lease on the target | drive |
 | 4 | Who registers a successor session | Operator only in v1 | Operator only |
 | 5 | Where the eligibility read runs and with what credential | Daemon-side, read-only, under the operator's existing local configuration; the fixture slice uses a fixture row | No live dispatch |
@@ -935,5 +1209,5 @@ The worker's declaration is not enough. **A timeout or a wake never makes anythi
 | 10 | Dispatch event stream wire shape | Sibling `principal_dispatch_*` types with the P §7.2 shapes, leaving the session-journal handlers unchanged | Sibling types |
 | 11 | Eligibility read staleness limit | 10 minutes | 10 minutes |
 | 12 | Observation freshness window | 120 seconds | 120 seconds |
-| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK route: 10 per session per minute. Attempts per task: 3 (`attempt_cap_reached`; raised only by the operator's `raise_cap`). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
+| 13 | Limits (excess refused `rate_limited` unless stated) | Dispatch: 6 per principal per minute. Cancel: 6 per principal per minute. Reconcile: 1 per attempt per minute. Decision requests: 1 per minute, 20 open per principal. Event ACK: 1 cursor write per principal per second. Worker ACK: 10 per session per minute, across either channel (tool or route). Attempts per task: 3 (`attempt_cap_reached`; raised only by the operator's `raise_cap`). Idempotency records: 10 000 per principal (`dispatch_capacity`). `ackBy` ≤ 10 minutes, `firstActivityBy` ≤ 30 minutes. Retention: closed tasks compacted to a snapshot after the 7-day tombstone, `RunLedger`-style | As recommended |
 | 14 | Event-ACK tier | Accept the own-cursor observe exception (§8) as an amendment to P §4 and §11 | Require drive tier for `principal_event_ack` |
