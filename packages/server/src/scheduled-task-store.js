@@ -87,6 +87,16 @@ const MAX_WIRE_ID_LENGTH = 256
  * — the split that made #7051 reachable through the file after add() was fixed.
  * @param {string} id - an already-trimmed, non-empty id
  */
+function requireIdWithinWireCap(id) {
+  if (id.length > MAX_WIRE_ID_LENGTH) {
+    throw new ScheduledTaskValidationError(
+      `task id must be <= ${MAX_WIRE_ID_LENGTH} characters (got ${id.length}) — ` +
+      'a longer id cannot be carried on the wire and would make the whole scheduled-tasks snapshot unparseable',
+      'id',
+    )
+  }
+}
+
 /**
  * #8571 — whether `value` has the shape of a task id this store would accept:
  * a non-empty string, already trimmed (`add` trims before storing) and within the
@@ -97,16 +107,6 @@ const MAX_WIRE_ID_LENGTH = 256
  */
 export function isScheduledTaskIdShape(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_WIRE_ID_LENGTH && value === value.trim()
-}
-
-function requireIdWithinWireCap(id) {
-  if (id.length > MAX_WIRE_ID_LENGTH) {
-    throw new ScheduledTaskValidationError(
-      `task id must be <= ${MAX_WIRE_ID_LENGTH} characters (got ${id.length}) — ` +
-      'a longer id cannot be carried on the wire and would make the whole scheduled-tasks snapshot unparseable',
-      'id',
-    )
-  }
 }
 
 /**

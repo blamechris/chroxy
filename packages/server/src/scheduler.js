@@ -463,7 +463,7 @@ export class SchedulerEngine extends EventEmitter {
     }
     this._started = true
     this._log.info('Scheduled execution ENABLED — arming headless scheduler')
-    this._readoptRestoredSessions()
+    this._adoptLinkedSessions()
     this._armNextTick()
     return true
   }
@@ -519,6 +519,7 @@ export class SchedulerEngine extends EventEmitter {
     this._clearArmedTimer()
     // Every registry change and every settled run funnels through here, so this
     // is the one place that notices a task has gone away (#7006).
+    this._adoptLinkedSessions()
     this._releaseSessions()
     const now = this._now()
     let earliest = null
@@ -560,8 +561,10 @@ export class SchedulerEngine extends EventEmitter {
    * later, the pass above destroys its session.
    *
    * The mapping itself is in-memory, but the session's `scheduledTaskId` is
-   * persisted, so start() re-adopts it after a restart (_readoptRestoredSessions,
-   * #8571) and a task deleted afterwards is released here like any other. Never throws: a failing destroy must not take
+   * persisted as a restore hint, so a restart re-adopts it (_adoptLinkedSessions,
+   * #8571) and a task deleted afterwards is released here like any other. Only an
+   * ADOPTED (mapped) session is closed; a task deleted while the daemon was down
+   * leaves its session as an ordinary one. Never throws: a failing destroy must not take
    * the scheduling tick down.
    */
   _releaseSessions() {
@@ -574,36 +577,52 @@ export class SchedulerEngine extends EventEmitter {
   }
 
   /**
-   * @private (#8571) — after a restart, rebuild the task->session map from the
-   * restored sessions' persisted `scheduledTaskId`. For each task in the store the
-   * most recently active linked session is adopted (ties: highest session id). Every
-   * other linked session — a duplicate, or one whose task is gone — is UNLINKED, never
-   * destroyed, so it becomes an ordinary session. Idempotent; never throws.
+   * @private (#8571) — adopt restored sessions into the task->session map. The
+   * persisted `scheduledTaskId` is only a restore HINT: the SessionManager holds it
+   * inert until this pass takes ownership of the session (which is what makes it
+   * `automation_owned`). For every task in the store with no LIVE mapped session, the
+   * most recently active live session linked to it (owned or hinted; ties: highest
+   * session id) is adopted and mapped. Run on start, on every re-arm (so a session
+   * that came back late — retryFailedRestore, an archive restore — is picked up)
+   * and before a fire creates a session. Idempotent and cheap; never throws.
+   *
+   * It NEVER unlinks or destroys. A task absent from the store is not evidence of a
+   * deletion (the store loads EMPTY when its file is unreadable), so sessions linked
+   * to an absent task, and non-chosen duplicates, keep their inert hint. A task
+   * deleted while the daemon was down therefore leaves its session as an ordinary
+   * one; only a session adopted in this process is closed on deletion
+   * (_releaseSessions). Sessions dropped by restore's staleness filter cannot be
+   * re-adopted, so a long-cadence task may still get a fresh session.
+   *
+   * @param {string} [onlyTaskId] - restrict the pass to one task
    */
-  _readoptRestoredSessions() {
+  _adoptLinkedSessions(onlyTaskId) {
     try {
       if (typeof this._sm?.listScheduledTaskSessions !== 'function') return
-      const best = new Map()
       const linked = this._sm.listScheduledTaskSessions()
-      for (const s of linked) {
-        if (!this._store.get(s.taskId)) continue
-        const cur = best.get(s.taskId)
-        if (!cur || s.lastActivityAt > cur.lastActivityAt
-          || (s.lastActivityAt === cur.lastActivityAt && s.sessionId > cur.sessionId)) {
-          best.set(s.taskId, s)
+      if (linked.length === 0) return
+      const tasks = onlyTaskId !== undefined
+        ? [this._store.get(onlyTaskId)].filter(Boolean)
+        : this._store.list()
+      for (const task of tasks) {
+        const mapped = this._sessionByTask.get(task.id)
+        if (mapped && this._sm.getSession?.(mapped)?.session) continue
+        let best = null
+        for (const s of linked) {
+          if (s.taskId !== task.id) continue
+          if (!best || s.lastActivityAt > best.lastActivityAt
+            || (s.lastActivityAt === best.lastActivityAt && s.sessionId > best.sessionId)) {
+            best = s
+          }
         }
-      }
-      for (const [taskId, s] of best) {
-        if (!this._sessionByTask.has(taskId)) this._sessionByTask.set(taskId, s.sessionId)
-      }
-      for (const s of linked) {
-        if (this._sessionByTask.get(s.taskId) === s.sessionId) continue
-        if (this._sm.unlinkScheduledTask?.(s.sessionId)) {
-          this._log.info(`Unlinked session ${s.sessionId} from scheduled task ${s.taskId}: ${this._store.get(s.taskId) ? 'another session of the task was re-adopted' : 'the task no longer exists'}`)
+        if (!best) continue
+        if (this._sm.adoptScheduledTask?.(best.sessionId, task.id)) {
+          this._sessionByTask.set(task.id, best.sessionId)
+          this._log.info(`Adopted session ${best.sessionId} as the session of scheduled task ${task.id}`)
         }
       }
     } catch (err) {
-      this._log.warn(`Could not re-adopt restored scheduled sessions: ${err?.message || err}`)
+      this._log.warn(`Could not adopt restored scheduled sessions: ${err?.message || err}`)
     }
   }
 
@@ -962,7 +981,14 @@ export class SchedulerEngine extends EventEmitter {
    * verified. A session that cannot be brought to the clamped mode is refused.
    */
   _resolveSession(task, ctx) {
-    const existing = this._sessionByTask.get(task.id)
+    let existing = this._sessionByTask.get(task.id)
+    if (!existing || !this._sm.getSession?.(existing)?.session) {
+      // Nothing live is mapped: before minting a fresh session, adopt one that is
+      // already linked to this task (restored late, or skipped at start) (#8571).
+      this._sessionByTask.delete(task.id)
+      this._adoptLinkedSessions(task.id)
+      existing = this._sessionByTask.get(task.id)
+    }
     if (existing) {
       const entry = this._sm.getSession?.(existing)
       if (entry?.session) {

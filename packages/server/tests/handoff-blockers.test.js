@@ -431,7 +431,7 @@ describe('CliSession startup queue (#8281)', () => {
 })
 
 describe('restored sessions are not automation_owned (#8281)', () => {
-  it('orchestration ownership is not persisted; the scheduler link is (#8571)', async () => {
+  it('orchestration ownership is not persisted; the scheduler link is only a hint until adopted (#8571)', async () => {
     const { registerProvider } = await import('../src/providers.js')
     class P extends BaseSession {
       constructor(opts) { super({ cwd: opts.cwd }); this._processReady = true; this.resumeSessionId = null }
@@ -459,11 +459,11 @@ describe('restored sessions are not automation_owned (#8281)', () => {
         assert.ok(second.restoreState(), 'restored')
         const [restored] = second.listSessions()
         assert.ok(restored, 'a session came back')
-        // #8571: only scheduledTaskId survives (until the scheduler re-adopts or
-        // unlinks it); the orchestration ownership is gone.
-        assert.deepEqual(second.getHandoffBlockers(restored.sessionId), [{ code: 'automation_owned', detail: { scheduledTaskId: 't1' } }])
-        assert.ok(second.unlinkScheduledTask(restored.sessionId))
-        assert.deepEqual(second.getHandoffBlockers(restored.sessionId), [], 'unlinked: no longer owned')
+        // #8571: the persisted scheduledTaskId is only a restore hint: no blocker
+        // until the scheduler adopts the session; orchestration ownership is gone.
+        assert.deepEqual(second.getHandoffBlockers(restored.sessionId), [], 'nothing re-stamps ownership on restore')
+        assert.ok(second.adoptScheduledTask(restored.sessionId, 't1'))
+        assert.deepEqual(second.getHandoffBlockers(restored.sessionId), [{ code: 'automation_owned', detail: { scheduledTaskId: 't1' } }], 'owned after adoption, with no orchestration detail')
       } finally { second.destroyAll() }
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
