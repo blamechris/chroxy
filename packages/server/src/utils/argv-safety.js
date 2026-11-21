@@ -262,7 +262,7 @@ export const AUDITED_SINKS = [
   {
     file: 'claude-tui-session.js',
     match: 'claudeSettingSourcesValueFor(projectAllowed)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {
     file: 'claude-tui-session.js',
@@ -304,7 +304,7 @@ export const AUDITED_SINKS = [
   {
     file: 'cli-session.js',
     match: 'claudeSettingSourcesValueFor(allowed)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {
     file: 'cli-session.js',
@@ -689,8 +689,13 @@ export const AUDITED_SINKS = [
   // ── web-task-manager.js ──
   {
     file: 'web-task-manager.js',
-    match: 'claudeSettingSourcesValue(cwd)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    match: 'claudeSettingSourcesValueFor(projectAllowed === true)',
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+  },
+  {
+    file: 'web-task-manager.js',
+    match: "execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => { this._childProcesses.delete(child) if (err) return reject(err) resolve(stdout) })",
+    reason: "the same generic exec wrapper as above, with its child tracked so destroy() can stop it: its one caller passes ['--setting-sources', <one of two fixed strings>, '--teleport', task.taskId], where task.taskId is a server-generated randomUUID() looked up from the task map.",
   },
   {
     file: 'web-task-manager.js',

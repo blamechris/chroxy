@@ -7531,13 +7531,20 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     case 'folder_trust_result': {
       // Settles the in-flight marker on EVERY reply (a failure included, or the
       // button would stay disabled); a failure keeps its reason for the dialog.
+      // The request is matched by its `requestId`, so a reply never settles a
+      // newer request of the same session; a reply without one falls back to the
+      // session it names.
       const reply = msg as unknown as ServerFolderTrustResultMessage;
-      if (typeof reply.sessionId !== 'string' || !reply.sessionId) break;
-      const { [reply.sessionId]: _pending, ...pending } = get().folderTrustPending;
-      const { [reply.sessionId]: _error, ...errors } = get().folderTrustError;
+      const pendingMap = get().folderTrustPending;
+      const settled = typeof reply.requestId === 'string' && reply.requestId
+        ? Object.keys(pendingMap).find((id) => pendingMap[id] === reply.requestId)
+        : (typeof reply.sessionId === 'string' && reply.sessionId ? reply.sessionId : undefined);
+      if (!settled) break;
+      const { [settled]: _pending, ...pending } = pendingMap;
+      const { [settled]: _error, ...errors } = get().folderTrustError;
       set({
         folderTrustPending: pending,
-        folderTrustError: reply.ok === true ? errors : { ...errors, [reply.sessionId]: reply.error || 'The trust change could not be applied' },
+        folderTrustError: reply.ok === true ? errors : { ...errors, [settled]: reply.error || 'The trust change could not be applied' },
       });
       break;
     }

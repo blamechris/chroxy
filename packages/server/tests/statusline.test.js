@@ -649,3 +649,75 @@ test('run: the settings file still matches its record, but the folder is no long
     assert.equal(spawned.length, 1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// When a folder stops being trusted, the status line that came from its own
+// settings is cleared at once, not left up until the next refresh.
+// ---------------------------------------------------------------------------
+
+function managerForTrustLoss({ userFiles = {}, isTrusted }) {
+  const spawnFn = (_file, args) => {
+    const child = makeFakeChild()
+    process.nextTick(() => {
+      child.stdout.emit('data', Buffer.from(args.join(' ').includes('proj.sh') ? 'from the folder' : 'from the user'))
+      child.exitCode = 0
+      child.emit('exit', 0, null)
+    })
+    return child
+  }
+  const mgr = new StatusLineManager({
+    homeDir: '/home',
+    readFileFn: fakeReadFrom(userFiles),
+    spawnFn,
+    buildEnv: () => ({}),
+    minRefreshIntervalMs: 0,
+    setTimer: () => ({}),
+    clearTimer: () => {},
+    readProjectSettingsFn: () => (isTrusted() ? JSON.stringify({ statusLine: { type: 'command', command: 'proj.sh' } }) : null),
+  })
+  const events = []
+  mgr.on('output', (e) => events.push(e))
+  return { mgr, events }
+}
+
+test('clearProjectOutput: the folder\'s status line is cleared as soon as the folder is no longer trusted', async () => {
+  let trusted = true
+  const { mgr, events } = managerForTrustLoss({ isTrusted: () => trusted })
+  await mgr.refresh('s1', { cwd: '/proj' })
+  assert.deepEqual(events.map((e) => [e.active, e.text]), [[true, 'from the folder']])
+  trusted = false
+  assert.equal(mgr.clearProjectOutput('s1'), true)
+  assert.deepEqual(events.at(-1), { sessionId: 's1', active: false, text: '', truncated: false, timedOut: false, exitCode: null })
+  assert.equal(events.length, 2, 'the clear is sent once, synchronously')
+  assert.equal(mgr.clearProjectOutput('s1'), false, 'nothing left to clear')
+  await mgr.refresh('s1', { cwd: '/proj' }, { force: true })
+  assert.equal(events.length, 2, 'nothing configured now: no second clear')
+})
+
+test('clearProjectOutput: output from the user\'s own settings is left alone; the user line replaces the folder\'s', async () => {
+  const userFiles = { '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }) }
+  let trusted = false
+  const own = managerForTrustLoss({ userFiles, isTrusted: () => trusted })
+  await own.mgr.refresh('s1', { cwd: '/proj' })
+  assert.equal(own.mgr.clearProjectOutput('s1'), false)
+  assert.deepEqual(own.events.map((e) => e.text), ['from the user'])
+
+  trusted = true
+  const both = managerForTrustLoss({ userFiles, isTrusted: () => trusted })
+  both.mgr.startSession('s2', () => ({ cwd: '/proj' }))
+  await both.mgr.refresh('s2', { cwd: '/proj' })
+  trusted = false
+  both.mgr.clearProjectOutput('s2')
+  for (let i = 0; i < 50 && both.events.length < 3; i++) await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(both.events.map((e) => [e.active, e.text]), [[true, 'from the folder'], [false, ''], [true, 'from the user']])
+})
+
+test('clearProjectOutput: a run that began while the folder was trusted cannot bring its output back', async () => {
+  let trusted = true
+  const { mgr, events } = managerForTrustLoss({ isTrusted: () => trusted })
+  const inFlight = mgr.refresh('s1', { cwd: '/proj' }) // reads the folder's file now, finishes later
+  trusted = false
+  mgr.clearProjectOutput('s1')
+  await inFlight
+  assert.deepEqual(events, [], 'nothing was shown, so nothing is cleared, and the stale run emits nothing')
+})

@@ -1,7 +1,7 @@
 import { assistantResponseText, sdkDeclarationEligible } from './assistant-response.js'
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { claudeSettingSources } from './claude-setting-sources.js'
+import { claudeSettingSourcesFor, projectSettingsAllowedAsync, projectSettingsDecidedWithoutScan } from './claude-setting-sources.js'
 import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
@@ -1107,6 +1107,33 @@ export class SdkSession extends BaseSession {
     }
 
     this._isBusy = true
+    // The project-settings decision for this turn, taken before any query state is
+    // set up. A folder with no trust record is decided at once; a trusted one is
+    // verified by a fresh scan in a worker thread (busy is already set, so a
+    // follow-up queues meanwhile).
+    let projectAllowed = projectSettingsDecidedWithoutScan(this.cwd)
+    if (projectAllowed === null) {
+      // interrupt() clears the token, which is how a Stop during the verification is seen.
+      const decisionToken = {}
+      this._pendingDecision = decisionToken
+      projectAllowed = await projectSettingsAllowedAsync(this.cwd)
+      const stopped = this._pendingDecision !== decisionToken
+      if (!stopped) this._pendingDecision = null
+      if (stopped && !this._destroying) {
+        // Stopped before the query started: the turn does not run.
+        this._isBusy = false
+        this._permissions.clearUserStopInFlight()
+        this.emit('stopped', {})
+        // A send that arrived during the verification was queued: deliver it now, as the
+        // end of a stopped turn does.
+        if (this._outgoingQueue.length) this.dequeueNextOutgoing()
+        return
+      }
+    }
+    if (this._destroying) {
+      this._isBusy = false
+      return
+    }
     // #7376: a turn starts with no Stop requested, whatever the last one did.
     this._stopRequestedThisTurn = false
     this._stopCancelledToolUseIds.clear() // #8363
@@ -1181,7 +1208,7 @@ export class SdkSession extends BaseSession {
       cwd: this.cwd,
       permissionMode: sdkPermMode,
       includePartialMessages: true,
-      settingSources: claudeSettingSources(this.cwd),
+      settingSources: claudeSettingSourcesFor(projectAllowed),
       systemPrompt,
       tools: { type: 'preset', preset: 'claude_code' },
       // The environment for the `claude` child query() spawns, built per turn
@@ -3580,6 +3607,13 @@ export class SdkSession extends BaseSession {
     // Runs even when there is no active `_query` (queued sends with the turn
     // already settling) so an interrupt never strands a queued message.
     this.clearOutgoingQueue()
+
+    if (this._pendingDecision) {
+      // A Stop while the turn is still verifying the folder: sendMessage sees the
+      // cleared token and does not start the query.
+      this._pendingDecision = null
+      return
+    }
 
     if (!this._query) {
       // #8430: a Stop with nothing to interrupt -- no query yet -- and no prompt

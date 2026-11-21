@@ -7,7 +7,7 @@
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
 import { buildThinkingLevelChanged } from './thinking-level-wire.js'
-import { buildFolderTrustStateMessageForDisplay } from './folder-trust-wire.js'
+import { buildFolderTrustStateMessageForDisplay, noteFolderTrustFrame } from './folder-trust-wire.js'
 import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { isBoundClient } from './environments/authority.js'
@@ -1578,7 +1578,11 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   // The scan runs on a worker thread, so it neither delays nor reorders any frame
   // above or below; the frame itself is sent strictly after them.
   buildFolderTrustStateMessageForDisplay(sessionId, entry)
-    .then((trustMsg) => { if (trustMsg) send(ws, trustMsg) })
+    .then((trustMsg) => {
+      if (!trustMsg) return
+      noteFolderTrustFrame(ctx.sessionManager, trustMsg)
+      send(ws, trustMsg)
+    })
     .catch((err) => { log.debug?.(`folder trust state failed: ${err?.message}`) })
 
   // #5731 T5 / #5623 / #5613: re-sync the session's primary owner so the

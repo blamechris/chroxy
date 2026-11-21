@@ -342,6 +342,10 @@ function normalizeResultDuration(payload) {
 
 export class BaseSession extends EventEmitter {
   /** Binary version observed by this live runtime, or `unknown`. */
+  get providerBinaryVersion() {
+    return 'unknown'
+  }
+
   /**
    * Whether the RUNNING process was launched with project settings loaded (claude-cli
    * and claude-tui set this at each launch). `undefined` for a provider that does not
@@ -349,10 +353,6 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean|undefined}
    */
   get launchedWithProject() { return this._launchedWithProject }
-
-  get providerBinaryVersion() {
-    return 'unknown'
-  }
 
   /** Runtime-negotiated capability states; static UI capabilities are separate. */
   get providerRuntimeCapabilities() {

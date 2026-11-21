@@ -15,7 +15,7 @@
  * With no `cwd` the answer is "not allowed".
  */
 
-import { getFolderTrustState, loadFolderTrustRecords, resolveRealPath } from './folder-trust.js'
+import { getFolderTrustStateForLaunch, loadFolderTrustRecords, resolveRealPath } from './folder-trust.js'
 
 /**
  * Setting-source names for a project-settings decision already taken.
@@ -36,47 +36,39 @@ export function claudeSettingSourcesValueFor(allowed) {
 }
 
 /**
- * Setting-source names for the SDK `settingSources` option.
+ * Decide, without any scan, a folder that cannot be trusted: no folder, one that
+ * cannot be resolved, or one with no trust record (whatever a scan would find, it is
+ * untrusted, so the common case answers without walking the folder).
  * @param {string} [cwd] - session working directory
- * @returns {string[]}
+ * @returns {false|null} `false` when decided untrusted, `null` when a scan must decide
  */
-export function claudeSettingSources(cwd) {
-  return claudeSettingSourcesFor(projectSettingsAllowed(cwd))
-}
-
-/**
- * The same decision as the value of the CLI's `--setting-sources` flag.
- * @param {string} [cwd] - session working directory
- * @returns {string}
- */
-export function claudeSettingSourcesValue(cwd) {
-  return claudeSettingSources(cwd).join(',')
-}
-
-/**
- * The same decision as CLI arguments: `--setting-sources user`.
- * @param {string} [cwd] - session working directory
- * @returns {string[]}
- */
-export function claudeSettingSourcesArgs(cwd) {
-  return ['--setting-sources', claudeSettingSourcesValue(cwd)]
+export function projectSettingsDecidedWithoutScan(cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return false
+  const real = resolveRealPath(cwd)
+  if (real.error) return false
+  if (!loadFolderTrustRecords().some((r) => r.path === real.path)) return false
+  return null
 }
 
 /**
  * May settings files in `cwd` (project scope) be read or executed? True ONLY when
  * the owner trusted the folder and its files are still the ones they approved.
  * There is no implicit rule: a folder with nothing command-bearing is untrusted
- * until it is trusted too. Evaluated against the files as they are now.
+ * until it is trusted too.
+ *
+ * This is the launch decision. A folder with no record is decided at once. For a
+ * recorded folder the files are scanned as they are NOW, in a worker thread, by a
+ * scan started for this call: never the display cache, never a scan another caller
+ * started. Any error, timeout or incomplete scan is "not allowed".
  * @param {string} [cwd] - session working directory
- * @param {{ cached?: boolean }} [opts] - `cached` reuses a scan up to 2 s old (display only)
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-export function projectSettingsAllowed(cwd, opts) {
-  if (typeof cwd !== 'string' || cwd === '') return false
-  // A folder with no trust record is untrusted whatever a scan would find, so
-  // the common case answers without walking the folder.
-  const real = resolveRealPath(cwd)
-  if (real.error) return false
-  if (!loadFolderTrustRecords().some((r) => r.path === real.path)) return false
-  return getFolderTrustState(cwd, opts).status === 'trusted'
+export async function projectSettingsAllowedAsync(cwd) {
+  const decided = projectSettingsDecidedWithoutScan(cwd)
+  if (decided !== null) return decided
+  try {
+    return (await getFolderTrustStateForLaunch(cwd)).status === 'trusted'
+  } catch {
+    return false
+  }
 }
