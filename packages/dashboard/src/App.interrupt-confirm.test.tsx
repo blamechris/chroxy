@@ -64,7 +64,7 @@ describe('App wiring of the early-interrupt gate (#8703)', () => {
     expect(interrupts()).toHaveLength(1)
   })
 
-  it('the first Escape (a real bubbling keydown) opens the dialog and does not close it with the same event', () => {
+  it('the first Escape opens the dialog (jsdom, synchronous dispatch; does NOT model browser ordering, see Modal.test.tsx)', () => {
     seed([msg('u1', 'user_input'), msg('thinking', 'thinking', '')])
     render(<App />)
     fireEvent.keyDown(composer(), { key: 'Escape' })
@@ -72,7 +72,7 @@ describe('App wiring of the early-interrupt gate (#8703)', () => {
     expect(interrupts()).toHaveLength(0)
   })
 
-  it('the first Escape dispatched OUTSIDE act (as a browser does) opens the dialog and the same event does not close it', async () => {
+  it('the first Escape dispatched outside act opens the dialog (jsdom only; the in-flight-event race is guarded in Modal.test.tsx)', async () => {
     seed([msg('u1', 'user_input'), msg('thinking', 'thinking', '')])
     render(<App />)
     const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }

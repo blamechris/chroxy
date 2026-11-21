@@ -106,6 +106,20 @@ describe('Modal', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
+  it('ignores an Escape already in flight when it opened, then handles a fresh one (#8703)', () => {
+    const onClose = vi.fn()
+    // Created BEFORE the modal mounts: its timeStamp precedes the listener's attach.
+    const inFlight = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+    // Guarantee the clock has advanced so the comparison is not a same-tick tie.
+    const t0 = performance.now(); while (performance.now() - t0 < 5) { /* spin */ }
+    render(<Modal open onClose={onClose} title="T"><div>c</div></Modal>)
+    document.dispatchEvent(inFlight)
+    expect(onClose).not.toHaveBeenCalled()
+    const t1 = performance.now(); while (performance.now() - t1 < 5) { /* spin */ }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('closes on Escape key', () => {
     const onClose = vi.fn()
     render(

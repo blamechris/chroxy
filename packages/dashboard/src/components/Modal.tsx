@@ -31,7 +31,26 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
   const { overlayRef, overlayProps } = useModalOverlay<HTMLDivElement>()
   const contentRef = useRef<HTMLDivElement>(null)
 
+  // When this modal's document keydown listener was attached (performance.now()).
+  const attachedAtRef = useRef(0)
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8703: ignore an event that was already in flight when the listener was
+    // attached. React 19 renders in the microtask checkpoint between the root
+    // listener and `document`, so a keydown whose own handler opened this modal
+    // (Escape in the composer parking a confirm) would otherwise reach the new
+    // listener on the way up and close the dialog with the keystroke that
+    // opened it. `Event.timeStamp` and `performance.now()` share the document's
+    // time origin. Deliberately NOT `defaultPrevented`: that would change every
+    // modal whose content preventDefaults Escape.
+    // Browsers stamp events with a DOMHighResTimeStamp (performance.now() clock);
+    // jsdom stamps them with epoch milliseconds (Date.now()). Normalise the
+    // epoch form onto the performance clock so both compare against attachedAt.
+    // The epoch form is whole milliseconds, so it can read up to 1ms early
+    // against the fractional attach time: allow that 1ms of slack for it.
+    const epoch = e.timeStamp > performance.timeOrigin
+    const eventTime = epoch ? e.timeStamp - performance.timeOrigin + 1 : e.timeStamp
+    if (eventTime < attachedAtRef.current) return
     if (e.key === 'Escape') {
       // Only close if this is the topmost modal (#1179)
       const overlays = document.querySelectorAll('[data-modal-overlay]')
@@ -43,6 +62,7 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
 
   useEffect(() => {
     if (open) {
+      attachedAtRef.current = performance.now()
       document.addEventListener('keydown', handleKeyDown)
       return () => document.removeEventListener('keydown', handleKeyDown)
     }
