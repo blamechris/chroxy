@@ -156,8 +156,8 @@ describe('reports and checks', () => {
     W.author(h.world, b.sk, T0 + 20 * MIN, { state: 'running', next: 'go' })
     h.tick('codex', T0 + 30 * MIN)
     assert.notEqual(a.sk, b.sk)
-    assert.ok(h.item(itemIds.declared(a.s)).open, 'the old session\'s item is not resolved by the new one')
-    assert.equal(h.item(itemIds.declared(b.s)), undefined)
+    assert.ok(h.item(itemIds.owner(a.s)).open, 'the old session\'s item is not resolved by the new one')
+    assert.equal(h.item(itemIds.owner(b.s)), undefined)
   })
 })
 

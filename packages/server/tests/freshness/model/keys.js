@@ -114,8 +114,12 @@ export function investigationKey(id, phase) {
 
 /** Item identity by origin. */
 export const itemIds = Object.freeze({
-  declared: (session) => H(sessionIdentity(session), 'owner_block', 'declared'),
-  prompt: (session) => H(sessionIdentity(session), 'owner_block', 'prompt'),
+  // One owner item per session, whatever its asks (a declared block, a
+  // pending prompt, or both).
+  owner: (session) => H(sessionIdentity(session), 'owner_block', 'owner'),
+  // An owner item per ask kind: the earlier identity, kept for the variant
+  // that restores two separate items.
+  ownerAsk: (session, kind) => H(sessionIdentity(session), 'owner_block', kind),
   seed: (seedScope, seedSession) => H(seedScope, seedSession, 'session_request', 'seed'),
   issue: (workKey) => H(workKey, 'session_request', 'issue'),
   attention: (session, reportId) => H(sessionIdentity(session), 'session_attention', reportId ?? null),
