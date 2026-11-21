@@ -734,6 +734,79 @@ export function getOwn<T>(rec: Readonly<Record<string, T>> | null | undefined, k
  * holding a narrower projection of the roster can still use it — and so this
  * file keeps its "pure functions with no store dependency" property.
  */
+type RetirableNotification = {
+  sessionId: string
+  eventType: string
+  requestId?: string
+  readAt?: number
+  sessionUnavailableAt?: number
+  sessionEndedAt?: number
+}
+
+/** #9222 — has this row been retired (unavailable to this client, or ended)? */
+export function isNotificationRetired(n: {
+  sessionUnavailableAt?: number
+  sessionEndedAt?: number
+}): boolean {
+  return n.sessionUnavailableAt !== undefined || n.sessionEndedAt !== undefined
+}
+
+/**
+ * #9222 — the rows `pushSessionNotification` keeps when it replaces the
+ * (sessionId, eventType) row. A retired row is the ONLY evidence the send guard
+ * has that its request was refused, so a replacement for a DIFFERENT request must
+ * not erase it (it is kept as read history). Only a verified replay of the SAME
+ * request id retires the evidence — and never for an `ended` row.
+ */
+export function keptWhenReplacing<T extends RetirableNotification>(
+  existing: readonly T[],
+  sessionId: string,
+  eventType: string,
+  requestId: string | undefined,
+  now: number,
+): T[] {
+  const out: T[] = []
+  for (const n of existing) {
+    if (!(n.sessionId === sessionId && n.eventType === eventType)) {
+      out.push(n)
+    } else if (isNotificationRetired(n) && n.requestId && !(n.requestId === requestId && n.sessionEndedAt === undefined)) {
+      out.push(n.readAt === undefined ? { ...n, readAt: now } : n)
+    }
+  }
+  return out
+}
+
+/**
+ * #9222 — stamp every notification that belongs to a session the client just
+ * watched leave the roster as unavailable (`ended` additionally marks a
+ * server-declared timeout, which is definitive). Pure; returns the SAME array
+ * reference when nothing needed stamping so subscribers do not churn.
+ */
+export function markSessionNotificationsUnavailable<T extends RetirableNotification>(
+  notifications: readonly T[] | undefined,
+  removedIds: readonly string[],
+  now: number,
+  ended = false,
+): readonly T[] | undefined {
+  // `undefined` is a real input: `sessionNotifications` is typed required, but the
+  // store's neighbouring readers all `?? []` it and partially-seeded state omits
+  // it. Nothing to stamp, and the unchanged reference tells the caller so.
+  if (!notifications || removedIds.length === 0) return notifications;
+  const removed = new Set(removedIds);
+  let changed = false;
+  const next = notifications.map((n) => {
+    if (!removed.has(n.sessionId)) return n;
+    if (n.sessionUnavailableAt !== undefined && (!ended || n.sessionEndedAt !== undefined)) return n;
+    changed = true;
+    return {
+      ...n,
+      sessionUnavailableAt: n.sessionUnavailableAt ?? now,
+      ...(ended ? { sessionEndedAt: now } : {}),
+    };
+  });
+  return changed ? next : notifications;
+}
+
 export function isSessionListed(
   sessions: readonly { sessionId: string }[],
   sessionId: string,

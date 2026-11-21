@@ -234,7 +234,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { filterThinking, nextMessageId, createEmptySessionPanels } from './utils';
+import { filterThinking, nextMessageId, createEmptySessionPanels, markSessionNotificationsUnavailable, keptWhenReplacing } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
@@ -1887,10 +1887,11 @@ function pushSessionNotification(
     ...(requestId ? { requestId } : {}),
   };
   getStore().setState((s) => {
-    const filtered = s.sessionNotifications.filter(
-      (n) => !(n.sessionId === sessionId && n.eventType === eventType),
-    );
-    return { sessionNotifications: [...filtered, notification] };
+    // #9222 — retired rows for OTHER requests survive the replacement (as read
+    // history) so the send guard keeps refusing them; a verified replay of the
+    // SAME request id replaces its own retired row (never an `ended` one).
+    const kept = keptWhenReplacing(s.sessionNotifications, sessionId, eventType, requestId, Date.now());
+    return { sessionNotifications: [...kept, notification] };
   });
 }
 
@@ -3112,6 +3113,27 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       }));
     } else {
       get().addMessage(permMsg);
+    }
+  }
+  // #9222 — a validated permission_request for (session, request) we retired is
+  // the server (re)asserting that SAME request is still pending (live or
+  // replayed), so only that row's unavailable stamp is lifted. Both ids must
+  // match (an id collision in another session is left alone), `ended` rows are
+  // never recovered, and it is done here rather than in pushSessionNotification,
+  // which returns early for the active session.
+  if (permRequestId && permTargetId) {
+    const isTarget = (n: SessionNotification) =>
+      n.sessionId === permTargetId && n.requestId === permRequestId
+      && n.sessionUnavailableAt !== undefined && n.sessionEndedAt === undefined;
+    const held = getStore().getState().sessionNotifications;
+    if (held?.some(isTarget)) {
+      getStore().setState({
+        sessionNotifications: held.map((n) => {
+          if (!isTarget(n)) return n;
+          const { sessionUnavailableAt: _lifted, ...rest } = n;
+          return rest;
+        }),
+      });
     }
   }
   if (permTargetId) {
@@ -5305,6 +5327,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           delete newStates[id];
         }
         patch.sessionStates = newStates;
+        // #9222 — keep the alerts as history but mark them unavailable (a removal
+        // may be a scope change, not a close), so a banner cannot keep offering
+        // Allow/Deny for a session this snapshot removed from THIS client's roster.
+        const closedNotifs = markSessionNotificationsUnavailable(get().sessionNotifications, removedIds, Date.now());
+        if (closedNotifs !== get().sessionNotifications) patch.sessionNotifications = closedNotifs as SessionNotification[];
         // #5163: drop the Control Room activity tree for any session that
         // dropped out of the list so a closed session's tree doesn't linger.
         let nextActivity = get().activity;
@@ -7189,6 +7216,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const patch: Partial<ConnectionState> = { sessionStates: newStates, sessions: newSessions };
         // The one removed id, in the shape both pruners take.
         const removedIds = [timeoutSessionId];
+        // #9222 — same stamp as the session_list prune, but a server-declared
+        // timeout is definitive (`ended`), so it is never recovered by a replay.
+        const closedNotifs = markSessionNotificationsUnavailable(get().sessionNotifications, removedIds, Date.now(), true);
+        if (closedNotifs !== get().sessionNotifications) patch.sessionNotifications = closedNotifs as SessionNotification[];
         // #5163 — drop the Control Room activity tree for the timed-out session,
         // exactly as the session_list prune does. Without it the tree lingers for
         // a session the user can no longer select. `clearSessionActivity` returns

@@ -638,6 +638,21 @@ export interface SessionNotification {
    * need a server-side persistence model (see PR #4890 follow-ups).
    */
   readAt?: number;
+  /**
+   * #9222 — set when this client WATCHED the alert's session leave its roster
+   * (`session_list` prune or `session_timeout`). A removal can also be a scope or
+   * visibility change, so this means "unavailable to this client", NOT "closed".
+   * The alert is kept as history (#7353); the banner shows no Allow/Deny and
+   * `sendPermissionResponse` refuses the request. Only an OBSERVED removal stamps
+   * it (never absence alone), so a banner that predates hydration stays live.
+   * A session reappearing in the roster does not clear it; only a verified
+   * replay of the SAME request id does (`pushSessionNotification`).
+   */
+  sessionUnavailableAt?: number;
+  /**
+   * #9222 — definitive: the server told us the session timed out. Never recovered.
+   */
+  sessionEndedAt?: number;
 }
 
 /**
