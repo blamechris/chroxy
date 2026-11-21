@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { makeConfig } from '../../src/freshness/config.js'
-import { itemIds, sessionKey } from '../../src/freshness/keys.js'
-import { DEFAULT_POLICY } from '../../src/freshness/policy.js'
-import { planConfig, restoreModel, run } from '../../src/freshness/reconciler.js'
+import { makeConfig } from './model/config.js'
+import { itemIds, sessionKey } from './model/keys.js'
+import { DEFAULT_POLICY } from './model/policy.js'
+import { planConfig, restoreModel, run } from './model/reconciler.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import * as W from './helpers/world.js'
 
@@ -155,6 +155,23 @@ describe('reports and checks', () => {
     assert.notEqual(a.sk, b.sk)
     assert.ok(h.item(itemIds.declared(a.s)).open, 'the old session\'s item is not resolved by the new one')
     assert.equal(h.item(itemIds.declared(b.s)), undefined)
+  })
+})
+
+describe('events from a host that numbers them per session', () => {
+  it('two sessions whose first events both have id 1 each keep their event; nothing is dropped or in conflict', () => {
+    const h = createHarness({ config: { per_source: { chroxy: 15 } }, world: W.createWorld({ perSessionIds: true }) })
+    const a = session(h, 'chroxy', 'a')
+    const b = session(h, 'chroxy', 'b')
+    W.author(h.world, a.sk, T0, { state: 'running', next: 'a' })
+    W.author(h.world, b.sk, T0, { state: 'running', next: 'b' })
+    W.turnStart(h.world, a.sk, T0 + MIN)
+    W.turnStart(h.world, b.sk, T0 + 2 * MIN)
+    assert.equal(h.world.sessions[a.sk].events[0].id, h.world.sessions[b.sk].events[0].id)
+    h.tick('chroxy', T0 + 15 * MIN)
+    const ev = h.records('activity').filter((r) => r.body.basis === 'open_turn_event_after_report')
+    assert.deepEqual(ev.map((r) => r.session.native_id).sort(), ['a', 'b'])
+    assert.equal(h.conflicts().length, 0)
   })
 })
 

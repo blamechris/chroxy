@@ -15,6 +15,20 @@ import { gradeRead } from './grade.js'
 import { H } from './hash.js'
 import { activityEventKey, activityStateKey, reportKey, sessionKey, systemKey } from './keys.js'
 
+function sameEvent(prior, sessionEnv, e) {
+  if (!prior) return false
+  const b = prior.body
+  return (
+    prior.kind === 'activity' &&
+    prior.session?.source === sessionEnv.source &&
+    prior.session?.native_id === sessionEnv.native_id &&
+    (prior.session?.incarnation ?? null) === (sessionEnv.incarnation ?? null) &&
+    b.basis === e.basis &&
+    (b.ref ?? null) === (e.ref ?? null) &&
+    (b.activity_at ?? null) === (e.activity_at ?? null)
+  )
+}
+
 export function put(record, at) {
   return { op: 'append', record, at }
 }
@@ -75,6 +89,10 @@ export function* planRead(ctx, opts) {
     // Added field.
     native_available: false,
     read_kind: opts.readKind ?? 'report',
+    // Added fields: what the grading depended on besides the report and the
+    // check time, so a reader can re-grade the check from the ledger alone.
+    source_now: read.source_now ?? null,
+    remote_without_clock: Boolean(read.remote_without_clock),
   }
   let reportDraft = null
   let regressed = false
@@ -157,6 +175,14 @@ export function* planRead(ctx, opts) {
     body.report_age_s = g.ageS
     body.error_code = g.errorCode
     body.not_read_reason = g.notReadReason
+    if (g.errorCode === 'clock_skew' && body.outcome === 'ok') {
+      // A skewed clock makes the read's outcome `error: clock_skew`, and a
+      // line whose time cannot be trusted writes no report record.
+      body.outcome = 'error'
+      body.report_id = null
+      reportDraft = null
+      regressed = false
+    }
   } else if (body.outcome === 'error') {
     body.freshness = 'error'
     body.error_code = read.error_code ?? 'adapter_fault'
@@ -171,7 +197,7 @@ export function* planRead(ctx, opts) {
   }
 
   // DESIGN-GAP: one read becomes several records (report, check, activity)
-  // and the design gives no atomicity rule. Written check-first, a crash
+  // and the rules give no atomicity rule (README, gaps). Written check-first, a crash
   // between the check and its activity records leaves a partial observation
   // that a resumed tick either keeps (if it reuses the check, the remaining
   // observations are lost) or collides with (if it re-reads, the activity
@@ -181,7 +207,9 @@ export function* planRead(ctx, opts) {
   if (native) {
     const state = (basis, ref, extra = {}) => {
       const id = activityStateKey(key, basis, ref)
-      if (st.index.has(id)) return null
+      const prior = st.index.get(id)
+      // Written by a crashed run of this same read: same check, basis and ref.
+      if (prior && prior.body.check_id === key && prior.body.basis === basis && (prior.body.ref ?? null) === (ref ?? null)) return null
       return put({ kind: 'activity', id, session: sessionEnv, body: { check_id: key, basis, ref: ref ?? null, activity_at: null, evidence_class: 'E1', observed_at: now, ...extra } }, now)
     }
     const ops = []
@@ -196,7 +224,11 @@ export function* planRead(ctx, opts) {
     for (const op of ops) if (op) yield op
     for (const e of native.events ?? []) {
       const id = activityEventKey({ hostEventId: e.id, session, basis: e.basis, activityAt: e.activity_at })
-      if (st.index.has(id)) continue
+      // The same event seen again at a later read is skipped, but only when
+      // it IS the same event: a different event under the same key goes on
+      // to append(), which records the collision as an idempotency_conflict
+      // instead of dropping it silently.
+      if (sameEvent(st.index.get(id), sessionEnv, e)) continue
       yield put({ kind: 'activity', id, session: sessionEnv, body: { check_id: key, basis: e.basis, ref: e.ref ?? null, activity_at: e.activity_at ?? null, evidence_class: 'E1', observed_at: now } }, now)
     }
   }

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { H, canonical } from '../../src/freshness/hash.js'
+import { H, canonical } from './model/hash.js'
 import {
   READ_NO,
   checkInvestigationKey,
@@ -12,10 +12,10 @@ import {
   surfaceKey,
   surfaceOrdinal,
   tickId,
-} from '../../src/freshness/keys.js'
-import { append, createLedger, loadLedger, verifyChain } from '../../src/freshness/ledger.js'
-import { deriveState } from '../../src/freshness/derive.js'
-import { DEFAULT_POLICY } from '../../src/freshness/policy.js'
+} from './model/keys.js'
+import { append, createLedger, loadLedger, verifyChain } from './model/ledger.js'
+import { deriveState } from './model/derive.js'
+import { DEFAULT_POLICY } from './model/policy.js'
 import { runSequence } from './helpers/sequence.js'
 
 const S1 = { source: 'chroxy', native_id: 's1', incarnation: 't0' }
@@ -75,11 +75,16 @@ describe('keys', () => {
     assert.equal(new Set([a, b, a2, b2]).size, 4)
   })
 
-  it('keys of different records in a generated ledger never collide across kinds', () => {
-    const r = runSequence(3, { steps: 150, probe: false })
-    assert.ok(r.ok)
-    const ids = r.harness.ctx.ledger.records.map((x) => x.id)
-    assert.equal(new Set(ids).size, ids.length)
+  // A cross-kind key collision cannot be seen by listing ids: append() only
+  // writes an absent key. It shows up as an idempotency_conflict, because the
+  // two drafts differ at least in their kind. So this asserts that a collision
+  // IS recorded that way; the generated sequences' I3a then covers the keys.
+  it('two different records under one key are recorded as a conflict, not dropped', () => {
+    const l = createLedger({ ledgerId: 'L' })
+    const id = H('shared')
+    assert.equal(append(l, { kind: 'check', id, body: { a: 1 } }, T).status, 'appended')
+    assert.equal(append(l, { kind: 'investigation', id, body: { a: 1 } }, T).status, 'conflict')
+    assert.equal(l.records.filter((r) => r.body.event === 'idempotency_conflict').length, 1)
   })
 })
 

@@ -1,5 +1,5 @@
 /**
- * Configuration for the session-freshness model: the design's starting values
+ * Configuration for the session-freshness model: starting values
  * expressed in seconds, plus the source capabilities the model needs to know.
  *
  * Every value here is a starting value, not a measurement. Pure data.

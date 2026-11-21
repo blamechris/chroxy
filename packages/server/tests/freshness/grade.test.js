@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { makeConfig } from '../../src/freshness/config.js'
-import { AGE_ORDER, band, gradeRead } from '../../src/freshness/grade.js'
+import { makeConfig } from './model/config.js'
+import { AGE_ORDER, band, gradeRead } from './model/grade.js'
 import { mulberry32 } from './helpers/prng.js'
 
 const MIN = 60_000
@@ -96,9 +96,9 @@ describe('freshness never improves for a fixed report under fixed configuration'
     assert.ok(AGE_ORDER[second.freshness] < AGE_ORDER[first.freshness])
   })
 
-  it('design gap witness: across the skew limit a fixed report goes from error to fresh as time passes', () => {
-    // The design says freshness only gets worse for a fixed report; it
-    // gives no order between `error` and the age values, and a report stamped
+  it('gap witness: across the skew limit a fixed report goes from error to fresh as time passes', () => {
+    // The rules say freshness only gets worse for a fixed report; they
+    // give no order between `error` and the age values, and a report stamped
     // ahead of the reconciler's clock improves from clock_skew to fresh.
     const early = grade({ lastReportAt: T + 5 * MIN, checkedAt: T })
     const later = grade({ lastReportAt: T + 5 * MIN, checkedAt: T + 6 * MIN })

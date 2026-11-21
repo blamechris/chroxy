@@ -75,15 +75,14 @@ export function sessionOf(state, session) {
 }
 
 /** The onset (a check id) of a trigger at the session's latest tick check, or null. */
-export function onsetOf(s, trigger) {
+export function onsetOf(s, trigger, policy) {
   if (!s.cur || !s.cur.flags[trigger]) return null
-  if (trigger === 'stale_report' && s.cur.staleReset) return s.cur.checkId
-  if (!s.prev || !s.prev.flags[trigger]) return s.cur.checkId
-  // DESIGN-GAP: the design counts cycles per onset but never says whether a
-  // new report starts a new onset while the trigger keeps holding. The model
-  // starts one, so a newly stale report gets its own cycles.
-  if (trigger === 'stale_report' && s.prev.reportId !== s.cur.reportId) return s.cur.checkId
-  return s.prev.onset[trigger]
+  const fresh = policy.startsNewOnset(trigger, {
+    prevHolds: Boolean(s.prev && s.prev.flags[trigger]),
+    sameReport: Boolean(s.prev) && s.prev.reportId === s.cur.reportId,
+    staleReset: s.cur.staleReset,
+  })
+  return fresh ? s.cur.checkId : s.prev.onset[trigger]
 }
 
 function flagsFor(state, s) {
@@ -112,10 +111,10 @@ function refreshFlags(state, s) {
   if (s.cur) s.cur.flags = flagsFor(state, s)
 }
 
-function finalizeCur(s) {
+function finalizeCur(s, policy) {
   if (!s.cur) return
   const onset = {}
-  for (const t of TRIGGERS) onset[t] = onsetOf(s, t)
+  for (const t of TRIGGERS) onset[t] = onsetOf(s, t, policy)
   s.prev = { ...s.cur, onset }
 }
 
@@ -135,7 +134,7 @@ function foldCheck(state, r) {
 
 function setCurrent(state, s, r) {
   const b = r.body
-  finalizeCur(s)
+  finalizeCur(s, state.policy)
   const rep = b.report_id ? state.reports.get(b.report_id) : null
   s.cur = {
     checkId: r.id,
@@ -281,7 +280,7 @@ function foldInvestigationPhase(state, inv, b, r) {
   if (!s) return
   s.lastClosedInv = { id: inv.id, reportId: inv.reportId, classification: b.classification, trigger: inv.trigger, cycle: inv.cycle, at: b.classified_at, tickId: inv.tickId, ownerWaitBasis: b.owner_wait_basis ?? null }
   if (b.classification === 'no_longer_observed' && s.cur) {
-    // The design: this check starts a new stale_report onset, with fresh cycles.
+    // Rule: this check starts a new stale_report onset, with fresh cycles.
     s.cur.staleReset = true
   }
 }
@@ -338,11 +337,15 @@ function foldSurface(state, r) {
   }
   if (b.phase === 'attempt') {
     state.attempts.set(r.id, { id: r.id, itemId: b.item_id, step: b.step, hasOutcome: false, unknown: false, seq: r.seq, body: b, at: ms(r.ts) })
-    // The design: an attempt consumes its ordinal even if the send is never
+    // Rule: an attempt consumes its ordinal even if the send is never
     // confirmed.
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
+  // Once the preemptor is shown, the items it preempted no longer wait on it.
+  if (b.step === 'shown' && (b.phase === 'attempt' || !state.policy.attemptUsesOrdinal)) {
+    for (const other of state.items.values()) if (other.preemptedBy === b.item_id) other.preemptedBy = null
+  }
 }
 
 function applyStep(it, b, at, seq) {
@@ -375,6 +378,7 @@ function applyStep(it, b, at, seq) {
       break
     case 'shown':
       it.state = 'active'
+      it.preemptedBy = null
       it.lastShowAt = at
       it.afterDeferral = false
       it.position = { rank: 1, seq: 0 }
@@ -392,6 +396,7 @@ function applyStep(it, b, at, seq) {
     case 'preempted':
       it.state = 'queued'
       it.position = { rank: 0, seq }
+      it.preemptedBy = b.preempted_by ?? null
       break
     case 'deferred':
       it.state = 'deferred'

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { itemIds } from '../../src/freshness/keys.js'
+import { itemIds } from './model/keys.js'
 import { MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
@@ -44,6 +44,28 @@ describe('classification', () => {
     W.turnEnd(h.world, c.sk, T0 + 58 * MIN)
     ticks(h, 'chroxy', T0, 4)
     assert.equal(classes(h, c.sk)[0], '1:finished_unreported')
+  })
+
+  it('an open-turn event older than the activity window, with no end event and a host not busy, is not working', () => {
+    for (const windowMin of [20, 10_000]) {
+      const h = setup({ investigation: { activity_window_minutes: windowMin, background_wait_max_minutes: 90 } })
+      const c = session(h, 'chroxy', 'c')
+      W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
+      W.turnStart(h.world, c.sk, T0 + 5 * MIN)
+      // The session dies in the middle of its turn: no turn-ending event.
+      W.dieMidTurn(h.world, c.sk)
+      ticks(h, 'chroxy', T0, 4)
+      const first = classes(h, c.sk)[0]
+      if (windowMin === 20) assert.notEqual(first, '1:working_unreported', 'an event 55 minutes old is outside the window')
+      else assert.equal(first, '1:working_unreported', 'inside a huge window the same event counts')
+    }
+    const m = setup({}, MUTANTS['I7f.window'])
+    const c = session(m, 'chroxy', 'c')
+    W.author(m.world, c.sk, T0, { state: 'running', next: 'a' })
+    W.turnStart(m.world, c.sk, T0 + 5 * MIN)
+    W.dieMidTurn(m.world, c.sk)
+    ticks(m, 'chroxy', T0, 4)
+    assert.equal(classes(m, c.sk)[0], '1:working_unreported', 'mutation: with the window ignored, old activity reads as working')
   })
 
   it('a tool start after the report and then a turn ending in error: not working_unreported', () => {
@@ -158,7 +180,7 @@ describe('classification', () => {
     assert.deepEqual(h.openItems().map((i) => i.origin), ['declared'])
   })
 
-  it('design gap witness: read literally, a stale owner block is inconclusive twice and raises a second item', () => {
+  it('gap witness: read literally, a stale owner block is inconclusive twice and raises a second item', () => {
     const h = setup({}, LITERAL.staleOwnerBlockInconclusive.policy)
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'approve', owner: OWNER })
@@ -218,7 +240,7 @@ describe('cycles, onsets and rechecks', () => {
     const model = run()
     assert.ok(attentionFor(model.h, model.c)?.open, 'the model surfaces it')
     const literal = run(LITERAL.noRecheckAfterOwnerWait.policy)
-    assert.equal(attentionFor(literal.h, literal.c), undefined, 'design gap witness: read literally, never surfaced')
+    assert.equal(attentionFor(literal.h, literal.c), undefined, 'gap witness: read literally, never surfaced')
   })
 
   it('five stale sessions with a cycle budget of three: three this tick, two the next, never two open for one session', () => {

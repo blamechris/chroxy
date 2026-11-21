@@ -9,17 +9,18 @@
  * truncation.
  */
 
-import { cadenceSeconds } from '../../../src/freshness/config.js'
-import { DEFAULT_POLICY, isOwnerBlock } from '../../../src/freshness/policy.js'
-import { restoreModel } from '../../../src/freshness/reconciler.js'
+import { DEFAULT_CONFIG, cadenceSeconds } from '../model/config.js'
+import { DEFAULT_POLICY, isOwnerBlock } from '../model/policy.js'
+import { planConfig, restoreModel, run } from '../model/reconciler.js'
 import { Crash, MIN, OWNER, T0, createHarness } from './harness.js'
 import { InvariantError, checkStep, createMonitor } from './invariants.js'
 import { mulberry32 } from './prng.js'
 import * as Wd from './world.js'
 
-// Budgets of one stress the ordering rules. Shorter surfacing timings than
-// the design's starting values make expiry, re-show and exhaustion reachable
-// within a few hundred steps; the rules are the same, only the numbers move.
+// Shorter surfacing timings than the starting values in config.js make
+// expiry, re-show and exhaustion reachable within a few hundred steps; the
+// rules are the same, only the numbers move. Budgets of one stress the
+// ordering rules; runSequence raises them on some seeds.
 export const GEN_CONFIG = Object.freeze({
   per_source: { chroxy: 15, codex: 30, 'claude-desktop': 40 },
   investigation_budget_per_tick: 1,
@@ -50,8 +51,8 @@ function lineKind(rng, w, now) {
   }
 }
 
-function initialWorld() {
-  const world = Wd.createWorld()
+function initialWorld({ perSessionIds }) {
+  const world = Wd.createWorld({ perSessionIds })
   Wd.addSession(world, { source: 'chroxy', native_id: 'c1', scope: 'repo-a' })
   Wd.addSession(world, { source: 'chroxy', native_id: 'c2', scope: 'repo-b' })
   Wd.addSession(world, { source: 'codex', native_id: 'x1', scope: 'repo-a' })
@@ -72,6 +73,8 @@ function drawEvent(rng, g, h) {
     ['prompt', 3], ['answer', 2], ['lapse', 2], ['relayed', 1], ['rewind', 1],
     ['drop', 1], ['relist', 1.5], ['outage', 1], ['recover', 2], ['flaky', 1], ['spawn', 0.5],
     ['owner_done', 4], ['owner_defer', 2], ['owner_dismiss', 2], ['quiet', 1.5],
+    ['die', 1.5], ['blocked_read', 0.6], ['untrusted', 0.6], ['future_line', 0.6],
+    ['source_skew', 0.5], ['answering', 0.6], ['flicker', 0.8], ['config', 0.4],
   ])
   switch (kind) {
     case 'tick': {
@@ -82,6 +85,13 @@ function drawEvent(rng, g, h) {
     case 'advance': return { kind, ms: rng.int(5, 150) * MIN }
     // A quiet stretch: many ticks in a row with nothing changing in the world.
     case 'quiet': return { kind, ticks: rng.int(6, 16) }
+    case 'die': case 'blocked_read': case 'untrusted': case 'flicker':
+      return { kind, sk }
+    // A host clock ahead: the line is stamped later than the reconciler's now.
+    case 'future_line': return { kind, sk, aheadMs: rng.int(3, 30) * MIN, fields: lineKind(rng, w, now) }
+    case 'source_skew': return { kind, source: rng.pick(Wd.SOURCES) }
+    case 'answering': return { kind, source: 'chroxy' }
+    case 'config': return { kind, which: rng.pick(['max_presentations', 'running_stale_after']) }
     case 'author': return { kind, sk, fields: lineKind(rng, w, now) }
     case 'reword': return { kind, sk, wording: rng.pick(WORDINGS) }
     case 'reauthor': return { kind, sk }
@@ -142,6 +152,13 @@ function applyWorld(g, h, ev) {
     case 'outage': world.sources[ev.source].up = false; break
     case 'recover': world.sources[ev.source].up = true; break
     case 'flaky': w.flaky = 2; break
+    case 'die': if (w.turn) Wd.dieMidTurn(world, ev.sk); break
+    case 'blocked_read': w.blockedRead = !w.blockedRead; break
+    case 'untrusted': w.untrusted = !w.untrusted; break
+    case 'flicker': w.flickerDrop = true; break
+    case 'future_line': Wd.author(world, ev.sk, now + ev.aheadMs, ev.fields); break
+    case 'source_skew': world.sources[ev.source].clockOffsetMs = world.sources[ev.source].clockOffsetMs ? 0 : 15 * MIN; break
+    case 'answering': world.sources[ev.source].answering = !world.sources[ev.source].answering; break
     case 'spawn': {
       if (world.order.length >= MAX_SESSIONS) break
       g.spawned += 1
@@ -195,6 +212,13 @@ function runStep(g, h, mon, ev) {
     }
     return
   }
+  if (ev.kind === 'config') {
+    const cur = structuredClone(h.ctx.state.config)
+    if (ev.which === 'max_presentations') cur.surface.max_presentations = cur.surface.max_presentations === 2 ? 3 : 2
+    else cur.freshness.running.stale_after_s = cur.freshness.running.stale_after_s === 2700 ? 3600 : 2700
+    run(h.ctx, planConfig(h.ctx, { config: cur, now: g.now }))
+    return
+  }
   if (ev.kind === 'owner') {
     if (ev.crash != null) {
       try {
@@ -220,17 +244,25 @@ export function probeClosable(h, policy) {
     const p = createHarness({ config: GEN_CONFIG, policy, world: structuredClone(h.world), now: h.now })
     p.ctx = restoreModel({ ledgerId: h.ctx.ledger.ledgerId, records: h.ctx.ledger.records, policy })
     p.policy = policy
-    let now = h.now + MIN
     const world = p.world
+    // After every time in the world, so the evidence is the newest line even
+    // when a host clock ran ahead.
+    let now = Math.max(h.now, ...Object.values(world.sessions).flatMap((w) => w.lines.map((l) => l.at))) + MIN
     const sources = new Set()
+    const readableSource = (src) => {
+      world.sources[src].up = true
+      world.sources[src].clockOffsetMs = 0
+      world.sources[src].answering = true
+      sources.add(src)
+    }
     const ensureReadable = (sk) => {
       const w = world.sessions[sk]
-      world.sources[w.session.source].up = true
+      readableSource(w.session.source)
       w.listed = true
       w.flaky = 0
       w.blockedRead = false
       w.untrusted = false
-      sources.add(w.session.source)
+      w.flickerDrop = false
     }
     const nonOwnerLine = (sk) => {
       // The weakest closing evidence: still blocked, but on something that is
@@ -264,9 +296,8 @@ export function probeClosable(h, policy) {
         ensureReadable(it.sk)
         break
       case 'outage':
-        world.sources[it.source].up = true
-        for (const sk of world.order) if (world.sessions[sk].session.source === it.source) { world.sessions[sk].flaky = 0; world.sessions[sk].listed = true }
-        sources.add(it.source)
+        for (const sk of world.order) if (world.sessions[sk].session.source === it.source) ensureReadable(sk)
+        readableSource(it.source)
         break
       case 'seed': {
         const nsk = Wd.addSession(world, { source: 'chroxy', native_id: `probe-${it.itemId.slice(0, 6)}`, scope: it.seed.scope })
@@ -296,16 +327,33 @@ export function probeClosable(h, policy) {
  * Run one generated sequence. Returns { ok, stats } or
  * { ok: false, error, step, events }.
  */
-export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe = true, config = GEN_CONFIG } = {}) {
+/** Per-seed variation of the run's setup, drawn before any event. */
+function seedSetup(rng, base) {
+  const config = { ...base }
+  if (rng.chance(0.4)) config.investigation_budget_per_tick = rng.int(2, 3)
+  if (rng.chance(0.4)) config.recheck_budget_per_tick = rng.int(2, 3)
+  if (rng.chance(0.3)) config.sources = { ...DEFAULT_CONFIG.sources, 'claude-desktop': { ...DEFAULT_CONFIG.sources['claude-desktop'], can_confirm_gone: false } }
+  return { config, perSessionIds: rng.chance(0.5) }
+}
+
+/**
+ * opts.fault: test-only hooks for proving structural checks can fail:
+ *   { dropAppend(draft) -> bool, afterStep(h, i) }
+ */
+export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe = true, config: baseConfig = GEN_CONFIG, fault = null } = {}) {
   const rng = mulberry32(seed)
-  const h = createHarness({ config, policy, world: initialWorld() })
+  const { config, perSessionIds } = seedSetup(rng, baseConfig)
+  const h = createHarness({ config, policy, world: initialWorld({ perSessionIds }) })
   const g = { now: T0, nextSlot: { chroxy: T0, codex: T0, 'claude-desktop': T0 }, ack: 0, spawned: 0 }
   const perSource = 4
+  // Bounds for the worst case, a cycle budget of one; a larger budget only
+  // makes the real wait shorter.
   const mon = createMonitor({
     config: h.ctx.state.config,
-    firstCycleBound: Math.ceil(perSource / config.investigation_budget_per_tick) + 1,
-    surfaceBound: 2 * (Math.ceil(perSource / config.investigation_budget_per_tick) + 1) + 2,
+    firstCycleBound: perSource + 1,
+    surfaceBound: 2 * (perSource + 1) + 2,
   })
+  if (fault?.dropAppend) h.dropAppend = fault.dropAppend
   const events = []
   let i = 0
   try {
@@ -313,6 +361,7 @@ export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe 
       const ev = drawEvent(rng, g, h)
       events.push(ev)
       runStep(g, h, mon, ev)
+      fault?.afterStep?.(h, i)
       checkStep(mon, h)
     }
     if (probe) probeClosable(h, policy)

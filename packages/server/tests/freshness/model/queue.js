@@ -3,7 +3,7 @@
  *
  * Items have one origin each; the origin fixes the item's identity, what
  * opens an episode and the only evidence that closes it. Every step is one
- * row of the design's item transition table and writes one `surface` record (or, for
+ * row of the item transition table (README) and writes one `surface` record (or, for
  * the three sending steps, an attempt record, the send, and an outcome
  * record). Four counters are stored on every surface record and copied
  * forward, so a restart reads them back rather than recounting.
@@ -84,7 +84,7 @@ export function* sweepUnknownDeliveries(ctx, now) {
 function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, contentRef, contentAt = null, reportId, deadline, orderTime, closable = true, seed = null, now }) {
   const st = ctx.state
   const existing = st.items.get(itemId)
-  if (!ctx.policy.mayOpenEpisode(existing, ref)) return false
+  if (!ctx.policy.mayOpenEpisode(existing, ref, origin)) return false
   const item = {
     itemId,
     kind,
@@ -177,52 +177,44 @@ function* prompts(ctx, source, now) {
   const P = ctx.policy
   for (const s of sessionsOf(st, source)) {
     const id = itemIds.prompt(s.session)
-    const it = st.items.get(id)
     // DESIGN-GAP: whether a prompt is pending can only be read from a check
     // that carried native state; an errored read says nothing either way.
     // The model evaluates the prompt origin only on such a check.
-    const live = s.cur && s.cur.nativeAvailable
+    const live = Boolean(s.cur && s.cur.nativeAvailable)
+    const pending = live ? [...s.cur.pending].map((ref) => s.prompts.get(ref)).filter((p) => p && p.status === 'pending') : []
+    pending.sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1))
+    const latest = pending[pending.length - 1]
+    const it = st.items.get(id)
     if (it?.open) {
       const cur = s.prompts.get(it.contentRef)
-      const pending = live ? [...s.cur.pending].map((ref) => s.prompts.get(ref)).filter((p) => p && p.status === 'pending') : []
-      pending.sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1))
-      const latest = pending[pending.length - 1]
       const answered = P.promptAnswered(it, cur, s.prompts, { livePending: live ? pending.length : null })
       if (answered) {
         yield* resolve(ctx, it, { now, evidence: answered })
-        continue
-      }
-      if (!live) continue
-      if (latest && P.contentChanged(it, { ref: latest.ref, at: latest.raised_at })) {
-        yield* update(ctx, it, { now, changeRef: latest.ref, changeAt: latest.raised_at, fingerprint: it.fingerprint, deadline: latest.deadline ?? null })
-      } else if (!latest) {
-        // DESIGN-GAP: the lapse rule's newer report does not say newer than
-        // what. The model uses a report authored after the item's
-        // latest prompt was raised.
+      } else if (live) {
         const rep = reportBody(st, s.latestAuthored)
-        const raisedAt = cur?.raised_at ?? -Infinity
-        if (rep && rep.last_report_at > raisedAt) yield* withdraw(ctx, it, { now, reason: 'lapsed' })
+        if (P.promptLapsed(it, cur, rep, { livePending: pending.length })) {
+          yield* withdraw(ctx, it, { now, reason: 'lapsed' })
+        } else if (latest && P.contentChanged(it, { ref: latest.ref, at: latest.raised_at })) {
+          yield* update(ctx, it, { now, changeRef: latest.ref, changeAt: latest.raised_at, fingerprint: it.fingerprint, deadline: latest.deadline ?? null })
+        }
       }
-    } else if (live) {
-      const pending = [...s.cur.pending].map((ref) => s.prompts.get(ref)).filter((p) => p && p.status === 'pending')
-      pending.sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1))
-      const latest = pending[pending.length - 1]
-      if (latest) {
-        yield* raise(ctx, {
-          itemId: id,
-          kind: 'owner_block',
-          origin: 'prompt',
-          session: s.session,
-          source: s.session.source,
-          ref: latest.ref,
-          contentRef: latest.ref,
-          contentAt: latest.raised_at ?? null,
-          deadline: latest.deadline ?? null,
-          orderTime: latest.raised_at ?? now,
-          reportId: s.latestAuthored,
-          now,
-        })
-      }
+    }
+    // An item closed just now can open its next episode in the same tick.
+    if (!st.items.get(id)?.open && latest) {
+      yield* raise(ctx, {
+        itemId: id,
+        kind: 'owner_block',
+        origin: 'prompt',
+        session: s.session,
+        source: s.session.source,
+        ref: latest.ref,
+        contentRef: latest.ref,
+        contentAt: latest.raised_at ?? null,
+        deadline: latest.deadline ?? null,
+        orderTime: latest.raised_at ?? now,
+        reportId: s.latestAuthored,
+        now,
+      })
     }
   }
 }
@@ -382,8 +374,9 @@ function* activeTiming(ctx, now) {
   const queued = openItems(st)
     .filter((x) => effectiveState(x, now) === 'queued')
     .sort((a, b) => compareKeys(P.orderKey(a, now), P.orderKey(b, now)))
-  if (queued.some((x) => P.preempts(x, it, now, cfg))) {
-    yield* step(ctx, it, 'preempted', { now })
+  const challenger = queued.find((x) => P.preempts(x, it, now, cfg))
+  if (challenger) {
+    yield* step(ctx, it, 'preempted', { now, extra: { preempted_by: challenger.itemId } })
     return
   }
   const k = P.reminderDue(it, now, cfg)
@@ -401,6 +394,7 @@ function* fillSlot(ctx, now) {
   const queue = openItems(st)
     .filter((it) => effectiveState(it, now) === 'queued')
     .sort((a, b) => compareKeys(P.orderKey(a, now), P.orderKey(b, now)))
+  P.preemptorFirst(queue)
   for (const it of queue) {
     if (P.canShow(it, cfg)) {
       const counted = P.showIsCounted(it)

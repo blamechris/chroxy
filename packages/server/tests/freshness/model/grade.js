@@ -14,7 +14,7 @@ export const FRESHNESS = Object.freeze(['fresh', 'aging', 'stale', 'unknown', 'e
 export const AGE_ORDER = Object.freeze({ fresh: 0, aging: 1, stale: 2 })
 
 /**
- * The design's age rule: check time minus report time. Kept as a separate
+ * The age rule: check time minus report time. Kept as a separate
  * function so that a test can swap it (a check that refreshes a report is the
  * failure this rule exists to prevent).
  */
@@ -71,7 +71,7 @@ export function gradeRead(input, config, ageFn = reportAgeMs) {
   const row = config.freshness[input.state]
   if (!row) return { ...out, freshness: 'unknown', reason: 'no_status_line' }
   // DESIGN-GAP: a report time later than the check time by no more than the
-  // skew limit is allowed, but the design defines no age for it. The model
+  // skew limit is allowed, but the rules define no age for it. The model
   // clamps the age at zero so that no negative age is ever recorded.
   const ageMs = Math.max(0, ageFn({ lastReportAt: input.lastReportAt, checkedAt: input.checkedAt, previousCheckedAt: input.previousCheckedAt }))
   const ageS = Math.floor(ageMs / 1000)

@@ -4,24 +4,39 @@
  * This is the ground truth the model is checked against: who authored what
  * and when, whether a turn is really in flight, which prompts are pending.
  * The model never sees it directly; it sees only the reads `adapter()`
- * returns, which follow the design's adapter rules (host times, changed-at
+ * returns, which follow the adapter rules in README (host times, changed-at
  * time on the Chroxy-like source, decisions carried forward there, native
  * state only where the source's read carries it).
  *
  * Plain data, so a test can structuredClone() a world to explore a branch.
  */
 
-import { sessionKey } from '../../../src/freshness/keys.js'
+import { sessionKey } from '../model/keys.js'
 
 export const SOURCES = Object.freeze(['chroxy', 'codex', 'claude-desktop'])
 
-export function createWorld() {
+/**
+ * `perSessionIds`: the host numbers events and prompts per session, so two
+ * sessions can both have an event '1' (as some hosts do).
+ */
+export function createWorld({ perSessionIds = false } = {}) {
+  const src = () => ({ up: true, clockOffsetMs: 0, answering: true })
   return {
-    sources: { chroxy: { up: true }, codex: { up: true }, 'claude-desktop': { up: true } },
+    perSessionIds,
+    sources: { chroxy: src(), codex: src(), 'claude-desktop': src() },
     sessions: {},
     order: [],
     counter: 0,
   }
+}
+
+function nextId(world, w, prefix) {
+  if (world.perSessionIds) {
+    w.idSeq += 1
+    return `${prefix}${w.idSeq}`
+  }
+  world.counter += 1
+  return `${prefix}${world.counter}`
 }
 
 export function addSession(world, { source, native_id, incarnation = 't0', scope = null }) {
@@ -42,6 +57,9 @@ export function addSession(world, { source, native_id, incarnation = 't0', scope
     flaky: 0,
     blockedRead: false,
     untrusted: false,
+    // Unlisted for the next tick read only; listed again for later reads.
+    flickerDrop: false,
+    idSeq: 0,
   }
   world.order.push(sk)
   return sk
@@ -111,8 +129,7 @@ export function rewind(world, sk, index) {
 
 export function raisePrompt(world, sk, at, ttlS = 300) {
   const w = W(world, sk)
-  world.counter += 1
-  const ref = `p${world.counter}`
+  const ref = nextId(world, w, 'p')
   w.prompts.push({ ref, raised_at: at, deadline: at + ttlS * 1000, status: 'pending', at: null })
   return ref
 }
@@ -137,16 +154,19 @@ export function lapsePrompt(world, sk, ref, at) {
 
 export function turnStart(world, sk, at) {
   const w = W(world, sk)
-  world.counter += 1
   w.turn = true
-  w.events.push({ id: `e${world.counter}`, basis: 'open_turn_event_after_report', activity_at: at, ref: null })
+  w.events.push({ id: nextId(world, w, world.perSessionIds ? '' : 'e'), basis: 'open_turn_event_after_report', activity_at: at, ref: null })
 }
 
 export function turnEnd(world, sk, at) {
   const w = W(world, sk)
-  world.counter += 1
   w.turn = false
-  w.events.push({ id: `e${world.counter}`, basis: 'turn_ended_after_report', activity_at: at, ref: null })
+  w.events.push({ id: nextId(world, w, world.perSessionIds ? '' : 'e'), basis: 'turn_ended_after_report', activity_at: at, ref: null })
+}
+
+/** The session dies in the middle of a turn: no turn-ending event is ever recorded. */
+export function dieMidTurn(world, sk) {
+  W(world, sk).turn = false
 }
 
 function declaration(w) {
@@ -155,21 +175,26 @@ function declaration(w) {
   return line ? { relayed: false, ...line } : null
 }
 
-function native(w) {
+function native(world, w) {
   return {
     turn_in_flight: w.turn,
     busy_background: w.background && !w.turn,
-    answering_now: true,
+    answering_now: world.sources[w.session.source].answering,
     pending: w.prompts.filter((p) => p.status === 'pending').map((p) => ({ ref: p.ref, raised_at: p.raised_at, deadline: p.deadline })),
     events: w.events.slice(),
   }
 }
 
-function readOne(world, session) {
+function readOne(world, session, now, { tickRead }) {
   const sk = sessionKey(session)
   const w = world.sessions[sk]
-  if (!world.sources[session.source].up) return { outcome: 'error', error_code: 'unreachable' }
+  const src = world.sources[session.source]
+  if (!src.up) return { outcome: 'error', error_code: 'unreachable' }
   if (!w || !w.listed) return { listed: false }
+  if (tickRead && w.flickerDrop) {
+    w.flickerDrop = false
+    return { listed: false }
+  }
   if (w.flaky > 0) {
     w.flaky -= 1
     return { outcome: 'error', error_code: 'timeout' }
@@ -177,10 +202,12 @@ function readOne(world, session) {
   if (w.blockedRead) return { outcome: 'blocked', not_read_reason: 'credential_required' }
   const chroxy = session.source === 'chroxy'
   const d = declaration(w)
-  const nat = chroxy ? native(w) : null
+  const nat = chroxy ? native(world, w) : null
+  const sourceNow = src.clockOffsetMs !== 0 && now != null ? now + src.clockOffsetMs : null
   if (!d) return { outcome: 'no_report', native: nat }
   return {
     outcome: 'ok',
+    source_now: sourceNow,
     report: {
       declared_via: d.relayed ? 'api' : chroxy ? 'marker' : 'transcript',
       last_report_at: d.at,
@@ -207,13 +234,13 @@ export function adapter(world) {
         .filter((w) => w.session.source === source && w.listed)
         .map((w) => ({ session: w.session, scope: source === 'claude-desktop' ? null : w.scope }))
     },
-    read: (session) => readOne(world, session),
-    reread: (session) => readOne(world, session),
+    read: (session, now) => readOne(world, session, now, { tickRead: true }),
+    reread: (session, now) => readOne(world, session, now, { tickRead: false }),
     activity(session) {
       const w = world.sessions[sessionKey(session)]
       if (!world.sources[session.source].up) return { outcome: 'error', error_code: 'unreachable' }
       if (!w || !w.listed) return { outcome: 'error', error_code: 'unreachable' }
-      return { outcome: 'ok', native: native(w) }
+      return { outcome: 'ok', native: native(world, w) }
     },
   }
 }

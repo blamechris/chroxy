@@ -71,7 +71,7 @@ function nativeEvidence(s, read) {
 
 function* investigationRead(ctx, { invId, readNo, session, readFn, now, tickId, readKind }) {
   const key = checkInvestigationKey(invId, readNo)
-  const recorded = ctx.policy.reuseRecorded(ctx.state.index, key)
+  const recorded = ctx.policy.reuseRecorded(ctx.state.index, key, 'check')
   if (recorded) {
     const snap = ctx.state.checkNative.get(key)
     const native = recorded.body.native_available
@@ -113,7 +113,7 @@ function candidatesFor(ctx, s, { tickId, srcHeld }) {
     if (trigger === 'repeated_error' && srcHeld) return
     if (!s.cur || s.cur.tickId !== tickId || !s.cur.flags[trigger]) return
     if (trigger === 'native_disagreement' && !caps.native_in_read) return
-    const onset = onsetOf(s, trigger)
+    const onset = onsetOf(s, trigger, P)
     const o = st.onsets.get(`${s.sk}|${trigger}|${onset}`)
     const closed = o?.closed ?? 0
     let cycle = null
@@ -142,7 +142,7 @@ function sourceCandidate(ctx, source, tickId) {
   if (closed === 0) cycle = 1
   else if (closed < P.maxCycles && P.secondCycleAfter.has(o.lastClass)) cycle = closed + 1
   if (cycle == null) return null
-  // DESIGN-GAP: the design does not say whether the one source-level
+  // DESIGN-GAP: the rules do not say whether the one source-level
   // investigation draws on the per-tick budget. The model counts it as a cycle.
   return { kind: 'cycle', sourceLevel: true, source, key: `src:${source}`, priority: 0, cycle, trigger: 'repeated_error', onset, onsetSeq: st.checks.get(onset)?.seq ?? 0 }
 }
@@ -166,7 +166,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
         : investigationId({ session, reportId, trigger: cand.trigger, onset: cand.onset, cycle: cand.cycle })
 
   const closeKey = investigationKey(invId, 'close')
-  const recordedClose = P.reuseRecorded(st.index, closeKey)
+  const recordedClose = P.reuseRecorded(st.index, closeKey, 'investigation')
   if (recordedClose) return signalFrom(recordedClose.body, s, cand)
 
   const env = cand.sourceLevel ? null : sessionEnvOf(s)

@@ -128,7 +128,7 @@ export function* planTick(ctx, { source, slotStart, now, world }) {
 
   for (const t of trackedSessions(ctx, source, world)) {
     const key = checkTickKey(tid, t.session)
-    if (ctx.policy.reuseRecorded(st.index, key)) continue
+    if (ctx.policy.reuseRecorded(st.index, key, 'check')) continue
     const read = t.listed === false ? { listed: false } : world.read(t.session, now)
     yield* planRead(ctx, { key, trigger: 'tick', session: t.session, read, now, tickId: tid, scope: t.scope })
   }

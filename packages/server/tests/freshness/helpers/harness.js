@@ -3,11 +3,11 @@
  * a send log, and a driver that can stop part-way through a step (a crash).
  */
 
-import { cadenceSeconds, makeConfig } from '../../../src/freshness/config.js'
-import { append } from '../../../src/freshness/ledger.js'
-import { foldRecord } from '../../../src/freshness/derive.js'
-import { DEFAULT_POLICY } from '../../../src/freshness/policy.js'
-import { createModel, planConfig, planOwnerEvent, planTick, restoreModel, run } from '../../../src/freshness/reconciler.js'
+import { cadenceSeconds, makeConfig } from '../model/config.js'
+import { append } from '../model/ledger.js'
+import { foldRecord } from '../model/derive.js'
+import { DEFAULT_POLICY } from '../model/policy.js'
+import { createModel, planConfig, planOwnerEvent, planTick, restoreModel, run } from '../model/reconciler.js'
 import { adapter, createWorld } from './world.js'
 
 export const T0 = Date.parse('2026-01-05T00:00:00.000Z')
@@ -22,14 +22,17 @@ export class Crash extends Error {}
  * operations. The operations already executed stay executed: appended records
  * are in the ledger and sends have happened.
  */
-export function runWithCrash(ctx, gen, { deliver, crashAfter, onSend }) {
+export function runWithCrash(ctx, gen, { deliver, crashAfter, onSend, dropAppend }) {
   let n = 0
   let res = gen.next()
   while (!res.done) {
     if (n >= crashAfter) throw new Crash(`crash after ${n} ops`)
     const op = res.value
     let reply
-    if (op.op === 'append') {
+    if (op.op === 'append' && dropAppend?.(op.record)) {
+      // Test-only fault: the planner believes the record was written.
+      reply = { status: 'appended', record: null }
+    } else if (op.op === 'append') {
       reply = append(ctx.ledger, op.record, op.at)
       if (reply.record) foldRecord(ctx.state, reply.record)
     } else {
@@ -54,6 +57,8 @@ export function createHarness({ config: overrides = {}, policy = DEFAULT_POLICY,
     now,
     sends: [],
     deliver: () => 'delivered',
+    // Test-only fault injection: a predicate over draft records to drop.
+    dropAppend: null,
     onSend(effect) {
       h.sends.push(effect)
     },
@@ -66,7 +71,7 @@ export function createHarness({ config: overrides = {}, policy = DEFAULT_POLICY,
       h.now = Math.max(h.now, at)
       const world = reads ? reads(adapter(h.world)) : adapter(h.world)
       const gen = planTick(h.ctx, { source, slotStart: slotStart ?? h.slotFor(source, at), now: at, world })
-      return runWithCrash(h.ctx, gen, { deliver: h.deliver, crashAfter, onSend: (e) => h.onSend(e) })
+      return runWithCrash(h.ctx, gen, { deliver: h.deliver, crashAfter, onSend: (e) => h.onSend(e), dropAppend: h.dropAppend })
     },
     owner(itemId, intent, ackRef, { at = h.now, until = null, crashAfter = Infinity } = {}) {
       h.now = Math.max(h.now, at)

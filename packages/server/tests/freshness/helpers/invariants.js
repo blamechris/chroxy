@@ -7,14 +7,21 @@
  * with this account, or as a bound the account says was crossed. Ground truth
  * about sessions comes from the simulated world.
  *
- * Each failure carries an invariant id (I1a .. I9) so a mutation proof can
- * assert WHICH invariant went red.
+ * Each failure carries an invariant id (I1a .. I10) so a mutation proof can
+ * assert WHICH invariant went red. The full list is in ../README.md.
+ *
+ * What the monitor derives for itself rather than reading from the model:
+ * item states and counters, the freshness band of each trusted authored read
+ * (I8b), the onset of each per-session trigger (I7a), and the evidence behind
+ * every resolution and withdrawal (I4b). It still reads from the model the
+ * parsed report fields and, for the source-level outage investigation only,
+ * the model's own onset.
  */
 
-import { isOwnerBlock } from '../../../src/freshness/policy.js'
-import { sourceCaps } from '../../../src/freshness/config.js'
-import { AGE_ORDER } from '../../../src/freshness/grade.js'
-import { itemIds, sessionKey } from '../../../src/freshness/keys.js'
+import { isOwnerBlock } from '../model/policy.js'
+import { sourceCaps } from '../model/config.js'
+import { AGE_ORDER } from '../model/grade.js'
+import { itemIds, sessionKey } from '../model/keys.js'
 
 export class InvariantError extends Error {
   constructor(id, message) {
@@ -24,6 +31,8 @@ export class InvariantError extends Error {
 }
 
 const STALE_STATES = new Set(['running', 'unknown', 'blocked', 'stalled'])
+const DISAGREE_STATES = new Set(['idle', 'done'])
+const TRIGGERS = ['stale_report', 'native_disagreement', 'dropped_from_list', 'repeated_error']
 const WITHDRAW_REASONS = {
   declared: new Set(),
   prompt: new Set(['lapsed']),
@@ -72,8 +81,66 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     lastTickOf: new Map(),
     tickOpenSeq: new Map(),
     scopes: new Map(),
+    configs: new Map(),
+    checkAct: new Map(),
+    livePending: new Map(),
+    runs: new Map(),
+    relayedSince: new Map(),
+    prevTickOutcome: new Map(),
+    ownerDone: new Set(),
+    onsetTrigger: new Map(),
     stats: { records: 0, sends: 0, shows: 0, reminders: 0, returns: 0, investigations: 0, rechecks: 0, episodes: 0, resolved: 0, withdrawn: 0, exhausted: 0, crashes: 0 },
   }
+}
+
+/**
+ * This monitor's own freshness band for one check, from the report record,
+ * the check's time and the configuration the check names. Returns null when
+ * the check is not a trusted, authored, listed read.
+ */
+function ownBand(mon, b) {
+  if (b.listed === false || b.last_report_at == null) return null
+  const cfg = mon.configs.get(b.config_ref)
+  if (!cfg) return null
+  const skew = cfg.max_source_skew_seconds * 1000
+  if (b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
+  if (b.last_report_at - b.checked_at > skew) return 'error'
+  const rep = b.report_id ? mon.reports.get(b.report_id) : null
+  if (!rep) return null
+  if (rep.evidence_class !== 'E2') return 'unknown'
+  const row = cfg.freshness[rep.state]
+  if (!row) return 'unknown'
+  const age = Math.max(0, b.checked_at - rep.last_report_at)
+  let v = age <= row.fresh_max_s * 1000 ? 'fresh' : age > row.stale_after_s * 1000 ? 'stale' : 'aging'
+  if (b.remote_without_clock && v === 'fresh') v = 'aging'
+  return v
+}
+
+/** The monitor's own trigger runs (onsets) for one session at one tick check. */
+function advanceRuns(mon, sk, b, own) {
+  const cfg = mon.configs.get(b.config_ref) ?? mon.config
+  const rep = b.report_id ? mon.reports.get(b.report_id) : null
+  if (rep && rep.evidence_class === 'E5') {
+    if (!mon.relayedSince.has(sk)) mon.relayedSince.set(sk, b.checked_at)
+  } else if (b.outcome !== 'error') {
+    mon.relayedSince.delete(sk)
+  }
+  const since = mon.relayedSince.get(sk)
+  const act = mon.checkAct.get(b.check_id)
+  const holds = {
+    stale_report: (own === 'stale' && STALE_STATES.has(b.state)) || (since != null && rep?.evidence_class === 'E5' && b.checked_at - since > cfg.freshness.running.stale_after_s * 1000),
+    native_disagreement: Boolean(b.native_available && act?.turn && DISAGREE_STATES.has(b.state)),
+    dropped_from_list: b.listed === false,
+    repeated_error: b.outcome === 'error' && mon.prevTickOutcome.get(sk) === 'error',
+  }
+  mon.prevTickOutcome.set(sk, b.outcome)
+  const runs = mon.runs.get(sk) ?? {}
+  for (const t of TRIGGERS) {
+    const prev = runs[t]
+    if (!holds[t]) runs[t] = null
+    else if (!prev || (t === 'stale_report' && prev.reportId !== b.report_id)) runs[t] = { cycles: 0, reportId: b.report_id }
+  }
+  mon.runs.set(sk, runs)
 }
 
 function spec(mon, id, origin) {
@@ -130,11 +197,36 @@ function justifyResolved(mon, it) {
   }
 }
 
+function justifyWithdrawn(mon, it, reason) {
+  switch (reason) {
+    case 'dismissed':
+      return mon.ownerDismiss.has(`${it.id}|${it.episode}`)
+    case 'lapsed': {
+      // No prompt pending at the latest live read, and a newer report.
+      const pend = mon.livePending.get(it.sk)
+      if (!pend || pend.size > 0) return false
+      const lr = mon.latestAuthored.get(it.sk)
+      const rep = lr ? mon.reports.get(lr) : null
+      const raised = mon.promptRaised.get(`${it.sk}|${it.contentRef}`) ?? -Infinity
+      return Boolean(rep && rep.last_report_at > raised)
+    }
+    case 'superseded':
+      return [...mon.items.values()].some((g) => g.open && g.origin === 'gone' && g.sk === it.sk)
+    case 'owner_stated_unverified':
+      return mon.ownerDone.has(`${it.id}|${it.episode}`) && !sourceCaps(mon.config, it.source).scope
+    default:
+      return false
+  }
+}
+
 function onRecord(mon, h, r) {
   const b = r.body
   const sk = r.session ? sessionKey(r.session) : null
-  const max = mon.config.surface.max_presentations
   switch (r.kind) {
+    case 'config':
+      mon.configs.set(b.config_ref, b.values)
+      mon.config = b.values
+      break
     case 'report':
       mon.reports.set(r.id, b)
       if (b.evidence_class === 'E2' && !mon.firstAuthored.has(sk)) mon.firstAuthored.set(sk, { at: b.last_report_at, scope: mon.scopes.get(sk) ?? null })
@@ -146,8 +238,26 @@ function onRecord(mon, h, r) {
       }
       break
     case 'check': {
+      // I8: for a fixed report under a fixed configuration, the age-graded
+      // freshness never improves.
+      if (b.report_id && b.freshness in AGE_ORDER) {
+        const key = `${sk}|${b.report_id}|${b.config_ref}`
+        const prev = mon.freshSeq.get(key)
+        if (prev && AGE_ORDER[b.freshness] < AGE_ORDER[prev.freshness] && b.checked_at >= prev.at) {
+          fail('I8', `freshness improved from ${prev.freshness} to ${b.freshness} for one report under one configuration`)
+        }
+        mon.freshSeq.set(key, { freshness: b.freshness, at: b.checked_at })
+      }
+      // I8b: the model's graded freshness equals this monitor's own band.
+      const own = ownBand(mon, b)
+      if (own != null && b.read_kind !== 'activity') {
+        const model = b.freshness
+        if (own !== model) fail('I8b', `freshness graded ${model} where the report's age gives ${own}`)
+      }
       if (b.trigger === 'tick') {
-        mon.latestTick.set(sk, { ...b, sk, tickId: r.refs?.tick })
+        mon.latestTick.set(sk, { ...b, sk, tickId: r.refs?.tick, own })
+        advanceRuns(mon, sk, b, own)
+        if (b.native_available) mon.livePending.set(sk, new Set((mon.checkAct.get(b.check_id)?.pending ?? []).map((p) => p.ref)))
         mon.listed.set(sk, b.listed !== false)
         const list = mon.tickChecks.get(r.refs?.tick) ?? []
         list.push({ source: b.source, outcome: b.outcome })
@@ -159,30 +269,26 @@ function onRecord(mon, h, r) {
         mon.scopes.set(sk, b.scope)
         if (mon.firstAuthored.has(sk)) mon.firstAuthored.get(sk).scope = b.scope
       }
-      // I8: for a fixed report under a fixed configuration, the age-graded
-      // freshness never improves.
-      if (b.report_id && b.freshness in AGE_ORDER) {
-        const key = `${sk}|${b.report_id}|${b.config_ref}`
-        const prev = mon.freshSeq.get(key)
-        if (prev && AGE_ORDER[b.freshness] < AGE_ORDER[prev.freshness] && b.checked_at >= prev.at) {
-          fail('I8', `freshness improved from ${prev.freshness} to ${b.freshness} for one report under one configuration`)
-        }
-        mon.freshSeq.set(key, { freshness: b.freshness, at: b.checked_at })
-      }
       break
     }
-    case 'activity':
+    case 'activity': {
+      const act = mon.checkAct.get(b.check_id) ?? { turn: false, pending: [] }
+      if (b.basis === 'busy_now_turn') act.turn = true
+      if (b.basis === 'pending_permission') act.pending.push({ ref: b.ref, raised_at: b.raised_at })
+      mon.checkAct.set(b.check_id, act)
       if (b.basis === 'permission_answered_by_owner') {
         mon.answered.add(`${sk}|${b.ref}`)
         mon.answeredAt.set(`${sk}|${b.ref}`, b.activity_at)
       }
       if (b.basis === 'pending_permission' && b.raised_at != null) mon.promptRaised.set(`${sk}|${b.ref}`, b.raised_at)
       break
+    }
     case 'investigation': {
       const tick = r.refs?.tick
       if (b.phase === 'open') {
         mon.stats.investigations += 1
         mon.openInv.set(b.investigation_id, true)
+        if (b.onset) mon.onsetTrigger.set(b.onset, b.trigger)
         const who = b.source_level ? `src:${b.source}` : sk
         const ts = `${tick}|${who}`
         mon.perTickSession.set(ts, (mon.perTickSession.get(ts) ?? 0) + 1)
@@ -199,15 +305,32 @@ function onRecord(mon, h, r) {
           if (!sourceCaps(mon.config, b.source).native_in_read) mon.tickPaid.set(tick, (mon.tickPaid.get(tick) ?? 0) + 1)
         } else {
           mon.tickCycles.set(tick, (mon.tickCycles.get(tick) ?? 0) + 1)
-          // I7a: at most two cycles per onset.
-          const ok = `${who}|${b.trigger}|${b.onset}`
-          const set = mon.onsetCycles.get(ok) ?? new Set()
-          set.add(b.cycle)
-          mon.onsetCycles.set(ok, set)
-          if (b.cycle < 1 || b.cycle > 2 || set.size > 2) fail('I7a', `cycle ${b.cycle} for one onset (${set.size} cycles)`)
+          // I7a: at most two cycles per onset. Per session, the onset is this
+          // monitor's own: an unbroken run of tick checks at which the trigger
+          // holds (a new report starts a new stale run; a no_longer_observed
+          // recheck starts one too). The source-level outage investigation
+          // uses the model's onset id: the monitor does not re-derive it.
+          if (b.cycle < 1 || b.cycle > 2) fail('I7a', `cycle ${b.cycle}`)
+          if (b.source_level) {
+            const ok = `${who}|${b.onset}`
+            const set = mon.onsetCycles.get(ok) ?? new Set()
+            set.add(b.cycle)
+            mon.onsetCycles.set(ok, set)
+            if (set.size > 2) fail('I7a', `${set.size} cycles for one source-level onset`)
+          } else {
+            const runs = mon.runs.get(sk) ?? {}
+            const run = runs[b.trigger] ?? (runs[b.trigger] = { cycles: 0, reportId: b.report_id })
+            mon.runs.set(sk, runs)
+            run.cycles += 1
+            if (run.cycles > 2) fail('I7a', `${run.cycles} cycles of ${b.trigger} in one unbroken run of the trigger`)
+          }
         }
       } else if (b.phase === 'close') {
         mon.openInv.delete(b.investigation_id)
+        if (b.trigger === 'recheck' && b.classification === 'no_longer_observed' && sk) {
+          const run = mon.runs.get(sk)?.stale_report
+          if (run) run.cycles = 0
+        }
       }
       break
     }
@@ -218,12 +341,14 @@ function onRecord(mon, h, r) {
         if (it.open) fail('I5', `a second episode opened while one is open (${b.origin})`)
         if (it.usedRefs.has(b.opened_by)) fail('I5', `an episode opened on an opening reference already used (${b.origin})`)
         if (b.episode !== it.episode + 1) fail('I5', `episode ${b.episode} after ${it.episode}`)
-        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null })
+        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null })
         it.usedRefs.add(b.opened_by)
         mon.stats.episodes += 1
         break
       }
       if (b.episode !== it.episode) break
+      const max = mon.config.surface.max_presentations
+      it.maxSeen = Math.max(it.maxSeen ?? max, max)
       const sending = b.phase === 'attempt'
       if (sending && it.exhausted) {
         // I6: an exhausted item sends nothing unless its content changed while a counted show remained.
@@ -232,15 +357,20 @@ function onRecord(mon, h, r) {
       if (b.phase === 'outcome') break
       switch (b.step) {
         case 'shown':
-          // I2c: a preemption shows the item that preempted, never the
-          // preempted item straight back.
-          if (mon.lastPreempted && mon.lastPreempted === it.id && sending) fail('I2c', 'a preempted item was shown again ahead of the item that preempted it')
+          // I2c: the first show after a preemption is not the preempted item
+          // itself. (It checks only that; which item is shown is the order's
+          // business.)
+          if (mon.lastPreempted && mon.lastPreempted === it.id && sending) fail('I2c', 'the first show after a preemption was the preempted item')
           if (sending) mon.lastPreempted = null
           it.shows += 1
-          if (it.state === 'deferred') it.deferredShows = (it.deferredShows ?? 0) + 1
-          else it.counted += 1
+          const counted = it.state !== 'deferred'
+          if (counted) it.counted += 1
+          else it.deferredShows = (it.deferredShows ?? 0) + 1
           it.state = 'active'
           mon.stats.shows += 1
+          // I1a: a counted show stays within the limit in force when it is made.
+          if (sending && counted && it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max})`)
+          if (sending && counted && b.shows_counted > max) fail('I1a', `stored shows_counted ${b.shows_counted} above max ${max}`)
           break
         case 'reminded':
           it.reminders += 1
@@ -291,7 +421,7 @@ function onRecord(mon, h, r) {
           break
         case 'withdrawn': {
           if (!WITHDRAW_REASONS[it.origin]?.has(b.reason)) fail('I4b', `an item (${it.origin}) was withdrawn for '${b.reason}'`)
-          if (b.reason === 'dismissed' && !mon.ownerDismiss.has(`${it.id}|${it.episode}`)) fail('I4b', 'withdrawn as dismissed with no dismissal')
+          if (!justifyWithdrawn(mon, it, b.reason)) fail('I4b', `an item (${it.origin}) was withdrawn as '${b.reason}' without the evidence for it`)
           if (b.reason === 'dismissed' && it.reportId) mon.dismissedReports.add(`${sk}|${it.reportId}`)
           it.open = false
           it.state = 'closed'
@@ -301,13 +431,11 @@ function onRecord(mon, h, r) {
         default:
           break
       }
-      // I1: per-episode bounds, from this monitor's own count.
-      if (it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max})`)
+      // I1: per-episode bounds, from this monitor's own count...
       if (it.reminders > 2) fail('I1b', `${it.reminders} reminders in one episode`)
       if (it.returns > 1) fail('I1c', `${it.returns} returns in one episode`)
-      if (it.shows > max + it.deferrals) fail('I1d', `${it.shows} shows exceed max ${max} plus ${it.deferrals} deferrals`)
+      if (it.shows > it.maxSeen + it.deferrals) fail('I1d', `${it.shows} shows exceed max ${it.maxSeen} plus ${it.deferrals} deferrals`)
       // ...and from the model's stored counters.
-      if (b.shows_counted > max) fail('I1a', `stored shows_counted ${b.shows_counted} above max ${max}`)
       if (b.reminders_used > 2) fail('I1b', `stored reminders_used ${b.reminders_used}`)
       if (b.returns_used > 1) fail('I1c', `stored returns_used ${b.returns_used}`)
       if (b.presentation > b.shows_counted + it.deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${it.deferrals} deferrals`)
@@ -316,6 +444,7 @@ function onRecord(mon, h, r) {
     case 'owner_ack': {
       const it = mon.items.get(b.item_id)
       if (b.phase === 'ack' && b.intent === 'dismiss') mon.ownerDismiss.add(`${b.item_id}|${b.episode}`)
+      if (b.phase === 'ack' && b.intent === 'done') mon.ownerDone.add(`${b.item_id}|${b.episode}`)
       if (it && b.phase === 'ack' && b.intent === 'done' && it.state === 'active' && b.episode === it.episode) {
         it.state = 'acknowledged'
         it.ackSeq = r.seq
@@ -361,7 +490,8 @@ function onTickClosed(mon, h, r) {
   for (const [sk, c] of mon.latestTick) {
     if (c.source !== source || c.tickId !== tick) continue
     const w = h.world.sessions[sk]
-    const qualifies = c.freshness === 'stale' && STALE_STATES.has(c.state)
+    // Graded by this monitor (I8b), not read from the model.
+    const qualifies = c.own === 'stale' && STALE_STATES.has(c.state)
     const hasInv = Boolean(c.report_id && mon.invReports.get(sk)?.has(c.report_id))
     const starved = qualifies && !hasInv
     // I7d: rechecks never consume the cycle budget.
@@ -371,6 +501,10 @@ function onTickClosed(mon, h, r) {
     mon.starve.set(sk, n)
     if (n > mon.firstCycleBound) fail('I7e', `a stale session waited ${n} ticks for its first cycle`)
     // I7f: a stale report that stays unexplained is surfaced within a bound.
+    // DESIGN-GAP (exemption): a session whose turn ended after its report is
+    // exempt, because the model never surfaces `finished_unreported` (it is
+    // surfaced only when linked work is open, and the model links none; see
+    // README).
     const rep = c.report_id ? mon.reports.get(c.report_id) : null
     const ended = rep && w ? w.events.some((e) => e.basis === 'turn_ended_after_report' && e.activity_at > rep.last_report_at) : false
     const unexplained = qualifies && w && !explainedNow(h.world, sk) && !ended
@@ -386,6 +520,25 @@ function onTickClosed(mon, h, r) {
     const g = rechecked && idleNow ? (mon.recheckStreak.get(sk) ?? 0) + 1 : 0
     mon.recheckStreak.set(sk, g)
     if (g > 1) fail('I7g', `a session was rechecked ${g} ticks running while nothing was working or waiting`)
+    // I10: an owner block is not left without an item. A prompt pending at a
+    // live read, and an authored report that is an owner block, each have an
+    // open item of that origin by the end of the tick, unless that item
+    // already used the same opening reference.
+    const sess = w?.session
+    if (sess && c.native_available) {
+      const pend = mon.checkAct.get(c.check_id)?.pending ?? []
+      if (pend.length) {
+        const latest = pend.slice().sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1)).pop()
+        const it = mon.items.get(itemIds.prompt(sess))
+        if (!it?.open && !it?.usedRefs.has(latest.ref)) fail('I10', 'a prompt pending at a live read has no open prompt item')
+      }
+    }
+    const la = mon.latestAuthored.get(sk)
+    const lrep = la ? mon.reports.get(la) : null
+    if (sess && lrep && isOwnerBlock(lrep, mon.config)) {
+      const it = mon.items.get(itemIds.declared(sess))
+      if (!it?.open && !it?.usedRefs.has(la)) fail('I10', 'an authored owner-block report has no open owner-block item')
+    }
   }
 }
 
@@ -412,21 +565,28 @@ export function checkStep(mon, h, { complete = true } = {}) {
     mon.sendKeys.add(s.attempt_id)
   }
   if (!complete) return
-  // I3c: every investigation path that opened has closed by the end of its step.
-  if (mon.openInv.size > 0) fail('I7g', `an investigation was left open after its tick`)
+  // I7h: every investigation that opened has closed by the end of its step.
+  if (mon.openInv.size > 0) fail('I7h', `an investigation was left open after its tick`)
   // I2: at most one item active at any moment.
   const active = [...mon.items.values()].filter((it) => it.open && it.state === 'active')
   if (active.length > 1) fail('I2', `${active.length} items active at once (${active.map((a) => a.origin).join(', ')})`)
-  // I4c: no item is dropped: the model's open set is exactly the account's.
+  // I4c: the model's derived open set equals this monitor's account of the
+  // same records. Both are folds of one ledger, so this catches a fold that
+  // drops or keeps an item wrongly; it cannot see an item never raised
+  // (that is I10's job).
   for (const it of mon.items.values()) {
     const m = h.ctx.state.items.get(it.id)
     if (it.open !== Boolean(m?.open)) fail('I4c', `item open=${it.open} in the ledger account but open=${Boolean(m?.open)} in the model`)
   }
-  // I9: one report never has two open items (an owner block and an attention item).
+  // I9: a stale owner-block report is not surfaced a second time as an
+  // attention item beside its own owner-block item. (An attention item raised
+  // because the session's reads keep failing is a different signal and is
+  // allowed; see README for the identity problem that leaves.)
   for (const it of h.ctx.state.items.values()) {
     if (!it.open || it.origin !== 'attention' || !it.session) continue
+    if (mon.onsetTrigger.get(it.openedBy) !== 'stale_report') continue
     const d = h.ctx.state.items.get(itemIds.declared(it.session))
     const rep = it.reportId ? mon.reports.get(it.reportId) : null
-    if (d?.open && rep && isOwnerBlock(rep, mon.config)) fail('I9', `one owner-block report holds both an owner-block item and an attention item`)
+    if (d?.open && rep && isOwnerBlock(rep, mon.config)) fail('I9', `a stale owner-block report holds both an owner-block item and an attention item`)
   }
 }

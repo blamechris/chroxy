@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { makeConfig } from '../../src/freshness/config.js'
-import { itemIds, surfaceOrdinal as surfaceOrdinalLiteral } from '../../src/freshness/keys.js'
-import { planConfig, run } from '../../src/freshness/reconciler.js'
-import { DEFAULT_POLICY, withPolicy } from '../../src/freshness/policy.js'
+import { makeConfig } from './model/config.js'
+import { itemIds, surfaceOrdinal as surfaceOrdinalLiteral } from './model/keys.js'
+import { planConfig, run } from './model/reconciler.js'
+import { DEFAULT_POLICY, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { literalPreempts } from './helpers/variants.js'
 import * as W from './helpers/world.js'
@@ -58,7 +58,7 @@ describe('the single slot', () => {
     assert.equal(h.openItems().filter((i) => i.state === 'active').length, 1)
   })
 
-  it('design gap witness: if acknowledgment frees the slot, the return makes two items active', () => {
+  it('gap witness: if acknowledgment frees the slot, the return makes two items active', () => {
     for (const literal of [true, false]) {
       const h = setup({}, literal ? withPolicy({ slotHolderStates: new Set(['active']) }) : undefined)
       const a = session(h, 'codex', 'a')
@@ -109,8 +109,8 @@ describe('the single slot', () => {
     const ib = itemIds.declared(b.s)
     ticks(h, 'chroxy', T0, 5)
     // The transition table sends an expired item to the back of its class
-    // (the time-limit acceptance case expects exhaustion at the limit; the
-    // table makes that happen only when the item next reaches the slot).
+    // (it is exhausted only when it next reaches the slot, not at the time
+    // limit itself; README, gaps).
     assert.deepEqual(steps(h, ia), ['queued', 'shown', 'reminded', 'reminded', 'expired'])
     assert.deepEqual(sent(h, ib), ['shown1'], 'the next item is shown when the first expires')
     ticks(h, 'chroxy', T0 + 5 * 15 * MIN, 12)
@@ -394,7 +394,7 @@ describe('origins and their closing evidence', () => {
     assert.equal(h.item(itemIds.declared(c.s)).state, 'closed')
   })
 
-  it('design gap witness: on a changed-at source a running line that DOES state a new decision is never an owner block', () => {
+  it('gap witness: on a changed-at source a running line that DOES state a new decision is never an owner block', () => {
     const h = setup()
     const c = session(h, 'chroxy', 'c')
     W.author(h.world, c.sk, T0, { state: 'running', next: 'a', decision: 'a brand new question' })
@@ -442,7 +442,7 @@ describe('origins and their closing evidence', () => {
     assert.equal(w?.body.reason, 'lapsed')
   })
 
-  it('design gap witness: a later prompt raised and answered between two ticks resolves the item (the literal rule never does)', () => {
+  it('gap witness: a later prompt raised and answered between two ticks resolves the item (the literal rule never does)', () => {
     for (const literal of [false, true]) {
       const policy = literal ? withPolicy({ promptAnswered: (item, cur) => (cur?.status === 'answered' ? item.contentRef : null) }) : undefined
       const h = setup({}, policy)
@@ -537,13 +537,14 @@ describe('preemption', () => {
     assert.deepEqual(sent(h, ib), ['shown1'])
   })
 
-  it('design gap witness: with "front of its class" applied to deadline items, the preempted item is re-shown ahead of its preemptor', () => {
+  it('gap witness: with "front of its class" applied to deadline items, the preempted item is re-shown ahead of its preemptor', () => {
     const frontFirst = (item, now) => {
       const k = DEFAULT_POLICY.orderKey({ ...item, deadline: null }, now)
       const hasDeadline = item.kind === 'owner_block' && item.deadline != null && item.deadline > now
       return hasDeadline ? [0, item.position?.rank ?? 1, item.position?.seq ?? 0, 0, item.deadline, item.itemId] : k
     }
-    const { h, ia, ib } = twoDeadlines(withPolicy({ orderKey: frontFirst }))
+    // The preemptor-first rule would also prevent it, so it is switched off.
+    const { h, ia, ib } = twoDeadlines(withPolicy({ orderKey: frontFirst, preemptorFirst: () => {} }))
     const seq = h.records('surface').filter((r) => r.body.phase !== 'outcome').map((r) => `${r.body.item_id === ia ? 'a' : 'b'}:${r.body.step}`)
     assert.deepEqual(seq.slice(0, 5), ['a:queued', 'a:shown', 'b:queued', 'a:preempted', 'a:shown'])
     assert.ok(h.item(ia).counters.shows_counted >= 2, 'the preempted item spent its shows')
@@ -551,7 +552,7 @@ describe('preemption', () => {
     void ib
   })
 
-  it('design gap witness: read literally, two deadline items preempt each other on alternate ticks', () => {
+  it('gap witness: read literally, two deadline items preempt each other on alternate ticks', () => {
     const { h } = twoDeadlines(withPolicy({ preempts: literalPreempts }))
     assert.ok(h.records('surface').filter((r) => r.body.step === 'preempted').length >= 2)
   })

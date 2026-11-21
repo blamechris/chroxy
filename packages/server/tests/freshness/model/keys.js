@@ -1,8 +1,8 @@
 /**
  * Idempotency keys for every record kind of the freshness ledger.
  *
- * Each function returns the record's `id`. The tuples follow the design's key
- * table exactly, without extra kind tags, so that a collision the design
+ * Each function returns the record's `id`. The tuples follow the key table
+ * in README exactly, without extra kind tags, so that a collision the table
  * allows is a collision the model reproduces. "Session" in a key is always the
  * identity triple (source, native id, incarnation), never a label.
  *
@@ -47,7 +47,7 @@ export function checkEmitKey(emitId, session) {
 }
 
 /**
- * The read numbers of the reads inside one investigation. The design names
+ * The read numbers of the reads inside one investigation. The key table names
  * three; the fourth is the model's.
  */
 export const READ_NO = Object.freeze({
@@ -77,9 +77,17 @@ export function activityStateKey(checkId, basis, ref) {
   return H(checkId, basis, ref ?? null)
 }
 
-/** `activity` for an event: the host's event id, or H(session, basis, activity_at). */
+/**
+ * `activity` for an event: the host's event id, or H(session, basis,
+ * activity_at) when the host gives none.
+ *
+ * DESIGN-GAP: the key table uses the host's event id alone. A host that
+ * numbers events per session gives two sessions the same id, and the second
+ * session's event would collide with the first's. The model puts the
+ * session identity in the key in both cases.
+ */
 export function activityEventKey({ hostEventId, session, basis, activityAt }) {
-  if (hostEventId != null) return String(hostEventId)
+  if (hostEventId != null) return H(sessionIdentity(session), 'event', String(hostEventId))
   return H(sessionIdentity(session), basis, activityAt ?? null)
 }
 
@@ -118,7 +126,7 @@ export const itemIds = Object.freeze({
 export const SENDING_STEPS = Object.freeze(new Set(['shown', 'reminded', 'returned']))
 
 /**
- * The design's per-step ordinal table. `ctx` carries what the
+ * The per-step ordinal table (README, keys). `ctx` carries what the
  * ordinal is drawn from: `presentation`, `k`, `ackRef`, `changeRef`.
  */
 export const SURFACE_ORDINAL = Object.freeze({

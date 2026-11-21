@@ -39,7 +39,7 @@ export function sha256(text) {
   return createHash('sha256').update(text).digest('hex')
 }
 
-/** The design's `H(...)`: a hash over the canonical encoding of its parts. */
+/** `H(...)`: a hash over the canonical encoding of its parts (README, keys). */
 export function H(...parts) {
   return sha256(canonical(parts))
 }

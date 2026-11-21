@@ -1,8 +1,8 @@
 /**
  * The rules of the session-freshness model, gathered into one policy object.
  *
- * `DEFAULT_POLICY` is the design's rules, plus the smallest choice the model
- * had to make wherever the design is silent or contradicts itself; each such
+ * `DEFAULT_POLICY` is the rules README states, plus the smallest choice the
+ * model had to make wherever the source rules were silent or contradictory; each such
  * choice is marked DESIGN-GAP. The planners in this directory call these rules
  * and nothing else, so a test can replace ONE rule with a broken one and show
  * that the invariant suite then fails. This object is the only injection point.
@@ -118,7 +118,7 @@ export function compareKeys(a, b) {
 }
 
 /**
- * Preemption, narrowed. The design's row preempts for any item
+ * Preemption, narrowed. The rule as written preempts for any item
  * whose deadline passes before the active item's next reminder.
  *
  * DESIGN-GAP: read literally, two items with deadlines preempt each other on
@@ -169,7 +169,7 @@ export const DEFAULT_POLICY = Object.freeze({
 
   // A new episode opens only when none is open and the opening
   // reference is one no earlier episode of that item used.
-  mayOpenEpisode(item, ref) {
+  mayOpenEpisode(item, ref, _origin) {
     if (!item) return true
     if (item.open) return false
     return !item.usedRefs.has(ref)
@@ -206,8 +206,8 @@ export const DEFAULT_POLICY = Object.freeze({
 
   preempts,
 
-  // DESIGN-GAP: an acceptance case lists acknowledgment among the events that
-  // free the slot, but the table returns an acknowledged item to `active` with a
+  // DESIGN-GAP: one statement of the rules lists acknowledgment among the
+  // events that free the slot, but the transition table returns an acknowledged item to `active` with a
   // send after an unconfirmed "done", which would make two items active. The
   // model keeps the slot held while an item is acknowledged and awaits
   // verification (one tick).
@@ -225,12 +225,25 @@ export const DEFAULT_POLICY = Object.freeze({
 
   orderKey,
 
+  // DESIGN-GAP: a preempted item goes to the front of its class, and prompts
+  // come before declared blocks only by class order. If the preemptor's
+  // deadline passes before it is shown (a crash between the preemption and
+  // the show, replayed minutes later), the preempted item outranks the item
+  // that preempted it and is shown straight back. The model shows a still
+  // queued preemptor first. Reorders `queue` in place.
+  preemptorFirst(queue) {
+    const head = queue[0]
+    if (!head?.preemptedBy) return
+    const i = queue.findIndex((x) => x.itemId === head.preemptedBy)
+    if (i > 0) queue.unshift(...queue.splice(i, 1))
+  },
+
   // Pending prompt origin: resolved by a host record that the owner
   // answered the latest prompt. Returns the answered prompt's ref, or null.
   // DESIGN-GAP: a prompt lives 300 s and a tick comes every 15 to 40 min, so
   // most prompts are raised AND answered between two ticks and are never seen
   // pending. The item's latest prompt is then an older, lapsed one and the
-  // design's rule never fires. The model also accepts an owner answer to any
+  // rule as written never fires. The model also accepts an owner answer to any
   // prompt raised (or, if never seen pending, answered) after the item's
   // current prompt, provided no prompt is pending at a live read.
   promptAnswered(item, current, prompts, { livePending }) {
@@ -242,6 +255,15 @@ export const DEFAULT_POLICY = Object.freeze({
       if ((p.raised_at ?? p.at ?? -Infinity) >= since) return p.ref
     }
     return null
+  },
+
+  // Pending prompt origin: withdrawn as lapsed when no prompt is pending at a
+  // live read and the session has authored a newer report.
+  // DESIGN-GAP: "newer" is not said to be newer than what. The model uses a
+  // report authored after the item's latest prompt was raised.
+  promptLapsed(item, current, latestReport, { livePending }) {
+    if (livePending !== 0 || !latestReport) return false
+    return latestReport.last_report_at > (current?.raised_at ?? -Infinity)
   },
 
   // Declared block origin: resolved by a newer authored report that is
@@ -274,18 +296,22 @@ export const DEFAULT_POLICY = Object.freeze({
   attemptAlreadyRecorded(ledger, key) {
     return ledger.byKey.has(key)
   },
-  // DESIGN-GAP: the design looks a key up before a SEND only. A step re-run
+  // DESIGN-GAP: the rules look a key up before a SEND only. A step re-run
   // after a crash also re-makes reads whose records are already written
   // (checks, verifications), and a re-read at a later time has a different
-  // payload under the same key, which the design itself turns into an
+  // payload under the same key, which the rules themselves turn into an
   // idempotency_conflict. The model reuses a recorded read instead of
   // re-reading.
-  reuseRecorded(index, key) {
-    return index.get(key) ?? null
+  // A record under the key is reused only if it is the kind expected there:
+  // a record of another kind is a key collision, and re-making the read lets
+  // append() record it as an idempotency_conflict instead of hiding it.
+  reuseRecorded(index, key, kind) {
+    const rec = index.get(key) ?? null
+    return rec && rec.kind === kind ? rec : null
   },
 
   // ── investigation ──
-  // DESIGN-GAP: several triggers can hold at once, and the design allows one
+  // DESIGN-GAP: several triggers can hold at once, and the rules allow one
   // investigation per session per tick without saying which. Fixed order.
   triggerPriority: Object.freeze(['dropped_from_list', 'repeated_error', 'native_disagreement', 'stale_report', 'recheck']),
   // DESIGN-GAP: "disagree" is defined by one example (idle while a turn is in
@@ -293,6 +319,17 @@ export const DEFAULT_POLICY = Object.freeze({
   // after every turn that ends RUNNING, so it cannot count. The model uses
   // idle and done.
   disagreementStates: Object.freeze(new Set(['idle', 'done'])),
+  // An onset is the check at which a trigger began to hold: the first check
+  // after one at which it did not hold. A `no_longer_observed` recheck starts
+  // a new stale_report onset.
+  // DESIGN-GAP: whether a new report starts a new onset while the trigger
+  // keeps holding is not said. The model starts one, so a newly stale report
+  // gets its own cycles.
+  startsNewOnset(trigger, { prevHolds, sameReport, staleReset }) {
+    if (!prevHolds) return true
+    if (trigger === 'stale_report') return staleReset || !sameReport
+    return false
+  },
   maxCycles: 2,
   secondCycleAfter: Object.freeze(new Set(['inconclusive', 'running_claim_unverified'])),
   recheckAfter: Object.freeze(new Set(['working_unreported', 'waiting_on_background'])),
@@ -355,19 +392,27 @@ export const DEFAULT_POLICY = Object.freeze({
     // classifies it `waiting_on_owner`: the owner-block item carries it.
     if (ev.ownerBlock) return 'waiting_on_owner'
     if (live && n.answering_now && n.turn_in_flight) return 'working_unreported'
-    const windowMs = config.investigation.activity_window_minutes * MIN_MS
     const after = ev.events.filter((e) => e.activity_at != null && e.activity_at > ev.reportAt)
     const lastEnd = Math.max(-Infinity, ...after.filter((e) => e.basis === 'turn_ended_after_report').map((e) => e.activity_at))
-    const openTurn = after.some((e) => e.basis === 'open_turn_event_after_report' && e.activity_at > lastEnd && ev.now - e.activity_at <= windowMs)
+    const openTurn = after.some((e) => e.basis === 'open_turn_event_after_report' && e.activity_at > lastEnd && this.withinActivityWindow(e, ev.now, config))
     if (openTurn) return 'working_unreported'
     if (live && n.busy_background && !n.turn_in_flight) return 'waiting_on_background'
-    if (Number.isFinite(lastEnd) && !(live && n.pending)) return 'finished_unreported'
+    // (A pending prompt already returned above.)
+    if (Number.isFinite(lastEnd)) return 'finished_unreported'
     // DESIGN-GAP: the absence of a turn and of a prompt cannot be shown on a
     // source with no native state. The model reads absence of evidence there
     // as nothing shown, so a stale non-owner block is still classified.
     if (BLOCKING_STATES.has(ev.state) && !ev.ownerBlock && !(live && n.turn_in_flight)) return 'blocked_unresolved'
-    if (ev.state === 'running' && !(live && n.turn_in_flight) && !(live && !n.busy_background)) return 'running_claim_unverified'
+    // On a live source a turn in flight or background work returned above,
+    // and their absence rules a wake out; only a source with no live busy
+    // state leaves the claim unverified.
+    if (ev.state === 'running' && !live) return 'running_claim_unverified'
     return 'inconclusive'
+  },
+
+  // An open-turn event counts as working only inside the activity window.
+  withinActivityWindow(event, now, config) {
+    return now - event.activity_at <= config.investigation.activity_window_minutes * MIN_MS
   },
 
   // A recheck runs rungs I1 and I3 only.
@@ -381,6 +426,12 @@ export const DEFAULT_POLICY = Object.freeze({
   },
 
   // What each classification does to the queue.
+  //
+  // DESIGN-GAP: `finished_unreported` is surfaced only "if linked work is
+  // still open", and this model links no work, so it is never surfaced: a
+  // session whose turn ended (in error, or by a stop) after a `running` line
+  // keeps that stale line without anyone being told. The surfacing
+  // invariant (I7f) exempts exactly these sessions, to match; see README.
   surfaceFor(classification, cycle, ev, config) {
     switch (classification) {
       case 'blocked_unresolved':

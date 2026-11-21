@@ -2,7 +2,7 @@
  * Rule variants for the freshness model's tests. Test-only: production code
  * sees only DEFAULT_POLICY.
  *
- * LITERAL: the design's text read literally where the model had to choose
+ * LITERAL: a rule read literally where the model had to choose
  * otherwise. Each is expected to fail a named invariant under generated
  * sequences; that failure is the evidence for the DESIGN-GAP the model marks.
  *
@@ -11,7 +11,7 @@
  * fail" rule).
  */
 
-import { DEFAULT_POLICY, isOwnerBlock, nextReminderAt, withPolicy } from '../../../src/freshness/policy.js'
+import { DEFAULT_POLICY, isOwnerBlock, nextReminderAt, withPolicy } from '../model/policy.js'
 
 // Any new report is a content change, keeping the model's forward-only rule
 // so that only the one reading differs.
@@ -21,7 +21,7 @@ function anyNewRef(item, next) {
 }
 
 export const LITERAL = {
-  // Acknowledgment frees the slot (as one acceptance case lists it).
+  // Acknowledgment frees the slot (as one statement of the rules has it).
   ackFreesSlot: { expect: 'I2', policy: withPolicy({ slotHolderStates: new Set(['active']) }) },
   // The transition table: any new report or prompt is a content change.
   anyNewReportIsContent: { expect: 'I6', policy: withPolicy({ contentChanged: anyNewRef }) },
@@ -73,6 +73,11 @@ export function literalPreempts(challenger, active, now, config) {
   return challenger.deadline < nextReminderAt(active, config)
 }
 
+/** The default rule's one-candidate-per-session choice, with no budget. */
+function onePerSession(candidates) {
+  return DEFAULT_POLICY.selectInvestigations(candidates, { cycleBudget: Infinity, recheckBudget: Infinity })
+}
+
 export const MUTANTS = {
   I1a: withPolicy({ canShow: () => true }),
   I1b: withPolicy({
@@ -89,8 +94,12 @@ export const MUTANTS = {
   I2b: withPolicy({ verifyFailedStep: () => 'returned' }),
   I1d: withPolicy({ showIsCounted: () => false }),
   I2: withPolicy({ slotHolderStates: new Set() }),
-  I2c: withPolicy({
-    // Front of the class applied to deadline items as well.
+  // The preempted item is not held behind a still-queued preemptor.
+  I2c: withPolicy({ preemptorFirst: () => {} }),
+  // "Front of its class" applied to deadline items as well; that alone is
+  // rescued by the preemptor-first rule, so both are broken.
+  'I2c.front': withPolicy({
+    preemptorFirst: () => {},
     orderKey(item, now) {
       const hasDeadline = item.kind === 'owner_block' && item.deadline != null && item.deadline > now
       if (!hasDeadline) return DEFAULT_POLICY.orderKey(item, now)
@@ -131,15 +140,14 @@ export const MUTANTS = {
   I7d: withPolicy({
     // Rechecks drawn from the cycle budget, ahead of cycles.
     selectInvestigations(candidates, { cycleBudget }) {
-      const ordered = [...candidates.filter((c) => c.kind === 'recheck'), ...candidates.filter((c) => c.kind === 'cycle')]
-      return ordered.slice(0, cycleBudget)
+      const one = onePerSession(candidates)
+      return [...one.filter((c) => c.kind === 'recheck'), ...one.filter((c) => c.kind === 'cycle')].slice(0, cycleBudget)
     },
   }),
   I7e: withPolicy({
-    // Newest onset first: an old onset can wait forever behind new ones.
+    // Newest onset first: an old onset can wait behind new ones.
     selectInvestigations(candidates, budgets) {
-      const cycles = candidates.filter((c) => c.kind === 'cycle').sort((a, b) => b.onsetSeq - a.onsetSeq).slice(0, budgets.cycleBudget)
-      return [...cycles, ...candidates.filter((c) => c.kind === 'recheck')]
+      return DEFAULT_POLICY.selectInvestigations(candidates.map((c) => ({ ...c, onsetSeq: -(c.onsetSeq ?? 0) })), budgets)
     },
   }),
   I7f: withPolicy({ surfaceFor: () => null }),
@@ -149,7 +157,21 @@ export const MUTANTS = {
       return 'working_unreported'
     },
   }),
+  I8b: withPolicy({ reportAge: ({ lastReportAt, checkedAt }) => (checkedAt - lastReportAt) / 2 }),
   I8: withPolicy({ reportAge: ({ lastReportAt, checkedAt, previousCheckedAt }) => checkedAt - (previousCheckedAt ?? lastReportAt) }),
+  // A model that starts a new onset at every tick: its own onset ids keep
+  // every cycle count at one, so only the monitor's own onsets can see it.
+  'I7a.onset': withPolicy({ startsNewOnset: () => true }),
+  // Withdraw a prompt item as lapsed while a prompt is still pending.
+  'I4b.lapsed': withPolicy({
+    promptLapsed(item, current, latestReport) {
+      return Boolean(latestReport && latestReport.last_report_at > (current?.raised_at ?? -Infinity))
+    },
+  }),
+  // Never open a prompt item.
+  I10: withPolicy({ mayOpenEpisode: (item, ref, origin) => (origin === 'prompt' ? false : DEFAULT_POLICY.mayOpenEpisode(item, ref, origin)) }),
+  // Any open-turn event after the report counts as working, however old.
+  'I7f.window': withPolicy({ withinActivityWindow: () => true }),
   I9: withPolicy({
     classify(ev, config) {
       return DEFAULT_POLICY.classify({ ...ev, ownerBlock: false }, config)
