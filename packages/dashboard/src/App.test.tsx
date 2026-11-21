@@ -191,6 +191,7 @@ vi.mock('./components/StdinDisabledBanner', () => ({
 
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { App } from './App'
+import { EMPTY_HINT_SETTLE_MS } from './components/ChatView'
 import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { createShortcutRegistry } from './shortcuts/registry'
 import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
@@ -1705,6 +1706,38 @@ describe('App', () => {
         expect(within(systemPane).queryByText('Reply cut off')).not.toBeInTheDocument()
         const chatPane = screen.getByTestId('chat-pane')
         expect(within(chatPane).getByText('Reply cut off')).toBeInTheDocument()
+      })
+    })
+
+    // #8231 -- the first-run hint says "type a message below", which is only true
+    // of the main chat. The System pane is mounted (hidden) beside it and has no
+    // input box, so it must never carry the hint.
+    describe('first-run hint is chat-only (#8231)', () => {
+      it('shows in the chat pane and not in the System pane for an empty session', () => {
+        vi.useFakeTimers()
+        try {
+          stateOverrides = {
+            ...connectedState,
+            getActiveSessionState: () => ({
+              messages: [],
+              streamingMessageId: null,
+              activeModel: null,
+              permissionMode: null,
+              contextUsage: null,
+              sessionCost: null,
+              isIdle: true,
+              activeAgents: [],
+              isPlanPending: false,
+            }),
+            viewMode: 'chat',
+          }
+          render(<App />)
+          act(() => { vi.advanceTimersByTime(EMPTY_HINT_SETTLE_MS * 4) })
+          expect(within(screen.getByTestId('chat-pane')).queryByTestId('chat-empty-hint')).not.toBeNull()
+          expect(within(screen.getByTestId('system-pane')).queryByTestId('chat-empty-hint')).toBeNull()
+        } finally {
+          vi.useRealTimers()
+        }
       })
     })
   })

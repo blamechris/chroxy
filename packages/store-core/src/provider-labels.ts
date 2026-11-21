@@ -105,7 +105,9 @@ export function getProviderInfo(provider: string): ProviderDisplayInfo {
     return { short: 'SDK', label, tooltip: 'SDK provider — billed per token', type: 'sdk' }
   }
   const short = provider.replace(/^claude-/, '').toUpperCase()
-  return { ...FALLBACK, label: short, short }
+  // #8231 — name the provider: a config-driven one (e.g. `smoke-stub`) has no
+  // registry entry, and the generic FALLBACK tooltip read the same for all of them.
+  return { ...FALLBACK, label: short, short, tooltip: `Provider: ${provider} (a configured provider)` }
 }
 
 // #5795 — single source of truth for "which AskUserQuestion render shapes can

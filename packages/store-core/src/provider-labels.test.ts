@@ -104,7 +104,12 @@ describe('getProviderInfo', () => {
     const info = getProviderInfo('my-provider')
     expect(info.type).toBe('other')
     expect(info.short).toBe('MY-PROVIDER')
-    expect(info.tooltip).toContain('billing dashboard')
+    // #8231 — names the provider instead of one generic line for all of them.
+    expect(info.tooltip).toBe('Provider: my-provider (a configured provider)')
+  })
+
+  it('the fallback tooltip keeps the full configured name, claude- prefix included (#8231)', () => {
+    expect(getProviderInfo('claude-smoke-stub').tooltip).toBe('Provider: claude-smoke-stub (a configured provider)')
   })
 
   it('strips claude- prefix from unknown claude-* providers', () => {
