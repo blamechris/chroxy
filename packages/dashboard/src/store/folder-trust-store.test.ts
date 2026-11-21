@@ -115,6 +115,27 @@ describe('folder_trust_result', () => {
     expect(get().folderTrustError.s1).toBeUndefined()
   })
 
+  it('settles by requestId: a reply to another request leaves the pending one alone, and the reason lands on the requesting session', () => {
+    receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    receive({ type: 'folder_trust_state', sessionId: 's2', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
+    get().trustFolder('s1')
+    get().trustFolder('s2')
+    const [s1Request, s2Request] = [get().folderTrustPending.s1, get().folderTrustPending.s2]
+    expect(s1Request).toBeTruthy()
+    // A late reply for a request that is no longer pending settles nothing, whatever session it names.
+    receive({ type: 'folder_trust_result', sessionId: 's1', requestId: 'folder-trust-old', ok: false, status: 'untrusted', error: 'old' })
+    expect(get().folderTrustPending.s1).toBe(s1Request)
+    expect(get().folderTrustError.s1).toBeUndefined()
+    // A reply names its request: it settles that request's session.
+    receive({ type: 'folder_trust_result', sessionId: 's1', requestId: s2Request, ok: false, status: 'untrusted', error: 'nope' })
+    expect(get().folderTrustPending.s2).toBeUndefined()
+    expect(get().folderTrustError.s2).toBe('nope')
+    expect(get().folderTrustPending.s1).toBe(s1Request)
+    // A reply without a requestId falls back to the session it names.
+    receive({ type: 'folder_trust_result', sessionId: 's1', ok: true, status: 'trusted' })
+    expect(get().folderTrustPending.s1).toBeUndefined()
+  })
+
   it('settles the marker on a failure and keeps the reason; the next attempt clears it', () => {
     receive({ type: 'folder_trust_state', sessionId: 's1', status: 'untrusted', summary, digest, appliesFrom: 'restart' })
     get().trustFolder('s1')
