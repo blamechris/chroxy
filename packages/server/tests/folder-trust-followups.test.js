@@ -18,6 +18,11 @@ import {
   withInterprocessLock,
   reclaimStale,
   isTransientLockError,
+  setLockReadBackHookForTest,
+  getFolderTrustState,
+  getFolderTrustStateForLaunch,
+  readTrustedProjectSettings,
+  trustFolder,
   setReclaimHookForTest,
   setLockWaitForTest,
   folderTrustStorePath,
@@ -452,5 +457,58 @@ describe('a display scan that times out is not a loss of trust', () => {
     sessionManager.getSession = () => ({ cwd: other, provider: 'claude-sdk', session: {} })
     await broadcastFolderTrustState(ctx, other)
     assert.deepEqual(lost, ['s1'])
+  })
+})
+
+describe('scans in the daemon thread keep the wall-clock budget', () => {
+  it('the status line reader, getFolderTrustState and trustFolder stop at the budget: an over-budget walk is untrusted', async () => {
+    const dir = join(root, 'slow')
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'a.sh' } }))
+    await trustReviewed(dir)
+    assert.ok(readTrustedProjectSettings(dir), 'trusted and readable on a normal clock')
+    for (let i = 0; i < 600; i++) mkdirSync(join(dir, 'tree', `d${i}`), { recursive: true })
+    invalidateFolderTrustCache()
+    let t = Date.now()
+    mock.method(Date, 'now', () => { t += 50; return t }) // a slow mount: every reading is 50 ms later
+    try {
+      assert.equal(getFolderTrustState(dir).status, 'untrusted')
+      invalidateFolderTrustCache()
+      assert.equal(readTrustedProjectSettings(dir), null)
+      const result = await trustFolder(dir, scanFolderSettings(dir).digest)
+      assert.equal(result.code, 'FOLDER_TRUST_UNTRUSTABLE')
+    } finally {
+      mock.restoreAll()
+    }
+  })
+})
+
+describe('the launch decision never scans an unrecorded folder', () => {
+  it('getFolderTrustStateForLaunch answers untrusted from the missing record, with no scan of any kind', async () => {
+    const cwd = project('unrecorded')
+    const inThread = scanCountForTest()
+    const worker = workerScanCountForTest()
+    const state = await getFolderTrustStateForLaunch(cwd)
+    assert.equal(state.status, 'untrusted')
+    assert.equal(scanCountForTest(), inThread)
+    assert.equal(workerScanCountForTest(), worker)
+  })
+})
+
+describe('a failed read-back of the lock just written', () => {
+  it('does not orphan the lock: ownership is retried, then our own file is removed, and the lock is taken on the next pass', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    let failures = 5 // the whole first read-back fails
+    setLockReadBackHookForTest((path, read) => (failures-- > 0 ? undefined : read(path)))
+    let runs = 0
+    try {
+      await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
+    } finally {
+      setLockReadBackHookForTest()
+    }
+    assert.equal(runs, 1)
+    assert.equal(existsSync(`${folderTrustStorePath()}.lock`), false, 'released')
+    await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 }) // a later call is not blocked
+    assert.equal(runs, 2)
   })
 })

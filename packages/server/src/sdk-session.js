@@ -1124,6 +1124,9 @@ export class SdkSession extends BaseSession {
         this._isBusy = false
         this._permissions.clearUserStopInFlight()
         this.emit('stopped', {})
+        // A send that arrived during the verification was queued: deliver it now, as the
+        // end of a stopped turn does.
+        if (this._outgoingQueue.length) this.dequeueNextOutgoing()
         return
       }
     }

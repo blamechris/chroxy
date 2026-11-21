@@ -267,6 +267,35 @@ describe('SDK turn stopped while the folder is being verified', () => {
   })
 })
 
+describe('SDK send queued during a stopped decision', () => {
+  it('a prompt sent while the folder is being verified, after a Stop, is delivered when the stopped turn ends', async () => {
+    const dir = projectWithMcp('setting-sources-sdk-queued-')
+    await trustReviewed(dir)
+    const session = new SdkSession({ cwd: dir, stateFilePath: join(tmp('setting-sources-sdk-'), 'state.json') })
+    session._fetchSupportedModels = () => {}
+    const prompts = []
+    session._callQuery = (args) => {
+      prompts.push(typeof args.prompt === 'string' ? args.prompt : 'streamed')
+      return (async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-q', model: 'claude-x', tools: [] }
+        yield { type: 'result', session_id: 'sdk-q', total_cost_usd: 0, duration_ms: 1, num_turns: 1, usage: {} }
+      })()
+    }
+    try {
+      const first = session.sendMessage('first')
+      await session.interrupt() // the Stop
+      await session.sendMessage('after the stop') // busy: queued
+      assert.equal(session._outgoingQueue.length, 1)
+      await first
+      for (let i = 0; i < 200 && prompts.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      assert.equal(prompts.length, 1, 'the queued prompt ran')
+      assert.equal(session._outgoingQueue.length, 0)
+    } finally {
+      session.destroy()
+    }
+  })
+})
+
 describe('CLI session argv', () => {
   const base = { model: null, permissionMode: 'approve', allowedTools: [], skillsText: '', resumeSessionId: null }
   const sourcesOf = (args) => {

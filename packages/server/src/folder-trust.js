@@ -27,9 +27,10 @@
  * Incompleteness is always HARD and fails closed: any error other than "absent",
  * a non-regular file, a dangling or circular link, a file over the per-file limit,
  * or any budget exceeded (bytes, files, directories, entries, depth; a display scan
- * also has a wall-clock budget for the nested search; a launch scan has none, so the
- * walk itself is bounded by entries and depth only, though the worker's overall timeout
- * can still end it, which fails closed). The folder is untrusted and cannot be
+ * has a wall-clock budget for the nested search, and so does every scan run in this
+ * thread (the status line's, trust and untrust's), which an over-budget walk leaves
+ * incomplete. Only a launch scan in the worker has none: its walk is bounded by entries
+ * and depth, and the worker's overall timeout can still end it, which fails closed). The folder is untrusted and cannot be
  * trusted. What is NOT covered by the digest: files that settings merely refer to
  * (hook scripts, for example), `CLAUDE.md` and rules. Trusting a folder trusts its code.
  *
@@ -72,9 +73,9 @@ export const MAX_NESTED_DIRS = 20_000
 export const MAX_NESTED_ENTRIES = 200_000
 /** Deepest level of the nested search (HARD beyond). */
 export const MAX_NESTED_DEPTH = 32
-/** Wall-clock budget of the nested search in a DISPLAY scan (HARD beyond). Launch scans have none. */
+/** Wall-clock budget of the nested search in every scan run in the daemon's own thread, and in display scans (HARD beyond). Worker launch scans have none. */
 export const NESTED_BUDGET_MS = 1500
-/** Limits of a display scan: the entry and depth bounds plus the wall-clock budget. */
+/** Limits of a display scan or an in-thread scan: the entry and depth bounds plus the wall-clock budget. */
 const DISPLAY_LIMITS = Object.freeze({ nestedBudgetMs: NESTED_BUDGET_MS })
 /** Largest config file parsed for the summary; a larger one is still hashed. */
 export const MAX_PARSE_BYTES = 256 * 1024
@@ -683,6 +684,21 @@ export function setLockWaitForTest(ms) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/** `readLock` that tells an unreadable file (undefined) from an absent one (null). */
+const readLockForOwnership = (lockPath) => {
+  try {
+    return readFileSync(lockPath, 'utf8')
+  } catch (err) {
+    return err?.code === 'ENOENT' ? null : undefined
+  }
+}
+
+/** Test seam: replaces the read-back of a just-written lock, to make it fail. */
+let lockReadBackHook = null
+export function setLockReadBackHookForTest(fn) {
+  lockReadBackHook = fn ?? null
+}
+
 const readLock = (lockPath) => {
   try {
     return readFileSync(lockPath, 'utf8')
@@ -779,6 +795,9 @@ export function reclaimStale(lockPath, judged) {
     writeFileSync(guard, guardBody, { mode: 0o600, flag: 'wx' })
   } catch (err) {
     if (err?.code === 'EEXIST') {
+      // Limit: removing a guard whose holder died is not atomic. With a dead holder and
+      // several processes racing, one could remove a guard another just re-created; the
+      // lock itself is still only removed after it is re-read as the judged content.
       const held = readLock(guard)
       if (guardIsAbandoned(guard, held) && readLock(guard) === held) {
         try { unlinkSync(guard) } catch { /* gone */ }
@@ -827,11 +846,26 @@ export async function withInterprocessLock(storePath, fn) {
   for (;;) {
     try {
       writeFileSync(lockPath, body, { mode: 0o600, flag: 'wx' })
-      if (isOurs(readLock(lockPath))) break
-      // The file is not what was just written: it is not ours to run under or to remove.
+      // Read back what was written. A read that fails (a transient Windows error, a scanner
+      // holding the file) is retried; if ownership still cannot be confirmed, our own
+      // just-written file is removed (its token is known) rather than left to block us.
+      let confirmed = false
+      for (let attempt = 0; attempt < 5 && !confirmed; attempt += 1) {
+        const back = lockReadBackHook ? lockReadBackHook(lockPath, readLockForOwnership) : readLockForOwnership(lockPath)
+        if (back === undefined) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); continue }
+        if (isOurs(back)) confirmed = true
+        break
+      }
+      if (confirmed) break
+      const now = readLock(lockPath)
+      if (now === null || isOurs(now)) unlinkOwned(lockPath)
     } catch (err) {
       if (!isTransientLockError(err)) throw err
       const content = readLock(lockPath)
+      if (isOurs(content)) {
+        // Our own file from an earlier pass whose read-back failed: ours to run under.
+        break
+      }
       if (lockIsStale(lockPath, content) && reclaimStale(lockPath, content)) {
         // Progress was made; go round again, but never past the deadline.
         if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
@@ -876,7 +910,7 @@ function scanCached(cwd, useCache) {
     if (hit) return hit
   }
   // A launch decision never reads the cache; its scan does feed it for display callers.
-  const scan = scanFolderSettings(cwd)
+  const scan = scanFolderSettings(cwd, DISPLAY_LIMITS)
   scanCache.set(scan.realPath, { at: Date.now(), scan })
   return scan
 }
@@ -1002,7 +1036,7 @@ function scanInWorker(lane, cwd, limits) {
 }
 
 /** What a display caller sees for a scan that timed out: not reviewable, never trusted. */
-function incompleteScan(cwd, why) {
+function incompleteScan(cwd, why, timedOut = true) {
   const files = []
   return {
     realPath: resolveRealPath(cwd).path,
@@ -1017,7 +1051,7 @@ function incompleteScan(cwd, why) {
     hardIncomplete: true,
     // The scan did not answer in time: the folder was not reviewed, which says nothing
     // about whether it changed. Display only.
-    timedOut: true,
+    timedOut,
   }
 }
 
@@ -1062,6 +1096,12 @@ async function scanForDisplay(cwd) {
  * @returns {Promise<{ status: 'trusted'|'untrusted', realPath: string, digest: string, summary: object }>}
  */
 export async function getFolderTrustStateForLaunch(cwd) {
+  // A folder with no trust record is untrusted whatever a scan would find: no scan.
+  const real = resolveRealPath(cwd)
+  if (real.error || !loadFolderTrustRecords().some((r) => r.path === real.path)) {
+    const none = incompleteScan(cwd, 'This folder is not trusted', false)
+    return { status: 'untrusted', realPath: none.realPath, digest: none.digest, summary: none.summary }
+  }
   let scan
   try {
     scan = await scanInWorker(launchLane, cwd, {})
@@ -1141,7 +1181,7 @@ export function isFolderTrusted(cwd, opts) {
 export async function trustFolder(cwd, expectedDigest) {
   if (typeof cwd !== 'string' || cwd === '') return { ok: false, status: 'untrusted', code: 'FOLDER_TRUST_NOT_APPLIED', error: 'no folder' }
   return withStoreLock(folderTrustStorePath(), async () => {
-    const scan = scanFolderSettings(cwd)
+    const scan = scanFolderSettings(cwd, DISPLAY_LIMITS)
     const base = { realPath: scan.realPath, digest: scan.digest, summary: scan.summary }
     if (scan.hardIncomplete) {
       return { ok: false, status: 'untrusted', ...base, code: 'FOLDER_TRUST_UNTRUSTABLE', error: 'This folder could not be fully reviewed' }
