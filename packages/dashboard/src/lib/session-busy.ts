@@ -26,7 +26,7 @@
  * helper and both call sites use it.
  */
 import { isLivePermissionPrompt } from '@chroxy/store-core'
-import type { ChatMessage } from '@chroxy/store-core'
+import type { ChatMessage, QueuedSessionMessage } from '@chroxy/store-core'
 
 /** The fields of a session state this module reads. */
 export interface SessionBusyState {
@@ -147,4 +147,65 @@ export function inputBarBusyProps(
 export function hasInterruptibleWork(s: SessionBusyState, now: number): boolean {
   if (isSessionBusy(s)) return true
   return s.messages.some((m) => m.options !== undefined && isLivePermissionPrompt(m, now))
+}
+
+/** The fields of a session state {@link isAwaitingFirstOutput} reads. */
+export interface AwaitingFirstOutputState extends SessionBusyState {
+  queuedMessages?: ReadonlyArray<QueuedSessionMessage>
+}
+
+/**
+ * #8703 — is this session busy with a turn that has produced NO output yet?
+ *
+ * True when {@link isSessionBusy} AND the transcript's latest (non-queued) user
+ * message has no assistant output after it. A Stop here ends the turn before it
+ * starts, which is rarely what a user pressing Escape out of habit means, so the
+ * dashboard's interrupt door asks first.
+ *
+ * "Assistant output" is any message the model or provider produced for the turn:
+ * `response` (streamed text), `tool_use` (a tool call and its result), a real
+ * `thinking` block (id other than the `'thinking'` placeholder), a `prompt`
+ * (permission request / question card: the model asked for something) and an
+ * `error` (a provider error: the turn has already answered). NOT output: the
+ * client-side `'thinking'` spinner placeholder (`filterThinking`'s target),
+ * `system` lines, an EMPTY `response` (the slot a `stream_start` opens before
+ * its first delta; claude-tui, the default provider, emits it as the turn
+ * begins), and user bubbles that are still queued (they are follow-ups
+ * behind the running turn, not the turn's own prompt).
+ *
+ * Known edges, documented not fixed: a queued bubble missing from
+ * `queuedMessages` (for example mid-replay) reads as the latest user message
+ * and so fails toward confirming; a server-initiated turn with an older
+ * no-output `user_input` at the tail could gate; and if the first token lands
+ * while the dialog is open, Confirm still stops the turn, which is the user's
+ * explicit choice.
+ *
+ * Deliberately derived from the transcript and NOT from
+ * `streamingMessageId === 'pending'`: `sendMessage`'s 5 s stall safety net
+ * clears that sentinel while the SDK may still be starting, which would close
+ * the window exactly when a slow start needs the confirmation.
+ */
+export function isAwaitingFirstOutput(s: AwaitingFirstOutputState): boolean {
+  if (!isSessionBusy(s)) return false
+  const queued = new Set(
+    (s.queuedMessages ?? []).map((q) => q.clientMessageId).filter((id): id is string => !!id),
+  )
+  let sawUser = false
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i]
+    if (!m) continue
+    if (m.type === 'user_input') {
+      if (queued.has(m.id)) continue
+      sawUser = true
+      break
+    }
+    if (m.type === 'thinking' && m.id === 'thinking') continue
+    if (m.type === 'system') continue
+    // A `response` is output only once it holds text. claude-tui emits
+    // `stream_start` as the turn begins (#4010) and the dashboard appends an
+    // EMPTY response slot for it, so the slot alone must not close the window.
+    if (m.type === 'response' && (m.content ?? '').trim() === '') continue
+    return false
+  }
+  return sawUser
 }

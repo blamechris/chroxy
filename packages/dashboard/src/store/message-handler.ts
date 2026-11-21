@@ -5322,6 +5322,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           delete newStates[id];
         }
         patch.sessionStates = newStates;
+        // #8703: an early-interrupt confirm aimed at a session that just left the
+        // roster must not outlive it (Confirm would send to a dead session).
+        const interruptTarget = get().pendingInterruptConfirm?.sessionId
+        if (interruptTarget && removedIds.includes(interruptTarget)) {
+          patch.pendingInterruptConfirm = null
+        }
         // #5163: drop the Control Room activity tree for any session that
         // dropped out of the list so a closed session's tree doesn't linger.
         let nextActivity = get().activity;

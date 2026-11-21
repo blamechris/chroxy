@@ -31,7 +31,31 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
   const { overlayRef, overlayProps } = useModalOverlay<HTMLDivElement>()
   const contentRef = useRef<HTMLDivElement>(null)
 
+  // When this modal OPENED (performance.now()): one stamp per open, set by the
+  // effect below. It must not live in the listener effect, which re-runs
+  // whenever `onClose` changes identity (inline closures re-run it on every
+  // parent render), because moving the stamp forward would swallow an Escape
+  // pressed while the main thread was busy.
+  const attachedAtRef = useRef(0)
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8703: ignore an event that was already in flight when the listener was
+    // attached. React 19 renders in the microtask checkpoint between the root
+    // listener and `document`, so a keydown whose own handler opened this modal
+    // (Escape in the composer parking a confirm) would otherwise reach the new
+    // listener on the way up and close the dialog with the keystroke that
+    // opened it. `Event.timeStamp` and `performance.now()` share the document's
+    // time origin. Deliberately NOT `defaultPrevented`: that would change every
+    // modal whose content preventDefaults Escape.
+    // Browsers stamp events with a DOMHighResTimeStamp (performance.now() clock),
+    // far below `timeOrigin`, so the `epoch` branch is unreachable there: it
+    // exists for jsdom, which stamps events with epoch milliseconds (Date.now()).
+    // It normalises that form onto the performance clock. Epoch stamps are
+    // whole milliseconds, so one can read up to 1ms early against the fractional
+    // open time; allow that 1ms of slack for the epoch form only.
+    const epoch = e.timeStamp > performance.timeOrigin
+    const eventTime = epoch ? e.timeStamp - performance.timeOrigin + 1 : e.timeStamp
+    if (eventTime < attachedAtRef.current) return
     if (e.key === 'Escape') {
       // Only close if this is the topmost modal (#1179)
       const overlays = document.querySelectorAll('[data-modal-overlay]')
@@ -40,6 +64,11 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
       }
     }
   }, [onClose])
+
+  // Declared BEFORE the listener effect so the stamp is set first on open.
+  useEffect(() => {
+    if (open) attachedAtRef.current = performance.now()
+  }, [open])
 
   useEffect(() => {
     if (open) {

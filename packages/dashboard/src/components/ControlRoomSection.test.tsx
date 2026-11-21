@@ -25,9 +25,11 @@ import { applyActivitySnapshot, createEmptyActivityState } from '@chroxy/store-c
 // needs to return harmless defaults. Mock it (the established pattern from
 // ActivityIndicator.*.test.tsx) so the real zustand hook isn't invoked under
 // jsdom — invoking it directly trips a null-React-internals error.
+const storeSendInterrupt = vi.hoisted(() => vi.fn())
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: unknown) => unknown) =>
     selector({
+      sendInterrupt: storeSendInterrupt,
       hostStatus: null,
       hostStatusLoading: false,
       connectionPhase: 'connected',
@@ -754,6 +756,26 @@ describe('ControlRoomSection control actions (#5272)', () => {
     expect(onCancelActivity).toHaveBeenCalledTimes(1)
     // Bound to the drill-down's mapped session id.
     expect(onCancelActivity).toHaveBeenCalledWith('a1', 's-chroxy')
+  })
+
+  it('without an override the "Interrupt turn" button goes through the store door with the drill-down sessionId (#8703)', () => {
+    storeSendInterrupt.mockClear()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={[makeSession('s-chroxy', '/Users/me/Projects/chroxy')]}
+        activity={buildActivity('s-chroxy', [activityEntry('a1', { status: 'running' })])}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+    fireEvent.click(screen.getByTestId('cr-interrupt-chroxy'))
+    // The store's sendInterrupt is the gate (see store/interrupt-confirm.test.tsx,
+    // which proves an explicit non-active sessionId is gated on THAT session).
+    expect(storeSendInterrupt).toHaveBeenCalledTimes(1)
+    expect(storeSendInterrupt).toHaveBeenCalledWith('s-chroxy')
   })
 
   it('wires the heading "Interrupt turn" button to onInterruptSession(sessionId)', () => {

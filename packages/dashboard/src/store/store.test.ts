@@ -689,7 +689,8 @@ describe('useConnectionStore', () => {
         },
       });
 
-      const result = useConnectionStore.getState().sendInterrupt();
+      // #8703: this fixture is a Stop in the no-output window, so confirm it; the test is about queue clearing.
+      const result = useConnectionStore.getState().sendInterrupt(undefined, { confirmed: true });
 
       expect(result).toBe('sent');
       const payload = JSON.parse(send.mock.calls[0]![0] as string);
