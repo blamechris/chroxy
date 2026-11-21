@@ -204,10 +204,10 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     classification = P.classifyRecheck({ native, readFailed, rungBlocked })
   } else {
     // The re-read: the same adapter read, once more; then one retry of a failed read.
-    const i0 = yield* investigationRead(ctx, { invId, readNo: READ_NO.REREAD, session, readFn: () => world.reread(session, now), now, tickId })
-    rungs.push({ rung: 're_read', outcome: i0.body.outcome })
-    let failed = i0.body.outcome === 'error'
-    let rungBlocked = i0.body.outcome === 'blocked'
+    const reRead = yield* investigationRead(ctx, { invId, readNo: READ_NO.REREAD, session, readFn: () => world.reread(session, now), now, tickId })
+    rungs.push({ rung: 're_read', outcome: reRead.body.outcome })
+    let failed = reRead.body.outcome === 'error'
+    let rungBlocked = reRead.body.outcome === 'blocked'
     if (failed) {
       const retry = yield* investigationRead(ctx, { invId, readNo: READ_NO.RETRY, session, readFn: () => world.reread(session, now), now, tickId })
       rungs.push({ rung: 're_read', outcome: retry.body.outcome, retry: true })
@@ -222,7 +222,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     let native = null
     if (!cand.sourceLevel && cand.trigger !== 'dropped_from_list') {
       if (caps.native_in_read) {
-        native = nativeEvidence(s, i0.native)
+        native = nativeEvidence(s, reRead.native)
         rungs.push({ rung: 'activity_read', outcome: native ? 'read' : 'none' })
       } else if (caps.activity_read) {
         const a = yield* investigationRead(ctx, { invId, readNo: READ_NO.ACTIVITY, session, readFn: () => world.activity(session, now), now, tickId, readKind: 'activity' })

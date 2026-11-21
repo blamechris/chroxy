@@ -105,7 +105,7 @@ describe('classification', () => {
     const d = session(h, 'claude-desktop', 'd', null)
     W.author(h.world, d.sk, T0, { state: 'running', next: 'a' })
     let t = ticks(h, 'claude-desktop', T0, 3)
-    // The I0 re-read is not allowed at the next tick only: the rung is blocked.
+    // The re-read is not allowed at the next tick only: the rung is blocked.
     let n = 0
     const blockedOnce = (a) => ({ ...a, reread: (s) => (n++ === 0 ? { outcome: 'blocked', not_read_reason: 'credential_required' } : a.reread(s)) })
     t += CAD * MIN
@@ -302,11 +302,11 @@ describe('disappearance and outages', () => {
     const inv = invs(h, c.sk)[0]
     assert.equal(inv.classification, 'gone')
     const reads = h.records('check').filter((r) => r.body.trigger === 'investigation')
-    assert.equal(reads.length, 2, 'the I0 re-read and the confirming read')
+    assert.equal(reads.length, 2, 'the re-read and the confirming read')
     assert.ok(h.item(itemIds.gone(c.s)).open)
   })
 
-  it('an I0 re-read that fails, its retry and the confirming read in one investigation: three distinct check keys, no conflict', () => {
+  it('a re-read that fails, its retry and the confirming read in one investigation: three distinct check keys, no conflict', () => {
     const h = setup()
     const c = session(h, 'chroxy', 'c')
     W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
