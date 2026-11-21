@@ -31,7 +31,11 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
   const { overlayRef, overlayProps } = useModalOverlay<HTMLDivElement>()
   const contentRef = useRef<HTMLDivElement>(null)
 
-  // When this modal's document keydown listener was attached (performance.now()).
+  // When this modal OPENED (performance.now()): one stamp per open, set by the
+  // effect below. It must not live in the listener effect, which re-runs
+  // whenever `onClose` changes identity (inline closures re-run it on every
+  // parent render), because moving the stamp forward would swallow an Escape
+  // pressed while the main thread was busy.
   const attachedAtRef = useRef(0)
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -43,11 +47,12 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
     // opened it. `Event.timeStamp` and `performance.now()` share the document's
     // time origin. Deliberately NOT `defaultPrevented`: that would change every
     // modal whose content preventDefaults Escape.
-    // Browsers stamp events with a DOMHighResTimeStamp (performance.now() clock);
-    // jsdom stamps them with epoch milliseconds (Date.now()). Normalise the
-    // epoch form onto the performance clock so both compare against attachedAt.
-    // The epoch form is whole milliseconds, so it can read up to 1ms early
-    // against the fractional attach time: allow that 1ms of slack for it.
+    // Browsers stamp events with a DOMHighResTimeStamp (performance.now() clock),
+    // far below `timeOrigin`, so the `epoch` branch is unreachable there: it
+    // exists for jsdom, which stamps events with epoch milliseconds (Date.now()).
+    // It normalises that form onto the performance clock. Epoch stamps are
+    // whole milliseconds, so one can read up to 1ms early against the fractional
+    // open time; allow that 1ms of slack for the epoch form only.
     const epoch = e.timeStamp > performance.timeOrigin
     const eventTime = epoch ? e.timeStamp - performance.timeOrigin + 1 : e.timeStamp
     if (eventTime < attachedAtRef.current) return
@@ -60,9 +65,13 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
     }
   }, [onClose])
 
+  // Declared BEFORE the listener effect so the stamp is set first on open.
+  useEffect(() => {
+    if (open) attachedAtRef.current = performance.now()
+  }, [open])
+
   useEffect(() => {
     if (open) {
-      attachedAtRef.current = performance.now()
       document.addEventListener('keydown', handleKeyDown)
       return () => document.removeEventListener('keydown', handleKeyDown)
     }
