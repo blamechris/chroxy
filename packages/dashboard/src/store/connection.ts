@@ -966,6 +966,34 @@ function isDifferentDaemonUrl(current: string | null, target: string): boolean {
   return current !== null && current !== target;
 }
 
+/**
+ * Send `trust_folder` / `untrust_folder` for a session and mark it in flight.
+ * The marker clears on `folder_trust_result` (or the matching `error`).
+ */
+function sendFolderTrust(
+  get: () => ConnectionState,
+  set: (patch: Partial<ConnectionState>) => void,
+  type: 'trust_folder' | 'untrust_folder',
+  sessionId: string,
+  reviewedDigest?: string,
+): boolean {
+  const { socket, folderTrustPending, folderTrustError, folderTrust } = get();
+  if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) return false;
+  if (folderTrustPending[sessionId]) return false;
+  const requestId = `folder-trust-${nextMessageId()}`;
+  const msg: Record<string, unknown> = { type, sessionId, requestId };
+  if (type === 'trust_folder') {
+    // Approval is bound to the snapshot the owner reviewed.
+    const digest = reviewedDigest ?? folderTrust[sessionId]?.digest;
+    if (!digest) return false;
+    msg.digest = digest;
+  }
+  if (!wsSend(socket, msg)) return false;
+  const { [sessionId]: _cleared, ...errors } = folderTrustError;
+  set({ folderTrustPending: { ...folderTrustPending, [sessionId]: requestId }, folderTrustError: errors });
+  return true;
+}
+
 // #8265: bring the persisted New Session defaults to the current schema BEFORE
 // the store reads them, so a legacy pin the user never deliberately chose
 // (claude-cli / claude-tui / a versioned Claude model) is inherited instead.
@@ -1174,6 +1202,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   archiveDeleteError: null,
   sessionArchivePolicySaving: false,
   sessionArchivePolicyError: null,
+  folderTrust: {},
+  folderTrustPending: {},
+  folderTrustError: {},
   pairingRefreshedCount: 0,
   // #7728 — one roster per provider (see ConnectionState.modelsByProvider).
   modelsByProvider: {},
@@ -2256,6 +2287,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ sessionArchivePolicySaving: true, sessionArchivePolicyError: null });
     return requestId;
   },
+
+  // Per-folder trust for project settings. The message names only the session:
+  // the daemon resolves the folder from its own record and answers with
+  // `folder_trust_result` (and a fresh `folder_trust_state`).
+  trustFolder: (sessionId: string, digest?: string): boolean => sendFolderTrust(get, set, 'trust_folder', sessionId, digest),
+  untrustFolder: (sessionId: string): boolean => sendFolderTrust(get, set, 'untrust_folder', sessionId),
 
   requestByokPoolStatus: (): boolean => {
     const { socket } = get();
@@ -3863,6 +3900,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // seed left here is owed to a session this action just forgot, and the
       // next server's session of the same id would drain it into ITS composer.
       pendingServerSeed: {},
+      folderTrust: {},
+      folderTrustPending: {},
+      folderTrustError: {},
       // #7483 — moved INSIDE these markers, unchanged in behaviour: this clear
       // predates #7470 (it is #5277's) and was already correct here. Its
       // position is what changed, so the roster guard in
@@ -4082,6 +4122,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // KEEPS the old server's persisted data on purpose, which is what makes
       // that read reachable rather than theoretical.
       pendingServerSeed: {},
+      folderTrust: {},
+      folderTrustPending: {},
+      folderTrustError: {},
       // #7483 — moved inside the markers, behaviour unchanged (see
       // forgetSession above for why).
       cancellingActivityIds: new Set<string>(),

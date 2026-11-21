@@ -415,6 +415,7 @@ constant, not this prose.**
 | Pairing (`pair_approve`, `pair_deny`), QR, `/connect` | absent | `rejectIfBound` (`handlers/pairing-handlers.js`, truthy `boundSessionId`) — refuses a principal **only through the sentinel**; the pairing HTTP routes refuse principals (§4.5) |
 | Identity rotation | no WS type (CLI only) | CLI needs local primary authority |
 | MCP config | `add_mcp_server` / `remove_mcp_server` absent | `rejectMcpConfigWriteUnlessPrimary` |
+| Folder trust | `trust_folder` / `untrust_folder` absent | `rejectFolderTrustUnlessPrimary` refuses `client.isPrimaryToken !== true` or `isBoundClient(client)` (true for a principal through the principal clause) |
 | Skill trust | `skill_trust_accept` / `skill_trust_grant` absent | `rejectSkillTrustIfBound` (`handlers/skills-handlers.js`, truthy `boundSessionId`) — sentinel-dependent |
 | File and git writes | `write_file`, `append_memory`, `git_stage`, `git_unstage`, `git_commit`, `git_create_pr` absent | `rejectMutationIfBound` on all six (`handlers/file-handlers.js`, truthy `boundSessionId`) — sentinel-dependent; `write_file` also hits the config-dir refusal in `ws-file-ops` |
 | Environments | `create_environment` / `destroy_environment` absent | `handleCreateEnvironment` refuses `isPrimaryToken !== true`; `handleDestroyEnvironment` refuses `isBoundClient` |

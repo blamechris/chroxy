@@ -13,10 +13,11 @@
  *   - ~/.claude/project-settings.json            (user project-settings)
  *   - ~/.claude/settings.json                    (user — lowest precedence)
  * (`CLAUDE_CONFIG_DIR` replaces `~/.claude`). The session's working directory
- * is consulted for `<sessionCwd>/.claude/settings.json` only when
- * `projectSettingsAllowed(cwd)` (claude-setting-sources.js) says so; today it
- * never does. `sessionCwd` comes from the server's session record, never from
- * the wire.
+ * is consulted for `<sessionCwd>/.claude/settings.json` only when the folder is
+ * trusted AND that file's bytes are exactly the ones in the trust record
+ * (`readTrustedProjectSettings`, folder-trust.js): read once, verified, parsed and
+ * executed from the same buffer, never cached. `sessionCwd` comes from the
+ * server's session record, never from the wire.
  *
  * Robustness hardening, none of which Claude Code documents but all of which a
  * long-lived daemon needs so a slow/hostile script can't wedge it:
@@ -32,7 +33,7 @@
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { projectSettingsAllowed } from './claude-setting-sources.js'
+import { readTrustedProjectSettings } from './folder-trust.js'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
@@ -64,9 +65,11 @@ export const STATUSLINE_CONFIG_CACHE_TTL_MS = 5_000
  * @param {string} claudeDir - claude's user-level config dir (`CLAUDE_CONFIG_DIR`, else `~/.claude`)
  * @returns {string[]} absolute settings.json paths, highest precedence first
  */
-export function statusLineSettingsPaths(cwd, claudeDir) {
+export function statusLineSettingsPaths(_cwd, claudeDir) {
+  // The session folder's own file is not in this list: it goes through
+  // `readTrustedProjectSettings`, which reads it once and checks it against the
+  // owner's trust record before anything in it can run.
   const paths = []
-  if (cwd && projectSettingsAllowed(cwd)) paths.push(join(cwd, '.claude', 'settings.json'))
   if (claudeDir) {
     paths.push(join(claudeDir, 'project-settings.json'))
     paths.push(join(claudeDir, 'settings.json'))
@@ -365,6 +368,7 @@ export class StatusLineManager extends EventEmitter {
     minRefreshIntervalMs = STATUSLINE_MIN_REFRESH_INTERVAL_MS,
     defaultRefreshIntervalMs = STATUSLINE_DEFAULT_REFRESH_INTERVAL_MS,
     configCacheTtlMs = STATUSLINE_CONFIG_CACHE_TTL_MS,
+    readProjectSettingsFn = readTrustedProjectSettings,
   } = {}) {
     super()
     // The user-level dir follows CLAUDE_CONFIG_DIR (#8974). `claudeDir` pins it;
@@ -372,6 +376,7 @@ export class StatusLineManager extends EventEmitter {
     // resolveConfig() call resolves `claudeConfigDir()` from the daemon's process.env.
     this._claudeDir = claudeDir ?? (homeDir ? join(homeDir, '.claude') : null)
     this._readFileFn = readFileFn
+    this._readProjectSettingsFn = readProjectSettingsFn
     this._spawnFn = spawnFn
     this._buildEnv = buildEnv
     this._now = now
@@ -400,6 +405,11 @@ export class StatusLineManager extends EventEmitter {
    * @returns {Promise<{command:string, refreshIntervalMs:number|null}|null>}
    */
   async resolveConfig(cwd) {
+    // The folder's own file first, and never from the cache: it is verified against
+    // the trust record on every call, so a trust change or an edit takes effect at once.
+    const projectConfig = this._projectConfig(cwd)
+    if (projectConfig) return projectConfig
+
     const cached = this._configCache.get(cwd)
     if (cached && cached.expiresAt > this._now()) return cached.config
 
@@ -426,6 +436,17 @@ export class StatusLineManager extends EventEmitter {
 
     this._configCache.set(cwd, { config, expiresAt: this._now() + this._configCacheTtlMs })
     return config
+  }
+
+  /** The verified project statusLine config, or null. Never throws. */
+  _projectConfig(cwd) {
+    try {
+      const raw = this._readProjectSettingsFn(cwd)
+      if (raw === null || raw === undefined) return null
+      return parseStatusLineConfig(JSON.parse(raw))
+    } catch {
+      return null
+    }
   }
 
   /** Drop any cached config (e.g. session ended) so a re-read is forced. */

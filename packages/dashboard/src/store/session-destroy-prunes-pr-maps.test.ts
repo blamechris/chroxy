@@ -248,6 +248,13 @@ function baseState(): Partial<ConnectionState> {
     // fixture that omits one must fail loudly rather than be papered over in
     // the helper.
     cancellingActivityIds: new Set<string>([`${DEAD}:act-1`, `${DEAD}:act-2`, `${LIVE}:act-1`]),
+    // Per-folder trust state: plain `Record<sessionId, …>` maps like the seeds above.
+    folderTrust: {
+      [DEAD]: { status: 'untrusted', appliesFrom: 'restart' },
+      [LIVE]: { status: 'trusted', appliesFrom: 'restart' },
+    },
+    folderTrustPending: { [DEAD]: 'r-dead', [LIVE]: 'r-live' },
+    folderTrustError: { [DEAD]: 'dead error', [LIVE]: 'live error' },
   }
 }
 
@@ -334,6 +341,15 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
     expect(after[LIVE]).toBe('seed for the live session')
   })
 
+  it('prunes the folder trust state of the destroyed session and leaves the survivor', () => {
+    handleMessage(listWithoutDead(), ctx() as never)
+    const s = store.getState()
+    for (const field of ['folderTrust', 'folderTrustPending', 'folderTrustError'] as const) {
+      expect(Object.keys(s[field]), field).toEqual([LIVE])
+    }
+    expect(s.folderTrust[LIVE]!.status).toBe('trusted')
+  })
+
   it('drops the destroyed session\'s Control Room activity subtree', () => {
     // #5163's clear, which this site has always done and no test in this file
     // asserted — the fixture carried an EMPTY tree purely so the call would not
@@ -380,6 +396,9 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
       },
       pendingServerSeed: { [DEAD]: 'dead seed', [NEIGHBOUR]: 'neighbour seed' },
       cancellingActivityIds: new Set<string>([`${DEAD}:act-1`, `${NEIGHBOUR}:act-1`]),
+      folderTrust: { [DEAD]: { status: 'untrusted', appliesFrom: 'restart' }, [NEIGHBOUR]: { status: 'trusted', appliesFrom: 'restart' } },
+      folderTrustPending: {},
+      folderTrustError: {},
     })
     handleMessage({
       type: 'session_list',
@@ -731,6 +750,14 @@ describe('#7495 session_timeout prunes the per-session roster (the fifth site)',
     expect(after[DEAD]).toBeUndefined()
     expect(Object.keys(after)).toEqual([LIVE])
     expect(after[LIVE]).toBe('seed for the live session')
+  })
+
+  it('prunes the folder trust state of the timed-out session and leaves the survivor', () => {
+    handleMessage(timeout(), ctx() as never)
+    const s = store.getState()
+    for (const field of ['folderTrust', 'folderTrustPending', 'folderTrustError'] as const) {
+      expect(Object.keys(s[field]), field).toEqual([LIVE])
+    }
   })
 
   it('prunes cancellingActivityIds for the timed-out session and leaves the survivor', () => {
@@ -1118,6 +1145,10 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     'pendingServerSeed',
     // #7483 — in-flight cancel_activity keys, `${sessionId}:${activityId}`.
     'cancellingActivityIds',
+    // Per-folder trust state, keyed by sessionId.
+    'folderTrust',
+    'folderTrustPending',
+    'folderTrustError',
   ]
 
   // -- Bucket 2: session-scoped, cleaned by its OWN code at all five sites. --

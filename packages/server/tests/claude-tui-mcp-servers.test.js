@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { trustReviewed } from './helpers/trust-folder.js'
 
 /**
  * #6820 — MCP visibility parity for the claude-tui provider.
@@ -64,7 +65,7 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
     })
   })
 
-  it('leaves out <cwd>/.mcp.json while project-scope settings are not loaded', () => {
+  it('leaves out project-local .mcp.json until the folder is trusted, then merges it', async () => {
     writeFileSync(configPath, JSON.stringify({ mcpServers: { globalfs: { command: 'npx' } } }))
     writeFileSync(
       join(cwd, '.mcp.json'),
@@ -74,13 +75,18 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
     const events = []
     session.on('mcp_servers', (data) => events.push(data))
 
+    // Untrusted: .mcp.json is not loaded, so it is not listed.
+    session._emitConfiguredMcpServers()
+    assert.deepEqual(events[0], { servers: [{ name: 'globalfs', status: 'configured' }] })
+
+    await trustReviewed(cwd)
     session._emitConfiguredMcpServers()
 
-    // The session does not load project-scope settings
-    // (claude-setting-sources.js), so a server defined only in <cwd>/.mcp.json
-    // is not one it can load and is not listed.
-    assert.deepEqual(events[0], {
+    // Trusted: the project file is loaded, so its server is listed (Project scope
+    // ahead of User scope, the precedence discoverMcpServerSpecs also uses).
+    assert.deepEqual(events[1], {
       servers: [
+        { name: 'repotool', status: 'configured' },
         { name: 'globalfs', status: 'configured' },
       ],
     })

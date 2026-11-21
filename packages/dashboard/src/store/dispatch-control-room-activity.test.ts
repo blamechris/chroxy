@@ -95,6 +95,9 @@ function baseState(): Partial<ConnectionState> {
     // fixture omission must fail loudly rather than be papered over in the
     // helper. `cancellingActivityIds` is empty here and set per-test below.
     pendingServerSeed: {},
+    folderTrust: {},
+    folderTrustPending: {},
+    folderTrustError: {},
     cancellingActivityIds: new Set<string>(),
   }
 }

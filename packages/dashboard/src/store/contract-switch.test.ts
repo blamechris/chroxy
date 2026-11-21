@@ -161,6 +161,9 @@ function seedStore(fx: ContractFixture) {
     sessionPrThreads: {},
     sessionPrThreadsLoading: {},
     pendingServerSeed: {},
+    folderTrust: {},
+    folderTrustPending: {},
+    folderTrustError: {},
     cancellingActivityIds: new Set<string>(),
     // #6268: web_task_error maps over state.webTasks; seed it (default []) so the
     // .map never throws, and let a fixture seed a task to flip to `failed`.

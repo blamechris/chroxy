@@ -63,6 +63,9 @@ function baseState(): Partial<ConnectionState> {
     sessionStates: {},
     sessionPresetSnapshots: {},
     pendingServerSeed: {},
+    folderTrust: {},
+    folderTrustPending: {},
+    folderTrustError: {},
     messages: [],
     // session_switched refreshes project slash commands + agents; stub them.
     fetchSlashCommands: vi.fn(),
