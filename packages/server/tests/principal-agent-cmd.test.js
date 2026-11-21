@@ -8,10 +8,13 @@ import assert from 'node:assert/strict'
 import { Command } from 'commander'
 import WebSocket from 'ws'
 import { WsServer as _WsServer, WS_CLOSE_CREDENTIAL_INVALID } from '../src/ws-server.js'
-import { runAgentGrant, runAgentList, runAgentRevoke, registerAgentCommand } from '../src/cli/agent-cmd.js'
+import { runAgentGrant, runAgentList, runAgentRevoke, runAgentDisable, runAgentEnable, registerAgentCommand } from '../src/cli/agent-cmd.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 import { tempPrincipalDir, testPrincipalStore, insertPrincipal } from './helpers/principal-store-fixture.js'
+import { PrincipalStore } from '../src/principal-store.js'
+import { PrincipalKillSwitch } from '../src/principal-kill-switch.js'
+import { join } from 'node:path'
 
 class WsServer extends _WsServer {
   constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
@@ -236,5 +239,110 @@ describe('list and revoke against a real daemon', () => {
     const r = await runAgentRevoke('', {}, { ...c.deps, connect: async () => { throw new Error('must not connect') } })
     assert.equal(r.ok, false)
     assert.equal(r.reason, 'bad_args')
+  })
+})
+
+describe('chroxy agent disable | enable (kill switch)', () => {
+  const fake = (reply) => {
+    const asked = []
+    return { asked, deps: { connect: async () => ({ ok: true, request: async (type, fields) => { asked.push([type, fields]); return reply }, close: async () => {} }) } }
+  }
+
+  it('requires exactly one of --all / --label, and never contacts the daemon otherwise', async () => {
+    for (const run of [runAgentDisable, runAgentEnable]) {
+      for (const opts of [{}, { all: true, label: 'x' }, { label: '' }]) {
+        const c = capture()
+        const f = fake({ ok: true, durable: true })
+        const r = await run(opts, { ...c.deps, ...f.deps })
+        assert.equal(r.ok, false)
+        assert.equal(r.reason, 'bad_args')
+        assert.deepEqual(f.asked, [])
+      }
+    }
+  })
+
+  it('disable sends the selector, prints the durable outcome and succeeds', async () => {
+    const c = capture()
+    const f = fake({ ok: true, durable: true, disabled: { all: true, labels: [] } })
+    assert.equal((await runAgentDisable({ all: true }, { ...c.deps, ...f.deps })).ok, true)
+    assert.deepEqual(f.asked, [['principal_admin_disable', { all: true }]])
+    assert.ok(/Disabled every agent principal \(durable\)/.test(c.out.join('\n')))
+    const l = fake({ ok: true, durable: true })
+    await runAgentDisable({ label: 'sup' }, { ...capture().deps, ...l.deps })
+    assert.deepEqual(l.asked, [['principal_admin_disable', { label: 'sup' }]])
+  })
+
+  it('a not-durable disable is a failure whose message says so', async () => {
+    const c = capture()
+    const r = await runAgentDisable({ all: true }, { ...c.deps, ...fake({ ok: true, durable: false, message: 'Disabled in this process but NOT durable' }).deps })
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'not_durable')
+    assert.ok(/NOT durable/.test(c.err.join('\n')))
+    assert.deepEqual(c.out, [])
+  })
+
+  it('enable prints the durable outcome; a refusal (audit unavailable) is a failure with the daemon\'s words', async () => {
+    const c = capture()
+    assert.equal((await runAgentEnable({ label: 'sup' }, { ...c.deps, ...fake({ ok: true, durable: true }).deps })).ok, true)
+    assert.ok(/Enabled agent principals labelled sup \(durable\)/.test(c.out.join('\n')))
+    const e = capture()
+    const r = await runAgentEnable({ all: true }, { ...e.deps, ...fake({ ok: false, code: 'AUDIT_UNAVAILABLE', message: 'needs a writable audit log' }).deps })
+    assert.equal(r.ok, false)
+    assert.ok(/needs a writable audit log/.test(e.err.join('\n')))
+  })
+
+  it('the commands are registered with --all and --label and a help text', () => {
+    const program = new Command()
+    registerAgentCommand(program)
+    const agent = program.commands.find((x) => x.name() === 'agent')
+    for (const name of ['disable', 'enable']) {
+      const cmd = agent.commands.find((x) => x.name() === name)
+      assert.ok(cmd, name)
+      assert.deepEqual(cmd.options.map((o) => o.long).sort(), ['--all', '--label'])
+      assert.ok(cmd.description().length > 10)
+    }
+  })
+
+  describe('against a real daemon', () => {
+    let server
+    const cleanups = []
+    afterEach(() => { if (server) { server.close(); server = null } while (cleanups.length) cleanups.pop()() })
+
+    it('disable closes the principal with 4401 and the switch file is written; enable is refused without a file-backed audit log', async () => {
+      const fixture = tempPrincipalDir()
+      cleanups.push(fixture.cleanup)
+      const killSwitch = new PrincipalKillSwitch({ path: join(fixture.dir, 'principals-disabled.json') })
+      const store = new PrincipalStore({ path: fixture.path, allowTestInsert: true, brakes: { killSwitch, auditAvailable: () => true } })
+      store.refresh()
+      const made = insertPrincipal(store, { label: 'watcher' })
+      const { manager } = createMockSessionManager([{ id: 'sess-1', name: 'One', cwd: '/tmp/p' }])
+      server = new WsServer({ port: 0, apiToken: 'primary-tok', sessionManager: manager, authRequired: true, principalStore: store })
+      server.start('127.0.0.1')
+      await new Promise((resolve) => server.httpServer.once('listening', resolve))
+      const port = server.httpServer.address().port
+      const deps = { resolveLocalConnection: () => ({ ok: true, url: `ws://127.0.0.1:${port}`, token: 'primary-tok', port }) }
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+      const frames = []
+      let code = null
+      ws.on('message', (d) => { try { frames.push(JSON.parse(d.toString())) } catch { /* ignore */ } })
+      ws.on('close', (c) => { code = c })
+      await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+      ws.send(JSON.stringify({ type: 'auth', token: made.token }))
+      await waitFor(() => frames.find((m) => m.type === 'auth_ok'), { label: 'principal auth_ok' })
+      server._authFailures.clear()
+      const c = capture()
+      const r = await runAgentDisable({ label: 'watcher' }, { ...deps, ...c.deps })
+      assert.equal(r.ok, true)
+      await waitFor(() => code !== null, { label: 'closed' })
+      assert.equal(code, WS_CLOSE_CREDENTIAL_INVALID)
+      assert.equal(store.state('pr-1'), 'disabled')
+      assert.equal(new PrincipalKillSwitch({ path: killSwitch.path }).isDisabled('watcher'), true)
+      server._authFailures.clear()
+      const e = capture()
+      const re = await runAgentEnable({ label: 'watcher' }, { ...deps, ...e.deps })
+      assert.equal(re.ok, false, 'no audit log is configured in this process, so enable refuses')
+      assert.ok(/audit log/.test(e.err.join('\n')))
+      assert.equal(store.state('pr-1'), 'disabled')
+    })
   })
 })

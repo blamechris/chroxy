@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PrincipalAdminGrantSchema, PrincipalAdminListSchema, PrincipalAdminRevokeSchema, ClientMessageSchema,
+  PrincipalAdminGrantSchema, PrincipalAdminListSchema, PrincipalAdminRevokeSchema, PrincipalAdminDisableSchema, PrincipalAdminEnableSchema, ClientMessageSchema,
   ServerPrincipalAdminResultSchema,
 } from '../src/schemas/index.ts'
 
@@ -27,6 +27,30 @@ describe('principal_admin_* client schemas (#9116)', () => {
     assert.equal(PrincipalAdminRevokeSchema.safeParse({ type: 'principal_admin_revoke', principalId: 'p' }).success, true)
     assert.equal(PrincipalAdminRevokeSchema.safeParse({ type: 'principal_admin_revoke', label: 'l', requestId: 'r' }).success, true)
     assert.equal(PrincipalAdminRevokeSchema.safeParse({ type: 'principal_admin_revoke', principalId: 'x'.repeat(65) }).success, false)
+  })
+})
+
+describe('principal_admin_disable / principal_admin_enable client schemas (S11)', () => {
+  it('both are members of the client message union', () => {
+    const types = ClientMessageSchema.options.map((o) => o.shape.type.value)
+    for (const t of ['principal_admin_disable', 'principal_admin_enable']) assert.ok(types.includes(t), t)
+  })
+
+  it('accept { all: true } or { label } with an optional requestId, and reject other shapes', () => {
+    for (const [schema, type] of [[PrincipalAdminDisableSchema, 'principal_admin_disable'], [PrincipalAdminEnableSchema, 'principal_admin_enable']]) {
+      assert.equal(schema.safeParse({ type, all: true }).success, true)
+      assert.equal(schema.safeParse({ type, label: 'sup', requestId: 'r' }).success, true)
+      assert.equal(schema.safeParse({ type, all: false }).success, false, 'all is only ever the literal true')
+      assert.equal(schema.safeParse({ type, label: 'x'.repeat(65) }).success, false)
+      assert.equal(schema.safeParse({ type: 'principal_admin_list', all: true }).success, false)
+    }
+  })
+
+  it('the result schema accepts the disable/enable ops, the disabled state and the switch summary', () => {
+    const base = { type: 'principal_admin_result', requestId: 'r', ok: true, durable: false, message: 'not durable', disabled: { all: true, labels: [] } }
+    assert.equal(ServerPrincipalAdminResultSchema.safeParse({ ...base, op: 'disable' }).success, true)
+    assert.equal(ServerPrincipalAdminResultSchema.safeParse({ ...base, op: 'enable' }).success, true)
+    assert.equal(ServerPrincipalAdminResultSchema.safeParse({ ...base, op: 'frobnicate' }).success, false)
   })
 })
 

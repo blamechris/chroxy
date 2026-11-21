@@ -92,7 +92,8 @@
  * @property {object|null} principalStore - #9116: the agent-principal store (principal-store.js) behind the strict-primary `principal_admin_*` handlers. Null where none was built.
  * @property {object|null} principalJournal - #9118: the daemon-side normalized event journal (principal-journal.js) behind `principal_events_read`. Null where none was built.
  * @property {object|null} principalSubscriptions - #9118: the per-client journal subscriptions (principal-subscriptions.js) behind `principal_subscribe`. Null where none was built.
- * @property {(principalId: string, reason?: string) => void} endPrincipalConnections - #9116: end every connection of one principal (credential_invalidated + close 4401); called after a revoke is acknowledged.
+ * @property {(selector: string | { principalId?: string, label?: string, all?: true }, reason?: string) => void} endPrincipalConnections - #9116: end every connection of the principal(s) a selector names (a principalId, or S11's label / all) (credential_invalidated + close 4401); called after a revoke is acknowledged.
+ * @property {(selector: { principalId?: string, label?: string, all?: true }) => object[]} drainPrincipalQueues - S11: drop principal-tagged queued work for a selector and return the dropped entries (empty until S9 builds the queue); the revoke and disable paths write one `dropped:<reason>` audit line per entry.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
@@ -220,6 +221,9 @@ export const CTX_NAMESPACES = {
     // connections (4401). Null / absent where server-cli built no store.
     'principalStore',
     'endPrincipalConnections',
+    // S11: drops principal-tagged queued work for a selector and returns the dropped
+    // entries (empty until S9 builds the queue); the revoke / disable paths audit each one.
+    'drainPrincipalQueues',
     // #9118: the agent principal's read path (S3): the event journal and the per-client
     // subscriptions to it. Null where server-cli built none; the `principal_*` read
     // handlers then refuse rather than pretend there is history.

@@ -4,8 +4,10 @@
  *   chroxy agent grant --label <label> --scope <tier> (--session <id> | --cwd <root>) [--ttl <dur>]
  *   chroxy agent list
  *   chroxy agent revoke <label-or-principalId>
+ *   chroxy agent disable --all | --label <label>
+ *   chroxy agent enable --all | --label <label>
  *
- * `list` and `revoke` ASK THE RUNNING DAEMON over the strict-primary, loopback-only
+ * `list`, `revoke`, `disable` and `enable` ASK THE RUNNING DAEMON over the strict-primary, loopback-only
  * `principal_admin_*` WebSocket types, with the primary token from connection.json,
  * exactly as `chroxy agent-control` reaches it. The CLI never reads or writes the
  * principal store: the daemon process is the only writer, so daemon and CLI cannot race.
@@ -120,6 +122,64 @@ export async function runAgentRevoke(target, _options = {}, deps = {}) {
   return { ok: true, reply }
 }
 
+/** `--all` xor `--label <label>`. Returns the request fields or null. */
+function switchFields(options) {
+  const hasAll = options?.all === true
+  const hasLabel = typeof options?.label === 'string' && options.label.length > 0
+  if (hasAll === hasLabel) return null
+  return hasAll ? { all: true } : { label: options.label }
+}
+
+function describeSwitch(fields) {
+  return fields.all === true ? 'every agent principal' : `agent principals labelled ${fields.label}`
+}
+
+/**
+ * `chroxy agent disable --all | --label <label>`: the persistent kill switch. The daemon
+ * flips it in memory, persists it, then acknowledges; the exit status is non-zero when the
+ * switch could not be confirmed durable (it is still ON in the running daemon).
+ */
+export async function runAgentDisable(options = {}, deps = {}) {
+  const w = deps.out || out
+  const e = deps.err || err
+  const fields = switchFields(options)
+  if (fields === null) {
+    e('Name what to disable: --all, or --label <label> (not both).')
+    return { ok: false, reason: 'bad_args' }
+  }
+  const result = await ask('principal_admin_disable', fields, deps)
+  if (!result.ok) { reportConnectFailure(result); return result }
+  const reply = result.reply
+  if (reply.ok !== true) { e(`Disable refused: ${reply.message || reply.code}`); return { ok: false, reply } }
+  if (reply.durable === false) {
+    e(`${reply.message || 'Disabled, but NOT durable: disable again once the config directory is writable.'}`)
+    return { ok: false, reply, reason: 'not_durable' }
+  }
+  w(`Disabled ${describeSwitch(fields)} (durable). Their connections are closed; re-enable with: chroxy agent enable ${fields.all ? '--all' : `--label ${fields.label}`}`)
+  return { ok: true, reply }
+}
+
+/** `chroxy agent enable --all | --label <label>`: explicit re-enable; never automatic. */
+export async function runAgentEnable(options = {}, deps = {}) {
+  const w = deps.out || out
+  const e = deps.err || err
+  const fields = switchFields(options)
+  if (fields === null) {
+    e('Name what to enable: --all, or --label <label> (not both).')
+    return { ok: false, reason: 'bad_args' }
+  }
+  const result = await ask('principal_admin_enable', fields, deps)
+  if (!result.ok) { reportConnectFailure(result); return result }
+  const reply = result.reply
+  if (reply.ok !== true) { e(`Enable refused: ${reply.message || reply.code}`); return { ok: false, reply } }
+  if (reply.durable === false) {
+    e(`${reply.message || 'Enabled, but NOT durable.'}`)
+    return { ok: false, reply, reason: 'not_durable' }
+  }
+  w(`Enabled ${describeSwitch(fields)} (durable).`)
+  return { ok: true, reply }
+}
+
 export function registerAgentCommand(program) {
   const agent = program.command('agent').description('Manage agent principals: scoped, revocable credentials for a supervisor agent (agent-principals.md)')
 
@@ -150,6 +210,26 @@ export function registerAgentCommand(program) {
     .description('Revoke a principal by label or principal id, and close its connections')
     .action(async (principal, options) => {
       const r = await runAgentRevoke(principal, options)
+      if (!r.ok) process.exitCode = 1
+    })
+
+  agent
+    .command('disable')
+    .description('Kill switch: disable every agent principal (--all) or one label (--label), persistently, and close their connections')
+    .option('--all', 'Disable every agent principal')
+    .option('--label <label>', 'Disable the principals carrying this label')
+    .action(async (options) => {
+      const r = await runAgentDisable(options)
+      if (!r.ok) process.exitCode = 1
+    })
+
+  agent
+    .command('enable')
+    .description('Re-enable disabled agent principals (--all or --label); never automatic')
+    .option('--all', 'Re-enable every agent principal')
+    .option('--label <label>', 'Re-enable the principals carrying this label')
+    .action(async (options) => {
+      const r = await runAgentEnable(options)
       if (!r.ok) process.exitCode = 1
     })
 }

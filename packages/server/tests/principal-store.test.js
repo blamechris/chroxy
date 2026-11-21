@@ -412,7 +412,7 @@ describe('grant refuses until the brakes land; nothing mints a token', () => {
     collect(SRC)
     assert.ok(files.length > 100)
     const rel = (f) => f.slice(SRC.length + 1)
-    const seen = { allowTestInsert: new Set(), testInsert: new Set(), newStore: new Set(), createStore: new Set(), grantCalls: [], cryptoImports: {} }
+    const seen = { allowTestInsert: new Set(), testInsert: new Set(), newStore: new Set(), createStore: new Set(), attachBrakes: new Set(), grantCalls: [], cryptoImports: {} }
     const walk = (n, file) => {
       if (!n || typeof n.type !== 'string') return
       if (n.type === 'Identifier' && n.name === 'allowTestInsert') seen.allowTestInsert.add(rel(file))
@@ -424,6 +424,7 @@ describe('grant refuses until the brakes land; nothing mints a token', () => {
         // production construction passes no options at all (so no allowTestInsert)
         assert.equal(n.arguments.length, 0, `${rel(file)} must call createPrincipalStore() with no options`)
       }
+      if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === 'attachBrakes') seen.attachBrakes.add(rel(file))
       if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === 'grant') seen.grantCalls.push(rel(file))
       if (n.type === 'ImportDeclaration' && n.source.value === 'node:crypto') seen.cryptoImports[rel(file)] = n.specifiers.map((sp) => sp.imported?.name)
       for (const key of Object.keys(n)) {
@@ -437,6 +438,8 @@ describe('grant refuses until the brakes land; nothing mints a token', () => {
     assert.deepEqual([...seen.testInsert].sort(), ['principal-store.js'])
     assert.deepEqual([...seen.newStore].sort(), ['principal-store.js'])
     assert.deepEqual([...seen.createStore].sort(), ['server-cli.js'])
+    // The daemon's store carries the S11 brakes (kill switch, audit gate): it attaches them.
+    assert.deepEqual([...seen.attachBrakes].sort(), ['server-cli.js'])
     assert.deepEqual(seen.grantCalls, [], 'nothing in src calls .grant() on a principal store')
     // The principal modules import no random-byte generator.
     for (const f of ['principal-store.js', 'principal-binding.js', 'principal-effect.js', 'durable-write.js', 'handlers/principal-admin-handlers.js', 'cli/agent-cmd.js']) {

@@ -164,6 +164,24 @@ let _logPath = null
 let _auditLogPath = null
 let _writeCount = 0
 let _quietConsole = false
+// Record framing of the audit file's tail. A failed append (ENOSPC) can leave a PREFIX of the
+// line with no newline; the next accepted line would be glued onto it and neither would parse
+// on its own. 'unchecked' (process start, after a rotation): look at the file's last byte before
+// the next write. 'dirty' (an append threw): start the next write on a fresh line. 'clean': as is.
+let _auditTail = 'unchecked'
+
+// Test seam for the file append, so a test can make it fail (ENOSPC, EBADF) without
+// breaking a real disk. Production never sets it; `null` restores the real call.
+let _appendFileSync = appendFileSync
+
+/**
+ * TEST ONLY. Replace the append used for the daemon log and the audit log. Pass null
+ * to restore `fs.appendFileSync`.
+ * @param {((path: string, data: string) => void) | null} fn
+ */
+export function _setAppendFileSyncForTest(fn) {
+  _appendFileSync = typeof fn === 'function' ? fn : appendFileSync
+}
 
 /** Set of callbacks for broadcasting log entries (supports multiple WsServer instances) */
 const _logListeners = new Set()
@@ -233,6 +251,7 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
   }
   _logPath = join(_logDir, 'chroxy.log')
   _auditLogPath = join(_logDir, AUDIT_LOG_NAME)
+  _auditTail = 'unchecked'
 }
 
 /**
@@ -270,6 +289,23 @@ export function getLogPath() {
  */
 export function getAuditLogPath() {
   return _logToFile ? _auditLogPath : null
+}
+
+/**
+ * Success-reporting audit write (agent-principals.md section 10.1, `auditOrRefuse`).
+ *
+ * `logger.audit()` swallows write errors (#746), so it cannot fail closed. This one
+ * returns `{ ok: true }` ONLY when the line was appended to the dedicated audit log, and
+ * `{ ok: false, reason }` when file logging is off or the append threw. The line has the
+ * same format and redaction as `audit()`, and is also mirrored to the daemon log, the
+ * console and log listeners exactly like one. A caller that must not act unaudited
+ * (a principal effect, #7169's Discord path) acts only on `ok: true`.
+ * @param {string} component
+ * @param {string} msg
+ * @returns {{ ok: true } | { ok: false, reason: 'audit_unavailable' }}
+ */
+export function auditOrRefuse(component, msg) {
+  return createLogger(component).auditStrict(msg)
 }
 
 /**
@@ -355,6 +391,7 @@ export function closeFileLogging() {
   _logDir = defaultLogDir()
   _logPath = null
   _auditLogPath = null
+  _auditTail = 'unchecked'
   _writeCount = 0
   _quietConsole = false
   _logListeners.clear()
@@ -365,13 +402,13 @@ export function closeFileLogging() {
  * Rotate: base.N.log (overwritten) <- ... <- base.1.log <- base.log
  */
 function _maybeRotateAt(logPath, maxSize, maxFiles) {
-  if (!logPath) return
+  if (!logPath) return false
   try {
     const stats = statSync(logPath)
-    if (stats.size < maxSize) return
+    if (stats.size < maxSize) return false
   } catch (err) {
     if (err?.code !== 'ENOENT') console.error('[logger] stat failed:', err?.message)
-    return
+    return false
   }
 
   // #7162: anchored to the FINAL '.log' — a first-occurrence string replace
@@ -386,6 +423,30 @@ function _maybeRotateAt(logPath, maxSize, maxFiles) {
     } catch (err) {
       if (err?.code !== 'ENOENT') console.error('[logger] rename failed:', err?.message)
     }
+  }
+  return true
+}
+
+/**
+ * Whether the audit file's tail needs a record boundary before the next line: true after a
+ * failed append, or when the file's last byte is not a newline (a crash or a partial append
+ * from an earlier process). A file we cannot inspect counts as needing one (a stray blank
+ * line is harmless; a glued record is not).
+ */
+function _auditTailNeedsBoundary() {
+  if (_auditTail === 'clean') return false
+  if (_auditTail === 'dirty') return true
+  let fd = null
+  try {
+    const size = statSync(_auditLogPath).size
+    if (size === 0) return false
+    fd = openSync(_auditLogPath, 'r')
+    const last = Buffer.alloc(1)
+    return readSync(fd, last, 0, 1, size - 1) !== 1 || last[0] !== 0x0a
+  } catch (err) {
+    return err?.code !== 'ENOENT'
+  } finally {
+    if (fd !== null) { try { closeSync(fd) } catch { /* nothing to do */ } }
   }
 }
 
@@ -445,7 +506,7 @@ export function createLogger(component, context = {}) {
     let fileWriteOk = false
     if (_logToFile && _logPath) {
       try {
-        appendFileSync(_logPath, line + '\n')
+        _appendFileSync(_logPath, line + '\n')
         fileWriteOk = true
         _writeCount++
         if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
@@ -495,14 +556,27 @@ export function createLogger(component, context = {}) {
     // whose retention noise can't touch. Kept fire-and-forget here — #7169's
     // fail-closed audit writer layers its success-reporting on top of this
     // sink rather than replacing the level-independent path.
+    // `auditWritten` is true ONLY when this append succeeded; `auditStrict` reports it.
+    let auditWritten = false
     if (level === 'audit' && _logToFile && _auditLogPath) {
       try {
-        appendFileSync(_auditLogPath, line + '\n')
-        _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)
+        // A record boundary first, so this line parses on its own whatever the tail holds.
+        _appendFileSync(_auditLogPath, (_auditTailNeedsBoundary() ? '\n' : '') + line + '\n')
+        auditWritten = true
+        _auditTail = 'clean'
       } catch {
-        // Same #746 rationale as above.
+        // Same #746 rationale as above. The append may have written a prefix.
+        _auditTail = 'dirty'
+      }
+      if (auditWritten) {
+        try {
+          if (_maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)) _auditTail = 'unchecked'
+        } catch {
+          // The line is already on disk; a rotation failure does not un-write it.
+        }
       }
     }
+    return auditWritten
   }
 
   return {
@@ -517,6 +591,12 @@ export function createLogger(component, context = {}) {
      * listeners, and written to the daemon log file like any other line.
      */
     audit(msg) { write('audit', msg, { always: true }) },
+    /** Like `audit`, but reports whether the line reached the audit log (see `auditOrRefuse`). */
+    auditStrict(msg) {
+      return write('audit', msg, { always: true }) === true
+        ? { ok: true }
+        : { ok: false, reason: 'audit_unavailable' }
+    },
     // Backward compat alias
     log(msg) { write('info', msg) },
     /** Create a child logger tagged with a session ID. */

@@ -13,7 +13,7 @@ import { registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { PRINCIPAL_BINDING_SENTINEL } from '../src/principal-binding.js'
 import { tempPrincipalDir, testPrincipalStore, insertPrincipal } from './helpers/principal-store-fixture.js'
 
-const TYPES = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke']
+const TYPES = ['principal_admin_grant', 'principal_admin_list', 'principal_admin_revoke', 'principal_admin_disable', 'principal_admin_enable']
 const LOOPBACK_REQ = { socket: { remoteAddress: '127.0.0.1' }, headers: {} }
 
 const host = (over = {}) => ({ id: 'h', isPrimaryToken: true, boundSessionId: null, _upgradeReq: LOOPBACK_REQ, loopbackAtUpgrade: true, ...over })
@@ -31,7 +31,7 @@ async function call(type, client, ctxOver = {}) {
 }
 
 describe('registration and classification', () => {
-  it('the three types are registered, denied to bound clients and principals, and allowed to neither', () => {
+  it('the five types are registered, denied to bound clients and principals, and allowed to neither', () => {
     let cases = 0
     for (const t of TYPES) {
       cases++
@@ -40,7 +40,7 @@ describe('registration and classification', () => {
       assert.ok(Object.hasOwn(PRINCIPAL_DENIED_MESSAGE_TYPES, t), `${t} must be in PRINCIPAL_DENIED_MESSAGE_TYPES`)
       assert.equal(Object.hasOwn(PRINCIPAL_ALLOWED_MESSAGE_TYPES, t), false)
     }
-    assert.ok(cases === 3)
+    assert.ok(cases === TYPES.length)
   })
 })
 
@@ -59,7 +59,7 @@ describe('the gate is the first statement: every non-strict-primary caller is re
   for (const type of TYPES) {
     for (const [name, client] of Object.entries(cases)) {
       it(`${type}: ${name} gets NOT_AUTHORIZED and the handler reads nothing`, async () => {
-        const store = { list: () => { throw new Error('reached the store') }, revoke: () => { throw new Error('reached the store') } }
+        const store = { list: () => { throw new Error('reached the store') }, revoke: () => { throw new Error('reached the store') }, get brakes() { throw new Error('reached the store') } }
         const { sent, touched } = await call(type, client, { principalStore: store, endPrincipalConnections: () => { throw new Error('ended') } })
         assert.equal(sent.length, 1)
         assert.equal(sent[0].code, 'NOT_AUTHORIZED')
@@ -82,7 +82,7 @@ describe('the gate is the first statement: every non-strict-primary caller is re
         n++
         assert.notEqual(sent[0].code, 'NOT_AUTHORIZED', type)
       }
-      assert.ok(n === 3)
+      assert.ok(n === TYPES.length)
       assert.deepEqual(ended, [['pr-1', 'revoked']])
     } finally { d.cleanup() }
   })
@@ -100,7 +100,7 @@ describe('grant refuses from the handler itself', () => {
 
 describe('list and revoke without a store', () => {
   it('answer UNAVAILABLE rather than pretending', async () => {
-    for (const type of ['principal_admin_list', 'principal_admin_revoke']) {
+    for (const type of ['principal_admin_list', 'principal_admin_revoke', 'principal_admin_disable', 'principal_admin_enable']) {
       const { sent } = await call(type, host(), {})
       assert.equal(sent[0].code, 'UNAVAILABLE', type)
     }

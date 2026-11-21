@@ -12,6 +12,7 @@ import { WsServer as _WsServer } from '../src/ws-server.js'
 import { withPrincipalEffect, credentialCheck, allChecks } from '../src/principal-effect.js'
 import { createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { createPrincipalAuditor } from '../src/principal-audit.js'
 import { tempPrincipalDir, testPrincipalStore, insertPrincipal, fakeClock } from './helpers/principal-store-fixture.js'
 
 class WsServer extends _WsServer {
@@ -19,11 +20,15 @@ class WsServer extends _WsServer {
   start(...args) { super.start(...args); setLogListener(null) }
 }
 
+/** A healthy auditor: every line lands. Audit-failure behaviour has its own file. */
+const okAuditor = () => createPrincipalAuditor({ auditOrRefuse: () => ({ ok: true }) })
+const AUDIT = { auditor: okAuditor(), action: 'send', sessionId: 'sess-1', requestId: 'r1' }
+
 describe('withPrincipalEffect: unit', () => {
   const client = { id: 'c' }
   it('runs fn and returns its value when the check passes', () => {
     let ran = 0
-    const r = withPrincipalEffect(client, () => ({ ok: true }), () => { ran++; return 42 })
+    const r = withPrincipalEffect(client, () => ({ ok: true }), AUDIT, () => { ran++; return 42 })
     assert.deepEqual(r, { ok: true, value: 42 })
     assert.equal(ran, 1)
   })
@@ -31,11 +36,11 @@ describe('withPrincipalEffect: unit', () => {
   it('does not run fn when the check refuses, throws, returns a promise or returns nothing', () => {
     let ran = 0
     const fn = () => { ran++ }
-    assert.deepEqual(withPrincipalEffect(client, () => ({ ok: false, reason: 'agents_off' }), fn), { ok: false, reason: 'agents_off' })
-    assert.deepEqual(withPrincipalEffect(client, () => { throw new Error('boom') }, fn), { ok: false, reason: 'check_error' })
-    assert.equal(withPrincipalEffect(client, () => Promise.resolve({ ok: true }), fn).ok, false, 'an async check would reopen the gap')
-    assert.equal(withPrincipalEffect(client, () => undefined, fn).ok, false)
-    assert.equal(withPrincipalEffect(client, () => ({ ok: 'yes' }), fn).ok, false, 'only the boolean true passes')
+    assert.deepEqual(withPrincipalEffect(client, () => ({ ok: false, reason: 'agents_off' }), AUDIT, fn), { ok: false, reason: 'agents_off' })
+    assert.deepEqual(withPrincipalEffect(client, () => { throw new Error('boom') }, AUDIT, fn), { ok: false, reason: 'check_error' })
+    assert.equal(withPrincipalEffect(client, () => Promise.resolve({ ok: true }), AUDIT, fn).ok, false, 'an async check would reopen the gap')
+    assert.equal(withPrincipalEffect(client, () => undefined, AUDIT, fn).ok, false)
+    assert.equal(withPrincipalEffect(client, () => ({ ok: 'yes' }), AUDIT, fn).ok, false, 'only the boolean true passes')
     assert.equal(ran, 0)
   })
 
@@ -96,7 +101,7 @@ describe('withPrincipalEffect: a handler that awaits, over a real principal conn
         await new Promise((r) => setImmediate(r))
         if (injectAt === i) inject()
       }
-      return withPrincipalEffect(client, check, () => { effects.push('landed'); return 'done' })
+      return withPrincipalEffect(client, check, AUDIT, () => { effects.push('landed'); return 'done' })
     }
     return { handler, effects }
   }

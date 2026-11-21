@@ -38,6 +38,7 @@ import { writeDurableFile } from './durable-write.js'
 import { configPath } from './config-dir.js'
 import { createLogger } from './logger.js'
 import { PRINCIPAL_TIER_ORDER } from './principal-policy.js'
+import { PRINCIPAL_LABEL_PATTERN } from './principal-label.js'
 
 const log = createLogger('principal-store')
 
@@ -47,7 +48,7 @@ export function principalStorePath() {
 }
 
 export const PRINCIPAL_STORE_VERSION = 1
-export const PRINCIPAL_LABEL_PATTERN = /^[a-z0-9_-]{1,32}$/
+export { PRINCIPAL_LABEL_PATTERN }
 export const DEFAULT_PRINCIPAL_TTL_MS = 24 * 60 * 60 * 1000
 export const MAX_PRINCIPAL_TTL_MS = 7 * 24 * 60 * 60 * 1000
 /** A store is a few KB; a bigger file is not ours. */
@@ -196,8 +197,15 @@ export class PrincipalStore {
    * @param {(a: string, b: string) => boolean} [opts.compare]  the hash comparison; defaults to
    *   `safeTokenCompare`. Injectable only so a test can prove it runs once per stored entry.
    * @param {Function} [opts.readSecret]  defaults to `readTrustedSecretFile`; injectable so a test can make the read throw
+   * @param {{ killSwitch: { isDisabled: (label: string) => boolean }, auditAvailable: () => boolean } | null} [opts.brakes]
+   *   the kill switch and the audit-availability gate (S11, contract section 10). `state()` is the ONE
+   *   choke point every credential check goes through (auth, the per-frame re-check, the keepalive
+   *   sweep, the effect wrapper), so a brake here binds them all. Production builds one through
+   *   `createGuardedPrincipalStore` (principal-brakes.js); a store built without it is for tests of
+   *   the store alone and has no brake.
    */
-  constructor({ path, now = Date.now, writeDurable = writeDurableFile, allowTestInsert = false, compare = safeTokenCompare, readSecret = readTrustedSecretFile } = {}) {
+  constructor({ path, now = Date.now, writeDurable = writeDurableFile, allowTestInsert = false, compare = safeTokenCompare, readSecret = readTrustedSecretFile, brakes = null } = {}) {
+    this._brakes = brakes
     this._pathOpt = path ?? null
     this._now = now
     this._writeDurable = writeDurable
@@ -213,6 +221,22 @@ export class PrincipalStore {
   }
 
   get path() { return this._pathOpt ?? principalStorePath() }
+
+  /** The kill switch and audit gate (S11), or null for a store built without brakes. */
+  get brakes() { return this._brakes }
+
+  /**
+   * Attach the brakes to a store built without them (the daemon: `createPrincipalStore()`
+   * takes no options, so production can never pass `allowTestInsert`). One shot: a second
+   * attach, or one onto a store that already has brakes, throws rather than swapping them.
+   */
+  attachBrakes(brakes) {
+    if (this._brakes) throw new Error('principal brakes are already attached')
+    if (typeof brakes?.killSwitch?.isDisabled !== 'function' || typeof brakes?.auditAvailable !== 'function') {
+      throw new Error('principal brakes need a killSwitch and an auditAvailable gate')
+    }
+    this._brakes = brakes
+  }
 
   now() { return this._now() }
 
@@ -303,13 +327,27 @@ export class PrincipalStore {
     return this._revokedInMemory.get(entry.principalId) ?? entry.revokedAt
   }
 
-  /** @returns {'live'|'revoked'|'expired'|'invalid'} why a principal is or is not usable now */
+  /**
+   * @returns {'live'|'revoked'|'expired'|'disabled'|'invalid'} why a principal is or is not usable now.
+   * `disabled`: the kill switch covers it. `invalid` also covers "audit logging is not
+   * available": principal access requires a file-backed audit log (contract section 10.1),
+   * so while there is none no principal authenticates or stays connected.
+   */
   state(principalId) {
     if (!this._health.ok) return 'invalid'
     const e = this._entries.get(principalId)
     if (!e) return 'invalid'
     if (this._revokedAt(e) !== null) return 'revoked'
     if (!(this._now() < e.expiresAt)) return 'expired'
+    const brakes = this._brakes
+    if (brakes) {
+      let disabled = true
+      let audit = false
+      try { disabled = brakes.killSwitch.isDisabled(e.label) !== false } catch { /* fail closed */ }
+      try { audit = brakes.auditAvailable() === true } catch { /* fail closed */ }
+      if (disabled) return 'disabled'
+      if (!audit) return 'invalid'
+    }
     return 'live'
   }
 
@@ -383,7 +421,7 @@ export class PrincipalStore {
    * Revoke one grant by `principalId` or by the label of a live grant.
    * Memory first, then the durable write, then the verdict.
    * @param {{ principalId?: string, label?: string }} selector
-   * @returns {{ found: false } | { found: true, principalId: string, alreadyRevoked: boolean, durable: boolean, persistError: string|null }}
+   * @returns {{ found: false } | { found: true, principalId: string, label: string, alreadyRevoked: boolean, durable: boolean, persistError: string|null }}
    */
   revoke(selector) {
     this.refresh()
@@ -399,7 +437,7 @@ export class PrincipalStore {
     if (!alreadyRevoked) this._revokedInMemory.set(target.principalId, this._now())
     // Persist even when already revoked in memory: an earlier persist may have failed.
     const outcome = this._persist()
-    return { found: true, principalId: target.principalId, alreadyRevoked, durable: outcome.durable, persistError: outcome.error }
+    return { found: true, principalId: target.principalId, label: target.label, alreadyRevoked, durable: outcome.durable, persistError: outcome.error }
   }
 
   _persist() {

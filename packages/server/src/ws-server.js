@@ -20,6 +20,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { dispatchPolicyFor, isPrincipalClient, frameForPrincipal, principalMaySee, principalPolicyOptsFromCtx, sendPrincipalRefusal, PRINCIPAL_ALLOWED_MESSAGE_TYPES } from './principal-policy.js'
 import { PrincipalSubscriptions } from './principal-subscriptions.js'
+import { principalAuditor } from './principal-audit.js'
 import { handleAuthMessage, isLoopbackConnection, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
@@ -358,7 +359,7 @@ function _isSecureRequest(req) {
  *   { type: 'scheduled_task_action', action, taskId?, handle?, task?, requestId? } — #6871 create/update/pause/resume/delete a scheduled task, or (#7079) `discard_unreadable` a load-refused stored entry by its opaque server-derived `handle` (UNBOUND-STRICT-PRIMARY gate — a scheduled task makes this machine run an agent session unattended; a pairing-BOUND client is rejected even if it is primary, #7025)
  *   { type: 'set_scheduler_enabled', enabled, requestId? } — #6871 flip the PERSISTED global scheduled-execution gate (features.scheduler); same unbound-strict-primary gate, and a daemon restart is required for it to take effect (reported as scheduler.restartRequired)
  *   { type: 'daemon_update_action', action: 'restart-now'|'postpone', target, confirmBusy?, requestId? } — #8331 apply or hold off the update the idle-only auto-deploy has queued for the daily daemon (STRICT-PRIMARY + UNBOUND gate — restarting kills every live session; a pairing or bound client gets daemon_update_action_result{code:NOT_AUTHORIZED} and nothing is written). restart-now with busy sessions and no confirmBusy replies daemon_update_confirm_required instead of writing
- *   { type: 'principal_admin_grant', label, scope, sessionIds?, cwdRoots?, ttlMs?, requestId? } | { type: 'principal_admin_list', requestId? } | { type: 'principal_admin_revoke', principalId?, label?, requestId? } — #9116 agent-principal management (STRICT-PRIMARY + UNBOUND + loopback-only; refused to bound clients and principals at dispatch). grant refuses until S11; reply is principal_admin_result
+ *   { type: 'principal_admin_grant', label, scope, sessionIds?, cwdRoots?, ttlMs?, requestId? } | { type: 'principal_admin_list', requestId? } | { type: 'principal_admin_revoke', principalId?, label?, requestId? } | { type: 'principal_admin_disable', all?: true, label?, requestId? } | { type: 'principal_admin_enable', all?: true, label?, requestId? } — #9116 agent-principal management (S11 adds the kill switch pair: disable persists a flag in the config dir and closes the affected principals' connections 4401; enable is explicit and refused while the audit log is unwritable) (STRICT-PRIMARY + UNBOUND + loopback-only; refused to bound clients and principals at dispatch). grant refuses until S11; reply is principal_admin_result
  *   { type: 'principal_subscribe', requestId, sessionIds[], cursors?[{ sessionId, journalId, seq }] } | { type: 'principal_unsubscribe', requestId?, sessionIds? } | { type: 'principal_events_read', requestId, sessionId, cursor?, limit? } — #9118 (S3 of #9112) the agent principal's journal read path (observe tier; every session id must be granted or the whole request is refused scope_denied); refused to every client that is not a principal; replies are principal_subscribed / principal_event / principal_live_fence / principal_gap / principal_events_page
  *   { type: 'principal_pending_permissions', requestId, sessionIds? } — #9119 (S4 of #9112) a read-only snapshot of the permission requests still pending on the principal's granted sessions, from the canonical state of both pipelines (observe tier; every explicit session id must be granted or the whole request is refused scope_denied, indistinguishable from a nonexistent session; omitted = every granted session); refused to every client that is not a principal; grants no decision authority; reply is principal_pending_permissions_result
  *   { type: 'principal_sessions_snapshot', requestId, sessionIds? } — #9120 (S5 of #9112) a read-only roster of the principal's granted sessions: observed status, declared status, handoff blockers, model requested/observed (observe tier; every explicit session id must be granted or the whole request is refused scope_denied, indistinguishable from a nonexistent session; omitted = every granted session); refused to every client that is not a principal; reply is principal_sessions_snapshot_result
@@ -599,7 +600,7 @@ function _isSecureRequest(req) {
  *   { type: 'daemon_update_status', running, pending, lastDeploy, postponedUntil, requestPending, applying } — #8331 the queued daily-daemon update + last deploy result; sent on auth and on change to STRICT-PRIMARY, UNBOUND clients ONLY
  *   { type: 'daemon_update_confirm_required', requestId, target, reasons[], sessions[] } — #8331 reply to restart-now while sessions are busy; nothing was written
  *   { type: 'daemon_update_action_result', requestId, action, ok, force?, postponedUntil?, code?, message? } — #8331 outcome of daemon_update_action (codes: NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE, UNSUPPORTED_ACTION)
- *   { type: 'principal_admin_result', requestId, op: 'grant'|'list'|'revoke', ok, code?, message?, health?, principals?, principalId?, alreadyRevoked?, durable? } — #9116 reply to principal_admin_grant|list|revoke, sent ONLY to the strict-primary, loopback requester (codes: NOT_AUTHORIZED, PRINCIPALS_NOT_ENABLED, UNAVAILABLE, BAD_REQUEST, NOT_FOUND); `grant` always refuses until the audit writer and kill switch land; `revoke` is acknowledged only after the durable write (durable:false = revoked in memory, not confirmed on disk); carries no token and no hash
+ *   { type: 'principal_admin_result', requestId, op: 'grant'|'list'|'revoke'|'disable'|'enable', ok, code?, message?, health?, principals?, principalId?, alreadyRevoked?, durable?, disabled? } — #9116 reply to principal_admin_grant|list|revoke|disable|enable, sent ONLY to the strict-primary, loopback requester (codes: NOT_AUTHORIZED, PRINCIPALS_NOT_ENABLED, UNAVAILABLE, BAD_REQUEST, NOT_FOUND, AUDIT_UNAVAILABLE, ALL_DISABLED, PERSIST_FAILED); `grant` always refuses until the audit writer and kill switch land; `revoke` is acknowledged only after the durable write (durable:false = revoked in memory, not confirmed on disk); carries no token and no hash
  *   { type: 'principal_subscribed', requestId, sessions: [{ sessionId, journalId, headSeq, gap? }] } — #9118 (S3 of #9112) reply to principal_subscribe, sent ONLY to the agent principal that asked; `gap` ({ reason, fromSeq?, toSeq? }) says the cursor could not be honored exactly (evicted, journal_reset, restart_loss, unknown_cursor)
  *   { type: 'principal_event', requestId?, sessionId, journalId, journalSeq, ts, eventType, data, truncated?, replay? } — #9118 one normalized, redacted journal event for a subscribed principal (never raw PTY, never thinking text); `journalSeq` not `seq`: the transport stamps its own `seq` on every frame; replay:true for a replayed event
  *   { type: 'principal_live_fence', requestId, sessionId, journalId, journalSeq } — #9118 end of the replay: every event after this journalSeq is live
@@ -1028,7 +1029,8 @@ export class WsServer {
         get principalStore() { return self._principalStore },
         get principalJournal() { return self._principalJournal },
         get principalSubscriptions() { return self._principalSubscriptions },
-        endPrincipalConnections: (principalId, reason) => self._endPrincipalConnections(principalId, reason),
+        endPrincipalConnections: (selector, reason) => self._endPrincipalConnections(selector, reason),
+        drainPrincipalQueues: (selector) => self._drainPrincipalQueues(selector),
         get devPreview() { return self._devPreview },
         get webTaskManager() { return self._webTaskManager },
         get environmentManager() { return self.environmentManager },
@@ -3369,10 +3371,11 @@ export class WsServer {
 
   /**
    * Why a principal connection may not continue: 'live' when it may, otherwise
-   * 'revoked', 'expired' or 'invalid' (no store, an untrusted store, an unknown grant, or
-   * an origin that is no longer loopback). Memory only: no disk read per frame.
+   * 'revoked', 'expired', 'disabled' (the kill switch) or 'invalid' (no store, an untrusted
+   * store, an unknown grant, an origin that is no longer loopback, or audit logging down).
+   * Memory only: no disk read per frame.
    * @param {object} client
-   * @returns {'live'|'revoked'|'expired'|'invalid'}
+   * @returns {'live'|'revoked'|'expired'|'disabled'|'invalid'}
    */
   _principalState(client) {
     const store = this._principalStore
@@ -3394,7 +3397,7 @@ export class WsServer {
     const timer = this._principalTimers.setTimeout(() => {
       client._principalExpiryTimer = null
       const state = this._principalState(client)
-      if (state !== 'live') this._endCredentialConnection(ws, client, state === 'revoked' ? 'revoked' : 'expired')
+      if (state !== 'live') this._endCredentialConnection(ws, client, state === 'revoked' || state === 'disabled' ? state : 'expired')
       // Fired early (the credential is still live): keep watching for the remaining lifetime.
       else if (client.authenticated) this._armPrincipalExpiry(ws, client)
     }, delay)
@@ -3409,11 +3412,32 @@ export class WsServer {
     }
   }
 
-  /** End every connection of one principal (revoke): each gets `credential_invalidated` and 4401. */
-  _endPrincipalConnections(principalId, reason = 'revoked') {
+  /**
+   * End the connections of the principals a selector names (revoke, kill): each gets
+   * `credential_invalidated` and 4401. The selector is a principalId string, or
+   * `{ principalId }`, `{ label }` or `{ all: true }`.
+   */
+  _endPrincipalConnections(selector, reason = 'revoked') {
+    const sel = typeof selector === 'string' ? { principalId: selector } : (selector ?? {})
     for (const [ws, client] of [...this.clients]) {
-      if (client.principal?.principalId === principalId) this._endCredentialConnection(ws, client, reason)
+      const p = client.principal
+      if (p == null) continue
+      if (sel.all === true || (sel.principalId != null && p.principalId === sel.principalId) || (sel.label != null && p.label === sel.label)) {
+        this._endCredentialConnection(ws, client, reason)
+      }
     }
+  }
+
+  /**
+   * Drop principal-tagged queued work for a selector and return the dropped entries so
+   * the caller can audit each one (`dropped:killed`). There is NO principal queue on
+   * this build (S9 adds it), so there is nothing to drop; the queue S9 builds plugs in
+   * as `this._principalQueues.drain(selector)`.
+   * @returns {object[]}
+   */
+  _drainPrincipalQueues(selector) {
+    const out = this._principalQueues?.drain?.(selector)
+    return Array.isArray(out) ? out : []
   }
 
   /**
@@ -3794,6 +3818,8 @@ export class WsServer {
     // seq contiguously. A failure here only leaves it marked unclean (a restart then
     // treats it as a crash, which is always safe).
     try { this._principalJournal?.close() } catch (err) { log.warn(`principal journal close failed: ${err?.message || err}`) }
+    // Write any collapsed refusal counts still waiting for their window to end.
+    try { principalAuditor.flushRejections() } catch (err) { log.warn(`principal audit flush failed: ${err?.message || err}`) }
     if (this._daemonUpdate && this._daemonUpdateChangeHandler && typeof this._daemonUpdate.off === 'function') {
       this._daemonUpdate.off('change', this._daemonUpdateChangeHandler)
       this._daemonUpdateChangeHandler = null

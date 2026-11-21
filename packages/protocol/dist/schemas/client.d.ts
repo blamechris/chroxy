@@ -1169,6 +1169,18 @@ export declare const PrincipalAdminRevokeSchema: z.ZodObject<{
     principalId: z.ZodOptional<z.ZodString>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const PrincipalAdminDisableSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_disable">;
+    requestId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodLiteral<true>>;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const PrincipalAdminEnableSchema: z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_enable">;
+    requestId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodLiteral<true>>;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const PrincipalJournalCursorSchema: z.ZodObject<{
     sessionId: z.ZodString;
     journalId: z.ZodString;
@@ -2136,6 +2148,16 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"principal_admin_revoke">;
     requestId: z.ZodOptional<z.ZodString>;
     principalId: z.ZodOptional<z.ZodString>;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_disable">;
+    requestId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodLiteral<true>>;
+    label: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"principal_admin_enable">;
+    requestId: z.ZodOptional<z.ZodString>;
+    all: z.ZodOptional<z.ZodLiteral<true>>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"principal_subscribe">;
