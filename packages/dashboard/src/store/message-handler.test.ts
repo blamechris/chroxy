@@ -650,6 +650,76 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #9259 — the synthesized terminal text (stream deltas, the stream-end
+  // newline, the tool_start line and the tool_result preview) is written to
+  // the ACTIVE session's terminal by appendTerminalData, so a frame from a
+  // background session must not reach it. A frame with no sessionId keeps its
+  // pre-multi-session meaning (the active session) and is still written.
+  describe('synthesized terminal text routing (#9259)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: createEmptySessionState(),
+          s2: createEmptySessionState(),
+        },
+      } as any))
+      setStore(store)
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+    const writes = () => (store.getState() as any)._terminalWrites as string[]
+    const send = (msg: Record<string, unknown>) => handleMessage(msg as any, ctx() as any)
+    const backgroundTurn = (sessionId: string | undefined) => {
+      const sid = sessionId === undefined ? {} : { sessionId }
+      send({ type: 'stream_start', messageId: 'r1', ...sid })
+      send({ type: 'stream_delta', messageId: 'r1', delta: 'BG-DELTA', ...sid })
+      send({ type: 'tool_start', messageId: 't1', toolUseId: 'toolu_bg', tool: 'BgTool', input: {}, ...sid })
+      send({ type: 'tool_result', toolUseId: 'toolu_bg', result: 'BG-RESULT', ...sid })
+      send({ type: 'stream_end', messageId: 'r1', ...sid })
+      vi.runAllTimers()
+    }
+
+    it('writes nothing to the terminal on screen for a background session turn', () => {
+      backgroundTurn('s2')
+      expect(writes()).toEqual([])
+    })
+
+    it('still records the background turn in that session\'s own messages', () => {
+      backgroundTurn('s2')
+      const s2 = (store.getState() as any).sessionStates.s2.messages
+      expect(s2.some((m: any) => m.type === 'tool_use' && m.toolUseId === 'toolu_bg')).toBe(true)
+      const s1 = (store.getState() as any).sessionStates.s1.messages
+      expect(s1.some((m: any) => m.toolUseId === 'toolu_bg')).toBe(false)
+    })
+
+    it('positive control: the active session\'s turn is written', () => {
+      backgroundTurn('s1')
+      const all = writes().join('')
+      expect(all).toContain('BG-DELTA')
+      expect(all).toContain('BgTool')
+      expect(all).toContain('BG-RESULT')
+    })
+
+    it('with no session active, a session-tagged frame keeps the flat-state write', () => {
+      store = createMockStore(baseState({ activeSessionId: null }))
+      setStore(store)
+      send({ type: 'stream_delta', messageId: 'r1', delta: 'BG-DELTA', sessionId: 's2' })
+      vi.runAllTimers()
+      expect(writes()).toEqual(['BG-DELTA'])
+    })
+
+    it('a frame with no sessionId still writes (legacy single-session frames)', () => {
+      backgroundTurn(undefined)
+      const all = writes().join('')
+      expect(all).toContain('BG-DELTA')
+      expect(all).toContain('BgTool')
+      expect(all).toContain('BG-RESULT')
+    })
+  })
+
   describe('terminal_size dispatch (#5835 Phase 2)', () => {
     it('records the authoritative size for the active session', () => {
       store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
