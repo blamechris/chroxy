@@ -476,21 +476,30 @@ describe('EventNormalizer', () => {
   // ---- EVENT_MAP: ready ----
 
   describe('ready event', () => {
-    it('emits claude_ready + model_changed + permission_mode_changed in multi mode', () => {
+    it('emits claude_ready + model_changed + permission_mode_changed + folder_trust_state in multi mode', () => {
       const result = normalizer.normalize('ready', {}, makeCtx())
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
       assert.equal(result.messages[1].msg.type, 'model_changed')
       assert.equal(result.messages[1].msg.model, 'sonnet')
       assert.equal(result.messages[2].msg.type, 'permission_mode_changed')
       assert.equal(result.messages[2].msg.mode, 'approve')
+      // The folder does not exist, so it has no command-bearing files.
+      assert.equal(result.messages[3].msg.type, 'folder_trust_state')
+      assert.equal(result.messages[3].msg.sessionId, 'sess-1')
+      assert.equal(result.messages[3].msg.status, 'none')
     })
 
-    it('emits claude_ready + model_changed + permission_mode_changed in legacy-cli mode', () => {
+    it('emits claude_ready + model_changed + permission_mode_changed + folder_trust_state in legacy-cli mode', () => {
       const ctx = makeCtx({ mode: 'legacy-cli' })
       const result = normalizer.normalize('ready', {}, ctx)
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
+    })
+
+    it('omits folder_trust_state when there is no canonical session id', () => {
+      const result = normalizer.normalize('ready', {}, makeCtx({ sessionId: null }))
+      assert.equal(result.messages.some((m) => m.msg.type === 'folder_trust_state'), false)
     })
 
     it('handles missing session entry gracefully', () => {
@@ -645,7 +654,8 @@ describe('EventNormalizer', () => {
         }),
       })
       const result = normalizer.normalize('ready', {}, ctx)
-      assert.equal(result.messages.length, 4)
+      // claude_ready, model, permission mode, thinking level, folder trust state
+      assert.equal(result.messages.length, 5)
       const msg = result.messages.find((m) => m.msg.type === 'thinking_level_changed')
       assert.ok(msg, 'expected a thinking_level_changed message in the ready burst')
       assert.equal(msg.msg.level, 'xhigh')
@@ -656,7 +666,7 @@ describe('EventNormalizer', () => {
       // property read is `undefined` — the BaseSession contract for "this
       // provider doesn't support thinking levels".
       const result = normalizer.normalize('ready', {}, makeCtx())
-      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.length, 4) // claude_ready, model, permission mode, folder trust state
       assert.equal(result.messages.some((m) => m.msg.type === 'thinking_level_changed'), false)
     })
 

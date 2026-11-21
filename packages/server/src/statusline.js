@@ -14,9 +14,9 @@
  *   - ~/.claude/settings.json                    (user — lowest precedence)
  * (`CLAUDE_CONFIG_DIR` replaces `~/.claude`). The session's working directory
  * is consulted for `<sessionCwd>/.claude/settings.json` only when
- * `projectSettingsAllowed(cwd)` (claude-setting-sources.js) says so; today it
- * never does. `sessionCwd` comes from the server's session record, never from
- * the wire.
+ * `projectSettingsAllowed(cwd)` (claude-setting-sources.js) says so: the folder
+ * has no command-bearing files, or its owner trusted their current contents.
+ * `sessionCwd` comes from the server's session record, never from the wire.
  *
  * Robustness hardening, none of which Claude Code documents but all of which a
  * long-lived daemon needs so a slow/hostile script can't wedge it:
@@ -66,7 +66,7 @@ export const STATUSLINE_CONFIG_CACHE_TTL_MS = 5_000
  */
 export function statusLineSettingsPaths(cwd, claudeDir) {
   const paths = []
-  if (cwd && projectSettingsAllowed(cwd)) paths.push(join(cwd, '.claude', 'settings.json'))
+  if (cwd && projectSettingsAllowed(cwd, { cached: true })) paths.push(join(cwd, '.claude', 'settings.json'))
   if (claudeDir) {
     paths.push(join(claudeDir, 'project-settings.json'))
     paths.push(join(claudeDir, 'settings.json'))

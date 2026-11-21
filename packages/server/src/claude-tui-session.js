@@ -6561,6 +6561,7 @@ export class ClaudeTuiSession extends BaseSession {
       permissionsEnabled,
       ...(nativeRouteNonce ? { nativeRouteNonce } : {}),
       thinkingSummaries: this._thinkingEnabled,
+      enableAllProjectMcpServers: projectSettingsAllowed(this.cwd),
     })
   }
 

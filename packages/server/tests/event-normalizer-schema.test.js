@@ -44,6 +44,7 @@ import {
   ServerConversationIdSchema,
   ServerSessionStoppedSchema,
   ServerStdinDroppedTotalsSchema,
+  ServerFolderTrustStateSchema,
 } from '@chroxy/protocol'
 import { FORWARDED_CLI_EVENTS } from '../src/ws-forwarding.js'
 
@@ -115,6 +116,7 @@ const SCHEMA_BY_TYPE = {
   conversation_id: ServerConversationIdSchema,
   session_stopped: ServerSessionStoppedSchema,
   stdin_dropped_totals: ServerStdinDroppedTotalsSchema,
+  folder_trust_state: ServerFolderTrustStateSchema,
 }
 
 // Wire types the normalizer emits that have NO `Server*Schema` in

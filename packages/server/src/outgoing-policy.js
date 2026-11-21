@@ -30,7 +30,7 @@ export const BOUND_OUTGOING_DENIED = Object.freeze([
   'daemon_update_status', 'delete_archived_session_result', 'directory_listing',
   'emulator_action_ack', 'emulator_status_snapshot', 'environment_created',
   'environment_destroyed', 'environment_error', 'environment_info', 'environment_list',
-  'external_sessions_snapshot', 'failed_restore_history', 'failed_restores_list',
+  'external_sessions_snapshot', 'failed_restore_history', 'failed_restores_list', 'folder_trust_result',
   'git_commit_result', 'git_create_pr_result', 'git_repo_check_result', 'github_webhook_config',
   'host_prune_action_ack', 'host_prune_status_snapshot', 'host_status_snapshot',
   'integration_action_ack', 'integration_status_snapshot', 'mailbox_status_snapshot',
@@ -47,7 +47,7 @@ export const BOUND_OUTGOING_DENIED = Object.freeze([
 ])
 
 /** @type {readonly string[]} */
-export const BOUND_OUTGOING_REDACTED = Object.freeze(['auth_bootstrap', 'auth_ok', 'cost_update', 'mcp_servers'])
+export const BOUND_OUTGOING_REDACTED = Object.freeze(['auth_bootstrap', 'auth_ok', 'cost_update', 'folder_trust_state', 'mcp_servers'])
 
 /** @type {readonly string[]} */
 export const BOUND_OUTGOING_ALLOWED = Object.freeze([
@@ -154,6 +154,12 @@ export function frameForBoundClient(message) {
           return rest
         }),
       }
+    }
+    if (type === 'folder_trust_state') {
+      // The summary lists the commands a folder's settings would run: the
+      // owner's to review, not this connection's. The status alone passes.
+      const { summary: _s, ...rest } = message
+      return rest
     }
     if (type === 'cost_update') {
       // The host-wide running total is not this session's cost.

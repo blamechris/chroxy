@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) now load only user-scope Claude settings.** Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned. BYOK sessions are unchanged: each MCP server they start still needs an approval first.
-  - A `Write` or `Edit` tool call on `.mcp.json` now prompts under the permission floor; reading it does not.
+- **Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) load project settings only for a folder with no command-bearing files, or one the owner trusted.** The user's own Claude settings always load. Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, project `CLAUDE.md`, skills, agents and commands) load when the folder has no `.mcp.json`, `.claude/settings.json` (in the folder or a parent) or files under `.claude/agents/`, `.claude/skills/` and `.claude/commands/`, or when the owner has trusted the folder. `.claude/settings.local.json` is never loaded, and the status line reads `<folder>/.claude/settings.json` only for such a folder.
+  - A session whose folder is not trusted shows "This folder's project settings are not loaded." with a **Review** button. The dialog lists the MCP servers (command and arguments), hooks, status-line command, plugins, file counts and paths, and **Trust this folder** approves them. A trusted folder shows **Stop trusting**.
+  - Trust is tied to the exact content of those files: any change makes the folder untrusted until it is approved again. The decision is kept in `~/.chroxy/folder-trust.json`.
+  - Only the primary token on a connection that is not bound to a session can trust or untrust a folder (`trust_folder`, `untrust_folder`). The change applies from the next turn on `claude-sdk` and after a restart on `claude-cli` and `claude-tui`.
+  - A trusted claude-tui session starts with `.mcp.json` servers enabled, so the TUI does not stop on its own approval dialog.
+  - BYOK sessions are unchanged: each MCP server they start still needs an approval first.
+  - A `Write` or `Edit` tool call on `.mcp.json` prompts under the permission floor; reading it does not.
 
 ## [0.11.10] - 2026-11-11
 

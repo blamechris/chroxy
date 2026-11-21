@@ -159,9 +159,10 @@ export function stderrIndicatesUnknownResumeCompacted(lines, windowLines = 10) {
  * @param {string[]} opts.allowedTools
  * @param {string} opts.skillsText
  * @param {string|null} opts.resumeSessionId
+ * @param {string} [opts.cwd] - session working directory; decides whether project settings load (claude-setting-sources.js)
  * @returns {string[]}
  */
-export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId } = {}) {
+export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId, cwd } = {}) {
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -169,7 +170,7 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
     '--verbose',
     '--include-partial-messages',
   ]
-  args.push('--setting-sources', claudeSettingSourcesValue())
+  args.push('--setting-sources', claudeSettingSourcesValue(cwd))
 
   if (model) {
     args.push('--model', model)
@@ -594,6 +595,7 @@ export class CliSession extends BaseSession {
       allowedTools: this.allowedTools,
       skillsText,
       resumeSessionId: this._sessionId,
+      cwd: this.cwd,
     })
 
     const resumeNote = this._sessionId ? ` (resume ${this._sessionId})` : ''

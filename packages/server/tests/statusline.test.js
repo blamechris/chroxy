@@ -14,6 +14,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import {
   parseStatusLineConfig,
@@ -64,7 +67,8 @@ test('parseStatusLineConfig floors a tiny refreshInterval', () => {
 // ---------------------------------------------------------------------------
 
 test('statusLineSettingsPaths lists user project-settings > user, highest first', () => {
-  const paths = statusLineSettingsPaths('/proj', '/home/u/.claude')
+  // No cwd: no project file is consulted (a folder's own file needs the folder's trust decision).
+  const paths = statusLineSettingsPaths(undefined, '/home/u/.claude')
   assert.deepEqual(paths, [
     '/home/u/.claude/project-settings.json',
     '/home/u/.claude/settings.json',
@@ -334,14 +338,21 @@ function fakeReadFrom(fileMap) {
   }
 }
 
-test('resolveConfig: project .claude/settings.json is ignored in favour of user settings', async () => {
-  const files = {
-    '/proj/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }),
-    '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }),
+test('resolveConfig: project .claude/settings.json is ignored in favour of user settings until the folder is trusted', async () => {
+  // A real folder with a command-bearing .mcp.json: untrusted, so its settings stay unread.
+  const proj = mkdtempSync(join(tmpdir(), 'statusline-untrusted-'))
+  try {
+    writeFileSync(join(proj, '.mcp.json'), JSON.stringify({ mcpServers: {} }))
+    const files = {
+      [join(proj, '.claude', 'settings.json')]: JSON.stringify({ statusLine: { type: 'command', command: 'project.sh' } }),
+      '/home/.claude/settings.json': JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }),
+    }
+    const mgr = new StatusLineManager({ homeDir: '/home', readFileFn: fakeReadFrom(files) })
+    const cfg = await mgr.resolveConfig(proj)
+    assert.equal(cfg.command, 'user.sh')
+  } finally {
+    rmSync(proj, { recursive: true, force: true })
   }
-  const mgr = new StatusLineManager({ homeDir: '/home', readFileFn: fakeReadFrom(files) })
-  const cfg = await mgr.resolveConfig('/proj')
-  assert.equal(cfg.command, 'user.sh')
 })
 
 test('resolveConfig: falls back to user settings when the project has none', async () => {

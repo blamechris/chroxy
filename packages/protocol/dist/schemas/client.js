@@ -465,6 +465,20 @@ export const RemoveMcpServerSchema = z.object({
     sessionId: z.string().max(256).optional(),
     requestId: z.string().max(256).optional(),
 });
+// Per-folder trust for project settings. The folder is ALWAYS the one in the
+// server's record of `sessionId`: the message carries no path, and any extra
+// `cwd`/`path` field is ignored. Both are PRIMARY-ONLY and refused for a
+// session-bound client or an agent principal. The reply is `folder_trust_result`.
+export const TrustFolderSchema = z.object({
+    type: z.literal('trust_folder'),
+    sessionId: z.string().min(1).max(256),
+    requestId: z.string().max(256).optional(),
+});
+export const UntrustFolderSchema = z.object({
+    type: z.literal('untrust_folder'),
+    sessionId: z.string().min(1).max(256),
+    requestId: z.string().max(256).optional(),
+});
 // ───────────────────────────────────────────────────────────────────────────
 // #6871 (epic #6784) — the dashboard scheduled-tasks panel.
 // ───────────────────────────────────────────────────────────────────────────
@@ -2092,6 +2106,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SubmitMcpAuthCodeSchema,
     AddMcpServerSchema,
     RemoveMcpServerSchema,
+    TrustFolderSchema,
+    UntrustFolderSchema,
     ScheduledTasksRequestSchema,
     ScheduledTaskActionSchema,
     SetSchedulerEnabledSchema,

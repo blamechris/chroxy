@@ -98,7 +98,14 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 
 ### Claude settings scope
 
-Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) now load only user-scope Claude settings. Settings in the session's working directory (`.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, project `CLAUDE.md`, skills, agents and commands) are not loaded, and the status line reads only user-level settings. Per-folder trust to restore project settings is planned. BYOK sessions are unchanged: each MCP server they start still needs an approval first.
+Claude-provider sessions (claude-sdk, claude-cli, claude-tui and their Docker variants, web tasks) always load the user's own Claude settings (`~/.claude`, or `CLAUDE_CONFIG_DIR`). Settings that live in the session's working directory (`.mcp.json`, `.claude/settings.json`, project `CLAUDE.md`, skills, agents and commands) load only in these two cases:
+
+- The folder has no command-bearing files. These are `.mcp.json` and `.claude/settings.json` in the folder or any parent folder, and the files under the folder's `.claude/agents/`, `.claude/skills/` and `.claude/commands/`. A folder with only a `CLAUDE.md` loads its project settings with no prompt.
+- The owner has trusted the folder. The session shows "This folder's project settings are not loaded." with a **Review** button. The dialog lists what would run (MCP servers with their command and arguments, hook commands, the status-line command, enabled plugins, file counts and paths); **Trust this folder** approves it. Only the primary token on a connection that is not bound to a session can trust or untrust a folder.
+
+Trust is tied to the exact content of those files. Changing any of them makes the folder untrusted again until it is approved again. A trusted folder loads the `user` and `project` scopes and the status line may read `<folder>/.claude/settings.json`. The `local` scope (`.claude/settings.local.json`) is never loaded. A trusted claude-tui session also starts with MCP servers from `.mcp.json` enabled, so the TUI does not stop on its own approval dialog.
+
+A change reaches a running session at different times: from the next turn on `claude-sdk`, and after a restart on `claude-cli` and `claude-tui` (and their docker variants). The decision is stored in `~/.chroxy/folder-trust.json` (mode 0600). BYOK sessions are unchanged: each MCP server they start still needs an approval first.
 
 ### Choose between SDK, CLI, and TUI
 

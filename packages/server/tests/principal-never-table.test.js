@@ -18,7 +18,7 @@ const EXPECTED_NEVER_TYPES = [
   'open_dev_preview', 'orchestration_run_start', 'pair_approve', 'pair_deny', 'remove_mcp_server',
   'restore_checkpoint', 'revoke_token', 'scheduled_task_action', 'session_preset_set', 'set_model',
   'set_permission_mode', 'set_permission_rules', 'set_scheduler_enabled', 'set_session_archive_policy',
-  'skill_trust_accept', 'skill_trust_grant', 'terminal_input', 'terminal_subscribe', 'write_file',
+  'skill_trust_accept', 'skill_trust_grant', 'terminal_input', 'terminal_subscribe', 'trust_folder', 'untrust_folder', 'write_file',
 ].sort()
 const EXPECTED_S2_ADDS = ['notification_prefs_set', 'set_permission_rules', 'skill_trust_accept', 'skill_trust_grant', 'terminal_input']
 
@@ -61,6 +61,8 @@ const MSGS = {
   orchestration_run_start: { type: 'orchestration_run_start', requestId: 'r1', cwd: '/tmp/x' },
   restore_checkpoint: { type: 'restore_checkpoint', checkpointId: 'cp1', mode: 'files' },
   set_model: { type: 'set_model', model: 'sonnet', sessionId: SID },
+  trust_folder: { type: 'trust_folder', requestId: 'r1', sessionId: SID },
+  untrust_folder: { type: 'untrust_folder', requestId: 'r1', sessionId: SID },
 }
 
 // Handlers that read one property BEFORE their gate (a feature flag, the session
@@ -76,6 +78,9 @@ const PROBE_CTX = {
     stubs: { 'sessions.sessionManager': { getSession: () => null } },
     tolerate: ['sessions.sessionManager', 'sessions.sessionManager.getSession'],
   },
+  // The folder gate runs before the session lookup, so reading the session manager IS "past the gate".
+  trust_folder: { stubs: { 'sessions.sessionManager': { getSession: () => null } } },
+  untrust_folder: { stubs: { 'sessions.sessionManager': { getSession: () => null } } },
 }
 const probeCtx = (type) => recordingCtx(PROBE_CTX[type])
 

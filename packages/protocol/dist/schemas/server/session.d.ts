@@ -64,6 +64,104 @@ export declare const ServerMcpServersSchema: z.ZodObject<{
         }>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/**
+ * Whether a session folder's project settings (`.mcp.json`, `.claude/settings.json`,
+ * agents, skills, commands) are loaded. `none`: the folder has no command-bearing
+ * files. `untrusted`: they exist and are not loaded. `trusted`: the owner approved
+ * their current contents. `summary` (display only; environment values are never
+ * included) accompanies `untrusted` and `trusted`. `appliesFrom` says when a change
+ * reaches the running session: `next_turn` (claude-sdk), `restart` (claude-cli,
+ * claude-tui and their docker variants) or `n/a` (a provider that does not run claude).
+ */
+export declare const FolderTrustSummarySchema: z.ZodObject<{
+    files: z.ZodArray<z.ZodString>;
+    mcpServers: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        name: z.ZodString;
+        command: z.ZodOptional<z.ZodString>;
+        args: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        url: z.ZodOptional<z.ZodString>;
+        type: z.ZodOptional<z.ZodString>;
+        envKeys: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>>;
+    hooks: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        event: z.ZodString;
+        commands: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>>;
+    statusLine: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        command: z.ZodString;
+    }, z.core.$strip>>;
+    enabledPlugins: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        plugin: z.ZodString;
+    }, z.core.$strip>>;
+    counts: z.ZodObject<{
+        agents: z.ZodNumber;
+        skills: z.ZodNumber;
+        commands: z.ZodNumber;
+    }, z.core.$strip>;
+    warnings: z.ZodArray<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerFolderTrustStateSchema: z.ZodObject<{
+    type: z.ZodLiteral<"folder_trust_state">;
+    sessionId: z.ZodString;
+    status: z.ZodEnum<{
+        none: "none";
+        trusted: "trusted";
+        untrusted: "untrusted";
+    }>;
+    summary: z.ZodOptional<z.ZodObject<{
+        files: z.ZodArray<z.ZodString>;
+        mcpServers: z.ZodArray<z.ZodObject<{
+            file: z.ZodString;
+            name: z.ZodString;
+            command: z.ZodOptional<z.ZodString>;
+            args: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            url: z.ZodOptional<z.ZodString>;
+            type: z.ZodOptional<z.ZodString>;
+            envKeys: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        }, z.core.$strip>>;
+        hooks: z.ZodArray<z.ZodObject<{
+            file: z.ZodString;
+            event: z.ZodString;
+            commands: z.ZodArray<z.ZodString>;
+        }, z.core.$strip>>;
+        statusLine: z.ZodArray<z.ZodObject<{
+            file: z.ZodString;
+            command: z.ZodString;
+        }, z.core.$strip>>;
+        enabledPlugins: z.ZodArray<z.ZodObject<{
+            file: z.ZodString;
+            plugin: z.ZodString;
+        }, z.core.$strip>>;
+        counts: z.ZodObject<{
+            agents: z.ZodNumber;
+            skills: z.ZodNumber;
+            commands: z.ZodNumber;
+        }, z.core.$strip>;
+        warnings: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>>;
+    appliesFrom: z.ZodEnum<{
+        restart: "restart";
+        next_turn: "next_turn";
+        "n/a": "n/a";
+    }>;
+}, z.core.$strip>;
+/** Reply to `trust_folder` / `untrust_folder`. `error` is set when `ok` is false. */
+export declare const ServerFolderTrustResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"folder_trust_result">;
+    sessionId: z.ZodString;
+    ok: z.ZodBoolean;
+    status: z.ZodEnum<{
+        none: "none";
+        trusted: "trusted";
+        untrusted: "untrusted";
+    }>;
+    error: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerPlanStartedSchema: z.ZodObject<{
     type: z.ZodLiteral<"plan_started">;
 }, z.core.$strip>;
