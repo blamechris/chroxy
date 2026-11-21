@@ -390,7 +390,7 @@ export class StatusLineManager extends EventEmitter {
 
     /** @type {Map<string, {config: object|null, expiresAt: number}>} keyed by cwd */
     this._configCache = new Map()
-    /** @type {Map<string, {getContext: Function, timer: any, lastRunAt: number, running: boolean, lastText: string|null}>} */
+    /** @type {Map<string, {getContext: Function, timer: any, lastRunAt: number, running: boolean, lastText: string|null, fromProject: boolean, epoch: number}>} */
     this._sessions = new Map()
     this._stopped = false
   }
@@ -405,13 +405,18 @@ export class StatusLineManager extends EventEmitter {
    * @returns {Promise<{command:string, refreshIntervalMs:number|null}|null>}
    */
   async resolveConfig(cwd) {
+    return (await this._resolve(cwd)).config
+  }
+
+  /** `resolveConfig`, also saying whether the config came from the trusted folder's own file. */
+  async _resolve(cwd) {
     // The folder's own file first, and never from the cache: it is verified against
     // the trust record on every call, so a trust change or an edit takes effect at once.
     const projectConfig = this._projectConfig(cwd)
-    if (projectConfig) return projectConfig
+    if (projectConfig) return { config: projectConfig, fromProject: true }
 
     const cached = this._configCache.get(cwd)
-    if (cached && cached.expiresAt > this._now()) return cached.config
+    if (cached && cached.expiresAt > this._now()) return { config: cached.config, fromProject: false }
 
     let config = null
     for (const path of statusLineSettingsPaths(cwd, this._claudeDir ?? claudeConfigDir())) {
@@ -435,7 +440,7 @@ export class StatusLineManager extends EventEmitter {
     }
 
     this._configCache.set(cwd, { config, expiresAt: this._now() + this._configCacheTtlMs })
-    return config
+    return { config, fromProject: false }
   }
 
   /** The verified project statusLine config, or null. Never throws. */
@@ -463,8 +468,8 @@ export class StatusLineManager extends EventEmitter {
    * @returns {Promise<{active:boolean, text:string, result:object|null}>}
    */
   async run(ctx) {
-    const config = await this.resolveConfig(ctx?.cwd)
-    if (!config) return { active: false, text: '', result: null }
+    const { config, fromProject } = await this._resolve(ctx?.cwd)
+    if (!config) return { active: false, text: '', result: null, fromProject: false }
 
     let env
     try {
@@ -485,7 +490,7 @@ export class StatusLineManager extends EventEmitter {
       setTimer: this._setTimer,
       clearTimer: this._clearTimer,
     })
-    return { active: true, text: statusLineDisplayText(result), result }
+    return { active: true, text: statusLineDisplayText(result), result, fromProject }
   }
 
   /**
@@ -505,7 +510,7 @@ export class StatusLineManager extends EventEmitter {
     if (!session) {
       // Refresh for a session we aren't tracking a loop for is still valid
       // (event-driven trigger before startSession); create a lightweight record.
-      session = { getContext: null, timer: null, lastRunAt: 0, running: false, lastText: null }
+      session = { getContext: null, timer: null, lastRunAt: 0, running: false, lastText: null, fromProject: false, epoch: 0 }
       this._sessions.set(sessionId, session)
     }
     if (session.running) return null
@@ -515,6 +520,7 @@ export class StatusLineManager extends EventEmitter {
 
     session.running = true
     session.lastRunAt = this._now()
+    const epoch = session.epoch
     let outcome
     try {
       outcome = await this.run(ctx)
@@ -530,7 +536,12 @@ export class StatusLineManager extends EventEmitter {
     const still = this._sessions.get(sessionId)
     if (!still) return outcome ? { ...outcome, emitted: false } : null
 
+    // A run that began before the folder stopped being trusted must not bring the
+    // folder's own output back (see clearProjectOutput).
+    if (still.epoch !== epoch && outcome.fromProject) return { ...outcome, emitted: false }
+
     let emitted = false
+    still.fromProject = outcome.active && outcome.fromProject === true
     if (outcome.active) {
       if (outcome.text !== still.lastText) {
         still.lastText = outcome.text
@@ -554,6 +565,31 @@ export class StatusLineManager extends EventEmitter {
   }
 
   /**
+   * The session's folder stopped being trusted (the owner stopped trusting it, or an edit
+   * revoked it). If the status line last shown came from the folder's own settings,
+   * clear it now with one empty `output`, instead of leaving that text up until the next
+   * refresh, then refresh at once so a user-level status line, if any, takes its place.
+   * Output from the user's own settings is left alone.
+   * @param {string} sessionId
+   * @returns {boolean} true when a cleared output was emitted
+   */
+  clearProjectOutput(sessionId) {
+    const session = this._sessions.get(sessionId)
+    if (!session || this._stopped) return false
+    session.epoch += 1 // a run already in flight began while the folder was trusted
+    if (!session.fromProject) return false
+    session.fromProject = false
+    const hadText = session.lastText !== null
+    session.lastText = null
+    if (hadText) this.emit('output', { sessionId, active: false, text: '', truncated: false, timedOut: false, exitCode: null })
+    try {
+      const ctx = session.getContext ? session.getContext() : null
+      if (ctx) this.refresh(sessionId, ctx, { force: true }).catch(() => {})
+    } catch { /* the periodic tick will refresh */ }
+    return hadText
+  }
+
+  /**
    * Begin tracking a session: store its context provider and start the periodic
    * refresh loop (a self-rescheduling, unref'd timer — never setInterval, so an
    * in-flight run never overlaps the next tick). Idempotent — a second call just
@@ -566,7 +602,7 @@ export class StatusLineManager extends EventEmitter {
     if (this._stopped) return
     let session = this._sessions.get(sessionId)
     if (!session) {
-      session = { getContext, timer: null, lastRunAt: 0, running: false, lastText: null }
+      session = { getContext, timer: null, lastRunAt: 0, running: false, lastText: null, fromProject: false, epoch: 0 }
       this._sessions.set(sessionId, session)
     } else {
       session.getContext = getContext

@@ -6,6 +6,7 @@ import { terminalMirrorRecipient } from './handler-utils.js'
 import { isBoundClient } from './environments/authority.js'
 import { broadcastRosterPerRecipient } from './roster-broadcast.js'
 import { getProviderRuntimeInfo } from './providers.js'
+import { buildFolderTrustStateMessageForDisplay, noteFolderTrustFrame } from './folder-trust-wire.js'
 import { MODEL_UNSUPPORTED_CODE } from './codex-model-rejections.js'
 
 const log = createLogger('ws-forwarding')
@@ -792,6 +793,22 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
           } else {
             broadcast(withServerTs(msg))
           }
+        }
+        break
+      }
+      case 'folder_trust_refresh': {
+        // A `ready` that found no fresh cached trust state: send the frame when the
+        // scan resolves, unless the session is gone by then. Display only.
+        const sid = effect.sessionId ?? sessionId
+        const entry = sessionManager?.getSession(sid)
+        if (entry && broadcastToSession) {
+          buildFolderTrustStateMessageForDisplay(sid, entry).then((frame) => {
+            if (!frame || !sessionManager.getSession(sid)) return
+            noteFolderTrustFrame(sessionManager, frame)
+            broadcastToSession(sid, withServerTs(frame))
+          }).catch((err) => {
+            log.debug(`folder trust refresh failed for ${sid}: ${err?.message || err}`)
+          })
         }
         break
       }

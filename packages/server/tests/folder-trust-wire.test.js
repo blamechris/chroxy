@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { buildFolderTrustStateMessage, buildFolderTrustStateMessageForDisplay, folderTrustAppliesFrom } from '../src/folder-trust-wire.js'
+import { EventEmitter } from 'node:events'
+import { buildFolderTrustStateMessage, buildFolderTrustStateMessageForDisplay, broadcastFolderTrustState, folderTrustAppliesFrom } from '../src/folder-trust-wire.js'
 import { invalidateFolderTrustCache, getFolderTrustState } from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
@@ -151,5 +152,30 @@ describe('off-thread display scan', () => {
     assert.equal((await buildFolderTrustStateMessageForDisplay('s1', entry)).status, 'untrusted')
     await trustReviewed(cwd)
     assert.equal((await buildFolderTrustStateMessageForDisplay('s1', entry)).status, 'trusted')
+  })
+})
+
+describe('a folder that is not trusted is announced to the rest of the daemon', () => {
+  function ctxFor(cwd) {
+    const sessionManager = new EventEmitter()
+    sessionManager.listSessions = () => [{ sessionId: 's1', cwd }]
+    sessionManager.getSession = () => ({ cwd, provider: 'claude-sdk', session: {} })
+    const lost = []
+    sessionManager.on('folder_trust_lost', (e) => lost.push(e.sessionId))
+    const sent = []
+    return { ctx: { sessions: { sessionManager }, transport: { broadcastToSession: (id, m) => sent.push([id, m]) } }, lost, sent }
+  }
+
+  it('an untrusted state broadcast emits folder_trust_lost for the session; a trusted one does not', async () => {
+    const cwd = project('p')
+    const { ctx, lost, sent } = ctxFor(cwd)
+    await broadcastFolderTrustState(ctx, cwd)
+    assert.equal(sent[0][1].status, 'untrusted')
+    assert.deepEqual(lost, ['s1'])
+    await trustReviewed(cwd)
+    lost.length = 0
+    await broadcastFolderTrustState(ctx, cwd)
+    assert.equal(sent.at(-1)[1].status, 'trusted')
+    assert.deepEqual(lost, [])
   })
 })

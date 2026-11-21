@@ -26,11 +26,14 @@ export function folderTrustAppliesFrom(provider) {
   return APPLIES_FROM[provider] ?? 'n/a'
 }
 
+/** Frames built from a display scan that timed out: not a finding about the folder. */
+const timedOutFrames = new WeakSet()
+
 function frameFor(sessionId, entry, appliesFrom, state) {
   const { status, summary, digest } = state
   // What the RUNNING process was launched with: claude-cli and claude-tui keep it until restart.
   const launched = appliesFrom === 'restart' ? entry.session?.launchedWithProject : undefined
-  return {
+  const frame = {
     type: 'folder_trust_state',
     sessionId,
     status,
@@ -39,6 +42,8 @@ function frameFor(sessionId, entry, appliesFrom, state) {
     appliesFrom,
     ...(typeof launched === 'boolean' ? { launchedWithProject: launched } : {}),
   }
+  if (state.timedOut) timedOutFrames.add(frame)
+  return frame
 }
 
 const folderOf = (entry) => {
@@ -61,6 +66,11 @@ export function buildFolderTrustStateMessage(sessionId, entry, opts = {}) {
   const appliesFrom = folderTrustAppliesFrom(entry.provider)
   if (appliesFrom === 'n/a') return null
   return frameFor(sessionId, entry, appliesFrom, opts.state ?? getFolderTrustState(cwd, opts))
+}
+
+/** Whether a session of this record gets a `folder_trust_state` frame at all (it has a folder and runs claude). */
+export function folderTrustFrameApplies(entry) {
+  return folderOf(entry) !== null && folderTrustAppliesFrom(entry.provider) !== 'n/a'
 }
 
 /**
@@ -89,6 +99,20 @@ export async function buildFolderTrustStateMessageForDisplay(sessionId, entry) {
 }
 
 /**
+ * Tell the rest of the daemon that a session's folder is not trusted (as of a frame
+ * about to be sent), so anything that was running from the folder's own settings can
+ * stop showing its output (`folder_trust_lost` on the session manager). Idempotent
+ * for its listeners; a failure is never allowed to cost the frame.
+ * @param {{ emit?: Function }|null|undefined} sessionManager
+ * @param {{ sessionId?: string, status?: string }|null} frame
+ */
+export function noteFolderTrustFrame(sessionManager, frame) {
+  // A frame from a scan that timed out says the folder was not reviewed, not that it lost trust.
+  if (!frame || frame.status === 'trusted' || timedOutFrames.has(frame) || typeof frame.sessionId !== 'string') return
+  try { sessionManager?.emit?.('folder_trust_lost', { sessionId: frame.sessionId }) } catch { /* display only */ }
+}
+
+/**
  * Send the fresh state to every session whose folder has the same real path. The
  * folder is scanned once (off-thread), not once per session.
  * @param {{ sessions: { sessionManager: object }, transport: { broadcastToSession: Function } }} ctx
@@ -106,6 +130,8 @@ export async function broadcastFolderTrustState(ctx, realPath) {
     const appliesFrom = folderTrustAppliesFrom(entry.provider)
     if (appliesFrom === 'n/a') continue
     state ??= await getFolderTrustStateForDisplay(realPath)
-    ctx.transport.broadcastToSession(listed.sessionId, frameFor(listed.sessionId, entry, appliesFrom, state))
+    const frame = frameFor(listed.sessionId, entry, appliesFrom, state)
+    noteFolderTrustFrame(manager, frame)
+    ctx.transport.broadcastToSession(listed.sessionId, frame)
   }
 }

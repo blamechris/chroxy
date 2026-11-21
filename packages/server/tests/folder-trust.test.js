@@ -19,7 +19,7 @@ import {
   readTrustedProjectSettings,
   MAX_SCANNED_FILES,
 } from '../src/folder-trust.js'
-import { projectSettingsAllowed, claudeSettingSources } from '../src/claude-setting-sources.js'
+import { projectSettingsAllowedAsync, claudeSettingSourcesFor } from '../src/claude-setting-sources.js'
 
 /**
  * Per-folder trust. Every test runs in a temp CHROXY_CONFIG_DIR (the trust
@@ -191,7 +191,7 @@ describe('scanFolderSettings: what is considered', () => {
     assert.equal(result.ok, false)
     assert.equal(result.code, 'FOLDER_TRUST_UNTRUSTABLE')
     assert.equal(isFolderTrusted(cwd), false)
-    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
   })
 
   it('a file over the per-file limit is HARD and never hashed by size/mtime', async () => {
@@ -274,7 +274,7 @@ describe('scanFolderSettings: what is considered', () => {
     assert.ok(scan.files.some((f) => f.path === join(root, '.claude', 'skills', 'up', 'SKILL.md')))
     assert.equal(scan.hasCommandBearingFiles, true)
     assert.equal(isFolderTrusted(cwd), false)
-    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
     // `home/.claude` is the user's own Claude dir here: its agents are not the project's.
     assert.equal(scan.files.some((f) => f.path.includes(join('home', '.claude'))), false)
   })
@@ -465,7 +465,7 @@ describe('trust does not survive an incomplete scan', () => {
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     symlinkSync(join(root, 'nowhere.md'), join(cwd, '.claude', 'agents', 'dangling.md'))
     assert.equal(isFolderTrusted(cwd), false)
-    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
   })
 })
 
@@ -579,7 +579,7 @@ describe('trust store', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const lock = `${folderTrustStorePath()}.lock`
-    writeFileSync(lock, `${process.pid}\n${Date.now()}\n`) // this process is alive
+    writeFileSync(lock, `${process.ppid}\n${Date.now()}\n`) // another process, alive
     let done = false
     const p = trust(cwd).then((r) => { done = true; return r })
     await new Promise((r) => setTimeout(r, 150))
@@ -590,12 +590,12 @@ describe('trust store', () => {
 
   it('a folder with nothing command-bearing can be trusted; adding any such file then untrusts it', async () => {
     write(join(cwd, 'CLAUDE.md'), '# notes')
-    assert.equal(projectSettingsAllowed(cwd), false, 'untrusted until trusted')
+    assert.equal(await projectSettingsAllowedAsync(cwd), false, 'untrusted until trusted')
     const result = await trust(cwd)
     assert.equal(result.ok, true)
-    assert.equal(projectSettingsAllowed(cwd), true)
+    assert.equal(await projectSettingsAllowedAsync(cwd), true)
     write(join(cwd, '.claude', 'agents', 'new.md'), 'x')
-    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
   })
 
   it('a corrupt store reads as no trust', () => {
@@ -642,38 +642,38 @@ describe('trust store', () => {
 })
 
 describe('projectSettingsAllowed', () => {
-  it('no implicit loading: a folder with no command-bearing files is untrusted too', () => {
+  it('no implicit loading: a folder with no command-bearing files is untrusted too', async () => {
     write(join(cwd, 'CLAUDE.md'), '# hi')
-    assert.equal(projectSettingsAllowed(cwd), false)
-    assert.deepEqual(claudeSettingSources(cwd), ['user'])
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(cwd)), ['user'])
     assert.equal(scanFolderSettings(cwd).summary.hasCommandBearingFiles, false)
   })
 
-  it('untrusted: false, and only the user scope', () => {
+  it('untrusted: false, and only the user scope', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
-    assert.equal(projectSettingsAllowed(cwd), false)
-    assert.deepEqual(claudeSettingSources(cwd), ['user'])
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(cwd)), ['user'])
   })
 
   it('trusted: true and ["user","project"], never local', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     await trust(cwd)
-    assert.equal(projectSettingsAllowed(cwd), true)
-    assert.deepEqual(claudeSettingSources(cwd), ['user', 'project'])
-    assert.equal(claudeSettingSources(cwd).includes('local'), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), true)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(cwd)), ['user', 'project'])
+    assert.equal(claudeSettingSourcesFor(await projectSettingsAllowedAsync(cwd)).includes('local'), false)
   })
 
   it('a trusted folder whose .mcp.json changes is no longer allowed', async () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     await trust(cwd)
     write(join(cwd, '.mcp.json'), { mcpServers: { n: { command: 'new' } } })
-    assert.equal(projectSettingsAllowed(cwd), false)
+    assert.equal(await projectSettingsAllowedAsync(cwd), false)
   })
 
-  it('no cwd is untrusted', () => {
-    assert.equal(projectSettingsAllowed(undefined), false)
-    assert.equal(projectSettingsAllowed(''), false)
-    assert.deepEqual(claudeSettingSources(undefined), ['user'])
+  it('no cwd is untrusted', async () => {
+    assert.equal(await projectSettingsAllowedAsync(undefined), false)
+    assert.equal(await projectSettingsAllowedAsync(''), false)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(undefined)), ['user'])
   })
 })
 
@@ -775,7 +775,7 @@ describe('cross-process store lock', () => {
     write(join(cwd, '.mcp.json'), { mcpServers: {} })
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const lock = `${folderTrustStorePath()}.lock`
-    writeFileSync(lock, `${process.pid}\nlive-token\n${Date.now()}\n`)
+    writeFileSync(lock, `${process.ppid}\nlive-token\n${Date.now()}\n`)
     const old = new Date(Date.now() - 3600_000)
     utimesSync(lock, old, old)
     let done = false

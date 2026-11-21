@@ -14,7 +14,7 @@
 import { sendError } from '../handler-utils.js'
 import { isBoundClient } from '../environments/authority.js'
 import { sessionLogger } from '../logger.js'
-import { trustFolder, untrustFolder, getFolderTrustState } from '../folder-trust.js'
+import { trustFolder, untrustFolder, getFolderTrustStatusForReply } from '../folder-trust.js'
 import { broadcastFolderTrustState } from '../folder-trust-wire.js'
 
 /** @returns {boolean} true when the caller was refused (the handler must return). */
@@ -53,7 +53,7 @@ function makeHandler(op, apply, logVerb) {
     } catch (err) {
       sessionLogger(sessionId).warn(`${op} failed for ${cwd}: ${err?.message || err}`)
       // Report the state the folder is really in now, and tell every session of it.
-      const current = getFolderTrustState(cwd)
+      const current = await getFolderTrustStatusForReply(cwd)
       ctx.transport.send(ws, {
         type: 'folder_trust_result',
         sessionId,

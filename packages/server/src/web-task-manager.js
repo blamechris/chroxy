@@ -4,7 +4,7 @@ import { buildClaudeLaunchEnv } from './utils/spawn-env.js'
 import { randomUUID } from 'crypto'
 import { cliHelpAdvertisesFlag, cliHelpFlagArity, isSafeArgvValue } from './utils/argv-safety.js'
 import { CliSession } from './cli-session.js'
-import { claudeSettingSourcesValue } from './claude-setting-sources.js'
+import { claudeSettingSourcesValueFor, projectSettingsAllowedAsync, projectSettingsDecidedWithoutScan } from './claude-setting-sources.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('web-task-manager')
@@ -304,7 +304,10 @@ export class WebTaskManager extends EventEmitter {
 
     try {
       const bin = this._verifyBinary()
-      const stdout = await execFileAsync(bin, ['--setting-sources', claudeSettingSourcesValue(task.cwd), '--teleport', task.taskId], { cwd: task.cwd, env: buildClaudeLaunchEnv() })
+      const projectAllowed = await projectSettingsAllowedAsync(task.cwd)
+      // The manager may have been destroyed while the folder was being verified.
+      if (this._destroyed) throw new Error('the task manager was shut down')
+      const stdout = await this._execTracked(bin, ['--setting-sources', claudeSettingSourcesValueFor(projectAllowed), '--teleport', task.taskId], { cwd: task.cwd, env: buildClaudeLaunchEnv() })
       return { success: true, output: stdout }
     } catch (err) {
       // #8060 review nitpick: only a GATE refusal gets a `(code=…)` suffix —
@@ -362,8 +365,44 @@ export class WebTaskManager extends EventEmitter {
       this.emit('task_error', { taskId: task.taskId, message: task.error })
       return
     }
+    // One project-settings decision per launch. A folder with no trust record is decided
+    // at once; a trusted one is verified by a fresh scan off the main thread first.
+    const decided = projectSettingsDecidedWithoutScan(task.cwd)
+    if (decided !== null) {
+      this._execRemoteTask(task, bin, decided)
+      return
+    }
+    projectSettingsAllowedAsync(task.cwd).then((allowed) => {
+      // Not if the manager was destroyed, or the task was removed or is no longer pending.
+      if (this._destroyed || this._tasks.get(task.taskId) !== task || task.status !== 'pending') return
+      this._execRemoteTask(task, bin, allowed)
+    }).catch((err) => {
+      if (this._destroyed || this._tasks.get(task.taskId) !== task) return
+      log.warn(`web task launch failed: ${err?.message || err}`)
+      task.status = 'failed'
+      task.error = err?.message || 'launch failed'
+      task.updatedAt = Date.now()
+      this.emit('task_updated', { ...task })
+      this.emit('task_error', { taskId: task.taskId, message: task.error })
+    })
+  }
+
+  /** execFile whose child is tracked, so destroy() stops it. @private */
+  _execTracked(cmd, args, opts) {
+    return new Promise((resolve, reject) => {
+      const child = execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => {
+        this._childProcesses.delete(child)
+        if (err) return reject(err)
+        resolve(stdout)
+      })
+      this._childProcesses.add(child)
+    })
+  }
+
+  /** Run the remote CLI for a task with the decided project-settings scope. @private */
+  _execRemoteTask(task, bin, projectAllowed) {
     // Use execFile with args array to prevent command injection
-    const child = execFile(bin, buildRemoteTaskArgs(task.prompt, task.cwd), { cwd: task.cwd, timeout: 300_000, env: buildClaudeLaunchEnv() }, (err, stdout, stderr) => {
+    const child = execFile(bin, buildRemoteTaskArgs(task.prompt, projectAllowed), { cwd: task.cwd, timeout: 300_000, env: buildClaudeLaunchEnv() }, (err, stdout, stderr) => {
       this._childProcesses.delete(child)
       // #7299: this callback runs asynchronously and can fire AFTER
       // destroy() has already cleared _pollTimer and cleared _tasks — a late
@@ -578,10 +617,11 @@ export class WebTaskUnavailableError extends Error {
  * `claude -- --nonexistent-flag-xyz` does not.
  *
  * @param {string} prompt - client-supplied task text.
+ * @param {boolean} [projectAllowed] - the project-settings launch decision for the task folder; absent means not allowed
  * @returns {string[]}
  */
-export function buildRemoteTaskArgs(prompt, cwd) {
-  return ['--setting-sources', claudeSettingSourcesValue(cwd), '--remote', '--', prompt]
+export function buildRemoteTaskArgs(prompt, projectAllowed) {
+  return ['--setting-sources', claudeSettingSourcesValueFor(projectAllowed === true), '--remote', '--', prompt]
 }
 
 /**

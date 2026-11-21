@@ -790,7 +790,10 @@ describe('WebTaskManager', () => {
       )
       const defIdx = src.indexOf('_spawnRemoteTask(task) {')
       assert.ok(defIdx !== -1, '_spawnRemoteTask definition not found')
-      const callSite = src.slice(defIdx, src.indexOf('\n  }', defIdx))
+      // The launch is split in two methods (the project-settings decision, then the spawn).
+      const execIdx = src.indexOf('_execRemoteTask(task, bin, projectAllowed) {')
+      assert.ok(execIdx > defIdx, '_execRemoteTask definition not found')
+      const callSite = src.slice(defIdx, src.indexOf('\n  }', execIdx))
 
       assert.match(callSite, /task\.remoteTaskId\s*=\s*parseRemoteTaskId\(stdout\)/,
         '_spawnRemoteTask must delegate remoteTaskId parsing to parseRemoteTaskId, not an inline regex')
@@ -874,7 +877,10 @@ describe('WebTaskManager', () => {
       // Anchor on the METHOD DEFINITION, not the call in launchTask.
       const defIdx = src.indexOf('_spawnRemoteTask(task) {')
       assert.ok(defIdx !== -1, '_spawnRemoteTask definition not found')
-      const callSite = src.slice(defIdx, src.indexOf('\n  }', defIdx))
+      // The launch is split in two methods (the project-settings decision, then the spawn).
+      const execIdx = src.indexOf('_execRemoteTask(task, bin, projectAllowed) {')
+      assert.ok(execIdx > defIdx, '_execRemoteTask definition not found')
+      const callSite = src.slice(defIdx, src.indexOf('\n  }', execIdx))
 
       // #8039: the call site must pass a VERIFIED, GATED bin — never the
       // bare literal 'claude' the pre-#8039 code spawned from a plain PATH
@@ -882,7 +888,7 @@ describe('WebTaskManager', () => {
       // this class goes through (see the class docblock).
       assert.match(callSite, /bin\s*=\s*this\._verifyBinary\(\)/,
         '_spawnRemoteTask must resolve its binary through the verified gate')
-      assert.match(callSite, /execFile\(bin, buildRemoteTaskArgs\(task\.prompt, task\.cwd\)/,
+      assert.match(callSite, /execFile\(bin, buildRemoteTaskArgs\(task\.prompt, projectAllowed\)/,
         '_spawnRemoteTask must delegate its argv to buildRemoteTaskArgs and spawn the GATED bin, not a literal')
       assert.ok(!/execFile\(\s*'claude'/.test(callSite),
         '_spawnRemoteTask must never pass the bare literal \'claude\' to execFile')
