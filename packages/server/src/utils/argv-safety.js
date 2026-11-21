@@ -694,6 +694,11 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'web-task-manager.js',
+    match: "execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => { this._childProcesses.delete(child) if (err) return reject(err) resolve(stdout) })",
+    reason: "the same generic exec wrapper as above, with its child tracked so destroy() can stop it: its one caller passes ['--setting-sources', <one of two fixed strings>, '--teleport', task.taskId], where task.taskId is a server-generated randomUUID() looked up from the task map.",
+  },
+  {
+    file: 'web-task-manager.js',
     match: "execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => { if (err) return reject(err) resolve(stdout) })",
     reason: "this generic exec wrapper's one caller passes ['--teleport', task.taskId], where task.taskId is a server-generated randomUUID() looked up from the task map — the client's raw taskId is used only as a Map key, never as the argv value itself. A separate, already-hardened call site handles the client prompt text via buildRemoteTaskArgs()'s -- terminator (#7291).",
   },

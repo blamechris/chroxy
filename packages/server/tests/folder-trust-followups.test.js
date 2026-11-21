@@ -17,13 +17,18 @@ import {
   getFolderTrustStateIfCached,
   withInterprocessLock,
   reclaimStale,
+  setReclaimHookForTest,
+  setLockWaitForTest,
   folderTrustStorePath,
+  untrustFolder,
+  getFolderTrustStatusForReply,
   NESTED_BUDGET_MS,
   MAX_FILE_BYTES,
 } from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { broadcastFolderTrustState } from '../src/folder-trust-wire.js'
 
 /**
  * Folder trust follow-ups: display freshness after a cold cache, incomplete display
@@ -269,19 +274,82 @@ describe('store lock: never two holders', () => {
     assert.equal(existsSync(`${lockPath()}.reclaim`), false)
   })
 
-  it('reclaim yields while another reclaim is in progress, and clears an abandoned guard', () => {
+  it('reclaim yields to a guard whose holder is alive however old it is, and clears one whose holder is gone', () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     const guard = `${lockPath()}.reclaim`
     writeFileSync(lockPath(), stale)
-    writeFileSync(guard, 'someone\n')
-    reclaimStale(lockPath(), stale)
-    assert.equal(existsSync(lockPath()), true, 'a fresh guard means someone else is reclaiming')
-    const old = new Date(Date.now() - 60_000)
+    writeFileSync(guard, `${process.pid}\nother-token\n`)
+    const old = new Date(Date.now() - 600_000)
     utimesSync(guard, old, old)
-    reclaimStale(lockPath(), stale) // removes the abandoned guard
+    assert.equal(reclaimStale(lockPath(), stale), false)
+    assert.equal(existsSync(guard), true, 'a live holder\'s guard is never judged abandoned by age')
+    assert.equal(existsSync(lockPath()), true)
+    writeFileSync(guard, '2147483646\nother-token\n') // a pid that is not alive
+    assert.equal(reclaimStale(lockPath(), stale), false, 'removing the abandoned guard is not the reclaim')
     assert.equal(existsSync(guard), false)
-    reclaimStale(lockPath(), stale)
+    assert.equal(reclaimStale(lockPath(), stale), true)
     assert.equal(existsSync(lockPath()), false)
+  })
+
+  it('an unparsable guard is abandoned only after a long time', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const guard = `${lockPath()}.reclaim`
+    writeFileSync(guard, '')
+    reclaimStale(lockPath(), stale)
+    assert.equal(existsSync(guard), true)
+    const old = new Date(Date.now() - 120_000)
+    utimesSync(guard, old, old)
+    reclaimStale(lockPath(), stale)
+    assert.equal(existsSync(guard), false)
+  })
+
+  it('a reclaimer that pauses cannot vacate a lock created since: it re-reads under its guard', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), stale)
+    try {
+      // While the first reclaimer is paused holding its guard, a second one finds the guard (alive,
+      // however old) and leaves it, the stale lock is replaced by a live holder, and the first resumes.
+      setReclaimHookForTest(() => {
+        setReclaimHookForTest()
+        assert.equal(reclaimStale(lockPath(), stale), false, 'the second reclaimer yields')
+        rmSync(lockPath())
+        writeFileSync(lockPath(), `${process.pid}\nlive-holder\n1\n`)
+      })
+      assert.equal(reclaimStale(lockPath(), stale), false)
+    } finally {
+      setReclaimHookForTest()
+    }
+    assert.ok(readFileSync(lockPath(), 'utf8').includes('live-holder'), 'the live holder was not vacated')
+    assert.equal(existsSync(`${lockPath()}.reclaim`), false)
+  })
+
+  it('a reclaimer releases only a guard that still holds its own token', () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    const guard = `${lockPath()}.reclaim`
+    writeFileSync(lockPath(), stale)
+    try {
+      setReclaimHookForTest(() => { writeFileSync(guard, `${process.pid}\nsomeone-elses-token\n`) })
+      reclaimStale(lockPath(), stale)
+    } finally {
+      setReclaimHookForTest()
+    }
+    assert.ok(readFileSync(guard, 'utf8').includes('someone-elses-token'), 'not ours: left alone')
+  })
+
+  it('a stale lock that cannot be reclaimed does not freeze the event loop: it waits, ticks, and fails at the deadline', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    writeFileSync(lockPath(), stale)
+    writeFileSync(`${lockPath()}.reclaim`, `${process.pid}\nholder\n`) // a live reclaimer
+    setLockWaitForTest(300)
+    let ticks = 0
+    const timer = setInterval(() => { ticks += 1 }, 5)
+    try {
+      await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
+    } finally {
+      clearInterval(timer)
+      setLockWaitForTest()
+    }
+    assert.ok(ticks >= 10, `timers ticked while waiting (${ticks})`)
   })
 
   it('a stale lock is taken over and the critical section runs once, with the lock removed afterwards', async () => {
@@ -315,5 +383,56 @@ describe('store lock: never two holders', () => {
     assert.deepEqual(lines.filter((l) => l.startsWith('OVERLAP')), [], 'no two holders at once')
     assert.equal(lines.filter((l) => l.startsWith('DONE')).length, 3 * iterations * rounds, 'every critical section ran')
     assert.equal(existsSync(critical), false)
+  })
+})
+
+describe('replies after a trust change do not scan in this thread', () => {
+  it('untrustFolder answers untrusted from the missing record, without any scan', async () => {
+    const cwd = project('p')
+    await trustReviewed(cwd)
+    const inThread = scanCountForTest()
+    const worker = workerScanCountForTest()
+    const result = await untrustFolder(cwd)
+    assert.equal(result.ok, true)
+    assert.equal(result.status, 'untrusted')
+    assert.equal(scanCountForTest(), inThread)
+    assert.equal(workerScanCountForTest(), worker)
+  })
+
+  it('the status reported after a failed change: no record is untrusted without a scan; a recorded folder uses a worker scan', async () => {
+    const cwd = project('p')
+    const inThread = scanCountForTest()
+    const worker = workerScanCountForTest()
+    assert.deepEqual(await getFolderTrustStatusForReply(cwd), { status: 'untrusted', realPath: cwd })
+    assert.equal(workerScanCountForTest(), worker)
+    await trustReviewed(cwd)
+    const inThreadAfterTrust = scanCountForTest()
+    assert.equal((await getFolderTrustStatusForReply(cwd)).status, 'trusted')
+    assert.ok(workerScanCountForTest() > worker)
+    assert.equal(scanCountForTest(), inThreadAfterTrust, 'not scanned in this thread')
+    assert.ok(inThread <= inThreadAfterTrust)
+  })
+})
+
+describe('a display scan that times out is not a loss of trust', () => {
+  it('the untrusted frame it produces is sent, but does not announce folder_trust_lost', async () => {
+    setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+    const hung = project('hang-trusted')
+    const sessionManager = new EventEmitter()
+    sessionManager.listSessions = () => [{ sessionId: 's1', cwd: hung }]
+    sessionManager.getSession = () => ({ cwd: hung, provider: 'claude-sdk', session: {} })
+    const lost = []
+    sessionManager.on('folder_trust_lost', (e) => lost.push(e.sessionId))
+    const sent = []
+    const ctx = { sessions: { sessionManager }, transport: { broadcastToSession: (id, m) => sent.push(m) } }
+    await broadcastFolderTrustState(ctx, hung)
+    assert.equal(sent[0].status, 'untrusted')
+    assert.deepEqual(lost, [], 'no loss announced for a scan that did not finish')
+    // A scan that did finish and found the folder untrusted still announces it.
+    const other = project('finished')
+    sessionManager.listSessions = () => [{ sessionId: 's1', cwd: other }]
+    sessionManager.getSession = () => ({ cwd: other, provider: 'claude-sdk', session: {} })
+    await broadcastFolderTrustState(ctx, other)
+    assert.deepEqual(lost, ['s1'])
   })
 })

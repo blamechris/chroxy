@@ -1111,7 +1111,22 @@ export class SdkSession extends BaseSession {
     // set up. A folder with no trust record is decided at once; a trusted one is
     // verified by a fresh scan in a worker thread (busy is already set, so a
     // follow-up queues meanwhile).
-    const projectAllowed = projectSettingsDecidedWithoutScan(this.cwd) ?? await projectSettingsAllowedAsync(this.cwd)
+    let projectAllowed = projectSettingsDecidedWithoutScan(this.cwd)
+    if (projectAllowed === null) {
+      // interrupt() clears the token, which is how a Stop during the verification is seen.
+      const decisionToken = {}
+      this._pendingDecision = decisionToken
+      projectAllowed = await projectSettingsAllowedAsync(this.cwd)
+      const stopped = this._pendingDecision !== decisionToken
+      if (!stopped) this._pendingDecision = null
+      if (stopped && !this._destroying) {
+        // Stopped before the query started: the turn does not run.
+        this._isBusy = false
+        this._permissions.clearUserStopInFlight()
+        this.emit('stopped', {})
+        return
+      }
+    }
     if (this._destroying) {
       this._isBusy = false
       return
@@ -3589,6 +3604,13 @@ export class SdkSession extends BaseSession {
     // Runs even when there is no active `_query` (queued sends with the turn
     // already settling) so an interrupt never strands a queued message.
     this.clearOutgoingQueue()
+
+    if (this._pendingDecision) {
+      // A Stop while the turn is still verifying the folder: sendMessage sees the
+      // cleared token and does not start the query.
+      this._pendingDecision = null
+      return
+    }
 
     if (!this._query) {
       // #8430: a Stop with nothing to interrupt -- no query yet -- and no prompt

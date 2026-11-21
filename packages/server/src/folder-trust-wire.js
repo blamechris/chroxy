@@ -26,11 +26,14 @@ export function folderTrustAppliesFrom(provider) {
   return APPLIES_FROM[provider] ?? 'n/a'
 }
 
+/** Frames built from a display scan that timed out: not a finding about the folder. */
+const timedOutFrames = new WeakSet()
+
 function frameFor(sessionId, entry, appliesFrom, state) {
   const { status, summary, digest } = state
   // What the RUNNING process was launched with: claude-cli and claude-tui keep it until restart.
   const launched = appliesFrom === 'restart' ? entry.session?.launchedWithProject : undefined
-  return {
+  const frame = {
     type: 'folder_trust_state',
     sessionId,
     status,
@@ -39,6 +42,8 @@ function frameFor(sessionId, entry, appliesFrom, state) {
     appliesFrom,
     ...(typeof launched === 'boolean' ? { launchedWithProject: launched } : {}),
   }
+  if (state.timedOut) timedOutFrames.add(frame)
+  return frame
 }
 
 const folderOf = (entry) => {
@@ -102,7 +107,8 @@ export async function buildFolderTrustStateMessageForDisplay(sessionId, entry) {
  * @param {{ sessionId?: string, status?: string }|null} frame
  */
 export function noteFolderTrustFrame(sessionManager, frame) {
-  if (!frame || frame.status === 'trusted' || typeof frame.sessionId !== 'string') return
+  // A frame from a scan that timed out says the folder was not reviewed, not that it lost trust.
+  if (!frame || frame.status === 'trusted' || timedOutFrames.has(frame) || typeof frame.sessionId !== 'string') return
   try { sessionManager?.emit?.('folder_trust_lost', { sessionId: frame.sessionId }) } catch { /* display only */ }
 }
 

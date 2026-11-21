@@ -571,6 +571,10 @@ export class CliSession extends BaseSession {
     // respawn, model-switch respawn, restart-on-input), so the stop latch is
     // spent. Cleared FIRST so a throw below cannot leave it armed.
     this._stoppedByUser = false
+    // Every start takes a new generation; a verification still pending for an older
+    // one never launches (see below).
+    const startGen = (this._startGen = (this._startGen || 0) + 1)
+    this._pendingStartGen = null
 
     // Register permission hook before starting the process (only once, not on respawn)
     if (this._hookManager && this._respawnCount === 0) {
@@ -591,11 +595,12 @@ export class CliSession extends BaseSession {
       this._launchPersistent(decided)
       return
     }
-    if (this._startPending) return
-    this._startPending = true
-    projectSettingsAllowedAsync(this.cwd).then((allowed) => {
-      this._startPending = false
-      if (this._destroying || this._stoppedByUser) return
+    this._pendingStartGen = startGen
+    projectSettingsAllowedAsync(this.cwd).catch(() => false).then((allowed) => {
+      if (this._pendingStartGen === startGen) this._pendingStartGen = null
+      // Launch only if nothing started, stopped or destroyed the session since, and no
+      // child exists (a newer start that took the fast path has already spawned one).
+      if (this._startGen !== startGen || this._destroying || this._stoppedByUser || this._child) return
       try {
         this._launchPersistent(allowed)
       } catch (err) {
@@ -2740,6 +2745,15 @@ export class CliSession extends BaseSession {
     // auto-fires after the halt. Runs even with no child so a queued send is
     // never stranded.
     this.clearOutgoingQueue()
+
+    // A Stop while a start is still verifying the folder: that start never launches, and
+    // the session is left as a Stop leaves it, revivable by the next send.
+    if (this._pendingStartGen !== null && this._pendingStartGen !== undefined) {
+      this._pendingStartGen = null
+      this._startGen = (this._startGen || 0) + 1
+      this._stoppedByUser = true
+      return
+    }
 
     if (!this._child) return
 

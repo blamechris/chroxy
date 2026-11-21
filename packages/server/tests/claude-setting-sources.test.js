@@ -1,4 +1,4 @@
-import { describe, it, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -22,6 +22,7 @@ import {
   invalidateFolderTrustCache,
   scanCountForTest,
   setWorkerForTest,
+  untrustFolder,
   workerScanCountForTest,
 } from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
@@ -61,6 +62,7 @@ function projectWithMcp(prefix) {
   return dir
 }
 
+const CRASH_WORKER = new URL('./fixtures/folder-trust-crash-worker.mjs', import.meta.url)
 const HANG_WORKER = new URL('./fixtures/folder-trust-hang-worker.mjs', import.meta.url)
 
 const tmpDirs = []
@@ -143,14 +145,65 @@ describe('claude-setting-sources helper', () => {
     assert.ok(ticks > 0, 'the main thread stayed responsive during the decision')
   })
 
-  it('a launch decision that times out, or whose worker cannot run, is handled: timeout is not allowed, no worker falls back in-thread', async () => {
+  it('a launch decision whose scan times out is not allowed', async () => {
     const dir = projectWithMcp('setting-sources-hang-')
     await trustReviewed(dir)
     try {
       setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+      const inThread = scanCountForTest()
       assert.equal(await projectSettingsAllowedAsync(dir), false, 'timeout fails closed')
+      assert.equal(scanCountForTest(), inThread, 'and no in-thread scan was run instead')
+    } finally {
+      setWorkerForTest()
+    }
+  })
+
+  it('a worker that exits or throws mid-scan fails closed: not allowed, and no in-thread scan', async () => {
+    for (const name of ['exit', 'throw']) {
+      const dir = projectWithMcp(`setting-sources-${name}-`)
+      await trustReviewed(dir)
+      try {
+        setWorkerForTest({ url: CRASH_WORKER })
+        const inThread = scanCountForTest()
+        assert.equal(await projectSettingsAllowedAsync(dir), false, `${name}: not allowed`)
+        assert.equal(scanCountForTest(), inThread, `${name}: not scanned in this thread`)
+        setWorkerForTest()
+        assert.equal(await projectSettingsAllowedAsync(dir), true, 'a fresh worker decides the next request')
+      } finally {
+        setWorkerForTest()
+      }
+    }
+  })
+
+  it('a worker that cannot be created falls back to a bounded in-thread scan', async () => {
+    const dir = projectWithMcp('setting-sources-nocreate-')
+    await trustReviewed(dir)
+    try {
+      setWorkerForTest({ factory: () => { throw new Error('no threads here') } })
+      const inThread = scanCountForTest()
+      assert.equal(await projectSettingsAllowedAsync(dir), true, 'the in-thread scan decides')
+      assert.equal(scanCountForTest(), inThread + 1)
+      // With the display budget: a walk that outruns it is incomplete, so not allowed.
+      for (let i = 0; i < 600; i++) mkdirSync(join(dir, 'tree', `d${i}`), { recursive: true })
+      const real = Date.now
+      let t = real()
+      mock.method(Date, 'now', () => { t += 50; return t })
+      try {
+        assert.equal(await projectSettingsAllowedAsync(dir), false)
+      } finally {
+        mock.restoreAll()
+      }
+    } finally {
+      setWorkerForTest()
+    }
+  })
+
+  it('a worker script that cannot be loaded counts as one that cannot be created', async () => {
+    const dir = projectWithMcp('setting-sources-noload-')
+    await trustReviewed(dir)
+    try {
       setWorkerForTest({ url: new URL('./fixtures/does-not-exist-worker.mjs', import.meta.url) })
-      assert.equal(await projectSettingsAllowedAsync(dir), true, 'a worker that cannot run falls back to an in-thread scan')
+      assert.equal(await projectSettingsAllowedAsync(dir), true)
     } finally {
       setWorkerForTest()
     }
@@ -186,6 +239,30 @@ describe('SDK session options', () => {
     const dir = projectWithMcp('setting-sources-sdk-trusted-')
     await trustReviewed(dir)
     assert.deepEqual(await settingSourcesFor(dir), ['user', 'project'])
+  })
+})
+
+describe('SDK turn stopped while the folder is being verified', () => {
+  it('a real interrupt() during the decision means the query never starts, busy clears, and stopped is emitted', async () => {
+    const dir = projectWithMcp('setting-sources-sdk-stopped-')
+    await trustReviewed(dir)
+    const session = new SdkSession({ cwd: dir, stateFilePath: join(tmp('setting-sources-sdk-'), 'state.json') })
+    session._fetchSupportedModels = () => {}
+    let queries = 0
+    session._callQuery = () => { queries += 1; return (async function* () {})() }
+    const events = []
+    session.on('stopped', () => events.push('stopped'))
+    try {
+      const turn = session.sendMessage('hi') // busy; the trusted folder is verified first
+      assert.equal(session._isBusy, true)
+      await session.interrupt()
+      await turn
+      assert.equal(queries, 0)
+      assert.equal(session._isBusy, false)
+      assert.deepEqual(events, ['stopped'])
+    } finally {
+      session.destroy()
+    }
   })
 })
 
@@ -245,17 +322,65 @@ describe('CLI session argv', () => {
     assert.equal(await launch(), true)
   })
 
-  it('a CliSession stopped or destroyed while its trusted folder is being verified never launches', async () => {
-    const dir = projectWithMcp('setting-sources-cli-destroyed-')
+  // A CliSession whose process start is counted, with its folder trusted (so the start verifies it first).
+  async function trustedCli(prefix) {
+    const dir = projectWithMcp(prefix)
     await trustReviewed(dir)
     const session = new CliSession({ cwd: dir, stateFilePath: join(tmp('setting-sources-cli-state-'), 'state.json') })
-    let spawned = false
-    session._spawnPersistentProcess = () => { spawned = true }
+    const spawns = []
+    session._spawnPersistentProcess = (args) => { spawns.push(args); session._child = { kill() {}, stdin: { end() {} }, on() {} } }
+    return { dir, session, spawns }
+  }
+
+  it('a CliSession destroyed while its trusted folder is being verified never launches', async () => {
+    const { session, spawns } = await trustedCli('setting-sources-cli-destroyed-')
     session.start()
-    session.start() // a second start while one is pending does not start a second process
     session.destroy()
     await new Promise((r) => setTimeout(r, 300))
-    assert.equal(spawned, false)
+    assert.equal(spawns.length, 0)
+  })
+
+  it('a second start while one is verifying launches exactly one process', async () => {
+    const { session, spawns } = await trustedCli('setting-sources-cli-twice-')
+    try {
+      session.start()
+      session.start()
+      await new Promise((r) => setTimeout(r, 400))
+      assert.equal(spawns.length, 1)
+    } finally {
+      session.destroy()
+    }
+  })
+
+  it('a Stop (interrupt) while the folder is being verified means no launch, and the session revives on the next send', async () => {
+    const { session, spawns } = await trustedCli('setting-sources-cli-stopped-')
+    try {
+      session.start()
+      session.interrupt()
+      await new Promise((r) => setTimeout(r, 300))
+      assert.equal(spawns.length, 0, 'the stopped start did not launch')
+      assert.equal(session._stoppedByUser, true, 'left as a Stop leaves it')
+      session._restartAfterStop() // what the next sendMessage does
+      for (let i = 0; i < 100 && spawns.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      assert.equal(spawns.length, 1, 'the next send revives it')
+    } finally {
+      session.destroy()
+    }
+  })
+
+  it('trust revoked while a start is verifying, then another start: one process, not two', async () => {
+    const { dir, session, spawns } = await trustedCli('setting-sources-cli-revoked-')
+    try {
+      session.start() // a recorded folder: verification pending
+      await untrustFolder(dir) // no record any more
+      session.start() // e.g. a respawn: takes the no-record path and launches at once
+      assert.equal(spawns.length, 1)
+      await new Promise((r) => setTimeout(r, 400))
+      assert.equal(spawns.length, 1, 'the earlier start did not launch a second process')
+      assert.equal(sourcesOf(spawns[0]), 'user')
+    } finally {
+      session.destroy()
+    }
   })
 
   it('buildClaudeCliArgs without a decision is untrusted', () => {
@@ -338,6 +463,69 @@ describe('web task argv', () => {
       manager._tasks.set('t1', { taskId: 't1', cwd: dir })
       await manager.teleportTask('t1')
       assert.deepEqual(JSON.parse(readFileSync(argvPath, 'utf8')).slice(0, 2), ['--setting-sources', 'user,project'])
+    } finally {
+      manager.destroy()
+    }
+  })
+
+  it('teleport: a manager destroyed while the folder is being verified never spawns', { skip }, async () => {
+    const { shim, argvPath, dir } = recordingShim()
+    await trustReviewed(dir)
+    const manager = managerFor(shim, dir)
+    manager._tasks.set('t1', { taskId: 't1', cwd: dir })
+    const teleport = manager.teleportTask('t1')
+    manager.destroy()
+    await assert.rejects(teleport, /Teleport failed/)
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(existsSync(argvPath), false)
+  })
+
+  it('teleport: the spawned child is tracked so destroy() can stop it', { skip }, async () => {
+    const { shim, dir } = recordingShim()
+    const manager = managerFor(shim, dir)
+    try {
+      manager._tasks.set('t1', { taskId: 't1', cwd: dir })
+      const teleport = manager.teleportTask('t1')
+      await new Promise((r) => setImmediate(r)) // past the project-settings decision, into the spawn
+      assert.equal(manager._childProcesses.size, 1)
+      await teleport
+      assert.equal(manager._childProcesses.size, 0, 'released when it exits')
+    } finally {
+      manager.destroy()
+    }
+  })
+
+  it('remote launch: a task removed or a manager destroyed while the folder is being verified never spawns', { skip }, async () => {
+    const { shim, argvPath, dir } = recordingShim()
+    await trustReviewed(dir)
+    const removed = managerFor(shim, dir)
+    try {
+      const { taskId } = removed.launchTask('removed')
+      removed._tasks.delete(taskId)
+      await new Promise((r) => setTimeout(r, 400))
+      assert.equal(existsSync(argvPath), false, 'a task that is gone is not launched')
+    } finally {
+      removed.destroy()
+    }
+    const destroyed = managerFor(shim, dir)
+    destroyed.launchTask('destroyed')
+    destroyed.destroy()
+    await new Promise((r) => setTimeout(r, 400))
+    assert.equal(existsSync(argvPath), false, 'a destroyed manager does not launch')
+  })
+
+  it('remote launch: a failure after the decision is reported as a task error', { skip }, async () => {
+    const { shim, dir } = recordingShim()
+    await trustReviewed(dir)
+    const manager = managerFor(shim, dir)
+    manager._execRemoteTask = () => { throw new Error('spawn blew up') }
+    const errors = []
+    manager.on('task_error', (e) => errors.push(e.message))
+    try {
+      const { taskId } = manager.launchTask('boom')
+      for (let i = 0; i < 100 && errors.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      assert.deepEqual(errors, ['spawn blew up'])
+      assert.equal(manager.getTask?.(taskId)?.status ?? manager._tasks.get(taskId).status, 'failed')
     } finally {
       manager.destroy()
     }
