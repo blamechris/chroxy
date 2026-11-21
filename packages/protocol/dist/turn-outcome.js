@@ -25,11 +25,15 @@
  *                    under it, so no provider ever ended it (#8259). Written by
  *                    the server's restore-time history sweep, not mapped from a
  *                    provider signal.
+ *  - `stopped_before_output` -- the USER stopped the turn before the model produced
+ *                    any output (#9241). Written by the server's stop path (a
+ *                    provider's own abort says nothing of the user), and worded
+ *                    quietly: a Stop after output stays unmarked (#8461).
  *
  * Append-only: every value is a wire contract. An absent field means the
  * provider did not say, which clients treat like `completed`: no marker.
  */
-export const TURN_OUTCOMES = ['completed', 'truncated', 'refused', 'stopped', 'interrupted'];
+export const TURN_OUTCOMES = ['completed', 'truncated', 'refused', 'stopped', 'interrupted', 'stopped_before_output'];
 const OUTCOME_SET = new Set(TURN_OUTCOMES);
 /** Narrow an arbitrary value to a known {@link TurnOutcome}. */
 export function isTurnOutcome(value) {
@@ -59,6 +63,10 @@ const DESCRIPTIONS = {
     interrupted: {
         label: 'Interrupted: connection lost',
         detail: 'The connection to the server was lost before this turn finished, so the reply is incomplete. Send your message again to retry.',
+    },
+    stopped_before_output: {
+        label: 'Stopped by you before a reply',
+        detail: 'You stopped this turn before the model produced any output.',
     },
 };
 /** Wording for a marked outcome; `null` for anything that gets no marker. */

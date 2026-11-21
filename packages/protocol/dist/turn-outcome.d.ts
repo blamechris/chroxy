@@ -25,11 +25,15 @@
  *                    under it, so no provider ever ended it (#8259). Written by
  *                    the server's restore-time history sweep, not mapped from a
  *                    provider signal.
+ *  - `stopped_before_output` -- the USER stopped the turn before the model produced
+ *                    any output (#9241). Written by the server's stop path (a
+ *                    provider's own abort says nothing of the user), and worded
+ *                    quietly: a Stop after output stays unmarked (#8461).
  *
  * Append-only: every value is a wire contract. An absent field means the
  * provider did not say, which clients treat like `completed`: no marker.
  */
-export declare const TURN_OUTCOMES: readonly ["completed", "truncated", "refused", "stopped", "interrupted"];
+export declare const TURN_OUTCOMES: readonly ["completed", "truncated", "refused", "stopped", "interrupted", "stopped_before_output"];
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 /** The outcomes a client marks in the transcript. `completed` is not one. */
 export type MarkedTurnOutcome = Exclude<TurnOutcome, 'completed'>;
