@@ -502,7 +502,8 @@ under the stored `gen`. Positive control: an undisturbed delivery sends once.
 - **Part 2, worker-returned.** A **nonce** (128 random bits) is generated when the single
   send is created; the `sending` record carries its **hash**, and the plaintext is never
   written to the ledger. It lives on only in the wake text, which a queued delivery shows to
-  the owner's clients (`message_queued`) and the session holds until its turn starts. The worker returns the nonce through its
+  the owner's clients (`message_queued`) and the session holds until its turn starts. The
+  worker returns the nonce through its
   acknowledgment channel (§6.7), which the daemon resolves to exactly one session without
   reading a session from the message. In one synchronous step the daemon checks that this
   session is the delivery's target (`wrong_session`), at the **current successor**
